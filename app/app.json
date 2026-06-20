@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Neutron",
+    "slug": "neutron",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "scheme": "neutron",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "computer.neutron.app"
+    },
+    "android": {
+      "package": "computer.neutron.app",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-notifications",
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

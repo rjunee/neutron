@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open Telegram to continue · Neutron</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0b1020;
+      --fg: #f4f5f7;
+      --muted: #9aa3b2;
+      --accent: #2aabee;
+      --card: #161b2e;
+      --border: rgba(255, 255, 255, 0.08);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+        sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      -webkit-font-smoothing: antialiased;
+    }
+    main {
+      min-height: 100%;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 40px 32px;
+      max-width: 440px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+    .logo {
+      width: 56px; height: 56px;
+      margin: 0 auto 16px;
+      display: block;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    p {
+      color: var(--muted);
+      margin: 0 0 24px;
+      line-height: 1.5;
+      font-size: 15px;
+    }
+    .deeplink {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      padding: 14px 24px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 16px;
+      transition: background 80ms ease, transform 80ms ease;
+    }
+    .deeplink:hover { background: #1f9ad8; }
+    .deeplink:active { transform: scale(0.98); }
+    .secondary {
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .secondary a {
+      color: var(--muted);
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+    }
+    .bot-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #d8dde6;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .error {
+      color: #ff6b6b;
+      font-size: 14px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <img class="logo" src="/logo.svg" alt="Neutron" onerror="this.style.display='none'" />
+      <h1>Open Telegram to continue</h1>
+      <p id="copy">Your account is ready. Tap below to open <span class="bot-id" id="bot-id"></span> in Telegram and finish onboarding there.</p>
+      <a id="deeplink" class="deeplink" href="#" rel="noopener noreferrer">
+        Open in Telegram
+        <span aria-hidden="true">→</span>
+      </a>
+      <p class="secondary">
+        Don't have Telegram?
+        <a href="https://telegram.org/" target="_blank" rel="noopener noreferrer">Get the app</a>
+      </p>
+      <p class="error" id="error" hidden></p>
+    </section>
+  </main>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var bot = params.get('bot');
+      var ev = params.get('signin_event_id');
+      var deeplink = document.getElementById('deeplink');
+      var botEl = document.getElementById('bot-id');
+      var errEl = document.getElementById('error');
+      if (!bot || !ev) {
+        errEl.hidden = false;
+        errEl.textContent = 'Missing bot or signin_event_id query params. Restart sign-up.';
+        deeplink.style.opacity = '0.5';
+        deeplink.style.pointerEvents = 'none';
+        return;
+      }
+      // Whitelist bot username + signin_event_id shapes so a malformed
+      // query string can't smuggle a script: scheme into href.
+      if (!/^[A-Za-z0-9_]{3,64}$/.test(bot) || !/^[A-Za-z0-9_-]{8,64}$/.test(ev)) {
+        errEl.hidden = false;
+        errEl.textContent = 'Malformed bot or signin_event_id query params. Restart sign-up.';
+        deeplink.style.opacity = '0.5';
+        deeplink.style.pointerEvents = 'none';
+        return;
+      }
+      botEl.textContent = '@' + bot;
+      var url = 'https://t.me/' + encodeURIComponent(bot) + '?start=onboard_' + encodeURIComponent(ev);
+      deeplink.href = url;
+      // Auto-launch on mobile (best-effort). Desktop users see the
+      // explicit button; auto-launch only fires when the screen is
+      // narrow enough to suggest a phone.
+      if (window.matchMedia && window.matchMedia('(max-width: 640px)').matches) {
+        // Slight delay so the user briefly sees the page before the
+        // OS prompt for "Open Telegram" appears — avoids a confusing
+        // flash if they didn't expect a redirect.
+        setTimeout(function () {
+          window.location.href = url;
+        }, 300);
+      }
+    })();
+  </script>
+</body>
+</html>

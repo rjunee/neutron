@@ -1,0 +1,12 @@
+{
+  "name": "@neutronai/gbrain-memory",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
+  },
+  "devDependencies": {
+    "gbrain": "github:garrytan/gbrain#8058144"
+  }
+}

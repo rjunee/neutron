@@ -1,0 +1,21 @@
+-- 0061_remote_shared_projects_active.sql
+--
+-- Neutron Connect (Slack-Connect model): adds the `active` flag to
+-- `remote_shared_projects` (the thin shared-project reference, migration 0060)
+-- so the collaborator's instance can mark a reference inactive when the host
+-- revokes the membership (connect-spec §1.7). On revoke the live reference is
+-- torn down and the unified list stops showing the shared project.
+--
+-- Migration mechanics:
+--   ALTER TABLE ADD COLUMN with a NOT NULL DEFAULT — safe on an empty/populated
+--   table (existing rows default to active=1). Snapshot regen required
+--   (bun run migrations/regen-snapshot.ts).
+--
+-- Verification (post-migration, per-project DB):
+--   SELECT active FROM remote_shared_projects LIMIT 1;  -- defaults to 1
+--   .schema remote_shared_projects                      -- shows the `active` column
+--
+-- Rollback path: the column defaults to 1 (active), so dropping it (or ignoring
+-- it) degrades to the pre-0061 "always active" behaviour with no data loss.
+
+ALTER TABLE remote_shared_projects ADD COLUMN active INTEGER NOT NULL DEFAULT 1;

@@ -1,0 +1,304 @@
+# System Overview
+
+High-level map of how Neutron Open boots and where the major runtime
+pieces live. Keep this short; deep detail belongs in `AS-BUILT.md` and the
+per-module headers.
+
+## Boot path
+
+`gateway/index.ts:boot()` opens the per-instance SQLite DB, applies
+migrations, then composes the module graph from a **graph composer**
+resolved via the `NEUTRON_GRAPH_COMPOSER_MODULE` env seam
+(`loadGraphComposerFromEnv`). Managed deploys point that env at the
+private `provisioning/realmode-composer.ts`; Open self-hosts leave it
+unset and boot a `/healthz`-only shell. The composer produces a
+`CompositionInput` → `composeProductionGraph` (`gateway/composition.ts`)
+wires the channel router, MCP/tool registry, HTTP surfaces, and the
+bundled Cores.
+
+## Cores
+
+Bundled Cores live under `cores/free/`. Each Core's production runtime is
+assembled by a single wiring entrypoint that the composer calls, and its
+MCP-tool backend is threaded through `buildCoresBackendFactories`
+(`gateway/boot-helpers.ts`) so the chat-command filter and the MCP tools
+share one backend instance. Examples:
+- Research: `buildProductionResearchCoreWiring` (in-Core).
+- Code-Gen: `buildProductionCodegenCoreWiring`
+  (`gateway/cores/build-production-codegen-wiring.ts`, gateway-side
+  because its Anthropic credential factory is gateway-side).
+
+## `/code` → foundational Trident (DONE — Trident-port PR-5)
+
+The ~5-PR port folding Vajra's full Trident into Neutron Open as
+foundational runtime is **complete**. `/code <task>` now routes through
+foundational Trident: the production filter `buildTridentCodeChatCommandFilter`
+parses the command and CREATES a `code_trident_runs` row
+(`trident/code-command.ts`), and the tick loop drives it build → review → fix
+loop → merge → done (or the Ralph plan↔task loop for governed repos). State
+in SQLite ⇒ restart-safe + resumable. See "Trident — the foundational
+autonomous-build runtime" above for the boot wiring.
+
+The Code-Gen Core (`cores/free/code-gen/`) wrapper is **superseded** for
+`/code`: `buildCodegenChatCommandFilter` + `CodegenOrchestrator` no longer
+back the `/code` path. The Core's four `codegen_*` MCP tools remain a Tier-2
+surface, and the physical deletion of the now-redundant Core orchestration
+(+ relocating the shared substrate machinery) is the one documented remaining
+cleanup — deferred because the orchestration is still referenced by those MCP
+tools, the install lifecycle/manifest, the Managed graph composer, and ~106
+self-contained passing tests. See `AS-BUILT.md` PR-5 Decisions Log.
+
+## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
+
+The `trident/` module (package `@neutronai/trident`) is the durable runtime
+for the autonomous Forge → Argus → merge pipeline, ported from Vajra's
+`/trident` skill. It is foundational runtime, not a Core. PR-2 landed the
+state-machine skeleton; **PR-3 wired the real agentic loop** (below).
+
+- **Persistence** — `code_trident_runs` (migration 0077): one row per
+  pipeline. The SQLite translation of Vajra's per-run JSON state file. The
+  in-flight sub-agent's id + status live ON the row (`subagent_run_id` /
+  `subagent_status`) so the loop is restart-safe, instead of in the
+  disconnected generic `runtime/subagent/` registry. `TridentRunStore`
+  (`trident/store.ts`) is the CRUD wrapper, shaped like `ReminderStore`.
+- **State machine** — `advanceTridentRun(run, deps)`
+  (`trident/state-machine.ts`): the phase graph
+  `forge-init → {argus | ralph-plan} → ralph-task → … → argus ⇄ forge-fix
+  → done` with terminal `done | failed | stopped`, the Argus round cap
+  (`max_rounds`, default 8) and the Ralph plan↔task round cap
+  (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
+  control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
+  `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
+  spawn+poll+merge `step` (below).
+- **The loop** (PR-3) — `buildTridentOrchestrator` (`trident/orchestrator.ts`)
+  composes the real loop into a tick `step`: (1) spawn the current phase's
+  Forge/Argus substrate session — the single `subagent_run_id === null`-
+  guarded spawn site, so a re-entrant tick never double-spawns; (2) poll +
+  transition via the pure `advanceTridentRun`; (3) merge on `done`.
+  `TridentSessionManager` (`trident/session.ts`) bridges a blocking
+  `TridentDispatch` (Forge/Argus turn → terminal text) onto the poll model
+  and parses the verdict; `trident/prompts.ts` owns the ported Forge/Argus
+  prompts + parsers + the **oversized-diff guard** (`chooseArgusScope`:
+  never read a >3000-line diff in one shot); `trident/merge.ts` fills the
+  `'pr'` (`gh pr merge --squash`) and `'local'` (`git merge --no-ff`) merge
+  bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
+  tested Vajra fixes are mapped (see `trident/vajra-fixes.test.ts`): no
+  phantom-id poll, no silent exit, loud fail on a missing Ralph
+  `REMAINING_TASKS`, the `max_rounds`/`max_ralph_rounds` caps, the
+  oversized-diff guard, model-routing defaults, and (PR-5) **restart-resume**
+  — an orphaned `subagent_run_id` (untracked after a control-plane restart)
+  is recovered by a bounded one-per-process re-dispatch
+  (`on_orphaned_session`), never a double-spawn. PR-5 flips production onto
+  the live loop: `build-core-modules.ts` wires the real `step` when the
+  composer threads `input.trident.dispatch` (else `stubAdvanceDeps`).
+- **Tick driver** — `TridentTickLoop` (`trident/tick.ts`), modelled on
+  `reminders/tick.ts`: a single-flight `setInterval` (default 90 s, the
+  skill's ScheduleWakeup cadence) that loads non-terminal runs and advances
+  each. Registered as the `trident` module in
+  `gateway/composition/build-core-modules.ts`, started/stopped with the
+  graph exactly like the reminders loop.
+- **git-mode auto-detect** — `detectMergeMode(repoPath, probe)`
+  (`trident/git-mode.ts`): `'pr'` when the repo has a GitHub `origin` AND
+  `gh` is available, else `'local'`. Persisted per run; no user config
+  (Ryan-locked: build both, auto-detect). `cleanupAfterMerge` dispatches to
+  the `trident/merge.ts` bodies (PR-3).
+
+### Ralph build mode (PR-4) — spec-driven, one task per fresh context
+
+For large, spec-driven work, Trident runs in **Ralph mode** (named after
+Geoffrey Huntley's "ralph" loop) instead of one big Forge context that drifts
+as its window fills. Progress lives in FILES + git history, never a context
+window, so a fresh agent each iteration cannot forget what was agreed.
+
+- **Detection** — `detectRalphMode(repoPath, probe, {explicit})`
+  (`trident/git-mode.ts`): a run is Ralph when explicitly requested OR the
+  repo's git root contains a `SPEC.md` (a "governed" repo).
+  `defaultRalphModeProbe` resolves the git root then checks `<root>/SPEC.md`.
+  Persisted as `ralph` on the run row; the run-creation call site is
+  `trident/code-command.ts` (the `/code` entry, PR-5), which auto-detects
+  git-mode + Ralph at dispatch.
+- **The loop** (driven by the same tick state machine):
+  1. `forge-init` (Ralph bootstrap) — create the branch, write the first
+     `IMPLEMENTATION_PLAN.md` (a `- [ ] <task>` checklist derived from
+     `SPEC.md`), build ONLY the top task, open the PR, report
+     `REMAINING_TASKS`. Prompt: `renderForgePrompt` + `RALPH_BOOTSTRAP_NOTE`.
+  2. `ralph-plan` — a FRESH, docs-only planner diffs `SPEC.md` against the
+     actual code and rewrites `IMPLEMENTATION_PLAN.md`, reporting
+     `REMAINING_TASKS` + `NEXT_TASK`. Prompt: `renderRalphPlanPrompt`; parsed
+     by `parseRalphPlan` (no PR contract lines required). The active
+     drift-catch: a regressed task re-opens as `- [ ]`.
+  3. `ralph-task` — a FRESH Forge implements ONLY the surfaced `NEXT_TASK`
+     (threaded via `session.nextTaskFor`), checks it off, updates
+     `AS-BUILT.md`, commits. Prompt: `renderRalphTaskPrompt`.
+  4. Repeat 2 ⇄ 3 until a planning pass reports `REMAINING_TASKS=0`, then →
+     `argus` → the normal fix/merge loop reviews + merges the accumulated
+     branch.
+- **Fail-loud guard** — a missing/garbled `REMAINING_TASKS` (strict
+  `^[0-9]+$`) from the bootstrap OR any planner halts the run (`phase=failed`),
+  never silently merges a partial governed build. `max_ralph_rounds`
+  (default 20) bounds a non-converging planner so the loop can't spin forever.
+
+Threading the production gateway credential closure into a live
+`TridentDispatch` so boot drives the loop (and the run-creation call site that
+calls `detectRalphMode`) is PR-5.
+
+## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
+
+The real overnight-work engine: while the user sleeps, the highest-priority
+queued items for each project are dispatched, **each as its own Trident run**
+(Forge→Argus→merge), and a morning brief reports the REAL result of every run.
+This is the Neutron-Open (SQLite-native) port of Vajra's
+`gateway/overnight-dispatcher.ts`, with the Ryan-locked design correction that
+each item is a Trident run rather than a single throwaway substrate turn.
+
+It replaces the old preview-only morning check-in stub
+(`onboarding/wow-moment/overnight-cron.ts`, `wow_overnight_handler`), which
+delivered a "here's what's on deck" message but never actually ran any work.
+
+**Queue model (chat-driven).** `overnight_queue` (migration
+`0078_overnight_queue.sql`) is the runtime source of truth — one row per work
+item, keyed by an `owk-YYYYMMDD-NNN` id. The agent maintains each project's
+STATUS.md `## Autonomous Overnight Work` block by RENDERING it from these rows
+(`status-md-sync.ts`); the user never edits STATUS.md. `overnight_budget` holds
+the per-window dispatch counter; in-flight concurrency is computed from the
+queue so it can't drift across a restart.
+
+**The `[context:]` hard gate.** Every dispatchable item MUST carry a
+`[context:<path>]` resolving to a real file inside the project repo (64 KB cap,
+no absolute paths, no `..`, no symlink-escape). Double-enforced at scan +
+dispatch; an item with no resolvable context is rejected, never spawned
+(`checkContextGate`). Verbatim port of Vajra's hard gate, re-pointed from
+`VAJRA_HOME` to the per-project repo root.
+
+**The dispatcher (`dispatcher.ts`)**, driven by the per-project cron
+`overnight-<slug>` (action 07, ~30-min tick), runs three branches:
+- **SCAN** (only inside the **23:00–07:00 local** window) — reconcile any
+  hand-seeded STATUS.md bullet into a real queue row, re-render the
+  agent-maintained block, gate `[context:]`, and dispatch the highest-priority
+  queued items up to budget (**2 concurrent / 8 per window**, env-overridable
+  via `NEUTRON_OVERNIGHT_MAX_CONCURRENT` / `NEUTRON_OVERNIGHT_MAX_PER_WINDOW`).
+  Each dispatch creates a `code_trident_runs` row via the Trident store and
+  links it onto the queue item (`trident_run_id` / `trident_slug`).
+- **ADVANCE** (anytime — items started near 06:30 finish after the window
+  closes) — poll each in-flight item's Trident run; on a terminal phase record
+  the REAL result (`PR#42` / `merged <branch>` / `failed: <reason>`), write a
+  result doc to `docs/overnight/<owk-id>.md` in the repo, mark the item
+  terminal, and re-render STATUS.md.
+- **REPORTER** (once at **≥06:50 local**) — see the morning brief below.
+
+**Morning brief (`morning-brief.ts`)** reports only items whose Trident run
+finished THIS window (`window_date_local`). It NEVER invents results: the
+General topic gets a high-level summary (counts + one line per project),
+per-project topics get the detail (each completed item's real result + each
+failure's reason). A quiet night posts one honest line to General.
+
+**Onboarding makes the promise TRUE.** `ProjectMaterializer` writes
+`autonomous_overnight_enabled: true` into every project's STATUS.md
+frontmatter and seeds one grounded overnight bullet pointing at a real
+`docs/overnight/seed-context.md` it writes from the synthesized project
+context — so the engine's scan reconcile adopts it into a real queue row, the
+hard gate passes, and the item runs as a Trident run on the first overnight
+window.
+
+**Wiring.** `register.ts` builds `overnight_handler` (the real engine) and the
+production seams (real-fs STATUS.md IO + result-doc writer, the
+`TridentRunStore`-backed Trident seam, opted-in project enumeration over
+`<owner_home>/Projects/`); `gateway/composition/build-core-modules.ts`
+registers it unconditionally in the production `CronHandlerRegistry`.
+
+**Divergences from Vajra** (intentional): SQLite queue not JSON; cron-driven
+not watchdog; each item is a Trident run (Forge→Argus→merge) not a single
+substrate turn; documented 2/8 caps not the drifted 4/40; context resolved per
+project repo not `VAJRA_HOME`.
+
+**Known gap.** The overnight engine creates + polls REAL `code_trident_runs`
+rows today. Whether those rows *advance* end-to-end in production is governed
+by the Trident tick loop, which still boots on `stubAdvanceDeps` (classify
+always "running") until the gateway credential closure is threaded into a live
+`TridentDispatch` — Trident PR-5. Until then a production overnight run is
+created + tracked but sits at `forge-init`; the full path (item → driven
+Trident run → real result → morning brief) is proven by the overnight test
+suite, which drives the run to terminal through the same store the engine
+polls.
+
+## Post-onboarding chat surface (`gateway/http/chat-bridge.ts`, `landing/chat.ts`)
+
+Once onboarding reaches `phase==completed`, the chat surface is a normal
+live-agent chat on EVERY topic — the General topic (`web:<uid>`) and each
+per-project topic (`web:<uid>:<project>`) alike.
+
+**Routing (server).** `handleInbound` gates a typed `user_message`:
+`isLiveAgentEligible` returns true iff the onboarding row is `phase==completed`,
+and the turn dispatches to `build-live-agent-turn` (the warm per-(project,topic)
+CC session) instead of the engine. Project topics route through
+`handleProjectTopicInbound`; General routes inline. A `button_choice` TAP always
+bypasses this gate and drives `engine.advance` — so the onboarding wow
+final-handoff buttons (mobile-app / telegram-bind / skip / done) keep working
+even after the topic is live.
+
+> GO-LIVE P0 (2026-06-20): General previously stayed on the engine path while a
+> final-handoff prompt was pending (`final_handoff_active === true`). An owner
+> who never tapped the handoff "Done" left that flag stuck true forever, so every
+> typed General message dead-ended in `noop_terminal` and the topic went silent
+> while project topics worked. The `final_handoff_active` gate was removed;
+> General now mirrors project topics. Live-agent reply rows persist with a 10-year
+> TTL (`build-live-agent-turn.ts`) so history never ghost-expires.
+
+> GO-LIVE (2026-06-20): live-agent turns are SERIALIZED per (instance, topic).
+> `build-live-agent-turn.ts` keeps a `turnChains` map (one promise tail per
+> topic) and chains each turn's body onto the prior turn's tail, so two messages
+> typed in quick succession on the same topic run strictly one-at-a-time and in
+> arrival order. Before this, a 2nd turn that arrived before the 1st settled also
+> saw `isColdFirstTurn` (the warm session wasn't pooled yet) → both cold-spawned
+> a parallel CC session, both emitted the "Waking up…" ack, replies raced /
+> duplicated, and one question was lost. Serialization makes the 1st turn
+> establish the single warm session (and pay the one cold-start ack); the 2nd
+> reuses it and answers its own question in order. Distinct topics keep distinct
+> chains and still run concurrently.
+
+**Client surface (`landing/chat.ts`).**
+- *First-load loader.* The "Setting things up…" indicator covers a FRESH
+  onboarding's page-load → WS-open → first-prompt window and clears on first
+  rendered content. A RESUMED returning session (`session_ready` with
+  `resumed: true`, stamped by `landing/server.ts` on the cookie-only resume and
+  spent-jti fallback paths) clears it immediately — a completed instance emits
+  no fresh first prompt, so without this the loader hung forever on reload.
+- *Topic switch.* `switchTopic` runs over the live WS (no reload): cache scroll,
+  abort the outgoing fetch, clear `#log` + per-topic render state (including the
+  on-open typing timeout), send `topic_switch`, await the `topic_switched` ack
+  (the server re-emits the active seed prompt first), then hydrate the
+  destination's full history via `GET /api/v1/chat/history?topic_id=…`.
+  Historical rows render inert (resolved → [agent][user]; unresolved → agent
+  bubble), with the single active prompt left for the live re-emit.
+- *Wow brief persistence (2026-06-20).* The wow channel adapter's `sendText`
+  (`buildWowChannelAdapter`, `gateway/realmode-composer/build-wow-dispatcher.ts`)
+  persists every delivered agent statement — notably action 01's first-week
+  brief — to `button_prompts` as an inert, already-resolved agent-bubble turn so
+  it survives a reload. Best-effort on the success path only (try/catch); it
+  never disturbs the load-bearing throw-on-undelivered routing.
+- *Truthful first-week brief (2026-06-20).* Action 01's overnight section
+  (`appendOvernightPreview`, `onboarding/wow-moment/actions/01-first-week-brief.ts`)
+  reads the REAL `overnight_queue` for the project at render time
+  (`OvernightQueueStore.listByProject`, filtered to `queued`/`in-flight`). It
+  reflects genuinely-queued rows when present, and otherwise OFFERS overnight
+  work / reminders rather than asserting a schedule. It never claims scheduled
+  overnight work or set reminders unless the real tables back it (owner DB at
+  onboarding: 0 queue rows, 0 reminders). Option B (wiring real overnight work
+  at onboarding) is a logged post-launch follow-up.
+- *No fake unread badge (2026-06-20).* The Open topics surface
+  (`open/chat-topics-surface.ts`) reports `unread_count: 0` for every topic.
+  There is no per-topic last-read marker, so a real unread count cannot be
+  computed; the previous count (unresolved-prompt tally) made every project's
+  single opening seed render a perpetual "1". The client badge hides at 0, so no
+  fake indicator paints. (Field + client mechanism retained for a future
+  real last-read seam.)
+
+## Onboarding project removal ("ignore X")
+
+At `projects_proposed` the freeform reply routes through the LLM router
+(`llm-router.ts`), which extracts a `removed_projects` array; the engine merges
+`union(seeded, extracted) minus removed_projects` so a named project is dropped
+before materialization. Removal verbs include drop / cut / skip / remove /
+**ignore / exclude / leave out / don't set up** (the last four added 2026-06-20
+after "ignore real estate investing" was acknowledged but not honored). Projects
+are also renameable/deletable later from settings — the prompt copy says so.

@@ -1,0 +1,43 @@
+-- 0054_onboarding_state_handoff_emitted_at.sql
+--
+-- 2026-06-03 — onboarding-buttons-only-tweak-later sprint. Add nullable
+-- `onboarding_handoff_emitted_at` column to `onboarding_state` so the
+-- engine's post-completion General-topic handoff message fires AT MOST
+-- ONCE per (project, user) onboarding row.
+--
+-- Per docs/plans/onboarding-buttons-only-tweak-later-brief.md § 5
+-- ("Idempotent: only fires ONCE per instance").
+--
+-- Semantics:
+--   NULL  → handoff not yet emitted; engine emits on next entry into the
+--           `wow_fired → completed` final-handoff path.
+--   value → handoff emitted at <ms-epoch>; engine SKIPS to honour the
+--           1-shot idempotency contract. Mark-on-emit (not on success) so
+--           a channel-send hiccup never causes a re-emit storm on
+--           crash-resume of `completed`.
+--
+-- Migration mechanics:
+--   The column is NULLABLE with no default, which SQLite STRICT tables
+--   permit via a plain `ALTER TABLE ... ADD COLUMN` (the table-rebuild
+--   dance at 0043 was only required there because... no — 0043 added a
+--   nullable column too and chose the rebuild for symmetry. A nullable
+--   INTEGER add is STRICT-compatible directly, so we use the lighter form
+--   here.) Every pre-migration row reads NULL ("handoff not yet emitted"),
+--   which is correct: completed instances that pre-date this column simply
+--   never re-emit (their handoff already fired under the prior code).
+--
+--   STRICT typing preserved. Composite PK `(project_slug, user_id)` from
+--   0034 preserved. Index `onboarding_state_phase` preserved. Forward-only.
+--   Snapshot regen required (bun run migrations/regen-snapshot.ts).
+--
+-- Verification (post-migration, per-project DB):
+--   SELECT
+--     COUNT(*) AS total_rows,
+--     SUM(CASE WHEN onboarding_handoff_emitted_at IS NULL THEN 1 ELSE 0 END)
+--       AS not_emitted_rows
+--   FROM onboarding_state;
+--
+-- Rollback path: dropping a single nullable column has no data-loss risk
+-- (the column is the only new state).
+
+ALTER TABLE onboarding_state ADD COLUMN onboarding_handoff_emitted_at INTEGER;

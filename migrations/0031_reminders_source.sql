@@ -1,0 +1,27 @@
+-- 0031_reminders_source.sql
+--
+-- Cores Reminders Tier 1 r2 follow-up — add an optional `source` tag
+-- to `reminders` so a Core that piggybacks on the shared engine table
+-- can scope its uninstall cleanup to just the rows IT created.
+--
+-- Background: the Tier 1 Reminders Core
+-- (`cores/free/reminders/src/backend.ts`) declares a sidecar in its
+-- manifest but writes through to the engine's per-project `reminders`
+-- table — the engine's tick loop already scans that table, so a
+-- second store would either need its own tick or risk silent
+-- non-firing. Without an ownership tag the Core's uninstall would
+-- either (a) leak rows in the project DB that keep firing after the
+-- Core is gone, or (b) over-cancel and stomp the engine's own
+-- organic reminders (Nova-style lifestyle nudges, wow-moment
+-- interest-check-ins, etc.).
+--
+-- The column is nullable; existing rows + every non-Core-created
+-- engine write leaves it NULL. The store's `listPendingBySource`
+-- selects on `source = ?` so NULL rows are NEVER swept by a Core's
+-- cleanup pass.
+--
+-- Forward-only, no CHECK constraint — future Cores pick their own
+-- source strings (typically the package name, e.g.
+-- '@neutron/reminders-core'), and the store keeps the column opaque.
+
+ALTER TABLE reminders ADD COLUMN source TEXT;

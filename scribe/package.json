@@ -1,0 +1,9 @@
+{
+  "name": "@neutronai/scribe",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "devDependencies": {
+    "gbrain": "github:garrytan/gbrain#8058144"
+  }
+}

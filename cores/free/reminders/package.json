@@ -1,0 +1,190 @@
+{
+  "name": "@neutronai/reminders-core",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts",
+    "./mcp-tools-extra": "./src/mcp-tools-extra.ts",
+    "./chat-commands": "./src/chat-commands.ts",
+    "./smart-wrap": "./src/smart-wrap.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/reminders": "workspace:*",
+    "@neutronai/tasks": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": [
+      "read:reminders_core.db",
+      "write:reminders_core.db"
+    ],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "reminders_create",
+        "description": "Schedule a one-shot reminder. Returns the new reminder's id and the persisted fire_at (unix seconds).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "message":    { "type": "string", "description": "Reminder body — composed verbatim or wrapped by the fire-time agent." },
+            "fire_at":    { "type": "number", "description": "Unix seconds (UTC) when the reminder should fire." },
+            "project_id": { "type": "string", "description": "Optional project scope; persisted as topic_id under the hood." }
+          },
+          "required": ["message", "fire_at"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "id":      { "type": "string" },
+            "fire_at": { "type": "number" }
+          },
+          "required": ["id", "fire_at"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_list",
+        "description": "List pending reminders for this owner, sorted by fire_at ASCENDING (soonest-firing first). Optional project_id narrows to a single project. v1 only lists pending reminders — fired/cancelled history is not yet exposed; the status field is reserved for forward-compat and may only be set to 'pending'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "limit":      { "type": "integer", "description": "Maximum number of reminders to return. Backend default applies when omitted." },
+            "project_id": { "type": "string", "description": "Optional project scope; matched against the row's topic_id." },
+            "status":     { "type": "string", "enum": ["pending"], "description": "v1 only supports 'pending'. fired/cancelled history is not yet exposed; the field stays for forward-compat." }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id":         { "type": "string" },
+                  "message":    { "type": "string" },
+                  "fire_at":    { "type": "number" },
+                  "status":     { "type": "string" },
+                  "project_id": { "type": ["string", "null"] }
+                },
+                "required": ["id", "message", "fire_at", "status", "project_id"]
+              }
+            }
+          },
+          "required": ["results"]
+        },
+        "capability_required": "read:reminders_core.db"
+      },
+      {
+        "name": "reminders_snooze",
+        "description": "Move a pending reminder to a later fire_at. Implemented as atomic cancel + re-create against the underlying engine so the engine's public API stays untouched; returns the NEW reminder id (the original id is cancelled).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id":          { "type": "string", "description": "Pending reminder id to snooze." },
+            "new_fire_at": { "type": "number", "description": "Unix seconds (UTC) for the new fire time." }
+          },
+          "required": ["id", "new_fire_at"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "id":               { "type": "string", "description": "Id of the newly-created reminder carrying the new fire_at." },
+            "cancelled_id":     { "type": "string", "description": "Id of the original reminder that was cancelled." },
+            "fire_at":          { "type": "number" }
+          },
+          "required": ["id", "cancelled_id", "fire_at"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_cancel",
+        "description": "Cancel a pending reminder. Returns ok=true when a pending row was cancelled, ok=false when the row was already fired/cancelled or never existed. Returns ok=false for both unknown ids and reminders owned by another owner (info-hiding is intentional — the caller is never told a foreign id exists).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Reminder id to cancel." }
+          },
+          "required": ["id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" }
+          },
+          "required": ["ok"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_convert_to_task",
+        "description": "Promote a pending reminder into a canonical task. Creates a task with the reminder's message as the title and the reminder's fire_at as the due_date; the task substrate then auto-creates a fresh linked reminder. The original reminder is cancelled so it does not fire twice. Returns the new task_id, the linked_reminder_id (the freshly-created reminder bound to the task), and the cancelled_reminder_id (the original).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Pending reminder id to convert." },
+            "project_id": { "type": "string", "description": "Optional project scope for the new task. Defaults to the reminder's project." },
+            "priority": { "type": "integer", "description": "Optional priority 0..3 (3 = highest)." },
+            "title": { "type": "string", "description": "Optional title override; falls back to the reminder's message." }
+          },
+          "required": ["id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": { "type": "string" },
+            "linked_reminder_id": { "type": ["string", "null"] },
+            "cancelled_reminder_id": { "type": "string" }
+          },
+          "required": ["task_id", "linked_reminder_id", "cancelled_reminder_id"]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "reminders_update",
+        "description": "Rewrite a pending reminder's message body. Implemented as atomic cancel+create inside projectDb.transaction so the engine surface stays untouched and the audit trail records both writes. Preserves the original row's topic_id + fire_at + recurrence + source (NULL for organic, '@neutronai/reminders-core' for Core-owned). Returns the new id, the replaced id, and the persisted new message body. Throws when id is unknown / belongs to another owner (info-hidden as 'not found') / is not pending.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id":      { "type": "string", "description": "Pending reminder id to rewrite." },
+            "message": { "type": "string", "description": "New message body. Replaces the original verbatim." }
+          },
+          "required": ["id", "message"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "id":          { "type": "string", "description": "Id of the new reminder carrying the new message." },
+            "replaced_id": { "type": "string", "description": "Id of the original reminder that was cancelled." },
+            "message":     { "type": "string", "description": "The new message body (echoed for confirmation)." }
+          },
+          "required": ["id", "replaced_id", "message"]
+        },
+        "capability_required": "write:reminders_core.db"
+      }
+    ],
+    "ui_components": [
+      {
+        "name": "RemindersLauncherIcon",
+        "entry_point": "./src/ui/launcher-icon.ts",
+        "surface": "launcher_icon"
+      },
+      {
+        "name": "RemindersAppTab",
+        "entry_point": "./src/ui/app-tab-surface.ts",
+        "surface": "app_tab"
+      }
+    ],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^0.1.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

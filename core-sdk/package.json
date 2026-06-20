@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/core-sdk",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true
+}

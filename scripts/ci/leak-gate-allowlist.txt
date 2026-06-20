@@ -1,0 +1,79 @@
+# scripts/ci/leak-gate-allowlist.txt
+#
+# The ONLY exception mechanism for the PUBLIC leak-gate subset
+# (scripts/ci/leak-gate.sh). Format, one entry per line:
+#
+#   <path-glob>:<rule-id>
+#
+# A finding is suppressed iff its file path matches <path-glob> AND its rule-id
+# matches <rule-id>. Rule ids are the bracketed names in leak-gate.sh output
+# (tenant-code, secret-file, …). Keep this file SHORT — every entry is a
+# reviewable, committed exception. This is the public-side counterpart to the
+# private scripts/sprint-c/leak-gate-allowlist.txt; it carries ONLY the entries
+# that are needed for the Tier-2/Tier-3 subset (no Tier-1 PII entries exist here
+# because the public subset runs no Tier-1 PII rules).
+
+# Migration 0074 backfills onboarding_state rows persisted at the old
+# `tenant_provisioned` onboarding phase value to `instance_provisioned`. Its
+# WHERE clause MUST name the old phase string to find the rows to rename, so the
+# file unavoidably carries the token — the one legitimate, permanent reference in
+# the Open tree. Data migrations are immutable history. Permanent tenant-code FP.
+migrations/0074_rename_tenant_provisioned_phase.sql:tenant-code
+
+# .env.example is the zero-PII self-host env TEMPLATE (every value is a default/
+# empty placeholder — no real secrets). Its name unavoidably collides with the
+# secret-file `.env*` pattern. Carried into Open on purpose (the quickstart's
+# `cp .env.example .env` step needs it). Permanent template false-positive.
+.env.example:secret-file
+
+# This gate's own source (scripts/ci/leak-gate.sh) + this allowlist necessarily
+# NAME the multi-tenant tokens + hosted domain they ban, so they self-match the
+# Tier-2 vocab + neutron-computer rules. Those are the gate's pattern source, not
+# a leak. No Tier-1/secret rule is exempted, so a real secret in either file is
+# still caught.
+scripts/ci/leak-gate.sh:tenant-code
+scripts/ci/leak-gate.sh:tenant-routing-camel
+scripts/ci/leak-gate.sh:tenant-purged
+scripts/ci/leak-gate.sh:workspace-retired
+scripts/ci/leak-gate.sh:cross-tenant-code
+scripts/ci/leak-gate.sh:provision-code
+scripts/ci/leak-gate.sh:tenant-word
+scripts/ci/leak-gate.sh:tenant-docs
+scripts/ci/leak-gate.sh:neutron-computer
+scripts/ci/leak-gate-allowlist.txt:tenant-code
+scripts/ci/leak-gate-allowlist.txt:tenant-purged
+scripts/ci/leak-gate-allowlist.txt:workspace-retired
+scripts/ci/leak-gate-allowlist.txt:tenant-word
+scripts/ci/leak-gate-allowlist.txt:cross-tenant-code
+
+# Migration .sql files are immutable history; several carry the word "tenant" in
+# their explanatory comments (e.g. 0050 `DEFAULT_TENANT_TIMEZONE`, 0002
+# workspace_members, 0074 tenant_provisioned backfill). The build #3 tenant→owner
+# purge does not (and must not) rewrite shipped migration history, so the historic
+# vocab in their comments is a permanent, reviewed false-positive.
+migrations/*:tenant-purged
+migrations/*:tenant-word
+migrations/*:tenant-code
+
+# build #3 (2026-06-19) tenant→owner purge left exactly two residual `tenant`
+# SUBSTRINGS, both in test fixtures, both unrelated to multi-tenant vocab:
+#   * "Lieutenant Commander Data" — a Star Trek character name used as a long-name
+#     UX fixture in the onboarding personality tests.
+#   * "xtenant-safety" — a research-core test query literal.
+# Carried by exact file so the zero-tolerance tenant-purged rule stays armed
+# everywhere else.
+onboarding/interview/__tests__/personality-offered-suggester-wiring.test.ts:tenant-purged
+onboarding/interview/__tests__/personality-offered-character-buttons.test.ts:tenant-purged
+gateway/__tests__/research-core-production-composer.test.ts:tenant-purged
+
+# docs/AS_BUILT.md is the public build log / audit trail. It documents the
+# tenant→owner + workspace→instance/worktree renames and therefore unavoidably
+# NAMES the retired vocabulary (exactly like leak-gate.sh self-matches its own
+# patterns). It carries NO real PII and NO hosted-domain address, so it is
+# exempted ONLY from the retired-vocab rules — never from the pii-denylist /
+# hosted-domain / secret rules.
+docs/AS_BUILT.md:tenant-purged
+docs/AS_BUILT.md:tenant-word
+docs/AS_BUILT.md:tenant-code
+docs/AS_BUILT.md:tenant-routing-camel
+docs/AS_BUILT.md:workspace-retired

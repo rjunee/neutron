@@ -1,0 +1,9 @@
+{
+  "name": "@neutronai/runtime",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}

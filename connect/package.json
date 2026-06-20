@@ -1,0 +1,19 @@
+{
+  "name": "@neutronai/connect",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./*": "./*"
+  },
+  "dependencies": {
+    "@neutronai/jwt-validator": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "gbrain": "github:garrytan/gbrain#8058144"
+  }
+}

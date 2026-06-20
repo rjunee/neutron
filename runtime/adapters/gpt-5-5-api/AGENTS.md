@@ -1,0 +1,9 @@
+# AGENTS.md — runtime/adapters/gpt-5-5-api
+
+This module owns the GPT-5.5 Responses API substrate adapter — `Substrate.start(spec) → SessionHandle` against `https://api.openai.com/v1/responses`. Caller-facing `tool_resolution: 'internal'` (load-bearing: the upstream Responses API is `external`, but `mcp-shim.ts` translates so Cores stay on the locked CC pattern). Composition: `auth.ts` resolves BYO `OPENAI_API_KEY` only (no subscription-OAuth — that's the codex-cli adapter's exclusive domain) → `multi-model-rotation.ts` walks `model_preference[]` on retryable error → `responses-stream.ts` POSTs and parses SSE → `mcp-shim.ts` resolves any upstream `tool_call` events via the per-instance MCP resolver and re-streams via `previous_response_id` continuation → `index.ts` ties it as `createGptResponsesApiSubstrate(options)`.
+
+It must NOT support subscription-OAuth (per OpenAI ToS analysis at internal design notes; reselling ChatGPT subscriptions is more directly prohibited than the analogous Anthropic surface), surface `tool_resolution: 'external'` to callers (the mcp-shim is the entire point — Cores are substrate-uniform), or pass `model: string` instead of `model_preference: string[]` (rotation lives inside this adapter, not in the dispatcher). Per § A.2.1 of the engineering plan, this adapter is the PRIMARY risk-mitigation against "Anthropic blocks Neutron's hosted-CC pattern" — it ships in P1, not P10.
+
+Session continuation: `previous_response_id` is the OpenAI primitive; the adapter passes `spec.session.id` into the request body and surfaces the response id back through `completion.session.id`. Server-side prompt caching is automatic (~50% discount, ~5–10 min TTL) — we do not annotate cache_control markers.
+
+Cross-refs: `docs/engineering-plan.md § A.2.1 + § B.P1`, internal design notes.

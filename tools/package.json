@@ -1,0 +1,10 @@
+{
+  "name": "@neutronai/tools",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/persistence": "workspace:*"
+  }
+}

@@ -1,0 +1,593 @@
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import type { WebSocketHandler } from 'bun'
+import { applyMigrations } from '../migrations/runner.ts'
+import { shutdownAllPersistentRepls } from '../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import { ProjectDb } from '../persistence/index.ts'
+// C2 OSS-split (2026-06-10) — the Managed production composer
+// (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
+// now lives in the Managed provisioning module (`realmode-composer.ts`) and reaches
+// this boot shell ONLY via the `NEUTRON_GRAPH_COMPOSER_MODULE` env seam
+// (see `loadGraphComposerFromEnv` at the bottom of this file). This
+// file holds ZERO imports — static OR dynamic — into Managed dirs
+// (signup/, provisioning/, identity/, proxy/).
+import { composeProductionGraph } from './composition.ts'
+
+
+// Shared boot-time helpers — extracted to `./boot-helpers.ts` (Argus
+// PR #440 r2 IMPORTANT 5) so the injected Managed composer imports a
+// NON-ENTRY module instead of this entry module (which would form a
+// top-level-await cycle through the NEUTRON_GRAPH_COMPOSER_MODULE
+// dynamic import below). This file re-exports the full helper surface
+// for back-compat; boot() itself only needs the two value imports.
+import {
+  bindHttpListener,
+  resolveListenPort,
+  resolveRepoRoot,
+  type GraphComposer,
+  type HttpHandler,
+} from './boot-helpers.ts'
+export {
+  createTasksCoreOwnerRegistry,
+  resolveRegistryDbPath,
+  resolveOwnerRegistryRow,
+  resolveListenPort,
+  defaultListProjects,
+  resolveOwnerHome,
+  resolveRepoRoot,
+  buildChainedChatCommandFilter,
+  buildRemindersChatCommandFilter,
+  buildTridentCodeChatCommandFilter,
+  buildCodegenChatCommandFilter,
+  readPatternFromPrompts,
+  buildCoresBackendFactories,
+  wrapResearchBackendWithDefaultProjectId,
+  loadAnthropicOAuthConfigFromEnv,
+  buildResearchLlmCallForOwner,
+  resolveIdentityPublicBaseUrl,
+  resolveBaseDomain,
+  buildMaxOAuthGateHandler,
+  buildMaxOauthHandoffUrl,
+  buildGateLandingServer,
+} from './boot-helpers.ts'
+export type {
+  TasksCoreOwnerRegistry,
+  BootOwnerRow,
+  BootOwnersRegistry,
+  OwnerRegistryLookupResult,
+  GraphComposer,
+  HttpHandler,
+  ListProjectsResolver,
+} from './boot-helpers.ts'
+import type { GatewayModuleGraph } from './module-graph.ts'
+import { sdNotify } from './sd-notify.ts'
+
+// 5-second tick interval pairs with the systemd unit's WatchdogSec=10 — 50%
+// safety margin per `man sd_notify(3)` recommendations. If the gateway misses
+// two ticks systemd's watchdog fires and Restart=always brings up a fresh
+// process within RestartSec=5s.
+const WATCHDOG_INTERVAL_MS = 5_000
+
+
+export interface BootHandle {
+  db: ProjectDb
+  graph: GatewayModuleGraph | null
+  /**
+   * Live HTTP listener wrapping `Bun.serve`. Always set; we always open a
+   * port. `port: 0` is allowed at boot for a random free port (tests); the
+   * resolved port is exposed on `server.port` post-boot. `stop()` closes the
+   * listener and is idempotent — `shutdown()` calls it.
+   */
+  server: BootServer
+  /**
+   * Idempotent graceful shutdown. Stops accepting new requests, drains
+   * in-flight ones up to systemd's TimeoutStopSec, then closes the DB.
+   *
+   * `force: true` is for in-process callers (tests, embedded runs) that
+   * need the event loop to drain immediately — it forwards to
+   * `server.stop(true)` so idle keep-alive sockets are closed alongside
+   * the listener. WITHOUT this, `bun test` hangs at suite end on the
+   * keep-alive idle timer for any test that fetched against the gateway.
+   * Production callers (the SIGTERM handler) leave `force` unset so
+   * in-flight requests get the graceful drain window.
+   */
+  shutdown: (opts?: { force?: boolean }) => Promise<void>
+}
+
+export interface BootServer {
+  /** The actual port the listener bound. */
+  port: number
+  /**
+   * Idempotent close. `force: true` forwards to `Bun.serve.stop(true)`,
+   * which closes idle keep-alive sockets immediately instead of waiting
+   * for them to drain. Tests pass force=true so `bun test` can exit
+   * cleanly; production callers leave it unset so in-flight requests
+   * complete within `TimeoutStopSec`.
+   */
+  stop: (opts?: { force?: boolean }) => Promise<void>
+}
+
+/**
+ * Resolve the per-instance SQLite path. Production: the systemd unit sets
+ * `NEUTRON_DB_PATH=<OWNER_HOME>/project.db`. Dev fallback when neither env nor
+ * a CLI flag set a path: a stable per-user default under
+ * `~/.local/share/neutron/` so `bun run gateway/index.ts` works out of the box.
+ */
+function resolveDbPath(): string {
+  const fromEnv = process.env['NEUTRON_DB_PATH']
+  if (fromEnv !== undefined && fromEnv !== '') return fromEnv
+  return join(homedir(), '.local', 'share', 'neutron', 'owner.db')
+}
+
+/**
+ * Resolve the per-instance url_slug used by every JWT-claim equality check
+ * inside the gateway (chat-bridge.validateStartToken etc.). Resolution
+ * order:
+ *
+ *   1. `<OWNER_HOME>/.url_slug` — written by the rename orchestrator on
+ *      every successful slug rename. This file-based override is what
+ *      makes a `systemctl restart` after rename pick up the new slug
+ *      without re-rendering the unit's hardcoded env block.
+ *   2. `NEUTRON_INSTANCE_SLUG` env — the systemd unit's install-time
+ *      Environment= block (canonical name as of C4-a2, SD1). Pre-rename /
+ *      first-boot path. Pre-P1.5 instances stay on this until their first
+ *      rename.
+ *   3. `'dev'` — direct `bun run gateway/index.ts` fallback.
+ *
+ * Argus r1 [IMPORTANT]: without (1), a per-instance gateway booted at
+ * url_slug=A still pins `expected_project_slug=A` in memory after the
+ * orchestrator renames to B. New JWTs minted with `project_slug=B` then
+ * 401 on every connect because the slug-history shim only knows about
+ * OLD slugs (B is the NEW slug, not in slug_history). The orchestrator
+ * pairs the file write with a systemctl restart so this resolver
+ * returns the new value on the next boot.
+ */
+export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
+  const ownerHome = env['OWNER_HOME']
+  if (ownerHome !== undefined && ownerHome !== '') {
+    const slugFile = join(ownerHome, '.url_slug')
+    if (existsSync(slugFile)) {
+      const fromFile = readFileSync(slugFile, 'utf8').trim()
+      if (fromFile.length > 0) return fromFile
+    }
+  }
+  return env['NEUTRON_INSTANCE_SLUG'] ?? 'dev'
+}
+
+
+export interface BootOptions {
+  composer?: GraphComposer
+  /**
+   * Optional explicit HTTP handler. When set, used for every inbound
+   * request; both the composer's `http_handler` and the default
+   * `/healthz`-only handler are bypassed. The integration tests inject one
+   * here to wire a cross-instance API server without standing up the full
+   * production composition.
+   */
+  httpHandler?: HttpHandler
+  /**
+   * Override port resolution. `0` requests a random free port (tests).
+   * Otherwise CLI flag > env > default-7800 wins.
+   */
+  port?: number
+}
+
+export async function boot(options: BootOptions = {}): Promise<BootHandle> {
+  const dbPath = resolveDbPath()
+  mkdirSync(dirname(dbPath), { recursive: true })
+
+  const db = ProjectDb.open(dbPath)
+  applyMigrations(db.raw())
+
+  const project_slug = resolveOwnerSlug()
+  const bootedAt = Date.now()
+
+  // Compose the module graph if the caller supplied a composer. We capture
+  // the composition output BEFORE composing so we can read any graph-level
+  // hooks the production caller wired (e.g. http_handler) without changing
+  // the GatewayModuleGraph contract.
+  let graph: GatewayModuleGraph | null = null
+  let realmode_cleanups: Array<() => void> = []
+  let composedHttpHandler: HttpHandler | undefined
+  // Sprint 18: WebSocket handler exposed by the landing server (chat
+  // upgrade path). Bun.serve receives it alongside the fetch handler so a
+  // single port handles both HTTP and WS. Default no-op stays cold when
+  // no landing server is wired (legacy P1 boot path).
+  let composedWebsocket: WebSocketHandler<unknown> | undefined
+  // Sprint 18: composed `{ fetch, websocket }` from composeHttpHandler.
+  // We hold onto the composed.fetch separately so the Bun.serve() arrow
+  // can pass the live `server` reference through after its declaration
+  // (the landing server's WebSocket upgrade pattern needs `server.upgrade`).
+  let composedChainFetch:
+    | ((req: Request, server: import('bun').Server<unknown>) => Response | Promise<Response>)
+    | undefined
+  if (options.composer !== undefined) {
+    try {
+      const composition = await options.composer({ db, project_slug })
+      if (composition.realmode_cleanups !== undefined) {
+        realmode_cleanups = composition.realmode_cleanups
+      }
+      // ISSUE #32 — the boot shell used to inline the
+      // `composition.app_xxx_surface → composeInput.appXxx` mapping
+      // here, then call `composeHttpHandler(composeInput)` itself.
+      // That left every `*-production-composer.test.ts` re-rolling
+      // the same `composeHttpHandler` invocation, which silently
+      // bypassed this mapping — a deletion at any
+      // `composeInput.appXxx = …` line in the old boot loop passed
+      // every reachability test. Mapping now lives in
+      // `composition.ts:buildComposedHttpFromComposition`, so a single
+      // path produces the composed `fetch` for both boot and tests.
+      //
+      // We seed `default_handler` here because only the boot shell
+      // knows the per-instance `bootedAt` + slug needed for the healthz
+      // stub; the composer accepts it via the new `default_handler`
+      // field.
+      composition.default_handler = defaultHealthzHandler({ project_slug, bootedAt })
+      const composed = await composeProductionGraph(composition)
+      graph = composed
+      if (composition.http_handler !== undefined) {
+        composedHttpHandler = composition.http_handler
+      } else if (composed.fetch !== undefined) {
+        composedChainFetch = composed.fetch
+        composedWebsocket = composed.websocket
+      }
+    } catch (err) {
+      // Sprint 19 — release resources on init failure so a systemd
+      // restart doesn't race a still-open SQLite handle / dangling
+      // timers spawned by a partially-composed graph. Mirrors the
+      // shutdown() cleanup at lines ~321-354 below; that path runs on
+      // SIGTERM AFTER a successful boot, this one runs when the boot
+      // itself fails. Without this, a throw from `options.composer` or
+      // `composeProductionGraph` would leak `db` (open SQLite handle)
+      // + any timers a half-composed graph already started (e.g. the
+      // reminders tick loop, the watchdog supervisor).
+      if (graph !== null) {
+        try {
+          await graph.shutdown()
+        } catch (shutdownErr) {
+          console.error('graph shutdown during init failure threw:', shutdownErr)
+        }
+      }
+      db.close()
+      throw err
+    }
+  }
+
+  // Pick the http handler. Explicit BootOptions wins over composer output;
+  // composer output wins over the default healthz stub. The chained-fetch
+  // path (Sprint 18) is wired below inside the Bun.serve `fetch` arrow so
+  // the live `server` reference is in scope for `server.upgrade(...)` on
+  // /ws/chat.
+  const handler: HttpHandler =
+    options.httpHandler ??
+    composedHttpHandler ??
+    defaultHealthzHandler({ project_slug, bootedAt })
+
+  // Open the listener. This is the carryover fix from S5 Argus r2: prior to
+  // this commit boot() never opened any HTTP port, so the systemd unit's
+  // ExecStart `--port=<allocated>` had nothing on the other end and Caddy
+  // proxied to a closed upstream on every real provision.
+  const port = resolveListenPort(process.argv, process.env, options.port)
+  // The websocket option is required for `server.upgrade(req, { data })`
+  // to work; we always pass one even when no landing server is wired so
+  // a future mid-boot composition switch can flip it on without
+  // restarting the listener. The no-op handler stays cold when no
+  // upgrade path is reachable.
+  const websocketHandler: WebSocketHandler<unknown> = composedWebsocket ?? {
+    open(): void {},
+    message(): void {},
+    close(): void {},
+  }
+  // #314: bind the resolved port DETERMINISTICALLY. A configured port (env /
+  // --port / the fixed 7800 default → `port !== 0`) is bound with a bounded
+  // EADDRINUSE retry (to ride out the prior process releasing the socket on a
+  // restart) and then FAILS LOUD if still held — it is NEVER silently moved to
+  // a random port, because the owner's bookmarked URL is pinned to it. Only the
+  // genuine "pick anything" case (`port === 0`, dev/tests) auto-selects.
+  const server = await bindHttpListener({
+    port,
+    serve: () =>
+      Bun.serve({
+        port,
+        // Default to loopback so an unauthenticated gateway is not LAN-exposed
+        // out of the box (S5 Argus security blocker). Self-hosters opt into a
+        // wider bind with NEUTRON_HOST=0.0.0.0 once they front it with auth / a
+        // trusted network — see .env.example and the Open README's exposure
+        // warning.
+        hostname: process.env.NEUTRON_HOST ?? '127.0.0.1',
+        fetch: async (req: Request, srv): Promise<Response> => {
+          try {
+            // Sprint 18 — when the chain is wired, route through it (it
+            // owns the precedence ladder + the live `srv` reference for
+            // WebSocket upgrades). Otherwise fall back to the simple
+            // single-handler path (P1 default + tests injecting
+            // `BootOptions.httpHandler`).
+            if (
+              options.httpHandler === undefined &&
+              composedHttpHandler === undefined &&
+              composedChainFetch !== undefined
+            ) {
+              return await composedChainFetch(req, srv)
+            }
+            return await handler(req)
+          } catch (err) {
+          // 500 on any unhandled handler error so the listener stays up.
+          // journald collects the trace; the supervisor watchdog uses the
+          // instance-process liveness signal, not these handler errors.
+          console.error('http handler threw:', err)
+          return new Response('Internal Server Error', { status: 500 })
+        }
+      },
+      websocket: websocketHandler,
+    }),
+  })
+  // Bun's typed surface marks `server.port` as `number | undefined` (TCP
+  // sockets aren't required for every transport), but for a port-bound HTTP
+  // server it's always set post-start. Assert at boot to keep the BootHandle
+  // strict.
+  if (server.port === undefined) {
+    throw new Error('Bun.serve did not bind a port (transport mismatch?)')
+  }
+  const boundServer: BootServer = {
+    port: server.port,
+    stop: async (opts) => {
+      // Production default: graceful drain. systemd's TimeoutStopSec
+      // bounds the window; in-flight HTTP requests complete before the
+      // socket is released. opts.force=true forwards
+      // closeActiveConnections=true so idle keep-alive sockets are
+      // closed alongside the listener.
+      //
+      // Auto-force when NODE_ENV='test' (bun test sets this for us) so
+      // in-process test runners exit cleanly. Without this, idle
+      // keep-alive sockets owned by the listener keep Bun's event loop
+      // alive on the keep-alive idle timer (~5 min) and `bun test` hangs
+      // at suite end. systemd-spawned production processes do not set
+      // NODE_ENV, so their semantics are unchanged.
+      const force = opts?.force ?? process.env['NODE_ENV'] === 'test'
+      await server.stop(force)
+    },
+  }
+
+  // Best-effort READY=1; sdNotify is a no-op when NOTIFY_SOCKET is unset (dev
+  // mode / macOS), and throws on real systemd error paths so a bricked notify
+  // surfaces loudly at boot rather than silently across the whole watchdog
+  // window. We only send READY=1 once the DB is open, the graph is composed,
+  // and the listener is bound — so a successful systemd START_TIMEOUT means
+  // every subsystem is actually ready to take traffic.
+  sdNotify('READY=1')
+
+  let watchdogTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    // Catch transient sd_notify failures (kernel-side `sendto()` errors,
+    // recv-side socket teardown during shutdown) so a single hiccup does NOT
+    // become an unhandled exception that crashes the process. systemd's
+    // WatchdogSec timer will fire on its own if a real outage stops ticks
+    // from arriving — that's the intended restart path. We log to stderr
+    // (journal) so a sustained pattern is observable.
+    try {
+      sdNotify('WATCHDOG=1')
+    } catch (err) {
+      console.error('sd_notify WATCHDOG=1 failed:', err)
+    }
+  }, WATCHDOG_INTERVAL_MS)
+
+  let shuttingDown = false
+  const shutdown = async (opts?: { force?: boolean }): Promise<void> => {
+    if (shuttingDown) return
+    shuttingDown = true
+    // Stop accepting NEW requests first so an SIGTERM doesn't race a freshly
+    // arriving Caddy proxy. We stop the listener BEFORE STOPPING=1 so by the
+    // time systemd starts the TimeoutStopSec countdown, nothing new can land.
+    // opts.force is threaded through to boundServer.stop so test callers can
+    // forcefully close idle keep-alive sockets without changing production
+    // graceful-drain semantics.
+    try {
+      await boundServer.stop(opts)
+    } catch (err) {
+      console.error('http listener stop failed:', err)
+    }
+    // Same try/catch shape as the watchdog tick above: a transient sd_notify
+    // failure (NOTIFY_SOCKET torn down mid-stop, kernel sendto hiccup) must
+    // NOT skip the cleanup that follows. Without this guard, a throw here
+    // would exit the function before clearInterval + db.close, leaving the
+    // watchdog timer alive and the DB open until systemd force-kills.
+    try {
+      sdNotify('STOPPING=1')
+    } catch (err) {
+      console.error('sd_notify STOPPING=1 failed:', err)
+    }
+    if (watchdogTimer !== null) {
+      clearInterval(watchdogTimer)
+      watchdogTimer = null
+    }
+    if (graph !== null) {
+      try {
+        await graph.shutdown()
+      } catch (err) {
+        console.error('module-graph shutdown failed:', err)
+      }
+    }
+    // ISSUES #217 — terminate the persistent-REPL warm pool (the `claude`
+    // PTY children + their dev-channel bridges) as part of graceful
+    // shutdown. Before this call the function was exported but NEVER
+    // invoked in production: under the old KillMode=process units every
+    // descendant reparented to init on each restart/deploy/delete and
+    // accumulated to RAM exhaustion (632 orphans / ~19 GB, 2026-06-11).
+    // systemd's KillMode=control-group is the guarantee layer (covers
+    // crash / SIGKILL / hung drain); this is the polite layer that also
+    // protects non-systemd deployments (Open self-host on macOS, dev
+    // runs). Continuity is unaffected — the next turn `--resume`s the
+    // captured session transcript.
+    //
+    // Timing note (Argus PR#438 minor 9): worst case this drain can
+    // exceed the unit's TimeoutStopSec=30 (one wedged spawn promise can
+    // hold the pool walk for the spawn timeout, ~40 s) — acceptable under
+    // systemd because the cgroup SIGKILL fires at the deadline and reaps
+    // whatever the drain hadn't reached. On NON-systemd deployments there
+    // is no such backstop and a SIGTERM-ignoring `claude` gets no
+    // per-child KILL escalation from this loop — a self-host orphan there
+    // is bounded by the dev-channel's exit-on-transport-close (same PR)
+    // rather than by an external reaper.
+    try {
+      await shutdownAllPersistentRepls()
+    } catch (err) {
+      console.error('persistent-REPL substrate shutdown failed:', err)
+    }
+    // P1.5 / Sprint 21 (Codex r2 P2) — run realmode cleanups (e.g. the
+    // slug-picker resolver's RW registry + identity DB handles) AFTER
+    // module-graph shutdown but BEFORE the main `db.close()` so any
+    // in-flight queries on the auxiliary connections finish cleanly.
+    for (const cleanup of realmode_cleanups) {
+      try {
+        cleanup()
+      } catch (err) {
+        console.error('realmode cleanup threw during shutdown:', err)
+      }
+    }
+    db.close()
+  }
+
+  const handleSignal = (): void => {
+    // Don't await; node signal handlers are sync. shutdown() stores its own
+    // re-entrancy guard so a double signal is harmless.
+    void shutdown()
+  }
+  process.once('SIGTERM', handleSignal)
+  process.once('SIGINT', handleSignal)
+
+  return { db, graph, server: boundServer, shutdown }
+}
+
+/**
+ * Default `/healthz` handler used when no composer + no explicit
+ * `BootOptions.httpHandler` are wired. Returns
+ * `{status:'ok', project_slug, uptime_ms}` for liveness; everything else is
+ * 404. Production wires a real handler via the composer.
+ */
+export function defaultHealthzHandler(opts: {
+  project_slug: string
+  bootedAt: number
+}): HttpHandler {
+  return (req: Request): Response => {
+    const url = new URL(req.url)
+    if (url.pathname === '/healthz') {
+      const body = {
+        status: 'ok' as const,
+        project_slug: opts.project_slug,
+        uptime_ms: Date.now() - opts.bootedAt,
+      }
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return new Response('Not Found', { status: 404 })
+  }
+}
+
+
+
+/**
+ * C2 OSS-split boundary closure (2026-06-10) — the graph-composer module
+ * seam. The Managed production composer (`buildDefaultRealModeComposer`)
+ * lived in this file until C2; it carried 24 open-not-to-managed import
+ * edges (signup/, provisioning/, identity/, proxy/), so it moved
+ * to the Managed provisioning module (`realmode-composer.ts`, Managed-side,
+ * those imports are legal). This Open boot shell now takes the composer
+ * as DEPLOY-CONFIG INJECTION: the per-instance systemd unit sets
+ *
+ *   Environment=NEUTRON_GRAPH_COMPOSER_MODULE=provisioning/realmode-composer.ts
+ *
+ * and the entrypoint dynamic-imports that path (resolved against the
+ * repo root for relative values) and calls its exported
+ * `buildGraphComposer()`. Open self-hosted boxes never set the env and
+ * boot the same `/healthz`-only dev shape as before. Open code never
+ * names a Managed path — the unit template (a Managed `scripts/install/`
+ * artifact) is what knows where the composer lives. Post-carve the env
+ * points into the private repo's composer while this file ships public.
+ *
+ * Fail-fast: `NEUTRON_AUTH_JWKS_URL` set (realmode requested) WITHOUT a
+ * composer module is a misconfigured Managed unit — exit 1 loudly rather
+ * than silently booting an instance with no chat surface. The deploy
+ * pipeline splices the env into existing units before the fleet restart
+ * (scripts/install/migrate-instances-graph-composer.sh).
+ *
+ * MODULE-CYCLE NOTE (Codex C2-round P1 2026-06-10; CLOSED structurally
+ * at Argus PR #440 r2, 2026-06-12): the composer module used to import
+ * its ~22 shared helpers back from THIS entry module while it was still
+ * mid-evaluation (the entrypoint suspends at its top-level
+ * `await loadGraphComposerFromEnv()`) — a TLA cycle that completed under
+ * Bun's loader but could deadlock under a strict ESM-TLA implementation,
+ * and prod bun is path-pinned, not version-pinned. The helpers now live
+ * in `gateway/boot-helpers.ts` (a non-entry module the composer imports
+ * directly), so the composer's module graph no longer contains this
+ * entry module at all. The real-entry subprocess test in
+ * `gateway/__tests__/graph-composer-env-seam.test.ts` keeps pinning the
+ * boot-through-the-seam behaviour so any future reintroduction of the
+ * cycle (or a Bun loader regression / Node port) surfaces as a test
+ * failure, not a prod boot hang.
+ */
+export async function loadGraphComposerFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<GraphComposer | undefined> {
+  const modulePath = env['NEUTRON_GRAPH_COMPOSER_MODULE']
+  const jwksUrl = env['NEUTRON_AUTH_JWKS_URL']
+  if (typeof modulePath !== 'string' || modulePath.length === 0) {
+    if (typeof jwksUrl === 'string' && jwksUrl.length > 0) {
+      console.error(
+        '[boot] FATAL: NEUTRON_AUTH_JWKS_URL is set (realmode requested) but ' +
+          'NEUTRON_GRAPH_COMPOSER_MODULE is not — the graph composer is ' +
+          'deploy-config injection since C2. Managed units set it to ' +
+          'owner-provisioning/realmode-composer.ts; run ' +
+          'scripts/install/migrate-owners-graph-composer.sh for pre-C2 units.',
+      )
+      process.exit(1)
+    }
+    return undefined
+  }
+  const resolved = modulePath.startsWith('/')
+    ? modulePath
+    : join(resolveRepoRoot(env), modulePath)
+  // `() => unknown`, not `() => GraphComposer`: the module is arbitrary
+  // deploy config — the return shape is a runtime claim we VERIFY below,
+  // not a compile-time fact we can assert here.
+  const mod = (await import(resolved)) as {
+    buildGraphComposer?: () => unknown
+  }
+  if (typeof mod.buildGraphComposer !== 'function') {
+    console.error(
+      `[boot] FATAL: NEUTRON_GRAPH_COMPOSER_MODULE=${modulePath} does not export buildGraphComposer()`,
+    )
+    process.exit(1)
+  }
+  // Argus PR #440 r2 (minor 8): validate the factory's RETURN value too.
+  // A GraphComposer is itself a function (see the type above); a module
+  // whose buildGraphComposer() returns undefined/an object would
+  // otherwise slip through here and explode later inside boot() with a
+  // far less actionable stack than this fail-fast.
+  const composer = mod.buildGraphComposer()
+  if (typeof composer !== 'function') {
+    console.error(
+      `[boot] FATAL: NEUTRON_GRAPH_COMPOSER_MODULE=${modulePath} buildGraphComposer() ` +
+        `returned ${composer === null ? 'null' : typeof composer} — expected a GraphComposer function`,
+    )
+    process.exit(1)
+  }
+  return composer as GraphComposer
+}
+
+if (import.meta.main) {
+  // Top-level await: Bun supports TLA in entry modules. An unhandled rejection
+  // exits non-zero, which systemd's Restart=always policy converts into a
+  // respawn after RestartSec=5s.
+  //
+  // When `NEUTRON_GRAPH_COMPOSER_MODULE` is set (Managed production
+  // install path), the injected composer mounts the cross-instance API on
+  // the per-instance port. Without it (dev / smoke / Open self-host), the
+  // boot shell only opens /healthz — same dev shape as Sprint 4.
+  const composer = await loadGraphComposerFromEnv()
+  await boot(composer !== undefined ? { composer } : {})
+  // The Bun.serve listener + watchdog setInterval both keep the event loop
+  // alive until shutdown() clears them from inside the SIGTERM handler. No
+  // additional keep-alive needed.
+}

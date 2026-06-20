@@ -1,0 +1,20 @@
+{
+  "name": "@neutronai/gateway",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/calendar-core": "workspace:*",
+    "@neutronai/codegen-core": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/email-managed-core": "workspace:*",
+    "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/notes": "workspace:*",
+    "@neutronai/reminders-core": "workspace:*",
+    "@neutronai/research-core": "workspace:*",
+    "@neutronai/tasks-core": "workspace:*",
+    "@neutronai/agent-settings": "workspace:*",
+    "jose": "^5.9.0"
+  }
+}

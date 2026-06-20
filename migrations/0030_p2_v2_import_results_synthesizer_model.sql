@@ -1,0 +1,21 @@
+-- 0030_p2_v2_import_results_synthesizer_model.sql
+--
+-- P2 v2 S21 — add `synthesizer_model` to `import_results` so the
+-- persisted row records which model produced the Pass-2 synthesis.
+--
+-- Motivation: live walkthroughs on Sam's Max subscription failed at
+-- Pass-2 with cumulative 429s even after S13's [0, 5s, 15s, 45s]
+-- retry-on-429 backoff. S21 wires a Sonnet 4.6 fallback for the
+-- substrate-backed Pass-2 caller — on Opus 4.7 429 exhaustion the
+-- caller dispatches the same prompt against Sonnet (different rate-
+-- limit bucket). The user gets a successful synthesis instead of a
+-- `failed` sub_step. This column records which model actually
+-- produced the result so observability / SQL queries can monitor
+-- how often production trips the fallback path.
+--
+-- Additive ADD COLUMN — no in-flight row can be stranded. The column
+-- is nullable; the runner's `loadResult` defaults missing rows to
+-- BEST_MODEL (Opus 4.7) at read time so legacy rows surface a sane
+-- value to consumers.
+
+ALTER TABLE import_results ADD COLUMN synthesizer_model TEXT;

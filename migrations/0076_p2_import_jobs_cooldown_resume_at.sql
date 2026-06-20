@@ -1,0 +1,27 @@
+-- 0076_p2_import_jobs_cooldown_resume_at.sql
+--
+-- 2026-06-17 (import-analysis-completeness) — Ryan-directed import fix:
+-- the Claude-export import must analyze EVERY chunk AND survive transient
+-- Anthropic rate-limits (single-Max owners get one credential, so one 429
+-- parks the whole pool). The runner now WAITS for the soonest credential
+-- cooldown to lift and RETRIES the chunk's LLM call rather than dropping
+-- it. While the runner sleeps inside a KNOWN quota-reset window it stamps
+-- the expected wake time here so:
+--
+--   1. `ImportJobRunner.status()` can derive the `waiting_on_cooldown`
+--      progress phase (status stays `rate_limit_cooling_off`, so the
+--      onboarding engine's import-running state machine is UNCHANGED — no
+--      status-enum table rebuild, no engine rewrite), and
+--   2. the import progress UI can render an accurate "waiting for your
+--      Anthropic quota to reset, resuming…" countdown to this timestamp.
+--
+-- Written by `persistWaitingOnCooldown`; cleared (set NULL) by
+-- `clearCoolingOffMessage` on the next successful LLM call and by
+-- `markRateLimitPaused` when the retry cap exhausts (the engine's
+-- COOLDOWN_AFTER_PAUSED_MS resume cron then owns the resume timing).
+--
+-- Schema-additive ADD COLUMN — no in-flight row can be stranded. Nullable;
+-- legacy rows that predate this migration have NULL, which `status()`
+-- reads as "not currently parked on a known cooldown window" (no phase).
+-- Forward-only; no down-migration (Neutron OSS contract).
+ALTER TABLE import_jobs ADD COLUMN cooldown_resume_at INTEGER;

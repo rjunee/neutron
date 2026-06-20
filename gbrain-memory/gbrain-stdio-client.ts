@@ -1,0 +1,192 @@
+/**
+ * @neutronai/gbrain-memory — production GBrain MCP transport (stdio).
+ *
+ * Spawns `gbrain serve` as a child process and speaks MCP over stdio — the
+ * shape the per-instance runtime wires (the GBrain CLI is installed globally via
+ * `bun install -g github:garrytan/gbrain`, or vendored at instance-provision
+ * time). This is the real MCP transport the prior in-tree memory adapter only
+ * ever sketched as an interface ("the actual client lands in P1").
+ *
+ * The per-instance systemd unit sets `GBRAIN_BRAIN_ID` (which brain) + optionally
+ * `GBRAIN_SOURCE` (project scope — MM ships single-source `default`; project
+ * partitioning via GBrain `source` comes in M2.6) before launch; we forward
+ * those through the child env.
+ *
+ * **Version-notice (notify mode).** GBrain emits `UPGRADE_AVAILABLE <cur>
+ * <latest>` on the child's stderr on a minor/major upstream bump. We pipe
+ * stderr into a `GBrainVersionNotice` so the owner's admin "Memory" tab can
+ * surface a one-line nudge — never a silent auto-upgrade inside an instance
+ * (see `version-notice.ts`).
+ */
+
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import {
+  StdioClientTransport,
+  getDefaultEnvironment,
+} from '@modelcontextprotocol/sdk/client/stdio.js'
+import {
+  GBrainUnavailableError,
+  isGbrainBinaryMissingError,
+  type McpClient,
+} from './memory-store.ts'
+import {
+  GBrainVersionNotice,
+  type GBrainUpgradeMode,
+  type GBrainUpgradeNotice,
+} from './version-notice.ts'
+
+export interface GBrainStdioMcpClientOptions {
+  /** Binary to spawn. Default `gbrain` (resolved from PATH / global install). */
+  command?: string
+  /** Args. Default `['serve']` (stdio MCP). */
+  args?: string[]
+  /** `GBRAIN_BRAIN_ID` — which per-instance brain to open. */
+  brainId?: string
+  /** `GBRAIN_SOURCE` — project scope. MM ships `default` (single source). */
+  source?: string
+  /** Extra child env (merged over `getDefaultEnvironment()`). */
+  env?: Record<string, string>
+  /** Working dir for the child. */
+  cwd?: string
+  /** Upgrade-notice mode. Default `notify` — Neutron never auto-upgrades. */
+  upgradeMode?: GBrainUpgradeMode
+  clientName?: string
+  clientVersion?: string
+}
+
+export class GBrainStdioMcpClient implements McpClient {
+  private readonly opts: GBrainStdioMcpClientOptions
+  private client: Client | null = null
+  private connecting: Promise<Client> | null = null
+  /**
+   * 2026-06-10 (wow-hang-resilience) — latched binary-missing detail.
+   * Non-null once a connect attempt failed because the `gbrain` binary
+   * is absent (Bun "Executable not found in $PATH" / spawn ENOENT).
+   * Every subsequent `call(...)` throws `GBrainUnavailableError`
+   * immediately — no re-spawn attempt, no per-op log storm. The
+   * condition is permanent for the process lifetime (installing the
+   * binary requires an instance restart anyway).
+   */
+  private unavailableDetail: string | null = null
+  /** The latest GBrain upstream upgrade notice, fed from the child's stderr. */
+  readonly versionNotice: GBrainVersionNotice
+
+  constructor(opts: GBrainStdioMcpClientOptions = {}) {
+    this.opts = opts
+    this.versionNotice = new GBrainVersionNotice(opts.upgradeMode ?? 'notify')
+  }
+
+  private async ensureConnected(): Promise<Client> {
+    if (this.unavailableDetail !== null) {
+      throw new GBrainUnavailableError(this.unavailableDetail)
+    }
+    if (this.client !== null) return this.client
+    if (this.connecting !== null) return this.connecting
+    this.connecting = (async () => {
+      const env: Record<string, string> = { ...getDefaultEnvironment() }
+      if (this.opts.env !== undefined) Object.assign(env, this.opts.env)
+      if (this.opts.brainId !== undefined) env['GBRAIN_BRAIN_ID'] = this.opts.brainId
+      if (this.opts.source !== undefined) env['GBRAIN_SOURCE'] = this.opts.source
+      const transport = new StdioClientTransport({
+        command: this.opts.command ?? 'gbrain',
+        args: this.opts.args ?? ['serve'],
+        env,
+        stderr: 'pipe',
+        ...(this.opts.cwd !== undefined ? { cwd: this.opts.cwd } : {}),
+      })
+      const client = new Client(
+        {
+          name: this.opts.clientName ?? 'neutron-gbrain-memory',
+          version: this.opts.clientVersion ?? '0.0.0',
+        },
+        { capabilities: {} },
+      )
+      try {
+        await client.connect(transport)
+      } catch (err) {
+        // Binary-missing is permanent for this process — latch it and
+        // log ONCE so downstream per-op failures degrade to a cheap
+        // tagged throw instead of re-spawning + spamming per page/edge.
+        if (isGbrainBinaryMissingError(err)) {
+          const detail = err instanceof Error ? err.message : String(err)
+          this.unavailableDetail = detail
+          console.error(
+            `[gbrain-stdio-client] '${this.opts.command ?? 'gbrain'}' could not be spawned (${detail}) — ` +
+              'GBrain memory sync DISABLED for this process. Entity pages remain on disk; ' +
+              'install gbrain (bun install -g github:garrytan/gbrain) and restart the owner to re-enable. ' +
+              'Further calls fail fast without re-spawning.',
+          )
+          throw new GBrainUnavailableError(detail)
+        }
+        throw err
+      }
+      const errStream = transport.stderr as { on?: (e: string, cb: (chunk: unknown) => void) => void } | null
+      if (errStream !== null && typeof errStream.on === 'function') {
+        errStream.on('data', (chunk: unknown) => {
+          this.versionNotice.ingestStderr(String(chunk))
+        })
+      }
+      this.client = client
+      return client
+    })()
+    try {
+      return await this.connecting
+    } finally {
+      this.connecting = null
+    }
+  }
+
+  async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+    const client = await this.ensureConnected()
+    const res = await client.callTool({ name, arguments: args })
+    return parseToolResult(res)
+  }
+
+  /** The latest GBrain upgrade notice, or null if up to date / mode off. */
+  upgrade(): GBrainUpgradeNotice | null {
+    return this.versionNotice.current()
+  }
+
+  async close(): Promise<void> {
+    if (this.client !== null) {
+      await this.client.close()
+      this.client = null
+    }
+  }
+}
+
+/**
+ * Normalise an MCP `CallToolResult` into the tool's payload. GBrain returns
+ * `{ content: [{ type: 'text', text: <json> }], isError? }`; we JSON-parse the
+ * text part (falling back to the raw string). An `isError` result throws so
+ * the `GBrainSyncHook`'s best-effort try/catch + `logFailure` fire.
+ */
+function parseToolResult(res: unknown): unknown {
+  const r = (res ?? {}) as Record<string, unknown>
+  const content = r['content']
+  let payload: unknown = res
+  if (Array.isArray(content)) {
+    const textPart = content.find(
+      (c) =>
+        c !== null &&
+        typeof c === 'object' &&
+        (c as Record<string, unknown>)['type'] === 'text' &&
+        typeof (c as Record<string, unknown>)['text'] === 'string',
+    ) as { text: string } | undefined
+    if (textPart !== undefined) {
+      try {
+        payload = JSON.parse(textPart.text)
+      } catch {
+        payload = textPart.text
+      }
+    }
+  } else if (r['structuredContent'] !== undefined) {
+    payload = r['structuredContent']
+  }
+  if (r['isError'] === true) {
+    const msg =
+      typeof payload === 'string' ? payload : JSON.stringify(payload)
+    throw new Error(`gbrain MCP tool error: ${msg}`)
+  }
+  return payload
+}

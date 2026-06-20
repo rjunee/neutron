@@ -1,0 +1,40 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // The deploy gate runs `bunx tsc --noEmit` against this root config.
+    // The browser-DOM chat client (`landing/chat.ts`) lives inside the
+    // gate so we add the DOM lib here. The Bun-side `Buffer` ↔ DOM
+    // `BodyInit` ambiguity in landing/boot.ts + landing/server.ts is
+    // resolved by wrapping the buffer in `new Uint8Array(buf)` at the
+    // call sites.
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": [
+    "open/**/*.ts",
+    "gateway/**/*.ts",
+    "runtime/**/*.ts",
+    "scribe/**/*.ts",
+    "gbrain-memory/**/*.ts",
+    "reminders/**/*.ts",
+    "tasks/**/*.ts",
+    "cron/**/*.ts",
+    "cores/**/*.ts",
+    "prompts/**/*.ts",
+    "mcp/**/*.ts",
+    "tools/**/*.ts",
+    "migrations/**/*.ts",
+    "persistence/**/*.ts",
+    "tests/integration/**/*.ts",
+    "scripts/**/*.ts",
+    "core-sdk/**/*.ts",
+    "channels/**/*.ts",
+    "connect/**/*.ts",
+    "watchdog/**/*.ts",
+    "auth/**/*.ts",
+    "onboarding/**/*.ts",
+    "landing/server.ts",
+    "landing/chat.ts",
+    "landing/__tests__/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

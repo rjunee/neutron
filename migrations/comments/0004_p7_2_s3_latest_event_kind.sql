@@ -1,0 +1,25 @@
+-- 0004_p7_2_s3_latest_event_kind.sql — surface the latest event_kind
+-- per thread on the materialised anchor row (P7.2 S3, Argus r2 BLOCKER 2).
+--
+-- The side-pane needs to know whether a thread's most recent event is
+-- `comment_resolved` (→ render in the collapsed "Resolved (N)"
+-- section), `agent_reply_skipped` (→ render a "Skipped" badge), or
+-- something else (→ render as an active thread). The events log
+-- already records this — the materialiser just needs to fold it onto
+-- the per-thread row so the side-pane's listThreads round-trip
+-- returns it without a separate query per visible thread.
+--
+-- Column lives on `doc_comment_anchors` (the materialised projection),
+-- NOT on `doc_comment_events` (which stays strictly append-only). The
+-- materialiser is the source of truth for the projection — re-running
+-- it produces the same `latest_event_kind` deterministically.
+--
+-- Nullable because rows materialised by older schema versions / before
+-- this column existed will read back as NULL; the side-pane treats
+-- absence as "active thread" (forward-compat per docs-client.ts § 7).
+-- A wipe-and-rebuild via `CommentStore.materialiseAll` repopulates the
+-- column from the event log.
+--
+-- Forward-only. Idempotent.
+
+ALTER TABLE doc_comment_anchors ADD COLUMN latest_event_kind TEXT;

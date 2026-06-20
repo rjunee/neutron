@@ -1,0 +1,227 @@
+/**
+ * @neutronai/gateway/git — per-gateway project-backup scheduler (P7.4 Phase 2).
+ *
+ * Per docs/plans/P7.4-phase2-project-backup-sprint-brief.md § 3. ONE
+ * ticker per gateway (not N per project). On every tick the scheduler:
+ *
+ *   1. Enumerates per-instance projects.
+ *   2. For each project where `now - last_attempted_at_ms >= tickIntervalMs`
+ *      (or no sidecar yet): schedules a `backupNow(project_id)` with a
+ *      per-project jitter so 20 projects don't IO-storm at once.
+ *   3. Writes `last_attempted_at_ms` BEFORE the snapshot fires (so a
+ *      gateway crash + restart doesn't re-fire every minute).
+ *
+ * Boot-time backfill (brief § 3.3): on `start()`, the scheduler fires
+ * an immediate tick. Projects whose `last_attempted_at_ms` is older
+ * than `tickIntervalMs` (or has no sidecar at all) get an immediate
+ * backup — still jittered, so a freshly-booted gateway with 20
+ * projects doesn't IO-storm.
+ *
+ * Sleep / suspend (brief § 3.4): a laptop running Open that sleeps
+ * for 18 hours doesn't fire the ticker. On resume, the next tick
+ * sees `now - last_attempted_at_ms` is huge and re-engages
+ * immediately. For Managed (hosted VPS), this concern doesn't apply.
+ */
+
+import type {
+  BackupResult,
+  ProjectBackupLogger,
+  ProjectBackupStore,
+} from './project-backup-store.ts'
+
+/** Default tick interval — every 6 hours. Brief § 0.3 confirms fixed. */
+export const DEFAULT_TICK_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+/** Default jitter cap — 5 minutes. Spreads 20 projects' snapshot
+ *  windows across a 5 min IO window. */
+export const DEFAULT_JITTER_MAX_MS = 5 * 60 * 1000
+
+/** Short interval the ticker walks at — every 60s the scheduler
+ *  re-checks the per-project last-attempted ledger. Each project's
+ *  individual cadence is still governed by `tickIntervalMs`; the
+ *  inner timer just polls. */
+const POLL_INTERVAL_MS = 60_000
+
+export interface ProjectBackupSchedulerOptions {
+  store: ProjectBackupStore
+  /** Tick interval per project. Default 6h. */
+  tickIntervalMs?: number
+  /** Project-id enumerator — production reads `<owner_home>/Projects/`. */
+  enumerateProjects: () => Promise<string[]>
+  /** Jitter cap to spread snapshot IO. Default 5 min. */
+  jitterMaxMs?: number
+  /** Now-fn override (tests). */
+  now?: () => number
+  /** Logger. */
+  logger?: ProjectBackupLogger
+  /**
+   * Optional inner-poll override for tests. Defaults to 60s in
+   * production; tests typically pass a smaller value AND a fake
+   * setInterval/setTimeout pair via the timer hooks below.
+   */
+  pollIntervalMs?: number
+  /**
+   * Optional setInterval override (tests).
+   */
+  setInterval?: (handler: () => void, ms: number) => NodeJS.Timeout
+  /**
+   * Optional setTimeout override (tests).
+   */
+  setTimeout?: (handler: () => void, ms: number) => NodeJS.Timeout
+  /**
+   * Optional clearInterval override (tests).
+   */
+  clearInterval?: (handle: NodeJS.Timeout) => void
+  /**
+   * Optional clearTimeout override (tests).
+   */
+  clearTimeout?: (handle: NodeJS.Timeout) => void
+  /**
+   * Random fn override (tests). Returns [0,1).
+   */
+  random?: () => number
+}
+
+export class ProjectBackupScheduler {
+  private readonly store: ProjectBackupStore
+  private readonly tickIntervalMs: number
+  private readonly enumerateProjects: () => Promise<string[]>
+  private readonly jitterMaxMs: number
+  private readonly nowFn: () => number
+  private readonly logger: ProjectBackupLogger
+  private readonly pollIntervalMs: number
+  private readonly setIntervalFn: (handler: () => void, ms: number) => NodeJS.Timeout
+  private readonly setTimeoutFn: (handler: () => void, ms: number) => NodeJS.Timeout
+  private readonly clearIntervalFn: (handle: NodeJS.Timeout) => void
+  private readonly clearTimeoutFn: (handle: NodeJS.Timeout) => void
+  private readonly randomFn: () => number
+
+  private interval: NodeJS.Timeout | null = null
+  private readonly pendingJitterTimers = new Map<string, NodeJS.Timeout>()
+  private stopped = false
+
+  constructor(opts: ProjectBackupSchedulerOptions) {
+    this.store = opts.store
+    this.tickIntervalMs = opts.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS
+    this.enumerateProjects = opts.enumerateProjects
+    this.jitterMaxMs = opts.jitterMaxMs ?? DEFAULT_JITTER_MAX_MS
+    this.nowFn = opts.now ?? ((): number => Date.now())
+    this.logger =
+      opts.logger ??
+      ((event, fields): void => {
+        try {
+          console.warn(`[project-backup-scheduler] ${event} ${JSON.stringify(fields)}`)
+        } catch {
+          console.warn(`[project-backup-scheduler] ${event}`)
+        }
+      })
+    this.pollIntervalMs = opts.pollIntervalMs ?? POLL_INTERVAL_MS
+    this.setIntervalFn = opts.setInterval ?? ((h, ms): NodeJS.Timeout => setInterval(h, ms) as unknown as NodeJS.Timeout)
+    this.setTimeoutFn = opts.setTimeout ?? ((h, ms): NodeJS.Timeout => setTimeout(h, ms) as unknown as NodeJS.Timeout)
+    this.clearIntervalFn = opts.clearInterval ?? ((handle): void => clearInterval(handle as unknown as ReturnType<typeof setInterval>))
+    this.clearTimeoutFn = opts.clearTimeout ?? ((handle): void => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
+    this.randomFn = opts.random ?? Math.random
+  }
+
+  start(): void {
+    if (this.interval !== null) return
+    this.stopped = false
+    // Boot-time backfill: fire an immediate poll.
+    void this.poll()
+    this.interval = this.setIntervalFn(() => {
+      void this.poll()
+    }, this.pollIntervalMs)
+  }
+
+  stop(): void {
+    this.stopped = true
+    if (this.interval !== null) {
+      this.clearIntervalFn(this.interval)
+      this.interval = null
+    }
+    for (const handle of this.pendingJitterTimers.values()) {
+      this.clearTimeoutFn(handle)
+    }
+    this.pendingJitterTimers.clear()
+  }
+
+  /** Single poll — fires backups for projects whose tick interval has
+   *  elapsed. Exposed for tests to drive manually. */
+  async poll(): Promise<void> {
+    if (this.stopped) return
+    let projects: string[] = []
+    try {
+      projects = await this.enumerateProjects()
+    } catch (err) {
+      this.logger('enumerate_failed', { error_message: errMessage(err) })
+      return
+    }
+    const now = this.nowFn()
+    for (const project_id of projects) {
+      if (this.stopped) return
+      // Skip projects with a pending jittered timer (another tick
+      // already scheduled them; we don't want to double-arm).
+      if (this.pendingJitterTimers.has(project_id)) continue
+      const last = await this.store.readLastAttemptedAt(project_id)
+      const elapsed = last === null ? Infinity : now - last
+      // Fire when at least `tickIntervalMs` has elapsed since the
+      // LAST attempt. `Infinity` for fresh projects always triggers.
+      if (elapsed < this.tickIntervalMs) {
+        // Update next-scheduled-at for the admin status surface.
+        if (last !== null) {
+          this.store.setNextScheduledAt(project_id, last + this.tickIntervalMs)
+        }
+        continue
+      }
+      const jitter = Math.floor(this.randomFn() * this.jitterMaxMs)
+      // Persist the attempt timestamp BEFORE the snapshot fires so a
+      // restart-mid-snapshot doesn't loop.
+      const attempted_at = this.nowFn()
+      try {
+        await this.store.writeLastAttemptedAt(project_id, attempted_at)
+      } catch (err) {
+        this.logger('write_last_attempted_failed', {
+          project_id,
+          error_message: errMessage(err),
+        })
+        // Without the sidecar we'd re-fire every poll; skip this
+        // project for this round.
+        continue
+      }
+      this.store.setNextScheduledAt(
+        project_id,
+        attempted_at + this.tickIntervalMs,
+      )
+      const handle = this.setTimeoutFn(() => {
+        this.pendingJitterTimers.delete(project_id)
+        if (this.stopped) return
+        this.fire(project_id)
+      }, jitter)
+      this.pendingJitterTimers.set(project_id, handle)
+    }
+  }
+
+  private async fire(project_id: string): Promise<BackupResult | null> {
+    try {
+      const result = await this.store.backupNow(project_id)
+      this.logger('backup_completed', {
+        project_id,
+        commit_sha: result.commit_sha,
+        pushed: result.pushed,
+        push_error: result.push_error,
+      })
+      return result
+    } catch (err) {
+      this.logger('backup_threw', {
+        project_id,
+        error_message: errMessage(err),
+      })
+      return null
+    }
+  }
+}
+
+function errMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return String(err)
+}

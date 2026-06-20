@@ -1,0 +1,7 @@
+# AGENTS.md — runtime/adapters/gpt-5-5-codex-cli
+
+This module owns the GPT-5.5 Codex CLI substrate adapter — `Substrate.start(spec) → SessionHandle` by spawning `codex exec --json "<prompt>"` and streaming line-buffered JSONL stdout. `tool_resolution: 'internal'` (Codex's MCP machinery in `~/.codex/config.toml` resolves tools server-side; symmetric to the CC adapter). Composition: `auth.ts` resolves either ChatGPT subscription OAuth (device-code, persisted under `$CODEX_HOME/auth.json`) or BYO `OPENAI_API_KEY` → `exec.ts` spawns the CLI and reads JSONL → `event-map.ts` translates Codex envelopes (`item.agent_message`, `item.command_execution`, `item.mcp_tool_call`, `turn.completed`, …) to substrate `Event` tagged-union → `index.ts` returns the handle as `createCodexCliSubstrate(options)`.
+
+It must NOT be used as the primary Managed-tier OpenAI substrate — that's `runtime/adapters/gpt-5-5-api/`'s job. This adapter exists for Open-tier ChatGPT-subscription users and as a parity-with-CC convenience surface. Per § Q9(A) of internal design notes, sub-OAuth via Codex is NOT ToS-clean for hosted Connect deployments — surface a clear "device-code auth not enabled by your workspace admin" error path that prompts the user to BYO API key. Codex thread_id (captured from the first `thread.started` envelope) is surfaced as `completion.substrate_instance_id` AND propagated into `completion.session.id` so callers can `--resume` it on the next turn.
+
+Cross-refs: internal design notes, internal design notes.

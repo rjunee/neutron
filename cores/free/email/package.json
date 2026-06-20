@@ -1,0 +1,301 @@
+{
+  "name": "@neutronai/email-managed-core",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts",
+    "./mcp-tools-extra": "./src/mcp-tools-extra.ts",
+    "./chat-commands": "./src/chat-commands.ts",
+    "./chat-bridge": "./src/chat-bridge.ts",
+    "./draft-policy": "./src/draft-policy.ts",
+    "./triage": "./src/triage.ts",
+    "./summarizer": "./src/summarizer.ts",
+    "./triage-scheduler": "./src/triage-scheduler.ts",
+    "./substrate-llm": "./src/substrate-llm.ts",
+    "./per-project-resolver": "./src/per-project-resolver.ts",
+    "./cache": "./src/cache.ts",
+    "./ui/launcher-icon": "./src/ui/launcher-icon.ts",
+    "./ui/app-tab-surface": "./src/ui/app-tab-surface.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": [
+      "read:email_managed_core.messages",
+      "write:email_managed_core.drafts"
+    ],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "email_list",
+        "description": "List Gmail message metadata for a label, ordered newest-first by internalDate (the natural inbox semantic). Returns one row per message — the id, thread_id, subject, from, snippet, internalDate, and label_ids — NOT the full body. Use email_read for the body. When `project_id` is supplied, results are filtered to messages also carrying the `Neutron/<project_id>` user label.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "label": { "type": "string", "description": "Gmail label id (e.g. 'INBOX', 'IMPORTANT', 'UNREAD', or a user label). Defaults to 'INBOX'." },
+            "max_results": { "type": "integer", "description": "Maximum messages to return. Backend default applies when omitted." },
+            "page_token": { "type": "string", "description": "Opaque cursor returned by a prior call. Omit on the first page." },
+            "project_id": { "type": "string", "description": "Optional project scope. Filters results to messages tagged with `Neutron/<project_id>`." }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id":            { "type": "string" },
+                  "thread_id":     { "type": "string" },
+                  "subject":       { "type": "string" },
+                  "from":          { "type": "string" },
+                  "snippet":       { "type": "string" },
+                  "internal_date": { "type": "string", "description": "ISO-8601 datetime derived from Gmail's epoch-ms internalDate." },
+                  "label_ids":     { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["id", "thread_id", "subject", "from", "snippet", "internal_date", "label_ids"]
+              }
+            },
+            "next_page_token": { "type": "string" }
+          },
+          "required": ["results"]
+        },
+        "capability_required": "read:email_managed_core.messages"
+      },
+      {
+        "name": "email_read",
+        "description": "Fetch the full body and headers of a single Gmail message by id.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "message_id": { "type": "string" }
+          },
+          "required": ["message_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "object",
+              "properties": {
+                "id":            { "type": "string" },
+                "thread_id":     { "type": "string" },
+                "subject":       { "type": "string" },
+                "from":          { "type": "string" },
+                "to":            { "type": "array", "items": { "type": "string" } },
+                "cc":            { "type": "array", "items": { "type": "string" } },
+                "snippet":       { "type": "string" },
+                "internal_date": { "type": "string" },
+                "label_ids":     { "type": "array", "items": { "type": "string" } },
+                "body_text":     { "type": "string" },
+                "body_html":     { "type": "string" }
+              },
+              "required": ["id", "thread_id", "subject", "from", "snippet", "internal_date", "label_ids", "body_text"]
+            }
+          },
+          "required": ["message"]
+        },
+        "capability_required": "read:email_managed_core.messages"
+      },
+      {
+        "name": "email_search",
+        "description": "Run a Gmail-style query (e.g. 'from:alice@x.com is:unread', 'subject:invoice newer_than:7d') and return matching message metadata, ordered newest-first. When `project_id` is supplied, `label:Neutron/<project_id>` is appended automatically.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query":       { "type": "string", "description": "Gmail search query — the same syntax the Gmail web UI accepts." },
+            "max_results": { "type": "integer", "description": "Maximum messages to return." },
+            "project_id":  { "type": "string", "description": "Optional project scope; AND-s `label:Neutron/<project_id>` into the query." }
+          },
+          "required": ["query"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id":            { "type": "string" },
+                  "thread_id":     { "type": "string" },
+                  "subject":       { "type": "string" },
+                  "from":          { "type": "string" },
+                  "snippet":       { "type": "string" },
+                  "internal_date": { "type": "string" },
+                  "label_ids":     { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["id", "thread_id", "subject", "from", "snippet", "internal_date", "label_ids"]
+              }
+            }
+          },
+          "required": ["results"]
+        },
+        "capability_required": "read:email_managed_core.messages"
+      },
+      {
+        "name": "email_summarize",
+        "description": "Summarize a single Gmail message. Returns a structured row (from, subject, key_points[], sentiment, ask_or_response). When `as_brief:true`, ALSO returns a 2-3 sentence prose brief composed by the Haiku-fast summarizer on top of the structured row.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "message_id": { "type": "string" },
+            "thread_id":  { "type": "string", "description": "Optional thread context. v1 ignores this field — the summarizer summarizes the single message identified by message_id." },
+            "as_brief":   { "type": "boolean", "description": "When true, compose a 2-3 sentence prose brief over the structured row." }
+          },
+          "required": ["message_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "object",
+              "properties": {
+                "message_id":      { "type": "string" },
+                "from":            { "type": "string" },
+                "subject":         { "type": "string" },
+                "key_points":      { "type": "array", "items": { "type": "string" } },
+                "sentiment":       { "type": "string", "enum": ["positive", "neutral", "negative", "urgent"] },
+                "ask_or_response": { "type": "string", "enum": ["ask", "response", "informational"] }
+              },
+              "required": ["message_id", "from", "subject", "key_points", "sentiment", "ask_or_response"]
+            },
+            "brief": {
+              "type": "object",
+              "properties": {
+                "text":        { "type": "string" },
+                "prompt_hash": { "type": "string" },
+                "model":       { "type": "string" },
+                "outcome":     { "type": "string", "enum": ["ok", "llm_error"] }
+              },
+              "required": ["text", "prompt_hash", "model", "outcome"]
+            }
+          },
+          "required": ["summary"]
+        },
+        "capability_required": "read:email_managed_core.messages"
+      },
+      {
+        "name": "email_draft_prepare",
+        "description": "Create a Gmail DRAFT (drafts.create) and atomically apply the owner 4-point label policy (INBOX + IMPORTANT + UNREAD) to the resulting thread via threads.modify. When `project_id` is supplied, ALSO applies the `Neutron/<project_id>` user-label. NOT sending — the draft lands in the user's Drafts label for review. Returns the new draft id + the persisted message metadata + the applied labels list. Sending is intentionally Tier 2 (Email-Private paid Core); this Tier 1 free Core only prepares drafts.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "to":                  { "type": "array", "items": { "type": "string" }, "description": "Recipient email addresses." },
+            "subject":             { "type": "string" },
+            "body":                { "type": "string", "description": "Plain-text body of the draft." },
+            "reply_to_message_id": { "type": "string", "description": "Optional — when set, the draft is linked to the existing Gmail thread of this message (In-Reply-To / References headers populated server-side)." },
+            "cc":                  { "type": "array", "items": { "type": "string" } },
+            "project_id":          { "type": "string", "description": "Optional project scope; AND-s `Neutron/<project_id>` to the draft's thread labels." }
+          },
+          "required": ["to", "subject", "body"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "draft_id":       { "type": "string" },
+            "message_id":     { "type": "string", "description": "Id of the underlying draft message resource (drafts.message.id). Distinct from draft_id." },
+            "thread_id":      { "type": "string" },
+            "applied_labels": { "type": "array", "items": { "type": "string" }, "description": "Labels applied to the draft's thread — always includes INBOX + IMPORTANT + UNREAD; includes Neutron/<project_id> when project_id was supplied." }
+          },
+          "required": ["draft_id", "message_id", "thread_id", "applied_labels"]
+        },
+        "capability_required": "write:email_managed_core.drafts"
+      },
+      {
+        "name": "email_triage",
+        "description": "Run the Haiku-fast triage agent over the most recent N inbox messages and return a top-5 ranked list with one-line reasons. When `dry_run:true`, returns the triage WITHOUT posting to chat. When `project_id` is supplied, only messages tagged with `Neutron/<project_id>` are considered.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "lookback_messages": { "type": "integer", "description": "Inbox lookback window. Default 50." },
+            "project_id":        { "type": "string", "description": "Optional project scope; restricts the triage to messages tagged with Neutron/<project_id>." },
+            "dry_run":           { "type": "boolean", "description": "When true, compose the triage but do NOT post to chat." }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "triage": {
+              "type": "object",
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "message_id": { "type": "string" },
+                      "thread_id":  { "type": "string" },
+                      "from":       { "type": "string" },
+                      "subject":    { "type": "string" },
+                      "reason":     { "type": "string" },
+                      "rank":       { "type": "integer" }
+                    },
+                    "required": ["message_id", "thread_id", "from", "subject", "reason", "rank"]
+                  }
+                },
+                "prompt_hash": { "type": "string" },
+                "model":       { "type": "string" },
+                "outcome":     { "type": "string", "enum": ["ok", "llm_error"] }
+              },
+              "required": ["items", "prompt_hash", "model", "outcome"]
+            },
+            "posted_chat_message_id": { "type": ["string", "null"] }
+          },
+          "required": ["triage", "posted_chat_message_id"]
+        },
+        "capability_required": "read:email_managed_core.messages"
+      }
+    ],
+    "ui_components": [
+      {
+        "name": "EmailManagedLauncherIcon",
+        "entry_point": "./src/ui/launcher-icon.ts",
+        "surface": "launcher_icon"
+      },
+      {
+        "name": "EmailManagedAppTab",
+        "entry_point": "./src/ui/app-tab-surface.ts",
+        "surface": "app_tab",
+        "props_schema": {
+          "type": "object",
+          "properties": {
+            "path":  { "type": "string" },
+            "label": { "type": "string" },
+            "emoji": { "type": "string" }
+          }
+        }
+      }
+    ],
+    "billing_hooks": [],
+    "linked_sources": [
+      {
+        "kind": "gmail",
+        "scope": "read_write",
+        "target_kinds": ["user"],
+        "description": "Gmail v1 — read messages + create drafts on the user's Gmail account. The Core requests THREE Google OAuth scopes: `gmail.readonly` (list/read/search/summarize/triage reach into the inbox), `gmail.modify` (the mandatory owner 4-point label policy applies INBOX + IMPORTANT + UNREAD to every drafted thread via threads.modify), and `gmail.compose` (drafts.create). `gmail.send` is INTENTIONALLY EXCLUDED — the Core has no send tool, no send method on GmailClient, and the OAuth grant doesn't authorise sending mail either. Tier 2 paid Email-Private Core will request `gmail.send` separately with a distinct capability + secret label for audit attribution."
+      }
+    ],
+    "secrets": [
+      {
+        "name": "gmail_managed_oauth",
+        "kind": "oauth_token",
+        "label": "gmail_compose",
+        "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.compose",
+        "required": true,
+        "install_prompt": "Connect your Gmail account so Neutron can read messages (gmail.readonly), label drafted threads INBOX + IMPORTANT + UNREAD (gmail.modify), and prepare drafts in your Drafts label (gmail.compose). Neutron NEVER sends mail from this Core — gmail.send is intentionally excluded; you click Send yourself in Gmail."
+      }
+    ],
+    "compat": { "coreApi": "^0.1.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

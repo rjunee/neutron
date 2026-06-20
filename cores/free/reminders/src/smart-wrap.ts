@@ -1,0 +1,201 @@
+/**
+ * @neutronai/reminders-core — Shape A / B / C composer.
+ *
+ * Three create-time modes for the `message` body persisted into the
+ * engine's `reminders.message` column. NO LLM call at create time —
+ * the fire-time engine agent (`prompts/reminder-agent-base.md`) owns
+ * all LLM composition.
+ *
+ *   Shape A (literal)     — the input `body` verbatim.
+ *   Shape B (smart_wrap)  — prepend the LOCKED smart-wrap prelude so
+ *                           the fire-time agent fetches context (weather,
+ *                           calendar, STATUS.md) and composes a fresh
+ *                           message at fire time.
+ *   Shape C (pattern)     — load a named pattern body from
+ *                           `prompts/reminder-patterns.md` verbatim +
+ *                           substitute caller-supplied `FILL:<slot>`
+ *                           markers.
+ *
+ * The Shape-B prelude string is byte-identical (modulo `{{OWNER_HOME}}`
+ * template substitution) to the Nova `remind` skill's Shape-B block.
+ * The fire-time agent's branch detection relies on the exact opening
+ * "Compose a smart version of this reminder ..." prefix; changing this
+ * literal would break fire-time composition for every existing
+ * smart-wrapped reminder. The snapshot test in
+ * `__tests__/smart-wrap.test.ts` pins the prelude bytes so any future
+ * drift surfaces as a deliberate diff.
+ *
+ * Shape C delegates pattern resolution to a caller-supplied
+ * `loadPattern(name)` closure so tests inject stubs and the production
+ * loader can read `prompts/reminder-patterns.md` off disk (or via the
+ * same template runtime the gateway uses for fire-time agent prompts).
+ * The composer never opens the patterns file directly.
+ */
+
+/**
+ * The five locked pattern names. New patterns are operator-managed via
+ * git (a new section in `prompts/reminder-patterns.md` + a new entry
+ * here in lockstep). Inventing patterns is out-of-scope for this
+ * sprint per the brief's § 9.
+ */
+export const REMINDER_PATTERN_NAMES = [
+  'nag-until-done',
+  'escalating-urgency',
+  'daily-countdown',
+  'check-in-cadence',
+  'context-aware-one-shot',
+] as const
+
+export type ReminderPatternName = typeof REMINDER_PATTERN_NAMES[number]
+
+/**
+ * The locked smart-wrap prelude. Lifted verbatim from the Nova `remind`
+ * SKILL.md "Shape B" block with the path-template substitution
+ * (`scripts/...` → `{{OWNER_HOME}}/scripts/...`, `Projects/...` →
+ * `{{OWNER_HOME}}/Projects/...`) — the same substitution Nova's
+ * prompts/ lift applied.
+ *
+ * The fire-time agent (`prompts/reminder-agent-base.md`) reads the
+ * `Compose a smart version of this reminder ...` opening line as the
+ * Shape-B detection trigger. The template substitution happens at fire
+ * time via the existing prompt-template loader, NOT in the composer —
+ * the composer stores the un-substituted literal so an owner-home
+ * rename doesn't poison existing reminders.
+ *
+ * Exported so the snapshot test + the production-composer integration
+ * test can compare the persisted `message` field against this literal
+ * byte-for-byte.
+ */
+export const SMART_WRAP_PRELUDE: string =
+  'Compose a smart version of this reminder using available context ' +
+  '(current weather via {{OWNER_HOME}}/scripts/weather.sh --for-reminder, ' +
+  'calendar via gog calendar events --today, recent project state from ' +
+  '{{OWNER_HOME}}/Projects/<slug>/STATUS.md, time of day). Keep it 1-3 ' +
+  'sentences, action-oriented, no preamble, no em dashes. If no useful ' +
+  'context is available, deliver the original message verbatim.'
+
+/**
+ * The body the user typed is appended after the prelude as a trailing
+ * "Original reminder: <body>" line. The fire-time agent reads this
+ * exact prefix to locate the user's literal phrase.
+ */
+const ORIGINAL_REMINDER_PREFIX = 'Original reminder: '
+
+export type ReminderMode =
+  | { kind: 'literal' }
+  | { kind: 'smart_wrap' }
+  | {
+      kind: 'pattern'
+      name: ReminderPatternName
+      slots?: Record<string, string>
+    }
+
+export interface SmartWrapInput {
+  /** Raw user phrase. The body is preserved verbatim across all shapes. */
+  body: string
+  mode: ReminderMode
+}
+
+export interface SmartWrapResult {
+  /** The final `message` body to persist into the engine row. */
+  message: string
+  /** True iff the body was wrapped or templated; Shape A returns false. */
+  composed: boolean
+  /** Audit metadata for the fire-time agent + the production log. */
+  audit: {
+    mode: 'literal' | 'smart_wrap' | 'pattern'
+    pattern_name?: ReminderPatternName
+    slots_filled?: string[]
+  }
+}
+
+export interface SmartWrapComposer {
+  compose(input: SmartWrapInput): SmartWrapResult
+}
+
+export interface SmartWrapDeps {
+  /**
+   * Loader that returns the verbatim pattern body from
+   * `prompts/reminder-patterns.md` by name. Tests inject a stub. The
+   * production wiring reuses the prompts/ template runtime that the
+   * gateway uses for fire-time agent prompts.
+   *
+   * The returned string MUST be the pattern body verbatim — including
+   * the leading `PATTERN: <name>` header that the fire-time agent
+   * uses to detect the Shape-C branch.
+   */
+  loadPattern: (name: ReminderPatternName) => string
+}
+
+export class UnknownReminderPatternError extends Error {
+  override readonly name = 'UnknownReminderPatternError'
+  readonly code = 'unknown_pattern' as const
+}
+
+export function isReminderPatternName(value: unknown): value is ReminderPatternName {
+  if (typeof value !== 'string') return false
+  return (REMINDER_PATTERN_NAMES as ReadonlyArray<string>).includes(value)
+}
+
+export function buildSmartWrapComposer(deps: SmartWrapDeps): SmartWrapComposer {
+  return {
+    compose(input: SmartWrapInput): SmartWrapResult {
+      const mode = input.mode
+      if (mode.kind === 'literal') {
+        return {
+          message: input.body,
+          composed: false,
+          audit: { mode: 'literal' },
+        }
+      }
+      if (mode.kind === 'smart_wrap') {
+        const message = `${SMART_WRAP_PRELUDE}\n\n${ORIGINAL_REMINDER_PREFIX}${input.body}`
+        return {
+          message,
+          composed: true,
+          audit: { mode: 'smart_wrap' },
+        }
+      }
+      // Shape C — pattern template.
+      if (!isReminderPatternName(mode.name)) {
+        throw new UnknownReminderPatternError(
+          `unknown reminder pattern: ${String(mode.name)}`,
+        )
+      }
+      let body: string
+      try {
+        body = deps.loadPattern(mode.name)
+      } catch (err) {
+        // A pattern named in the locked enum should always resolve;
+        // surface a loader failure as UnknownReminderPatternError so
+        // the chat-bridge can render a consistent error code.
+        throw new UnknownReminderPatternError(
+          `failed to load pattern '${mode.name}': ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+      const slots = mode.slots ?? {}
+      const slotsFilled: string[] = []
+      let composed = body
+      for (const [key, value] of Object.entries(slots)) {
+        const marker = `FILL:${key}`
+        if (composed.includes(marker)) {
+          composed = composed.split(marker).join(value)
+          slotsFilled.push(key)
+        }
+      }
+      // Append the user's raw body at the end as a trailing context
+      // line, mirroring Shape B's "Original reminder: <body>" — the
+      // fire-time agent reads this when the pattern body itself does
+      // not carry the user's phrase verbatim.
+      const message = `${composed}\n\n${ORIGINAL_REMINDER_PREFIX}${input.body}`
+      const audit: SmartWrapResult['audit'] = {
+        mode: 'pattern',
+        pattern_name: mode.name,
+      }
+      if (slotsFilled.length > 0) audit.slots_filled = slotsFilled
+      return { message, composed: true, audit }
+    },
+  }
+}

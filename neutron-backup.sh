@@ -1,0 +1,337 @@
+#!/bin/sh
+#
+# neutron-backup.sh — deterministic, NO-LLM git backup of the Neutron data dir.
+#
+# Mirrors openclaw's vault-backup pattern: `git init` the data dir if needed,
+# then auto-commit it on a schedule. If a remote is configured
+# (NEUTRON_BACKUP_REMOTE), also `git push` for offsite backup; with no remote
+# the local git history alone is fully recoverable.
+#
+# The backup is wired as a launchd StartInterval agent (macOS) / systemd timer
+# (Linux) rather than through the in-process CronJobRegistry: that registry is
+# rebuilt at server boot from open/composer.ts and cannot be injected into from
+# an installer shell script without editing the composer. A timer is the
+# spec-sanctioned fallback ("if cron-job registration from the installer is not
+# clean, fall back to a launchd/systemd timer") and is itself deterministic +
+# LLM-free.
+#
+# Subcommands:
+#   run             do one backup pass (init → add → commit → optional push)
+#   install-timer   write + load the periodic backup timer
+#   uninstall-timer stop + remove the timer
+#   print           write the resolved timer file to stdout (test seam)
+#
+# Resolution (env overridable):
+#   NEUTRON_SERVICE_CODE_DIR  code dir (default: this script's dir) — for .env
+#   NEUTRON_HOME              data dir to back up (default: <code>/.env, else $HOME/neutron/data)
+#   NEUTRON_BACKUP_REMOTE     git remote URL for offsite push (default: none → local-only)
+#   NEUTRON_BACKUP_INTERVAL   seconds between backups (default: 43200 = 12h)
+#   NEUTRON_SERVICE_OS        force darwin|linux (default: `uname -s`) — test seam
+#   NEUTRON_SERVICE_LAUNCHCTL launchctl command (default: launchctl) — test seam
+#   NEUTRON_SERVICE_SYSTEMCTL systemctl command (default: systemctl) — test seam
+#   NEUTRON_BACKUP_SELF       path to this script (default: resolved) — for the timer
+#
+# POSIX sh — no bashisms.
+
+set -eu
+
+LABEL=neutron-backup
+
+info() { printf 'neutron-backup: %s\n' "$*"; }
+warn() { printf 'neutron-backup: WARNING: %s\n' "$*" >&2; }
+die()  { printf 'neutron-backup: ERROR: %s\n' "$*" >&2; exit 1; }
+
+_dotenv_get() {
+  _file=$1
+  _key=$2
+  [ -f "$_file" ] || return 0
+  _line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${_key}=" "$_file" 2>/dev/null | tail -n1)
+  [ -n "$_line" ] || return 0
+  _val=${_line#*=}
+  case "$_val" in
+    \"*\") _val=${_val#\"}; _val=${_val%\"} ;;
+    \'*\') _val=${_val#\'}; _val=${_val%\'} ;;
+  esac
+  _val=$(printf '%s' "$_val" | sed -e "s|\${HOME}|$HOME|g" -e "s|\$HOME|$HOME|g")
+  printf '%s\n' "$_val"
+}
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SELF=${NEUTRON_BACKUP_SELF:-$SCRIPT_DIR/neutron-backup.sh}
+CODE_DIR=${NEUTRON_SERVICE_CODE_DIR:-$SCRIPT_DIR}
+ENVFILE="$CODE_DIR/.env"
+
+DATA_DIR=${NEUTRON_HOME:-}
+[ -n "$DATA_DIR" ] || DATA_DIR=$(_dotenv_get "$ENVFILE" NEUTRON_HOME)
+[ -n "$DATA_DIR" ] || DATA_DIR="$HOME/neutron/data"
+
+REMOTE=${NEUTRON_BACKUP_REMOTE:-}
+[ -n "$REMOTE" ] || REMOTE=$(_dotenv_get "$ENVFILE" NEUTRON_BACKUP_REMOTE)
+
+INTERVAL=${NEUTRON_BACKUP_INTERVAL:-}
+[ -n "$INTERVAL" ] || INTERVAL=$(_dotenv_get "$ENVFILE" NEUTRON_BACKUP_INTERVAL)
+[ -n "$INTERVAL" ] || INTERVAL=43200
+
+OS=${NEUTRON_SERVICE_OS:-}
+[ -n "$OS" ] || case "$(uname -s 2>/dev/null || echo unknown)" in
+  Darwin) OS=darwin ;;
+  Linux)  OS=linux ;;
+  *)      OS=unknown ;;
+esac
+
+PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE_PATH="$UNIT_DIR/$LABEL.service"
+TIMER_PATH="$UNIT_DIR/$LABEL.timer"
+LAUNCHCTL=${NEUTRON_SERVICE_LAUNCHCTL:-launchctl}
+SYSTEMCTL=${NEUTRON_SERVICE_SYSTEMCTL:-systemctl}
+LOG_FILE="$DATA_DIR/logs/backup.log"
+
+# ── the backup operation ─────────────────────────────────────────────────────
+# Fold any WAL-resident commits into the main .db file BEFORE we snapshot it.
+# The schema runs in WAL mode (PRAGMA journal_mode = WAL, migrations/0001), so a
+# backup taken WHILE the server is live can find recently-committed rows sitting
+# in the gitignored `-wal` sidecar and NOT yet in the main `.db` file — a naive
+# `git add` of the .db would silently miss them (or capture a torn image). A
+# TRUNCATE checkpoint flushes every committed WAL frame into the main .db file and
+# empties the WAL, so the committed .db is complete + internally coherent; ongoing
+# server writes then accumulate in a fresh WAL while the main file stays stable for
+# git to read. Best-effort + non-fatal: a non-SQLite `.db`, or a missing sqlite3
+# CLI, is committed as-is (with a warning) rather than aborting the whole backup.
+checkpoint_sqlite_dbs() {
+  for _db in "$DATA_DIR"/*.db; do
+    [ -f "$_db" ] || continue          # no-match glob, or a stray non-file
+    # Header sniff: only run sqlite3 on real SQLite files (the magic is the 16
+    # bytes "SQLite format 3\0"), so a non-DB `.db` is left untouched.
+    case "$(head -c 16 "$_db" 2>/dev/null || true)" in
+      "SQLite format 3"*) : ;;
+      *) continue ;;
+    esac
+    if command -v sqlite3 >/dev/null 2>&1; then
+      if sqlite3 "$_db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null 2>&1; then
+        info "checkpointed WAL → $(basename "$_db") (coherent snapshot)"
+      else
+        warn "wal checkpoint failed for $_db — committing it as-is (may miss WAL-resident rows)"
+      fi
+    elif [ -f "$_db-wal" ] && [ -s "$_db-wal" ]; then
+      warn "sqlite3 not found — cannot fold $(basename "$_db")'s WAL into a single-file snapshot."
+      warn "  Install sqlite3 for WAL-coherent backups, or stop the server before backing up."
+    fi
+  done
+}
+
+# Volatile files we never want in the backup history: logs, pidfiles, and the
+# SQLite WAL/SHM sidecars (transient; the committed project.db — made coherent by
+# checkpoint_sqlite_dbs above — is the recoverable snapshot). Written once on init.
+write_gitignore() {
+  _gi="$DATA_DIR/.gitignore"
+  [ -f "$_gi" ] && return 0
+  cat > "$_gi" <<'GI'
+# Neutron data backup — exclude volatile runtime files.
+logs/
+*.log
+*.pid
+*-wal
+*-shm
+GI
+}
+
+do_run() {
+  [ -d "$DATA_DIR" ] || die "data dir does not exist: $DATA_DIR"
+  command -v git >/dev/null 2>&1 || die "git is required for backups — install git"
+  cd "$DATA_DIR" || die "could not enter $DATA_DIR"
+
+  if [ ! -d "$DATA_DIR/.git" ]; then
+    info "initializing git backup repo in $DATA_DIR"
+    git init -q
+    # Identity for unattended commits (only if the user has none configured).
+    git config user.email  >/dev/null 2>&1 || git config user.email "neutron-backup@localhost"
+    git config user.name   >/dev/null 2>&1 || git config user.name  "Neutron Backup"
+  fi
+  write_gitignore
+  # Coherent snapshot first (fold WAL into the main .db), THEN stage + commit.
+  checkpoint_sqlite_dbs
+
+  git add -A
+  if git diff --cached --quiet 2>/dev/null; then
+    info "no changes to back up"
+  else
+    _ts=$(date +"%Y-%m-%d %H:%M:%S %Z" 2>/dev/null || echo backup)
+    git commit -q -m "neutron backup: $_ts" || true
+    info "committed backup ($_ts)"
+  fi
+
+  # Offsite push only when a remote is configured. Local history alone is
+  # already fully recoverable, so a push failure must never lose the commit.
+  if [ -n "$REMOTE" ]; then
+    if git remote get-url origin >/dev/null 2>&1; then
+      git remote set-url origin "$REMOTE"
+    else
+      git remote add origin "$REMOTE"
+    fi
+    _branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+    if git push -q origin "$_branch" 2>/dev/null; then
+      info "pushed to $REMOTE ($_branch)"
+    else
+      warn "git push to $REMOTE failed — local commit preserved, will retry next run"
+    fi
+  fi
+}
+
+# ── timer generators ─────────────────────────────────────────────────────────
+# Emit the launchd <key>/<string> pair for NEUTRON_BACKUP_REMOTE — but ONLY when
+# a remote is configured, so the unset case bakes nothing and `do_run` falls back
+# to the .env lookup. Tab-indented to match the surrounding plist dict.
+_plist_remote_env() {
+  [ -n "$REMOTE" ] || return 0
+  printf '\t\t<key>NEUTRON_BACKUP_REMOTE</key>\n\t\t<string>%s</string>' "$REMOTE"
+}
+
+# Emit a systemd `Environment=NEUTRON_BACKUP_REMOTE=…` line — only when a remote
+# is configured (else nothing, and `do_run` reads it from .env).
+_unit_remote_env() {
+  [ -n "$REMOTE" ] || return 0
+  printf 'Environment=NEUTRON_BACKUP_REMOTE=%s' "$REMOTE"
+}
+
+# launchd StartInterval agent — runs `neutron-backup.sh run` every INTERVAL
+# seconds (and once at load). When a backup remote is configured it is baked into
+# EnvironmentVariables so the scheduled push targets it directly.
+generate_plist() {
+  _remote_env=$(_plist_remote_env)
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>$SELF</string>
+		<string>run</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>$INTERVAL</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$LOG_FILE</string>
+	<key>StandardErrorPath</key>
+	<string>$LOG_FILE</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>$HOME</string>
+		<key>NEUTRON_HOME</key>
+		<string>$DATA_DIR</string>
+		<key>NEUTRON_SERVICE_CODE_DIR</key>
+		<string>$CODE_DIR</string>
+$_remote_env
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+	</dict>
+</dict>
+</plist>
+PLIST
+}
+
+# systemd user service + timer pair. OnUnitActiveSec drives the interval;
+# OnBootSec gives a first run shortly after login.
+generate_service() {
+  _remote_env=$(_unit_remote_env)
+  cat <<UNIT
+[Unit]
+Description=Neutron (Open) data backup
+
+[Service]
+Type=oneshot
+Environment=NEUTRON_HOME=$DATA_DIR
+Environment=NEUTRON_SERVICE_CODE_DIR=$CODE_DIR
+$_remote_env
+ExecStart=/bin/sh $SELF run
+UNIT
+}
+
+generate_timer() {
+  cat <<TIMER
+[Unit]
+Description=Neutron (Open) data backup — every ${INTERVAL}s
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=${INTERVAL}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER
+}
+
+# ── timer lifecycle ──────────────────────────────────────────────────────────
+do_install_timer() {
+  mkdir -p "$DATA_DIR/logs"
+  case "$OS" in
+    darwin)
+      mkdir -p "$(dirname "$PLIST_PATH")"
+      generate_plist > "$PLIST_PATH"
+      info "wrote backup agent → $PLIST_PATH (every ${INTERVAL}s)"
+      _domain="gui/$(id -u)"
+      "$LAUNCHCTL" bootout "$_domain/$LABEL" >/dev/null 2>&1 || true
+      "$LAUNCHCTL" bootstrap "$_domain" "$PLIST_PATH" 2>/dev/null \
+        || "$LAUNCHCTL" load -w "$PLIST_PATH" 2>/dev/null || true
+      info "backup agent loaded ($LABEL)"
+      ;;
+    linux)
+      mkdir -p "$UNIT_DIR"
+      generate_service > "$SERVICE_PATH"
+      generate_timer > "$TIMER_PATH"
+      info "wrote backup service + timer → $TIMER_PATH (every ${INTERVAL}s)"
+      "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true
+      "$SYSTEMCTL" --user enable --now "$LABEL.timer" >/dev/null 2>&1 \
+        || warn "systemctl --user enable failed — is a user session/bus available? (try: loginctl enable-linger $USER)"
+      info "backup timer enabled ($LABEL)"
+      ;;
+    *)
+      warn "unsupported OS for the backup timer — run '$SELF run' from your own cron instead"
+      ;;
+  esac
+}
+
+do_uninstall_timer() {
+  case "$OS" in
+    darwin)
+      "$LAUNCHCTL" bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 \
+        || "$LAUNCHCTL" unload -w "$PLIST_PATH" >/dev/null 2>&1 || true
+      [ -f "$PLIST_PATH" ] && { rm -f "$PLIST_PATH"; info "removed $PLIST_PATH"; } || true
+      ;;
+    linux)
+      "$SYSTEMCTL" --user disable --now "$LABEL.timer" >/dev/null 2>&1 || true
+      [ -f "$TIMER_PATH" ] && { rm -f "$TIMER_PATH"; info "removed $TIMER_PATH"; } || true
+      [ -f "$SERVICE_PATH" ] && rm -f "$SERVICE_PATH" || true
+      "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true
+      ;;
+    *) : ;;
+  esac
+}
+
+do_print() {
+  case "$OS" in
+    darwin) generate_plist ;;
+    linux)  generate_timer ;;
+    *) die "unsupported OS for print" ;;
+  esac
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+cmd=${1:-}
+case "$cmd" in
+  run)             do_run ;;
+  install-timer)   do_install_timer ;;
+  uninstall-timer) do_uninstall_timer ;;
+  print)           do_print ;;
+  ""|--help|-h)
+    printf 'usage: neutron-backup.sh {run|install-timer|uninstall-timer|print}\n' ;;
+  *) die "unknown command: $cmd (try --help)" ;;
+esac

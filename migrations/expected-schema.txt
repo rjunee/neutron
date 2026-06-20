@@ -1,0 +1,1274 @@
+[index] button_prompts_expires (tbl=button_prompts)
+CREATE INDEX button_prompts_expires
+    ON button_prompts (expires_at)
+    WHERE resolved_at IS NULL
+
+[index] button_prompts_idempotency (tbl=button_prompts)
+CREATE UNIQUE INDEX button_prompts_idempotency
+    ON button_prompts (topic_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+
+[index] button_prompts_topic_active (tbl=button_prompts)
+CREATE INDEX button_prompts_topic_active
+    ON button_prompts (topic_id, resolved_at)
+
+[index] button_prompts_topic_created (tbl=button_prompts)
+CREATE INDEX button_prompts_topic_created
+    ON button_prompts (topic_id, created_at DESC)
+
+[index] core_installations_install_state (tbl=core_installations)
+CREATE INDEX core_installations_install_state
+    ON core_installations(project_slug, install_state)
+
+[index] core_installations_project (tbl=core_installations)
+CREATE INDEX core_installations_project
+    ON core_installations (project_slug)
+
+[index] cores_oauth_pending_expires (tbl=cores_oauth_pending)
+CREATE INDEX cores_oauth_pending_expires
+    ON cores_oauth_pending(expires_at)
+
+[index] gateway_events_attempt (tbl=gateway_events)
+CREATE INDEX gateway_events_attempt
+    ON gateway_events (project_slug, user_id, attempt_id)
+
+[index] gateway_events_module_event (tbl=gateway_events)
+CREATE INDEX gateway_events_module_event
+    ON gateway_events (module, event_name)
+
+[index] gateway_events_project_event (tbl=gateway_events)
+CREATE INDEX gateway_events_project_event
+    ON gateway_events (project_slug, event_name)
+
+[index] gateway_events_ts (tbl=gateway_events)
+CREATE INDEX gateway_events_ts
+    ON gateway_events (ts)
+
+[index] idx_code_trident_runs_active (tbl=code_trident_runs)
+CREATE INDEX idx_code_trident_runs_active
+    ON code_trident_runs (phase)
+    WHERE phase NOT IN ('done', 'failed', 'stopped')
+
+[index] idx_code_trident_runs_slug (tbl=code_trident_runs)
+CREATE UNIQUE INDEX idx_code_trident_runs_slug
+    ON code_trident_runs (project_slug, slug)
+
+[index] idx_connect_guest_invites_project (tbl=connect_guest_invites)
+CREATE INDEX idx_connect_guest_invites_project
+    ON connect_guest_invites (project_id)
+
+[index] idx_connect_guest_invites_unredeemed (tbl=connect_guest_invites)
+CREATE INDEX idx_connect_guest_invites_unredeemed
+    ON connect_guest_invites (expires_at_ms)
+    WHERE redeemed_at_ms IS NULL
+
+[index] idx_connected_members_active_identity (tbl=connected_members)
+CREATE UNIQUE INDEX idx_connected_members_active_identity
+    ON connected_members (home_instance_slug, home_user_id)
+    WHERE status = 'active'
+
+[index] idx_connected_members_home_instance (tbl=connected_members)
+CREATE INDEX idx_connected_members_home_instance
+    ON connected_members (home_instance_slug)
+
+[index] idx_connected_members_status (tbl=connected_members)
+CREATE INDEX idx_connected_members_status
+    ON connected_members (status)
+
+[index] idx_cron_state_last_run_at (tbl=cron_state)
+CREATE INDEX idx_cron_state_last_run_at ON cron_state(last_run_at)
+
+[index] idx_current_focus_pick_project_created (tbl=current_focus_pick)
+CREATE INDEX idx_current_focus_pick_project_created
+  ON current_focus_pick(project_slug, created_at DESC)
+
+[index] idx_device_push_tokens_project_token (tbl=device_push_tokens)
+CREATE UNIQUE INDEX idx_device_push_tokens_project_token
+    ON device_push_tokens (project_slug, device_token)
+
+[index] idx_device_push_tokens_project_user (tbl=device_push_tokens)
+CREATE INDEX idx_device_push_tokens_project_user
+    ON device_push_tokens (project_slug, user_id)
+
+[index] idx_messages_session_id (tbl=messages)
+CREATE INDEX idx_messages_session_id ON messages(session_id)
+
+[index] idx_messages_timestamp (tbl=messages)
+CREATE INDEX idx_messages_timestamp ON messages(timestamp)
+
+[index] idx_meters_session_id (tbl=meters)
+CREATE INDEX idx_meters_session_id ON meters(session_id)
+
+[index] idx_meters_started_at (tbl=meters)
+CREATE INDEX idx_meters_started_at ON meters(started_at)
+
+[index] idx_meters_substrate_instance_id (tbl=meters)
+CREATE INDEX idx_meters_substrate_instance_id ON meters(substrate_instance_id)
+
+[index] idx_meters_substrate_kind (tbl=meters)
+CREATE INDEX idx_meters_substrate_kind ON meters(substrate_kind)
+
+[index] idx_overnight_queue_project (tbl=overnight_queue)
+CREATE INDEX idx_overnight_queue_project
+    ON overnight_queue (project_slug, status)
+
+[index] idx_overnight_queue_status (tbl=overnight_queue)
+CREATE INDEX idx_overnight_queue_status
+    ON overnight_queue (status)
+
+[index] idx_project_members_user (tbl=project_members)
+CREATE INDEX idx_project_members_user
+    ON project_members (user_id)
+
+[index] idx_reminders_fire_at (tbl=reminders)
+CREATE INDEX idx_reminders_fire_at ON reminders(fire_at)
+
+[index] idx_reminders_status (tbl=reminders)
+CREATE INDEX idx_reminders_status ON reminders(status)
+
+[index] idx_reminders_topic_id (tbl=reminders)
+CREATE INDEX idx_reminders_topic_id ON reminders(topic_id)
+
+[index] idx_reverse_promotions_recipient_project (tbl=reverse_promotions)
+CREATE INDEX idx_reverse_promotions_recipient_project
+    ON reverse_promotions(recipient_project_id)
+
+[index] idx_sessions_billing_mode (tbl=sessions)
+CREATE INDEX idx_sessions_billing_mode ON sessions(billing_mode)
+
+[index] idx_sessions_core_id (tbl=sessions)
+CREATE INDEX idx_sessions_core_id ON sessions(core_id)
+
+[index] idx_sessions_privacy_mode (tbl=sessions)
+CREATE INDEX idx_sessions_privacy_mode ON sessions(privacy_mode)
+
+[index] idx_sessions_project_id (tbl=sessions)
+CREATE INDEX idx_sessions_project_id ON sessions(project_id)
+
+[index] idx_sessions_project_slug (tbl=sessions)
+CREATE INDEX idx_sessions_project_slug ON sessions(project_slug)
+
+[index] idx_sessions_source (tbl=sessions)
+CREATE INDEX idx_sessions_source ON sessions(source)
+
+[index] idx_sessions_started_at (tbl=sessions)
+CREATE INDEX idx_sessions_started_at ON sessions(started_at)
+
+[index] idx_sessions_user_id (tbl=sessions)
+CREATE INDEX idx_sessions_user_id ON sessions(user_id)
+
+[index] idx_task_reminder_links_project_task (tbl=task_reminder_links)
+CREATE INDEX idx_task_reminder_links_project_task
+    ON task_reminder_links (project_slug, task_id)
+
+[index] idx_task_reminder_links_reminder (tbl=task_reminder_links)
+CREATE INDEX idx_task_reminder_links_reminder
+    ON task_reminder_links (reminder_id)
+
+[index] idx_tasks_project_due_date (tbl=tasks)
+CREATE INDEX idx_tasks_project_due_date
+    ON tasks (project_slug, due_date)
+    WHERE due_date IS NOT NULL
+
+[index] idx_tasks_project_focus_score (tbl=tasks)
+CREATE INDEX idx_tasks_project_focus_score
+    ON tasks (project_slug, focus_score DESC)
+    WHERE status = 'open'
+
+[index] idx_tasks_project_slug_project_status (tbl=tasks)
+CREATE INDEX idx_tasks_project_slug_project_status
+    ON tasks (project_slug, project_id, status)
+
+[index] idx_tool_approvals_requested_at (tbl=tool_approvals)
+CREATE INDEX idx_tool_approvals_requested_at ON tool_approvals(requested_at)
+
+[index] idx_tool_approvals_status (tbl=tool_approvals)
+CREATE INDEX idx_tool_approvals_status ON tool_approvals(status)
+
+[index] idx_topic_origins_origin_instance (tbl=topic_origins)
+CREATE INDEX idx_topic_origins_origin_instance
+    ON topic_origins(origin_user_instance_slug)
+
+[index] idx_topics_channel_binding (tbl=topics)
+CREATE UNIQUE INDEX idx_topics_channel_binding
+    ON topics(channel_kind, channel_topic_id)
+    WHERE status != 'archived'
+
+[index] idx_topics_project_id (tbl=topics)
+CREATE INDEX idx_topics_project_id ON topics(project_id)
+
+[index] idx_topics_status (tbl=topics)
+CREATE INDEX idx_topics_status ON topics(status)
+
+[index] idx_upload_sessions_expires (tbl=upload_sessions)
+CREATE INDEX idx_upload_sessions_expires
+    ON upload_sessions (expires_at)
+    WHERE status = 'uploading'
+
+[index] idx_upload_sessions_project (tbl=upload_sessions)
+CREATE INDEX idx_upload_sessions_project
+    ON upload_sessions (project_slug, status)
+
+[index] idx_watchdog_alerts_detected_at (tbl=watchdog_alerts)
+CREATE INDEX idx_watchdog_alerts_detected_at ON watchdog_alerts(detected_at)
+
+[index] idx_watchdog_alerts_kind (tbl=watchdog_alerts)
+CREATE INDEX idx_watchdog_alerts_kind ON watchdog_alerts(kind)
+
+[index] idx_watchdog_alerts_resolved_at (tbl=watchdog_alerts)
+CREATE INDEX idx_watchdog_alerts_resolved_at ON watchdog_alerts(resolved_at)
+
+[index] idx_workspace_members_role (tbl=workspace_members)
+CREATE INDEX idx_workspace_members_role ON workspace_members(role)
+
+[index] import_jobs_project_status (tbl=import_jobs)
+CREATE INDEX import_jobs_project_status
+    ON import_jobs (project_slug, status)
+
+[index] import_jobs_started_at (tbl=import_jobs)
+CREATE INDEX import_jobs_started_at
+    ON import_jobs (started_at)
+
+[index] import_pass1_chunks_job (tbl=import_pass1_chunks)
+CREATE INDEX import_pass1_chunks_job
+    ON import_pass1_chunks (job_id)
+
+[index] import_pass1_chunks_project_source (tbl=import_pass1_chunks)
+CREATE INDEX import_pass1_chunks_project_source
+    ON import_pass1_chunks (project_slug, source)
+
+[index] import_results_project (tbl=import_results)
+CREATE INDEX import_results_project
+    ON import_results (project_slug, finalized_at)
+
+[index] inbound_messages_by_origin (tbl=inbound_messages)
+CREATE INDEX inbound_messages_by_origin
+    ON inbound_messages (origin_instance_slug, received_at)
+
+[index] invites_pending_expiry (tbl=invites)
+CREATE INDEX invites_pending_expiry
+    ON invites (expires_at_ms)
+    WHERE consumed_at_ms IS NULL
+
+[index] invites_workspace (tbl=invites)
+CREATE INDEX invites_workspace
+    ON invites (workspace_instance_slug, created_at_ms)
+
+[index] onboarding_state_phase (tbl=onboarding_state)
+CREATE INDEX onboarding_state_phase
+    ON onboarding_state (phase, last_advanced_at)
+
+[index] paste_consumed_nonces_expires (tbl=paste_consumed_nonces)
+CREATE INDEX paste_consumed_nonces_expires
+    ON paste_consumed_nonces (expires_at_ms)
+
+[index] pending_redirects_expires (tbl=pending_redirects)
+CREATE INDEX pending_redirects_expires
+    ON pending_redirects (expires_at_ms)
+
+[index] persona_drafts_by_project (tbl=persona_drafts)
+CREATE INDEX persona_drafts_by_project
+    ON persona_drafts (project_slug, created_at)
+
+[index] profile_pic_candidates_job (tbl=profile_pic_candidates)
+CREATE INDEX profile_pic_candidates_job
+    ON profile_pic_candidates (job_id)
+
+[index] profile_pic_jobs_project_status (tbl=profile_pic_jobs)
+CREATE INDEX profile_pic_jobs_project_status
+    ON profile_pic_jobs (project_slug, status)
+
+[index] profile_pic_pending_project_user_started (tbl=profile_pic_pending)
+CREATE INDEX profile_pic_pending_project_user_started
+    ON profile_pic_pending (project_slug, user_id, started_at DESC)
+
+[index] profile_pic_pending_status_started (tbl=profile_pic_pending)
+CREATE INDEX profile_pic_pending_status_started
+    ON profile_pic_pending (status, started_at)
+
+[index] sean_ellis_responses_open (tbl=sean_ellis_responses)
+CREATE INDEX sean_ellis_responses_open
+    ON sean_ellis_responses (project_slug)
+    WHERE response_kind = 'no_response'
+
+[index] sean_ellis_responses_project (tbl=sean_ellis_responses)
+CREATE INDEX sean_ellis_responses_project
+    ON sean_ellis_responses (project_slug, prompt_emitted_at)
+
+[index] sean_ellis_responses_prompt_id (tbl=sean_ellis_responses)
+CREATE INDEX sean_ellis_responses_prompt_id
+    ON sean_ellis_responses (prompt_id)
+    WHERE prompt_id IS NOT NULL
+
+[index] secret_audit_log_outcome (tbl=secret_audit_log)
+CREATE INDEX secret_audit_log_outcome
+    ON secret_audit_log (outcome)
+    WHERE outcome != 'ok'
+
+[index] secret_audit_log_project_core (tbl=secret_audit_log)
+CREATE INDEX secret_audit_log_project_core
+    ON secret_audit_log (project_slug, core_slug, ts)
+
+[index] secrets_by_project_kind (tbl=secrets)
+CREATE INDEX secrets_by_project_kind ON secrets (project_slug, kind)
+
+[index] signin_events_by_user (tbl=signin_events)
+CREATE INDEX signin_events_by_user ON signin_events (user_id, occurred_at)
+
+[index] signup_consumed_start_tokens_expires (tbl=signup_consumed_start_tokens)
+CREATE INDEX signup_consumed_start_tokens_expires
+    ON signup_consumed_start_tokens (expires_at_ms)
+
+[index] telegram_bind_tokens_expires (tbl=telegram_bind_tokens)
+CREATE INDEX telegram_bind_tokens_expires
+    ON telegram_bind_tokens (expires_at_ms)
+
+[index] telegram_bindings_user_id (tbl=telegram_bindings)
+CREATE INDEX telegram_bindings_user_id
+    ON telegram_bindings (user_id)
+
+[index] wow_events_fired_at (tbl=wow_events)
+CREATE INDEX wow_events_fired_at
+    ON wow_events (fired_at)
+
+[index] wow_events_project_action (tbl=wow_events)
+CREATE INDEX wow_events_project_action
+    ON wow_events (project_slug, action_id)
+
+[table] _migrations (tbl=_migrations)
+CREATE TABLE _migrations (
+       version INTEGER PRIMARY KEY,
+       name TEXT NOT NULL,
+       applied_at REAL NOT NULL
+     )
+
+[table] api_keys (tbl=api_keys)
+CREATE TABLE api_keys (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK (provider IN ('anthropic', 'openai', 'gemini')),
+    label TEXT NOT NULL,
+    secret_id TEXT NOT NULL,                                   -- logical FK into secrets.id
+    added_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    UNIQUE (project_slug, provider, label)
+) STRICT
+
+[table] button_prompts (tbl=button_prompts)
+CREATE TABLE button_prompts (
+    prompt_id TEXT PRIMARY KEY NOT NULL,
+    topic_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    allow_freeform INTEGER NOT NULL CHECK (allow_freeform IN (0, 1)),
+    expires_at INTEGER NOT NULL,
+    idempotency_key TEXT,
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER,
+    resolved_at INTEGER,
+    resolution_value TEXT,
+    resolution_freeform_text TEXT,
+    resolution_speaker_user_id TEXT,
+    resolution_channel_kind TEXT
+, kind TEXT) STRICT
+
+[table] code_trident_runs (tbl=code_trident_runs)
+CREATE TABLE code_trident_runs (
+    id                  TEXT PRIMARY KEY NOT NULL,
+    slug                TEXT NOT NULL,
+    project_slug        TEXT NOT NULL,
+    phase               TEXT NOT NULL DEFAULT 'forge-init'
+                            CHECK (phase IN (
+                                'forge-init', 'ralph-plan', 'ralph-task',
+                                'argus', 'forge-fix',
+                                'done', 'failed', 'stopped'
+                            )),
+    round               INTEGER NOT NULL DEFAULT 1,
+    max_rounds          INTEGER NOT NULL DEFAULT 8,
+    ralph               INTEGER NOT NULL DEFAULT 0
+                            CHECK (ralph IN (0, 1)),
+    ralph_round         INTEGER NOT NULL DEFAULT 0,
+    max_ralph_rounds    INTEGER NOT NULL DEFAULT 20,
+    branch              TEXT,
+    pr                  INTEGER,
+    merge_mode          TEXT NOT NULL DEFAULT 'local'
+                            CHECK (merge_mode IN ('local', 'pr')),
+    subagent_run_id     TEXT,
+    subagent_status     TEXT
+                            CHECK (subagent_status IS NULL OR subagent_status IN (
+                                'pending', 'running', 'completed', 'failed', 'crashed'
+                            )),
+    repo_path           TEXT NOT NULL,
+    worktree            TEXT,
+    task                TEXT NOT NULL,
+    chat_id             TEXT,
+    thread_id           TEXT,
+    failure_reason      TEXT,
+    started_at          TEXT NOT NULL,                  -- ISO-8601 UTC
+    last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
+) STRICT
+
+[table] connect_guest_invites (tbl=connect_guest_invites)
+CREATE TABLE connect_guest_invites (
+    token_hash        TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    display_name_hint TEXT,
+    access      TEXT NOT NULL DEFAULT 'write'
+                          CHECK (access IN ('write', 'read')),
+    created_at_ms     INTEGER NOT NULL,
+    expires_at_ms     INTEGER NOT NULL,
+    redeemed_at_ms    INTEGER,
+    redeemed_by_slug  TEXT
+) STRICT
+
+[table] connected_members (tbl=connected_members)
+CREATE TABLE "connected_members" (
+    local_slug         TEXT PRIMARY KEY,
+    display_name       TEXT NOT NULL,
+    role               TEXT NOT NULL
+                           CHECK (role IN ('owner', 'collaborator')),
+    home_authority     TEXT,
+    home_instance_slug TEXT,
+    home_user_id       TEXT,
+    access             TEXT NOT NULL
+                           CHECK (access IN ('read', 'write')),
+    approved_at        TEXT,
+    status             TEXT NOT NULL
+                           CHECK (status IN ('pending', 'active', 'revoked'))
+) STRICT
+
+[table] core_installations (tbl=core_installations)
+CREATE TABLE core_installations (
+    project_slug                 TEXT NOT NULL,
+    core_slug                   TEXT NOT NULL,                     -- stable per-Core id (npm package name slugified)
+    package_name                TEXT NOT NULL,                     -- raw npm package name ("@neutron/dtc-analytics")
+    package_version             TEXT NOT NULL,                     -- semver tag at install time
+    manifest_capabilities_json  TEXT NOT NULL,                     -- JSON array of capability strings declared at install/upgrade
+    data_layout                 TEXT NOT NULL CHECK (data_layout IN ('tables', 'sidecar')),
+    sidecar_db_path             TEXT,                               -- absolute path; non-null only when data_layout='sidecar'
+    installed_at                INTEGER NOT NULL,                  -- unix-ms
+    configured_at               INTEGER,
+    started_at                  INTEGER,
+    stopped_at                  INTEGER,
+    uninstalled_at              INTEGER, install_state TEXT NOT NULL DEFAULT 'install_ok',                            -- soft-delete marker; NULL for live installs
+    PRIMARY KEY (project_slug, core_slug)
+) STRICT
+
+[table] cores_oauth_pending (tbl=cores_oauth_pending)
+CREATE TABLE cores_oauth_pending (
+    state               TEXT PRIMARY KEY NOT NULL,
+    project_slug         TEXT NOT NULL,              -- frozen internal_handle
+    code_verifier       TEXT NOT NULL,              -- PKCE; Google validates against authorize-time code_challenge
+    labels_json         TEXT NOT NULL,              -- JSON array of labels this grant covers
+    redirect_uri        TEXT NOT NULL,              -- the auth service callback URL
+    started_at          INTEGER NOT NULL,           -- ms epoch
+    expires_at          INTEGER NOT NULL,           -- started_at + 10*60*1000
+    consumed_at         INTEGER                     -- set on successful exchange; row pruned after
+) STRICT
+
+[table] cron_state (tbl=cron_state)
+CREATE TABLE cron_state (
+    job_name TEXT NOT NULL,
+    project_slug TEXT NOT NULL,
+    last_run_at REAL,                                    -- unix seconds; NULL on first install before first run
+    last_run_status TEXT,                                -- 'ok' | 'error' | 'skipped' | NULL
+    last_run_error TEXT,                                 -- stringified error if last_run_status='error'
+    last_run_duration_ms INTEGER,                        -- elapsed ms for the most recent run
+    PRIMARY KEY (job_name, project_slug)
+)
+
+[table] current_focus_pick (tbl=current_focus_pick)
+CREATE TABLE current_focus_pick (
+  project_slug      TEXT NOT NULL,
+  -- YYYY-MM-DD in the owner's local timezone (resolved from
+  -- `instance_metadata.timezone` at engine invocation; default
+  -- America/Los_Angeles when unset).
+  day              TEXT NOT NULL,
+  task_id          TEXT NOT NULL,
+  llm_rationale    TEXT NOT NULL,
+  -- JSON array, e.g. '["t1","t2","t3"]'. Server-generated (never
+  -- user-supplied) so no injection risk. May contain fewer than 3 ids
+  -- when the slate has <3 open tasks; the staleness engine handles
+  -- short arrays gracefully.
+  top_3_task_ids   TEXT NOT NULL,
+  -- ISO-8601 UTC.
+  created_at       TEXT NOT NULL,
+  -- Model id used for the pick (e.g. `claude-haiku-4-5`). Recorded so
+  -- a future re-run can detect model drift.
+  llm_model        TEXT NOT NULL,
+  -- Anthropic request id (`x-request-id` header) when available;
+  -- otherwise NULL. Useful for tracing back to Anthropic-side logs.
+  llm_request_id   TEXT,
+  PRIMARY KEY (project_slug, day)
+)
+
+[table] device_push_tokens (tbl=device_push_tokens)
+CREATE TABLE device_push_tokens (
+    id              TEXT PRIMARY KEY NOT NULL,
+    project_slug     TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    device_token    TEXT NOT NULL,
+    platform        TEXT NOT NULL
+                        CHECK (platform IN ('ios', 'android')),
+    registered_at   TEXT NOT NULL,                              -- ISO-8601 UTC
+    updated_at      TEXT NOT NULL                               -- ISO-8601 UTC
+) STRICT
+
+[table] gateway_events (tbl=gateway_events)
+CREATE TABLE gateway_events (
+    id TEXT PRIMARY KEY NOT NULL,
+    ts INTEGER NOT NULL,                                  -- unix-ms
+    level TEXT NOT NULL DEFAULT 'info'
+        CHECK (level IN ('info', 'warn', 'error')),
+    project_slug TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    module TEXT NOT NULL,                                 -- 'onboarding' | 'signup' | …
+    event_name TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    duration_ms INTEGER                                   -- optional span close
+, attempt_id TEXT NOT NULL DEFAULT 'legacy-pre-S30') STRICT
+
+[table] import_jobs (tbl=import_jobs)
+CREATE TABLE import_jobs (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    source TEXT NOT NULL
+        CHECK (source IN (
+            'chatgpt-zip',
+            'claude-zip',
+            'gmail-oauth',
+            'calendar-oauth',
+            'drive-oauth',
+            'notion-oauth',
+            'slack-oauth'
+        )),
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN (
+            'queued',
+            'pass1-running',
+            'pass2-running',
+            'rate_limit_cooling_off',
+            'rate_limit_paused',
+            'completed',
+            'failed',
+            'cancelled'
+        )),
+    dollars_spent REAL NOT NULL DEFAULT 0,
+    pass1_chunks_done INTEGER NOT NULL DEFAULT 0,
+    pass1_chunks_total INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    chunks_total_known INTEGER NOT NULL DEFAULT 0
+        CHECK (chunks_total_known IN (0, 1))
+, last_paused_at INTEGER, chunk_target_tokens INTEGER, cooldown_resume_at INTEGER) STRICT
+
+[table] import_pass1_chunks (tbl=import_pass1_chunks)
+CREATE TABLE import_pass1_chunks (
+    project_slug TEXT NOT NULL,
+    source TEXT NOT NULL,
+    chunk_hash TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    chunk_byte_length INTEGER NOT NULL,
+    candidate_entities_json TEXT NOT NULL DEFAULT '[]',
+    candidate_topics_json TEXT NOT NULL DEFAULT '[]',
+    candidate_tasks_json TEXT NOT NULL DEFAULT '[]',
+    voice_signals_json TEXT NOT NULL DEFAULT '{}',
+    dollars_billed REAL NOT NULL DEFAULT 0,
+    analyzed_at INTEGER NOT NULL,
+    -- Codex r5 P1: distinguish a finalized chunk (analyzed=1) from a
+    -- placeholder claim (analyzed=0). Cache hits ONLY land on
+    -- analyzed=1 rows. A budget-stop or substrate-error before
+    -- finalize deletes the placeholder so retries can re-process.
+    analyzed INTEGER NOT NULL DEFAULT 0
+        CHECK (analyzed IN (0, 1)), chunk_text TEXT,
+    PRIMARY KEY (project_slug, source, chunk_hash)
+) STRICT
+
+[table] import_results (tbl=import_results)
+CREATE TABLE import_results (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    source TEXT NOT NULL,
+    projects_json TEXT NOT NULL DEFAULT '[]',
+    tasks_json TEXT NOT NULL DEFAULT '[]',
+    topics_json TEXT NOT NULL DEFAULT '[]',
+    reminders_json TEXT NOT NULL DEFAULT '[]',
+    entities_json TEXT NOT NULL DEFAULT '[]',
+    voice_signals_json TEXT NOT NULL DEFAULT '{}',
+    facts_json TEXT NOT NULL DEFAULT '{}',
+    finalized_at INTEGER NOT NULL,
+    partial INTEGER NOT NULL DEFAULT 0
+        CHECK (partial IN (0, 1))
+, inferred_interests_json TEXT NOT NULL DEFAULT '[]', confidence_by_inference_json TEXT NOT NULL DEFAULT '[]', conversation_count INTEGER, synthesizer_model TEXT) STRICT
+
+[table] inbound_messages (tbl=inbound_messages)
+CREATE TABLE inbound_messages (
+    ack_id TEXT PRIMARY KEY NOT NULL,
+    origin_instance_slug TEXT NOT NULL,
+    origin_user_id TEXT NOT NULL,
+    receiving_instance_slug TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    speaker_user_id TEXT NOT NULL,
+    channel_hint TEXT,
+    body_json TEXT NOT NULL,                                   -- opaque receiver-displays-or-persists payload
+    received_at INTEGER NOT NULL,
+    routed_at INTEGER,                                         -- nullable; populated after the router accepts
+    route_status TEXT,                                         -- 'ok' | 'error' | NULL while pending
+    route_error TEXT
+, author_id TEXT, author_display TEXT) STRICT
+
+[table] instance_metadata (tbl=instance_metadata)
+CREATE TABLE instance_metadata (
+  instance_slug TEXT NOT NULL PRIMARY KEY,
+  -- IANA timezone identifier (e.g. 'America/Los_Angeles', 'America/New_York',
+  -- 'Asia/Singapore'). NULL → consumers fall back to
+  -- `DEFAULT_TENANT_TIMEZONE`. Validated by `Intl.DateTimeFormat` at read
+  -- time; an unknown identifier throws and the cron tick / surface request
+  -- fails closed (which is preferable to silently picking the wrong day).
+  timezone TEXT
+)
+
+[table] invites (tbl=invites)
+CREATE TABLE invites (
+    token_id TEXT PRIMARY KEY NOT NULL,
+    workspace_instance_slug TEXT NOT NULL,
+    invitee_email_hash TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    inviter_user_id TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    consumed_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL
+) STRICT
+
+[table] max_subs_unimplemented (tbl=max_subs_unimplemented)
+CREATE TABLE max_subs_unimplemented (
+    id TEXT PRIMARY KEY NOT NULL,
+    -- The CHECK below can never be true (`1 = 0`), so any INSERT
+    -- against this table fails. Defense-in-depth: even if a buggy
+    -- caller bypasses the MultiSubNotImplementedError-throwing
+    -- classes and writes raw SQL, the row never lands.
+    placeholder TEXT NOT NULL CHECK (1 = 0)
+) STRICT
+
+[table] messages (tbl=messages)
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT,                                     -- JSON
+    tool_name TEXT,
+    timestamp REAL NOT NULL,
+    token_count INTEGER,
+    finish_reason TEXT,
+    reasoning TEXT,
+    reasoning_content TEXT,
+    reasoning_details TEXT,
+    codex_reasoning_items TEXT,                          -- JSON, GPT-5.5 adapter parity per § A.2.1
+    codex_message_items TEXT
+)
+
+[table] messages_fts (tbl=messages_fts)
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    content,
+    content=messages,
+    content_rowid=id
+)
+
+[table] messages_fts_config (tbl=messages_fts_config)
+CREATE TABLE 'messages_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID
+
+[table] messages_fts_data (tbl=messages_fts_data)
+CREATE TABLE 'messages_fts_data'(id INTEGER PRIMARY KEY, block BLOB)
+
+[table] messages_fts_docsize (tbl=messages_fts_docsize)
+CREATE TABLE 'messages_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)
+
+[table] messages_fts_idx (tbl=messages_fts_idx)
+CREATE TABLE 'messages_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID
+
+[table] meters (tbl=meters)
+CREATE TABLE meters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    substrate_kind TEXT NOT NULL,                        -- 'cc' | 'gpt-5-5-codex-cli' | 'gpt-5-5-api' | 'open-weight-h100' | etc.
+    substrate_instance_id TEXT,                          -- which CC sub / H100 node / OpenAI account served this call (per § B.P1)
+    model TEXT,                                          -- model id at dispatch time
+    started_at REAL NOT NULL,                            -- unix seconds
+    ended_at REAL,                                       -- unix seconds; NULL until completion event arrives
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd REAL,
+    actual_cost_usd REAL,
+    pricing_version TEXT,                                -- which pricing snapshot the cost calc used; doubles as drift-detect for retroactive recalc
+    error TEXT                                           -- adapter-emitted error string when the dispatch errored; NULL on success
+)
+
+[table] onboarding_state (tbl=onboarding_state)
+CREATE TABLE "onboarding_state" (
+    project_slug TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    phase_state_json TEXT NOT NULL DEFAULT '{}',
+    started_at INTEGER NOT NULL,
+    last_advanced_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    import_job_id TEXT,
+    persona_files_committed INTEGER NOT NULL DEFAULT 0
+        CHECK (persona_files_committed IN (0, 1)),
+    wow_fired INTEGER NOT NULL DEFAULT 0
+        CHECK (wow_fired IN (0, 1)),
+    attempt_id TEXT NOT NULL DEFAULT 'legacy-pre-S30',
+    wow_pushed_at INTEGER, onboarding_handoff_emitted_at INTEGER,
+    PRIMARY KEY (project_slug, user_id)
+) STRICT
+
+[table] onboarding_transcripts_meta (tbl=onboarding_transcripts_meta)
+CREATE TABLE onboarding_transcripts_meta (
+    project_slug TEXT PRIMARY KEY NOT NULL,
+    file_path TEXT NOT NULL,
+    line_count INTEGER NOT NULL DEFAULT 0,
+    last_appended_at INTEGER,
+    started_at INTEGER NOT NULL
+) STRICT
+
+[table] overnight_budget (tbl=overnight_budget)
+CREATE TABLE overnight_budget (
+    window_date_local   TEXT PRIMARY KEY NOT NULL,           -- local YYYY-MM-DD
+    started_this_window INTEGER NOT NULL DEFAULT 0
+) STRICT
+
+[table] overnight_queue (tbl=overnight_queue)
+CREATE TABLE overnight_queue (
+    id                  TEXT PRIMARY KEY NOT NULL,           -- owk-YYYYMMDD-NNN
+    project_slug        TEXT NOT NULL,
+    agent_role          TEXT NOT NULL DEFAULT 'forge'
+                            CHECK (agent_role IN ('forge', 'atlas')),
+    priority            TEXT NOT NULL DEFAULT 'P3'
+                            CHECK (priority IN ('P1', 'P2', 'P3')),
+    description         TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'queued'
+                            CHECK (status IN ('queued', 'in-flight', 'completed', 'failed')),
+    context_relpath     TEXT,
+    result              TEXT,
+    trident_run_id      TEXT,
+    trident_slug        TEXT,
+    spawn_attempts      INTEGER NOT NULL DEFAULT 0,
+    ralph               INTEGER NOT NULL DEFAULT 0
+                            CHECK (ralph IN (0, 1)),
+    created_at          TEXT NOT NULL,                       -- ISO-8601 UTC
+    started_at          TEXT,
+    finished_at         TEXT,
+    window_date_local   TEXT
+) STRICT
+
+[table] paste_consumed_nonces (tbl=paste_consumed_nonces)
+CREATE TABLE paste_consumed_nonces (
+    jti TEXT PRIMARY KEY NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    claimed_at_ms INTEGER NOT NULL
+) STRICT
+
+[table] pending_redirects (tbl=pending_redirects)
+CREATE TABLE pending_redirects (
+    topic_id TEXT PRIMARY KEY NOT NULL,
+    new_slug TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    new_start_token TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL
+) STRICT
+
+[table] persona_drafts (tbl=persona_drafts)
+CREATE TABLE persona_drafts (
+    draft_id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    soul_md TEXT NOT NULL,
+    user_md TEXT NOT NULL,
+    priority_map_md TEXT NOT NULL,
+    cringe_flags_json TEXT NOT NULL DEFAULT '{}',
+    regen_attempts_json TEXT NOT NULL DEFAULT '{"soul":0,"user":0,"priority_map":0}',
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'committed', 'manual_review', 'discarded')),
+    created_at INTEGER NOT NULL,
+    committed_at INTEGER,
+    git_sha TEXT
+) STRICT
+
+[table] profile_pic_candidates (tbl=profile_pic_candidates)
+CREATE TABLE profile_pic_candidates (
+    id TEXT PRIMARY KEY NOT NULL,
+    job_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'gemini'
+        CHECK (source IN ('gemini', 'fallback', 'upload')),
+    created_at INTEGER NOT NULL,
+    picked_at INTEGER
+) STRICT
+
+[table] profile_pic_jobs (tbl=profile_pic_jobs)
+CREATE TABLE profile_pic_jobs (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN (
+            'queued',
+            'generating',
+            'ready',
+            'fallback',
+            'user_uploaded',
+            'failed'
+        )),
+    archetype_hint TEXT,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    fallback_used INTEGER NOT NULL DEFAULT 0
+        CHECK (fallback_used IN (0, 1)),
+    failure_count INTEGER NOT NULL DEFAULT 0
+) STRICT
+
+[table] profile_pic_pending (tbl=profile_pic_pending)
+CREATE TABLE profile_pic_pending (
+    request_id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    user_id TEXT,
+    prompt TEXT NOT NULL,
+    archetype_hint TEXT,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    result_path TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'completed', 'failed', 'expired')),
+    auto_retry_attempted INTEGER NOT NULL DEFAULT 0
+        CHECK (auto_retry_attempted IN (0, 1))
+, job_id TEXT) STRICT
+
+[table] project_members (tbl=project_members)
+CREATE TABLE project_members (
+    project_id      TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'member'
+                        CHECK (role IN ('owner', 'member')),
+    joined_at       TEXT NOT NULL, origin_instance TEXT,                              -- ISO-8601 UTC
+    PRIMARY KEY (project_id, user_id),
+    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+) STRICT
+
+[table] projects (tbl=projects)
+CREATE TABLE "projects" (
+    id                   TEXT PRIMARY KEY NOT NULL,
+    name                 TEXT NOT NULL,
+    description          TEXT,
+    persona              TEXT,
+    privacy_mode         TEXT NOT NULL DEFAULT 'private'
+                             CHECK (privacy_mode IN ('private', 'workspace', 'public')),
+    billing_mode         TEXT NOT NULL DEFAULT 'personal'
+                             CHECK (billing_mode IN ('personal', 'group_per_seat', 'group_shared')),
+    created_at           TEXT NOT NULL,                          -- ISO-8601 UTC
+    updated_at           TEXT NOT NULL,                          -- ISO-8601 UTC
+    deleted_at           TEXT,                                   -- ISO-8601 UTC; NULL = live
+    context_archived_at  TEXT,                                   -- ISO-8601 UTC; NULL = not archived
+    topic_id             TEXT                                    -- telegram forum-topic thread id; NULL = unbound
+) STRICT
+
+[table] reminders (tbl=reminders)
+CREATE TABLE reminders (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    topic_id TEXT,                                       -- nullable: instance-level reminders without a topic
+    fire_at REAL NOT NULL,                               -- unix seconds; UTC
+    message TEXT NOT NULL,                               -- literal / smart-wrap / pattern-template body
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'fired', 'cancelled')),
+    created_at REAL NOT NULL,
+    fired_at REAL,                                       -- nullable until fired
+    cancelled_at REAL                                    -- nullable until cancelled
+, recurrence TEXT, source TEXT)
+
+[table] remote_shared_projects (tbl=remote_shared_projects)
+CREATE TABLE remote_shared_projects (
+    project_id     TEXT PRIMARY KEY,
+    relay_base_url TEXT NOT NULL,
+    owner_home     TEXT NOT NULL,
+    joined_at      TEXT NOT NULL
+, active INTEGER NOT NULL DEFAULT 1) STRICT
+
+[table] reverse_promotions (tbl=reverse_promotions)
+CREATE TABLE "reverse_promotions" (
+    -- Slug of the source workspace instance the topic came from. Leading column
+    -- of the composite PK so `WHERE source_workspace_instance_slug = ?`
+    -- is index-served on its own.
+    source_workspace_instance_slug TEXT NOT NULL,
+    -- The WORKSPACE-side topic id that this recipient topic was
+    -- migrated from. Lookup key on retry, scoped by the slug above so
+    -- two unrelated workspaces with colliding topic_ids do not stomp
+    -- each other on the recipient side.
+    source_workspace_topic_id TEXT NOT NULL,
+    -- The recipient's local topic id minted by step 1. Reused on retry.
+    recipient_topic_id TEXT NOT NULL,
+    -- The recipient's local project_id minted by step 1. Reused on
+    -- retry so a second call does NOT generate a fresh project id.
+    recipient_project_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (source_workspace_instance_slug, source_workspace_topic_id)
+)
+
+[table] sean_ellis_responses (tbl=sean_ellis_responses)
+CREATE TABLE sean_ellis_responses (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    prompt_emitted_at INTEGER NOT NULL,                  -- unix-ms when the survey button-prompt was rendered
+    responded_at INTEGER,                                -- nullable until tapped / freeform completed
+    response_kind TEXT NOT NULL DEFAULT 'no_response'
+        CHECK (response_kind IN (
+            'very_disappointed',
+            'somewhat_disappointed',
+            'not_disappointed',
+            'no_response'
+        )),
+    freeform_text TEXT                                   -- only set when [B] tap path collected freeform
+, prompt_id TEXT, pending_response_kind TEXT) STRICT
+
+[table] secret_audit_log (tbl=secret_audit_log)
+CREATE TABLE secret_audit_log (
+    id              TEXT PRIMARY KEY NOT NULL,
+    ts              INTEGER NOT NULL,                              -- unix-ms
+    project_slug     TEXT NOT NULL,
+    core_slug       TEXT NOT NULL,                                 -- the calling Core
+    op              TEXT NOT NULL CHECK (op IN (
+                        'get',
+                        'put',
+                        'rotate',
+                        'list',
+                        'delete',
+                        'tool_call'                                -- capability-gate denials on tool dispatch
+                    )),
+    kind            TEXT NOT NULL,                                 -- secret kind ('byo_api_key', 'oauth_token', ...) OR 'tool' for tool-call rows
+    label           TEXT NOT NULL,                                 -- secret label OR tool name for op='tool_call'
+    outcome         TEXT NOT NULL CHECK (outcome IN (
+                        'ok',
+                        'capability_denied',
+                        'not_found',
+                        'error'
+                    )),
+    error           TEXT                                            -- nullable; populated on outcome != 'ok'
+, author_id TEXT) STRICT
+
+[table] secrets (tbl=secrets)
+CREATE TABLE secrets (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    ciphertext TEXT NOT NULL,                                  -- JSON-encoded EncryptedEnvelope
+    created_at INTEGER NOT NULL,
+    rotated_at INTEGER,
+    expires_at INTEGER,
+    UNIQUE (project_slug, kind, label)
+) STRICT
+
+[table] sessions (tbl=sessions)
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY NOT NULL,                        -- TEXT PRIMARY KEY is implicitly nullable on rowid tables; pin it for defense-in-depth
+
+    -- Hermes baseline:
+    source TEXT NOT NULL,                                -- 'cli' | 'telegram' | 'discord' | 'app-mobile' | 'app-web' | 'webhook'
+    user_id TEXT,                                        -- the human speaker; NULL for cron-spawned sessions
+    model TEXT,
+    model_config TEXT,                                   -- JSON
+    system_prompt TEXT,
+    parent_session_id TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    end_reason TEXT,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    tool_call_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    billing_provider TEXT,
+    billing_base_url TEXT,
+    billing_mode TEXT,                                   -- 'creator_pays' | 'workspace_owned' | 'private_substrate'
+    estimated_cost_usd REAL,
+    actual_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    pricing_version TEXT,
+    title TEXT,
+    api_call_count INTEGER NOT NULL DEFAULT 0,
+
+    -- Neutron additions:
+    project_slug TEXT NOT NULL,                          -- redundant within a per-project DB; enables project verification on every read
+    project_id TEXT,                                     -- project scope; NULL for instance-level sessions
+    core_id TEXT,                                        -- which Core spawned this session; NULL for direct user sessions
+    substrate_instance_id TEXT,                          -- which CC sub / H100 node / OpenAI account served the call (per § B.P1 substrate-adapter spec)
+    channel_binding_kind TEXT,                           -- 'telegram_thread' | 'app_socket' | 'webhook' | 'cron_isolated'
+    channel_binding_address TEXT,                        -- thread_id / socket_id / webhook_url / cron_job_id
+    privacy_mode TEXT NOT NULL DEFAULT 'regular' CHECK (privacy_mode IN ('regular', 'private')),
+
+    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+)
+
+[table] shared_project_mirrors (tbl=shared_project_mirrors)
+CREATE TABLE shared_project_mirrors (
+    project_id  TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    host        TEXT    NOT NULL,
+    author_id   TEXT,
+    page_count  INTEGER NOT NULL DEFAULT 0,
+    edge_count  INTEGER NOT NULL DEFAULT 0,
+    imported_at TEXT    NOT NULL,
+    PRIMARY KEY (project_id, source)
+) STRICT
+
+[table] signin_events (tbl=signin_events)
+CREATE TABLE signin_events (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL,
+    oauth_provider TEXT NOT NULL,
+    signup_via TEXT NOT NULL CHECK (signup_via IN ('telegram', 'web')),
+    occurred_at INTEGER NOT NULL,
+    is_first_signin INTEGER NOT NULL CHECK (is_first_signin IN (0, 1)),
+    project_slug TEXT,                                         -- populated by sign-in-trigger after provisionInstance
+    redirect_url TEXT,
+    start_token TEXT                                           -- ed25519 JWT carried by the redirect; P2 redeems by id
+) STRICT
+
+[table] signup_consumed_start_tokens (tbl=signup_consumed_start_tokens)
+CREATE TABLE signup_consumed_start_tokens (
+    jti TEXT PRIMARY KEY NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    claimed_at_ms INTEGER NOT NULL
+) STRICT
+
+[table] task_reminder_links (tbl=task_reminder_links)
+CREATE TABLE task_reminder_links (
+    task_id          TEXT NOT NULL,
+    reminder_id      TEXT NOT NULL,
+    project_slug      TEXT NOT NULL,
+    created_at       TEXT NOT NULL,                          -- ISO-8601 UTC
+    PRIMARY KEY (task_id, reminder_id),
+    FOREIGN KEY (task_id)     REFERENCES tasks (id) ON DELETE CASCADE,
+    FOREIGN KEY (reminder_id) REFERENCES reminders (id) ON DELETE CASCADE
+) STRICT
+
+[table] tasks (tbl=tasks)
+CREATE TABLE tasks (
+    id              TEXT PRIMARY KEY NOT NULL,
+    project_slug     TEXT NOT NULL,
+    project_id      TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL,
+    description     TEXT,
+    status          TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'done', 'cancelled')),
+    priority        INTEGER
+                        CHECK (priority IS NULL OR (priority >= 0 AND priority <= 3)),
+    due_date        TEXT,                                       -- ISO-8601; nullable
+    owner_persona   TEXT,
+    source          TEXT,                                       -- 'agent' | 'chat' | 'app' | 'cli' | 'reminder' | 'overnight' | ...
+    created_at      TEXT NOT NULL,                              -- ISO-8601 UTC
+    updated_at      TEXT NOT NULL,                              -- ISO-8601 UTC
+    completed_at    TEXT                                        -- ISO-8601 UTC; NULL until status='done'
+, focus_score REAL, focus_score_updated_at TEXT, top3_skip_count INTEGER NOT NULL DEFAULT 0, staleness_demoted_at TEXT, staleness_demotion_count INTEGER NOT NULL DEFAULT 0) STRICT
+
+[table] telegram_bind_tokens (tbl=telegram_bind_tokens)
+CREATE TABLE telegram_bind_tokens (
+  random_id        TEXT NOT NULL PRIMARY KEY,
+  user_id          TEXT NOT NULL,
+  expires_at_ms    INTEGER NOT NULL,
+  created_at_ms    INTEGER NOT NULL,
+  -- NULL until the bot-side handler atomically claims the token via
+  -- UPDATE ... WHERE consumed_at_ms IS NULL. The single-statement claim is
+  -- the concurrency primitive — two concurrent taps on the same deeplink
+  -- contend on this column and exactly one wins.
+  consumed_at_ms   INTEGER
+)
+
+[table] telegram_bindings (tbl=telegram_bindings)
+CREATE TABLE telegram_bindings (
+  chat_id            TEXT NOT NULL PRIMARY KEY,
+  user_id            TEXT NOT NULL,
+  bound_at_ms        INTEGER NOT NULL,
+  -- The random_id segment of the bind token that produced this row. Informal
+  -- audit trail; not a FK because consumed bind-tokens may be GC'd by a future
+  -- TTL sweeper while their resulting bindings persist.
+  source_random_id   TEXT NOT NULL
+)
+
+[table] tool_approvals (tbl=tool_approvals)
+CREATE TABLE tool_approvals (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    topic_id TEXT,
+    tool_name TEXT NOT NULL,
+    args_json TEXT NOT NULL,                             -- JSON
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+    requested_at REAL NOT NULL,
+    decided_at REAL,                                     -- nullable until approved/denied/expired
+    decided_by TEXT                                      -- user_id of decider; NULL for auto-expired
+)
+
+[table] topic_origins (tbl=topic_origins)
+CREATE TABLE topic_origins (
+    -- The workspace-side topic id (the new UUID minted by promote.ts).
+    workspace_topic_id TEXT PRIMARY KEY NOT NULL,
+    -- Slug of the user instance that originally owned the solo topic.
+    origin_user_instance_slug TEXT NOT NULL,
+    -- Topic id within the origin user instance DB.
+    origin_topic_id TEXT NOT NULL,
+    -- The original native channel binding on the solo side; what the
+    -- recipient is restored to when they reverse-promote AND match the
+    -- origin slug.
+    origin_channel_kind TEXT NOT NULL,
+    origin_channel_topic_id TEXT NOT NULL,
+    created_at REAL NOT NULL
+)
+
+[table] topics (tbl=topics)
+CREATE TABLE topics (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,                           -- redundant within a per-project DB; kept for cross-instance audit + Zone A bookkeeping
+    project_id TEXT,                                     -- nullable: instance-level topics
+    channel_kind TEXT NOT NULL,                          -- 'telegram' | 'app_socket' | 'webhook' | 'cli'
+    channel_topic_id TEXT NOT NULL,                      -- the channel's native topic id (telegram thread_id, socket id, webhook url path, …)
+    privacy_mode TEXT NOT NULL DEFAULT 'regular' CHECK (privacy_mode IN ('regular', 'private')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived', 'deleted')),
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+)
+
+[table] upload_sessions (tbl=upload_sessions)
+CREATE TABLE upload_sessions (
+    upload_id       TEXT PRIMARY KEY NOT NULL,
+    project_slug     TEXT NOT NULL,
+    source          TEXT NOT NULL
+                        CHECK (source IN ('chatgpt', 'claude')),
+    filename        TEXT NOT NULL,
+    total_bytes     INTEGER NOT NULL,
+    bytes_received  INTEGER NOT NULL DEFAULT 0,
+    mime_type       TEXT NOT NULL,
+    status          TEXT NOT NULL
+                        CHECK (status IN ('uploading', 'complete', 'expired')),
+    created_at      INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL
+) STRICT
+
+[table] watchdog_alerts (tbl=watchdog_alerts)
+CREATE TABLE watchdog_alerts (
+    id TEXT PRIMARY KEY NOT NULL,
+    kind TEXT NOT NULL,                                  -- 'gateway_heartbeat' | 'stuck_agent' | 'crashed_agent' | 'overrun_cron' | 'db_lock_contention' | 'substrate_cooldown_saturation'
+    project_slug TEXT NOT NULL,
+    detected_at REAL NOT NULL,
+    resolved_at REAL,
+    payload_json TEXT NOT NULL                           -- JSON: kind-specific details (PID, agent_id, job_name, last_seen_at, etc.)
+)
+
+[table] workspace_members (tbl=workspace_members)
+CREATE TABLE workspace_members (
+    user_id TEXT PRIMARY KEY NOT NULL,                   -- the Neutron user_id from the auth service (Zone C); TEXT PRIMARY KEY is implicitly nullable on rowid tables, pin it
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    joined_at REAL NOT NULL,
+    invited_by TEXT,                                     -- user_id of inviter; NULL for the founding owner
+    invite_token TEXT,                                   -- nullable; consumed at accept-time
+    accepted_at REAL                                     -- nullable; NULL = pending invite
+)
+
+[table] wow_events (tbl=wow_events)
+CREATE TABLE "wow_events" (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_slug TEXT NOT NULL,
+    action_id TEXT NOT NULL
+        CHECK (action_id IN (
+            '01-first-week-brief',
+            '02-lifestyle-reminders',
+            '03-project-shells',
+            '04-overdue-task',
+            '05-followup-email-draft',
+            '06-interest-check-in',
+            '07-overnight-pass'
+        )),
+    fired_at INTEGER NOT NULL,
+    success INTEGER NOT NULL DEFAULT 0
+        CHECK (success IN (0, 1)),
+    success_reason TEXT,
+    engagement TEXT
+        CHECK (engagement IS NULL OR engagement IN (
+            'read', 'scrolled', 'idle',
+            'kept', 'tweaked', 'skipped',
+            'will_handle', 'snoozed', 'dropped',
+            'opened', 'sent', 'discarded'
+        )),
+    redacted_payload_json TEXT NOT NULL DEFAULT '{}'
+) STRICT
+
+[trigger] messages_ad (tbl=messages)
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END
+
+[trigger] messages_ai (tbl=messages)
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END
+
+[trigger] messages_au (tbl=messages)
+CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END
+
+[view] onboarding_metrics (tbl=onboarding_metrics)
+CREATE VIEW onboarding_metrics AS
+SELECT
+  e.project_slug,
+  e.user_id,
+  e.attempt_id,
+  MIN(CASE WHEN e.event_name = 'signup.started'                    THEN e.ts END) AS signup_started_at,
+  MIN(CASE WHEN e.event_name = 'signup.oauth_complete'             THEN e.ts END) AS oauth_complete_at,
+  MIN(CASE WHEN e.event_name = 'signup.instance_provisioned'       THEN e.ts END) AS instance_provisioned_at,
+  MIN(CASE WHEN e.event_name = 'onboarding.import_pass2_complete'  THEN e.ts END) AS import_done_at,
+  MIN(CASE WHEN e.event_name = 'onboarding.persona_committed'      THEN e.ts END) AS persona_committed_at,
+  MIN(CASE WHEN e.event_name = 'onboarding.wow_dispatched'         THEN e.ts END) AS wow_dispatched_at,
+  MIN(CASE WHEN e.event_name = 'onboarding.completed'              THEN e.ts END) AS completed_at,
+  MIN(CASE WHEN e.event_name = 'onboarding.abandoned'              THEN e.ts END) AS abandoned_at,
+  MIN(CASE WHEN e.event_name = 'onboarding.failed'                 THEN e.ts END) AS failed_at,
+  COUNT(CASE WHEN e.event_name = 'onboarding.phase_advanced'       THEN 1 END)    AS phase_advances,
+  COUNT(CASE WHEN e.event_name = 'onboarding.persona_regen'        THEN 1 END)    AS persona_regens,
+  COUNT(CASE WHEN e.event_name = 'onboarding.button_timeout'       THEN 1 END)    AS button_timeouts,
+  COUNT(CASE WHEN e.event_name = 'onboarding.wow_action_fired'     THEN 1 END)    AS wow_actions_fired,
+  COUNT(CASE WHEN e.event_name = 'onboarding.wow_action_fired'
+              AND JSON_EXTRACT(e.payload_json, '$.success') = 1    THEN 1 END)    AS wow_actions_succeeded,
+  COUNT(CASE WHEN e.event_name = 'onboarding.gap_fill_iteration'   THEN 1 END)    AS gap_fill_iterations,
+  COUNT(CASE WHEN e.event_name = 'onboarding.llm_rephrase_completed'
+              AND JSON_EXTRACT(e.payload_json, '$.fallback_used') = 1 THEN 1 END) AS llm_fallback_count,
+  (SELECT JSON_EXTRACT(payload_json, '$.response')
+     FROM gateway_events g
+    WHERE g.project_slug = e.project_slug
+      AND g.user_id = e.user_id
+      AND g.attempt_id = e.attempt_id
+      AND g.event_name = 'onboarding.sean_ellis_response'
+    ORDER BY g.ts DESC
+    LIMIT 1) AS sean_ellis_response,
+  (SELECT JSON_EXTRACT(payload_json, '$.picks')
+     FROM gateway_events g
+    WHERE g.project_slug = e.project_slug
+      AND g.user_id = e.user_id
+      AND g.attempt_id = e.attempt_id
+      AND g.event_name = 'onboarding.wow_action_selected'
+    LIMIT 1) AS llm_picked_actions,
+  (MIN(CASE WHEN e.event_name = 'onboarding.wow_dispatched' THEN e.ts END) -
+   MIN(CASE WHEN e.event_name = 'signup.started'            THEN e.ts END)) AS time_to_wow_ms
+FROM gateway_events e
+WHERE e.module IN ('onboarding', 'signup')
+GROUP BY e.project_slug, e.user_id, e.attempt_id

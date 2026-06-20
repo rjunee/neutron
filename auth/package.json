@@ -1,0 +1,10 @@
+{
+  "name": "@neutronai/auth",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
+  }
+}

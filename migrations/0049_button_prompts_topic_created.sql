@@ -1,0 +1,38 @@
+-- 0049_button_prompts_topic_created.sql
+--
+-- Chat history hydration sprint (2026-05-28).
+--
+-- Adds a covering index on (topic_id, created_at DESC) to the
+-- `button_prompts` table so the new `ButtonStore.listHistoryByTopic`
+-- query (powering `GET /api/v1/chat/history` for the chat-history
+-- hydration surface) can stream pages without an in-memory sort.
+--
+-- Query shape it covers:
+--
+--   SELECT … FROM button_prompts
+--   WHERE topic_id = ?
+--     AND (created_at, prompt_id) < (?, ?)
+--     AND (resolved_at IS NOT NULL OR expires_at > ?)
+--   ORDER BY created_at DESC, prompt_id DESC
+--   LIMIT ?
+--
+-- The pre-existing `button_prompts_topic_active` (topic_id, resolved_at)
+-- handles the topic-filter step but leaves the planner with an
+-- in-memory `created_at DESC` sort. For per-user `web:<user_id>` topics
+-- with O(100) rows the sort is sub-millisecond, but the spec calls for
+-- "always populated" history — so we ship the covering index now to
+-- keep the query plan stable as topics grow (post-onboarding Cores
+-- turns land in the same table, and a long-running user can easily
+-- accumulate 1000+ rows over months).
+--
+-- The composite-cursor `(created_at, prompt_id)` tuple in the WHERE
+-- clause also benefits from this index: SQLite walks the index in
+-- DESC order and short-circuits at the cursor boundary without a
+-- table scan.
+--
+-- `IF NOT EXISTS` mirrors the convention used in migration 0010 for
+-- the rest of the table's indices. Bun's SQLite supports the DESC
+-- modifier on indices (used in migrations 0037, 0045, 0046).
+
+CREATE INDEX IF NOT EXISTS button_prompts_topic_created
+    ON button_prompts (topic_id, created_at DESC);

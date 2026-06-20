@@ -1,0 +1,25 @@
+-- 0063_import_pass1_chunk_text.sql
+--
+-- 2026-06-11 — Item 4 (post-onboarding-experience spec § ITEM 4 / § 4.2b):
+-- RETAIN the raw transcript text per analyzed Pass-1 chunk.
+--
+-- WHY: before this migration the import pipeline stored ONLY chunk metadata
+-- (hash, ids, byte length) + the extracted candidate JSON — the raw
+-- conversation text was discarded the moment Pass-1 finished. That made any
+-- per-project transcript slicing / summarization impossible: the project
+-- materializer had nothing to slice. Sam resolved Q-transcript-capture
+-- (spec § open question 2) as Option A: persist the raw text durably. The
+-- transcript is the user's own data inside their own project DB — the no-PII
+-- rule applies to the public OSS repo, not to project data; bootstrapping
+-- projects from the upload is the whole point of the import.
+--
+-- Column is nullable: rows analyzed before this migration carry NULL (their
+-- text is unrecoverable — the discard already happened). The job-runner's
+-- claimChunk now writes chunk_text at claim time, and its ON CONFLICT path
+-- backfills chunk_text onto pre-existing cache-hit rows whose chunk_text is
+-- NULL, so a re-import of the same zip repopulates retention at $0 LLM cost.
+--
+-- Consumers: onboarding/wow-moment/project-materializer.ts (per-project
+-- transcript slices + summary). Forward-only.
+
+ALTER TABLE import_pass1_chunks ADD COLUMN chunk_text TEXT;

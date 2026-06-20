@@ -1,0 +1,384 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { createCipheriv, createDecipheriv } from 'node:crypto'
+import { Database } from 'bun:sqlite'
+import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '../../migrations/runner.ts'
+import { SecretsStore, SecretsStoreError, ensureKey } from '../secrets-store.ts'
+
+/**
+ * ISSUES #219 — `EncryptedBotTokenStore` (the P1-S4 legacy bot-token
+ * primitive) lives in a Managed-carved provisioning dir that the Open split
+ * strips from the public tree.
+ * This forward-compat regression asserts that the Open `SecretsStore` stays
+ * byte-compatible with the legacy AES-256-GCM envelope + shared
+ * `.neutron-aes-key` keyfile, so the legacy format is the FIXTURE the test
+ * pins. The verbatim mirror below reproduces that exact on-disk format
+ * (envelope `{v:1,iv_b64,ct_b64,tag_b64}` + lazy 0600 keyfile) without
+ * importing the Managed module — the wire format, not the class identity,
+ * is what `SecretsStore` must remain compatible with.
+ */
+const LEGACY_KEY_LENGTH_BYTES = 32
+const LEGACY_IV_LENGTH_BYTES = 12
+const LEGACY_AUTH_TAG_LENGTH_BYTES = 16
+
+class LegacyEncryptedBotTokenStore {
+  private readonly key: Buffer
+  constructor(options: { data_dir: string }) {
+    this.key = ensureLegacyKey(options.data_dir)
+  }
+  encrypt(plaintext: string): string {
+    const iv = crypto.getRandomValues(new Uint8Array(LEGACY_IV_LENGTH_BYTES))
+    const cipher = createCipheriv('aes-256-gcm', this.key, Buffer.from(iv))
+    const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+    const tag = cipher.getAuthTag()
+    if (tag.length !== LEGACY_AUTH_TAG_LENGTH_BYTES) {
+      throw new Error(`unexpected auth tag length ${tag.length}`)
+    }
+    return JSON.stringify({
+      v: 1,
+      iv_b64: Buffer.from(iv).toString('base64'),
+      ct_b64: ct.toString('base64'),
+      tag_b64: tag.toString('base64'),
+    })
+  }
+  decrypt(envelope: string): string {
+    const env = JSON.parse(envelope) as {
+      v: number
+      iv_b64: string
+      ct_b64: string
+      tag_b64: string
+    }
+    if (env.v !== 1) throw new Error(`unsupported envelope version v=${env.v}`)
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      this.key,
+      Buffer.from(env.iv_b64, 'base64'),
+    )
+    decipher.setAuthTag(Buffer.from(env.tag_b64, 'base64'))
+    const pt = Buffer.concat([
+      decipher.update(Buffer.from(env.ct_b64, 'base64')),
+      decipher.final(),
+    ])
+    return pt.toString('utf8')
+  }
+}
+
+function ensureLegacyKey(data_dir: string): Buffer {
+  const path = join(data_dir, '.neutron-aes-key')
+  if (existsSync(path)) {
+    const buf = readFileSync(path)
+    if (buf.length !== LEGACY_KEY_LENGTH_BYTES) {
+      throw new Error(`bot-token key at ${path} has wrong length ${buf.length}`)
+    }
+    return buf
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  const fresh = Buffer.from(
+    crypto.getRandomValues(new Uint8Array(LEGACY_KEY_LENGTH_BYTES)),
+  )
+  writeFileSync(path, fresh, { mode: 0o600 })
+  return fresh
+}
+
+let workdir: string
+let db: ProjectDb
+let dataDir: string
+
+beforeEach(() => {
+  workdir = mkdtempSync(join(tmpdir(), 'neutron-secrets-'))
+  dataDir = join(workdir, 'project')
+  mkdirSync(dataDir, { recursive: true })
+  const dbPath = join(workdir, 'project.db')
+  const raw = new Database(dbPath, { create: true })
+  applyMigrations(raw)
+  raw.close()
+  db = ProjectDb.open(dbPath)
+})
+
+afterEach(() => {
+  rmSync(workdir, { recursive: true, force: true })
+})
+
+function buildStore(): SecretsStore {
+  return new SecretsStore({ data_dir: dataDir, db, now: () => 1_700_000_000_000 })
+}
+
+test('put + get round-trips an arbitrary plaintext via AES-256-GCM', async () => {
+  const store = buildStore()
+  const result = await store.put({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'anthropic:prod',
+    plaintext: 'sk-ant-secret-token-1',
+  })
+  expect(typeof result.id).toBe('string')
+  expect(result.id.length).toBeGreaterThan(0)
+  const decrypted = await store.get({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'anthropic:prod',
+  })
+  expect(decrypted).toBe('sk-ant-secret-token-1')
+})
+
+test('get returns null for missing rows', async () => {
+  const store = buildStore()
+  const decrypted = await store.get({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'missing',
+  })
+  expect(decrypted).toBeNull()
+})
+
+test('put rejects duplicate (project_slug, kind, label) with duplicate_label code', async () => {
+  const store = buildStore()
+  await store.put({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'anthropic:prod',
+    plaintext: 'first',
+  })
+  await expect(
+    store.put({
+      internal_handle: 'alice',
+      kind: 'byo_api_key',
+      label: 'anthropic:prod',
+      plaintext: 'second',
+    }),
+  ).rejects.toMatchObject({ code: 'duplicate_label' })
+})
+
+test('rotate replaces ciphertext and stamps rotated_at', async () => {
+  let nowVal = 1_700_000_000_000
+  const store = new SecretsStore({ data_dir: dataDir, db, now: () => nowVal })
+  const { id } = await store.put({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'k1',
+    plaintext: 'v1',
+  })
+  nowVal += 60_000
+  await store.rotate(id, 'v2')
+  const current = await store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k1' })
+  expect(current).toBe('v2')
+  const list = await store.list({ internal_handle: 'alice' })
+  expect(list[0]?.rotated_at).toBe(nowVal)
+})
+
+test('rotate on unknown id throws not_found', async () => {
+  const store = buildStore()
+  await expect(store.rotate('does-not-exist', 'x')).rejects.toMatchObject({
+    code: 'not_found',
+  })
+})
+
+test('delete removes the row; subsequent get returns null', async () => {
+  const store = buildStore()
+  const { id } = await store.put({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'k',
+    plaintext: 'v',
+  })
+  await store.delete(id)
+  const after = await store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k' })
+  expect(after).toBeNull()
+})
+
+test('list filters by project_slug and optional kind', async () => {
+  const store = buildStore()
+  await store.put({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k1', plaintext: 'v' })
+  await store.put({ internal_handle: 'alice', kind: 'webhook_secret', label: 'k2', plaintext: 'v' })
+  await store.put({ internal_handle: 'bobby', kind: 'byo_api_key', label: 'k3', plaintext: 'v' })
+  const aliceAll = await store.list({ internal_handle: 'alice' })
+  expect(aliceAll.map((r) => r.label).sort()).toEqual(['k1', 'k2'])
+  const aliceKeys = await store.list({ internal_handle: 'alice', kind: 'byo_api_key' })
+  expect(aliceKeys.map((r) => r.label)).toEqual(['k1'])
+})
+
+test('ensureKey reuses a pre-existing legacy bot-token keyfile', () => {
+  const path = join(dataDir, '.neutron-aes-key')
+  const legacy = Buffer.from(crypto.getRandomValues(new Uint8Array(32)))
+  writeFileSync(path, legacy, { mode: 0o600 })
+  const reused = ensureKey(dataDir)
+  expect(reused.equals(legacy)).toBe(true)
+})
+
+// Codex follow-up — defense-in-depth. `writeFileSync({mode:0o600})` only
+// applies on CREATE, so a copied / manually-placed keyfile at 0644 would
+// leave every secret in `secrets` decryptable by other local users.
+// Mirrors the Argus r1 finding 3 chmodSync fix for `~/.codex/auth.json`.
+test('ensureKey force-tightens an existing keyfile from 0644 to 0600', () => {
+  const path = join(dataDir, '.neutron-aes-key')
+  const legacy = Buffer.from(crypto.getRandomValues(new Uint8Array(32)))
+  writeFileSync(path, legacy, { mode: 0o600 })
+  // Simulate a keyfile that someone copied or `mv`d in with overly broad
+  // perms (the 0o600 above is what writeFileSync forces; chmod 0o644
+  // afterwards is the real-world drift case).
+  chmodSync(path, 0o644)
+  expect(statSync(path).mode & 0o777).toBe(0o644)
+  ensureKey(dataDir)
+  expect(statSync(path).mode & 0o777).toBe(0o600)
+})
+
+test('ensureKey creates a fresh 32-byte keyfile when none exists', () => {
+  const path = join(dataDir, '.neutron-aes-key')
+  expect(existsSync(path)).toBe(false)
+  const fresh = ensureKey(dataDir)
+  expect(fresh.length).toBe(32)
+  expect(existsSync(path)).toBe(true)
+  // Re-call returns the same bytes (idempotent).
+  expect(ensureKey(dataDir).equals(fresh)).toBe(true)
+})
+
+// CRITICAL forward-compat regression — see § 0a.1 risk row 1.
+test('SecretsStore decrypts an envelope written by the legacy EncryptedBotTokenStore', async () => {
+  // Step 1: legacy store writes a token with its own keyfile setup.
+  const legacy = new LegacyEncryptedBotTokenStore({ data_dir: dataDir })
+  const envelope = legacy.encrypt('legacy-bot-token-xyz')
+
+  // Step 2: P1.5 SecretsStore opens against the SAME data_dir. It must
+  // detect + reuse the existing keyfile rather than overwrite.
+  const store = buildStore()
+  const recoveredViaLegacyShape = store.decryptEnvelope(envelope)
+  expect(recoveredViaLegacyShape).toBe('legacy-bot-token-xyz')
+
+  // Step 3: the legacy store can ALSO decrypt anything the new store wrote
+  // (round-trip in the other direction).
+  const newCipher = store.encryptPlaintext('round-trip')
+  expect(legacy.decrypt(newCipher)).toBe('round-trip')
+
+  // Step 4: the keyfile bytes on disk are identical (no overwrite).
+  const onDisk = readFileSync(join(dataDir, '.neutron-aes-key'))
+  expect(onDisk.length).toBe(32)
+})
+
+test('decrypt of a tampered envelope throws SecretsStoreError(decrypt_failed)', async () => {
+  const store = buildStore()
+  await store.put({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'k',
+    plaintext: 'secret',
+  })
+  // Manually tamper with the ciphertext.
+  await db.run(
+    `UPDATE secrets SET ciphertext = ? WHERE project_slug = ? AND kind = ? AND label = ?`,
+    ['{"v":1,"iv_b64":"aaa","ct_b64":"bbb","tag_b64":"ccc"}', 'alice', 'byo_api_key', 'k'],
+  )
+  await expect(
+    store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'k' }),
+  ).rejects.toBeInstanceOf(SecretsStoreError)
+})
+
+test('expires_at is persisted when supplied (used by Max OAuth access tokens)', async () => {
+  const store = buildStore()
+  await store.put({
+    internal_handle: 'alice',
+    kind: 'max_oauth_access',
+    label: 'default:access',
+    plaintext: 'access-tok',
+    expires_at: 1_800_000_000_000,
+  })
+  const list = await store.list({ internal_handle: 'alice', kind: 'max_oauth_access' })
+  expect(list).toHaveLength(1)
+  expect(list[0]?.expires_at).toBe(1_800_000_000_000)
+})
+
+// Codex review fix — expired rows must behave like missing secrets so
+// stale OAuth access tokens trigger the refresh-token path.
+test('get returns null for an expired secret (expires_at <= now)', async () => {
+  let nowVal = 1_700_000_000_000
+  const store = new SecretsStore({ data_dir: dataDir, db, now: () => nowVal })
+  await store.put({
+    internal_handle: 'alice',
+    kind: 'max_oauth_access',
+    label: 'default:access',
+    plaintext: 'access-soon-stale',
+    expires_at: nowVal + 1_000,
+  })
+  // Within window — returns the plaintext.
+  expect(
+    await store.get({ internal_handle: 'alice', kind: 'max_oauth_access', label: 'default:access' }),
+  ).toBe('access-soon-stale')
+  // Advance past expiry — get returns null.
+  nowVal += 5_000
+  expect(
+    await store.get({ internal_handle: 'alice', kind: 'max_oauth_access', label: 'default:access' }),
+  ).toBeNull()
+  // The row still exists in storage — list shows it. Callers can rotate
+  // or sweep based on listing.
+  const list = await store.list({ internal_handle: 'alice', kind: 'max_oauth_access' })
+  expect(list).toHaveLength(1)
+})
+
+test('rows without expires_at are returned regardless of clock', async () => {
+  const store = buildStore()
+  await store.put({
+    internal_handle: 'alice',
+    kind: 'byo_api_key',
+    label: 'permanent',
+    plaintext: 'never-expires',
+  })
+  expect(
+    await store.get({ internal_handle: 'alice', kind: 'byo_api_key', label: 'permanent' }),
+  ).toBe('never-expires')
+})
+
+// 2026-05-12 (Bug A regression) — the SecretsStore lookup key is the
+// FROZEN `internal_handle`, not the mutable `url_slug`. Pre-fix, the
+// gateway boot canonicalised `project_slug` to the NEW url_slug after a
+// rename, then read the SecretsStore with that mutable value — the
+// pre-rename secret rows (keyed on the original handle) became
+// invisible, dropping the chat surface to the gate page even though
+// Max OAuth tokens were still on disk. See file header.
+test('post-rename: a secret written keyed on internal_handle is still readable after a synthetic url_slug rename', async () => {
+  // Step 1 — write the secret under the FROZEN handle. This is the
+  // shape the persist-paste-token path lands on disk at first-time
+  // provisioning.
+  const store = buildStore()
+  const internal_handle = 't-example1'
+  await store.put({
+    internal_handle,
+    kind: 'max_oauth_refresh',
+    label: 'default',
+    plaintext: 'sk-ant-paste-token-from-first-boot',
+  })
+  await store.put({
+    internal_handle,
+    kind: 'max_oauth_access',
+    label: 'default:access',
+    plaintext: 'sk-ant-paste-token-from-first-boot',
+    expires_at: 2_000_000_000_000,
+  })
+
+  // Step 2 — synthetic rename: nothing on disk changes; the owner's
+  // `url_slug` flips from 't-example1' to 'acme' at the registry +
+  // membership + Caddy layer. The SecretsStore lookup MUST continue
+  // to use the frozen `internal_handle` (the on-disk key) — that's the
+  // contract this regression test pins.
+  const new_url_slug = 'acme'
+  void new_url_slug
+
+  // Step 3 — boot-time read with the canonicalised lookup. Reading with
+  // `internal_handle` returns the cached token; reading with the new
+  // url_slug returns null (the row was never keyed on it). This is the
+  // contract: callers MUST use internal_handle.
+  const refreshUnderHandle = await store.get({
+    internal_handle,
+    kind: 'max_oauth_refresh',
+    label: 'default',
+  })
+  expect(refreshUnderHandle).toBe('sk-ant-paste-token-from-first-boot')
+
+  const refreshUnderNewSlug = await store.get({
+    internal_handle: new_url_slug,
+    kind: 'max_oauth_refresh',
+    label: 'default',
+  })
+  expect(refreshUnderNewSlug).toBeNull()
+})

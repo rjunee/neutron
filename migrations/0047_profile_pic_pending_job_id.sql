@@ -1,0 +1,41 @@
+-- 0047_profile_pic_pending_job_id.sql
+--
+-- ISSUE #45 — completed-after-Wait race fires duplicate Gemini call.
+--
+-- Add a nullable `job_id` column to `profile_pic_pending` so the row
+-- carries a reference back to its originating `profile_pic_jobs.id`.
+--
+-- Why: PR #302 closed the in-flight dedupe (a 'pending' row inside the
+-- 60 s freshness window short-circuits a fresh `pipeline.start`) but
+-- left a residual hole — when the boot-resume auto-retry's
+-- `markCompleted` lands BEFORE the user taps Wait, the next
+-- `ensureCandidates` observes `latest.status === 'completed'` and
+-- (lacking any reference to the live job) falls through to a brand-new
+-- `pipeline.start`. A second Gemini call fires; the bytes on disk from
+-- the boot retry are orphaned.
+--
+-- With `job_id` recorded on the pending row, the engine hook can
+-- surface the original job's candidates instead of re-running Gemini:
+--
+--   recordPending(..., job_id) → row INSERT carries the originating
+--                                profile_pic_jobs.id
+--   latestForUser(...)         → row mapper surfaces job_id
+--   engine hook                → 'completed' AND job_id IS NOT NULL
+--                                → return `kind:'ready'` referencing
+--                                  pipeline.status(job_id).candidates
+--                                  (NO new pipeline.start)
+--
+-- Nullable + no backfill — existing rows stay NULL and the engine
+-- hook's legacy branch (job_id NULL → fall through to pipeline.start)
+-- preserves today's behavior for any row that survives the upgrade.
+--
+-- No FK constraint to `profile_pic_jobs` — the pending-call store has
+-- always been intentionally decoupled from the user-visible job table
+-- (different lifecycles; the pending row records per-Gemini-call
+-- attempts while the job table aggregates user-visible state). A
+-- referential constraint would couple the two tables across the wire
+-- the boot-resume hook depends on.
+--
+-- Forward-only. STRICT typing preserved (column is TEXT, nullable).
+
+ALTER TABLE profile_pic_pending ADD COLUMN job_id TEXT;

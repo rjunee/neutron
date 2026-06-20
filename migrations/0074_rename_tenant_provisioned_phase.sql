@@ -1,0 +1,40 @@
+-- 0074_rename_tenant_provisioned_phase.sql
+--
+-- OSS-split Open RIP — FINAL done-gate tranche (T-PROVISIONED). Rename the
+-- onboarding interview phase value tenant_provisioned -> instance_provisioned
+-- for any in-flight onboarding_state rows persisted at the old phase string.
+--
+-- Context: tenant_provisioned was the back-stage signup -> provisioning phase
+-- in the onboarding interview state machine (onboarding/interview/phase.ts).
+-- Under the instance-vocabulary mandate (docs/NEUTRON.md SS 2.3) the phase
+-- enum value, its consumers, the telemetry symbols, and the
+-- phase-state machine all move to instance_provisioned in lockstep with this
+-- migration. The phase is in AUTO_SKIP_PHASES (rows normally transit through it
+-- without persisting), but a row CAN be persisted mid-transit (crash /
+-- interleave), so this backfill guarantees no orphaned row keeps the old value
+-- after the symbol rename. The phase value is string-keyed: the producer emits
+-- one string and the consumer matches it, so a renamed state machine could not
+-- match a stale persisted value -- this migration closes that gap.
+--
+-- Only the onboarding_state.phase column stores the phase value (phase_state_json
+-- holds field-capture bookkeeping keys + user_id, never the phase name), so a
+-- single UPDATE on that column is the complete backfill.
+--
+-- Precedent: 0025_p2_v2_phase_rename.sql renamed onboarding_state.phase values
+-- the same way (UPDATE ... SET phase=... WHERE phase=...); its roundtrip test
+-- (tests/integration/migration-0025-phase-rename-roundtrip.test.ts) is mirrored
+-- by tests/integration/migration-0074-instance-provisioned-rename-roundtrip.test.ts.
+--
+-- Migration mechanics: additive on schema (no columns added/removed); only the
+-- phase column value changes. Terminal phases (completed, failed) are untouched.
+-- The runner wraps the body in BEGIN/COMMIT for atomicity. Idempotent at the
+-- runner level (the _migrations table records this version; re-runs are skipped)
+-- and in the SQL body itself (the UPDATE matches zero rows once it has applied).
+--
+-- Leak-gate note: this file necessarily names the old phase value in the WHERE
+-- clause to find the rows to backfill -- the one legitimate, permanent reference
+-- to the old vocabulary in the carved Open tree. It carries a committed
+-- leak-gate allowlist entry (scripts/sprint-c/leak-gate-allowlist.txt) so the
+-- gate stays silent on this immutable backfill, exactly as 0025 did.
+
+UPDATE onboarding_state SET phase = 'instance_provisioned' WHERE phase = 'tenant_provisioned';

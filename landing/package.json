@@ -1,0 +1,9 @@
+{
+  "name": "@neutronai/landing",
+  "type": "module",
+  "main": "./chat.ts",
+  "private": true,
+  "dependencies": {
+    "jose": "^5.9.0"
+  }
+}

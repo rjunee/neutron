@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
+<meta name="theme-color" content="#0b0e14" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
+<title>Neutron — your agent harness is ready</title>
+<meta name="description" content="Neutron is a self-hosted agent harness that runs on your own machine. No account, no cloud — start it from your terminal and connect." />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="mask-icon" href="/favicon.svg" color="#6fe3d4" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Neutron" />
+<meta property="og:title" content="Neutron — your agent harness is ready" />
+<meta property="og:description" content="A self-hosted agent harness that runs on your own machine. No account, no cloud — start it from your terminal and connect." />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Neutron — your agent harness is ready" />
+<meta name="twitter:description" content="A self-hosted agent harness that runs on your own machine. No account, no cloud — start it from your terminal and connect." />
+<style>
+  :root {
+    /* Neutrals tinted toward a cool slate-teal — cohesion with the
+       harness's mask-icon accent, not the generic AI cyan-on-black. */
+    --bg:            oklch(0.17 0.012 235);
+    --bg-raised:     oklch(0.21 0.014 235);
+    --fg:            oklch(0.94 0.008 235);
+    --fg-dim:        oklch(0.72 0.012 235);
+    --fg-faint:      oklch(0.55 0.012 235);
+    --hairline:      oklch(0.30 0.014 235);
+    --hairline-soft: oklch(0.25 0.013 235);
+    /* Single sharp accent — a sodium signal-amber against the cold slate.
+       Rare by design: it appears on the prompt glyph and one link only. */
+    --signal:        oklch(0.82 0.13 75);
+    --signal-dim:    oklch(0.70 0.10 75);
+
+    --space-2:  4px;
+    --space-3:  8px;
+    --space-4:  12px;
+    --space-5:  16px;
+    --space-6:  24px;
+    --space-7:  32px;
+    --space-8:  48px;
+    --space-9:  64px;
+
+    /* No web-font fetch — a self-hosted first-run surface must render
+       offline. We lean on a refined system-UI stack for body and the
+       native monospace stack for the terminal block (it's the OS's own
+       coding font, which is exactly right for a developer harness). */
+    --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:            oklch(0.97 0.006 235);
+      --bg-raised:     oklch(1 0 0);
+      --fg:            oklch(0.27 0.014 235);
+      --fg-dim:        oklch(0.45 0.014 235);
+      --fg-faint:      oklch(0.60 0.012 235);
+      --hairline:      oklch(0.86 0.012 235);
+      --hairline-soft: oklch(0.91 0.010 235);
+      --signal:        oklch(0.58 0.14 60);
+      --signal-dim:    oklch(0.50 0.12 60);
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: clamp(15px, 0.9rem + 0.2vw, 17px);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    /* Faint grid — reads as a workbench surface, not decoration. */
+    background-image:
+      linear-gradient(to right, var(--hairline-soft) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--hairline-soft) 1px, transparent 1px);
+    background-size: 64px 64px;
+    background-position: center top;
+  }
+  /* Fade the grid out toward the edges so it never competes with text. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(120% 90% at 50% 0%, transparent 0%, var(--bg) 78%);
+  }
+
+  main {
+    position: relative;
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: clamp(var(--space-8), 12vh, 128px) var(--space-6) var(--space-9);
+    flex: 1;
+  }
+
+  .mark {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-4);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    margin-bottom: var(--space-8);
+  }
+  .mark .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--signal);
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--signal) 18%, transparent);
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    margin: 0 0 var(--space-5);
+  }
+
+  h1 {
+    font-weight: 560;
+    font-size: clamp(2.1rem, 1.4rem + 3vw, 3.4rem);
+    line-height: 1.04;
+    letter-spacing: -0.022em;
+    margin: 0;
+    max-width: 14ch;
+  }
+
+  .lede {
+    color: var(--fg-dim);
+    font-size: clamp(1.05rem, 1rem + 0.4vw, 1.25rem);
+    line-height: 1.55;
+    max-width: 56ch;
+    margin: var(--space-6) 0 0;
+  }
+  .lede b { color: var(--fg); font-weight: 560; }
+
+  /* First-run command block — the centerpiece. A self-hoster's first
+     action is a paste into their terminal, so that IS the call to action. */
+  .quickstart {
+    margin: var(--space-8) 0 0;
+  }
+  .quickstart-label {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-4);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    margin-bottom: var(--space-4);
+  }
+  .quickstart-label .step { color: var(--fg-dim); }
+
+  .term {
+    background: var(--bg-raised);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--hairline-soft);
+  }
+  .term-bar .lights { display: flex; gap: 6px; }
+  .term-bar .lights i {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--hairline);
+  }
+  .term-bar .path {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-faint);
+    margin-left: auto;
+  }
+  .term-body {
+    padding: var(--space-6) var(--space-6) var(--space-7);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1.9;
+  }
+  .term-line { white-space: nowrap; overflow-x: auto; }
+  .term-line .prompt {
+    color: var(--signal);
+    user-select: none;
+    margin-right: 0.75ch;
+  }
+  .term-line .cmd { color: var(--fg); }
+  .term-line .flag { color: var(--fg-dim); }
+  .term-out {
+    color: var(--fg-faint);
+    margin-top: var(--space-4);
+    white-space: pre-wrap;
+  }
+  .term-out .token {
+    color: var(--fg);
+    background: color-mix(in oklch, var(--signal) 14%, transparent);
+    padding: 1px 6px;
+    border-radius: 5px;
+  }
+
+  .copy {
+    margin-top: var(--space-5);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.04em;
+    color: var(--fg-dim);
+    background: transparent;
+    border: 1px solid var(--hairline);
+    border-radius: 9px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: border-color 140ms ease, color 140ms ease;
+  }
+  .copy:hover { border-color: var(--fg-faint); color: var(--fg); }
+  .copy:active { transform: translateY(1px); }
+  .copy[data-copied="true"] { color: var(--signal); border-color: var(--signal-dim); }
+
+  /* Three terse facts — what the harness is. No icon-card grid. */
+  .facts {
+    margin: var(--space-9) 0 0;
+    display: grid;
+    gap: var(--space-6);
+  }
+  @media (min-width: 620px) {
+    .facts { grid-template-columns: repeat(3, 1fr); gap: var(--space-7); }
+  }
+  .fact h3 {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg);
+    margin: 0 0 var(--space-3);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--hairline);
+  }
+  .fact p { margin: 0; color: var(--fg-dim); font-size: 0.95rem; line-height: 1.5; }
+
+  .next {
+    margin: var(--space-9) 0 0;
+    padding-top: var(--space-6);
+    border-top: 1px solid var(--hairline-soft);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-5) var(--space-6);
+  }
+  .next p { margin: 0; color: var(--fg-dim); font-size: 0.95rem; }
+  a.docs {
+    color: var(--signal);
+    text-decoration: none;
+    font-weight: 560;
+    font-size: 0.98rem;
+    border-bottom: 1px solid color-mix(in oklch, var(--signal) 40%, transparent);
+    padding-bottom: 1px;
+    transition: border-color 140ms ease;
+  }
+  a.docs:hover { border-bottom-color: var(--signal); }
+  a.ghost {
+    color: var(--fg-dim);
+    text-decoration: none;
+    font-size: 0.95rem;
+    border-bottom: 1px solid var(--hairline);
+    padding-bottom: 1px;
+    transition: color 140ms ease, border-color 140ms ease;
+  }
+  a.ghost:hover { color: var(--fg); border-bottom-color: var(--fg-faint); }
+
+  footer {
+    max-width: 720px;
+    margin: 0 auto;
+    width: 100%;
+    padding: var(--space-7) var(--space-6);
+    color: var(--fg-faint);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+  }
+
+  /* Staggered first-paint reveal — one orchestrated load moment. */
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(10px); animation: rise 620ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+    .reveal.d1 { animation-delay: 60ms; }
+    .reveal.d2 { animation-delay: 130ms; }
+    .reveal.d3 { animation-delay: 210ms; }
+    .reveal.d4 { animation-delay: 300ms; }
+    .reveal.d5 { animation-delay: 400ms; }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark reveal d1"><span class="dot"></span>Neutron</div>
+
+  <p class="eyebrow reveal d1">Self-hosted · local-first · no account</p>
+  <h1 class="reveal d2">Your agent harness is ready</h1>
+  <p class="lede reveal d2">
+    Neutron is an <b>agent harness</b> you run on your own machine — your files, your
+    keys, your gateway. There's nothing to sign into. Start it from a terminal and
+    connect from the web or the app.
+  </p>
+
+  <section class="quickstart reveal d3" aria-label="First run">
+    <div class="quickstart-label">
+      <span>Quickstart</span>
+      <span class="step">first run</span>
+    </div>
+    <div class="term" role="img" aria-label="Terminal showing the neutron up command and the printed access token">
+      <div class="term-bar">
+        <span class="lights"><i></i><i></i><i></i></span>
+        <span class="path">~/neutron</span>
+      </div>
+      <div class="term-body">
+        <div class="term-line"><span class="prompt">$</span><span class="cmd" id="cmd">neutron up</span></div>
+        <div class="term-out">harness listening on http://localhost:8787
+access token  <span class="token">paste-this-into-the-app</span></div>
+      </div>
+    </div>
+    <button class="copy" id="copy" type="button" aria-live="polite">
+      <span id="copy-label">Copy command</span>
+    </button>
+  </section>
+
+  <section class="facts reveal d4" aria-label="What this is">
+    <div class="fact">
+      <h3>Runs on your box</h3>
+      <p>The gateway, your data, and every agent transcript stay on the machine you start it on.</p>
+    </div>
+    <div class="fact">
+      <h3>Bring your own keys</h3>
+      <p>Point it at the model provider you already pay for. Nothing routes through a hosted service.</p>
+    </div>
+    <div class="fact">
+      <h3>Open source</h3>
+      <p>Read it, fork it, extend it. The harness ships with its source — no black boxes.</p>
+    </div>
+  </section>
+
+  <div class="next reveal d5">
+    <p>Already running? Open the chat surface or wire up the app.</p>
+    <a class="docs" href="#quickstart">Read the quickstart</a>
+    <a class="ghost" href="/docs">Docs</a>
+  </div>
+</main>
+
+<footer class="reveal d5">NEUTRON · AGENT HARNESS · LOCAL-FIRST</footer>
+
+<script>
+  // Progressive enhancement only — the page is fully usable without JS.
+  (function () {
+    var btn = document.getElementById('copy');
+    var label = document.getElementById('copy-label');
+    if (!btn || !label || !navigator.clipboard) return;
+    btn.addEventListener('click', function () {
+      navigator.clipboard.writeText('neutron up').then(function () {
+        btn.setAttribute('data-copied', 'true');
+        label.textContent = 'Copied';
+        setTimeout(function () {
+          btn.removeAttribute('data-copied');
+          label.textContent = 'Copy command';
+        }, 1600);
+      });
+    });
+  })();
+</script>
+</body>
+</html>

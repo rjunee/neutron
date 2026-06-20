@@ -1,0 +1,12 @@
+{
+  "name": "@neutronai/mcp",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/tools": "workspace:*",
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
+  }
+}

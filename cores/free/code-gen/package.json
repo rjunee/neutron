@@ -1,0 +1,136 @@
+{
+  "name": "@neutronai/codegen-core",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts",
+    "./chat-commands": "./src/chat-commands.ts",
+    "./runtime-runner": "./src/runtime-runner.ts",
+    "./substrate-runtime": "./src/substrate-runtime.ts",
+    "./tool-handlers": "./src/tool-handlers.ts",
+    "./worktree-resolver": "./src/worktree-resolver.ts",
+    "./sidecar-store": "./src/sidecar/store.ts",
+    "./host-runners": "./src/host-runners.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": [
+      "read:codegen_core.tasks",
+      "write:codegen_core.tasks",
+      "agent:dispatch_subagent",
+      "host:gh",
+      "network:github"
+    ],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "codegen_dispatch",
+        "description": "Kick off a code-generation task. Returns a task_id immediately; the LLM-driven runner (Forge → Argus → gated merge) executes asynchronously and writes the resulting branch / PR back into the task record. Poll codegen_status until the task is in a terminal state, then call codegen_fetch.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "task":          { "type": "string", "description": "Plain-language description of the code change the runner should attempt." },
+            "repo_path":     { "type": "string", "description": "Optional absolute path to the working repository. Defaults to the host repo the Core is installed into." },
+            "target_branch": { "type": "string", "description": "Optional name for the feature branch the runner opens. Auto-generated from the task slug when omitted." },
+            "project_id":    { "type": "string", "description": "Optional project scope; defaults to the active project from MCP-session context." }
+          },
+          "required": ["task"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": { "type": "string" }
+          },
+          "required": ["task_id"]
+        },
+        "capability_required": "write:codegen_core.tasks"
+      },
+      {
+        "name": "codegen_status",
+        "description": "Look up the current state of a code-generation task. Returns one of pending / running / completed / failed / cancelled.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": { "type": "string" }
+          },
+          "required": ["task_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "cancelled"] }
+          },
+          "required": ["status"]
+        },
+        "capability_required": "read:codegen_core.tasks"
+      },
+      {
+        "name": "codegen_fetch",
+        "description": "Fetch the result of a completed code-generation task. Returns the PR number, branch name, worktree path, and a short summary for a completed task; throws CodegenTaskFailedError carrying { code, message } for a failed task; throws CodegenTaskNotFoundError for an unknown task_id; throws CodegenTaskPendingError when the task hasn't reached a terminal state yet.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": { "type": "string" }
+          },
+          "required": ["task_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "pr_number":     { "type": "integer" },
+            "branch":        { "type": "string" },
+            "worktree":      { "type": "string" },
+            "summary":       { "type": "string" }
+          },
+          "required": ["pr_number", "branch", "worktree", "summary"]
+        },
+        "capability_required": "read:codegen_core.tasks"
+      },
+      {
+        "name": "codegen_cancel",
+        "description": "Cancel an in-flight code-gen task. Calls into the sub-agent control surface to cancel the sub-agent run, then marks the task `cancelled` in the sidecar.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "task_id": { "type": "string" }
+          },
+          "required": ["task_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "cancelled":    { "type": "boolean" },
+            "prior_status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "cancelled"] }
+          },
+          "required": ["cancelled", "prior_status"]
+        },
+        "capability_required": "write:codegen_core.tasks"
+      }
+    ],
+    "ui_components": [
+      {
+        "name": "CodeGenLauncherIcon",
+        "entry_point": "./src/ui/launcher-icon.ts",
+        "surface": "launcher_icon"
+      },
+      {
+        "name": "CodeGenAppTab",
+        "entry_point": "./src/ui/app-tab-surface.ts",
+        "surface": "app_tab"
+      }
+    ],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^0.1.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

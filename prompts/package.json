@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/prompts",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true
+}

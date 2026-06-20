@@ -1,0 +1,11 @@
+{
+  "name": "@neutronai/onboarding",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "jose": "^5.9.0"
+  }
+}

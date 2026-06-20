@@ -1,0 +1,217 @@
+{
+  "name": "@neutronai/agent-settings",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": [
+      "read:agent_settings",
+      "write:agent_settings",
+      "write:telegram_topics"
+    ],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "list_projects",
+        "description": "List the current (non-deleted) projects with id, name, slug, telegram topic id, and a short context summary. Call this when the user asks what projects exist, or before renaming / deleting / merging so you have the exact current names.",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "projects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" },
+                  "slug": { "type": "string" },
+                  "topic_id": { "type": ["string", "null"] },
+                  "context_summary": { "type": "string" }
+                },
+                "required": ["id", "name", "slug", "topic_id", "context_summary"]
+              }
+            }
+          },
+          "required": ["projects"]
+        },
+        "capability_required": "read:agent_settings"
+      },
+      {
+        "name": "rename_project",
+        "description": "Rename a project from old_name to new_name. Also retitles the project's Telegram forum topic. Call this when the user says e.g. 'rename 123 Main St to Home Base'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "old_name": { "type": "string", "description": "The project's current display name." },
+            "new_name": { "type": "string", "description": "The new display name." }
+          },
+          "required": ["old_name", "new_name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "project": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "slug": { "type": "string" },
+                "topic_id": { "type": ["string", "null"] },
+                "context_summary": { "type": "string" }
+              },
+              "required": ["id", "name", "slug", "topic_id", "context_summary"]
+            }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "delete_project",
+        "description": "Soft-delete a project by name. The project disappears from the project list and its Telegram forum topic is closed/archived; the underlying data is retained. Call this when the user says e.g. 'delete the Old Stuff project'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "The display name of the project to delete." }
+          },
+          "required": ["name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "removed": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "context_archived_at": { "type": ["string", "null"] }
+              },
+              "required": ["name", "context_archived_at"]
+            }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "merge_projects",
+        "description": "Merge one project into another: moves the 'from' project's context (its members + any sidecar context rows) into the 'into' project, soft-deletes 'from', and archives 'from's Telegram topic. Call this when the user says e.g. 'merge Side Notes into Main Work'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "from_name": { "type": "string", "description": "Display name of the project being absorbed (will be soft-deleted)." },
+            "into_name": { "type": "string", "description": "Display name of the project that survives and receives the context." }
+          },
+          "required": ["from_name", "into_name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "merged_project": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "slug": { "type": "string" },
+                "topic_id": { "type": ["string", "null"] },
+                "context_summary": { "type": "string" }
+              },
+              "required": ["id", "name", "slug", "topic_id", "context_summary"]
+            }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "update_personality",
+        "description": "Update the agent's personality settings: a short archetype label and/or a free-text description phrase. Call this when the user says e.g. 'make your personality more playful' or 'switch your archetype to a calm strategist'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "new_archetype": { "type": "string", "description": "Optional short archetype label, e.g. 'pragmatic build agent'." },
+            "new_description": { "type": "string", "description": "Optional free-text personality description phrase." }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "personality": {
+              "type": "object",
+              "properties": {
+                "archetype": { "type": ["string", "null"] },
+                "description": { "type": ["string", "null"] }
+              },
+              "required": ["archetype", "description"]
+            }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "update_agent_name",
+        "description": "Update the agent's display name. Call this when the user says e.g. 'call yourself Nova' or 'change your name to Atlas'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "new_name": { "type": "string", "description": "The new agent display name." }
+          },
+          "required": ["new_name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "agent_name": { "type": ["string", "null"] }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "connect_telegram",
+        "description": "Mint a fresh one-time Telegram bind deep link (https://t.me/<bot>?start=bind_<token>) so the user can connect or re-connect their Telegram bot at any time. Call this when the user says e.g. 'connect a telegram bot', 'link telegram', or asks for a new link because the old one expired. Reply with the returned deep_link and mention it expires in expires_in_minutes minutes.",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "deep_link": { "type": "string" },
+            "expires_in_minutes": { "type": "number" },
+            "error": { "type": "string" }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^0.1.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

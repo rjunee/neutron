@@ -1,0 +1,34 @@
+-- 0056_project_members_origin_instance.sql
+--
+-- 2026-06-07 — M2.6 Phase 2 (Neutron Connect). Adds the nullable
+-- `origin_instance` column to `project_members` so a shared project's members
+-- carry a meeting-point-assigned namespace, never colliding across instances.
+--
+-- Per docs/plans/m26-ph2-connect-server-brief.md § 1 (row 2.2) + § 2.2 +
+-- docs/research/neutron-oss-cross-org-syndication-2026-06-06.md § 7.2.
+--
+-- Semantics:
+--   NULL      → owner-home member (the project creator's own session; no foreign
+--               namespacing needed). This is what every pre-migration row reads,
+--               which is correct: existing project_members are all owner-home.
+--   value     → the joining member's `connected_members.local_slug` (the
+--               meeting-point-assigned, grammar-valid namespace). The unified
+--               project list already surfaces a foreign-origin tag; this column
+--               backs that tag with a real per-member identity record.
+--
+-- Migration mechanics:
+--   `project_members` is a STRICT table (migrations/0038_projects_canonical.sql).
+--   A nullable TEXT column with no default is STRICT-compatible via a plain
+--   `ALTER TABLE ... ADD COLUMN` (same lighter form used by 0054), so no
+--   table-rebuild is required. Composite PK (project_id, user_id) preserved.
+--   Index idx_project_members_user preserved. FK to projects(id) preserved.
+--   Forward-only; never edited. Snapshot regen required
+--   (bun run migrations/regen-snapshot.ts).
+--
+-- Verification (post-migration, per-project DB):
+--   SELECT COUNT(*) FROM project_members WHERE origin_instance IS NULL;  -- all pre-existing rows
+--   (column presence: SELECT origin_instance FROM project_members LIMIT 0;)
+--
+-- Rollback path: dropping a single nullable column has no data-loss risk.
+
+ALTER TABLE project_members ADD COLUMN origin_instance TEXT;

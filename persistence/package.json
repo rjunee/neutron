@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/persistence",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true
+}
