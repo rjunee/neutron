@@ -2,6 +2,34 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-20 — CI green on the public runner: grep falls back to POSIX grep + least-privilege workflow token
+
+Post-public-flip hardening on rjunee/neutron. Two CI/security fixes; PR-A.
+
+**1. `grepScoped` CI failure — ripgrep is not on the GitHub runner.** The
+`grep` codegen tool (`cores/free/code-gen/src/tool-handlers.ts:grepScoped`)
+shelled out unconditionally to `rg` (ripgrep). It passes locally (rg installed)
+but the stock `ubuntu-latest` runner has no ripgrep, so `Bun.spawn(['rg', …])`
+fails and the two `grepScoped` tests error in CI. Fix (the more robust option in
+the brief): the tool now prefers ripgrep but **falls back to POSIX `grep`** when
+`Bun.which('rg')` returns null — robust for any self-hoster's CI too, not just
+GitHub's. Both binaries emit `path:line:text` with `-n` and exit 1 on no-match,
+so the caller sees an identical shape either way; the fallback adds `-r` plus
+`--exclude-dir=.git --exclude-dir=node_modules` (the ignores rg applies
+implicitly) and maps `--glob` → `--include=`. Tool description + the stale
+"using ripgrep" wording updated to match.
+
+**2. `actions/missing-workflow-permissions` (1 CodeQL alert).** Added an
+explicit least-privilege top-level `permissions: { contents: read }` block to
+`.github/workflows/ci.yml` (the only workflow; CodeQL runs via GitHub default
+setup, no committed codeql.yml). CI only reads the checkout + runs
+typecheck/tests, so no write scopes are granted.
+
+**Verify.** `bun test cores/free/code-gen/__tests__/tool-handlers.test.ts` →
+16/16 pass with ripgrep present AND with `rg` removed from PATH (grep-fallback
+path exercised on BSD grep; GNU grep on the Linux runner supports the same
+flags). `bunx tsc --noEmit` clean.
+
 ## 2026-06-20 — #314: deterministic port bind on restart (no silent random-port fallback)
 
 Owner-confirmed P1 self-host defect (#314), fixed on
