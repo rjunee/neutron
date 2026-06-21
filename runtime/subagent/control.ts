@@ -50,6 +50,66 @@ export async function cancelRun(
   state.cancellers.delete(run_id)
 }
 
+/**
+ * Force a live run into a terminal-FAILED state (`status='crashed'`) with a
+ * recorded `failure_reason`. Mirrors `cancelRun` but is the watchdog's verb for
+ * "this dispatch died/stuck and must be surfaced", as distinct from a deliberate
+ * caller cancellation (which stays `status='cancelled'`).
+ *
+ * Best-effort terminates any live process via the registered canceller (a
+ * `'stuck'` agent may still be running and needs killing; a `'process_dead'`
+ * one is already gone and the canceller is a harmless no-op that also frees the
+ * handle). Idempotent: failing an already-terminal run is a no-op returning
+ * `false`. Returns `true` when this call performed the terminal transition.
+ *
+ * Race-safe: the canceller is `await`ed, and a concurrent completion handler
+ * can mark the run `finished`/`cancelled` while it is in flight. The status is
+ * re-checked AFTER the await, so a legitimate terminal completion is never
+ * overwritten with `crashed` (and the watchdog never emits a false failure for
+ * a run that actually finished).
+ */
+export async function failRun(
+  state: ControlState,
+  run_id: string,
+  reason: 'process_dead' | 'stuck',
+  now: number = Date.now(),
+): Promise<boolean> {
+  const rec = state.registry.byRunId(run_id)
+  if (!rec) return false
+  if (rec.status === 'finished' || rec.status === 'cancelled' || rec.status === 'crashed') {
+    return false
+  }
+  const c = state.cancellers.get(run_id)
+  if (c) {
+    try {
+      await c('lifecycle_cleanup')
+    } catch {
+      // Cancellers are best-effort. If they throw, we still mark failed.
+    }
+    // Re-read after the await: another path may have driven the run terminal
+    // (a real completion landing concurrently) while the canceller ran. Don't
+    // clobber a legitimate finish, and don't report a false failure.
+    const after = state.registry.byRunId(run_id)
+    if (
+      !after ||
+      after.status === 'finished' ||
+      after.status === 'cancelled' ||
+      after.status === 'crashed'
+    ) {
+      state.cancellers.delete(run_id)
+      return false
+    }
+  }
+  state.registry.update(run_id, {
+    status: 'crashed',
+    ended_at: now,
+    failure_reason: reason,
+    last_event_at: now,
+  })
+  state.cancellers.delete(run_id)
+  return true
+}
+
 export function statusOf(state: ControlState, run_id: string): SubagentRecord | undefined {
   return state.registry.byRunId(run_id)
 }
