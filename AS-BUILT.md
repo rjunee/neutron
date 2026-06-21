@@ -2,7 +2,31 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
-## 2026-06-21 — Installer must NOT skip Claude auth into a dead chat (ISSUES #318)
+## 2026-06-21 — PR #9 CI fix-round: merge `origin/main` to clear flaky-segfault chunk crash (ISSUES #318)
+
+PR #9 (the auth-gate change below) reported a RED `test` check while `main` was
+green. Root cause was NOT the auth-gate logic: CI's bounded-memory partitioned
+runner crashed **chunk#2** with a Bun 1.3.9 `panic(main thread): Segmentation
+fault` during file *load* (on `connect/__tests__/*`, 0 tests run, a 100-file
+coverage hole) — the known flaky #79. The dispatcher mis-read the log: every
+"1 fail"/"2 fail" and the "FATAL, NOT a cooldown: no reportFailure" string it
+grepped are **passing** test *names*, not failures.
+
+Why it surfaced on #9 and not `main`: the branch was 2 commits behind
+`origin/main`, which had concurrently advanced `gateway/realmode-composer/
+build-landing-stack.ts` and `open/composer.ts` — the *same* files this PR
+touches — and this PR's 2 new test files shifted the runner's chunk
+composition, tripping the latent Bun segfault. Fix: merge `origin/main` into the
+branch so the working tree matches CI's tested merge commit. Code auto-merged
+cleanly (the auth-gate `chatAuthGate` wiring and main's proactive/reminders
+additions are orthogonal); only this `AS-BUILT.md` conflicted (two newest-first
+entries) and was resolved keeping both.
+
+Verification: `bunx tsc --noEmit` clean; the FULL partitioned suite
+(`scripts/run-tests.sh`, 724 files / 8 chunks) ran GREEN **twice** with full
+coverage and no segfault; the re-triggered GitHub `test` check is now PASS.
+
+
 
 Owner hit this on a fresh `curl …/install.sh | sh -s -- --yes`: the
 non-interactive `--yes` install **SKIPPED** the Claude-auth step (printed a
