@@ -12,10 +12,34 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { BusyRetryExhaustedError, ProjectDb } from '../../persistence/index.ts'
 import { TaskStore } from '../store.ts'
-import { appendInboxRow, runTaskScan, type TaskScanPaths } from '../inbox/index.ts'
+import {
+  appendInboxRow,
+  runTaskScan,
+  TaskScanAbortedError,
+  type TaskScanPaths,
+} from '../inbox/index.ts'
 import { completeLineTail, finalizeProcessing } from '../inbox/scanner.ts'
+
+/**
+ * Replace `store.create` so the FIRST call throws `err`, then restore the
+ * real implementation. Returns the number of times the throwing stub fired.
+ * Lets a test drive a single transient/deterministic store failure on the
+ * apply path and then confirm a later scan recovers cleanly.
+ */
+function failCreateOnce(store: TaskStore, err: unknown): { fired: () => number } {
+  const realCreate = store.create.bind(store)
+  let count = 0
+  store.create = (async (input) => {
+    if (count === 0) {
+      count++
+      throw err
+    }
+    return realCreate(input)
+  }) as TaskStore['create']
+  return { fired: () => count }
+}
 
 const NOW = new Date('2026-06-21T12:00:00.000Z')
 
@@ -365,6 +389,95 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
     const second = await scan()
     expect(second.applied).toBe(1)
     expect(store.get('later')?.title).toBe('unblocked')
+  })
+
+  test('a BUSY-exhausted store error ABORTS the scan, LEAVES the sidecar, and the next scan applies the row', async () => {
+    // The data-loss class this re-review targets, on the STORE-WRITE path:
+    // `drainClaimed` advances the baseline before applying, so an `errored`
+    // outcome for an UNEXPECTED store error would sit behind finalBaseline →
+    // archived + sidecar unlinked → a valid row lost forever. A transient
+    // failure must instead ABORT the scan and leave the row for next time.
+    appendInboxRow(paths.inbox, { action: 'add', id: 'busy', title: 'survives contention' })
+    const sidecar = `${paths.inbox}.processing`
+
+    const stub = failCreateOnce(
+      store,
+      new BusyRetryExhaustedError(15, new Error('database is locked')),
+    )
+
+    let aborted: unknown = null
+    try {
+      await scan()
+    } catch (err) {
+      aborted = err
+    }
+    // Scan ABORTED (did not silently succeed-and-drop).
+    expect(aborted).toBeInstanceOf(TaskScanAbortedError)
+    expect(stub.fired()).toBe(1)
+
+    // Sidecar LEFT and INTACT (baseline not advanced past the row); the
+    // row never reached the store; nothing was archived.
+    expect(existsSync(sidecar)).toBe(true)
+    expect(readFileSync(sidecar, 'utf8')).toContain('survives contention')
+    expect(store.get('busy')).toBeNull()
+    expect(existsSync(paths.archive)).toBe(false)
+
+    // The store recovers; the next scan drains the leftover sidecar and the
+    // row APPLIES — no data loss.
+    const recovered = await scan()
+    expect(recovered.applied).toBe(1)
+    expect(store.get('busy')?.title).toBe('survives contention')
+    expect(existsSync(sidecar)).toBe(false)
+  })
+
+  test('a transient disk/IO error (ENOSPC) on a store write also ABORTS, never drops the row', async () => {
+    appendInboxRow(paths.inbox, { action: 'add', id: 'io', title: 'disk recovered' })
+    const sidecar = `${paths.inbox}.processing`
+
+    const ioErr = Object.assign(new Error('ENOSPC: no space left on device, write'), {
+      code: 'ENOSPC',
+    })
+    failCreateOnce(store, ioErr)
+
+    let aborted: unknown = null
+    try {
+      await scan()
+    } catch (err) {
+      aborted = err
+    }
+    expect(aborted).toBeInstanceOf(TaskScanAbortedError)
+    expect(existsSync(sidecar)).toBe(true)
+    expect(store.get('io')).toBeNull()
+
+    const recovered = await scan()
+    expect(recovered.applied).toBe(1)
+    expect(store.get('io')?.title).toBe('disk recovered')
+    expect(existsSync(sidecar)).toBe(false)
+  })
+
+  test('a DETERMINISTIC store error is archived as errored + skipped (NOT aborted — no queue livelock)', async () => {
+    // A non-transient, deterministic per-row rejection would re-fail every
+    // scan. Aborting on it would wedge the whole queue (the sidecar is always
+    // drained before the live inbox). So it must be recorded as `errored`,
+    // the baseline advanced, the sidecar dropped, and later rows unblocked.
+    appendInboxRow(paths.inbox, { action: 'add', id: 'poison', title: 'bad row' })
+    const sidecar = `${paths.inbox}.processing`
+
+    failCreateOnce(store, new Error('datatype mismatch')) // not unique, not transient
+
+    const result = await scan()
+    expect(result.errored).toBe(1)
+    expect(result.outcomes[0]?.status).toBe('errored')
+    // Queue advanced + cleared (no livelock); nothing left in the sidecar.
+    expect(existsSync(sidecar)).toBe(false)
+    const archive = readFileSync(paths.archive, 'utf8')
+    expect(archive).toContain('"status":"errored"')
+
+    // A later live row is NOT blocked by the poison row.
+    appendInboxRow(paths.inbox, { action: 'add', id: 'after', title: 'unblocked row' })
+    const second = await scan()
+    expect(second.applied).toBe(1)
+    expect(store.get('after')?.title).toBe('unblocked row')
   })
 
   test('a newline-less residual is requeued NEWLINE-TERMINATED so it cannot livelock', async () => {

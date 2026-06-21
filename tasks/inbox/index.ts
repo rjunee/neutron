@@ -25,6 +25,7 @@ export type {
 export {
   applyInboxRow,
   applyInboxRows,
+  isTransientStoreError,
   listAllTasks,
   TASK_SOURCE_INBOX,
 } from './apply.ts'
@@ -51,6 +52,7 @@ export type {
 export {
   appendInboxRow,
   runTaskScan,
+  TaskScanAbortedError,
 } from './scanner.ts'
 
 export type {

@@ -311,6 +311,33 @@ function claimInbox(inboxPath: string): boolean {
   return true
 }
 
+/**
+ * Thrown when a TRANSIENT store/infra exception (busy-retry exhaustion
+ * under sustained contention, or a disk/IO error — see
+ * {@link isTransientStoreError}) interrupts the apply phase. The scan is
+ * ABORTED before it advances the baseline, archives outcomes, or drops the
+ * sidecar, so the claimed rows stay in the `.processing` sidecar and the
+ * next scan recovers + retries them idempotently (stable ids /
+ * skip-on-missing). Carries the underlying error as {@link cause}.
+ *
+ * This is deliberately NOT raised for deterministic per-row rejections
+ * (unknown action, an unexpected constraint/validation error, a programming
+ * bug): those are captured as `errored` outcomes and skipped so a single
+ * poison row can never wedge the queue (`claimInbox` always drains the
+ * sidecar before the live inbox).
+ */
+export class TaskScanAbortedError extends Error {
+  override readonly name: string = 'TaskScanAbortedError'
+
+  constructor(readonly cause: unknown) {
+    super(
+      `task scan aborted on transient store error: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    )
+  }
+}
+
 /** Max in-order tail-drain passes over the rotated sidecar per scan. */
 const MAX_TAIL_DRAIN_PASSES = 8
 
@@ -351,12 +378,26 @@ async function drainClaimed(deps: RunTaskScanDeps): Promise<DrainResult> {
   for (let pass = 0; pass < MAX_TAIL_DRAIN_PASSES; pass++) {
     const slice = readConsumable(processingPath, baseline)
     if (slice === null || slice.nextBaseline <= baseline) break
-    baseline = slice.nextBaseline
     if (slice.tail.length > 0) {
       const parsed = parseInbox(slice.tail)
+      let applied: ApplyOutcome[]
+      try {
+        applied = await applyInboxRows(applyDeps, parsed.rows)
+      } catch (err) {
+        // A TRANSIENT store/infra error (busy-retry exhausted, disk/IO)
+        // escaped the apply. ABORT the scan WITHOUT advancing the baseline:
+        // the claimed rows stay in the sidecar and the next scan recovers +
+        // retries them idempotently. Advancing here would let `runTaskScan`
+        // archive nothing for the row yet finalize past it, unlinking the
+        // sidecar and permanently losing a valid row.
+        throw new TaskScanAbortedError(err)
+      }
       errors.push(...parsed.errors)
-      outcomes.push(...(await applyInboxRows(applyDeps, parsed.rows)))
+      outcomes.push(...applied)
     }
+    // Advance only AFTER a clean apply, so an abort never moves the baseline
+    // past rows that were not durably committed-and-archived.
+    baseline = slice.nextBaseline
   }
   return { outcomes, errors, finalBaseline: baseline }
 }
@@ -473,6 +514,13 @@ function appendArchive(
  * Run one full scan cycle. Idempotent end-to-end: rendering reflects the
  * post-mutation store state, and the queue is claimed via an atomic
  * rotate so a re-run never double-applies an already-drained queue.
+ *
+ * Throws {@link TaskScanAbortedError} if a TRANSIENT store/infra error
+ * (busy-retry exhaustion, disk/IO) interrupts the apply phase: the scan is
+ * aborted before archiving, rendering, or finalizing, leaving the claimed
+ * rows in the `.processing` sidecar for the next scan to recover. A caller
+ * driving this on a cron tick should log + swallow that error and let the
+ * next tick retry; the rows are never lost.
  */
 export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult> {
   // 1. Claim the queue (atomic rotate, or drain a crashed leftover). A

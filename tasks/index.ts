@@ -117,6 +117,7 @@ export {
   ALL_INBOX_ACTIONS,
   applyInboxRow,
   applyInboxRows,
+  isTransientStoreError,
   listAllTasks,
   TASK_SOURCE_INBOX,
   effectiveBucket,
@@ -125,6 +126,7 @@ export {
   DEFAULT_DONE_WINDOW_DAYS,
   appendInboxRow,
   runTaskScan,
+  TaskScanAbortedError,
 } from './inbox/index.ts'
 
 export type {

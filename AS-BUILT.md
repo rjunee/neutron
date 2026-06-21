@@ -2,6 +2,63 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — PR #15 Argus fix-pass #2: abort the scan on an infra store exception (apply-path data loss)
+
+Argus (Codex/GPT-5 cross-model + Claude correctness trace) found the SAME
+silent-data-loss-on-infra-failure class as fix-pass #1, but on the
+store-WRITE path rather than the requeue path:
+
+**Blocker — a transient store failure permanently dropped the inbox row
+(`tasks/inbox/apply.ts` + `drainClaimed`/`finalizeProcessing`).**
+`applyInboxRow`'s outer `catch` converted ANY store throw into an `errored`
+outcome. The per-action helpers already handle the EXPECTED per-row cases
+(unique→`duplicate`, `TaskNotFoundError`→`not_found`), so what reached the
+outer catch was an UNEXPECTED store/infra error — most importantly
+`BusyRetryExhaustedError` after the 15-retry `withBusyRetry` budget under
+sustained contention, or a disk/IO error. Because `drainClaimed` advances
+the baseline BEFORE applying, that `errored` row sat behind `finalBaseline`;
+`runTaskScan` archived it, `finalizeProcessing` found no residual past the
+baseline, and the sidecar was unlinked → the valid row was lost, never
+retried.
+
+**Fix — distinguish TRANSIENT infra exceptions from deterministic per-row
+rejections.** New `isTransientStoreError()` (`apply.ts`) classifies an
+exception as transient iff it is a `BusyRetryExhaustedError`, carries a
+transient Node IO `code` (ENOSPC/EIO/EACCES/EAGAIN/EBUSY/EMFILE/ENFILE/
+EROFS/EDQUOT/…), or matches a transient SQLite message (disk I/O error /
+disk full / database is locked / SQLITE_BUSY / unable to open database).
+`applyInboxRow` now RE-THROWS a transient error (so the scan aborts) but
+still captures everything else as an `errored` outcome. `drainClaimed`
+wraps a transient throw in the new `TaskScanAbortedError` and aborts the
+scan WITHOUT advancing the baseline; `runTaskScan` therefore never archives,
+renders, or finalizes — the claimed rows stay in the `.processing` sidecar
+and the next scan recovers + retries them idempotently (stable ids /
+skip-on-missing). The baseline now advances ONLY after a clean apply.
+
+**Why classify instead of "any throw aborts":** a deterministic per-row
+rejection (an unexpected constraint/validation error, a programming bug)
+would re-fail identically every scan; aborting on it would LIVELOCK the whole
+queue, because `claimInbox` always drains the sidecar before the live inbox.
+Deterministic failures keep the prior non-blocking behavior (archived as
+`errored`, baseline advanced, sidecar dropped), so one poison row can never
+wedge the queue.
+
+**Minor (deferred per the verdict):** the residual-unlink TOCTOU in
+`finalizeProcessing` (a pre-rename fd appending between the length re-check
+and `unlinkSync`) is documented as unreachable under the blessed atomic
+`appendInboxRow` API. Closing it by renaming the sidecar to a unique
+`.processed-<id>` would need a new orphan-cleanup pass (those files are never
+re-claimed) — non-trivial, so left as a follow-up.
+
+**Tests (real):** `inbox-scanner.test.ts` gains: a `BusyRetryExhaustedError`
+on `create` ABORTS the scan (throws `TaskScanAbortedError`), LEAVES the
+sidecar intact, never reaches the store, archives nothing, and the next scan
+applies the row; a transient disk/IO error (`code:'ENOSPC'`) aborts the same
+way; and a DETERMINISTIC store error is archived as `errored` + skipped (NOT
+aborted) with the queue advanced and a later row unblocked (no livelock).
+`bunx tsc --noEmit` clean; full `bash scripts/run-tests.sh` green (739 files,
+0 failed chunks).
+
 ## 2026-06-21 — PR #15 Argus fix-pass: close the scanner finalize data-loss windows + resolve main conflicts
 
 Argus (Codex/GPT-5 cross-model + Claude correctness reviewer, independently

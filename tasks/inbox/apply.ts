@@ -12,6 +12,7 @@
  * rather than an error — so a re-scan of an un-truncated queue is safe.
  */
 
+import { BusyRetryExhaustedError } from '../../persistence/index.ts'
 import {
   NO_PROJECT,
   TaskNotFoundError,
@@ -87,8 +88,82 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
- * Apply one inbox row to the store. Never throws — every failure is
- * captured in the returned {@link ApplyOutcome}.
+ * Node IO error codes that signal a TRANSIENT environmental failure — the
+ * write might succeed on a later scan once the condition clears (disk
+ * freed, lock released, fd / quota available). Distinct from a
+ * deterministic per-row rejection (a constraint/validation error), which
+ * would re-fail identically every scan.
+ */
+const TRANSIENT_IO_CODES: ReadonlySet<string> = new Set([
+  'ENOSPC', // no space left on device
+  'EIO', // low-level I/O error
+  'EACCES', // permission denied (e.g. a transient FS remount / readonly flip)
+  'EPERM',
+  'EAGAIN',
+  'EBUSY',
+  'EMFILE', // too many open fds (transient)
+  'ENFILE',
+  'EROFS', // filesystem went read-only on failure
+  'EDQUOT', // disk quota exceeded
+])
+
+/** SQLite messages that map to disk/IO/contention, not row-level rejection. */
+const TRANSIENT_SQLITE_PATTERNS: ReadonlyArray<RegExp> = [
+  /disk i\/o error/i, // SQLITE_IOERR
+  /database or disk is full/i, // SQLITE_FULL
+  /database is locked/i, // SQLITE_BUSY (belt-and-suspenders; usually wrapped)
+  /\bSQLITE_BUSY\b/i,
+  /unable to open database/i, // SQLITE_CANTOPEN
+]
+
+/**
+ * Should an exception escaping a store mutation ABORT the scan (so the
+ * claimed rows stay in the sidecar for the next scan to retry) rather than
+ * be recorded as a per-row `errored` outcome?
+ *
+ * TRUE only for plausibly-TRANSIENT infra failures: a busy-retry budget
+ * exhaustion under sustained contention ({@link BusyRetryExhaustedError}
+ * from `withBusyRetry`), or a disk/IO error. These may succeed on a later
+ * scan, so the scanner must not advance past the row, archive it, or drop
+ * the sidecar — doing so permanently loses a valid row.
+ *
+ * FALSE for everything else. A deterministic per-row rejection (an
+ * unexpected constraint/validation error, or a programming bug) would
+ * re-fail identically on every scan; aborting on it would LIVELOCK the
+ * whole queue, because `claimInbox` always drains the sidecar before the
+ * live inbox. Those are captured as `errored` and skipped — exactly the
+ * pre-existing, non-blocking behavior — so one poison row can never wedge
+ * the queue.
+ */
+export function isTransientStoreError(err: unknown): boolean {
+  if (err instanceof BusyRetryExhaustedError) return true
+  if (err === null || typeof err !== 'object') return false
+  const code = (err as { code?: unknown }).code
+  if (typeof code === 'string' && TRANSIENT_IO_CODES.has(code)) return true
+  const message = (err as { message?: unknown }).message
+  if (typeof message === 'string') {
+    return TRANSIENT_SQLITE_PATTERNS.some((re) => re.test(message))
+  }
+  return false
+}
+
+/**
+ * Apply one inbox row to the store.
+ *
+ * EXPECTED per-row outcomes are always captured in the returned
+ * {@link ApplyOutcome} (never thrown): a replayed `add` id →
+ * `skipped:duplicate`, an edit on a missing/foreign task →
+ * `skipped:not_found`, an empty update → `skipped:no_fields`, an unknown
+ * action → `errored`. A deterministic, unexpected per-row rejection (an
+ * unanticipated constraint/validation error or programming bug) is also
+ * captured as `errored` so a single poison row can never wedge the queue.
+ *
+ * A TRANSIENT store/infra failure ({@link isTransientStoreError} —
+ * busy-retry exhaustion or a disk/IO error) is the ONE thing that THROWS:
+ * it propagates so the scanner can ABORT the scan and leave the row in the
+ * sidecar for the next scan to retry idempotently, rather than archiving an
+ * `errored` outcome and silently dropping a valid row (see `drainClaimed` /
+ * `finalizeProcessing` in `scanner.ts`).
  */
 export async function applyInboxRow(
   deps: ApplyDeps,
@@ -110,6 +185,11 @@ export async function applyInboxRow(
         return { row, status: 'errored', reason: `unknown action: ${row.action}` }
     }
   } catch (err) {
+    // Transient infra failure → re-throw so the scan ABORTS (no baseline
+    // advance, no archive, sidecar left) and the next scan retries the row.
+    if (isTransientStoreError(err)) throw err
+    // Deterministic per-row failure → record + skip (non-blocking), so a
+    // poison row is archived rather than livelocking the queue forever.
     const reason = err instanceof Error ? err.message : String(err)
     return { row, status: 'errored', reason }
   }
@@ -220,7 +300,14 @@ async function applyDelete(deps: ApplyDeps, row: InboxRow): Promise<ApplyOutcome
   }
 }
 
-/** Apply a batch of rows in order, returning one outcome per row. */
+/**
+ * Apply a batch of rows in order, returning one outcome per row. Propagates
+ * a TRANSIENT store/infra error ({@link isTransientStoreError}) from the
+ * offending row — earlier rows in the batch have already been applied (their
+ * outcomes are discarded with the throw), but every apply is idempotent on
+ * replay, so the scanner can safely abort and re-drain the whole claim next
+ * scan. Deterministic per-row failures are captured as `errored`, not thrown.
+ */
 export async function applyInboxRows(
   deps: ApplyDeps,
   rows: InboxRow[],
