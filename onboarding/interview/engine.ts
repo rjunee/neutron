@@ -7276,6 +7276,15 @@ export class InterviewEngine implements EngineInternals {
       )
       return null
     }
+    // Codex r1 [P2] — a SYNTHESISED advance is the router's timeout/parse-fail
+    // fallback (`synthesised: 'timeout' | 'unparseable'`), whose `freeform_text`
+    // is just the echoed/truncated user input, NOT a real classification.
+    // `dispatchRouterDecision` treats it as a re-prompt, never an extraction, so
+    // we must not persist projects parsed from an unclassified fallback (it could
+    // be truncated, or a tangent/clarifying question the router couldn't read).
+    // Bail to the existing advance-with-empty-patch path (the share-work flow at
+    // projects_proposed still catches the list on a later, now-warm turn).
+    if (decision.synthesised !== undefined) return null
     const extracted: ExtractedFields = {}
     // A non-null `state_delta` only ever arrives here in the REVIEW/CORRECTION
     // hybrid case (or a future amend smuggled onto this best-effort path); read
