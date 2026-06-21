@@ -1,28 +1,33 @@
 /**
- * @neutronai/runtime — subagent registry pruning pass.
+ * @neutronai/runtime — subagent lifecycle tick.
  *
  * Runs on a periodic tick (default 60s), driven by the gateway's main interval.
- * Single responsibility: **cleanup-after pruning** — delete terminal records
- * (`finished`|`crashed`|`cancelled`) whose `cleanup_after` has elapsed.
+ * One ordered tick with two phases:
  *
- * Liveness reaping — detecting a `running` record that went stale or whose
- * process died — USED to live here too (it silently `cancelRun`'d stale records
- * and marked pid-gone ones `crashed`). That responsibility moved to the
- * **agent-aware watchdog** (`watchdog.ts`), which SURFACES each failure (marks
- * it failed + notifies) instead of silently reaping it. Keeping both reaping the
- * same `running` records at the same threshold raced: whichever ran first won,
- * and if this pass won it swallowed the failure the watchdog was meant to
- * surface. Splitting the duties makes them disjoint, so tick order is
- * irrelevant — the watchdog owns live→terminal transitions; this pass only
- * prunes already-terminal records.
+ *   1. **Liveness surfacing** (when `watchdog` deps are supplied): runs the
+ *      agent-aware watchdog (`watchdog.ts`) — detects stale/dead `running`
+ *      records, marks them failed, and NOTIFIES — then …
+ *   2. **Cleanup-after pruning**: deletes terminal records
+ *      (`finished`|`crashed`|`cancelled`) past their `cleanup_after`.
+ *
+ * The watchdog runs BEFORE the prune so the single tick both surfaces a failing
+ * agent and reaps already-terminal ones, in a defined order, with no second
+ * independent reaper to race. Liveness reaping USED to live in this file as a
+ * SILENT pass (it `cancelRun`'d stale records / marked pid-gone ones `crashed`
+ * with no notification); that logic moved into the watchdog so failures are
+ * surfaced, and this tick now COMPOSES the watchdog rather than duplicating it.
+ *
+ * Omit the `watchdog` deps to run a prune-only tick (e.g. a cleanup-only
+ * scheduler); the watchdog can also be driven standalone via `runAgentWatchdog`.
  */
 
 import type { SubagentRegistry } from './registry.ts'
+import { runAgentWatchdog, type AgentWatchdogDeps } from './watchdog.ts'
 
 /**
  * @deprecated The stale-`running` threshold now lives on the agent-aware
  * watchdog as `DEFAULT_STUCK_THRESHOLD_MS` (`watchdog.ts`). Retained as a
- * back-compat alias; this pruning pass no longer uses it.
+ * back-compat alias.
  */
 export const STALE_THRESHOLD_MS = 5 * 60_000
 
@@ -30,19 +35,39 @@ export interface LifecycleDeps {
   registry: SubagentRegistry
   /** Now-injection for tests. */
   now?: () => number
+  /**
+   * Liveness-surfacing deps. When present, the tick runs the agent-aware
+   * watchdog first (surfacing stale/dead live agents) and then prunes. Omit for
+   * a prune-only tick. `registry` + `now` are threaded from above, so this is
+   * the watchdog's deps minus those two (`control`, optional `notify` /
+   * `pid_alive` / `stuck_threshold_ms`).
+   */
+  watchdog?: Omit<AgentWatchdogDeps, 'registry' | 'now'>
 }
 
 /**
- * Run one prune tick: delete terminal records past their `cleanup_after`.
- * Returns the number deleted. Idempotent + safe to call concurrently with the
- * agent-aware watchdog (disjoint responsibilities — see module header).
+ * Run one lifecycle tick. Returns the number of records affected (agents
+ * surfaced-as-failed + terminal records pruned). Idempotent.
  */
 export async function runLifecycleTick(deps: LifecycleDeps): Promise<number> {
   const now = (deps.now ?? Date.now)()
   let affected = 0
+
+  // (1) Liveness surfacing — the watchdog owns all live→terminal transitions.
+  if (deps.watchdog) {
+    const { surfaced } = await runAgentWatchdog({
+      ...deps.watchdog,
+      registry: deps.registry,
+      now: () => now,
+    })
+    affected += surfaced.length
+  }
+
+  // (2) Cleanup-after pruning of already-terminal records.
   for (const rec of deps.registry.pruneCandidates(now)) {
     deps.registry.delete(rec.run_id)
     affected++
   }
+
   return affected
 }

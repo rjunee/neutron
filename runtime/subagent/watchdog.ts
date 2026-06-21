@@ -25,11 +25,12 @@
  * `delivery_target`) for a caller to retry/notify as policy dictates.
  *
  * This pass is the SOLE owner of live→terminal liveness transitions for
- * dispatched agents. `runLifecycleTick` (`lifecycle.ts`) deliberately no longer
- * reaps `running` records — it only prunes already-terminal ones — so the two
- * never race over the same record and a stale agent can't be silently swallowed
- * before it is surfaced here. Pure + injectable (now / pid_alive / notify) so
- * the tests are hermetic; every transition is idempotent.
+ * dispatched agents. `runLifecycleTick` (`lifecycle.ts`) does not reap liveness
+ * itself — it COMPOSES this watchdog (runs it, then prunes already-terminal
+ * records), so there is never a second independent reaper to race and a stale
+ * agent can't be silently swallowed before it is surfaced here. It can also be
+ * driven standalone. Pure + injectable (now / pid_alive / notify) so the tests
+ * are hermetic; every transition is idempotent.
  */
 
 import { failRun, type ControlState } from './control.ts'

@@ -242,17 +242,56 @@ describe('lifecycle prune pass', () => {
     expect(registry.byRunId(rec.run_id)).toBeUndefined()
   })
 
-  test('leaves a live (non-terminal) record untouched — no liveness reaping here', async () => {
+  test('prune-only mode (no watchdog deps) leaves a live record untouched', async () => {
     const registry = new SubagentRegistry()
     const rec = await spawnSubagent(
       { instance_key: 'instance-a', agent_kind: 'forge' },
       { registry, verify_delegation: async () => validClaims, mint_run_id: () => 'r' },
     )
-    // Stale + a would-be-gone pid, but this pass no longer reaps liveness.
+    // Stale + a would-be-gone pid, but a prune-only tick does not reap liveness.
     registry.update(rec.run_id, { status: 'running', last_event_at: 0, pid: 99999 })
     const affected = await runLifecycleTick({ registry, now: () => STALE_THRESHOLD_MS + 1 })
     expect(affected).toBe(0)
     expect(registry.byRunId(rec.run_id)?.status).toBe('running')
+  })
+
+  test('composed tick: surfaces a stale agent via the watchdog AND prunes, in one pass', async () => {
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    // A stale live agent that the watchdog phase should surface…
+    const stale = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: async () => validClaims, mint_run_id: () => 'stale' },
+    )
+    registry.update(stale.run_id, { status: 'running', last_event_at: 0 })
+    registerCanceller(ctrl, stale.run_id, async () => {})
+    // …and a terminal record the prune phase should delete.
+    const done = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: async () => validClaims, mint_run_id: () => 'done' },
+    )
+    registry.update(done.run_id, { status: 'finished', ended_at: 0, cleanup_after: 100 })
+
+    const surfaced: string[] = []
+    const affected = await runLifecycleTick({
+      registry,
+      now: () => STALE_THRESHOLD_MS + 1,
+      watchdog: {
+        control: ctrl,
+        pid_alive: () => true,
+        notify: (e) => {
+          surfaced.push(e.run_id)
+        },
+      },
+    })
+
+    // Watchdog surfaced the stale agent (marked crashed + notified)…
+    expect(surfaced).toEqual(['stale'])
+    expect(statusOf(ctrl, 'stale')?.status).toBe('crashed')
+    expect(statusOf(ctrl, 'stale')?.failure_reason).toBe('stuck')
+    // …and the prune phase deleted the terminal record.
+    expect(registry.byRunId('done')).toBeUndefined()
+    expect(affected).toBe(2) // 1 surfaced + 1 pruned
   })
 })
 

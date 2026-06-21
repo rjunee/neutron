@@ -49,16 +49,20 @@ in the agent-dispatch layer (`runtime/subagent/`):
   context for a caller to retry/notify. Pure + injectable (`now` / `pid_alive` /
   `notify`); idempotent.
 
-- **`lifecycle.ts` is now prune-only.** Its stale-`running` reaping (silent
-  `cancelRun`) and pid-gone reaping (silent `crashed`) moved INTO the watchdog
-  (which surfaces). Keeping both reaping the same `running` records at the same
-  5-min threshold raced: if the silent lifecycle pass won the tick it swallowed
-  the very failure the watchdog was meant to surface (a stale record gone from
-  `live()` is never seen by the watchdog). Splitting the duties — watchdog owns
-  all live→terminal transitions, `runLifecycleTick` only deletes already-terminal
-  records past `cleanup_after` — makes them disjoint, so tick order is
-  irrelevant. (`STALE_THRESHOLD_MS` kept as a deprecated alias; `LifecycleDeps`
-  slimmed to `{ registry, now? }`.)
+- **`lifecycle.ts` now COMPOSES the watchdog** instead of duplicating liveness
+  reaping. It previously reaped stale-`running` records SILENTLY (`cancelRun`)
+  and marked pid-gone ones `crashed` with no notification; running that beside
+  the new surfacing watchdog at the same 5-min threshold raced — if the silent
+  pass won the tick it swallowed the very failure the watchdog was meant to
+  surface (a record gone from `live()` is never seen by the watchdog).
+  `runLifecycleTick` is now one ordered tick: **(1)** when `watchdog` deps are
+  supplied it runs `runAgentWatchdog` first (the SOLE owner of live→terminal
+  transitions — surfaces stale/dead agents), **(2)** then prunes already-terminal
+  records past `cleanup_after`. One reaper, defined order, no race — and the
+  established tick entry point keeps reaping liveness (now via the surfacing
+  path) rather than silently losing it. Omit the `watchdog` deps for a
+  prune-only tick. (`STALE_THRESHOLD_MS` kept as a deprecated alias;
+  `LifecycleDeps` = `{ registry, now?, watchdog? }`.)
 
   Guard + watchdog are complementary: the watchdog reaps a registry-live-but-
   process-dead record so a legitimate re-spawn can proceed, while the guard
