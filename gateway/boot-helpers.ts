@@ -1022,6 +1022,27 @@ export async function buildCoresBackendFactories(
       if (emailModel !== undefined) factoryDeps.model = emailModel
       return factoryDeps
     },
+    google_workspace_core: async () => {
+      // Google Workspace Core (gap-audit P0-6, 2026-06-20) — wires the
+      // production Drive v3 / Sheets v4 / Docs v1 REST client whose lazy
+      // access-token accessor reads through the shared OAuthTokenManager
+      // for transparent refresh, EXACTLY like the Calendar + Email Cores.
+      // When the Cores OAuth surface is unmounted (envs absent), falls
+      // back to the in-memory client so the install pipeline still
+      // installs the Core (dispatches against an empty workspace). The
+      // grant is stored under the distinct `google_workspace` label so
+      // it connects/disconnects independently of the Calendar/Email
+      // grants — per-Core OAuth, NOT a shared global token.
+      const mod = await import('@neutronai/google-workspace-core')
+      if (googleOAuthAccessToken !== null) {
+        return {
+          client: mod.buildGoogleWorkspaceClient({
+            accessToken: () => googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
+          }),
+        }
+      }
+      return { client: mod.buildInMemoryGoogleWorkspaceClient() }
+    },
     research_core: async () => {
       // Argus r1 BLOCKER #3 + #4: the composer ALWAYS threads the real
       // per-instance project backend through here so the MCP tools

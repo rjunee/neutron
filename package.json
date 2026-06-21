@@ -18,6 +18,7 @@
     "cores/free/reminders",
     "cores/free/tasks",
     "cores/free/calendar",
+    "cores/free/google-workspace",
     "cores/free/code-gen",
     "cores/free/email",
     "cores/free/research",

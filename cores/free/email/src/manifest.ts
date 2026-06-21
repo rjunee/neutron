@@ -32,22 +32,24 @@ export const CORE_PACKAGE_NAME = '@neutronai/email-managed-core' as const
  * refresh/access token row.
  *
  * The label `gmail_compose` is the stable storage key for the token
- * across this Core's lifecycle. The actual OAuth grant covers
- * THREE scopes (per Argus r1 BLOCKER #2 fix, 2026-05-21):
+ * across this Core's lifecycle. The OAuth grant covers FOUR scopes:
  *
  *   - `gmail.readonly`  — list/read/search/summarize/triage paths
- *   - `gmail.modify`    — threads.modify for the owner 4-point label
- *                         policy (INBOX + IMPORTANT + UNREAD applied
- *                         to every drafted thread atomically)
+ *   - `gmail.modify`    — threads.modify for the owner visibility
+ *                         label policy (INBOX + IMPORTANT + UNREAD
+ *                         applied to every drafted/sent thread)
  *   - `gmail.compose`   — drafts.create
+ *   - `gmail.send`      — messages.send (the `email_send` tool)
  *
- * `gmail.send` is INTENTIONALLY EXCLUDED. The Tier 1 "never sends"
- * guarantee is enforced at THREE layers: product surface (no send
- * tool, no send method on `GmailClient`), OAuth grant (gmail.send
- * absent from the scope set, so the persisted token cannot send),
- * and audit (every dispatch goes through `CapabilityGuard.
- * wrapToolHandler`). Tier 2 Email-Private Core will request
- * gmail.send separately under a distinct secret label.
+ * SEND HISTORY: send was originally carved OUT of this Tier 1 Core
+ * (drafts-only) and reserved for a Tier 2 paid Core. The gap-audit
+ * (`docs/research/vajra-neutron-daily-driver-gap-audit-2026-06-20.md`,
+ * P0) reversed that product decision — Gmail-send is a daily-driver
+ * need — so `gmail.send` + the `email_send` tool now ship here under
+ * the distinct `SEND_CAPABILITY` for clean audit attribution. The
+ * 4-point DRAFT rule (DRAFT + INBOX + IMPORTANT + UNREAD) is unchanged;
+ * sends apply the same INBOX + IMPORTANT + UNREAD visibility labels to
+ * the sent thread (the DRAFT label is N/A for a sent message).
  */
 export const OAUTH_SECRET_LABEL = 'gmail_compose' as const
 
@@ -65,14 +67,23 @@ export const TOOL_NAMES = [
   'email_summarize',
   'email_draft_prepare',
   'email_triage',
+  'email_send',
 ] as const
 export type EmailToolName = typeof TOOL_NAMES[number]
 
 /**
  * Capability strings the manifest declares.
+ *
+ * `SEND_CAPABILITY` is DISTINCT from the drafts write capability so
+ * every actual outbound send is attributable to its own capability in
+ * the audit log (the runtime `CapabilityGuard` stamps the dispatched
+ * capability on each `tool_call` row). Send was added per the
+ * gap-audit P0 finding that Gmail-send is a daily need
+ * (`docs/research/vajra-neutron-daily-driver-gap-audit-2026-06-20.md`).
  */
 export const READ_CAPABILITY = 'read:email_managed_core.messages' as const
 export const WRITE_CAPABILITY = 'write:email_managed_core.drafts' as const
+export const SEND_CAPABILITY = 'write:email_managed_core.send' as const
 
 /**
  * Per-project Gmail user-label namespace. v1 ships the literal

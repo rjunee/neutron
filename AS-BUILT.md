@@ -2,6 +2,87 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — External-tool floor: Google Workspace Core (Drive/Sheets/Docs) + Gmail send (gap-audit P0-6)
+
+Closes the gap-audit external-tool floor (P0-6 / §(b) cat 9,
+`~/repos/neutron-managed/docs/research/vajra-neutron-daily-driver-gap-audit-2026-06-20.md`):
+Drive/Sheets/Docs were MISSING entirely, and the Email Core was draft-only
+(no send). Both are daily Ryan workflows. Scope: `cores/` + the tool layer only
+— no `composer.ts`, no admin UI.
+
+**NEW: `@neutronai/google-workspace-core` (`cores/free/google-workspace/`, slug
+`google_workspace_core`).** A Tier 1 free Core surfacing nine MCP tools across
+three Google APIs, all capability-guarded + audit-logged:
+
+- Drive v3 — `drive_list` / `drive_read` / `drive_upload`
+- Sheets v4 — `sheets_read` / `sheets_append` / `sheets_update`
+- Docs v1 — `docs_read` / `docs_create` / `docs_update`
+
+Per-service `read:/write:google_workspace_core.{drive,sheets,docs}` capabilities.
+ONE Google OAuth grant under the DISTINCT label `google_workspace`
+(scopes: `drive` + `spreadsheets` + `documents`) — reuses the SAME per-Core OAuth
+plumbing Calendar (`google_calendar`) + Email (`gmail_compose`) already depend on
+(runtime composer drives the install-time prompt + resolves a live access token
+via the per-Core SecretsAccessor through the shared `OAuthTokenManager`). NOT a
+global token registry; the grant connects/disconnects independently. The Core
+declares `required: true`, so under the Noop install prompter it lands in the
+`manifest_invalid` install-failure bucket exactly like Calendar/Email until the
+owner connects Google — surfaced in `/api/cores` as `install_state: failed`.
+
+- `src/backend.ts` — a narrow `GoogleWorkspaceClient` interface with TWO
+  implementations: `buildInMemoryGoogleWorkspaceClient()` (in-process store, backs
+  the tools test) and `buildGoogleWorkspaceClient()` (hand-rolled `fetch`-based
+  Drive/Sheets/Docs REST wrapper, no `googleapis` dep — accepts a lazy
+  `accessToken()` accessor + a `fetchImpl` override). Drive read exports
+  Google-native files to text (Docs→text/plain, Sheets→text/csv) and downloads
+  others via `alt=media`; upload is multipart text. Sheets append/update use
+  `valueInputOption=USER_ENTERED`. Docs read flattens the structured document to
+  text; create = `documents.create` + a `batchUpdate` insertText; update inserts
+  at an explicit index or appends at the resolved end index.
+- `__tests__/backend.test.ts` asserts each production op against a mocked Google
+  API (HTTP method/path/payload) + the in-memory adapter round-trips.
+  `__tests__/tools.test.ts` exercises the capability-gated tool layer + audit
+  rows. `__tests__/manifest.test.ts` pins the manifest contract.
+
+**Email Core: Gmail SEND shipped (`email_send`).** HISTORY: send was originally
+carved OUT of this Tier 1 Core (drafts-only, three intentional regression guards
+asserting "no send tool / no `gmail.send` scope", reserved for a Tier 2 paid
+Core). The gap-audit (P0) explicitly reversed that product decision — Gmail-send
+is a daily-driver need — so this PR ships it here and FLIPS those guards.
+
+- New `email_send` tool + `GmailClient.sendMessage(...)` on all three backends
+  (two in-memory + the production Gmail REST client → `messages.send`). Sends a
+  new message or a reply (In-Reply-To/References + `threadId` populated
+  server-side). Header-injection is blocked at the shared `buildRawMessage` MIME
+  layer (CR/LF/NUL rejected).
+- Send gets its OWN capability `write:email_managed_core.send` (distinct from the
+  drafts write capability) for clean audit attribution; the OAuth grant now adds
+  `gmail.send` (FOUR scopes).
+- The 4-point DRAFT rule (DRAFT + INBOX + IMPORTANT + UNREAD) is UNCHANGED. Send
+  applies the same INBOX + IMPORTANT + UNREAD visibility labels to the sent thread
+  via `threads.modify` (the DRAFT label is N/A for a sent message) so the
+  conversation surfaces in the owner's inbox — the send-path counterpart to the
+  draft rule. `DraftLabelingError` carries the sent message id for idempotent
+  retry on a partial completion.
+
+**Registration plumbing (the thing the prior attempt broke).** The earlier run
+failed with `tool_registration_failed` for `calendar_core` + `email_managed_core`
+and never opened a PR — a module-resolution break (`Cannot find module
+'@neutronai/cores-runtime'`). Root cause avoided here by following the EXACT
+existing pattern: new Core added to root `workspaces` + `gateway/package.json`
+deps, `bun install` re-run so the `node_modules/@neutronai/*` symlinks
+(cores-runtime/cores-sdk/runtime + the gateway→core link) are created identically
+to Calendar/Email. New Core's backend factory wired in `gateway/boot-helpers.ts`
+(dual-mode: Google REST client when the OAuth accessor is present, in-memory
+fallback otherwise) + `google_workspace_core: 'client'` in
+`install-bundled.ts:BACKEND_KEY_BY_SLUG`. Gateway inventory tests updated
+(`cores-composition` + `cores-surface`: discovered set + the OAuth-gated failure
+list, now Calendar + Email + Google Workspace).
+
+**Verify.** `bunx tsc --noEmit` clean. Full `bun test`: 7624 pass / 90 skip /
+0 fail across 722 files — INCLUDING every cores registration test
+(`cores-composition`, `cores-surface`, `cores-oauth-surface`, install-lifecycle).
+
 ## 2026-06-21 — Chat-sync foundation fix-round (Argus REQUEST CHANGES): double-dispatch guard + wiring split
 
 Argus (cross-model with Codex/GPT-5) requested changes on PR #6 with two

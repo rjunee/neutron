@@ -1027,6 +1027,7 @@ const BACKEND_KEY_BY_SLUG: Readonly<Record<string, string>> = {
   reminders_core: 'backend',
   calendar_core: 'client',
   email_managed_core: 'client',
+  google_workspace_core: 'client',
   research_core: 'backend',
   codegen_core: 'orchestrator',
   dtc_analytics: 'store',
