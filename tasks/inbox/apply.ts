@@ -25,6 +25,9 @@ import type { InboxRow } from './types.ts'
 /** Provenance stamped on tasks created/edited via the inbox queue. */
 export const TASK_SOURCE_INBOX = 'inbox' as const
 
+/** Page size for the title-based task lookup in {@link resolveTaskId}. */
+const TITLE_LOOKUP_PAGE_SIZE = 500
+
 export type ApplyStatus = 'applied' | 'skipped' | 'errored'
 
 export interface ApplyOutcome {
@@ -60,16 +63,21 @@ function resolveTaskId(deps: ApplyDeps, row: InboxRow): string | null {
     return task.id
   }
   if (row.title === undefined) return null
-  const listInput: Parameters<TaskStore['list']>[0] = {
-    project_slug: deps.project_slug,
-    status: 'open',
-    limit: 500,
+  // Page through open tasks so a title beyond the first page still
+  // resolves (don't cap the lookup). Early-exit on the first exact match.
+  for (let offset = 0; ; offset += TITLE_LOOKUP_PAGE_SIZE) {
+    const listInput: Parameters<TaskStore['list']>[0] = {
+      project_slug: deps.project_slug,
+      status: 'open',
+      limit: TITLE_LOOKUP_PAGE_SIZE,
+      offset,
+    }
+    if (row.project !== undefined) listInput.project_id = row.project
+    const page = deps.store.list(listInput)
+    const match = page.find((t) => t.title === row.title)
+    if (match !== undefined) return match.id
+    if (page.length < TITLE_LOOKUP_PAGE_SIZE) return null
   }
-  if (row.project !== undefined) listInput.project_id = row.project
-  const match = deps.store
-    .list(listInput)
-    .find((t) => t.title === row.title)
-  return match?.id ?? null
 }
 
 /** Is this the SQLite UNIQUE/PK violation a replayed `add` id triggers? */

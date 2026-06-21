@@ -70,6 +70,24 @@ describe('inbox — parse', () => {
     expect(res as string).toContain('id')
   })
 
+  test('a present-but-invalid priority or due is a parse error (not silently dropped)', () => {
+    const badPrio = parseInboxLine('{"action":"add","title":"x","priority":"P9"}')
+    expect(typeof badPrio).toBe('string')
+    expect(badPrio as string).toContain('priority')
+
+    const badPrioInt = parseInboxLine('{"action":"add","title":"x","priority":4}')
+    expect(typeof badPrioInt).toBe('string')
+
+    const badDue = parseInboxLine('{"action":"add","title":"x","due":"not-a-date"}')
+    expect(typeof badDue).toBe('string')
+    expect(badDue as string).toContain('due')
+
+    // An absent field is fine — no error, field simply unset.
+    const ok = parseInboxLine('{"action":"add","title":"x"}') as InboxRow
+    expect(ok.priority).toBeUndefined()
+    expect(ok.due_date).toBeUndefined()
+  })
+
   test('unknown action + malformed JSON are reported, blanks skipped', () => {
     const body = [
       '',
@@ -284,6 +302,20 @@ describe('inbox — apply', () => {
     }
     const all = listAllTasks(deps())
     expect(all.length).toBe(N)
+  })
+
+  test('title-based lookup pages past the first 500 open tasks', async () => {
+    // 501 dateless open tasks → default order is newest-first, so the
+    // FIRST-created ('task 0') sorts last, landing on page 2 (offset 500).
+    for (let i = 0; i < 501; i++) {
+      await store.create({ project_slug: 't1', title: `task ${i}` })
+    }
+    const outcome = await applyInboxRow(
+      deps(),
+      parseInboxLine('{"action":"complete","title":"task 0"}') as InboxRow,
+    )
+    expect(outcome.status).toBe('applied')
+    expect(store.get(outcome.task_id as string)?.status).toBe('done')
   })
 
   test('applyInboxRows applies a batch in order', async () => {

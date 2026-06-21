@@ -18,7 +18,10 @@ New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
   Rows: `add` / `complete` / `update` / `cancel` / `delete`. Human forms
   (`P0..P3`, `YYYY-MM-DD`) are normalized to the store's scales (priority
   0..3, ISO due). Malformed lines surface as `ParseError`s (1-based line
-  numbers) instead of throwing — one bad row never blocks the queue.
+  numbers) instead of throwing — one bad row never blocks the queue. A
+  PRESENT-but-invalid `priority`/`due` (e.g. `"P9"`, `"not-a-date"`) is a hard
+  parse error, not a silent drop, so a typo can't quietly create an
+  unprioritized/undated task.
 - **`apply.ts`** — maps a parsed row to the matching `TaskStore` mutation,
   returning a structured `ApplyOutcome`. `add` with a stable `id` is
   idempotent (PK collision → `skipped:'duplicate'`); edit-ops locate by `id`

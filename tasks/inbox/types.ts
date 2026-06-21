@@ -174,11 +174,26 @@ export function parseInboxLine(raw: string): InboxRow | string {
   const title = record['title']
   if (typeof title === 'string' && title.trim() !== '') row.title = title.trim()
 
-  const priority = normalizePriority(record['priority'])
-  if (priority !== undefined) row.priority = priority
+  // A PRESENT-but-invalid priority/due is a hard parse error, not a
+  // silent drop — a typo'd `"P9"` must surface as a malformed row rather
+  // than quietly creating an unprioritized task.
+  const rawPriority = record['priority']
+  if (rawPriority !== undefined) {
+    const priority = normalizePriority(rawPriority)
+    if (priority === undefined) {
+      return `invalid "priority": ${JSON.stringify(rawPriority)} (expected P0..P3 or an integer 0..3)`
+    }
+    row.priority = priority
+  }
 
-  const due = normalizeDue(record['due'] ?? record['due_date'])
-  if (due !== undefined) row.due_date = due
+  const rawDue = record['due'] ?? record['due_date']
+  if (rawDue !== undefined) {
+    const due = normalizeDue(rawDue)
+    if (due === undefined) {
+      return `invalid "due": ${JSON.stringify(rawDue)} (expected YYYY-MM-DD or ISO-8601)`
+    }
+    row.due_date = due
+  }
 
   const notes = record['notes'] ?? record['description']
   if (typeof notes === 'string') row.notes = notes
