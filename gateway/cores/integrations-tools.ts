@@ -21,6 +21,7 @@
 
 import type { ToolRegistration } from '../../tools/registry.ts'
 import type { SecretsStore } from '../../auth/secrets-store.ts'
+import type { ProjectDb } from '../../persistence/index.ts'
 import type { StartOAuthResult } from '../http/cores-oauth-surface.ts'
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
 import {
@@ -28,6 +29,7 @@ import {
   collectApiKeySlots,
   collectOAuthSlots,
   deleteApiKey,
+  disconnectOAuth,
   IntegrationsError,
   setApiKey,
   type IntegrationsRegistryView,
@@ -38,6 +40,12 @@ export interface IntegrationsToolsDeps {
   tokens: OAuthTokenManager
   secretsStore: SecretsStore
   project_slug: string
+  /**
+   * Project DB — threaded so the OAuth-disconnect path can flag every
+   * affected Core `install_failed_dependency_missing` via the shared
+   * `disconnectOAuth` brain, matching the HTTP/UI disconnect path exactly.
+   */
+  db: ProjectDb
   /**
    * Start a Google OAuth grant in-process and return the PUBLIC Google
    * `authorize_url` (provided by the Cores OAuth surface). The agent hands
@@ -177,8 +185,18 @@ export function buildIntegrationsTools(
       const oauthSlots = collectOAuthSlots(deps.registry)
       const apiKeySlots = collectApiKeySlots(deps.registry)
       if (oauthSlots.has(label)) {
-        const { deleted } = await deps.tokens.disconnect(label)
-        return { kind: 'oauth', label, disconnected: deleted }
+        // Route through the SHARED disconnect brain — revoke + delete tokens
+        // AND flag every affected Core dependency-missing — so a chat-
+        // initiated disconnect leaves /api/cores in the SAME state the UI/HTTP
+        // path produces (no "still installed" divergence).
+        const { deleted, affected_cores } = await disconnectOAuth({
+          tokens: deps.tokens,
+          registry: deps.registry,
+          projectDb: deps.db,
+          project_slug: deps.project_slug,
+          label,
+        })
+        return { kind: 'oauth', label, disconnected: deleted, affected_cores }
       }
       if (apiKeySlots.has(label)) {
         const { deleted } = await deleteApiKey({

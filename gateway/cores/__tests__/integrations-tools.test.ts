@@ -18,7 +18,8 @@ import { ProjectDb } from '../../../persistence/index.ts'
 import { SecretsStore } from '../../../auth/secrets-store.ts'
 import { ToolRegistry } from '../../../tools/registry.ts'
 import type { ToolCallContext, ToolRegistration } from '../../../tools/registry.ts'
-import { installBundledCores } from '../install-bundled.ts'
+import { installBundledCores, updateInstallState } from '../install-bundled.ts'
+import { CoreInstallationsStore } from '../../../cores/runtime/installations-store.ts'
 import { OAuthTokenManager, GOOGLE_REVOKE_URL } from '../oauth-token-manager.ts'
 import { buildIntegrationsTools } from '../integrations-tools.ts'
 
@@ -93,9 +94,20 @@ async function makeBench() {
     tokens,
     secretsStore: secrets,
     project_slug: OWNER,
+    db,
     startOAuth,
   })
-  return { secrets, tokens, built, startedLabels }
+  return { secrets, tokens, built, startedLabels, db, cores }
+}
+
+function readInstallState(db: ProjectDb, core_slug: string): string | null {
+  const row = db
+    .raw()
+    .query<{ install_state: string }, [string, string]>(
+      `SELECT install_state FROM core_installations WHERE project_slug = ? AND core_slug = ?`,
+    )
+    .get(OWNER, core_slug)
+  return row?.install_state ?? null
 }
 
 test('integrations_list returns OAuth + API-key slots', async () => {
@@ -177,6 +189,47 @@ test('integrations_disconnect on an OAuth account deletes the stored tokens', as
       label: 'google_workspace',
     }),
   ).toBeNull()
+})
+
+test('integrations_disconnect on an OAuth account flags affected Cores dependency-missing (UI/chat parity)', async () => {
+  const b = await makeBench()
+  // A chat-initiated OAuth disconnect must leave /api/cores in the SAME state
+  // the UI/HTTP path produces: the affected Core flipped to
+  // install_failed_dependency_missing — NOT still reporting `installed`. This
+  // is the divergence Argus PR #13 IMPORTANT #3 flagged: before the shared
+  // `disconnectOAuth` brain, the chat path deleted tokens but never wrote the
+  // install_state, so the Core stayed "installed" with a silently-broken dep.
+  const installs = new CoreInstallationsStore({ db: b.db })
+  await installs.record({
+    project_slug: OWNER,
+    core_slug: 'google_workspace_core',
+    package_name: '@neutronai/google-workspace-core',
+    package_version: '0.0.0',
+    capabilities: [],
+    data_layout: 'tables',
+  })
+  await updateInstallState(b.db, OWNER, 'google_workspace_core', 'install_ok')
+  expect(readInstallState(b.db, 'google_workspace_core')).toBe('install_ok')
+
+  await b.secrets.put({
+    internal_handle: OWNER,
+    kind: 'oauth_token',
+    label: 'google_workspace',
+    plaintext: 'access',
+    expires_at: Date.now() + 3_600_000,
+  })
+
+  const out = (await byName(b.built, 'integrations_disconnect').handler(
+    { label: 'google_workspace' },
+    CTX,
+  )) as { kind: string; disconnected: boolean; affected_cores: string[] }
+  expect(out.kind).toBe('oauth')
+  expect(out.disconnected).toBe(true)
+  expect(out.affected_cores).toContain('google_workspace_core')
+  // The real state mutation the UI path also performs.
+  expect(readInstallState(b.db, 'google_workspace_core')).toBe(
+    'install_failed_dependency_missing',
+  )
 })
 
 test('integrations_disconnect on an API-key slot clears the stored key', async () => {

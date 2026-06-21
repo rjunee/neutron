@@ -32,6 +32,7 @@ import {
   View,
 } from 'react-native';
 
+import { shouldRedirectToLogin } from '../lib/auth-helpers';
 import { loadAppConfig } from '../lib/config';
 import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
@@ -47,7 +48,7 @@ import {
 
 export default function IntegrationsScreen() {
   const router = useRouter();
-  const { user } = useAuthSession();
+  const { user, status } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
 
   const client = useMemo(() => {
@@ -62,8 +63,13 @@ export default function IntegrationsScreen() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user === null) router.replace('/login');
-  }, [router, user]);
+    // Redirect to /login only once auth has RESOLVED to genuinely-
+    // unauthenticated. `user` is transiently null while the session provider
+    // hydrates the token from storage; treating that as "logged out" would
+    // bounce an already-signed-in user to /login on a direct load / refresh /
+    // deep-link of /integrations. Shared guard (see app/settings.tsx).
+    if (shouldRedirectToLogin({ status, user })) router.replace('/login');
+  }, [router, status, user]);
 
   const fetchAll = useCallback(async () => {
     if (client === null) return;

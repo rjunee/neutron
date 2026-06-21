@@ -22,7 +22,31 @@ import {
   hexToBase64Url,
   parseDevTokenUserId,
   parseOauthCallback,
+  shouldRedirectToLogin,
 } from '../lib/auth-helpers';
+
+describe('shouldRedirectToLogin', () => {
+  const user = { token: 't', displayName: 'Me' };
+
+  it('does NOT redirect while auth is still hydrating (token loading from storage)', () => {
+    // The bug Argus PR #13 flagged: an authenticated user is transiently
+    // `user === null` during hydration; redirecting then bounces them to
+    // /login on a direct load / refresh / deep-link.
+    expect(shouldRedirectToLogin({ status: 'hydrating', user: null })).toBe(false);
+  });
+
+  it('does NOT redirect a hydrated, authenticated user', () => {
+    expect(shouldRedirectToLogin({ status: 'ready', user })).toBe(false);
+  });
+
+  it('does NOT redirect an authenticated user even mid-hydration', () => {
+    expect(shouldRedirectToLogin({ status: 'hydrating', user })).toBe(false);
+  });
+
+  it('redirects only once auth has RESOLVED to genuinely-unauthenticated', () => {
+    expect(shouldRedirectToLogin({ status: 'ready', user: null })).toBe(true);
+  });
+});
 
 describe('buildStartUrl', () => {
   it('composes the canonical start URL with every required param', () => {

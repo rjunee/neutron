@@ -49,7 +49,6 @@ import {
 } from '../cores/oauth-token-manager.ts'
 import {
   reinstallFailedCore,
-  updateInstallState,
   SecretsStorePrompter,
   type CoreBackendFactoryMap,
   type InstallBundledCoresResult,
@@ -58,25 +57,16 @@ import {
 import type { SecretsStore } from '../../auth/secrets-store.ts'
 import type { ProjectDb } from '../../persistence/index.ts'
 import type { ToolRegistry } from '../../tools/registry.ts'
-import {
-  buildIntegrationsStatus,
-  deleteApiKey,
-  setApiKey,
-  IntegrationsError,
-} from '../cores/integrations.ts'
+import { disconnectOAuth } from '../cores/integrations.ts'
 
 const PATH_BASE = '/api/cores/oauth/google'
-const INTEGRATIONS_PATH = '/api/cores/integrations'
-const API_KEYS_BASE = '/api/cores/api-keys'
 
-/** True for any path this surface owns (OAuth + Integrations + API keys). */
+/** True for any path this surface owns (`/api/cores/oauth/google/*`). The
+ *  unified Integrations status + standalone API-key routes live in their own
+ *  surface (`cores-integrations-surface.ts`), mounted independent of the
+ *  Google-OAuth client gate so they work on bearer-auth-only deployments. */
 function ownsPath(pathname: string): boolean {
-  return (
-    pathname.startsWith(PATH_BASE) ||
-    pathname === INTEGRATIONS_PATH ||
-    pathname.startsWith(`${API_KEYS_BASE}/`) ||
-    pathname === API_KEYS_BASE
-  )
+  return pathname.startsWith(PATH_BASE)
 }
 
 export const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -263,48 +253,6 @@ export function createCoresOAuthSurface(
 
       if (pathname === `${PATH_BASE}/status` && req.method === 'GET') {
         return await handleStatus({ tokens, knownLabels })
-      }
-
-      // WAVE 2 Track A — unified Integrations status (OAuth + API keys).
-      if (pathname === INTEGRATIONS_PATH && req.method === 'GET') {
-        const status = await buildIntegrationsStatus({
-          registry: cores.registry,
-          tokens,
-          secretsStore,
-          project_slug,
-        })
-        return jsonResponse(200, { ok: true, ...status })
-      }
-
-      // WAVE 2 Track A — standalone API-key set/clear. `<label>` is a
-      // manifest-declared `byo_api_key` slot (e.g. `tavily`).
-      const apiKeyMatch = /^\/api\/cores\/api-keys\/([A-Za-z0-9_\-:.]+)\/?$/.exec(
-        pathname,
-      )
-      if (apiKeyMatch !== null) {
-        const label = apiKeyMatch[1] ?? ''
-        if (req.method === 'POST') {
-          return await handleSetApiKey({
-            req,
-            label,
-            cores,
-            secretsStore,
-            project_slug,
-          })
-        }
-        if (req.method === 'DELETE') {
-          return await handleDeleteApiKey({
-            label,
-            cores,
-            secretsStore,
-            project_slug,
-          })
-        }
-        return jsonResponse(405, {
-          ok: false,
-          code: 'method_not_allowed',
-          message: `${req.method} not allowed on ${pathname}`,
-        })
       }
 
       const disconnectMatch = /^\/api\/cores\/oauth\/google\/disconnect\/([A-Za-z0-9_\-:.]+)\/?$/.exec(
@@ -647,32 +595,20 @@ async function handleDisconnect(input: {
       message: `label='${input.label}' is not declared by any bundled Core's manifest.secrets[]`,
     })
   }
-  const { deleted } = await input.tokens.disconnect(input.label)
-  const affectedCores: string[] = []
-  for (const core of input.cores.registry.list()) {
-    if (core.manifest.secrets.some((s) => s.label === input.label)) {
-      affectedCores.push(core.slug)
-      // Mark every affected Core's runtime row as dependency-missing.
-      // We also remove the Core from the in-process `installed` map so
-      // subsequent /api/cores reads surface the dependency_missing
-      // state via the cores-surface mapping; the install row stays
-      // (its history is intentional).
-      try {
-        await updateInstallState(
-          input.projectDb,
-          input.project_slug,
-          core.slug,
-          'install_failed_dependency_missing',
-        )
-      } catch {
-        // best-effort
-      }
-    }
-  }
+  // Route through the SHARED disconnect brain so the HTTP + chat paths can't
+  // diverge: revoke + delete tokens AND mark every affected Core's runtime
+  // row dependency-missing so /api/cores surfaces a reconnect cue.
+  const { deleted, affected_cores } = await disconnectOAuth({
+    tokens: input.tokens,
+    registry: input.cores.registry,
+    projectDb: input.projectDb,
+    project_slug: input.project_slug,
+    label: input.label,
+  })
   return jsonResponse(200, {
     ok: true,
     disconnected: deleted ? [input.label] : [],
-    affected_cores: affectedCores,
+    affected_cores,
   })
 }
 
@@ -689,65 +625,6 @@ async function handleStatus(input: {
     ok: true,
     google: { connected, labels },
   })
-}
-
-async function handleSetApiKey(input: {
-  req: Request
-  label: string
-  cores: InstallBundledCoresResult
-  secretsStore: SecretsStore
-  project_slug: string
-}): Promise<Response> {
-  let body: { value?: unknown }
-  try {
-    body = (await input.req.json()) as { value?: unknown }
-  } catch {
-    return jsonResponse(400, {
-      ok: false,
-      code: 'malformed_json',
-      message: 'request body must be JSON with a `value` field',
-    })
-  }
-  const value = typeof body.value === 'string' ? body.value : ''
-  try {
-    await setApiKey({
-      registry: input.cores.registry,
-      secretsStore: input.secretsStore,
-      project_slug: input.project_slug,
-      label: input.label,
-      value,
-    })
-  } catch (err) {
-    return integrationsErrorResponse(err)
-  }
-  return jsonResponse(200, { ok: true, label: input.label, connected: true })
-}
-
-async function handleDeleteApiKey(input: {
-  label: string
-  cores: InstallBundledCoresResult
-  secretsStore: SecretsStore
-  project_slug: string
-}): Promise<Response> {
-  try {
-    const { deleted } = await deleteApiKey({
-      registry: input.cores.registry,
-      secretsStore: input.secretsStore,
-      project_slug: input.project_slug,
-      label: input.label,
-    })
-    return jsonResponse(200, { ok: true, label: input.label, deleted })
-  } catch (err) {
-    return integrationsErrorResponse(err)
-  }
-}
-
-function integrationsErrorResponse(err: unknown): Response {
-  if (err instanceof IntegrationsError) {
-    const status = err.code === 'unknown_label' ? 400 : 422
-    return jsonResponse(status, { ok: false, code: err.code, message: err.message })
-  }
-  throw err
 }
 
 function collectKnownLabels(

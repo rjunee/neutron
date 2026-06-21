@@ -230,6 +230,11 @@ async function buildComposedHttpFromComposition(
   if (composition.cores_oauth_surface !== undefined) {
     composeInput.coresOAuth = { handler: composition.cores_oauth_surface.handler }
   }
+  if (composition.cores_integrations_surface !== undefined) {
+    composeInput.coresIntegrations = {
+      handler: composition.cores_integrations_surface.handler,
+    }
+  }
   if (composition.notes_drawer_browser_surface !== undefined) {
     composeInput.notesDrawerBrowser = {
       handler: composition.notes_drawer_browser_surface.handler,
@@ -272,6 +277,7 @@ async function buildComposedHttpFromComposition(
     composition.app_backups_surface !== undefined ||
     composition.cores_surface !== undefined ||
     composition.cores_oauth_surface !== undefined ||
+    composition.cores_integrations_surface !== undefined ||
     composition.notes_drawer_browser_surface !== undefined
   if (!hasAnyChainedSurface) return null
   return composeHttpHandler(composeInput)

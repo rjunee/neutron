@@ -1,11 +1,19 @@
 /**
  * WAVE 2 Track A — `/api/cores/integrations` + `/api/cores/api-keys/*`
- * HTTP surface tests (folded into the Cores OAuth surface).
+ * HTTP surface tests (dedicated `cores-integrations-surface.ts`).
+ *
+ * This surface is mounted INDEPENDENT of the Google-OAuth client gate
+ * (Argus PR #13 IMPORTANT #2): it takes NO OAuth client config, only the
+ * bundled-Cores registry + a SecretsStore + a token manager (for OAuth-slot
+ * status reads). So these tests construct it WITHOUT any Google OAuth client
+ * — exactly the deployment shape (Cores + bearer auth, no Google client)
+ * that previously 404'd on all standalone API-key management.
  *
  * Covers:
  *   - GET /api/cores/integrations lists OAuth accounts + API-key slots
  *     with the correct connected status (the data behind the UI).
- *   - POST /api/cores/api-keys/<label> stores a key (real mutation).
+ *   - POST /api/cores/api-keys/<label> stores a key (real mutation) — with
+ *     NO Google OAuth client wired.
  *   - DELETE /api/cores/api-keys/<label> clears it.
  *   - unknown label → 400; missing bearer → 401.
  */
@@ -22,16 +30,11 @@ import { SecretsStore } from '../../auth/secrets-store.ts'
 import { ToolRegistry } from '../../tools/registry.ts'
 import { createAppWsAuthResolver } from '../../channels/index.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
-import { CoresOAuthPendingStore } from '../cores/oauth-pending-store.ts'
 import { OAuthTokenManager, GOOGLE_REVOKE_URL, metaLabel } from '../cores/oauth-token-manager.ts'
-import { createCoresOAuthSurface } from '../http/cores-oauth-surface.ts'
+import { createCoresIntegrationsSurface } from '../http/cores-integrations-surface.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const OWNER = 'integrations-surface-test'
-const SHARED_SECRET = 'test-shared-secret'
-const REDIRECT_URI = 'https://auth.test/oauth/cores/google/callback'
-const OWNER_BASE_URL = 'https://owner.neutron.example'
-const IDENTITY_BASE_URL = 'https://auth.test'
 
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => {
@@ -65,30 +68,22 @@ async function makeBench() {
     if (url.startsWith(GOOGLE_REVOKE_URL)) return new Response('{}', { status: 200 })
     return new Response('not found', { status: 404 })
   }) as (input: string | URL | Request, init?: RequestInit) => Promise<Response>
-  const pending = new CoresOAuthPendingStore({ db })
+  // No Google OAuth client: empty client creds, exactly as wireCoresSurfaces
+  // builds the token manager on a no-OAuth deployment. getStatus only reads
+  // SecretsStore rows, so OAuth-slot status still renders.
   const tokens = new OAuthTokenManager({
     secretsStore: secrets,
     internal_handle: OWNER,
-    client_id: 'cid',
-    client_secret: 'csecret',
+    client_id: '',
+    client_secret: '',
     fetch: fakeFetch,
   })
-  const surface = createCoresOAuthSurface({
-    cores,
-    pending,
+  const surface = createCoresIntegrationsSurface({
+    registry: cores.registry,
     tokens,
     secretsStore: secrets,
-    projectDb: db,
-    dataDir: home,
-    tools,
     project_slug: OWNER,
-    identityBaseUrl: IDENTITY_BASE_URL,
-    ownerBaseUrl: OWNER_BASE_URL,
-    redirectUri: REDIRECT_URI,
-    clientId: 'cid',
-    internalSharedSecret: SHARED_SECRET,
     auth,
-    fetch: fakeFetch,
   })
   const server = Bun.serve({
     port: 0,
@@ -104,7 +99,7 @@ function authed(base: string, path: string, init: RequestInit = {}): Promise<Res
   return fetch(`${base}${path}`, { ...init, headers })
 }
 
-test('GET /api/cores/integrations lists OAuth + API-key slots with status', async () => {
+test('GET /api/cores/integrations lists OAuth + API-key slots with status (no Google client wired)', async () => {
   const b = await makeBench()
   // Seed one connected Google account + one stored API key.
   await b.secrets.put({
@@ -144,7 +139,7 @@ test('GET /api/cores/integrations lists OAuth + API-key slots with status', asyn
   expect(JSON.stringify(body)).not.toContain('tvly-1')
 })
 
-test('POST then DELETE /api/cores/api-keys/tavily mutates stored state', async () => {
+test('POST then DELETE /api/cores/api-keys/tavily mutates stored state (no Google client wired)', async () => {
   const b = await makeBench()
   const setRes = await authed(b.base, '/api/cores/api-keys/tavily', {
     method: 'POST',

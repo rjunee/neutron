@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 
 import { signOut } from '../lib/auth';
+import { shouldRedirectToLogin } from '../lib/auth-helpers';
 import { loadAppConfig } from '../lib/config';
 import { disablePushForUser } from '../lib/push';
 import { useAuthSession } from '../lib/session';
@@ -39,8 +40,8 @@ export default function SettingsScreen() {
     // Only redirect to /login once the session provider has finished
     // hydrating — otherwise a fresh page-load on /settings bounces to
     // /login during the first paint even when a token exists in
-    // persistent storage.
-    if (status === 'ready' && user === null) {
+    // persistent storage. Shared guard (see app/integrations.tsx).
+    if (shouldRedirectToLogin({ status, user })) {
       router.replace('/login');
     }
   }, [router, status, user]);

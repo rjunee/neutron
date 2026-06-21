@@ -43,6 +43,26 @@ export function buildStartUrl(input: {
 }
 
 /**
+ * Decide whether an auth-gated screen should redirect to `/login`.
+ *
+ * The session provider starts in `'hydrating'` (reading the persisted token
+ * from storage) and flips to `'ready'` once that resolves. During hydration
+ * `user` is transiently `null` even for a signed-in user, so a guard that
+ * redirects on `user === null` ALONE bounces an authenticated user to /login
+ * on a direct load / refresh / deep-link before the token finishes loading.
+ *
+ * Redirect ONLY once auth has RESOLVED to genuinely-unauthenticated, i.e.
+ * `status === 'ready' && user === null`. This is the shared guard behind both
+ * `app/settings.tsx` and `app/integrations.tsx` (Argus PR #13 BLOCKING).
+ */
+export function shouldRedirectToLogin(input: {
+  status: 'hydrating' | 'ready';
+  user: unknown;
+}): boolean {
+  return input.status === 'ready' && input.user === null;
+}
+
+/**
  * Parse the OAuth callback URL the identity service emits. The
  * landing page either deep-links to `neutron://oauth/callback?token=…&state=…`
  * (native) or hands the same query string to the in-page callback

@@ -2,6 +2,55 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Integrations PR #13 fix-pass (Argus: 1 blocker + 2 important)
+
+Addresses the Argus review of PR #13 (`feat-integrations-admin-ui-wave2-clean`).
+
+**[BLOCKING] Session-hydration redirect bounced authenticated users to /login.**
+`app/app/integrations.tsx`'s redirect effect fired whenever `user === null`
+without guarding on the hydration state — so a direct load / refresh / deep-link
+of `/integrations` bounced an already-signed-in user to `/login` while the token
+was still being read from storage (`user` is transiently null during
+`status === 'hydrating'`). FIX: extracted the decision into a pure, unit-tested
+helper `shouldRedirectToLogin({status, user})` (`app/lib/auth-helpers.ts`) that
+redirects ONLY on `status === 'ready' && user === null`, and routed BOTH
+`integrations.tsx` and `settings.tsx` through it (DRY — settings already had the
+correct guard inline). Tests: `app/__tests__/auth-helpers.test.ts` — hydrated+authed
+user NOT redirected, mid-hydration user NOT redirected, resolved-unauthenticated
+IS redirected.
+
+**[IMPORTANT] Standalone API-key surface was gated on the Google-OAuth client.**
+The `/api/cores/integrations` + `/api/cores/api-keys/*` routes AND the
+`integrations_*` chat tools were mounted only inside the `input.cores.oauth !==
+undefined` branch of `wire-cores-surfaces.ts`, so a Cores + bearer-auth
+deployment with NO Google OAuth client 404'd on ALL standalone API-key
+management (e.g. Tavily) — even though API keys never need Google OAuth. FIX:
+extracted a dedicated **`gateway/http/cores-integrations-surface.ts`** owning
+those routes, mounted under the AUTH gate (new `cores_integrations_surface`
+composition slot, chained ahead of `/api/cores` in `compose.ts`), INDEPENDENT of
+the OAuth-client gate. The OAuth token manager is now built under the auth gate
+too (empty client creds when no Google client — `getStatus`/`disconnect` only
+read/delete SecretsStore rows). `integrations_connect` on an OAuth slot returns a
+clear `oauth_not_configured` error when no client is wired; API-key connect works
+regardless. Tests: `cores-integrations-surface.test.ts` now constructs the
+surface with NO Google client (empty creds) and proves list/set/delete all work.
+
+**[IMPORTANT] OAuth-disconnect parity (chat ≠ UI).** The UI/HTTP disconnect
+revoked tokens AND flagged every affected Core `install_failed_dependency_missing`;
+the chat `integrations_disconnect` tool revoked tokens ONLY (its deps didn't even
+carry `projectDb`), so after a chat disconnect `/api/cores` still reported the
+Core `installed` with a silently-broken dependency. FIX: extracted a shared
+**`disconnectOAuth({tokens, registry, projectDb, project_slug, label})`** brain in
+`gateway/cores/integrations.ts` that BOTH the HTTP `handleDisconnect` and the chat
+tool now call (mirrors how `runOAuthStart`/`startOAuth` unifies connect); threaded
+`input.db` into `buildIntegrationsTools`. Tests: `integrations-tools.test.ts` —
+chat disconnect flips the affected Core's `install_state` to
+`install_failed_dependency_missing` (real DB mutation) + returns `affected_cores`.
+
+**Verification:** `bunx tsc --noEmit` clean (root + `app/`); FULL
+`scripts/run-tests.sh` GREEN — 731 files / 8 bounded-memory chunks, 0 failed,
+coverage audit PASS. `composer.ts` untouched.
+
 ## 2026-06-21 — Integrations admin UI + agent-native parity (WAVE 2 Track A, gap-audit §(b) cat 9)
 
 One surface that SHOWS everything a project has connected — per-Core Google

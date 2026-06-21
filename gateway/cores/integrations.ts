@@ -29,6 +29,7 @@
  */
 
 import type { SecretsStore } from '../../auth/secrets-store.ts'
+import type { ProjectDb } from '../../persistence/index.ts'
 import { metaLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,
@@ -295,6 +296,67 @@ export async function deleteApiKey(
   if (match === undefined) return { deleted: false }
   await input.secretsStore.delete(match.id)
   return { deleted: true }
+}
+
+export interface DisconnectOAuthInput {
+  /** Token manager for the per-project SecretsStore (revoke + delete). */
+  tokens: OAuthTokenManager
+  /** Bundled-Cores registry view — used to find every Core sharing the label. */
+  registry: IntegrationsRegistryView
+  /** Project DB — for the per-Core `install_state` write. */
+  projectDb: ProjectDb
+  project_slug: string
+  label: string
+}
+
+export interface DisconnectOAuthResult {
+  /** `true` when at least one stored token row was deleted. */
+  deleted: boolean
+  /** Slugs of every bundled Core that declared the disconnected label. */
+  affected_cores: string[]
+}
+
+/**
+ * SHARED OAuth-disconnect brain — the single mutation both the HTTP admin
+ * surface (`POST /api/cores/oauth/google/disconnect/<label>`) and the
+ * agent-native `integrations_disconnect` chat tool route through, so the two
+ * paths can't diverge (mirrors how `runOAuthStart`/`startOAuth` already
+ * unify connect). Two effects, in order:
+ *
+ *   1. Revoke + delete the stored tokens via the manager.
+ *   2. Flag EVERY bundled Core that declares the label as
+ *      `install_failed_dependency_missing`, so `/api/cores` surfaces a
+ *      reconnect cue instead of still reporting the Core `installed` with a
+ *      silently-broken dependency.
+ *
+ * Before this brain existed the chat tool did (1) only — leaving the Core
+ * reporting `installed` after a chat disconnect (Argus PR #13 IMPORTANT #3).
+ */
+export async function disconnectOAuth(
+  input: DisconnectOAuthInput,
+): Promise<DisconnectOAuthResult> {
+  const { deleted } = await input.tokens.disconnect(input.label)
+  // Lazy import to avoid a static cycle with the install lifecycle (mirrors
+  // the OAuth surface's onInvalidGrant callback).
+  const { updateInstallState } = await import('./install-bundled.ts')
+  const affected_cores: string[] = []
+  for (const core of input.registry.list()) {
+    if (core.manifest.secrets.some((s) => s.label === input.label)) {
+      affected_cores.push(core.slug)
+      try {
+        await updateInstallState(
+          input.projectDb,
+          input.project_slug,
+          core.slug,
+          'install_failed_dependency_missing',
+        )
+      } catch {
+        // best-effort — a single Core's state write must not fail the whole
+        // disconnect.
+      }
+    }
+  }
+  return { deleted, affected_cores }
 }
 
 // Re-export the suffix helpers so callers constructing oauth row shapes
