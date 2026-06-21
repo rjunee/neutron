@@ -330,6 +330,46 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(result.thread_id).toBe('thread-42')
   })
 
+  test('email_send sends, applies the owner visibility labels, and writes an audit ok row', async () => {
+    const { client, summarizer } = buildFixtures()
+    const manifest = loadManifest()
+    const tools = buildTools({ manifest, project_slug: OWNER, audit, client, summarizer })
+
+    const result = await tools.email_send({
+      to: ['alice@example.com'],
+      subject: 'hello',
+      body: 'hi there',
+    })
+    expect(result.message_id.length).toBeGreaterThan(0)
+    expect(result.applied_labels).toContain('INBOX')
+    expect(result.applied_labels).toContain('IMPORTANT')
+    expect(result.applied_labels).toContain('UNREAD')
+    // The sent message is SENT-labeled, not DRAFT.
+    const { message } = await tools.email_read({ message_id: result.message_id })
+    expect(message.label_ids).toContain('SENT')
+    expect(message.label_ids).not.toContain('DRAFT')
+    // Audit row for the send dispatch.
+    const rows = await audit.list({ project_slug: OWNER, core_slug: 'email_managed_core' })
+    const ok = rows.filter((r) => r.outcome === 'ok' && r.label === 'email_send')
+    expect(ok.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('capability gate: stripping the send capability rejects email_send but leaves draft_prepare working', async () => {
+    const { client, summarizer } = buildFixtures()
+    const base = loadManifest()
+    const manifest: NeutronManifest = {
+      ...base,
+      capabilities: base.capabilities.filter((c) => c !== 'write:email_managed_core.send'),
+    }
+    const tools = buildTools({ manifest, project_slug: OWNER, audit, client, summarizer })
+    await expect(
+      tools.email_send({ to: ['a@x.com'], subject: 's', body: 'b' }),
+    ).rejects.toBeInstanceOf(CapabilityDeniedError)
+    // draft_prepare still works (its capability is untouched).
+    const draft = await tools.email_draft_prepare({ to: ['a@x.com'], subject: 's', body: 'b' })
+    expect(draft.applied_labels).toContain('INBOX')
+  })
+
   test('capability gate: stripped WRITE_CAPABILITY rejects draft_prepare, leaves the four read tools intact', async () => {
     const { client, summarizer } = buildFixtures()
     client.seed({ id: 'msg-1', subject: 's', from: 'a@x.com', body_text: 'hi' })

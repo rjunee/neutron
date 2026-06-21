@@ -115,6 +115,9 @@ describe('Sam 4-point draft policy (load-bearing)', () => {
           applied_labels: ['INBOX', 'IMPORTANT', 'UNREAD'],
         }
       },
+      async sendMessage() {
+        return { message_id: 'sent-stub', thread_id: 'thread-stub', applied_labels: [] }
+      },
       async ensureProjectLabel() {
         return { label_id: 'Label_x', label_name: 'Neutron/x', created: false }
       },
@@ -158,6 +161,9 @@ describe('Sam 4-point draft policy (load-bearing)', () => {
           'msg-orphan',
           new Error('threads.modify failed: 500'),
         )
+      },
+      async sendMessage() {
+        return { message_id: 'sent-stub', thread_id: 'thread-stub', applied_labels: [] }
       },
       async ensureProjectLabel() {
         return { label_id: 'Label_x', label_name: 'Neutron/x', created: false }

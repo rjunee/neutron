@@ -44,9 +44,15 @@ const INSTALLED_SLUGS = [
   'agent_settings',
   ...(HAS_PAID_STAGING ? ['dtc_analytics'] : []),
 ].sort()
-// total catalog rows = installed + the 2 manifest_invalid failures
-// (calendar_core, email_managed_core).
-const EXPECTED_CATALOG_LEN = INSTALLED_SLUGS.length + 2
+// OAuth-gated Cores the Noop prompter can't install (manifest_invalid):
+// Calendar + Email + the Google Workspace Core (gap-audit P0-6).
+const FAILED_SLUGS = [
+  'calendar_core',
+  'email_managed_core',
+  'google_workspace_core',
+].sort()
+// total catalog rows = installed + the manifest_invalid failures.
+const EXPECTED_CATALOG_LEN = INSTALLED_SLUGS.length + FAILED_SLUGS.length
 
 interface Bench {
   ownerHome: string
@@ -135,7 +141,7 @@ describe('GET /api/cores', () => {
     const installed = body.cores.filter((c) => c.install_state === 'installed').map((c) => c.slug).sort()
     const failed = body.cores.filter((c) => c.install_state === 'failed').map((c) => c.slug).sort()
     expect(installed).toEqual(INSTALLED_SLUGS)
-    expect(failed).toEqual(['calendar_core', 'email_managed_core'])
+    expect(failed).toEqual(FAILED_SLUGS)
     for (const c of body.cores.filter((c) => c.install_state === 'failed')) {
       expect(c.install_error?.code).toBe('manifest_invalid')
     }

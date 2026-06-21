@@ -52,6 +52,7 @@ const DISCOVERED_SLUGS = [
   'calendar_core',
   'codegen_core',
   'email_managed_core',
+  'google_workspace_core',
   'notes',
   'reminders_core',
   'research_core',
@@ -67,6 +68,14 @@ const INSTALLED_SLUGS = [
   'tasks_core',
   'agent_settings',
   ...(HAS_PAID_STAGING ? ['dtc_analytics'] : []),
+].sort()
+// Cores with a `required: true` OAuth secret the Noop prompter can't
+// satisfy → install_failed(manifest_invalid). Calendar + Email + the
+// Google Workspace Core (gap-audit P0-6) all gate on Google OAuth.
+const FAILED_SLUGS = [
+  'calendar_core',
+  'email_managed_core',
+  'google_workspace_core',
 ].sort()
 const EXPECTED_DISCOVERED = DISCOVERED_SLUGS.length
 const EXPECTED_INSTALLED = INSTALLED_SLUGS.length
@@ -140,12 +149,9 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
       rootDirs: [REPO_ROOT],
     })
     expect(result.installed.size).toBe(EXPECTED_INSTALLED)
-    expect(result.failures.length).toBe(2)
+    expect(result.failures.length).toBe(FAILED_SLUGS.length)
     const failedSlugs = result.failures.map((f) => f.core_slug).sort()
-    expect(failedSlugs).toEqual([
-      'calendar_core',
-      'email_managed_core',
-    ])
+    expect(failedSlugs).toEqual(FAILED_SLUGS)
     for (const failure of result.failures) {
       expect(failure.code).toBe('manifest_invalid')
     }
@@ -191,8 +197,8 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
     }
   })
 
-  test('failure-rate gate (50%) is NOT tripped — 2 failures of the discovered set', async () => {
-    // No throw expected — 2 of 8/9 (~22-25%) is well under the 50% gate.
+  test('failure-rate gate (50%) is NOT tripped — OAuth-gated failures of the discovered set', async () => {
+    // No throw expected — 3 of 9/10 (~30-33%) is well under the 50% gate.
     const result = await installBundledCores({
       project_slug: OWNER,
       projectDb: bench.db,
@@ -202,7 +208,7 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
       rootDirs: [REPO_ROOT],
     })
     expect(result.discovered).toBe(EXPECTED_DISCOVERED)
-    expect(result.failures.length).toBe(2)
+    expect(result.failures.length).toBe(FAILED_SLUGS.length)
   })
 
   test('a second installBundledCores call is idempotent — no duplicate rows, no re-prompted secrets', async () => {
