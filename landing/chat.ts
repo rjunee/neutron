@@ -191,6 +191,65 @@ export function buildSlugRenamedTarget(
   return target
 }
 
+/**
+ * Allow-list the scheme of a navigation target before it is handed to a
+ * `window.location` sink. The slug-rename / redirect envelopes arrive over the
+ * authenticated gateway WebSocket, but a value that flows into `location` is
+ * still treated as untrusted: a `javascript:` (or `data:`/`vbscript:`) URL in a
+ * location sink is a DOM-XSS execution vector, and an unconstrained host is an
+ * open redirect (CodeQL js/xss + js/client-side-unvalidated-url-redirection).
+ *
+ * Relative inputs resolve against the current document so a same-app path is
+ * accepted; everything is normalized through the URL parser and only returned
+ * when it resolves to an `http`/`https` URL with a non-empty host. Callers must
+ * navigate to the RETURNED value (not the raw input) so the check is on the
+ * exact string that reaches the sink. Returns null when the target is unsafe —
+ * callers then refuse to navigate rather than trust an arbitrary scheme.
+ */
+export function safeNavUrl(raw: string): string | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null
+  const base =
+    typeof window !== 'undefined' && window.location
+      ? window.location.href
+      : undefined
+  let url: URL
+  try {
+    url = base !== undefined ? new URL(raw, base) : new URL(raw)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  if (url.hostname.length === 0) return null
+  return url.href
+}
+
+/**
+ * Allow-list an `<img src>` value (image-gallery option thumbnails). Image
+ * URLs ride in over the WS too; we accept only `http`/`https` (incl. relative
+ * paths like `/profile-pic/candidate/<id>.png`, which resolve to the app
+ * origin) and inline `data:image/*` payloads. Any other scheme — notably
+ * `javascript:` — yields null so the caller falls back to a text label rather
+ * than writing an attacker-influenced scheme to the DOM (CodeQL js/xss).
+ */
+export function safeImageSrc(raw: string): string | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null
+  const base =
+    typeof window !== 'undefined' && window.location
+      ? window.location.href
+      : undefined
+  let url: URL
+  try {
+    url = base !== undefined ? new URL(raw, base) : new URL(raw)
+  } catch {
+    return null
+  }
+  if (url.protocol === 'http:' || url.protocol === 'https:') return url.href
+  if (url.protocol === 'data:' && url.pathname.startsWith('image/')) {
+    return url.href
+  }
+  return null
+}
+
 export interface UserMessage {
   type: 'user_message'
   body: string
@@ -2302,14 +2361,21 @@ export class ChatClient {
     if (win?.__neutron_debug === true) {
       target = `${target}&debug=1`
     }
+    // Scheme/host allow-list before the location sink — refuse a
+    // javascript:/data: target (DOM-XSS) or an unparseable redirect.
+    const safe = safeNavUrl(target)
+    if (safe === null) {
+      this.setStatus('error', 'redirect blocked: unsafe target')
+      return
+    }
     this.setStatus('connecting', `redirecting to ${msg.project_slug}.…`)
     try {
-      window.location.replace(target)
+      window.location.replace(safe)
     } catch {
       // Defensive fallback for environments where replace throws (test
       // jsdom, sandboxed iframe). location.assign + hard set still
       // produce a navigation in real browsers.
-      window.location.href = target
+      window.location.href = safe
     }
   }
 
@@ -2369,11 +2435,17 @@ export class ChatClient {
     btn.textContent = 'Open your agent →'
     btn.addEventListener('click', () => {
       this.consumeButtons(grid, btn)
+      // Scheme/host allow-list before the location sink (see safeNavUrl).
+      const safe = safeNavUrl(target)
+      if (safe === null) {
+        this.setStatus('error', 'open blocked: unsafe target')
+        return
+      }
       this.setStatus('connecting', `opening ${msg.new_slug}.…`)
       try {
-        window.location.assign(target)
+        window.location.assign(safe)
       } catch {
-        window.location.href = target
+        window.location.href = safe
       }
     })
     grid.appendChild(btn)
@@ -2587,10 +2659,16 @@ export class ChatClient {
       for (const opt of msg.options) {
         const btn = document.createElement('button')
         btn.type = 'button'
-        if (isGallery && typeof opt.image_url === 'string' && opt.image_url.length > 0) {
+        // Allow-list the thumbnail scheme; an unsafe (e.g. javascript:) src
+        // falls through to the plain-text label below (CodeQL js/xss).
+        const safeThumb =
+          isGallery && typeof opt.image_url === 'string'
+            ? safeImageSrc(opt.image_url)
+            : null
+        if (safeThumb !== null) {
           btn.className = 'thumb'
           const img = document.createElement('img')
-          img.src = opt.image_url
+          img.src = safeThumb
           img.alt = opt.body
           img.loading = 'lazy'
           btn.appendChild(img)

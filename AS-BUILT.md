@@ -46,6 +46,46 @@ flags). `bun test app/__tests__/restore-ui.test.ts` → 19/19. `bunx tsc --noEmi
 clean. First CI run confirmed both `grepScoped` tests PASS on the stock runner
 (grep fallback works) — only the unrelated date flake was red, now fixed.
 
+## 2026-06-20 — chat client: scheme/host allow-list on navigation + image sinks (CodeQL js/xss + open-redirect)
+
+Post-public-flip security hardening on rjunee/neutron; PR-B. CodeQL flagged 8
+alerts in `landing/chat.ts` (3 js/xss + 5 js/client-side-unvalidated-url-
+redirection), all on three DOM sinks that consume values arriving over the
+gateway WebSocket. VERIFIED each, then fixed at the sink.
+
+**The three sinks.**
+- `handleRedirect` (redirect envelope) → `window.location.replace/href = target`
+  built from `msg.new_url` + `msg.new_start_token`.
+- `handleSlugRenamed` (slug-rename CTA click) → `window.location.assign/href =
+  target` built from `buildSlugRenamedTarget(msg.new_host, …)`.
+- image-gallery option render → `img.src = opt.image_url`.
+
+**Why it's a real sink class.** Even though these envelopes come from the
+authenticated gateway, a value that flows into `window.location` is an
+execution sink: a `javascript:` (or `data:`/`vbscript:`) URL there is DOM-XSS,
+and an unconstrained host is an open redirect. The chat agent/LLM can influence
+some of these fields, so they are treated as untrusted at the boundary.
+
+**The fix — allow-list at the sink (escape-the-scheme, validate-the-target).**
+Two exported, unit-tested helpers in `landing/chat.ts`:
+- `safeNavUrl(raw)`: parses the target (relative resolves against the current
+  document), returns it only when it normalizes to an `http:`/`https:` URL with
+  a non-empty host, else null. Both location handlers now navigate to the
+  RETURNED value (so the check is on the exact string that reaches the sink) and
+  refuse to navigate (status "redirect/open blocked: unsafe target") when null.
+- `safeImageSrc(raw)`: accepts only `http`/`https` (incl. relative paths that
+  resolve to the app origin) and inline `data:image/*`; any other scheme →
+  null, and the gallery option falls back to its plain-text label.
+
+**Tests.** NEW `landing/__tests__/chat-url-sanitizers.test.ts` (12) pins
+http(s) pass-through + rejection of `javascript:`/`data:`/`vbscript:`/`file:`/
+empty/garbage for `safeNavUrl`, and http(s)/`data:image` accept + `javascript:`/
+non-image-`data:` reject for `safeImageSrc`. Existing
+`chat-slug-renamed-target.test.ts` (13), `chat-slug-renamed-cta.test.ts`,
+`option-grid-layout.test.ts`, `chat-rendering.test.ts` (39 combined) stay green
+— behaviour for legitimate http(s) targets is unchanged. `bunx tsc --noEmit`
+clean.
+
 ## 2026-06-20 — #314: deterministic port bind on restart (no silent random-port fallback)
 
 Owner-confirmed P1 self-host defect (#314), fixed on
