@@ -204,6 +204,36 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(store.listDue(now_sec).map((x) => x.id)).toContain(r.id)
   })
 
+  test('#319 a concurrent reschedule during dispatch is NOT clobbered by the claim revert', async () => {
+    const store = new ReminderStore(db)
+    const now_sec = 10_000_000
+    const initial_fire = now_sec - 10
+    const owner_new_fire = now_sec + 99_999 // owner moves it far into the future
+    const r = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: initial_fire,
+      message: 'weekly-raced',
+      recurrence: 'weekly',
+    })
+    const dispatcher: ReminderDispatcher = {
+      dispatch: async (rem) => {
+        // Simulate the owner rescheduling WHILE the (long) dispatch is in
+        // flight — the claim already advanced fire_at; this overrides it.
+        await store.reschedule(rem.id, owner_new_fire)
+        throw new Error('post failed after the owner rescheduled')
+      },
+    }
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
+
+    await loop.runOnce()
+    // The revert is a CAS keyed on the claimed fire_at, so the owner's new time
+    // survives — it is NOT overwritten back to the original due time.
+    const after = store.get(r.id)
+    expect(after?.status).toBe('pending')
+    expect(after?.fire_at).toBe(owner_new_fire)
+  })
+
   test('recurring rows roll forward to the next occurrence instead of marking fired', async () => {
     const store = new ReminderStore(db)
     const now_sec = 10_000_000

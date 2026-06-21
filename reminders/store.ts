@@ -210,6 +210,36 @@ export class ReminderStore {
   }
 
   /**
+   * #319 — undo a recurring claim's `advanceRecurrence` ONLY if the row still
+   * carries the exact `fire_at` the claim wrote (`claimed_fire_at`). This is a
+   * compare-and-swap so the tick loop's revert (after a failed dispatch)
+   * cannot clobber a concurrent owner reschedule that ran during the dispatch
+   * await: if the owner changed `fire_at` to anything else, the CAS no-ops and
+   * their value survives. Returns `true` iff the row was reverted.
+   */
+  async revertRecurrenceAdvance(
+    id: string,
+    claimed_fire_at: number,
+    original_fire_at: number,
+  ): Promise<boolean> {
+    const before = this.get(id)
+    if (
+      before === null ||
+      before.status !== 'pending' ||
+      before.recurrence === null ||
+      before.fire_at !== claimed_fire_at
+    ) {
+      return false
+    }
+    await this.db.run(
+      `UPDATE reminders SET fire_at = ?
+        WHERE id = ? AND status = 'pending' AND recurrence IS NOT NULL AND fire_at = ?`,
+      [original_fire_at, id, claimed_fire_at],
+    )
+    return true
+  }
+
+  /**
    * P2 v2 S9 (Codex S9-r1 P1) — advance a recurring reminder's `fire_at`
    * to its next occurrence. Used by the tick loop INSTEAD of `markFired`
    * for rows where `recurrence !== null`: the row stays `pending` and

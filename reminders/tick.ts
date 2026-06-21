@@ -139,8 +139,12 @@ export class ReminderTickLoop {
           )
           const advanced = await this.store.advanceRecurrence(reminder.id, next_fire_at_sec)
           if (advanced) {
-            // Revert = restore the original (due) fire_at so it re-fires.
-            claimRevert = () => this.store.reschedule(reminder.id, reminder.fire_at)
+            // Revert = restore the original (due) fire_at so it re-fires — but
+            // ONLY if the row still carries the fire_at this claim wrote. A
+            // compare-and-swap so a concurrent owner reschedule during the
+            // dispatch await isn't clobbered by the revert (#319).
+            claimRevert = () =>
+              this.store.revertRecurrenceAdvance(reminder.id, next_fire_at_sec, reminder.fire_at)
           } else {
             // Defensive: the row stopped being a pending recurring row between
             // listDue + now (e.g. cancelled mid-tick) — finalize as fired.
