@@ -129,6 +129,107 @@ describe('double-spawn guard', () => {
     expect(registry.live()).toHaveLength(2)
   })
 
+  test('nested: concurrent spawns sharing a key create exactly ONE record (no TOCTOU race)', async () => {
+    // Regression for the race where the guard read ran BEFORE the
+    // `await verify_delegation`, letting two concurrent nested spawns both
+    // pass the check and both create a record. The guard now reads liveByKey
+    // immediately before the synchronous create (after the await), so the
+    // second caller always sees the first's record.
+    const registry = new SubagentRegistry()
+    const parent = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: verify, mint_run_id: () => 'parent' },
+    )
+    const key = 'instance-a:nested-task:atlas'
+    // A verifier that yields the event loop (a real JWT verify is async), so
+    // the two spawns interleave at the await point.
+    const yieldingVerify = async () => {
+      await Promise.resolve()
+      return validClaims
+    }
+    const ids = makeIds('child')
+    const [a, b] = await Promise.all([
+      spawnSubagent(
+        { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: key },
+        { registry, verify_delegation: yieldingVerify, mint_run_id: ids },
+      ),
+      spawnSubagent(
+        { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: key },
+        { registry, verify_delegation: yieldingVerify, mint_run_id: ids },
+      ),
+    ])
+    // Both resolve to the SAME single child record.
+    expect(a.run_id).toBe(b.run_id)
+    // Only one child of the parent exists (plus the parent = 2 total).
+    expect(registry.byParent(parent.run_id)).toHaveLength(1)
+    expect(registry.snapshot()).toHaveLength(2)
+  })
+
+  test('nested: an UNauthorized request (no token) with a guessed key throws — never coalesces', async () => {
+    // Regression for the leak where coalescing happened BEFORE nested
+    // authorization, handing a malformed/forged request another run's record.
+    const registry = new SubagentRegistry()
+    const parent = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: verify, mint_run_id: () => 'parent' },
+    )
+    const key = 'instance-a:secret-task:atlas'
+    // A legitimate, authorized nested child holds the key.
+    await spawnSubagent(
+      { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'legit-child' },
+    )
+    // An attacker who guesses the key but presents NO delegation token must be
+    // rejected on authorization — not handed the live record.
+    await expect(
+      spawnSubagent(
+        { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', spawn_key: key },
+        { registry, verify_delegation: verify, mint_run_id: () => 'attacker' },
+      ),
+    ).rejects.toThrow(/requires a signed delegation token/)
+  })
+
+  test('nested: a request whose delegation token fails verification throws — never coalesces', async () => {
+    const registry = new SubagentRegistry()
+    const parent = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: verify, mint_run_id: () => 'parent' },
+    )
+    const key = 'instance-a:t:atlas'
+    await spawnSubagent(
+      { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'legit' },
+    )
+    await expect(
+      spawnSubagent(
+        { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'forged', spawn_key: key },
+        {
+          registry,
+          verify_delegation: async () => {
+            throw new Error('bad signature')
+          },
+          mint_run_id: () => 'attacker',
+        },
+      ),
+    ).rejects.toThrow(/bad signature/)
+  })
+
+  test('the guard is instance-scoped: a same key on a different instance does NOT coalesce', async () => {
+    const registry = new SubagentRegistry()
+    const key = 'shared-key'
+    const a = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'A' },
+    )
+    registry.update(a.run_id, { status: 'running' })
+    const b = await spawnSubagent(
+      { instance_key: 'instance-b', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'B' },
+    )
+    expect(b.run_id).toBe('B')
+    expect(registry.live()).toHaveLength(2)
+  })
+
   test('coalesce returns the in-flight twin WITHOUT consuming a concurrency slot', async () => {
     // The duplicate must not be blocked by the global cap — the original twin
     // already counts toward it, and coalescing adds nothing.

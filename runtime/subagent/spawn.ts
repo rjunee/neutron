@@ -4,14 +4,20 @@
  * Lifted from OpenClaw's `subagent-spawn.ts` shape, hardened with the
  * Hermes-style signed-delegation tokens.
  *
- * Validation chain (each step throws on violation):
+ * Validation chain (each step throws on violation), in order:
  *
- *   0. double-spawn guard: if `spawn_key` is set and a LIVE record already
- *      holds it, coalesce (return the in-flight record) or refuse (throw)
- *   1. spawn_depth ≤ MAX_SPAWN_DEPTH (walk parent ancestry)
- *   2. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT
+ *   1. nested authorization (only when `parent_run_id` is set):
+ *        a. parent exists + spawn_depth ≤ MAX_SPAWN_DEPTH
+ *        b. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT
+ *        c. delegation token present, verifies, and its claims match the
+ *           requested instance + depth
+ *   2. double-spawn guard: if `spawn_key` is set and a same-instance LIVE
+ *      record already holds it, coalesce (return the in-flight record) or
+ *      refuse (throw). Runs AFTER step 1 so a coalesce only ever returns an
+ *      authorized caller their own in-flight twin, and after the step-1 `await`
+ *      so the check-then-create is atomic (no TOCTOU); runs BEFORE step 3 so a
+ *      coalesced duplicate is never blocked by the concurrency cap.
  *   3. live registry size < MAX_CONCURRENT_SUBAGENTS
- *   4. delegation token verifies + claims match expected scope
  *
  * Returns the freshly-created `SubagentRecord` (status=`pending`). The caller
  * is responsible for kicking off the actual substrate dispatch and calling
@@ -93,31 +99,22 @@ export async function spawnSubagent(
   input: SpawnInput,
   deps: SpawnDeps,
 ): Promise<SubagentRecord> {
-  // (0) Double-spawn guard. Consulted FIRST so coalescing a duplicate is never
-  // blocked by the concurrency cap (the in-flight twin already counts toward
-  // it) and never mints a wasted run_id.
-  if (input.spawn_key !== undefined) {
-    const inflight = deps.registry.liveByKey(input.spawn_key)
-    if (inflight) {
-      if (input.on_duplicate === 'refuse') {
-        throw new Error(
-          `subagent spawn: duplicate in-flight spawn for key ${JSON.stringify(input.spawn_key)} ` +
-            `(live run_id=${inflight.run_id}, status=${inflight.status}); refusing`,
-        )
-      }
-      // Coalesce: hand back the existing run so the caller awaits the one
-      // genuine process instead of starting a second.
-      return inflight
-    }
-  }
-
-  const live = deps.registry.live()
-  if (live.length >= MAX_CONCURRENT_SUBAGENTS) {
-    throw new Error(
-      `subagent spawn: global concurrency cap hit (${live.length}/${MAX_CONCURRENT_SUBAGENTS}); refusing new spawn`,
-    )
-  }
-
+  // Authorize a nested spawn FIRST. Two reasons the double-spawn guard runs
+  // AFTER this block rather than before it:
+  //
+  //   (P2) Authorize-before-coalesce. Coalescing returns another run's record;
+  //        doing that before verifying `parent_run_id` + the delegation token
+  //        would hand an unauthorized / malformed nested request (one that
+  //        guessed or replayed a `spawn_key`) a live record it never proved it
+  //        owns, and bypass the mandatory nested-delegation check.
+  //
+  //   (P1) No-TOCTOU. `verify_delegation` is the only `await` in this function.
+  //        If the guard's `liveByKey` read ran before it, two concurrent nested
+  //        spawns sharing a key could BOTH pass the read, then both resume past
+  //        the await and create separate records. Reading `liveByKey`
+  //        immediately before the synchronous `create` below (no await between)
+  //        makes the check-then-create atomic, so the second caller always sees
+  //        the first caller's record.
   let spawn_depth = 0
   let claims: DelegationClaims | undefined
   if (input.parent_run_id !== undefined) {
@@ -153,6 +150,35 @@ export async function spawnSubagent(
         `subagent spawn: delegation authorizes depth ${claims.depth} but spawn requires depth ${spawn_depth}`,
       )
     }
+  }
+
+  // Double-spawn guard. Runs here — after nested authorization (P2) and after
+  // the only `await` above (P1) — but BEFORE the concurrency cap, so coalescing
+  // a duplicate is never blocked by the cap (the in-flight twin already counts
+  // toward it) and never mints a wasted run_id. The `liveByKey` read and the
+  // synchronous `create` below are not separated by any `await`, so the
+  // check-then-create is atomic against a concurrent duplicate. Scoped to the
+  // same instance: a key only coalesces against a record this caller owns.
+  if (input.spawn_key !== undefined) {
+    const inflight = deps.registry.liveByKey(input.spawn_key)
+    if (inflight && inflight.instance_key === input.instance_key) {
+      if (input.on_duplicate === 'refuse') {
+        throw new Error(
+          `subagent spawn: duplicate in-flight spawn for key ${JSON.stringify(input.spawn_key)} ` +
+            `(live run_id=${inflight.run_id}, status=${inflight.status}); refusing`,
+        )
+      }
+      // Coalesce: hand back the existing run so the caller awaits the one
+      // genuine process instead of starting a second.
+      return inflight
+    }
+  }
+
+  const live = deps.registry.live()
+  if (live.length >= MAX_CONCURRENT_SUBAGENTS) {
+    throw new Error(
+      `subagent spawn: global concurrency cap hit (${live.length}/${MAX_CONCURRENT_SUBAGENTS}); refusing new spawn`,
+    )
   }
 
   const run_id = (deps.mint_run_id ?? defaultMintRunId)()
