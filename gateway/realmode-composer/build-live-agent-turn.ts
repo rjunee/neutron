@@ -23,8 +23,11 @@
  *      process) — `personaLoader.load()` (the owner's Kairos
  *      SOUL/USER/priority-map written by persona-gen compose.ts) spliced
  *      through `assembleSystemPrompt` (which also reads owner workspace
- *      files + appends the owner-settings tool fragment), plus a compact
- *      <recent_conversation> block from `buttonStore.listHistoryByTopic`.
+ *      files + appends the owner-settings tool fragment), the owner-agnostic
+ *      `<operating_doctrine>` layer (gap-audit item 10 — the lived "how you
+ *      act every turn" doctrine, per-context weighted General vs project),
+ *      plus a compact <recent_conversation> block from
+ *      `buttonStore.listHistoryByTopic`.
  *      Missing persona files → generic Neutron-assistant fallback (never
  *      hard-fail). Subsequent turns on the same topic send ONLY the user
  *      text — the warm REPL's own transcript carries the conversation.
@@ -61,6 +64,7 @@ import { assembleSystemPrompt } from '../../runtime/system-prompt.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 import type { ToolDef } from '../../core-sdk/types.ts'
 import { collectTokensToString } from './build-llm-call-substrate.ts'
+import { buildOperatingDoctrineFragment } from './operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'
 
 const LOG_TAG = '[live-agent-turn]'
@@ -504,14 +508,32 @@ async function composeFirstTurnPrompt(
           'This is a live chat turn: answer the user directly and concisely.',
           '</live_agent_context>',
         ].join('\n')
+  // gap-audit item 10 — operating-doctrine layer. The owner's generated SOUL
+  // (base_persona above) is mostly STATIC IDENTITY; this fragment carries the
+  // owner-agnostic "how you act on every turn" doctrine (truth-first,
+  // calibrated confidence, anti-sycophancy/pushback, grounding reframe) so it
+  // is present consistently on EVERY topic's first turn — which anchors that
+  // topic's warm CC session and therefore governs every subsequent turn on it.
+  // Per-context weighted: General gets cross-project breadth, a project topic
+  // gets this-project craft. NOT owner-specific; the owner's SOUL still wins on
+  // any sharper rule (the fragment says so explicitly).
+  const doctrineFragment = buildOperatingDoctrineFragment(
+    turn.project_id !== undefined
+      ? { scope: 'project', project_id: turn.project_id }
+      : { scope: 'general' },
+  )
   // WAVE 2 Track A — per-project persona. For a project topic, splice THAT
   // project's persona label (from `projects.persona`) as its OWN fragment so
   // this topic's dedicated warm session adopts its personality on top of the
   // owner-wide SOUL/USER doctrine. Never for General; best-effort (a missing
   // persona or a throwing resolver degrades to the owner-wide persona alone).
   const projectPersonaFragment = await composeProjectPersonaFragment(input, turn)
+  // Order: doctrine (how you act) right after the SOUL persona, then the
+  // project-voice refinement, then the this-turn scope block.
   const instance_fragments =
-    projectPersonaFragment !== null ? [projectPersonaFragment, scopeFragment] : [scopeFragment]
+    projectPersonaFragment !== null
+      ? [doctrineFragment, projectPersonaFragment, scopeFragment]
+      : [doctrineFragment, scopeFragment]
   let system: string
   try {
     system = await assembleSystemPrompt({
@@ -533,6 +555,7 @@ async function composeFirstTurnPrompt(
     )
     system = [
       persona.trim().length > 0 ? persona : FALLBACK_PERSONA,
+      doctrineFragment,
       ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
       scopeFragment,
     ].join('\n\n')
