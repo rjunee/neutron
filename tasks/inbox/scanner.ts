@@ -135,10 +135,148 @@ function processingPathFor(inboxPath: string): string {
   return `${inboxPath}.processing`
 }
 
-interface ClaimedInbox {
-  body: string
-  /** Bytes read from the sidecar at claim time (for the late-write guard). */
-  baselineBytes: number
+interface CompleteLineTail {
+  /** The complete-line slice from `baseline` up to and including the last `\n`. */
+  tail: string
+  /** Byte offset to advance the baseline to (always a newline boundary). */
+  nextBaseline: number
+}
+
+/**
+ * Return the COMPLETE-LINE tail of `buf` past byte offset `baseline`:
+ * everything from `baseline` up to and INCLUDING the last `\n`. A
+ * concurrent appender (a pre-rename-held fd) can leave the sidecar ending
+ * mid-line, so slicing purely by byte count (`subarray(baseline)`) could
+ * hand a partial JSON line to the parser — recorded as a parse error and
+ * its committed completion then recorded as a SECOND parse error, silently
+ * losing the row. Snapping to the last newline guarantees we only ever
+ * parse — and advance the baseline past — whole lines; any trailing
+ * partial stays put for the next read/scan to complete. Returns null when
+ * there is no complete new line past `baseline`.
+ */
+export function completeLineTail(buf: Buffer, baseline: number): CompleteLineTail | null {
+  if (buf.length <= baseline) return null
+  // 0x0a === '\n'. lastIndexOf scans the whole buffer; if the last newline
+  // sits before our baseline, the bytes past baseline are only a partial line.
+  const lastNewline = buf.lastIndexOf(0x0a)
+  if (lastNewline < baseline) return null
+  const nextBaseline = lastNewline + 1
+  return { tail: buf.subarray(baseline, nextBaseline).toString('utf8'), nextBaseline }
+}
+
+interface Consumable {
+  /** Bytes safe to apply/requeue past `baseline` (may be ''). */
+  tail: string
+  /** Byte offset consumed up to (start of any leftover partial). */
+  nextBaseline: number
+  /** Sidecar length the tail was sliced from (for the unlink growth guard). */
+  length: number
+  /** An actively-growing (in-flight) partial remains past `nextBaseline`. */
+  partial: boolean
+}
+
+/**
+ * Is `text` a SETTLED final JSONL row rather than an in-flight fragment?
+ *
+ * A trailing line without a terminating newline is either a complete row
+ * hand-written with no closing newline OR a truncated mid-write from an
+ * out-of-band fd that paused after a fragment. Timing cannot tell them
+ * apart (a paused writer looks stable), but JSON STRUCTURE can: every row
+ * the queue emits is a single-line JSON object, and NO proper byte-prefix
+ * of a complete JSON object is itself valid JSON (the closing `}` is always
+ * the last byte; any shorter prefix is unbalanced or mid-token). So a
+ * fragment never parses, while a complete row always does. A blank tail has
+ * nothing to wait for. Anything else (non-blank, unparseable) is treated as
+ * an in-flight fragment and left in the sidecar.
+ */
+function isSettledRow(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed === '') return true
+  try {
+    JSON.parse(trimmed)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Read the sidecar and decide what is SAFE to consume past `baseline`.
+ *
+ * Complete (newline-terminated) lines are always safe. The tricky case is a
+ * trailing line WITHOUT a terminating newline. Under the blessed
+ * {@link appendInboxRow} API every row is one atomic `write(2)` of
+ * `JSON + '\n'`, so the queue files never hold a torn line; a newline-less
+ * tail therefore only arises from a direct hand-edit (or the
+ * documented-as-unreachable out-of-band fd held across the rename). We must
+ * neither STRAND it (livelock — `claimInbox` always drains the sidecar
+ * before the live inbox, so a stuck tail blocks all later rows) nor TEAR an
+ * actively-growing concurrent write. The decision:
+ *
+ *   1. Complete JSONL row (valid JSON or blank — see {@link isSettledRow}):
+ *      consume it. No proper byte-prefix of a complete JSON object is itself
+ *      valid JSON, so this never mistakes a fragment for a row — and it
+ *      needs no timing assumption.
+ *   2. Otherwise (malformed / truncated tail): use GROWTH as the tiebreaker.
+ *      A second read that shows the file still growing means a writer is
+ *      mid-line → consume only whole lines and leave the partial
+ *      (`partial:true`). A stable tail is a settled malformed line (a
+ *      hand-edit) → consume it so it is archived as a parse error like any
+ *      other bad row, never blocking the queue.
+ *
+ * The only unhandled case — an out-of-band writer that PAUSES mid-line
+ * exactly across the two reads — is unreachable under the blessed API and
+ * accepted (a rare archived parse error, never a silent live-inbox drop).
+ *
+ * Returns null ONLY when the sidecar is gone/unreadable (so the caller must
+ * NOT blind-unlink it). When the file is readable but has nothing new past
+ * `baseline`, returns an empty consumable carrying the current length so the
+ * caller's unlink can still apply its growth guard.
+ */
+function readConsumable(path: string, baseline: number): Consumable | null {
+  let buf: Buffer
+  try {
+    buf = readFileSync(path)
+  } catch {
+    return null
+  }
+  if (buf.length <= baseline) {
+    return { tail: '', nextBaseline: buf.length, length: buf.length, partial: false }
+  }
+  const endsOnBoundary = buf[buf.length - 1] === 0x0a // '\n'
+  if (!endsOnBoundary) {
+    // The final, newline-less line starts after the last '\n' (or at the
+    // baseline if no newline remains past it).
+    const lastNewline = buf.lastIndexOf(0x0a)
+    const tailStart = Math.max(lastNewline + 1, baseline)
+    if (!isSettledRow(buf.subarray(tailStart).toString('utf8'))) {
+      // Malformed tail: defer only while a writer is actively appending.
+      let confirm: Buffer
+      try {
+        confirm = readFileSync(path)
+      } catch {
+        return null
+      }
+      if (confirm.length !== buf.length) {
+        // Still growing → only whole lines are safe; leave the partial.
+        const whole = completeLineTail(buf, baseline)
+        return {
+          tail: whole?.tail ?? '',
+          nextBaseline: whole?.nextBaseline ?? baseline,
+          length: buf.length,
+          partial: true,
+        }
+      }
+      // Stable malformed tail → fall through and consume it (archived as a
+      // parse error), so a hand-edited bad final line can never livelock.
+    }
+  }
+  return {
+    tail: buf.subarray(baseline).toString('utf8'),
+    nextBaseline: buf.length,
+    length: buf.length,
+    partial: false,
+  }
 }
 
 /**
@@ -156,21 +294,21 @@ interface ClaimedInbox {
  *     before the rename but written after our read is caught by the
  *     late-write guard in `finalizeProcessing`.
  *
- * Returns null when there is nothing to do.
+ * Returns false when there is nothing to do. The claimed bytes live at
+ * the sidecar path; the drain reads them from disk (so a pre-rename fd's
+ * late writes are picked up) rather than from a claim-time snapshot.
  */
-function claimInbox(inboxPath: string): ClaimedInbox | null {
+function claimInbox(inboxPath: string): boolean {
   const processingPath = processingPathFor(inboxPath)
   if (existsSync(processingPath)) {
     // Leftover from a crashed scan. A pre-rename appender could STILL hold
     // an fd to this inode and write to it during recovery, so it gets the
     // same late-write drain/requeue handling as a fresh rotation.
-    const body = readFileSync(processingPath, 'utf8')
-    return { body, baselineBytes: Buffer.byteLength(body, 'utf8') }
+    return true
   }
-  if (!existsSync(inboxPath)) return null
+  if (!existsSync(inboxPath)) return false
   renameSync(inboxPath, processingPath)
-  const body = readFileSync(processingPath, 'utf8')
-  return { body, baselineBytes: Buffer.byteLength(body, 'utf8') }
+  return true
 }
 
 /** Max in-order tail-drain passes over the rotated sidecar per scan. */
@@ -196,29 +334,29 @@ interface DrainResult {
  * continuous writer can't spin the scan forever — any final residual is
  * handled by {@link finalizeProcessing}.
  */
-async function drainClaimed(
-  deps: RunTaskScanDeps,
-  claim: ClaimedInbox,
-): Promise<DrainResult> {
+async function drainClaimed(deps: RunTaskScanDeps): Promise<DrainResult> {
   const applyDeps = { store: deps.store, project_slug: deps.project_slug }
-  const parsed = parseInbox(claim.body)
-  const errors: ParseError[] = [...parsed.errors]
-  const outcomes = await applyInboxRows(applyDeps, parsed.rows)
-  let baseline = claim.baselineBytes
+  const errors: ParseError[] = []
+  const outcomes: ApplyOutcome[] = []
+  let baseline = 0
   const processingPath = processingPathFor(deps.paths.inbox)
+
+  // Read the sidecar and apply everything safe to consume; loop to drain —
+  // IN ORDER — any rows a pre-rename-opened fd appends during the apply
+  // window. `readConsumable` settles a newline-less final row vs an
+  // in-flight partial (see its doc), so a continuous writer leaves only a
+  // growing partial that this loop stops on (and finalize defers), while a
+  // settled row is consumed here. Bounded so a pathological continuous
+  // writer can't spin the scan forever.
   for (let pass = 0; pass < MAX_TAIL_DRAIN_PASSES; pass++) {
-    let latest: Buffer
-    try {
-      latest = readFileSync(processingPath)
-    } catch {
-      break
+    const slice = readConsumable(processingPath, baseline)
+    if (slice === null || slice.nextBaseline <= baseline) break
+    baseline = slice.nextBaseline
+    if (slice.tail.length > 0) {
+      const parsed = parseInbox(slice.tail)
+      errors.push(...parsed.errors)
+      outcomes.push(...(await applyInboxRows(applyDeps, parsed.rows)))
     }
-    if (latest.length <= baseline) break
-    const tailStr = latest.subarray(baseline).toString('utf8')
-    baseline = latest.length
-    const tailParsed = parseInbox(tailStr)
-    errors.push(...tailParsed.errors)
-    outcomes.push(...(await applyInboxRows(applyDeps, tailParsed.rows)))
   }
   return { outcomes, errors, finalBaseline: baseline }
 }
@@ -231,20 +369,63 @@ async function drainClaimed(
  * vanishing residual is the only path that can reorder relative to live
  * appends, and a crash before the unlink simply defers it via the
  * leftover-sidecar recovery path.
+ *
+ * The sidecar is dropped ONLY when nothing can be lost by doing so:
+ *
+ *   - If the requeue WRITE fails (disk full, EACCES on the live inbox,
+ *     …), the residual bytes were never persisted to the live inbox, so we
+ *     LEAVE the sidecar in place. The next scan recovers it via the
+ *     leftover-sidecar path; reprocessing is idempotent (stable ids /
+ *     skip-on-missing). The previous code unconditionally unlinked here,
+ *     silently dropping the residual on any requeue failure.
+ *   - A trailing PARTIAL line (no newline yet — an in-flight write) is left
+ *     too, so its eventual completion is recovered whole rather than split.
+ *   - We re-read the sidecar immediately before unlinking and only remove
+ *     it if it hasn't grown since the requeue read — closing the TOCTOU
+ *     window where a pre-rename fd appends a row between read and unlink
+ *     that would otherwise be dropped with the dirent.
  */
-function finalizeProcessing(inboxPath: string, finalBaseline: number): void {
+export function finalizeProcessing(inboxPath: string, finalBaseline: number): void {
   const processingPath = processingPathFor(inboxPath)
-  try {
-    const latest = readFileSync(processingPath)
-    if (latest.length > finalBaseline) {
-      const tail = latest.subarray(finalBaseline).toString('utf8')
-      if (tail.length > 0) appendFileSync(inboxPath, tail, { mode: 0o600 })
+
+  // Requeue any residual past the inline drain's baseline. A settled
+  // newline-less final line counts as complete; an actively-growing partial
+  // is left (`partial:true`) for the next scan.
+  const residual = readConsumable(processingPath, finalBaseline)
+  // Sidecar gone or unreadable — do NOT blind-unlink (an unreadable-but-
+  // present sidecar must be left for the next scan, not dropped). A truly
+  // vanished sidecar needs no cleanup.
+  if (residual === null) return
+
+  if (residual.tail.length > 0) {
+    // Normalize: the requeued bytes MUST end in a newline so the next scan
+    // parses them as whole lines. Without this, a settled newline-less final
+    // row would be requeued un-terminated and re-leave the sidecar forever.
+    const tail = residual.tail.endsWith('\n') ? residual.tail : residual.tail + '\n'
+    try {
+      appendFileSync(inboxPath, tail, { mode: 0o600 })
+    } catch {
+      // Requeue write failed (disk full, EACCES on the live inbox, …): the
+      // residual is NOT in the live inbox, so we must NOT drop the sidecar —
+      // leave it for the next scan to recover (reprocessing is idempotent).
+      return
     }
+  }
+
+  // An actively-growing partial remains: leave the sidecar so the next scan
+  // recovers the completed line rather than dropping the in-flight write.
+  if (residual.partial) return
+
+  // Close the unlink window: a pre-rename fd could append a fresh row to the
+  // sidecar inode AFTER our read but BEFORE the unlink, and the unlink would
+  // drop that row with the dirent. Only remove it if it hasn't grown.
+  try {
+    if (readFileSync(processingPath).length !== residual.length) return
   } catch {
-    /* re-read best-effort; fall through to unlink */
+    return
   }
   try {
-    if (existsSync(processingPath)) unlinkSync(processingPath)
+    unlinkSync(processingPath)
   } catch {
     /* best-effort; the next scan recovers + reprocesses idempotently */
   }
@@ -294,17 +475,17 @@ function appendArchive(
  * rotate so a re-run never double-applies an already-drained queue.
  */
 export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult> {
-  // 1. Claim the queue (atomic rotate, or drain a crashed leftover), then
-  // parse it. A null claim (nothing pending) still re-renders below so a
-  // bare cron tick refreshes the time-sensitive focus ordering.
-  const claim = claimInbox(deps.paths.inbox)
+  // 1. Claim the queue (atomic rotate, or drain a crashed leftover). A
+  // false claim (nothing pending) still re-renders below so a bare cron
+  // tick refreshes the time-sensitive focus ordering.
+  const claimed = claimInbox(deps.paths.inbox)
   const now = deps.now?.() ?? new Date()
   const nowIso = now.toISOString()
 
   // 2. Apply the claimed rows + drain any late tail writes, in order.
-  const drained: DrainResult = claim === null
+  const drained: DrainResult = !claimed
     ? { outcomes: [], errors: [], finalBaseline: 0 }
-    : await drainClaimed(deps, claim)
+    : await drainClaimed(deps)
   const outcomes = drained.outcomes
   const errors = drained.errors
 
@@ -333,7 +514,7 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   // 5. Commit: requeue any residual past the inline drain, then drop the
   // sidecar now the store + markdown are both durable. A crash before here
   // leaves the sidecar for the next scan to recover.
-  if (claim !== null) {
+  if (claimed) {
     finalizeProcessing(deps.paths.inbox, drained.finalBaseline)
   }
 

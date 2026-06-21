@@ -21,24 +21,38 @@ converged) flagged two IMPORTANT correctness holes in
    The drain/finalize tail was sliced purely by byte count
    (`subarray(baseline)`), so a reader observing a sidecar mid-append could
    split a JSON line at a non-newline boundary — the committed row recorded as
-   two parse errors and lost. New `completeLineTail()` helper snaps every
-   advance to the last `\n` boundary and never consumes a partial line (the
-   claim snapshot is now kept as a `Buffer` so the snap is byte-accurate).
-   `finalizeProcessing` also re-reads the sidecar immediately before
-   `unlinkSync` and only removes it when the length hasn't grown since the
-   requeue read — closing the window where a pre-rename fd appends a row
-   between read and unlink that would be dropped with the dirent.
+   two parse errors and lost. The drain/finalize now read the sidecar from
+   disk through a single `readConsumable()` reader. Complete (newline-
+   terminated) lines are always safe. A trailing line WITHOUT a newline is
+   resolved without relying on timing alone: (1) if it is a complete JSONL row
+   (valid JSON — and since no proper byte-prefix of a complete JSON object is
+   itself valid JSON, a fragment never masquerades as one) it is consumed, so
+   a hand-edited final row with no trailing newline drains instead of
+   livelocking the sidecar; (2) a malformed tail uses GROWTH as the tiebreaker
+   — still growing ⇒ an active writer is mid-line, so only whole lines are
+   consumed and the partial is left (`partial`); stable ⇒ a settled bad
+   hand-edit, consumed and archived as a parse error so it can never block the
+   queue. (The lone unhandled case — an out-of-band fd that pauses mid-line
+   exactly across the two reads — is unreachable under the blessed atomic-
+   append API and accepted.) `finalizeProcessing` also re-reads the sidecar
+   immediately before `unlinkSync` and removes it only when the length is
+   unchanged since the read — closing the read→unlink TOCTOU window (on BOTH
+   the residual and no-residual paths); an unreadable sidecar is left, never
+   blind-unlinked.
 
 Note (minor, documented): DASHBOARD.md task lines are rendered inline (richer
 human "today" view) and intentionally bypass `renderTaskLine`, so the "locked
 Nova tag format lives in exactly one place" claim covers tasks.md/STATUS.md but
 not DASHBOARD.md.
 
-**Tests (real):** `inbox-scanner.test.ts` gains a test that a FAILED requeue
-write LEAVES the sidecar intact (no data loss) AND the next scan recovers both
-rows; a test that a partial mid-write line is never split into parse errors and
-is recovered WHOLE once completed; plus `completeLineTail` newline-snap unit
-tests. `bunx tsc --noEmit` clean; full `bash scripts/run-tests.sh` green.
+**Tests (real):** `inbox-scanner.test.ts` gains: a FAILED requeue write LEAVES
+the sidecar intact (no data loss) AND the next scan recovers both rows; a
+hand-edited final row without a trailing newline is applied, not stranded; a
+stable malformed final line without a newline is archived as a parse error and
+never blocks later rows (no livelock); a newline-less residual is requeued
+newline-terminated so it can't livelock; plus `completeLineTail` newline-snap
+unit tests. `bunx tsc --noEmit` clean; full `bash scripts/run-tests.sh` green
+(two passes). Hardened across several Codex cross-model review rounds.
 
 Also resolved the PR #15 vs `main` conflict (only `AS-BUILT.md`; both the
 markdown-task-surface entry and main's per-topic-session-isolation entry kept).
