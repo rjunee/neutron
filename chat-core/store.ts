@@ -96,12 +96,36 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
     created_at: existing.created_at !== 0 ? existing.created_at : incoming.created_at,
     // Status only ever advances queued → sent → acked.
     status: advanceStatus(existing.status, incoming.status),
+    // Track B Phase 4 — receipts accumulate by set-union, so applying a
+    // receipt_update (or a re-delivered message carrying inline receipts) is
+    // idempotent + order-independent: a device can never "un-deliver" or
+    // "un-read" a message, and two devices' acks both survive.
+    delivered_to: unionDeviceIds(existing.delivered_to, incoming.delivered_to),
+    read_by: unionDeviceIds(existing.read_by, incoming.read_by),
   }
 }
 
 const STATUS_RANK = { queued: 0, sent: 1, acked: 2 } as const
 function advanceStatus(a: ChatMessage['status'], b: ChatMessage['status']): ChatMessage['status'] {
   return STATUS_RANK[b] >= STATUS_RANK[a] ? b : a
+}
+
+/**
+ * Set-union two device-id lists into a sorted, de-duplicated array (or `null`
+ * when both are empty). Tolerant of `null`/`undefined`/absent (an older
+ * persisted row predating receipts) so the merge never throws. Sorted output
+ * keeps the stored value canonical regardless of arrival order — handy for
+ * byte-stable persistence + deterministic tests.
+ */
+export function unionDeviceIds(
+  a: readonly string[] | null | undefined,
+  b: readonly string[] | null | undefined,
+): readonly string[] | null {
+  const set = new Set<string>()
+  if (a) for (const id of a) if (id.length > 0) set.add(id)
+  if (b) for (const id of b) if (id.length > 0) set.add(id)
+  if (set.size === 0) return null
+  return [...set].sort()
 }
 
 export class InMemoryStore implements Store {

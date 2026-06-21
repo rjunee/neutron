@@ -17,7 +17,12 @@
  */
 
 import { InMemoryStore, type Store } from './store.ts'
-import type { ChatMessage, InboundChatMessage, OutboundResume } from './types.ts'
+import type {
+  ChatMessage,
+  InboundChatMessage,
+  InboundReceiptUpdate,
+  OutboundResume,
+} from './types.ts'
 
 export interface ApplyResult {
   /** The seq this message carries (null if the server didn't assign one). */
@@ -55,8 +60,42 @@ export class SyncEngine {
       created_at: env.created_at,
       status: 'acked',
     }
+    // Track B Phase 4 — carry inline receipt state through to the store, which
+    // set-unions it onto any existing row (the optimistic bubble, or a prior
+    // delivery). Only set when present so we never clobber accumulated receipts
+    // with an empty list on a later partial.
+    if (env.delivered_to !== undefined && env.delivered_to !== null) {
+      msg.delivered_to = env.delivered_to
+    }
+    if (env.read_by !== undefined && env.read_by !== null) {
+      msg.read_by = env.read_by
+    }
     await this.store.upsert(msg)
     return { seq: env.seq, applied: !deduped, reconciled }
+  }
+
+  /**
+   * Apply a receipt-state update for an already-delivered message (Track B
+   * Phase 4). Looks the message up by its server `message_id` and set-unions
+   * the new aggregate onto it via the same idempotent UPSERT path messages use
+   * — NOT a fork of the apply logic. Returns `{ applied:false }` when the
+   * message isn't in the local store yet (a receipt can't precede its message
+   * on the wire: the server only fans a receipt after the message persisted,
+   * and a resume replays messages before their receipts), so the update is
+   * harmlessly dropped rather than creating a bodyless placeholder row.
+   */
+  async applyReceiptUpdate(
+    topic_id: string,
+    update: InboundReceiptUpdate,
+  ): Promise<{ applied: boolean }> {
+    if (update.message_id.length === 0) return { applied: false }
+    const existing = await this.store.getByMessageId(topic_id, update.message_id)
+    if (existing === null) return { applied: false }
+    const patch: ChatMessage = { ...existing }
+    if (update.delivered_by.length > 0) patch.delivered_to = update.delivered_by
+    if (update.read_by.length > 0) patch.read_by = update.read_by
+    await this.store.upsert(patch)
+    return { applied: true }
   }
 
   /** Build the gap-fill request to send on (re)connect. */

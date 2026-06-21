@@ -24,7 +24,12 @@
 import { SendQueue } from './send-queue.ts'
 import { InMemoryStore, type Store } from './store.ts'
 import { SyncEngine } from './sync-engine.ts'
-import { normalizeInbound, type ChatMessage } from './types.ts'
+import {
+  normalizeInbound,
+  normalizeReceiptUpdate,
+  type ChatMessage,
+  type OutboundReceipt,
+} from './types.ts'
 import { ChatWsClient, type ConnStatus, type SocketLike } from './ws-client.ts'
 
 export interface WebChatSessionOptions {
@@ -52,21 +57,35 @@ export interface WebChatSessionOptions {
    * indicator while the durable transcript still flows through the Store.
    */
   onFrame?: (frame: unknown) => void
+  /**
+   * This client's stable device id (Track B Phase 4). Threaded into the render
+   * layer so a message's read tick excludes the sender's own device. The id is
+   * ALSO passed on the WS upgrade URL (`&device_id=…`) so the server attributes
+   * receipts to it — the session never self-reports it in a `receipt` frame,
+   * which is what stops a client forging another device's ack.
+   */
+  device_id?: string
   generateId?: () => string
   now?: () => number
 }
 
 export class WebChatSession {
   readonly topic_id: string
+  /** This client's device id (for read-tick self-exclusion). */
+  readonly device_id: string
   private readonly store: Store
   private readonly queue: SendQueue
   private readonly engine: SyncEngine
   private readonly ws: ChatWsClient
   private readonly onChange: (() => void) | undefined
   private readonly onFrame: ((frame: unknown) => void) | undefined
+  /** message_ids we've already sent a `read` receipt for — so re-rendering a
+   *  visible message doesn't re-emit a receipt on every change. */
+  private readonly readSent = new Set<string>()
 
   constructor(opts: WebChatSessionOptions) {
     this.topic_id = opts.topic_id
+    this.device_id = opts.device_id ?? generateDeviceId(opts.generateId)
     this.store = opts.store ?? new InMemoryStore()
     const queueOpts: { generateId?: () => string; now?: () => number } = {}
     if (opts.generateId !== undefined) queueOpts.generateId = opts.generateId
@@ -156,10 +175,39 @@ export class WebChatSession {
       await this.resumeAndFlush()
       return
     }
+    // Track B Phase 4 — a receipt_update carries the latest delivered/read
+    // aggregate for an already-applied message. Merge it (set-union) onto the
+    // stored row so the bubble's tick advances. No-op if the message isn't
+    // local yet (a receipt never precedes its message on the wire).
+    const receipt = normalizeReceiptUpdate(data)
+    if (receipt !== null) {
+      const { applied } = await this.engine.applyReceiptUpdate(this.topic_id, receipt)
+      if (applied) this.emitChange()
+      return
+    }
     const msg = normalizeInbound(data)
     if (msg === null) return
     await this.engine.applyInbound(this.topic_id, msg)
     this.emitChange()
+  }
+
+  /**
+   * Report that the local user has read (viewed) one or more messages
+   * (Track B Phase 4). The UI calls this with the message_ids that scrolled
+   * into view; we send one `receipt` frame per not-yet-reported id over the
+   * socket. The server attributes each to THIS socket's device id and fans a
+   * `receipt_update` back to every device, so the sender's bubble advances to
+   * "read". Best-effort: a receipt sent while the socket is down is simply
+   * dropped (it is not on the lossless message critical path) — the next view
+   * after reconnect re-reports it because the id only enters {@link readSent}
+   * once a frame is actually accepted.
+   */
+  markRead(messageIds: readonly string[]): void {
+    for (const message_id of messageIds) {
+      if (message_id.length === 0 || this.readSent.has(message_id)) continue
+      const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' }
+      if (this.ws.send(env)) this.readSent.add(message_id)
+    }
   }
 
   /** Send the resume request from our local cursor, then re-drive every
@@ -189,4 +237,14 @@ export class WebChatSession {
   private emitChange(): void {
     if (this.onChange !== undefined) this.onChange()
   }
+}
+
+/** Mint a device id when the caller didn't supply a stable one. Prefer an
+ *  injected generator (tests), then `crypto.randomUUID`, then a cheap fallback
+ *  so the session never throws in an environment without WebCrypto. */
+function generateDeviceId(generateId?: () => string): string {
+  if (generateId !== undefined) return generateId()
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
+  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`
+  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`
 }

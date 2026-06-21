@@ -36,10 +36,12 @@ import {
   ChatWsClient,
   InMemoryStore,
   normalizeInbound,
+  normalizeReceiptUpdate,
   SendQueue,
   SyncEngine,
   type ChatMessage,
   type ConnStatus,
+  type OutboundReceipt,
   type SocketLike,
   type Store,
 } from '@neutron/chat-core';
@@ -59,6 +61,9 @@ export interface MobileChatSessionOptions {
   onStatus?: (status: ConnStatus) => void;
   /** Called for every raw inbound frame (streaming partials, typing, …). */
   onFrame?: (data: unknown) => void;
+  /** This device's stable id (Track B Phase 4 — read-receipt self-exclusion +
+   *  server attribution via the WS upgrade URL). Defaults to a generated id. */
+  device_id?: string;
   generateId?: () => string;
   now?: () => number;
   /** Injectable reconnect timer (tests). Defaults to global setTimeout. */
@@ -68,15 +73,20 @@ export interface MobileChatSessionOptions {
 
 export class MobileChatSession {
   readonly topic_id: string;
+  /** This device's id (for read-tick self-exclusion). */
+  readonly device_id: string;
   private readonly store: Store;
   private readonly queue: SendQueue;
   private readonly engine: SyncEngine;
   private readonly ws: ChatWsClient;
   private readonly onChange: (() => void) | undefined;
   private readonly onFrame: ((data: unknown) => void) | undefined;
+  /** message_ids we've already reported `read` for (de-dups re-renders). */
+  private readonly readSent = new Set<string>();
 
   constructor(opts: MobileChatSessionOptions) {
     this.topic_id = opts.topic_id;
+    this.device_id = opts.device_id ?? generateDeviceId(opts.generateId);
     this.store = opts.store ?? new InMemoryStore();
     const queueOpts: { generateId?: () => string; now?: () => number } = {};
     if (opts.generateId !== undefined) queueOpts.generateId = opts.generateId;
@@ -170,6 +180,24 @@ export class MobileChatSession {
     return this.queue.pendingCount(this.topic_id);
   }
 
+  /**
+   * Report that the local user has read (viewed) one or more messages
+   * (Track B Phase 4). The UI calls this with the message_ids that became
+   * visible (e.g. FlashList `onViewableItemsChanged`); we send one `receipt`
+   * frame per not-yet-reported id. The server attributes each to THIS device
+   * (via the upgrade-URL device id) and fans a `receipt_update` to every device
+   * so the sender's bubble advances to "read". Best-effort over the open socket
+   * — an id only enters {@link readSent} once a frame is actually accepted, so
+   * a receipt dropped while offline is re-sent on the next view after reconnect.
+   */
+  markRead(messageIds: readonly string[]): void {
+    for (const message_id of messageIds) {
+      if (message_id.length === 0 || this.readSent.has(message_id)) continue;
+      const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' };
+      if (this.ws.send(env)) this.readSent.add(message_id);
+    }
+  }
+
   private async handleInbound(data: unknown): Promise<void> {
     // Hand the raw frame to the UI first so streaming partials + typing
     // brackets render even though chat-core only persists final messages.
@@ -179,6 +207,15 @@ export class MobileChatSession {
     const env = data as Record<string, unknown>;
     if (env['type'] === 'session_ready') {
       await this.resumeAndFlush();
+      return;
+    }
+    // Track B Phase 4 — a receipt_update advances an already-applied message's
+    // delivered/read aggregate. Merge (set-union) onto the stored row so the
+    // tick advances; no-op when the message isn't local yet.
+    const receipt = normalizeReceiptUpdate(data);
+    if (receipt !== null) {
+      const { applied } = await this.engine.applyReceiptUpdate(this.topic_id, receipt);
+      if (applied) this.emitChange();
       return;
     }
     const msg = normalizeInbound(data);
@@ -212,4 +249,14 @@ export class MobileChatSession {
   private emitChange(): void {
     if (this.onChange !== undefined) this.onChange();
   }
+}
+
+/** Mint a device id when the caller didn't supply a stable one. Prefer an
+ *  injected generator (tests), then `crypto.randomUUID`, then a cheap fallback
+ *  so the session never throws on a runtime without WebCrypto. */
+function generateDeviceId(generateId?: () => string): string {
+  if (generateId !== undefined) return generateId();
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`;
+  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`;
 }

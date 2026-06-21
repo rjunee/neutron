@@ -158,9 +158,32 @@ describe('deliveryState', () => {
     expect(deliveryState(agentMsg({ message_id: 'a1' }))).toBeNull();
   });
 
-  it('glyphs escalate pending → sent → delivered', () => {
+  it('promotes acked → read when read by another device/agent (Track B Phase 4)', () => {
+    expect(
+      deliveryState(userMsg({ client_msg_id: 'c', status: 'acked', read_by: ['agent'] })),
+    ).toBe('read');
+    expect(
+      deliveryState(userMsg({ client_msg_id: 'c', status: 'acked', read_by: ['devB'] }), 'devA'),
+    ).toBe('read');
+  });
+
+  it('excludes the sender’s own device from the read set', () => {
+    // read_by only contains self → still just delivered, not read.
+    expect(
+      deliveryState(userMsg({ client_msg_id: 'c', status: 'acked', read_by: ['devA'] }), 'devA'),
+    ).toBe('delivered');
+  });
+
+  it('a queued/sent message ignores receipts', () => {
+    expect(
+      deliveryState(userMsg({ client_msg_id: 'c', status: 'sent', read_by: ['agent'] })),
+    ).toBe('sent');
+  });
+
+  it('glyphs escalate pending → sent → delivered → read (read shares ✓✓)', () => {
     expect(deliveryGlyph('pending')).toBe('🕓');
     expect(deliveryGlyph('sent')).toBe('✓');
     expect(deliveryGlyph('delivered')).toBe('✓✓');
+    expect(deliveryGlyph('read')).toBe('✓✓');
   });
 });

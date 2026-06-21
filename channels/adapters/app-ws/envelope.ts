@@ -55,6 +55,23 @@ export interface AppWsInboundResume {
   after_seq: number
 }
 
+/**
+ * Track B Phase 4 (delivery + read receipts) — a client reports it has READ
+ * (viewed) a message. Delivery is server-tracked (recorded for every connected
+ * device at fan-out time), so the only receipt a client sends is `read`. The
+ * server attributes it to the SOCKET's device id (stashed at upgrade) — the
+ * client never self-reports a device id here, so it can't forge another
+ * device's receipt. `seq` is the message's server seq when the client knows it
+ * (orders/scopes the replay); omitted otherwise.
+ */
+export interface AppWsInboundReceipt {
+  v: 1
+  type: 'receipt'
+  message_id: string
+  state: 'read'
+  seq?: number
+}
+
 export type AppWsInbound = AppWsInboundUserMessage
 
 export interface AppWsOutboundSessionReady {
@@ -96,6 +113,15 @@ export interface AppWsOutboundUserMessageEcho {
    * in-memory-only behaviour).
    */
   seq?: number
+  /**
+   * Track B Phase 4 — receipt aggregate carried inline on the message. The
+   * server records `delivered` for every device connected at fan-out time and
+   * stamps the list here (so a receiving device knows it's been delivered);
+   * `read_by` is folded on replay so a reconnecting device sees current read
+   * state. Both absent when the receipt log isn't wired.
+   */
+  delivered_by?: ReadonlyArray<string>
+  read_by?: ReadonlyArray<string>
 }
 
 export interface AppWsOutboundAgentMessageOption {
@@ -182,6 +208,14 @@ export interface AppWsOutboundAgentMessage {
    * Absent when the durable log isn't wired.
    */
   seq?: number
+  /**
+   * Track B Phase 4 — receipt aggregate carried inline (same semantics as the
+   * user echo). `delivered_by` = devices connected at fan-out; `read_by` folded
+   * on replay. The client's UI doesn't show ticks on agent messages, but the
+   * read state still drives cross-device unread reconciliation.
+   */
+  delivered_by?: ReadonlyArray<string>
+  read_by?: ReadonlyArray<string>
 }
 
 /**
@@ -214,11 +248,33 @@ export interface AppWsOutboundError {
   message: string
 }
 
+/**
+ * Track B Phase 4 — a receipt-state update for one already-delivered message.
+ * Fanned out to EVERY device on the topic whenever a device reads a message
+ * (or the agent reads an inbound user message). Carries the FULL current
+ * aggregate (not a delta) so the client merge is idempotent + order-independent
+ * — the same union semantics as the inline `delivered_by`/`read_by` on the
+ * message envelope. Also replayed (per message with receipts) after a resume.
+ */
+export interface AppWsOutboundReceiptUpdate {
+  v: 1
+  type: 'receipt_update'
+  message_id: string
+  /** The message's server seq (lets a client scope/ignore stale updates). */
+  seq?: number
+  delivered_by: ReadonlyArray<string>
+  read_by: ReadonlyArray<string>
+  ts: number
+  /** P5.2 parity — project the underlying message belongs to. */
+  project_id?: string
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
   | AppWsOutboundAgentMessage
   | AppWsOutboundAgentMessagePartial
+  | AppWsOutboundReceiptUpdate
   | AppWsOutboundError
 
 /**
@@ -278,6 +334,32 @@ export function decodeAppWsResume(raw: unknown): AppWsInboundResume | null {
   const raw_after = e['after_seq']
   if (typeof raw_after !== 'number' || !Number.isFinite(raw_after)) return null
   return { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
+}
+
+/**
+ * Track B Phase 4 — decode a `{ v:1, type:'receipt', message_id, state:'read' }`
+ * read-receipt control frame. SEPARATE from the message + resume decoders so
+ * each path keeps its narrow type. Returns `null` for anything malformed. Only
+ * `read` is accepted from clients (delivery is server-tracked). The device id
+ * is intentionally NOT read from the frame — the surface attributes the receipt
+ * to the socket's own device id, so a client can't forge another device's ack.
+ */
+export function decodeAppWsReceipt(raw: unknown): AppWsInboundReceipt | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'receipt') return null
+  if (e['state'] !== 'read') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0 || message_id.length > 256) {
+    return null
+  }
+  const out: AppWsInboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' }
+  const raw_seq = e['seq']
+  if (typeof raw_seq === 'number' && Number.isFinite(raw_seq)) {
+    out.seq = Math.max(0, Math.trunc(raw_seq))
+  }
+  return out
 }
 
 /**
@@ -362,6 +444,30 @@ export function sanitizePlatform(raw: unknown): 'web' | 'native' | null {
   if (raw === 'web' || raw === 'native') return raw
   return null
 }
+
+/** Track B Phase 4 — bound the device_id reported on the WS upgrade query
+ *  string. Client-minted (a uuid or short opaque token); 128 chars is ample. */
+export const MAX_DEVICE_ID_LEN = 128
+
+/**
+ * Validate a device_id from the untrusted upgrade query string. Returns the
+ * cleaned value or `null` (absent / malformed → the surface mints a synthetic
+ * per-connection id so receipt attribution still works, it just isn't stable
+ * across reconnects for that client). Same charset as project ids.
+ */
+export function sanitizeDeviceId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  if (raw.length === 0 || raw.length > MAX_DEVICE_ID_LEN) return null
+  if (!/^[A-Za-z0-9_.-]+$/.test(raw)) return null
+  return raw
+}
+
+/** Track B Phase 4 — synthetic device id the gateway attributes to the agent
+ *  loop when it reads (picks up) an inbound user message. Lets a single-device
+ *  sender see the read tick the moment the agent acts, with no second device.
+ *  Mirrors `@neutron/chat-core`'s `AGENT_DEVICE_ID`; the wire value is the bare
+ *  string `agent`. */
+export const AGENT_DEVICE_ID = 'agent'
 
 /** Synthetic `channel_topic_id` for an Expo session. */
 export function appWsTopicId(user_id: string): string {

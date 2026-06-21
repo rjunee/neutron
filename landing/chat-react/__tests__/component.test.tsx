@@ -103,6 +103,7 @@ describe('ChatApp render (happy-dom)', () => {
       projectId: null,
       projects: [],
       origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
     }
 
     function Harness(): React.JSX.Element {

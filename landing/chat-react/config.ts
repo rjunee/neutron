@@ -37,6 +37,9 @@ export interface BootstrapConfig {
   projects: ProjectTab[]
   /** Page origin (`https://host`) — used to absolutize relative attachment URLs. */
   origin: string
+  /** Track B Phase 4 — this client's device id (read-receipt attribution +
+   *  read-tick self-exclusion). Carried on the WS URL `&device_id=`. */
+  deviceId: string
 }
 
 export interface WindowLike {
@@ -79,19 +82,31 @@ export function decodeJwtSub(token: string | undefined | null): string | null {
   }
 }
 
-/** Build the app-ws WebSocket URL for a host + token (+ optional project). */
+/** Build the app-ws WebSocket URL for a host + token (+ optional project +
+ *  optional device id for receipt attribution). */
 export function buildWsUrl(
   protocol: string,
   host: string,
   token: string,
   projectId: string | null,
+  deviceId?: string,
 ): string {
   const scheme = protocol === 'https:' ? 'wss:' : 'ws:'
   const params = new URLSearchParams()
   params.set('platform', 'web')
   params.set('token', token)
   if (projectId !== null && projectId.length > 0) params.set('project_id', projectId)
+  if (deviceId !== undefined && deviceId.length > 0) params.set('device_id', deviceId)
   return `${scheme}//${host}/ws/app/chat?${params.toString()}`
+}
+
+/** Mint a per-page-load device id. Stability across reloads isn't required for
+ *  correctness — the web UI only reports reads for agent messages (never the
+ *  user's own sends), so a fresh id can't light a sender's own read tick. */
+export function makeDeviceId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
+  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`
+  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`
 }
 
 export class ChatBootstrapError extends Error {}
@@ -117,8 +132,10 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     typeof win.__neutron_active_project_id === 'string' && win.__neutron_active_project_id.length > 0
       ? win.__neutron_active_project_id
       : null
+  const deviceId = makeDeviceId()
   const wsUrl =
-    win.__neutron_app_ws_url ?? buildWsUrl(win.location.protocol, win.location.host, appWsToken, projectId)
+    win.__neutron_app_ws_url ??
+    buildWsUrl(win.location.protocol, win.location.host, appWsToken, projectId, deviceId)
   const origin = `${win.location.protocol}//${win.location.host}`
-  return { wsUrl, topicId: appWsTopicId(userId), userId, projectId, projects, origin }
+  return { wsUrl, topicId: appWsTopicId(userId), userId, projectId, projects, origin, deviceId }
 }

@@ -12,6 +12,21 @@
 export type MessageRole = 'user' | 'agent'
 
 /**
+ * A per-message acknowledgement (Track B Phase 4 — delivery + read receipts).
+ * `delivered` means a device received the message over the socket (the server
+ * records this for every connected device at fan-out time); `read` means a
+ * device — or the synthetic `agent` reader — has viewed it. `read` implies
+ * `delivered`; the per-message receipt ladder only ever advances.
+ */
+export type ReceiptState = 'delivered' | 'read'
+
+/** The synthetic device id the server attributes to the agent loop when it
+ *  reads (processes) an inbound user message. Lets a single-device sender see
+ *  "read" ticks the moment the agent picks the message up, with no second
+ *  human device required. */
+export const AGENT_DEVICE_ID = 'agent'
+
+/**
  * Lifecycle of a locally-originated message:
  *  - `queued` — written to the local store, not yet handed to the socket
  *    (offline, or buffered before flush).
@@ -43,6 +58,21 @@ export interface ChatMessage {
   attachments: readonly string[] | null
   created_at: number
   status: SendStatus
+  /**
+   * Track B Phase 4 — device ids that have received (delivered) this message.
+   * Server-tracked: the gateway records every connected device at fan-out time
+   * and stamps the list on the outbound envelope. Optional + additive so every
+   * existing construction site stays valid; absent/undefined is treated as the
+   * empty set. Merged by set-union, so receipts only ever accumulate.
+   */
+  delivered_to?: readonly string[] | null
+  /**
+   * Track B Phase 4 — device ids (and the synthetic {@link AGENT_DEVICE_ID})
+   * that have read this message. A user message's bubble shows the read tick
+   * once `read_by` contains any device other than the sender's own. Merged by
+   * set-union; monotonic.
+   */
+  read_by?: readonly string[] | null
 }
 
 /**
@@ -61,6 +91,25 @@ export interface InboundChatMessage {
   project_id: string | null
   attachments: readonly string[] | null
   created_at: number
+  /** Track B Phase 4 — receipt state carried inline on the message envelope
+   *  (the server stamps the connected devices at fan-out + folds the persisted
+   *  aggregate on replay). Null/absent when no receipts apply. */
+  delivered_to?: readonly string[] | null
+  read_by?: readonly string[] | null
+}
+
+/**
+ * A receipt-state update for a single already-delivered message (Track B
+ * Phase 4). Carries the FULL current aggregate (not a delta) so applying it is
+ * idempotent and order-independent — the same union-merge contract the message
+ * apply path uses. Produced by {@link normalizeReceiptUpdate} from a
+ * `receipt_update` wire frame.
+ */
+export interface InboundReceiptUpdate {
+  message_id: string
+  seq: number | null
+  delivered_by: readonly string[]
+  read_by: readonly string[]
 }
 
 /** Wire envelope a client sends to deliver a user message. */
@@ -78,6 +127,21 @@ export interface OutboundResume {
   v: 1
   type: 'resume'
   after_seq: number
+}
+
+/**
+ * Wire envelope a client sends to report it has read (viewed) a message
+ * (Track B Phase 4). The server attributes it to the socket's device id — the
+ * client does NOT self-report a device id, so a malicious client can't forge
+ * another device's receipt. `seq` is the message's server seq when the client
+ * knows it (lets the server order/replay the receipt); omitted otherwise.
+ */
+export interface OutboundReceipt {
+  v: 1
+  type: 'receipt'
+  message_id: string
+  state: ReceiptState
+  seq?: number
 }
 
 /**
@@ -125,7 +189,56 @@ export function normalizeInbound(raw: unknown): InboundChatMessage | null {
   const rawTs = e['ts']
   if (typeof rawTs === 'number' && Number.isFinite(rawTs)) created_at = rawTs
 
-  return { role, message_id, seq, body, client_msg_id, project_id, attachments, created_at }
+  // Track B Phase 4 — receipt state carried inline on the message envelope.
+  const delivered_to = parseStringArray(e['delivered_by'])
+  const read_by = parseStringArray(e['read_by'])
+
+  const out: InboundChatMessage = {
+    role,
+    message_id,
+    seq,
+    body,
+    client_msg_id,
+    project_id,
+    attachments,
+    created_at,
+  }
+  if (delivered_to !== null) out.delivered_to = delivered_to
+  if (read_by !== null) out.read_by = read_by
+  return out
+}
+
+/**
+ * Normalize a parsed `receipt_update` wire frame into an
+ * {@link InboundReceiptUpdate}, or `null` when the frame is not a well-formed
+ * receipt update. Defensive (drop, never throw), matching {@link
+ * normalizeInbound}. The aggregate arrays default to empty when malformed.
+ */
+export function normalizeReceiptUpdate(raw: unknown): InboundReceiptUpdate | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'receipt_update') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0) return null
+
+  let seq: number | null = null
+  const rawSeq = e['seq']
+  if (typeof rawSeq === 'number' && Number.isFinite(rawSeq)) seq = Math.trunc(rawSeq)
+
+  return {
+    message_id,
+    seq,
+    delivered_by: parseStringArray(e['delivered_by']) ?? [],
+    read_by: parseStringArray(e['read_by']) ?? [],
+  }
+}
+
+/** Parse an untrusted value into a clean string array, or `null` when it isn't
+ *  a non-empty array of strings. Shared by the message + receipt decoders. */
+function parseStringArray(raw: unknown): readonly string[] | null {
+  if (!Array.isArray(raw)) return null
+  const cleaned = raw.filter((x): x is string => typeof x === 'string' && x.length > 0)
+  return cleaned.length > 0 ? cleaned : null
 }
 
 /**

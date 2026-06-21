@@ -56,21 +56,45 @@ export interface UseMobileChatResult {
   ready: boolean;
   /** Send a user message (optimistic + offline-safe). */
   send: (body: string, attachments?: readonly string[]) => void;
+  /** Report messages the user has viewed (Track B Phase 4 read receipts). */
+  markRead: (messageIds: readonly string[]) => void;
+  /** This device's id — passed to `deliveryState` so a message's read tick
+   *  excludes the sender's own device. Empty until the session constructs. */
+  selfDeviceId: string;
 }
 
-/** Build the native chat WS URL for this user + project. */
-function buildWsUrl(baseUrl: string, token: string, projectId: string): string {
+/** Build the native chat WS URL for this user + project. The `device_id` is
+ *  carried so the gateway attributes this device's read receipts (Track B
+ *  Phase 4); the same id is handed to the session for read-tick self-exclusion. */
+function buildWsUrl(
+  baseUrl: string,
+  token: string,
+  projectId: string,
+  deviceId: string,
+): string {
   const wsBase = httpToWs(baseUrl).replace(/\/+$/, '');
   const params = new URLSearchParams();
   params.set('token', token);
   if (projectId.length > 0) params.set('project_id', projectId);
   params.set('platform', 'native');
+  params.set('device_id', deviceId);
   return `${wsBase}/ws/app/chat?${params.toString()}`;
+}
+
+/** A per-session device id. Stability across launches isn't required for
+ *  correctness here — the mobile UI only reports reads for AGENT messages
+ *  (never the user's own sends), so a freshly-minted id can never light a
+ *  sender's own read tick. */
+function makeDeviceId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`;
+  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`;
 }
 
 export function useMobileChat(projectId: string): UseMobileChatResult {
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
+  const deviceId = useMemo(() => makeDeviceId(), []);
 
   const sessionRef = useRef<MobileChatSession | null>(null);
   const streamRef = useRef<StreamState>(emptyStreamState());
@@ -80,6 +104,7 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
   const [status, setStatus] = useState<ConnStatus>('idle');
   const [pendingCount, setPendingCount] = useState(0);
   const [ready, setReady] = useState(false);
+  const [selfDeviceId, setSelfDeviceId] = useState('');
 
   // Construct the store + session for this (user, project). Re-runs when the
   // identity or project changes; fully torn down on cleanup.
@@ -104,9 +129,10 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
       const store = await createMobileStore();
       if (disposed) return;
       session = new MobileChatSession({
-        url: buildWsUrl(config.base_url, user.token, projectId),
+        url: buildWsUrl(config.base_url, user.token, projectId, deviceId),
         topic_id: `app:${user.id}`,
         store,
+        device_id: deviceId,
         onChange: () => refresh(session as MobileChatSession),
         onStatus: (s) => {
           if (!disposed) setStatus(s);
@@ -126,6 +152,7 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
       });
       sessionRef.current = session;
       setReady(true);
+      setSelfDeviceId(session.device_id);
       refresh(session); // instant cold-open from the durable store
       session.start();
     })();
@@ -136,10 +163,11 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
       sessionRef.current = null;
       session?.stop();
       setReady(false);
+      setSelfDeviceId('');
       setMessages([]);
       setStream(emptyStreamState());
     };
-  }, [user, projectId, config.base_url]);
+  }, [user, projectId, config.base_url, deviceId]);
 
   // AppState → socket activity. Background severs the socket cheaply;
   // foreground reconnects + resumes (research doc §6).
@@ -183,9 +211,14 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     void sessionRef.current?.send(trimmed, opts);
   }, [projectId]);
 
+  const markRead = useCallback((messageIds: readonly string[]): void => {
+    if (messageIds.length === 0) return;
+    sessionRef.current?.markRead(messageIds);
+  }, []);
+
   const rows = useMemo(() => buildRenderRows(messages, stream), [messages, stream]);
 
-  return { rows, status, typing: stream.typing, pendingCount, ready, send };
+  return { rows, status, typing: stream.typing, pendingCount, ready, send, markRead, selfDeviceId };
 }
 
 /** A message belongs to this project view when its project_id matches, or

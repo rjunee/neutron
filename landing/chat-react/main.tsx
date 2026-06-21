@@ -65,6 +65,7 @@ async function boot(): Promise<void> {
         url: config.wsUrl,
         topic_id: config.topicId,
         store,
+        device_id: config.deviceId,
         onChange: sinks.onChange,
         onStatus: sinks.onStatus,
         onFrame: sinks.onFrame,

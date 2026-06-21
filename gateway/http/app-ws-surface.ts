@@ -33,11 +33,14 @@ import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
 import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
 import {
   decodeAppWsInbound,
+  decodeAppWsReceipt,
   decodeAppWsResume,
   appWsTopicId,
+  AGENT_DEVICE_ID,
   MAX_USER_MESSAGE_LEN,
   payloadIsEmpty,
   sanitizeAttachments,
+  sanitizeDeviceId,
   sanitizePlatform,
   sanitizeProjectId,
   type AppWsOutbound,
@@ -73,6 +76,13 @@ export interface AppWsSocketData {
    * those default to native at the adapter.
    */
   platform?: AppWsClientPlatform
+  /**
+   * Track B Phase 4 — client-minted device id from the upgrade query string.
+   * Used to attribute read receipts to the right device and to record
+   * `delivered` for this device at message fan-out time. Absent for legacy
+   * clients that don't report one (those just aren't tracked for receipts).
+   */
+  device_id?: string
   /** Captured ONCE in `open` so identity-aware unregister works. */
   send?: (env: AppWsOutbound) => void
 }
@@ -176,11 +186,20 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // dropped and the adapter defaults to native (neutron://).
         const raw_platform = url.searchParams.get('platform')
         const platform = raw_platform !== null ? sanitizePlatform(raw_platform) : null
+        // Track B Phase 4 — device id for receipt attribution. Mint a synthetic
+        // per-connection id when the client doesn't report one (legacy client,
+        // or a missing/malformed value) so every socket is always attributable;
+        // a client-supplied id is stable across reconnects, a minted one isn't.
+        const raw_device_id = url.searchParams.get('device_id')
+        const device_id =
+          (raw_device_id !== null ? sanitizeDeviceId(raw_device_id) : null) ??
+          `conn-${crypto.randomUUID()}`
         const data: AppWsSocketData = {
           surface: 'app_ws',
           user_id: resolved.user_id,
           project_slug: resolved.project_slug,
           channel_topic_id: appWsTopicId(resolved.user_id),
+          device_id,
         }
         if (project_id !== null) data.project_id = project_id
         if (platform !== null) data.platform = platform
@@ -232,8 +251,9 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // emitted first via adapter.emitDirect — that goes through the
         // registry and silently dropped because the entry wasn't
         // registered yet. Caught by app-ws-surface.test.ts WS round-trip.)
-        const registerOpts: { platform?: AppWsClientPlatform } = {}
+        const registerOpts: { platform?: AppWsClientPlatform; device_id?: string } = {}
         if (data.platform !== undefined) registerOpts.platform = data.platform
+        if (data.device_id !== undefined) registerOpts.device_id = data.device_id
         registry.register(data.channel_topic_id, send, registerOpts)
         const ready: AppWsOutbound = {
           v: 1,
@@ -288,9 +308,43 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
               if (send !== undefined) send(env)
               else ws.send(JSON.stringify(env))
             }
+            // Track B Phase 4 — after the message replay, replay current
+            // receipt state (one receipt_update per message with receipts) to
+            // THIS socket so its ladder reflects delivered/read for the gap it
+            // missed. No-op when the receipt log isn't wired. Sent AFTER the
+            // messages so each update's target message is already applied.
+            const receipts = await adapter.replayReceiptsAfter(
+              data.channel_topic_id,
+              resume.after_seq,
+            )
+            for (const env of receipts) {
+              if (send !== undefined) send(env)
+              else ws.send(JSON.stringify(env))
+            }
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'resume error'
             ws.send(JSON.stringify({ v: 1, type: 'error', code: 'resume_failed', message: reason }))
+          }
+          return
+        }
+        // Track B Phase 4 — a `read` receipt from this device. Attributed to the
+        // SOCKET's device id (never the frame), then fanned to every device as a
+        // receipt_update so the sender's bubble advances. Checked before the
+        // message decoder so the user_message path keeps its narrow type.
+        const receipt = decodeAppWsReceipt(parsed)
+        if (receipt !== null) {
+          const device_id = data.device_id ?? `conn-${data.user_id}`
+          try {
+            await adapter.recordReceipt({
+              channel_topic_id: data.channel_topic_id,
+              message_id: receipt.message_id,
+              device_id,
+              state: 'read',
+              ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+            })
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : 'receipt error'
+            ws.send(JSON.stringify({ v: 1, type: 'error', code: 'receipt_failed', message: reason }))
           }
           return
         }
@@ -319,7 +373,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           // Chat-sync foundation — persist + stamp seq + fan out the echo
           // (de-dups on client_msg_id when a durable log is wired). Falls
           // back to the legacy in-memory echo when no log is configured.
-          const { was_new } = await adapter.ingestUserMessage({
+          const { was_new, message_id } = await adapter.ingestUserMessage({
             channel_topic_id: data.channel_topic_id,
             user_id: data.user_id,
             body: inbound.body,
@@ -336,6 +390,17 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           // agent / a command twice. Storage idempotency alone doesn't make the
           // surface idempotent; this gate does.
           if (!was_new) return
+          // Track B Phase 4 — the server has received this user message and is
+          // about to act on it; record an `agent` READ receipt so the sender's
+          // bubble shows the read tick the instant the agent picks it up — no
+          // second device required. Fans a receipt_update to every device.
+          await adapter.recordReceipt({
+            channel_topic_id: data.channel_topic_id,
+            message_id,
+            device_id: AGENT_DEVICE_ID,
+            state: 'read',
+            ...(inbound_project_id !== undefined ? { project_id: inbound_project_id } : {}),
+          })
           // Pre-dispatch chat-command filter — when matched, the
           // filter has already executed its side effect (e.g. captured
           // a note); we post a tool-result envelope back and SKIP
@@ -506,6 +571,16 @@ async function handleSend(
   // twice. We still return the canonical echo so the client renders correctly.
   let command_result: ChatCommandFilterResult | null = null
   if (was_new) {
+    // Track B Phase 4 — record an `agent` READ receipt for the freshly-received
+    // message so the sender's bubble advances the moment the server picks it up
+    // (parity with the WS path). Fans a receipt_update to every live device.
+    await ctx.adapter.recordReceipt({
+      channel_topic_id,
+      message_id,
+      device_id: AGENT_DEVICE_ID,
+      state: 'read',
+      ...(project_id !== null ? { project_id } : {}),
+    })
     // Pre-dispatch chat-command filter — when matched, short-circuit
     // the LLM dispatch and stash a tool-result envelope to ship in the
     // response body. Per docs/plans/notes-core-tier1-brief.md § 3.2.

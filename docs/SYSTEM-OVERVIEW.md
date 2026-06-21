@@ -103,6 +103,51 @@ the existing per-platform durable store without forking the engine.
   can recall earlier turns mid-conversation. Server search is per-topic by
   design; cross-topic global search is the client store's job.
 
+## Delivery + read receipts (Track B Phase 4) — `@neutron/chat-core` + app-ws
+
+The per-message delivery ladder — **`pending → sent → delivered → read`** —
+across the web + mobile chat stack, built ON the chat-core engine (the sync
+engine is NOT forked). Scope is receipts only.
+
+- **Two acknowledgement kinds.** `delivered` is **server-tracked**: when the
+  gateway fans a message out it records a `delivered` receipt for every device
+  connected at that instant and stamps the set inline on the envelope
+  (`delivered_by`). `read` is **explicit**: a client sends `{type:'receipt',
+  state:'read', message_id}` when a message is viewed, and the gateway
+  attributes it to the SOCKET's device id (never client-supplied — no forging).
+  The agent loop also marks an inbound user message `read` (synthetic `agent`
+  device) the moment it picks it up, so a single-device sender gets the blue
+  read tick without a second device.
+- **`receipt_update` fan-out (full aggregate).** Each read records + re-fans a
+  `receipt_update` carrying the WHOLE current `delivered_by[]`/`read_by[]` (not
+  a delta). The client merges by **set-union**, so apply is idempotent +
+  order-independent — the same contract message apply uses; a device can never
+  un-deliver or un-read. A resume replays one `receipt_update` per
+  message-with-receipts after the cursor.
+- **Stored in the Store contract, engine untouched.** `ChatMessage` gains
+  optional `delivered_to`/`read_by`; `mergeMessage` set-unions them
+  (`unionDeviceIds`); `SyncEngine.applyReceiptUpdate` is an additive method
+  over the existing UPSERT path (no-op if the message isn't local yet — a
+  receipt never precedes its message on the wire). Both backends persist it:
+  RN op-sqlite via two JSON columns + an idempotent `ADD COLUMN` migration;
+  web in-mem/OPFS for free.
+- **Server (`channels/adapters/app-ws/`, `gateway/http/app-ws-surface.ts`,
+  `persistence/app-chat-receipts.ts`).** `AppChatReceiptStore` (migration
+  `0082_app_chat_receipts.sql`) keeps one row per `(topic, message, device)` —
+  `read` implies `delivered`, monotonic, seq resolved from the message log for
+  resume ordering. The adapter gains a `receipt_log` option, delivered-at-fan-out
+  stamping, `recordReceipt` (read → persist + fan), and `replayReceiptsAfter`;
+  the registry tracks per-session `device_id`; the surface mints/parses a
+  `device_id` at upgrade, handles the `receipt` inbound, auto-reads on the WS +
+  HTTP send paths, and replays receipts after a resume.
+- **Clients.** chat-core sessions add `device_id` + `receipt_update` handling +
+  `markRead(ids)`. Mobile (`ChatSyncSurface`) extends the ladder with `read`
+  (blue ✓✓), reports agent messages read via `onViewableItemsChanged`, and
+  excludes the sender's own device. React/assistant-ui surfaces a Telegram-style
+  delivery status line. Like Phase-1's `chat_log`, `receipt_log` is an additive
+  adapter option — wired in tests + composers, not yet in the live gateway
+  composition (the app-ws surface itself isn't productionised there yet).
+
 ## `/code` → foundational Trident (DONE — Trident-port PR-5)
 
 The ~5-PR port folding Vajra's full Trident into Neutron Open as
