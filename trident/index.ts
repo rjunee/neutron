@@ -85,6 +85,29 @@ export type {
   ForgeMeta,
 } from './session.ts'
 
+// WAVE 2 P1 #7 — typed agent dispatch (Forge/Argus/Atlas/Sentinel) with the
+// lifted `prompts/<kind>.md` execution contracts loaded as the system
+// prompt (previously those files were dead code; trident built prompts
+// inline). `dispatchAgent` is the phase-less path that makes Atlas + Sentinel
+// dispatchable alongside the build-loop's Forge/Argus.
+export {
+  loadAgentSystemPrompt,
+  AGENT_PROMPT_FALLBACK,
+  DISPATCH_AGENT_KINDS,
+} from './agent-prompts.ts'
+export type {
+  DispatchAgentKind,
+  AgentSystemPrompt,
+  LoadAgentPromptDeps,
+} from './agent-prompts.ts'
+
+export { dispatchAgent } from './agent-dispatch.ts'
+export type {
+  DispatchAgentInput,
+  DispatchAgentDeps,
+  DispatchAgentOutcome,
+} from './agent-dispatch.ts'
+
 export {
   buildMergeCleanupDeps,
   detectBaseBranch,

@@ -2,6 +2,68 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Wire Atlas/Sentinel dispatch + load `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
+
+**Problem.** The daily-driver gap audit flagged two coupled defects in the typed
+agent dispatch layer:
+
+1. **Typed dispatch was Forge/Argus-only.** The trident state machine spawns only
+   `forge` and `argus` (`orchestrator.ts`). Atlas (research/analysis/ops/strategy/
+   writing) and Sentinel (review of NON-code work) had no path into the dispatcher
+   at all, even though `runtime/subagent/registry.ts` already types them in
+   `AgentKind`.
+2. **The lifted prompt files were DEAD CODE.** `prompts/{forge,atlas,argus,
+   sentinel}.md` carry the detailed execution contracts (Argus's review checklist
+   + cross-model hardening, Forge's delivery mechanics, Atlas's research
+   discipline, Sentinel's QA protocol) — but `trident/prompts.ts` builds the
+   dispatched prompt INLINE and `orchestrator.ts` passed the literal kind label
+   (`system: 'forge'`), so the `.md` contracts never reached the agent.
+
+**What shipped.**
+
+- **`trident/agent-prompts.ts` (NEW).** `loadAgentSystemPrompt(kind)` loads
+  `prompts/<kind>.md` through `@neutronai/prompts`'s canonical, path-traversal-safe
+  `loadPrompt` (which substitutes the platform `{{OWNER_HOME}}` / `{{TELEGRAM_CHAT_ID}}`
+  tokens) and returns it as the agent's SYSTEM prompt with `source: 'file'`. On any
+  failure (missing/empty/unreadable file) it returns a terse inline
+  `AGENT_PROMPT_FALLBACK[kind]` with `source: 'fallback'` — loading a prompt never
+  throws into the dispatch path, and a bare checkout still dispatches a functional
+  agent. `DispatchAgentKind = Exclude<AgentKind, 'core'>` keeps the four typed
+  agents in sync with the registry.
+
+- **`trident/agent-dispatch.ts` (NEW).** `dispatchAgent({kind, task, ...}, {dispatch})`
+  is the phase-less, one-shot typed-dispatch path that makes Atlas + Sentinel
+  dispatchable alongside Forge/Argus. It REUSES the existing one-turn
+  `TridentDispatch` substrate closure (no trident rebuild): loads
+  `prompts/<kind>.md` as `system`, hands the task as the user turn, returns the
+  result plus `kind` + `prompt_source` so callers/tests can assert the loaded
+  contract reached the agent config.
+
+- **`trident/orchestrator.ts`.** The Forge→Argus spawn path now sets `system` to
+  the loaded `prompts/forge.md` / `prompts/argus.md` content (via a new injectable
+  `agent_system_prompt` option, default `loadAgentSystemPrompt(kind).content`)
+  instead of the literal `'forge'` / `'argus'` label. The per-run task instructions
+  still ride the `user_message` turn (unchanged `renderForgePrompt` etc.).
+
+- **`trident/session.ts`.** `TridentDispatchInput.kind` widened to
+  `DispatchAgentKind`; `phase` made optional (Atlas/Sentinel one-shots carry no
+  trident phase). The session manager still only ever receives forge/argus from
+  the orchestrator.
+
+**Tests (real, not scaffolding).** `agent-prompts.test.ts` (real on-disk load for
+all four kinds + signature assertions + fallback-never-throws + template
+substitution), `agent-dispatch.test.ts` (Atlas/Sentinel dispatch carries their
+real persona; stub-loader hermetic assertions; forge/argus no-regression),
+`orchestrator-prompt-loading.test.ts` (the real spawn path now hands the loaded
+`prompts/forge.md` / `argus.md` content to the dispatch). +22 tests; full trident
+suite 206 pass; `bunx tsc --noEmit` clean.
+
+**Not in scope (follow-ups).** No production *caller* invokes `dispatchAgent` for
+Atlas/Sentinel yet — Open has no `/research` chat command or Sentinel-review
+trigger. This change supplies the dispatch capability + prompt-file loading; wiring
+a chat-surface trigger is a separate gap. (Repo has no `STATUS.md` convention —
+AS-BUILT is the single running log.)
+
 ## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
 
 **Problem.** The daily-driver gap audit flagged that Open collapses multi-project

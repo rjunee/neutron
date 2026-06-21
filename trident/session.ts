@@ -36,14 +36,28 @@ import {
   parseRalphPlan,
 } from './prompts.ts'
 import type { SubagentOutcome } from './state-machine.ts'
+import type { DispatchAgentKind } from './agent-prompts.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 
 export interface TridentDispatchInput {
-  /** Sub-agent kind. */
-  kind: 'forge' | 'argus'
-  /** The trident phase that produced this dispatch (drives result parsing). */
-  phase: TridentPhase
-  /** Fully-rendered system prompt. */
+  /**
+   * Sub-agent kind. The trident state machine only ever spawns `'forge'`
+   * and `'argus'`; the wider `DispatchAgentKind` union lets the SAME
+   * one-turn dispatch closure also serve a phase-less `'atlas'` /
+   * `'sentinel'` dispatch (see `agent-dispatch.ts`).
+   */
+  kind: DispatchAgentKind
+  /**
+   * The trident phase that produced this dispatch (drives result
+   * parsing). Omitted for phase-less typed dispatches (Atlas / Sentinel
+   * one-shots) that do not run inside the Forge→Argus state machine.
+   */
+  phase?: TridentPhase
+  /**
+   * Fully-rendered SYSTEM prompt — the agent's execution contract, loaded
+   * from `prompts/<kind>.md` via `loadAgentSystemPrompt` (was previously
+   * just the literal kind label).
+   */
   system: string
   /** Fully-rendered user message. */
   user_message: string
@@ -95,7 +109,7 @@ type SessionState =
 
 interface SessionEntry {
   state: SessionState
-  phase: TridentPhase
+  phase?: TridentPhase
   trident_run_id: string
 }
 
@@ -150,11 +164,12 @@ export class TridentSessionManager {
     if (typeof run_id !== 'string' || run_id.length === 0) {
       throw new Error('TridentSessionManager: mint_run_id produced an empty id')
     }
-    this.sessions.set(run_id, {
+    const entry: SessionEntry = {
       state: { status: 'running' },
-      phase: input.phase,
       trident_run_id: input.trident_run_id,
-    })
+    }
+    if (input.phase !== undefined) entry.phase = input.phase
+    this.sessions.set(run_id, entry)
     const p = this.runDispatch(run_id, input)
     this.inflight.add(p)
     void p.finally(() => this.inflight.delete(p))

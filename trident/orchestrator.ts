@@ -30,6 +30,10 @@
  * loop is exercised against a scripted fake dispatch + fake git/gh.
  */
 
+import {
+  loadAgentSystemPrompt,
+  type DispatchAgentKind,
+} from './agent-prompts.ts'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import { buildMergeCleanupDeps, detectBaseBranch, type RunHostCommand } from './merge.ts'
 import {
@@ -82,6 +86,15 @@ export interface BuildTridentOrchestratorOptions {
   base_branch?: string
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
+  /**
+   * Resolve a dispatchable agent's SYSTEM prompt. Defaults to
+   * `loadAgentSystemPrompt(kind).content`, which loads the on-disk
+   * `prompts/<kind>.md` execution contract (falling back to a minimal
+   * inline identity if the file is missing). Overridable so tests can
+   * assert the loaded contract reaches the dispatch without touching the
+   * real filesystem.
+   */
+  agent_system_prompt?: (kind: DispatchAgentKind) => string
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted (non-null) but which the session
@@ -152,6 +165,11 @@ export function buildTridentOrchestrator(
   const merge_deps = opts.merge_deps ?? buildMergeCleanupDeps(opts.run_host)
   const session = opts.session
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
+  // Resolve each dispatched agent's SYSTEM prompt from its on-disk
+  // `prompts/<kind>.md` contract (was a literal kind label). Default loads
+  // + falls back; tests inject a stub.
+  const agentSystemPrompt =
+    opts.agent_system_prompt ?? ((kind: DispatchAgentKind) => loadAgentSystemPrompt(kind).content)
   // Run ids re-dispatched in THIS process — the per-process bound on the
   // resume/reap recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
@@ -168,7 +186,7 @@ export function buildTridentOrchestrator(
         return session.spawn({
           kind: 'forge',
           phase: run.phase,
-          system: 'forge',
+          system: agentSystemPrompt('forge'),
           user_message: renderForgePrompt(run, base),
           repo_path: run.worktree ?? run.repo_path,
           trident_run_id: run.id,
@@ -181,7 +199,7 @@ export function buildTridentOrchestrator(
         return session.spawn({
           kind: 'forge',
           phase: run.phase,
-          system: 'forge',
+          system: agentSystemPrompt('forge'),
           user_message: renderForgeFixPrompt(run, base, findings, run.round),
           repo_path: run.worktree ?? run.repo_path,
           trident_run_id: run.id,
@@ -196,7 +214,7 @@ export function buildTridentOrchestrator(
         return session.spawn({
           kind: 'forge',
           phase: run.phase,
-          system: 'forge',
+          system: agentSystemPrompt('forge'),
           user_message: renderRalphPlanPrompt(run, base),
           repo_path: run.worktree ?? run.repo_path,
           trident_run_id: run.id,
@@ -211,7 +229,7 @@ export function buildTridentOrchestrator(
         return session.spawn({
           kind: 'forge',
           phase: run.phase,
-          system: 'forge',
+          system: agentSystemPrompt('forge'),
           user_message: renderRalphTaskPrompt(run, base, next_task),
           repo_path: run.worktree ?? run.repo_path,
           trident_run_id: run.id,
@@ -236,7 +254,7 @@ export function buildTridentOrchestrator(
         return session.spawn({
           kind: 'argus',
           phase: run.phase,
-          system: 'argus',
+          system: agentSystemPrompt('argus'),
           user_message: prompt,
           repo_path: run.worktree ?? run.repo_path,
           trident_run_id: run.id,
