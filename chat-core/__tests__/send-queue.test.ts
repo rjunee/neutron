@@ -83,3 +83,51 @@ describe('SendQueue — flush', () => {
     expect(delivered).toEqual(['two'])
   })
 })
+
+describe('SendQueue — flushUnacked (reconnect retry of sent-but-unacked)', () => {
+  it('re-sends a message stuck `sent` (echo never arrived) on reconnect', async () => {
+    const store = new InMemoryStore()
+    const queue = new SendQueue(store, { now: () => 7 })
+    await queue.enqueue({ topic_id: TOPIC, body: 'lost', client_msg_id: 'c1' })
+    // First flush hands it to the socket → marked `sent` …
+    await queue.flush(() => {}, TOPIC)
+    expect((await store.list(TOPIC))[0]?.status).toBe('sent')
+    // … but the connection dropped before the server echoed it. A plain flush
+    // would never retry (only drains `queued`):
+    let plain = 0
+    await queue.flush(() => { plain++ }, TOPIC)
+    expect(plain).toBe(0)
+    // flushUnacked re-drives it on reconnect.
+    const retried: string[] = []
+    const flushed = await queue.flushUnacked((env) => { retried.push(env.body) }, TOPIC)
+    expect(retried).toEqual(['lost'])
+    expect(flushed.length).toBe(1)
+  })
+
+  it('never re-sends an acked message', async () => {
+    const store = new InMemoryStore()
+    const queue = new SendQueue(store, { now: () => 1 })
+    await queue.enqueue({ topic_id: TOPIC, body: 'done', client_msg_id: 'c1' })
+    await queue.flush(() => {}, TOPIC)
+    // Simulate the server echo reconciling it to `acked` (what SyncEngine does).
+    const row = (await store.list(TOPIC))[0]!
+    await store.upsert({ ...row, message_id: 'srv-1', seq: 1, status: 'acked' })
+    const retried: string[] = []
+    await queue.flushUnacked((env) => { retried.push(env.body) }, TOPIC)
+    expect(retried).toEqual([]) // acked → not re-sent
+  })
+
+  it('drains queued AND sent together, oldest first, on reconnect', async () => {
+    const store = new InMemoryStore()
+    const queue = new SendQueue(store, { now: (() => { let t = 0; return () => ++t })() })
+    // 'one' gets sent, 'two' stays queued (socket died before its turn).
+    await queue.enqueue({ topic_id: TOPIC, body: 'one', client_msg_id: 'c1' })
+    await queue.flush(() => {}, TOPIC) // 'one' → sent
+    await queue.enqueue({ topic_id: TOPIC, body: 'two', client_msg_id: 'c2' }) // queued
+    const order: string[] = []
+    await queue.flushUnacked((env) => { order.push(env.body) }, TOPIC)
+    expect(order).toEqual(['one', 'two'])
+    // 'two' is now sent too.
+    expect((await queue.pendingCount(TOPIC))).toBe(0)
+  })
+})

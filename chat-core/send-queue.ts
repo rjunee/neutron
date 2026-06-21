@@ -100,6 +100,46 @@ export class SendQueue {
     return flushed
   }
 
+  /**
+   * Reconnect retry: drain every NOT-yet-acked message (both `queued` and
+   * `sent`) to the socket, oldest first, marking each `sent`.
+   *
+   * A row reaches `sent` the instant `WebSocket.send()` accepts the frame —
+   * but if the connection drops before the server persists + echoes it, the
+   * server never acked it and the optimistic bubble is stuck `sent` forever;
+   * a plain {@link flush} (which only drains `queued`) would never retry it,
+   * silently losing the send (Codex P1, PR #6). On (re)connect we instead
+   * re-send anything not `acked`. This is SAFE — every send carries a
+   * `client_msg_id`, so the server de-dupes the retry (`AppChatStore.append`
+   * idempotency) AND the surface's `was_new` guard means the re-delivery never
+   * re-fires the agent / a command. `acked` rows (the server already holds
+   * them) are never re-sent. Same break-on-throw semantics as {@link flush}:
+   * a socket that dies mid-drain leaves the remainder for the next reconnect.
+   */
+  async flushUnacked(send: SendFn, topic_id: string): Promise<ChatMessage[]> {
+    const unacked = (await this.store.list(topic_id))
+      .filter((m) => m.status !== 'acked')
+      .sort((a, b) => a.created_at - b.created_at)
+    const flushed: ChatMessage[] = []
+    for (const msg of unacked) {
+      const env = toEnvelope(msg)
+      try {
+        await send(env)
+      } catch {
+        // Socket down — leave this and the rest for the next reconnect.
+        break
+      }
+      // A `queued` row advances to `sent`; a `sent` row stays `sent` (the
+      // retry is idempotent server-side). Never regress an `acked` row — they
+      // were filtered out above.
+      if (msg.status === 'queued') {
+        await this.store.upsert({ ...msg, status: 'sent' })
+      }
+      flushed.push({ ...msg, status: 'sent' })
+    }
+    return flushed
+  }
+
   /** Count of messages still awaiting delivery (queued) for a topic. */
   async pendingCount(topic_id: string): Promise<number> {
     return (await this.store.pendingSends(topic_id)).length

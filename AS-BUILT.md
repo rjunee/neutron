@@ -55,6 +55,41 @@ absent, and the `createWebStore()` OPFS-or-in-memory web store — is complete a
 tested here. The one open-repo loose end (a speculative unused `@neutron/chat-core`
 dep on `landing/package.json`) is removed (see the web-wiring note below).
 
+**Cross-model review (Codex/GPT-5) — one fix taken, three follow-ups logged.**
+The fix-round Codex pass surfaced four correctness gaps in the *original*
+Phase-1 design (none in the double-dispatch fix itself; all pre-existing, not in
+Argus's blocking set). Triaged:
+
+- **TAKEN — sent-but-unacked sends are now retried on reconnect (Codex P1).**
+  `SendQueue` marked a row `sent` the instant `WebSocket.send()` accepted the
+  frame; if the socket dropped before the server persisted + echoed it, the row
+  was stranded `sent` and a plain `flush` (which only drains `queued`) never
+  retried it — a silently lost send. NEW `SendQueue.flushUnacked` re-drives every
+  not-`acked` row (queued + sent) oldest-first; `WebChatSession.resumeAndFlush`
+  now calls it on every (re)connect. This is SAFE precisely because of this PR's
+  guarantees: every send carries a `client_msg_id`, so the server de-dupes the
+  retry, and the new `was_new` guard means the re-delivery never re-fires the
+  agent. `acked` rows are never re-sent. Tests: 3 in `send-queue.test.ts` +
+  1 reconnect-retry in `web-session.test.ts` (RED→GREEN).
+- **FOLLOW-UP (Codex P1) — rich agent envelopes are flattened on replay.**
+  `AppChatStore.append` persists only `body/project/created_at`, so
+  `replayAfter` reconstructs a bare `agent_message` — a device that reconnects
+  loses `options`/`image_urls`/`citations`/`doc_refs`/`deep_link`/
+  `upload_affordance` that live devices saw. Proper fix needs a schema change
+  (store the full envelope JSON) + a migration; deferred to a dedicated PR rather
+  than widen this fix-round into the persistence schema.
+- **FOLLOW-UP (Codex P1) — resume does not page past the first 500 rows.**
+  The server caps each replay at `DEFAULT_REPLAY_LIMIT` (500); a cold/long-
+  offline client sends one `resume` and stops, so topics with >500 persisted
+  messages never pull the tail. Robust paging needs a server "resume
+  complete / has-more" marker (a protocol addition) so the client knows to
+  re-resume from the new high-water mark; deferred.
+- **FOLLOW-UP (Codex P2) — mixed web+native fan-out uses one platform.**
+  `getPlatform` returns only the most-recently-registered platform, used to pick
+  the doc-link scheme for the whole fan-out, so a simultaneously-connected
+  web+native account gets one device's links in the wrong scheme. Needs
+  per-device envelope encoding in the registry fan-out; deferred (P2).
+
 ## 2026-06-21 — Chat-sync foundation (Phase 1): server `seq`/`resume`/multi-device + `@neutron/chat-core`
 
 The first phase of web↔mobile Telegram-parity (research:

@@ -138,11 +138,20 @@ export class WebChatSession {
     this.emitChange()
   }
 
-  /** Send the resume request from our local cursor, then flush the queue. */
+  /** Send the resume request from our local cursor, then re-drive every
+   *  not-yet-acked send. Uses `flushUnacked` (not `flush`) so a message that
+   *  was handed to a socket which then dropped before the server echoed it is
+   *  retried on reconnect rather than stranded `sent` forever (Codex P1). The
+   *  retry is idempotent server-side (`client_msg_id`) and the surface's
+   *  `was_new` guard stops it re-firing the agent. */
   private async resumeAndFlush(): Promise<void> {
     const resume = await this.engine.resumeRequest(this.topic_id)
     this.ws.send(resume)
-    await this.flush()
+    const flushed = await this.queue.flushUnacked((envelope) => {
+      const ok = this.ws.send(envelope)
+      if (!ok) throw new Error('socket not open')
+    }, this.topic_id)
+    if (flushed.length > 0) this.emitChange()
   }
 
   private async flush(): Promise<void> {

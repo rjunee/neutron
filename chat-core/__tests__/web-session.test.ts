@@ -122,6 +122,29 @@ describe('WebChatSession — gap-free reconnect (resume)', () => {
     expect(msgs.map((m) => m.body)).toEqual(['one', 'two', 'three'])
   })
 
+  it('retries a sent-but-unacked message on reconnect (no lost send)', async () => {
+    const { session, sockets } = setup()
+    session.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(readyFrame())
+    await new Promise((r) => setTimeout(r, 0))
+    // Send while open → flushed immediately, marked `sent`.
+    await session.send('important', { client_msg_id: 'cmid-keep' })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(sockets[0]!.sentUserMessages().map((e) => e['body'])).toEqual(['important'])
+    // The connection drops before the server echoes it (no user_message echo
+    // applied → row stays `sent`, never `acked`). A reconnect announce arrives.
+    sockets[0]!.deliver(readyFrame())
+    await new Promise((r) => setTimeout(r, 0))
+    // The send is retried (idempotent server-side on client_msg_id).
+    const bodies = sockets[0]!.sentUserMessages().map((e) => e['body'])
+    expect(bodies).toEqual(['important', 'important'])
+    // Both retries carry the same client_msg_id so the server de-dupes.
+    expect(
+      sockets[0]!.sentUserMessages().every((e) => e['client_msg_id'] === 'cmid-keep'),
+    ).toBe(true)
+  })
+
   it('reconciles the optimistic bubble when its server echo (with seq) arrives', async () => {
     const { session, sockets } = setup()
     session.start()
