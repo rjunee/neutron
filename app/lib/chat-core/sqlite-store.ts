@@ -52,9 +52,13 @@ const TABLE = 'chat_messages';
 
 /** DDL applied once on open. Idempotent. */
 const SCHEMA = [
+  // PK is (topic_id, identity), NOT identity alone: the Store contract is
+  // topic-scoped (InMemoryStore keys per topic), so the same message identity
+  // may legitimately exist in two topics. A global identity PK would let
+  // INSERT OR REPLACE clobber another topic's row → silent data loss.
   `CREATE TABLE IF NOT EXISTS ${TABLE} (
-     identity      TEXT PRIMARY KEY NOT NULL,
      topic_id      TEXT NOT NULL,
+     identity      TEXT NOT NULL,
      client_msg_id TEXT NOT NULL,
      message_id    TEXT,
      seq           INTEGER,
@@ -63,7 +67,8 @@ const SCHEMA = [
      project_id    TEXT,
      attachments   TEXT,
      created_at    INTEGER NOT NULL,
-     status        TEXT NOT NULL
+     status        TEXT NOT NULL,
+     PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_cmid ON ${TABLE} (topic_id, client_msg_id)`,
@@ -109,7 +114,10 @@ export class SqliteChatStore implements Store {
     const mergedIdentity = messageIdentity(merged.client_msg_id, merged.message_id) ?? identity;
     const existingIdentity = messageIdentity(existing.client_msg_id, existing.message_id);
     if (existingIdentity !== null && existingIdentity !== mergedIdentity) {
-      await this.db.execute(`DELETE FROM ${TABLE} WHERE identity = ?`, [existingIdentity]);
+      await this.db.execute(`DELETE FROM ${TABLE} WHERE topic_id = ? AND identity = ?`, [
+        msg.topic_id,
+        existingIdentity,
+      ]);
     }
     await this.write(mergedIdentity, merged);
   }

@@ -171,4 +171,19 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect((await store.list('app:a')).length).toBe(0);
     expect((await store.list('app:b')).length).toBe(1); // untouched
   });
+
+  it('keeps rows with the SAME identity in different topics (no PK clobber)', async () => {
+    // Codex P2 regression: a global identity PK would let topic B's upsert
+    // INSERT-OR-REPLACE topic A's row out of existence. The PK is (topic_id,
+    // identity), so a shared client_msg_id / message_id across topics coexists.
+    const store = await SqliteChatStore.open(bunExecutor(freshDb()));
+    await store.upsert(msg({ topic_id: 'app:a', client_msg_id: 'shared', seq: 1, message_id: 'same', body: 'a-body', status: 'acked' }));
+    await store.upsert(msg({ topic_id: 'app:b', client_msg_id: 'shared', seq: 1, message_id: 'same', body: 'b-body', status: 'acked' }));
+    expect((await store.list('app:a')).map((m) => m.body)).toEqual(['a-body']);
+    expect((await store.list('app:b')).map((m) => m.body)).toEqual(['b-body']);
+    // A reconcile in B (identity change cmid→message_id path) must not touch A.
+    await store.upsert(msg({ topic_id: 'app:b', client_msg_id: 'shared', seq: 2, message_id: 'same2', body: 'b-updated', status: 'acked' }));
+    expect((await store.list('app:a')).map((m) => m.body)).toEqual(['a-body']);
+    expect((await store.list('app:b')).map((m) => m.body)).toEqual(['b-updated']);
+  });
 });
