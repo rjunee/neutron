@@ -129,7 +129,16 @@ function normalizeDue(value: unknown): string | null | undefined {
   if (trimmed === '') return null
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     const ms = Date.parse(`${trimmed}T00:00:00.000Z`)
-    return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
+    if (!Number.isFinite(ms)) return undefined
+    const d = new Date(ms)
+    // `Date.parse` rolls impossible calendar dates over (2026-02-31 →
+    // 2026-03-03). Reject unless the parsed UTC y-m-d round-trips to the
+    // exact input, so a typo doesn't silently schedule the wrong day.
+    const y = d.getUTCFullYear().toString().padStart(4, '0')
+    const m = (d.getUTCMonth() + 1).toString().padStart(2, '0')
+    const day = d.getUTCDate().toString().padStart(2, '0')
+    if (`${y}-${m}-${day}` !== trimmed) return undefined
+    return d.toISOString()
   }
   const ms = Date.parse(trimmed)
   return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined

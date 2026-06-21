@@ -82,6 +82,14 @@ describe('inbox — parse', () => {
     expect(typeof badDue).toBe('string')
     expect(badDue as string).toContain('due')
 
+    // Impossible calendar date must be rejected, not rolled over to Mar 3.
+    const rollover = parseInboxLine('{"action":"add","title":"x","due":"2026-02-31"}')
+    expect(typeof rollover).toBe('string')
+    expect(rollover as string).toContain('due')
+    // A real leap day is accepted.
+    const leap = parseInboxLine('{"action":"add","title":"x","due":"2024-02-29"}') as InboxRow
+    expect(leap.due_date).toBe('2024-02-29T00:00:00.000Z')
+
     // An absent field is fine — no error, field simply unset.
     const ok = parseInboxLine('{"action":"add","title":"x"}') as InboxRow
     expect(ok.priority).toBeUndefined()
