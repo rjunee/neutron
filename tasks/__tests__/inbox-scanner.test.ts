@@ -156,10 +156,10 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
     expect(store.list({ project_slug: 't1', status: 'all' }).length).toBe(1)
   })
 
-  test('a write to the rotated inode during apply is requeued, not lost', async () => {
+  test('a write to the rotated inode during apply is drained in order, same scan', async () => {
     appendInboxRow(paths.inbox, { action: 'add', id: 'a', title: 'first row' })
     // During the apply window, simulate a pre-rename-opened fd writing to
-    // the already-rotated sidecar (the exact race the guard protects).
+    // the already-rotated sidecar (the exact race the inline drain covers).
     let injected = false
     const result = await runTaskScan({
       store,
@@ -176,11 +176,37 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
         return NOW
       },
     })
-    expect(result.applied).toBe(1) // only 'a' was in the claimed snapshot
-    // 'b' was requeued to the live inbox and survives for the next scan.
-    const second = await scan()
-    expect(second.applied).toBe(1)
+    // The late row is drained IN ORDER within this same scan — not lost,
+    // not deferred, not reordered behind a newer live-inbox row.
+    expect(result.applied).toBe(2)
+    expect(store.get('a')?.title).toBe('first row')
     expect(store.get('b')?.title).toBe('racing row')
+    expect(existsSync(`${paths.inbox}.processing`)).toBe(false)
+  })
+
+  test('a dependent add→update pair written across the rotate boundary stays ordered', async () => {
+    // 'create' is in the claimed snapshot; its dependent 'update' is
+    // written to the rotated sidecar during apply. Inline draining applies
+    // the update AFTER the add (correct order), so it is not lost.
+    appendInboxRow(paths.inbox, { action: 'add', id: 'dep', title: 'original' })
+    let injected = false
+    const result = await runTaskScan({
+      store,
+      project_slug: 't1',
+      paths,
+      now: () => {
+        if (!injected) {
+          injected = true
+          appendFileSync(
+            `${paths.inbox}.processing`,
+            JSON.stringify({ action: 'update', id: 'dep', priority: 'P0' }) + '\n',
+          )
+        }
+        return NOW
+      },
+    })
+    expect(result.applied).toBe(2) // add + dependent update
+    expect(store.get('dep')?.priority).toBe(3) // update landed after the add
   })
 
   test('complete via inbox flips the task to Done in tasks.md', async () => {

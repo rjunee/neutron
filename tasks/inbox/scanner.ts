@@ -18,13 +18,17 @@
  *   3. Apply each row to the `TaskStore` (`applyInboxRows`).
  *   4. Archive every processed row + its outcome to
  *      `task-inbox.archive.jsonl` (append-only audit log).
+ *      Any rows a pre-rename-opened fd appends to the sidecar DURING this
+ *      apply window are drained IN ORDER within the same scan
+ *      (`drainClaimed`), so a dependent `add`→`update` pair across the
+ *      rotate boundary stays ordered.
  *   5. Re-render `tasks.md` + `DASHBOARD.md` from the post-mutation store
- *      state (atomic writes), then `finalizeProcessing`: requeue any late
- *      writes to the rotated inode and delete the sidecar. A crash before
- *      that delete is recovered on the next scan; reprocessing is safe
- *      because every `add` row carries a stable id (stamped at append) so
- *      replay collides on the PK and skips, and edit-ops on missing rows
- *      skip.
+ *      state (atomic writes), then `finalizeProcessing`: requeue any
+ *      residual past the inline drain and delete the sidecar. A crash
+ *      before that delete is recovered on the next scan; reprocessing is
+ *      safe because every `add` row carries a stable id (stamped at
+ *      append) so replay collides on the PK and skips, and edit-ops on
+ *      missing rows skip.
  *
  * Designed to be driven by a cron tick (mirroring the focus-score
  * recompute cron) OR invoked ad-hoc. Path resolution is injected so the
@@ -168,26 +172,76 @@ function claimInbox(inboxPath: string): ClaimedInbox | null {
   return { body, baselineBytes: Buffer.byteLength(body, 'utf8'), rotated: true }
 }
 
+/** Max in-order tail-drain passes over the rotated sidecar per scan. */
+const MAX_TAIL_DRAIN_PASSES = 8
+
+interface DrainResult {
+  outcomes: ApplyOutcome[]
+  errors: ParseError[]
+  /** Bytes of the sidecar consumed (applied) by the time the drain ended. */
+  finalBaseline: number
+}
+
 /**
- * Commit the scan: requeue any rows an appender wrote to the rotated
- * inode AFTER our claim-time read (a pre-rename-opened fd writing during
- * the multi-step apply window), then delete the sidecar.
- *
- * The guard re-reads the sidecar and, if it grew past the claim-time
- * baseline, copies the new tail back onto the live inbox so the next
- * scan picks it up — no loss across the entire apply window. A residual
- * sub-syscall window remains (a write landing strictly between this
- * re-read and the unlink); for the expected single-scanner,
- * human/agent-cadence usage that is acceptable, and a crash there simply
- * defers those rows to the next scan via the leftover-sidecar path.
+ * Apply the claimed body, then drain — IN ORDER, within this same scan —
+ * any rows a pre-rename-opened fd appended to the rotated sidecar during
+ * the apply window. Draining inline (rather than requeueing to the live
+ * inbox) preserves global append order: rotated-inode rows are older than
+ * anything in the freshly-recreated live inbox, so applying them now,
+ * before the next scan reads the live inbox, keeps a dependent
+ * `add`→`update` pair in order. Bounded to {@link MAX_TAIL_DRAIN_PASSES}
+ * passes so a pathological continuous writer can't spin the scan forever
+ * — any final residual is handled by {@link finalizeProcessing}.
  */
-function finalizeProcessing(inboxPath: string, claim: ClaimedInbox): void {
+async function drainClaimed(
+  deps: RunTaskScanDeps,
+  claim: ClaimedInbox,
+): Promise<DrainResult> {
+  const applyDeps = { store: deps.store, project_slug: deps.project_slug }
+  const parsed = parseInbox(claim.body)
+  const errors: ParseError[] = [...parsed.errors]
+  const outcomes = await applyInboxRows(applyDeps, parsed.rows)
+  let baseline = claim.baselineBytes
+  if (claim.rotated) {
+    const processingPath = processingPathFor(deps.paths.inbox)
+    for (let pass = 0; pass < MAX_TAIL_DRAIN_PASSES; pass++) {
+      let latest: Buffer
+      try {
+        latest = readFileSync(processingPath)
+      } catch {
+        break
+      }
+      if (latest.length <= baseline) break
+      const tailStr = latest.subarray(baseline).toString('utf8')
+      baseline = latest.length
+      const tailParsed = parseInbox(tailStr)
+      errors.push(...tailParsed.errors)
+      outcomes.push(...(await applyInboxRows(applyDeps, tailParsed.rows)))
+    }
+  }
+  return { outcomes, errors, finalBaseline: baseline }
+}
+
+/**
+ * Commit the scan: requeue any residual rows written to the rotated inode
+ * AFTER the inline drain gave up (only possible under sustained
+ * concurrent writes past {@link MAX_TAIL_DRAIN_PASSES}), then delete the
+ * sidecar. The requeue appends to the live inbox for the next scan — this
+ * vanishing residual is the only path that can reorder relative to live
+ * appends, and a crash before the unlink simply defers it via the
+ * leftover-sidecar recovery path.
+ */
+function finalizeProcessing(
+  inboxPath: string,
+  claim: ClaimedInbox,
+  finalBaseline: number,
+): void {
   const processingPath = processingPathFor(inboxPath)
   try {
     if (claim.rotated) {
       const latest = readFileSync(processingPath)
-      if (latest.length > claim.baselineBytes) {
-        const tail = latest.subarray(claim.baselineBytes).toString('utf8')
+      if (latest.length > finalBaseline) {
+        const tail = latest.subarray(finalBaseline).toString('utf8')
         if (tail.length > 0) appendFileSync(inboxPath, tail, { mode: 0o600 })
       }
     }
@@ -251,15 +305,13 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   const claim = claimInbox(deps.paths.inbox)
   const now = deps.now?.() ?? new Date()
   const nowIso = now.toISOString()
-  const { rows, errors } = claim === null
-    ? { rows: [], errors: [] }
-    : parseInbox(claim.body)
 
-  // 2. Apply every parsed row to the store, in order.
-  const outcomes = await applyInboxRows(
-    { store: deps.store, project_slug: deps.project_slug },
-    rows,
-  )
+  // 2. Apply the claimed rows + drain any late tail writes, in order.
+  const drained: DrainResult = claim === null
+    ? { outcomes: [], errors: [], finalBaseline: 0 }
+    : await drainClaimed(deps, claim)
+  const outcomes = drained.outcomes
+  const errors = drained.errors
 
   // 3. Archive processed rows + parse errors (audit trail).
   appendArchive(deps.paths.archive, nowIso, outcomes, errors)
@@ -283,10 +335,12 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   await atomicWriteFile(deps.paths.tasks_md, tasksMd, { mode: 0o600 })
   await atomicWriteFile(deps.paths.dashboard, dashboard, { mode: 0o600 })
 
-  // 5. Commit: requeue any late writes to the rotated inode, then drop
-  // the sidecar now the store + markdown are both durable. A crash before
-  // here leaves the sidecar for the next scan to recover.
-  if (claim !== null) finalizeProcessing(deps.paths.inbox, claim)
+  // 5. Commit: requeue any residual past the inline drain, then drop the
+  // sidecar now the store + markdown are both durable. A crash before here
+  // leaves the sidecar for the next scan to recover.
+  if (claim !== null) {
+    finalizeProcessing(deps.paths.inbox, claim, drained.finalBaseline)
+  }
 
   const applied = outcomes.filter((o) => o.status === 'applied').length
   const skipped = outcomes.filter((o) => o.status === 'skipped').length

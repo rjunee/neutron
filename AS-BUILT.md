@@ -45,10 +45,10 @@ New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
   then drop the sidecar. Concurrent-append safety: a racing append targets
   the live `task-inbox.jsonl`, which the rename moved aside, so it survives
   in a freshly-recreated inbox the next scan drains; a pre-rename-opened fd
-  that writes DURING the apply window is caught by the late-write guard
-  (re-read the sidecar before unlink, copy the new tail back) — leaving only
-  a sub-syscall residual window, acceptable for the single-scanner,
-  human/agent-cadence usage. At most one sidecar exists at a time: a leftover
+  that writes DURING the apply window is drained IN ORDER within the same
+  scan (bounded passes), so a dependent `add`→`update` pair across the rotate
+  boundary stays ordered — only a vanishing residual past the drain bound
+  requeues, acceptable for the single-scanner, human/agent-cadence usage. At most one sidecar exists at a time: a leftover
   from a crashed scan is drained first and the live inbox waits one cycle, so
   un-committed rows are never clobbered. Crash recovery is idempotent because
   `appendInboxRow` stamps a stable UUID on every id-less `add` AT APPEND
