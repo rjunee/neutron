@@ -16,6 +16,7 @@
  */
 
 import { InMemoryStore, type Store } from '../store.ts'
+import type { MessageSearchHit, MessageSearchOptions } from '../search.ts'
 import type { ChatMessage } from '../types.ts'
 
 const SNAPSHOT_FILE = 'neutron-chat-core.json'
@@ -102,6 +103,14 @@ export class OpfsChatStore implements Store {
     await this.mem.clear(topic_id)
     this.knownTopics.delete(topic_id)
     this.schedulePersist()
+  }
+
+  // Message search delegates to the in-memory index this store already keeps
+  // hot (the OPFS snapshot is just durability). When the Phase-2 wasm-SQLite
+  // engine lands here it gets real FTS5 via SqliteChatStore, behind this same
+  // method — no caller changes.
+  searchMessages(query: string, opts?: MessageSearchOptions): Promise<MessageSearchHit[]> {
+    return this.mem.searchMessages(query, opts)
   }
 
   /** Force any pending snapshot write to complete (tests / unload). */

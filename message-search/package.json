@@ -1,0 +1,11 @@
+{
+  "name": "@neutronai/message-search",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutron/chat-core": "workspace:*",
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/tools": "workspace:*"
+  }
+}
