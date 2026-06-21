@@ -2,6 +2,47 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — PR #15 Argus fix-pass: close the scanner finalize data-loss windows + resolve main conflicts
+
+Argus (Codex/GPT-5 cross-model + Claude correctness reviewer, independently
+converged) flagged two IMPORTANT correctness holes in
+`tasks/inbox/scanner.ts`'s drain/finalize path. Both fixed:
+
+1. **Unlink-after-failed-requeue lost residual rows — `finalizeProcessing`.**
+   If the residual `appendFileSync(inboxPath, tail)` requeue threw (disk full,
+   EACCES on the live inbox), control fell to the catch and then
+   UNCONDITIONALLY `unlinkSync`'d the sidecar → residual neither applied nor
+   left for recovery (silent loss). Now the sidecar is dropped ONLY when the
+   requeue actually succeeded (or there was no complete residual); a failed
+   requeue LEAVES the sidecar so the next scan recovers it (reprocessing is
+   idempotent via stable ids / skip-on-missing).
+
+2. **Byte-boundary line split + unlink TOCTOU — `drainClaimed` + `finalizeProcessing`.**
+   The drain/finalize tail was sliced purely by byte count
+   (`subarray(baseline)`), so a reader observing a sidecar mid-append could
+   split a JSON line at a non-newline boundary — the committed row recorded as
+   two parse errors and lost. New `completeLineTail()` helper snaps every
+   advance to the last `\n` boundary and never consumes a partial line (the
+   claim snapshot is now kept as a `Buffer` so the snap is byte-accurate).
+   `finalizeProcessing` also re-reads the sidecar immediately before
+   `unlinkSync` and only removes it when the length hasn't grown since the
+   requeue read — closing the window where a pre-rename fd appends a row
+   between read and unlink that would be dropped with the dirent.
+
+Note (minor, documented): DASHBOARD.md task lines are rendered inline (richer
+human "today" view) and intentionally bypass `renderTaskLine`, so the "locked
+Nova tag format lives in exactly one place" claim covers tasks.md/STATUS.md but
+not DASHBOARD.md.
+
+**Tests (real):** `inbox-scanner.test.ts` gains a test that a FAILED requeue
+write LEAVES the sidecar intact (no data loss) AND the next scan recovers both
+rows; a test that a partial mid-write line is never split into parse errors and
+is recovered WHOLE once completed; plus `completeLineTail` newline-snap unit
+tests. `bunx tsc --noEmit` clean; full `bash scripts/run-tests.sh` green.
+
+Also resolved the PR #15 vs `main` conflict (only `AS-BUILT.md`; both the
+markdown-task-surface entry and main's per-topic-session-isolation entry kept).
+
 ## 2026-06-21 — Markdown task surface: task-inbox append-queue + tasks.md / DASHBOARD.md scanner (gap-audit P1 #11)
 
 Closes gap-audit §(a) #11 / §(b) cat 11: the focus-score formula
@@ -81,6 +122,76 @@ parse errors archived + non-blocking; focus ordering in the rendered file).
 Deferred: composition wiring of the scanner to a cron tick + real
 `<NEUTRON_HOME>` paths (a small build-core-modules follow-up; the seam is the
 injected `TaskScanPaths`).
+
+## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
+
+**Problem.** The daily-driver gap audit flagged that Open collapses multi-project
+chat into one shared agent identity: every Telegram/web topic spoke with the
+same instance-wide persona. Two sub-problems, one VERIFIED, one new:
+
+1. **Per-topic session isolation** — already *mostly* wired but never asserted at
+   the key level. `build-live-agent-turn.ts` stamps
+   `spec.metering_context.project_id = scope` (`'general'` or the project id) and
+   `build-llm-call-substrate.ts` folds that into
+   `ClaudeCodeSubstrateOptions.project_id`, which `poolKeyFor()` keys the
+   module-level warm-REPL pool on `(substrate_instance_id, user_id, project_id,
+   credential_identity)`. So distinct topics already resolve to distinct warm CC
+   sessions — but the existing test only asserted `metering_context` was *set*,
+   not that distinct **session keys** result. The audit's "ONE shared substrate"
+   read of composer.ts:207 predates this keying (the `cc-agent-*` live substrate
+   produces a *keyed pool*, not one session).
+
+2. **Per-project persona** — the real gap. `projects.persona` (a free-form label
+   like "Forge — pragmatic build agent", written by the settings drawer +
+   onboarding) was NEVER read into a chat turn. `composeFirstTurnPrompt` only
+   loaded the owner-wide `PersonaPromptLoader` (`<owner_home>/persona/*.md`).
+
+**What shipped.**
+
+- **`open/project-persona-resolver.ts` (NEW).** `buildProjectPersonaResolver(db)`
+  → `(project_id) => string | null`, reading the canonical
+  `projects.persona` column (`WHERE id = ? AND deleted_at IS NULL`). A closure
+  over the live `ProjectDb` (re-run per cold turn, NOT a captured value), so a
+  persona edited mid-session lands on the next cold topic. Best-effort: a
+  transient SQLite error logs + returns null (degrade to owner-wide persona,
+  never hard-fail — mirrors the persona-loader's rule).
+
+- **`build-live-agent-turn.ts`.** New optional `projectPersonaResolver` on
+  `BuildLiveAgentTurnInput`. `composeFirstTurnPrompt` now splices a
+  `<project_persona>` fragment ABOVE the scope fragment for project topics, so
+  the project topic's dedicated warm session adopts ITS persona on top of — not
+  in place of — the owner-wide SOUL/USER `base_persona`. NEVER consulted for
+  General (`turn.project_id === undefined`). A null/empty/throwing resolver
+  degrades silently. First-turn-only (the warm REPL carries it forward); the
+  degraded system-prompt-assembly fallback path also carries the fragment.
+
+- **`open/composer.ts`.** Builds the resolver via `buildProjectPersonaResolver(db)`
+  and threads it into the `liveAgentTurnFactory`. Surgical: one import + one
+  call + one passthrough field. LLM-less boot is unaffected (the factory only
+  exists when `liveAgentSubstrate !== null`).
+
+**Why reuse, not rebuild.** Per the scope guard, the warm-session lifecycle
+(spawn/warm/resume/respawn) and the keyed pool already exist in
+`persistent-repl-substrate.ts`; the metering→`project_id`→`poolKeyFor` fold
+already gives per-topic sessions. This change does NOT touch that machinery — it
+adds the per-project persona seam and PROVES the isolation at the key level.
+
+**Verify (REAL).**
+- `gateway/realmode-composer/__tests__/build-live-agent-turn-session-isolation.test.ts`
+  (NEW) — wires the REAL `buildLlmCallSubstrate` (production seam) under the
+  live-agent runner with a capturing `substrateFactory`, dispatches General +
+  two project topics, and asserts the computed `poolKeyFor` yields THREE
+  DISTINCT keys (not one shared), a STABLE key across turns on the same topic,
+  and that the single-topic path still replies. This is the "assert distinct
+  session keys, not just that a session exists" the spec demands.
+- `build-live-agent-turn.test.ts` (+6 tests) — project topic injects its persona
+  into the first-turn prompt; General never consults the resolver; null/empty →
+  no block; a throwing resolver degrades; two topics each get their OWN persona;
+  persona is a first-turn-only splice.
+- `open/__tests__/project-persona-resolver.test.ts` (NEW) — REAL migrated
+  project.db: trimmed persona for a live project, null for unknown/NULL/empty,
+  soft-deleted ignored, closed-db → null (never throws).
+- `bunx tsc --noEmit` clean. Full `bun test` → 7684 pass / 90 skip / 0 fail.
 
 ## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
 
