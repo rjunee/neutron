@@ -85,6 +85,9 @@
   .car-dot:nth-child(3) { animation-delay: .4s; }
   @keyframes car-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
   .car-pending { text-align: center; font-size: 12px; color: var(--muted); padding: 4px; }
+  /* Track B Phase 4 — delivery/read receipt status line for the latest send. */
+  .car-receipt { text-align: right; font-size: 11px; color: var(--muted); padding: 2px 14px; }
+  .car-receipt-read { color: var(--accent); }
   .car-scroll-bottom {
     position: absolute; right: 16px; bottom: 78px; z-index: 5;
     width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);

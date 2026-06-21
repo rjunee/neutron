@@ -2,6 +2,79 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Track B Phase 4 (slice 2): delivery + read receipts over `@neutron/chat-core`
+
+**What shipped.** A per-message delivery ladder — `pending → sent → delivered →
+read` — across the web + mobile chat stack, built ON the existing chat-core
+engine (NO fork of the sync engine). Scope is receipts ONLY (reactions +
+edit/delete are later slices, out of scope).
+
+**Receipt model.**
+- **Delivered is server-tracked.** When the gateway fans a message out, it
+  records a `delivered` receipt for every device connected at that moment and
+  stamps the set inline on the outbound envelope (`delivered_by`). No client
+  cooperation needed.
+- **Read is explicit + agent-driven.** A client sends `{type:'receipt',
+  state:'read', message_id}` when a message is viewed; the gateway attributes it
+  to the SOCKET's device id (never a client-supplied one — no forging). The
+  agent loop ALSO marks an inbound user message `read` (synthetic `agent`
+  device) the instant it picks it up, so a single-device sender sees the blue
+  read tick with no second device.
+- **Fan-out as `receipt_update`.** Each read records + re-fans a `receipt_update`
+  carrying the FULL current aggregate (`delivered_by[]`/`read_by[]`, not a
+  delta). The client merge is set-union → idempotent + order-independent, the
+  same contract message apply uses. Resume replays one `receipt_update` per
+  message-with-receipts after the cursor.
+
+**Stored in the chat-core Store contract (both backends), engine untouched.**
+- `chat-core/types.ts`: `ChatMessage` gains optional `delivered_to`/`read_by`;
+  `normalizeReceiptUpdate` + `OutboundReceipt` + `AGENT_DEVICE_ID`.
+- `chat-core/store.ts`: `mergeMessage` set-unions the receipt arrays
+  (`unionDeviceIds`) — monotonic, so a device can never un-deliver/un-read.
+- `chat-core/sync-engine.ts`: additive `applyReceiptUpdate(topic, update)` —
+  looks the message up by `message_id`, merges via the existing UPSERT path;
+  no-op when the message isn't local yet (a receipt never precedes its message).
+- RN op-sqlite (`app/lib/chat-core/sqlite-store.ts`): two new JSON columns +
+  an idempotent `ADD COLUMN` migration for pre-receipts DBs. Web in-mem/OPFS
+  serialize the fields for free.
+
+**Server (`channels/adapters/app-ws/` + `gateway/http/app-ws-surface.ts`).**
+- Durable receipt log `persistence/app-chat-receipts.ts` (`AppChatReceiptStore`)
+  + migration `0082_app_chat_receipts.sql` — one row per `(topic, message,
+  device)`, `read` implies `delivered`, monotonic timestamps, seq resolved from
+  the message log for resume ordering.
+- Adapter: `receipt_log` option; `delivered`-at-fan-out stamping;
+  `recordReceipt` (read → persist + fan `receipt_update`); `replayReceiptsAfter`.
+- Session registry: per-session `device_id` + `devices(topic)`.
+- Surface: parses/mints a `device_id` at upgrade; a `receipt` inbound branch;
+  agent auto-read on the WS + HTTP send paths; receipt replay after a resume.
+
+**Clients.**
+- chat-core sessions (`web-session.ts` / `mobile-session.ts`): `device_id`
+  option, `receipt_update` handling, `markRead(ids)` (de-duped, best-effort).
+- Mobile (`ChatSyncSurface.tsx` + `chat-render-model.ts`): ladder extended with
+  `read` (blue ✓✓); `onViewableItemsChanged` reports agent messages read;
+  `deliveryState(msg, selfDeviceId)` excludes the sender's own device.
+- React/assistant-ui (`landing/chat-react/`): controller computes per-message
+  `delivery` + `latestUserDelivery`, auto-reads agent messages, and renders a
+  Telegram-style status line (🕓/✓/✓✓/✓✓ blue).
+
+**Wiring posture (honest scope).** Like the Phase-1 `chat_log`, the `receipt_log`
+is an ADDITIVE adapter option — exercised by the test composers + a real-SQLite
+gateway integration test, NOT yet wired into the live gateway composition (the
+production app-ws surface itself isn't composed in `gateway/composition.ts`
+yet). When the app-ws surface is productionised, pass `chat_log` + `receipt_log`
+together.
+
+**Tests (real, not mocks).** `chat-core/__tests__/receipts.test.ts` (union,
+decode, engine apply + applyReceiptUpdate), `persistence/app-chat-receipts.test.ts`
+(record/aggregate/replay over real SQLite), `channels/adapters/app-ws/__tests__/
+receipts.test.ts` (delivered fan-out, read fan-out, multi-device, replay),
+`gateway/__tests__/app-ws-receipts.test.ts` (end-to-end WS: agent auto-read,
+multi-device read fan-out, resume replay over a live Bun.serve), plus
+render-model + sqlite-store (incl. pre-receipts migration) cases. Root + all
+leaf tsc clean; full `bun test` green (8023 pass / 0 fail).
+
 ## 2026-06-21 — #323 fix round 2: extract from `freeform_text`, not `state_delta` (Argus r1 BLOCKERs 1 & 2)
 
 **Why a second pass.** Argus REQUEST-CHANGES on PR #20: the round-1 fix was

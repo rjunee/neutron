@@ -140,6 +140,63 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect(row?.client_msg_id).toBe('');
   });
 
+  it('round-trips + set-unions receipt fields (Track B Phase 4)', async () => {
+    const store = await SqliteChatStore.open(bunExecutor(freshDb()));
+    await store.upsert(
+      msg({ client_msg_id: 'c1', message_id: 'm1', seq: 1, status: 'acked', delivered_to: ['devA'] }),
+    );
+    // A later receipt partial unions devB delivered + agent read onto the row.
+    await store.upsert(
+      msg({
+        client_msg_id: 'c1',
+        message_id: 'm1',
+        seq: 1,
+        status: 'acked',
+        delivered_to: ['devB'],
+        read_by: ['agent'],
+      }),
+    );
+    const [row] = await store.list(TOPIC);
+    expect(row?.delivered_to).toEqual(['devA', 'devB']);
+    expect(row?.read_by).toEqual(['agent']);
+  });
+
+  it('persists receipts across a cold reopen (migrated columns)', async () => {
+    const db = freshDb();
+    const first = await SqliteChatStore.open(bunExecutor(db));
+    await first.upsert(
+      msg({ client_msg_id: 'c1', message_id: 'm1', seq: 1, status: 'acked', read_by: ['agent'] }),
+    );
+    const reopened = await SqliteChatStore.open(bunExecutor(db));
+    const [row] = await reopened.list(TOPIC);
+    expect(row?.read_by).toEqual(['agent']);
+  });
+
+  it('migrates a pre-receipts DB by adding the columns on open (idempotent ALTER)', async () => {
+    const db = freshDb();
+    // Simulate a DB written by a build that predates receipts: the message
+    // table without delivered_to / read_by, holding one row.
+    db.run(`CREATE TABLE chat_messages (
+       topic_id TEXT NOT NULL, identity TEXT NOT NULL, client_msg_id TEXT NOT NULL,
+       message_id TEXT, seq INTEGER, role TEXT NOT NULL, body TEXT NOT NULL,
+       project_id TEXT, attachments TEXT, created_at INTEGER NOT NULL, status TEXT NOT NULL,
+       PRIMARY KEY (topic_id, identity))`);
+    db.run(
+      `INSERT INTO chat_messages (topic_id, identity, client_msg_id, message_id, seq, role, body, created_at, status)
+       VALUES (?, 'c:c1', 'c1', 'm1', 1, 'user', 'legacy', 1, 'acked')`,
+      [TOPIC],
+    );
+    // Opening the store adds the columns; the legacy row reads back with null
+    // receipts, and a receipt upsert then sticks.
+    const store = await SqliteChatStore.open(bunExecutor(db));
+    let [row] = await store.list(TOPIC);
+    expect(row?.body).toBe('legacy');
+    expect(row?.read_by ?? null).toBeNull();
+    await store.upsert(msg({ client_msg_id: 'c1', message_id: 'm1', seq: 1, status: 'acked', read_by: ['agent'] }));
+    [row] = await store.list(TOPIC);
+    expect(row?.read_by).toEqual(['agent']);
+  });
+
   it('does not regress status or known fields on a later partial', async () => {
     const store = await SqliteChatStore.open(bunExecutor(freshDb()));
     await store.upsert(msg({ client_msg_id: 'c1', message_id: 'm1', seq: 7, body: 'final', status: 'acked' }));

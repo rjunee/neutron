@@ -138,22 +138,53 @@ export function rowKey(message: ChatMessage): string {
   return `t:${message.created_at}`;
 }
 
-/** Telegram-style delivery ladder for an outbound (user) message. */
-export type DeliveryState = 'pending' | 'sent' | 'delivered';
+/**
+ * Telegram-style delivery ladder for an outbound (user) message. Track B
+ * Phase 4 adds `read` (blue double-tick): the message has been read by a
+ * device other than the sender — the agent loop (which marks every inbound
+ * user message read once it picks it up) or a second device on the account.
+ */
+export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read';
 
-export function deliveryState(message: ChatMessage): DeliveryState | null {
+/**
+ * Map a message's send status + receipt aggregate to its ladder state.
+ * `selfDeviceId` (when known) is excluded from the read set so the sender's
+ * own device can't light its own read tick; a `read_by` entry from any OTHER
+ * device — including the synthetic `agent` reader — advances it to `read`.
+ */
+export function deliveryState(
+  message: ChatMessage,
+  selfDeviceId?: string,
+): DeliveryState | null {
   if (message.role !== 'user') return null; // only outbound messages show ticks
   switch (message.status) {
     case 'queued':
-      return 'pending'; // ⧖ — written locally, not yet on the wire (offline)
+      return 'pending'; // 🕓 — written locally, not yet on the wire (offline)
     case 'sent':
       return 'sent'; // ✓ — handed to the socket, awaiting the server echo
     case 'acked':
-      return 'delivered'; // ✓✓ — persisted server-side with a seq
+      // ✓✓ delivered; promotes to read once another device/agent has read it.
+      return isReadByOther(message.read_by, selfDeviceId) ? 'read' : 'delivered';
   }
 }
 
-/** The glyph the UI renders for a delivery state. */
+/** True when `read_by` holds at least one device id other than the sender's
+ *  own. Tolerant of null/undefined (a message with no receipts). */
+function isReadByOther(
+  readBy: readonly string[] | null | undefined,
+  selfDeviceId?: string,
+): boolean {
+  if (readBy === null || readBy === undefined) return false;
+  for (const id of readBy) {
+    if (id.length > 0 && id !== selfDeviceId) return true;
+  }
+  return false;
+}
+
+/** The glyph the UI renders for a delivery state. `delivered` and `read` share
+ *  the ✓✓ double-tick; the UI distinguishes `read` by COLOUR (blue), matching
+ *  the Telegram ladder — so the glyph is identical and the state drives the
+ *  style. */
 export function deliveryGlyph(state: DeliveryState): string {
   switch (state) {
     case 'pending':
@@ -161,6 +192,8 @@ export function deliveryGlyph(state: DeliveryState): string {
     case 'sent':
       return '✓';
     case 'delivered':
+      return '✓✓';
+    case 'read':
       return '✓✓';
   }
 }

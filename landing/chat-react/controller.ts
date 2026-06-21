@@ -30,6 +30,14 @@ import type { ChatMessage, ConnStatus, SendStatus } from '@neutron/chat-core'
 
 export type RenderRole = 'user' | 'agent'
 
+/**
+ * Track B Phase 4 — the per-message delivery ladder for an outbound (user)
+ * message: 🕓 pending → ✓ sent → ✓✓ delivered → ✓✓ read (blue). Mirrors the
+ * mobile `DeliveryState`; redefined here so the browser bundle doesn't pull in
+ * the RN `app/` package.
+ */
+export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read'
+
 export interface RenderMessage {
   /** Stable identity: client_msg_id for user sends, message_id for agent /
    *  streaming bubbles. Drives assistant-ui's message keying. */
@@ -41,6 +49,8 @@ export interface RenderMessage {
   streaming: boolean
   attachments: readonly string[] | null
   createdAt: number
+  /** Delivery ladder for user messages (null for agent / streaming bubbles). */
+  delivery: DeliveryState | null
 }
 
 export interface ChatViewModel {
@@ -51,6 +61,9 @@ export interface ChatViewModel {
   /** Count of sends still queued/unacked (offline tail). */
   pending: number
   projectId: string | null
+  /** Track B Phase 4 — delivery state of the most recent user message, for a
+   *  Telegram-style status line under the thread. Null when none sent. */
+  latestUserDelivery: DeliveryState | null
 }
 
 /** The slice of `WebChatSession` the controller depends on (injectable). */
@@ -65,6 +78,11 @@ export interface ControllerSession {
   ): Promise<void>
   messages(): Promise<ChatMessage[]>
   pendingCount(): Promise<number>
+  /** Track B Phase 4 — report read messages (optional so legacy fakes still
+   *  satisfy the interface). */
+  markRead?(messageIds: readonly string[]): void
+  /** This client's device id, for read-tick self-exclusion (optional). */
+  readonly device_id?: string
 }
 
 /** Sinks the controller hands to the session factory so it can observe it. */
@@ -96,6 +114,8 @@ export class NeutronChatController {
   private readonly listeners = new Set<(vm: ChatViewModel) => void>()
   private vm: ChatViewModel
   private seq = 0
+  /** This client's device id (for read-tick self-exclusion). */
+  private readonly deviceId: string
 
   constructor(opts: NeutronChatControllerOptions) {
     this.projectId = opts.projectId ?? null
@@ -106,6 +126,7 @@ export class NeutronChatController {
       onStatus: (status) => this.handleStatus(status),
       onFrame: (frame) => this.handleFrame(frame),
     })
+    this.deviceId = this.session.device_id ?? ''
     this.vm = this.computeVm()
   }
 
@@ -213,7 +234,30 @@ export class NeutronChatController {
         if (persistedIds.has(id)) this.streaming.delete(id)
       }
     }
+    this.markVisibleAgentRead(msgs)
     this.publish()
+  }
+
+  /**
+   * Track B Phase 4 — report agent messages as read. The web chat is a single
+   * scrolling thread the user is looking at, so a persisted agent message is
+   * "read"; the session de-dups so this only sends one receipt per message.
+   * Reporting ONLY agent messages (never the user's own sends) means a receipt
+   * can't light the sender's own read tick.
+   */
+  private markVisibleAgentRead(msgs: ChatMessage[]): void {
+    if (this.session.markRead === undefined) return
+    const ids: string[] = []
+    for (const m of msgs) {
+      if (m.role === 'agent' && m.message_id !== null) ids.push(m.message_id)
+    }
+    if (ids.length > 0) this.session.markRead(ids)
+  }
+
+  /** Report messages the user has viewed (Track B Phase 4). Exposed for a UI
+   *  that wants finer-grained viewport reporting than the auto-read above. */
+  markRead(messageIds: readonly string[]): void {
+    this.session.markRead?.(messageIds)
   }
 
   private publish(): void {
@@ -230,6 +274,7 @@ export class NeutronChatController {
       streaming: false,
       attachments: m.attachments,
       createdAt: m.created_at,
+      delivery: deliveryFor(m, this.deviceId),
     }))
     // Append live streaming bubbles whose final message hasn't persisted yet.
     const persistedIds = new Set<string>()
@@ -245,16 +290,27 @@ export class NeutronChatController {
         streaming: true,
         attachments: null,
         createdAt: entry.createdAt,
+        delivery: null,
       })
     }
     liveStreams.sort((a, b) => a.createdAt - b.createdAt)
     const messages = [...rendered, ...liveStreams]
+    // Latest user message's delivery — for a Telegram-style status line.
+    let latestUserDelivery: DeliveryState | null = null
+    for (let i = rendered.length - 1; i >= 0; i--) {
+      const r = rendered[i]
+      if (r !== undefined && r.role === 'user') {
+        latestUserDelivery = r.delivery
+        break
+      }
+    }
     return {
       messages,
       isRunning: this.awaitingReply || liveStreams.length > 0,
       status: this.connStatus,
       pending: this.pending,
       projectId: this.projectId,
+      latestUserDelivery,
     }
   }
 
@@ -263,4 +319,23 @@ export class NeutronChatController {
     this.seq += 1
     return this.seq
   }
+}
+
+/**
+ * Track B Phase 4 — derive an outbound message's delivery ladder from its send
+ * status + read aggregate. Mirrors the mobile `deliveryState`: queued→pending,
+ * sent→sent, acked→delivered, and acked→read once any device OTHER than this
+ * one (incl. the synthetic `agent` reader) appears in `read_by`.
+ */
+export function deliveryFor(m: ChatMessage, selfDeviceId: string): DeliveryState | null {
+  if (m.role !== 'user') return null
+  if (m.status === 'queued') return 'pending'
+  if (m.status === 'sent') return 'sent'
+  const readBy = m.read_by
+  if (readBy !== null && readBy !== undefined) {
+    for (const id of readBy) {
+      if (id.length > 0 && id !== selfDeviceId) return 'read'
+    }
+  }
+  return 'delivered'
 }

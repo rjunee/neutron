@@ -8,6 +8,15 @@ export {
   type AppChatAppendResult,
   type AppChatStoreOptions,
 } from './app-chat-store.ts'
+export {
+  AppChatReceiptStore,
+  DEFAULT_RECEIPT_REPLAY_LIMIT,
+  type AppChatReceiptLog,
+  type AppChatReceiptState,
+  type AppChatReceiptRecordInput,
+  type AppChatReceiptAggregate,
+  type AppChatReceiptStoreOptions,
+} from './app-chat-receipts.ts'
 export { PersistenceError, BusyRetryExhaustedError } from './errors.ts'
 export {
   withBusyRetry,

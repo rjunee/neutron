@@ -10,7 +10,11 @@
  *     primitive FlashList v2 ships for chat (smooth, no jump on prepend);
  *   - optimistic, offline-safe send (the bubble appears instantly, with a
  *     pending clock; the queue flushes on reconnect);
- *   - per-message delivery ladder (🕓 pending → ✓ sent → ✓✓ delivered);
+ *   - per-message delivery ladder (🕓 pending → ✓ sent → ✓✓ delivered →
+ *     ✓✓ read, the read tick rendered accent-blue) — Track B Phase 4;
+ *   - read receipts: agent messages scrolling into view are reported read via
+ *     `markRead`, and the agent auto-marks the user's own sends read the moment
+ *     it picks them up, so a sent bubble advances to the blue read tick;
  *   - a live streaming/typing bubble assembled from `agent_message_partial`s;
  *   - a connection status strip driven by the chat-core WS client.
  *
@@ -46,12 +50,42 @@ export interface ChatSyncSurfaceProps {
   projectId: string;
 }
 
+/** FlashList viewable-items payload (loosely typed — FlashList v2's callback
+ *  hands us `{ viewableItems: { item }[] }`). */
+interface ViewableItemsChange {
+  viewableItems: ReadonlyArray<{ item?: RenderRow }>;
+}
+
 export function ChatSyncSurface({ projectId }: ChatSyncSurfaceProps): React.JSX.Element {
-  const { rows, status, typing, pendingCount, ready, send } = useMobileChat(projectId);
+  const { rows, status, typing, pendingCount, ready, send, markRead, selfDeviceId } =
+    useMobileChat(projectId);
 
   const renderItem = useCallback(
-    ({ item }: { item: RenderRow }) => <ChatRow row={item} />,
-    [],
+    ({ item }: { item: RenderRow }) => <ChatRow row={item} selfDeviceId={selfDeviceId} />,
+    [selfDeviceId],
+  );
+
+  // Track B Phase 4 — when agent messages scroll into view, report them read.
+  // We report ONLY agent messages (unambiguously not the user's own sends), so
+  // a read receipt can never light the sender's own bubble; it drives the
+  // server-side aggregate + any other device's cross-device read state.
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: ViewableItemsChange): void => {
+      const ids: string[] = [];
+      for (const v of viewableItems) {
+        const item = v.item;
+        if (
+          item !== undefined &&
+          item.kind === 'message' &&
+          item.message.role === 'agent' &&
+          item.message.message_id !== null
+        ) {
+          ids.push(item.message.message_id);
+        }
+      }
+      if (ids.length > 0) markRead(ids);
+    },
+    [markRead],
   );
 
   return (
@@ -76,6 +110,7 @@ export function ChatSyncSurface({ projectId }: ChatSyncSurfaceProps): React.JSX.
             startRenderingFromBottom: true,
             autoscrollToBottomThreshold: 0.2,
           }}
+          onViewableItemsChanged={onViewableItemsChanged}
           ListFooterComponent={typing ? <TypingIndicator /> : null}
           ListEmptyComponent={<EmptyState />}
         />
@@ -90,7 +125,13 @@ function keyForRow(row: RenderRow): string {
 }
 
 /** One message or streaming bubble. */
-function ChatRow({ row }: { row: RenderRow }): React.JSX.Element {
+function ChatRow({
+  row,
+  selfDeviceId,
+}: {
+  row: RenderRow;
+  selfDeviceId: string;
+}): React.JSX.Element {
   if (row.kind === 'streaming') {
     return (
       <View style={[styles.bubbleWrap, styles.agentWrap]}>
@@ -103,13 +144,16 @@ function ChatRow({ row }: { row: RenderRow }): React.JSX.Element {
 
   const { message } = row;
   const isUser = message.role === 'user';
-  const delivery = deliveryState(message);
+  const delivery = deliveryState(message, selfDeviceId);
   return (
     <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
       <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
         <Text style={isUser ? styles.userText : styles.agentText}>{message.body}</Text>
         {delivery !== null ? (
-          <Text style={styles.delivery} accessibilityLabel={`delivery: ${delivery}`}>
+          <Text
+            style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
+            accessibilityLabel={`delivery: ${delivery}`}
+          >
             {deliveryGlyph(delivery)}
           </Text>
         ) : null}
@@ -233,6 +277,12 @@ const styles = StyleSheet.create({
     opacity: 0.7,
     alignSelf: 'flex-end',
     marginTop: 2,
+  },
+  // Track B Phase 4 — read receipts: the ✓✓ goes accent-blue + full opacity,
+  // the Telegram "read" tick. `delivered` keeps the muted same-glyph styling.
+  deliveryRead: {
+    color: THEME.accent,
+    opacity: 1,
   },
   typingBubble: { paddingVertical: SPACING.xs },
   typingText: { ...TYPOGRAPHY.h2, color: THEME.text_muted, letterSpacing: 2 },

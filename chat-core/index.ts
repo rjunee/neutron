@@ -11,19 +11,25 @@
 
 export {
   normalizeInbound,
+  normalizeReceiptUpdate,
   messageIdentity,
+  AGENT_DEVICE_ID,
   type MessageRole,
   type SendStatus,
+  type ReceiptState,
   type ChatMessage,
   type InboundChatMessage,
+  type InboundReceiptUpdate,
   type OutboundUserMessage,
   type OutboundResume,
+  type OutboundReceipt,
 } from './types.ts'
 
 export {
   InMemoryStore,
   compareForDisplay,
   mergeMessage,
+  unionDeviceIds,
   type Store,
 } from './store.ts'
 

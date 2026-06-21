@@ -40,7 +40,12 @@ import type {
   IncomingEventReceiver,
   OutgoingMessage,
 } from '../../types.ts'
-import type { AppChatMessageLog, AppChatRow } from '../../../persistence/index.ts'
+import type {
+  AppChatMessageLog,
+  AppChatReceiptLog,
+  AppChatReceiptState,
+  AppChatRow,
+} from '../../../persistence/index.ts'
 import type { AppWsSessionRegistry } from './session-registry.ts'
 import {
   sanitizeProjectId,
@@ -48,6 +53,7 @@ import {
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentMessageDocRef,
   type AppWsOutboundAgentMessageUploadAffordance,
+  type AppWsOutboundReceiptUpdate,
   type AppWsOutboundUserMessageEcho,
 } from './envelope.ts'
 
@@ -74,6 +80,16 @@ export interface AppWsAdapterOptions {
    * are unaffected.
    */
   chat_log?: AppChatMessageLog
+  /**
+   * Track B Phase 4 — durable per-(message, device) receipt log. When supplied
+   * (alongside {@link chat_log}), the adapter records a `delivered` receipt for
+   * every device connected at message fan-out time (stamped inline on the
+   * envelope), records `read` receipts (agent + client) via
+   * {@link AppWsAdapter.recordReceipt}, and replays receipt state on resume.
+   * ABSENT → no receipts (legacy behaviour); messages still carry no
+   * delivered_by/read_by.
+   */
+  receipt_log?: AppChatReceiptLog
 }
 
 export class AppWsAdapter implements ChannelAdapter {
@@ -83,6 +99,7 @@ export class AppWsAdapter implements ChannelAdapter {
   private readonly now: () => number
   private readonly generate_message_id: () => string
   private readonly chat_log: AppChatMessageLog | undefined
+  private readonly receipt_log: AppChatReceiptLog | undefined
 
   constructor(opts: AppWsAdapterOptions) {
     this.registry = opts.registry
@@ -90,11 +107,17 @@ export class AppWsAdapter implements ChannelAdapter {
     this.now = opts.now ?? (() => Date.now())
     this.generate_message_id = opts.generate_message_id ?? (() => crypto.randomUUID())
     this.chat_log = opts.chat_log
+    this.receipt_log = opts.receipt_log
   }
 
   /** Whether a durable message log is wired (enables seq + resume). */
   get hasChatLog(): boolean {
     return this.chat_log !== undefined
+  }
+
+  /** Whether the receipt log is wired (enables delivery + read receipts). */
+  get hasReceipts(): boolean {
+    return this.receipt_log !== undefined
   }
 
   /**
@@ -133,6 +156,9 @@ export class AppWsAdapter implements ChannelAdapter {
         )
       }
     }
+    // Track B Phase 4 — record `delivered` for every device connected right
+    // now + stamp them inline so each receiving device knows it's delivered.
+    await this.stampDelivered(message.topic.channel_topic_id, envelope)
     const delivered = this.registry.send(message.topic.channel_topic_id, envelope)
     if (!delivered) {
       // Mirror landing/server's silent-drop posture: no live socket for
@@ -304,8 +330,130 @@ export class AppWsAdapter implements ChannelAdapter {
       env.attachments = [...input.attachments]
     }
     if (seq !== null) env.seq = seq
+    // Track B Phase 4 — record `delivered` for every connected device + stamp
+    // them inline. On an idempotent re-send (`was_new === false`) this still
+    // records delivered for any device that's now connected but wasn't when the
+    // message was first sent — closing the gap for a device that came online
+    // after the original fan-out.
+    await this.stampDelivered(input.channel_topic_id, env)
     this.registry.send(input.channel_topic_id, env)
     return { message_id: canonical_id, seq, was_new }
+  }
+
+  /**
+   * Track B Phase 4 — record a `delivered` receipt for every device connected
+   * to the topic right now, and stamp the resulting set inline on the outbound
+   * message envelope (`delivered_by`). No-op when the receipt log isn't wired
+   * or no device reports an id. Failure-isolated: a receipt persist error never
+   * blocks the live message fan-out.
+   */
+  private async stampDelivered(
+    channel_topic_id: string,
+    env: AppWsOutboundUserMessageEcho | AppWsOutboundAgentMessage,
+  ): Promise<void> {
+    if (this.receipt_log === undefined) return
+    const devices = this.registry.devices(channel_topic_id)
+    if (devices.length === 0) return
+    const at = this.now()
+    const delivered = new Set<string>()
+    for (const device_id of devices) {
+      try {
+        const agg = await this.receipt_log.record({
+          topic_id: channel_topic_id,
+          message_id: env.message_id,
+          device_id,
+          state: 'delivered',
+          at,
+        })
+        for (const d of agg.delivered_by) delivered.add(d)
+        if (agg.read_by.length > 0) env.read_by = [...agg.read_by]
+      } catch (err) {
+        console.warn(
+          `[app-ws] topic=${channel_topic_id} delivered-receipt persist failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
+    if (delivered.size > 0) env.delivered_by = [...delivered].sort()
+  }
+
+  /**
+   * Track B Phase 4 — record a receipt for a message (a client `read`, or the
+   * agent reading an inbound user message) and fan a `receipt_update` carrying
+   * the FULL post-record aggregate to EVERY device on the topic, so the
+   * sender's bubble advances. Returns the fanned envelope (for tests /
+   * telemetry), or `null` when the receipt log isn't wired. The fan-out is
+   * unconditional even if `delivered`/`read` didn't change — the client merge
+   * is idempotent, and re-emitting keeps a device that missed the prior frame
+   * in sync.
+   */
+  async recordReceipt(input: {
+    channel_topic_id: string
+    message_id: string
+    device_id: string
+    state: AppChatReceiptState
+    project_id?: string
+  }): Promise<AppWsOutboundReceiptUpdate | null> {
+    if (this.receipt_log === undefined) return null
+    if (input.message_id.length === 0 || input.device_id.length === 0) return null
+    let agg
+    try {
+      agg = await this.receipt_log.record({
+        topic_id: input.channel_topic_id,
+        message_id: input.message_id,
+        device_id: input.device_id,
+        state: input.state,
+        at: this.now(),
+      })
+    } catch (err) {
+      console.warn(
+        `[app-ws] topic=${input.channel_topic_id} receipt persist failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      return null
+    }
+    const env: AppWsOutboundReceiptUpdate = {
+      v: 1,
+      type: 'receipt_update',
+      message_id: input.message_id,
+      delivered_by: agg.delivered_by,
+      read_by: agg.read_by,
+      ts: this.now(),
+    }
+    if (agg.seq > 0) env.seq = agg.seq
+    if (input.project_id !== undefined) env.project_id = input.project_id
+    this.registry.send(input.channel_topic_id, env)
+    return env
+  }
+
+  /**
+   * Track B Phase 4 — replay receipt state to a reconnecting device after the
+   * message replay. Returns one `receipt_update` per message (with seq >
+   * after_seq) that has any receipt, ascending by seq. The surface sends these
+   * to the single requesting socket so its ladder reflects current state.
+   * `[]` when the receipt log isn't wired.
+   */
+  async replayReceiptsAfter(
+    channel_topic_id: string,
+    after_seq: number,
+  ): Promise<AppWsOutboundReceiptUpdate[]> {
+    if (this.receipt_log === undefined) return []
+    const aggregates = await this.receipt_log.aggregatesAfter(channel_topic_id, after_seq)
+    const ts = this.now()
+    return aggregates.map((agg) => {
+      const env: AppWsOutboundReceiptUpdate = {
+        v: 1,
+        type: 'receipt_update',
+        message_id: agg.message_id,
+        delivered_by: agg.delivered_by,
+        read_by: agg.read_by,
+        ts,
+      }
+      if (agg.seq > 0) env.seq = agg.seq
+      return env
+    })
   }
 
   /**

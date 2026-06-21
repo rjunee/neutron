@@ -41,6 +41,14 @@ export type AppWsClientPlatform = 'web' | 'native'
 
 export interface AppWsRegisterOptions {
   platform?: AppWsClientPlatform
+  /**
+   * Track B Phase 4 — the client's device id (from the WS upgrade query
+   * string). Lets the adapter (a) record a `delivered` receipt for every
+   * device connected at message fan-out time, and (b) attribute a `read`
+   * receipt to the right device. Absent for legacy clients that don't report
+   * one — those sessions are simply omitted from the delivered set.
+   */
+  device_id?: string
 }
 
 export interface AppWsSessionRegistry {
@@ -61,12 +69,19 @@ export interface AppWsSessionRegistry {
   getPlatform(channel_topic_id: string): AppWsClientPlatform | null
   /** Number of live devices on a topic (0 when offline). */
   deviceCount(channel_topic_id: string): number
+  /**
+   * Track B Phase 4 — distinct device ids currently connected on a topic
+   * (deduped; legacy sessions without a reported device_id are omitted). The
+   * adapter records a `delivered` receipt for each at message fan-out time.
+   */
+  devices(channel_topic_id: string): string[]
   topics(): string[]
 }
 
 interface SessionEntry {
   send: (env: AppWsOutbound) => void
   platform?: AppWsClientPlatform
+  device_id?: string
 }
 
 export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
@@ -81,6 +96,7 @@ export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
   ): void {
     const entry: SessionEntry = { send }
     if (opts?.platform !== undefined) entry.platform = opts.platform
+    if (opts?.device_id !== undefined) entry.device_id = opts.device_id
     let set = this.entries.get(channel_topic_id)
     if (set === undefined) {
       set = new Set<SessionEntry>()
@@ -150,6 +166,16 @@ export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
 
   deviceCount(channel_topic_id: string): number {
     return this.entries.get(channel_topic_id)?.size ?? 0
+  }
+
+  devices(channel_topic_id: string): string[] {
+    const set = this.entries.get(channel_topic_id)
+    if (set === undefined || set.size === 0) return []
+    const ids = new Set<string>()
+    for (const entry of set) {
+      if (entry.device_id !== undefined && entry.device_id.length > 0) ids.add(entry.device_id)
+    }
+    return [...ids]
   }
 
   topics(): string[] {

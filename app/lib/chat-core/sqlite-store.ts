@@ -75,6 +75,8 @@ const SCHEMA = [
      attachments   TEXT,
      created_at    INTEGER NOT NULL,
      status        TEXT NOT NULL,
+     delivered_to  TEXT,
+     read_by       TEXT,
      PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
@@ -137,6 +139,13 @@ export class SqliteChatStore implements Store {
     for (const stmt of SCHEMA) {
       await db.execute(stmt);
     }
+    // Track B Phase 4 — additive receipt columns. `CREATE TABLE IF NOT EXISTS`
+    // never alters an already-present table, so a DB written by a build that
+    // predates receipts is migrated here with idempotent ADD COLUMNs. Each is
+    // isolated: a "duplicate column" error (the column already exists) is the
+    // expected steady state and must not fail the store open.
+    await ensureColumn(db, TABLE, 'delivered_to');
+    await ensureColumn(db, TABLE, 'read_by');
     if (!ftsPreexisted) {
       await backfillFts(db);
     }
@@ -306,8 +315,8 @@ export class SqliteChatStore implements Store {
   private async write(identity: string, msg: ChatMessage): Promise<void> {
     await this.db.execute(
       `INSERT OR REPLACE INTO ${TABLE}
-         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         identity,
         msg.topic_id,
@@ -320,6 +329,8 @@ export class SqliteChatStore implements Store {
         msg.attachments !== null ? JSON.stringify(msg.attachments) : null,
         msg.created_at,
         msg.status,
+        encodeDeviceIds(msg.delivered_to),
+        encodeDeviceIds(msg.read_by),
       ],
     );
   }
@@ -342,7 +353,27 @@ function rowToMessage(row: SqlRow): ChatMessage {
     attachments: parseAttachments(row['attachments']),
     created_at: typeof row['created_at'] === 'number' ? row['created_at'] : 0,
     status: normalizeStatus(row['status']),
+    delivered_to: parseDeviceIds(row['delivered_to']),
+    read_by: parseDeviceIds(row['read_by']),
   };
+}
+
+/** Encode a device-id list as a JSON column value, or NULL when empty. */
+function encodeDeviceIds(ids: readonly string[] | null | undefined): SqlValue {
+  return ids !== null && ids !== undefined && ids.length > 0 ? JSON.stringify(ids) : null;
+}
+
+/** Parse the JSON device-id column back into a clean array (or null). */
+function parseDeviceIds(raw: SqlValue | undefined): readonly string[] | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const cleaned = parsed.filter((x): x is string => typeof x === 'string' && x.length > 0);
+    return cleaned.length > 0 ? cleaned : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseAttachments(raw: SqlValue | undefined): readonly string[] | null {
@@ -359,6 +390,22 @@ function parseAttachments(raw: SqlValue | undefined): readonly string[] | null {
 
 function normalizeStatus(raw: SqlValue | undefined): ChatMessage['status'] {
   return raw === 'sent' || raw === 'acked' ? raw : 'queued';
+}
+
+/**
+ * Idempotently add a nullable TEXT column to a table. SQLite has no
+ * `ADD COLUMN IF NOT EXISTS`, so we attempt the ALTER and swallow the
+ * "duplicate column name" error that means the column already exists — the
+ * normal case on every open after the first. Any other failure is also
+ * swallowed (the column simply won't be present and the row mappers tolerate
+ * its absence), so a migration hiccup never bricks the chat surface.
+ */
+async function ensureColumn(db: SqliteExecutor, table: string, column: string): Promise<void> {
+  try {
+    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+  } catch {
+    // Column already exists (steady state) or ALTER unsupported — non-fatal.
+  }
 }
 
 /** True iff a table (or FTS5 virtual table) named `name` already exists. */
