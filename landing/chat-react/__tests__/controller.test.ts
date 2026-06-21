@@ -153,6 +153,54 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(env?.['project_id']).toBe('proj-7')
   })
 
+  it('hydrates the durable transcript + pending on start (instant cold-open)', async () => {
+    // Seed a store as if a previous session persisted a transcript + a send
+    // that never flushed (offline tail), then mount a controller over it.
+    const store = new InMemoryStore()
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: '',
+      message_id: 'm-old',
+      seq: 1,
+      role: 'agent',
+      body: 'welcome back',
+      project_id: null,
+      attachments: null,
+      created_at: 1,
+      status: 'acked',
+    })
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: 'cmid-queued',
+      message_id: null,
+      seq: null,
+      role: 'user',
+      body: 'sent while offline',
+      project_id: null,
+      attachments: null,
+      created_at: 2,
+      status: 'queued',
+    })
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store,
+          createSocket: () => new FakeSocket(),
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    // No frames, no sends — just mount.
+    controller.start()
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.messages.map((m) => m.text)).toEqual(['welcome back', 'sent while offline'])
+    expect(vm.pending).toBe(1)
+  })
+
   it('notifies subscribers on every change', async () => {
     const { controller, sockets } = setup()
     let notifications = 0

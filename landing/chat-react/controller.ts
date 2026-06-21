@@ -111,6 +111,12 @@ export class NeutronChatController {
 
   start(): void {
     this.session.start()
+    // Cold-open hydration: a durable Store (OPFS) may already hold the
+    // transcript + queued offline sends from a previous session. Read it
+    // immediately so a returning user sees their chat (and pending badge)
+    // instantly on mount — NOT only after the next inbound frame / send. The
+    // live `session_ready` resume still fills any gap once the socket opens.
+    void this.handleChange()
   }
 
   stop(): void {
