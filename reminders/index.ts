@@ -23,3 +23,24 @@ export type {
   ReminderFiredHook,
   ReminderTickOptions,
 } from './tick.ts'
+
+export {
+  buildReminderDispatcher,
+  buildSubstrateReminderLlm,
+} from './dispatcher.ts'
+export type {
+  ReminderOutbound,
+  ReminderOutboundInput,
+  ReminderContextSource,
+  ReminderTopicResolver,
+  ReminderLlm,
+  BuildReminderDispatcherInput,
+} from './dispatcher.ts'
+export { buildButtonStoreReminderOutbound } from './outbound.ts'
+export { buildStatusMdContextSource } from './context.ts'
+export {
+  classifyReminderMessage,
+  literalFallback,
+  KNOWN_REMINDER_PATTERNS,
+} from './message-shape.ts'
+export type { ReminderShape } from './message-shape.ts'

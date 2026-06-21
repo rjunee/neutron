@@ -33,6 +33,7 @@ import {
   InMemoryWebChatSenderRegistry,
   type SlugHistoryShimStore,
   type OwnerRegistryLookup,
+  type WebChatSenderRegistry,
 } from '../http/chat-bridge.ts'
 import {
   InterviewEngine,
@@ -801,6 +802,15 @@ export interface LandingStackWithEngine extends LandingStack {
    * miss in-flight emits.
    */
   buttonStore: ButtonStore
+  /**
+   * Reminders fire-time delivery (2026-06-20, audit P0-2) — surface the
+   * per-instance `WebChatSenderRegistry` so the boot shell can build the
+   * reminder outbound against the SAME registry the chat-bridge registers
+   * per-socket senders on. A fired reminder persists a durable history row
+   * via `buttonStore` AND best-effort live-pushes through this registry, so
+   * the registry must be the live one the open WS sockets bind to.
+   */
+  registry: WebChatSenderRegistry
 }
 
 /**
@@ -1416,5 +1426,9 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
     importPayloadResolver,
     stateStore,
     buttonStore,
+    // Audit P0-2 — expose the live web sender registry so the boot shell can
+    // build the reminder outbound against the SAME registry the per-socket
+    // chat senders bind to (durable history row + best-effort live push).
+    registry,
   }
 }
