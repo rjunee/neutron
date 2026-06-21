@@ -16,6 +16,7 @@ import { CronScheduler } from '../../cron/scheduler.ts'
 import { CronStateStore } from '../../cron/state.ts'
 import { McpServer } from '../../mcp/server.ts'
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
+import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
@@ -134,6 +135,12 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
     init: () => {
       const reg = new ToolRegistry()
       registerNeutronToolsSurface(reg)
+      // Doc-search (QMD-equivalent) — register the `doc_search` +
+      // `doc_read` agent tools when the composer wired a runtime, so the
+      // live agent can search the owner's project docs mid-conversation.
+      if (input.doc_search !== undefined) {
+        registerDocSearchToolSurface(reg, input.doc_search.runtime)
+      }
       return reg
     },
   }
