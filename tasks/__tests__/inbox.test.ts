@@ -9,6 +9,7 @@ import { NO_PROJECT, TaskStore, type Task } from '../store.ts'
 import {
   applyInboxRow,
   applyInboxRows,
+  listAllTasks,
   effectiveBucket,
   parseInbox,
   parseInboxLine,
@@ -260,6 +261,29 @@ describe('inbox — apply', () => {
       expect(outcome.status).toBe('skipped')
       expect(outcome.reason).toBe('not_found')
     }
+  })
+
+  test('an id-based edit cannot cross project_slug boundaries', async () => {
+    // A task owned by a DIFFERENT slug.
+    const foreign = await store.create({ project_slug: 't2', title: 'not yours', id: 'foreign-1' })
+    // The scanner runs for slug 't1'; an inbox row naming the foreign id...
+    const outcome = await applyInboxRow(
+      deps(), // project_slug: 't1'
+      parseInboxLine('{"action":"complete","id":"foreign-1"}') as InboxRow,
+    )
+    expect(outcome.status).toBe('skipped')
+    expect(outcome.reason).toBe('not_found')
+    // The foreign task is untouched.
+    expect(store.get(foreign.id)?.status).toBe('open')
+  })
+
+  test('listAllTasks pages past the 1000-row cap', async () => {
+    const N = 1001
+    for (let i = 0; i < N; i++) {
+      await store.create({ project_slug: 't1', title: `task ${i}` })
+    }
+    const all = listAllTasks(deps())
+    expect(all.length).toBe(N)
   })
 
   test('applyInboxRows applies a batch in order', async () => {

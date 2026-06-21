@@ -46,9 +46,19 @@ export interface ApplyDeps {
  * `cancel` / `delete`) targets. Prefers an explicit `id`; otherwise
  * locates the first OPEN task whose title matches exactly, scoped to
  * the row's project when given. Returns null when nothing matches.
+ *
+ * Both paths are scoped to `deps.project_slug`: `TaskStore`'s by-id
+ * methods operate on a GLOBAL id (no slug filter), so an explicit id is
+ * verified to belong to this scanner's slug before it's returned — a
+ * scanner for one slug must never mutate another slug's task even if its
+ * id leaks into this inbox.
  */
 function resolveTaskId(deps: ApplyDeps, row: InboxRow): string | null {
-  if (row.id !== undefined) return row.id
+  if (row.id !== undefined) {
+    const task = deps.store.get(row.id)
+    if (task === null || task.project_slug !== deps.project_slug) return null
+    return task.id
+  }
   if (row.title === undefined) return null
   const listInput: Parameters<TaskStore['list']>[0] = {
     project_slug: deps.project_slug,
@@ -203,12 +213,26 @@ export async function applyInboxRows(
   return outcomes
 }
 
-/** Convenience: pull every task (any status) for the slug, focus-ordered. */
+/** Page size for {@link listAllTasks}. */
+const LIST_PAGE_SIZE = 1000
+
+/**
+ * Pull EVERY task (any status) for the slug, focus-ordered — paging
+ * through the store so the rendered markdown never silently drops tasks
+ * past a fixed cap (an instance can hold more than one page of tasks).
+ */
 export function listAllTasks(deps: ApplyDeps): Task[] {
-  return deps.store.list({
-    project_slug: deps.project_slug,
-    status: 'all',
-    order: 'focus_score',
-    limit: 1000,
-  })
+  const all: Task[] = []
+  for (let offset = 0; ; offset += LIST_PAGE_SIZE) {
+    const page = deps.store.list({
+      project_slug: deps.project_slug,
+      status: 'all',
+      order: 'focus_score',
+      limit: LIST_PAGE_SIZE,
+      offset,
+    })
+    all.push(...page)
+    if (page.length < LIST_PAGE_SIZE) break
+  }
+  return all
 }

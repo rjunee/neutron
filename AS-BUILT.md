@@ -22,8 +22,12 @@ New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
 - **`apply.ts`** — maps a parsed row to the matching `TaskStore` mutation,
   returning a structured `ApplyOutcome`. `add` with a stable `id` is
   idempotent (PK collision → `skipped:'duplicate'`); edit-ops locate by `id`
-  or exact open-title match; missing targets → `skipped:'not_found'`. Inbox
-  writes stamp `source='inbox'`.
+  or exact open-title match; missing targets → `skipped:'not_found'`. Both
+  resolution paths are scoped to the scanner's `project_slug` — an explicit
+  `id` is verified to belong to this slug before any mutation, since the
+  store's by-id methods are global (no cross-slug task can be touched). Inbox
+  writes stamp `source='inbox'`. `listAllTasks` pages through the store so the
+  rendered markdown never drops tasks past a fixed cap.
 - **`render.ts`** — pure renderers. `tasks.md` = flat focus-ordered active
   list (cross-project) + recent-Done tail. `DASHBOARD.md` = open tasks grouped
   into **auto-promoted P0/P1/P2/P3 sections**: `effectiveBucket` is the
