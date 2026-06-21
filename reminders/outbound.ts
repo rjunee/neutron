@@ -9,9 +9,10 @@
  *     reconnect, even if no socket is open at fire time (a reminder fires from
  *     a timer, not a request — there may be no live client).
  *   • LIVE — best-effort push the `agent_message` envelope through the
- *     `WebChatSenderRegistry` so an open client paints it immediately. A closed
- *     socket makes `registry.send` throw; that is swallowed (the durable row is
- *     the guarantee, the live push is the nicety).
+ *     `WebChatSenderRegistry` so an open client paints it immediately. With no
+ *     registered sender `registry.send` returns `false` (the return is ignored);
+ *     a stale sender lambda that throws is swallowed too — the durable row is
+ *     the guarantee, the live push is the nicety.
  *
  * Persist-before-send: a live-push failure never costs the durable record.
  */

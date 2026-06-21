@@ -16,6 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { sanitizeProjectId } from '../channels/adapters/app-ws/envelope.ts'
 import type { ReminderContextSource } from './dispatcher.ts'
 import type { Reminder } from './store.ts'
 
@@ -31,24 +32,36 @@ export interface BuildStatusMdContextSourceInput {
 }
 
 /**
- * Build a context source that reads `<owner_home>/Projects/<slug>/STATUS.md`
- * for the reminder's project. Returns an empty string when the file is absent
- * or unreadable.
+ * Build a context source that reads
+ * `<owner_home>/Projects/<destination_project_id>/STATUS.md` for the
+ * reminder's DESTINATION project. The destination id is derived from the
+ * reminder's `topic_id` upstream (`deriveReminderProjectId`) and passed in —
+ * it is NOT `reminder.project_slug` (the fixed instance/owner slug), which for
+ * project reminders would point at the wrong / empty STATUS.md.
+ *
+ * The id is sanitized (`sanitizeProjectId`) before it becomes a path segment
+ * so a malformed/hostile project id can't traverse out of `Projects/`. Returns
+ * an empty string when the id is unsafe, or the file is absent or unreadable.
  */
 export function buildStatusMdContextSource(
   input: BuildStatusMdContextSourceInput,
 ): ReminderContextSource {
   const cap = input.char_cap ?? STATUS_MD_CHAR_CAP
   return {
-    gather(reminder: Reminder): string {
-      const path = join(input.owner_home, 'Projects', reminder.project_slug, 'STATUS.md')
+    gather(_reminder: Reminder, project_id: string): string {
+      const safe = sanitizeProjectId(project_id)
+      if (safe === null) {
+        input.log?.(`[reminder-context] unsafe project id ${JSON.stringify(project_id)} — skipping STATUS.md`)
+        return ''
+      }
+      const path = join(input.owner_home, 'Projects', safe, 'STATUS.md')
       try {
         if (!existsSync(path)) return ''
         const body = readFileSync(path, 'utf8')
         const clipped = body.length > cap ? `${body.slice(0, cap)}\n…(truncated)` : body
-        return `Project ${reminder.project_slug} STATUS.md:\n${clipped}`
+        return `Project ${safe} STATUS.md:\n${clipped}`
       } catch (err) {
-        input.log?.(`[reminder-context] STATUS.md read failed for ${reminder.project_slug}: ${String(err)}`)
+        input.log?.(`[reminder-context] STATUS.md read failed for ${safe}: ${String(err)}`)
         return ''
       }
     },

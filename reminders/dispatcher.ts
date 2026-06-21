@@ -26,7 +26,7 @@ import { FAST_MODEL } from '../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { ToolDef } from '../core-sdk/types.ts'
 import { collectTokensToString } from '../gateway/realmode-composer/build-llm-call-substrate.ts'
-import { classifyReminderMessage, literalFallback } from './message-shape.ts'
+import { classifyReminderMessage, literalFallback, type ReminderShape } from './message-shape.ts'
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'
 import type { ReminderDispatcher } from './tick.ts'
@@ -46,7 +46,46 @@ export interface ReminderOutbound {
 
 /** Gathers live context (calendar / STATUS / project state) for a fire. */
 export interface ReminderContextSource {
-  gather(reminder: Reminder): string | Promise<string>
+  /**
+   * `project_id` is the DESTINATION project the reminder composes against
+   * (see {@link deriveReminderProjectId}) — NOT the instance `project_slug`.
+   * The source uses it to locate the right project's state (e.g. STATUS.md).
+   */
+  gather(reminder: Reminder, project_id: string): string | Promise<string>
+}
+
+/**
+ * Derive the DESTINATION project id a reminder composes against from its
+ * stored `topic_id`. For project reminders the engine stores the destination
+ * project in `topic_id` (Reminders Core persists the raw `project_id`; the app
+ * surface persists `app-project:<project_id>`; an already-web-shaped topic is
+ * `web:<user_id>:<project_id>`), while `project_slug` is the FIXED instance /
+ * owner slug. Keying context + metering off `project_slug` reads the wrong
+ * project's STATUS.md and meters every project reminder to the owner — this
+ * bridges to the actual destination, mirroring `resolveTopicId` in
+ * `open/composer.ts`.
+ *
+ * `null` / empty topic, or a General `web:<user_id>` topic with no project
+ * segment, → the instance slug (`project_slug`), preserving instance-level
+ * behaviour. A `[ROUTING]` header is a thread destination, not a project, so
+ * it is deliberately NOT consulted here (only `reminder.topic_id` is).
+ */
+export function deriveReminderProjectId(reminder: Reminder): string {
+  const topic = reminder.topic_id
+  if (topic === null || topic.trim().length === 0) return reminder.project_slug
+  if (topic.startsWith('app-project:')) {
+    const id = topic.slice('app-project:'.length)
+    return id.length > 0 ? id : reminder.project_slug
+  }
+  if (topic.startsWith('web:')) {
+    // `web:<user_id>` (General) → instance; `web:<user_id>:<project_id>` → project.
+    const sep = topic.indexOf(':', 'web:'.length)
+    if (sep < 0) return reminder.project_slug
+    const id = topic.slice(sep + 1)
+    return id.length > 0 ? id : reminder.project_slug
+  }
+  // Raw engine destination = the project_id itself (Reminders Core path).
+  return topic
 }
 
 /**
@@ -155,8 +194,11 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     capability_required: 'fs:project_data',
   }))
 
-  async function compose(reminder: Reminder): Promise<string> {
-    const shape = classifyReminderMessage(reminder.message)
+  async function compose(
+    reminder: Reminder,
+    shape: ReminderShape,
+    project_id: string,
+  ): Promise<string> {
     if (llm === null) {
       return literalFallback(shape)
     }
@@ -164,7 +206,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       let context = ''
       if (input.context !== undefined) {
         try {
-          context = await input.context.gather(reminder)
+          context = await input.context.gather(reminder, project_id)
         } catch (err) {
           log(`reminder ${reminder.id} context gather failed: ${String(err)}`)
         }
@@ -179,7 +221,10 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
         tools,
         model_preference: [model],
         max_tokens,
-        metering_context: { project_id: reminder.project_slug },
+        // Meter the compose turn to the DESTINATION project, not the instance
+        // slug — see `deriveReminderProjectId`. Without this every project
+        // reminder is metered/session-keyed to the owner.
+        metering_context: { project_id },
       }
       const text = await llm.compose(spec)
       if (text.trim().length === 0) {
@@ -198,12 +243,22 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
   return {
     async dispatch(reminder: Reminder): Promise<void> {
       const shape = classifyReminderMessage(reminder.message)
+      // A reminder whose stored `message` is empty/whitespace (the Reminders
+      // Core create path, unlike the app surface, has no non-empty guard) has
+      // no deliverable intent — even the LLM has nothing to compose from.
+      // Skip the post (and the wasted compose turn) and return normally so the
+      // tick advances the row rather than re-firing an empty body forever.
+      if (literalFallback(shape).trim().length === 0) {
+        log(`reminder ${reminder.id} has empty message — skipping empty-body fire`)
+        return
+      }
       const explicit_topic = reminder.topic_id ?? shape.routing_topic ?? null
+      const destination_project_id = deriveReminderProjectId(reminder)
       const topic_id =
         resolveTopicId !== undefined
           ? resolveTopicId({ reminder, explicit_topic })
           : (explicit_topic ?? general_topic_id)
-      const body = await compose(reminder)
+      const body = await compose(reminder, shape, destination_project_id)
       const accepted = await input.outbound.post({
         topic_id,
         project_slug: reminder.project_slug,

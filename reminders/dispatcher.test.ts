@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { AgentSpec } from '../runtime/substrate.ts'
 import {
   buildReminderDispatcher,
+  deriveReminderProjectId,
   type ReminderLlm,
   type ReminderOutbound,
   type ReminderOutboundInput,
@@ -59,7 +60,10 @@ describe('buildReminderDispatcher — composition + post', () => {
     await d.dispatch(makeReminder({ message: 'water the office plants' }))
 
     expect(llm.specs[0]!.prompt).toContain('water the office plants')
-    expect(llm.specs[0]!.metering_context?.project_id).toBe('proj')
+    // Metered to the DESTINATION project derived from topic_id, not the
+    // instance project_slug ('proj'). Default makeReminder's raw topic_id
+    // ('topic-1') IS the destination project id (Reminders Core shape).
+    expect(llm.specs[0]!.metering_context?.project_id).toBe('topic-1')
   })
 
   test('gathered context is threaded into the prompt', async () => {
@@ -170,5 +174,104 @@ describe('buildReminderDispatcher — composition + post', () => {
     await d.dispatch(makeReminder())
 
     expect(outbound.posts[0]!.body).toBe('composed anyway')
+  })
+
+  // BLOCKING fix (Argus PR #7) — a PROJECT reminder gathers context for AND
+  // meters to its DESTINATION project (encoded in topic_id), not the fixed
+  // instance project_slug.
+  test('project reminder gathers context + meters by the topic_id project, not project_slug', async () => {
+    const outbound = recordingOutbound()
+    const llm = recordingLlm('composed')
+    const gathered: Array<{ slug: string; project_id: string }> = []
+    const d = buildReminderDispatcher({
+      outbound,
+      llm,
+      context: {
+        gather: (reminder, project_id) => {
+          gathered.push({ slug: reminder.project_slug, project_id })
+          return `ctx for ${project_id}`
+        },
+      },
+    })
+
+    // App-surface shape: project_slug is the instance, topic_id carries the
+    // destination project as `app-project:<project_id>`.
+    await d.dispatch(
+      makeReminder({ project_slug: 'owner-instance', topic_id: 'app-project:acme-app' }),
+    )
+
+    // Context source saw the destination project id, not the instance slug...
+    expect(gathered).toEqual([{ slug: 'owner-instance', project_id: 'acme-app' }])
+    expect(llm.specs[0]!.prompt).toContain('ctx for acme-app')
+    // ...and the compose turn metered to the destination project, not the owner.
+    expect(llm.specs[0]!.metering_context?.project_id).toBe('acme-app')
+  })
+
+  test('instance-level reminder (null topic_id) keys context + metering to project_slug', async () => {
+    const outbound = recordingOutbound()
+    const llm = recordingLlm('composed')
+    const gathered: string[] = []
+    const d = buildReminderDispatcher({
+      outbound,
+      llm,
+      context: { gather: (_r, project_id) => { gathered.push(project_id); return '' } },
+    })
+
+    await d.dispatch(makeReminder({ project_slug: 'home-instance', topic_id: null }))
+
+    expect(gathered).toEqual(['home-instance'])
+    expect(llm.specs[0]!.metering_context?.project_id).toBe('home-instance')
+  })
+
+  test('empty / whitespace message does not fire an empty body (no post)', async () => {
+    const outbound = recordingOutbound()
+    const llm = recordingLlm('should not be called')
+    const d = buildReminderDispatcher({ outbound, llm })
+
+    // Returns normally (so the tick advances the row) but posts nothing.
+    await expect(d.dispatch(makeReminder({ message: '   \n  ' }))).resolves.toBeUndefined()
+    // A reminder that is ONLY a [ROUTING] header has no body either.
+    await d.dispatch(makeReminder({ message: '[ROUTING] target_thread: 5\n   ' }))
+
+    expect(outbound.posts).toHaveLength(0)
+    expect(llm.specs).toHaveLength(0)
+  })
+})
+
+describe('deriveReminderProjectId', () => {
+  const base: Reminder = {
+    id: 'r',
+    project_slug: 'instance-slug',
+    topic_id: null,
+    fire_at: 0,
+    message: 'm',
+    status: 'pending',
+    recurrence: null,
+    source: null,
+    created_at: 0,
+    fired_at: null,
+    cancelled_at: null,
+  }
+
+  test('null / empty / whitespace topic → instance project_slug', () => {
+    expect(deriveReminderProjectId({ ...base, topic_id: null })).toBe('instance-slug')
+    expect(deriveReminderProjectId({ ...base, topic_id: '' })).toBe('instance-slug')
+    expect(deriveReminderProjectId({ ...base, topic_id: '   ' })).toBe('instance-slug')
+  })
+
+  test('raw topic (Reminders Core) → the topic IS the project id', () => {
+    expect(deriveReminderProjectId({ ...base, topic_id: 'acme' })).toBe('acme')
+  })
+
+  test('app-project:<id> (app surface) → the project id', () => {
+    expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:acme-app' })).toBe('acme-app')
+    // Degenerate empty suffix falls back to the instance slug.
+    expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:' })).toBe('instance-slug')
+  })
+
+  test('web:<user>:<project> → project; web:<user> (General) → instance', () => {
+    expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner:acme' })).toBe('acme')
+    expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner' })).toBe('instance-slug')
+    expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner:' })).toBe('instance-slug')
   })
 })
