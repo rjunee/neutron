@@ -2,6 +2,66 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Track B Phase 4 (slice 1): full-text MESSAGE search (FTS5 over chat history) + `message_search` agent tool
+
+**What shipped.** Full-text search over CHAT MESSAGE history — the complement to
+the just-merged doc search (#18, over project markdown). The user and the live
+agent can now search their conversations. The index lives in the `@neutron/chat-core`
+**Store** (the seam the sync engine + send-queue already depend on), so search
+rides BOTH durable backends without forking the engine.
+
+- **`chat-core/search.ts` (NEW).** The shared search layer: `MessageSearchHit` /
+  `MessageSearchOptions` types; `sanitizeFtsQuery` (free text → safe FTS5 MATCH,
+  hyphenated terms phrase-quoted — lifted from `doc-search/query.ts`); and
+  `searchMessagesInMemory` — the pure-JS AND-of-terms scan with TF/length
+  relevance blended with recency and `[`…`]` highlighting, shared by the
+  in-memory path. ~`RELEVANCE_WEIGHT = 0.7`.
+- **`chat-core/store.ts`.** `Store` gains `searchMessages(query, opts)`.
+  `InMemoryStore` implements it (scope by topic/project/global, then delegate to
+  `searchMessagesInMemory`) — which automatically gives the OPFS web store
+  (`stores/opfs-store.ts`, delegates to its in-memory index) search too.
+- **`app/lib/chat-core/sqlite-store.ts` — real FTS5.** Adds a `chat_fts`
+  **external-content FTS5** virtual table over the message `body`, kept in
+  lock-step with `chat_messages` by AFTER INSERT/DELETE/UPDATE triggers (the
+  store's only write is still `INSERT OR REPLACE` on the message table; the
+  reconcile DELETE + the trigger pair keep the mirror exact). `searchMessages`
+  ranks by **BM25** (normalised to [0,1]), orders relevance-then-recency, and
+  highlights via SQLite `snippet()`. `open()` one-shot `'rebuild'`s the index
+  when the FTS table did not pre-exist but the message table holds rows (the
+  cold-open path for a DB written before message search). This is the op-sqlite
+  (RN) backend, verified on real SQL via the bun:sqlite adapter; wasm-SQLite
+  (web) drops in behind the same class.
+- **`message-search/` (NEW workspace package, `@neutronai/message-search`).** The
+  runtime + agent-tool surface (twin of `doc-search/`). `StoreMessageSearchRuntime`
+  wraps any chat-core Store (supports global cross-topic search).
+  `HistorySourceMessageSearchRuntime` is the server shape — hydrates an ephemeral
+  in-memory FTS index from one topic's history, so the gateway needs no persistent
+  message index. `registerMessageSearchToolSurface` registers the read-only
+  `read:project_data` **`message_search`** `{query, limit?, global?}` tool, scoped
+  to the CURRENT conversation by default (the call's `topic_id`), `global=true` to
+  widen.
+- **Gateway wiring.** `MiscCompositionInput.message_search?.runtime` (optional seam,
+  mirrors `doc_search`); `build-core-modules.ts` registers the tool when present.
+  `gateway/composition/message-search-wiring.ts` (NEW) adapts ButtonStore turn
+  history (agent prompt body + user resolution reply → chat messages, cursor-paged)
+  into the runtime's `MessageHistorySource`; `open/composer.ts` supplies it from
+  `landing.buttonStore`. Failure-isolated (a history read error degrades to no
+  results).
+- **Scope boundary.** chat-core search supports topic/project/**global**; the server
+  ButtonStore bridge is **per-topic** ("search THIS conversation" — the dominant
+  agent need). Cross-topic global search is the client store's job (web
+  wasm-sqlite / RN op-sqlite). Receipts / reactions / edit-delete are later Phase 4
+  slices, out of scope here.
+
+**Tests.** `chat-core/__tests__/search.test.ts` (sanitiser, snippet, JS rank/scope/
+edit/clear), `app/__tests__/chat-core-sqlite-search.test.ts` (real FTS5: rank +
+highlight, topic/project/global scope, edit/reconcile/clear keep the mirror
+consistent, hyphen-token recall, cold-open backfill), `message-search/{runtime,tool}.test.ts`
+(both runtimes + the registered tool end-to-end), and
+`gateway/composition/__tests__/message-search-wiring.test.ts` (ButtonStore bridge incl.
+pagination + failure degradation). `tsc --noEmit` clean; full `run-tests.sh` green
+(760 files / 8 chunks).
+
 ## 2026-06-21 — WAVE 2 non-blocking follow-ups: trident channel-kind, reminders crash dedup, proactive minors, CI gate, persona escape (#317/#319/#320/#321/#322)
 
 **Problem.** Five non-blocking follow-ups opened during the WAVE 2 overnight wave

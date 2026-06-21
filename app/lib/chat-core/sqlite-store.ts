@@ -25,10 +25,16 @@
  */
 
 import {
+  clampSearchLimit,
   compareForDisplay,
   mergeMessage,
   messageIdentity,
+  minMaxNormalise,
+  sanitizeFtsQuery,
+  toHit,
   type ChatMessage,
+  type MessageSearchHit,
+  type MessageSearchOptions,
   type Store,
 } from '@neutron/chat-core';
 
@@ -49,6 +55,7 @@ export interface SqliteExecutor {
 }
 
 const TABLE = 'chat_messages';
+const FTS_TABLE = 'chat_fts';
 
 /** DDL applied once on open. Idempotent. */
 const SCHEMA = [
@@ -75,7 +82,38 @@ const SCHEMA = [
   // Backs `getByMessageId` — the sync engine's resume-replay point lookup for
   // agent messages. Without it, replaying N messages was O(N²) (full scans).
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_mid ON ${TABLE} (topic_id, message_id)`,
+
+  // ── Full-text MESSAGE search (Track B Phase 4) ─────────────────────────
+  // `chat_fts` is an EXTERNAL-CONTENT FTS5 mirror over the message `body`.
+  // External content means the index stores NO copy of the text — it points
+  // back at `chat_messages` by rowid, so the only write path is still the
+  // message table; the triggers below keep the index in lock-step on every
+  // insert / delete (and the explicit reconcile DELETE in `upsert`). This is
+  // the canonical FTS5 contentless-sync pattern (same as `doc-search`).
+  `CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(
+     body,
+     content='${TABLE}',
+     tokenize='unicode61 remove_diacritics 2'
+   )`,
+  // INSERT OR REPLACE (the store's only write) fires DELETE-then-INSERT on a
+  // PK conflict, so the AI + AD triggers alone keep the mirror exact; the AU
+  // trigger covers any future in-place UPDATE for completeness.
+  `CREATE TRIGGER IF NOT EXISTS ${TABLE}_fts_ai AFTER INSERT ON ${TABLE} BEGIN
+     INSERT INTO ${FTS_TABLE}(rowid, body) VALUES (new.rowid, new.body);
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS ${TABLE}_fts_ad AFTER DELETE ON ${TABLE} BEGIN
+     INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, body) VALUES ('delete', old.rowid, old.body);
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS ${TABLE}_fts_au AFTER UPDATE ON ${TABLE} BEGIN
+     INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, body) VALUES ('delete', old.rowid, old.body);
+     INSERT INTO ${FTS_TABLE}(rowid, body) VALUES (new.rowid, new.body);
+   END`,
 ];
+
+/** Hard cap on BM25-ordered candidate rows pulled before the recency re-sort
+ *  + final limit. Bounds a pathologically broad query over a large transcript
+ *  to a fixed working set rather than loading the whole match set into JS. */
+const SEARCH_CANDIDATE_CAP = 1000;
 
 export class SqliteChatStore implements Store {
   private readonly db: SqliteExecutor;
@@ -90,8 +128,17 @@ export class SqliteChatStore implements Store {
    * factory so this stays driver-agnostic.
    */
   static async open(db: SqliteExecutor): Promise<SqliteChatStore> {
+    // Did the FTS mirror exist BEFORE this open? If not, and the message table
+    // already holds rows (a DB written by a build that predates message
+    // search), we must one-shot backfill the index — the sync triggers only
+    // index rows written after they exist. Checked before the DDL because the
+    // CREATE below would otherwise make it exist unconditionally.
+    const ftsPreexisted = await tableExists(db, FTS_TABLE);
     for (const stmt of SCHEMA) {
       await db.execute(stmt);
+    }
+    if (!ftsPreexisted) {
+      await backfillFts(db);
     }
     return new SqliteChatStore(db);
   }
@@ -170,7 +217,68 @@ export class SqliteChatStore implements Store {
   }
 
   async clear(topic_id: string): Promise<void> {
+    // The AFTER DELETE trigger evicts every cleared row from the FTS mirror,
+    // so a topic wipe leaves no orphaned index entries to surface in search.
     await this.db.execute(`DELETE FROM ${TABLE} WHERE topic_id = ?`, [topic_id]);
+  }
+
+  async searchMessages(
+    query: string,
+    opts: MessageSearchOptions = {},
+  ): Promise<MessageSearchHit[]> {
+    const limit = clampSearchLimit(opts.limit);
+    const match = sanitizeFtsQuery(query);
+    if (match.length === 0) return [];
+
+    const params: SqlValue[] = [match];
+    let scope = '';
+    if (opts.topic_id !== undefined && opts.topic_id.length > 0) {
+      scope += ' AND m.topic_id = ?';
+      params.push(opts.topic_id);
+    }
+    if (opts.project_id !== undefined && opts.project_id.length > 0) {
+      scope += ' AND m.project_id = ?';
+      params.push(opts.project_id);
+    }
+    params.push(SEARCH_CANDIDATE_CAP);
+
+    // bm25() returns a score where MORE-negative is a better match; we pull
+    // BM25-ordered candidates, normalise -bm25 into a [0,1] relevance, then
+    // re-sort relevance-desc with a recency tiebreak (newest first) — the
+    // "recency/relevance" ordering the Store contract promises. snippet()
+    // emits the `[`…`]` highlight markers, matching the JS path + doc-search.
+    const sql =
+      `SELECT m.topic_id AS topic_id, m.client_msg_id AS client_msg_id,
+              m.message_id AS message_id, m.seq AS seq, m.role AS role,
+              m.body AS body, m.project_id AS project_id, m.created_at AS created_at,
+              bm25(${FTS_TABLE}) AS bm25,
+              snippet(${FTS_TABLE}, 0, '[', ']', ' … ', 12) AS snippet
+         FROM ${FTS_TABLE}
+         JOIN ${TABLE} m ON m.rowid = ${FTS_TABLE}.rowid
+        WHERE ${FTS_TABLE} MATCH ?${scope}
+        ORDER BY bm25
+        LIMIT ?`;
+
+    let rows: SqlRow[];
+    try {
+      ({ rows } = await this.db.execute(sql, params));
+    } catch {
+      // Malformed MATCH expression / FTS5 unavailable — treat as no results
+      // rather than throwing into the agent turn or the UI search box.
+      return [];
+    }
+    if (rows.length === 0) return [];
+
+    const relNorm = minMaxNormalise(
+      rows.map((r) => -(typeof r['bm25'] === 'number' ? r['bm25'] : 0)),
+    );
+    return rows
+      .map((r, i) => {
+        const snippet = typeof r['snippet'] === 'string' ? r['snippet'] : '';
+        return toHit(rowToMessage(r), relNorm[i]!, snippet);
+      })
+      .sort((a, b) => b.score - a.score || b.created_at - a.created_at)
+      .slice(0, limit);
   }
 
   private async rowByIdentity(topic_id: string, identity: string): Promise<ChatMessage | null> {
@@ -251,4 +359,37 @@ function parseAttachments(raw: SqlValue | undefined): readonly string[] | null {
 
 function normalizeStatus(raw: SqlValue | undefined): ChatMessage['status'] {
   return raw === 'sent' || raw === 'acked' ? raw : 'queued';
+}
+
+/** True iff a table (or FTS5 virtual table) named `name` already exists. */
+async function tableExists(db: SqliteExecutor, name: string): Promise<boolean> {
+  try {
+    const { rows } = await db.execute(
+      `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`,
+      [name],
+    );
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Re-derive the FTS mirror from the message table in one pass. Used once, when
+ * the index is first created over a message table that already holds rows.
+ * `'rebuild'` is FTS5's external-content backfill command; `numberOf` cannot
+ * be used to gate this because `COUNT(*)` on an external-content FTS reports
+ * the CONTENT row count, not the indexed-doc count (so it can read non-zero
+ * while the index is empty). Failure-isolated: if FTS5 isn't compiled in,
+ * search simply returns nothing rather than failing the store open.
+ */
+async function backfillFts(db: SqliteExecutor): Promise<void> {
+  try {
+    const { rows } = await db.execute(`SELECT COUNT(*) AS n FROM ${TABLE}`);
+    const messages = typeof rows[0]?.['n'] === 'number' ? (rows[0]['n'] as number) : 0;
+    if (messages === 0) return;
+    await db.execute(`INSERT INTO ${FTS_TABLE}(${FTS_TABLE}) VALUES ('rebuild')`);
+  } catch {
+    // FTS5 unavailable / transient error — degrade to "no results".
+  }
 }

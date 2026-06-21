@@ -60,6 +60,49 @@ mid-conversation. It is the Neutron equivalent of Vajra's QMD.
   builds the index at `<owner_home>/cache/doc-search/index.db`, threads the
   runtime in, and closes it on shutdown (failure-isolated).
 
+## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
+
+The chat-history twin of doc-search: full-text search over the user's CHAT
+MESSAGES (not docs), so both the user and the live agent can find "where did we
+talk about X". The full-text index lives in the chat-core **Store** — the same
+seam the sync engine, send-queue, and UI already depend on — so search rides
+the existing per-platform durable store without forking the engine.
+
+- **Store contract (`chat-core/store.ts`, `search.ts`).** `Store` gains
+  `searchMessages(query, opts)` → ranked, `[`…`]`-highlighted
+  `MessageSearchHit[]`, scoped by `topic_id` / `project_id` or global
+  (omit both). `sanitizeFtsQuery` turns free text into a safe FTS5 MATCH
+  expression (no operator injection; hyphenated terms phrase-quoted), shared
+  by both backends.
+- **Durable backend — real FTS5 (`app/lib/chat-core/sqlite-store.ts`).** The
+  op-sqlite (RN) / bun:sqlite (tests) / wasm-SQLite (web, when it lands) store
+  adds a `chat_fts` **external-content FTS5** mirror over the message `body`,
+  kept in lock-step with `chat_messages` by AFTER INSERT/DELETE/UPDATE triggers
+  (so the store's only write path stays the message table). Ranking is **BM25**
+  normalised to a [0,1] relevance, ordered relevance-then-recency, with
+  SQLite `snippet()` highlights. A cold-open over a pre-search DB one-shot
+  `'rebuild'`s the index from existing rows.
+- **Fallback backend — tokenised JS (`InMemoryStore`).** The always-available
+  fallback (and the substrate behind today's OPFS web store) implements the
+  SAME `MessageSearchHit` contract with an AND-of-terms scan, TF/length
+  relevance blended with recency, and identical `[`…`]` highlighting — so the
+  query API behaves the same regardless of substrate.
+- **Runtime + tool (`message-search/runtime.ts`, `tool.ts`).**
+  `StoreMessageSearchRuntime` wraps any chat-core Store (client: topic /
+  project / global). `HistorySourceMessageSearchRuntime` is the server shape:
+  it hydrates an ephemeral in-memory FTS index from one topic's history (no
+  persistent server index). `registerMessageSearchToolSurface` registers the
+  read-only `read:project_data` **`message_search`** `{query, limit?, global?}`
+  tool — scoped to the CURRENT conversation by default (the call's `topic_id`),
+  `global=true` to widen.
+- **Wiring.** The `tools` module
+  (`gateway/composition/build-core-modules.ts`) registers the surface when the
+  composer supplies `MiscCompositionInput.message_search.runtime`.
+  `open/composer.ts` supplies a runtime backed by the owner's ButtonStore turn
+  history (`gateway/composition/message-search-wiring.ts`), so the live agent
+  can recall earlier turns mid-conversation. Server search is per-topic by
+  design; cross-topic global search is the client store's job.
+
 ## `/code` → foundational Trident (DONE — Trident-port PR-5)
 
 The ~5-PR port folding Vajra's full Trident into Neutron Open as

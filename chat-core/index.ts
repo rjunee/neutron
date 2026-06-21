@@ -27,6 +27,20 @@ export {
   type Store,
 } from './store.ts'
 
+export {
+  sanitizeFtsQuery,
+  searchMessagesInMemory,
+  queryTerms,
+  buildSnippet,
+  clampSearchLimit,
+  minMaxNormalise,
+  toHit,
+  DEFAULT_SEARCH_LIMIT,
+  MAX_SEARCH_LIMIT,
+  type MessageSearchHit,
+  type MessageSearchOptions,
+} from './search.ts'
+
 export { SyncEngine, type ApplyResult } from './sync-engine.ts'
 
 export {
