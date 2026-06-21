@@ -140,6 +140,30 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
     expect(store.list({ project_slug: 't1', status: 'all' }).length).toBe(2)
   })
 
+  test('a late write to a recovered leftover sidecar is drained, not lost', async () => {
+    // Leftover sidecar from a crashed scan, with one row already in it.
+    const sidecar = `${paths.inbox}.processing`
+    appendFileSync(sidecar, JSON.stringify({ action: 'add', id: 'r1', title: 'recovered' }) + '\n')
+    // During recovery apply, a pre-crash fd appends another row to it.
+    let injected = false
+    const result = await runTaskScan({
+      store,
+      project_slug: 't1',
+      paths,
+      now: () => {
+        if (!injected) {
+          injected = true
+          appendFileSync(sidecar, JSON.stringify({ action: 'add', id: 'r2', title: 'late recovered' }) + '\n')
+        }
+        return NOW
+      },
+    })
+    expect(result.applied).toBe(2) // both the leftover + the late write
+    expect(store.get('r1')?.title).toBe('recovered')
+    expect(store.get('r2')?.title).toBe('late recovered')
+    expect(existsSync(sidecar)).toBe(false)
+  })
+
   test('id-less add gets a stable id at append time (replay-safe)', async () => {
     appendInboxRow(paths.inbox, { action: 'add', title: 'no explicit id' })
     // The persisted line carries an id even though the caller omitted it.

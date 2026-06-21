@@ -139,8 +139,6 @@ interface ClaimedInbox {
   body: string
   /** Bytes read from the sidecar at claim time (for the late-write guard). */
   baselineBytes: number
-  /** True when we rotated the live inbox this scan (vs. draining a leftover). */
-  rotated: boolean
 }
 
 /**
@@ -163,13 +161,16 @@ interface ClaimedInbox {
 function claimInbox(inboxPath: string): ClaimedInbox | null {
   const processingPath = processingPathFor(inboxPath)
   if (existsSync(processingPath)) {
+    // Leftover from a crashed scan. A pre-rename appender could STILL hold
+    // an fd to this inode and write to it during recovery, so it gets the
+    // same late-write drain/requeue handling as a fresh rotation.
     const body = readFileSync(processingPath, 'utf8')
-    return { body, baselineBytes: Buffer.byteLength(body, 'utf8'), rotated: false }
+    return { body, baselineBytes: Buffer.byteLength(body, 'utf8') }
   }
   if (!existsSync(inboxPath)) return null
   renameSync(inboxPath, processingPath)
   const body = readFileSync(processingPath, 'utf8')
-  return { body, baselineBytes: Buffer.byteLength(body, 'utf8'), rotated: true }
+  return { body, baselineBytes: Buffer.byteLength(body, 'utf8') }
 }
 
 /** Max in-order tail-drain passes over the rotated sidecar per scan. */
@@ -184,14 +185,16 @@ interface DrainResult {
 
 /**
  * Apply the claimed body, then drain — IN ORDER, within this same scan —
- * any rows a pre-rename-opened fd appended to the rotated sidecar during
- * the apply window. Draining inline (rather than requeueing to the live
- * inbox) preserves global append order: rotated-inode rows are older than
+ * any rows a pre-rename-opened fd appended to the sidecar during the apply
+ * window. Draining inline (rather than requeueing to the live inbox)
+ * preserves global append order: sidecar-inode rows are older than
  * anything in the freshly-recreated live inbox, so applying them now,
  * before the next scan reads the live inbox, keeps a dependent
- * `add`→`update` pair in order. Bounded to {@link MAX_TAIL_DRAIN_PASSES}
- * passes so a pathological continuous writer can't spin the scan forever
- * — any final residual is handled by {@link finalizeProcessing}.
+ * `add`→`update` pair in order. Applies to BOTH a fresh rotation and a
+ * recovered leftover sidecar (a pre-crash fd can still target either).
+ * Bounded to {@link MAX_TAIL_DRAIN_PASSES} passes so a pathological
+ * continuous writer can't spin the scan forever — any final residual is
+ * handled by {@link finalizeProcessing}.
  */
 async function drainClaimed(
   deps: RunTaskScanDeps,
@@ -202,22 +205,20 @@ async function drainClaimed(
   const errors: ParseError[] = [...parsed.errors]
   const outcomes = await applyInboxRows(applyDeps, parsed.rows)
   let baseline = claim.baselineBytes
-  if (claim.rotated) {
-    const processingPath = processingPathFor(deps.paths.inbox)
-    for (let pass = 0; pass < MAX_TAIL_DRAIN_PASSES; pass++) {
-      let latest: Buffer
-      try {
-        latest = readFileSync(processingPath)
-      } catch {
-        break
-      }
-      if (latest.length <= baseline) break
-      const tailStr = latest.subarray(baseline).toString('utf8')
-      baseline = latest.length
-      const tailParsed = parseInbox(tailStr)
-      errors.push(...tailParsed.errors)
-      outcomes.push(...(await applyInboxRows(applyDeps, tailParsed.rows)))
+  const processingPath = processingPathFor(deps.paths.inbox)
+  for (let pass = 0; pass < MAX_TAIL_DRAIN_PASSES; pass++) {
+    let latest: Buffer
+    try {
+      latest = readFileSync(processingPath)
+    } catch {
+      break
     }
+    if (latest.length <= baseline) break
+    const tailStr = latest.subarray(baseline).toString('utf8')
+    baseline = latest.length
+    const tailParsed = parseInbox(tailStr)
+    errors.push(...tailParsed.errors)
+    outcomes.push(...(await applyInboxRows(applyDeps, tailParsed.rows)))
   }
   return { outcomes, errors, finalBaseline: baseline }
 }
@@ -231,19 +232,13 @@ async function drainClaimed(
  * appends, and a crash before the unlink simply defers it via the
  * leftover-sidecar recovery path.
  */
-function finalizeProcessing(
-  inboxPath: string,
-  claim: ClaimedInbox,
-  finalBaseline: number,
-): void {
+function finalizeProcessing(inboxPath: string, finalBaseline: number): void {
   const processingPath = processingPathFor(inboxPath)
   try {
-    if (claim.rotated) {
-      const latest = readFileSync(processingPath)
-      if (latest.length > finalBaseline) {
-        const tail = latest.subarray(finalBaseline).toString('utf8')
-        if (tail.length > 0) appendFileSync(inboxPath, tail, { mode: 0o600 })
-      }
+    const latest = readFileSync(processingPath)
+    if (latest.length > finalBaseline) {
+      const tail = latest.subarray(finalBaseline).toString('utf8')
+      if (tail.length > 0) appendFileSync(inboxPath, tail, { mode: 0o600 })
     }
   } catch {
     /* re-read best-effort; fall through to unlink */
@@ -339,7 +334,7 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   // sidecar now the store + markdown are both durable. A crash before here
   // leaves the sidecar for the next scan to recover.
   if (claim !== null) {
-    finalizeProcessing(deps.paths.inbox, claim, drained.finalBaseline)
+    finalizeProcessing(deps.paths.inbox, drained.finalBaseline)
   }
 
   const applied = outcomes.filter((o) => o.status === 'applied').length
