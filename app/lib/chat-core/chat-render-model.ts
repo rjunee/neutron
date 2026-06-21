@@ -75,6 +75,26 @@ export function foldStreamFrame(state: StreamState, frame: unknown): StreamState
   return state;
 }
 
+/**
+ * Does this raw frame belong to the given project view? Streaming frames
+ * (`agent_message_partial` / `agent_message`) carry an optional `project_id`,
+ * but the app WS topic is per-USER — every project's stream arrives on the
+ * same socket. A project-scoped view must therefore drop a sibling project's
+ * stream the same way the durable transcript is filtered (`matchesProject` in
+ * the hook), else another project's partial renders in this chat until its
+ * final message lands and is filtered out (Codex P2). Semantics mirror the
+ * durable filter: the global (empty-`projectId`) view shows only untagged
+ * streams; a project view shows only its own. Non-stream frames (no
+ * `project_id`) are unaffected — `foldStreamFrame` ignores them regardless.
+ */
+export function frameMatchesProject(frame: unknown, projectId: string): boolean {
+  if (typeof frame !== 'object' || frame === null) return true;
+  const raw = (frame as Record<string, unknown>)['project_id'];
+  const framePid = typeof raw === 'string' && raw.length > 0 ? raw : null;
+  if (projectId.length === 0) return framePid === null;
+  return framePid === projectId;
+}
+
 /** A renderable row: either a durable message or a live streaming bubble. */
 export type RenderRow =
   | { kind: 'message'; key: string; message: ChatMessage }

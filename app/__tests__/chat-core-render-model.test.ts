@@ -17,6 +17,7 @@ import {
   deliveryState,
   emptyStreamState,
   foldStreamFrame,
+  frameMatchesProject,
 } from '../lib/chat-core/chat-render-model';
 
 function userMsg(p: Partial<ChatMessage> & { client_msg_id: string }): ChatMessage {
@@ -112,6 +113,37 @@ describe('buildRenderRows', () => {
     const keys = rows.map((r) => r.key);
     expect(new Set(keys).size).toBe(keys.length);
     expect(keys).toEqual(['c:c1', 'm:a1']);
+  });
+});
+
+describe('frameMatchesProject', () => {
+  const partial = (project_id?: string) => ({
+    v: 1,
+    type: 'agent_message_partial',
+    message_id: 'a1',
+    body_delta: 'hi',
+    ts: 1,
+    ...(project_id !== undefined ? { project_id } : {}),
+  });
+
+  it('a project view keeps only its own tagged stream', () => {
+    expect(frameMatchesProject(partial('proj-1'), 'proj-1')).toBe(true);
+    // Regression (Codex P2): a sibling project's stream must be dropped so it
+    // never renders in this project's chat.
+    expect(frameMatchesProject(partial('proj-2'), 'proj-1')).toBe(false);
+    // An untagged stream is the global transcript's, not this project's.
+    expect(frameMatchesProject(partial(undefined), 'proj-1')).toBe(false);
+  });
+
+  it('the global (empty projectId) view keeps only untagged streams', () => {
+    expect(frameMatchesProject(partial(undefined), '')).toBe(true);
+    expect(frameMatchesProject(partial(''), '')).toBe(true);
+    expect(frameMatchesProject(partial('proj-1'), '')).toBe(false);
+  });
+
+  it('passes through non-object frames (fold ignores them anyway)', () => {
+    expect(frameMatchesProject(null, 'proj-1')).toBe(true);
+    expect(frameMatchesProject('nope', 'proj-1')).toBe(true);
   });
 });
 

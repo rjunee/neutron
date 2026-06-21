@@ -83,8 +83,9 @@ at the end of this entry for the Argus-driven corrections.
   seq cursor (+ dedup of a re-delivered seq), cold-open + re-drive of a stranded send
   across a simulated restart, `catchUp()` gap-fill, `catchUp()` no-op-when-not-open
   (deferred resume rides next session_ready), and the `onFrame` streaming seam.
-- `app/__tests__/chat-core-render-model.test.ts` (10) — streaming fold state machine,
-  durable↔streaming merge + stable keys, delivery ladder.
+- `app/__tests__/chat-core-render-model.test.ts` (13) — streaming fold state machine,
+  durable↔streaming merge + stable keys, delivery ladder, and the fix-round
+  `frameMatchesProject` filter (own/sibling/untagged streams per view).
 - `app/__tests__/active-tab.test.ts` (5, fix-round) — `activeTabFromSegments` mapping:
   legal tab leaves, bare-route default, and the chat-sync/notes/cores/backups → null
   (no Chat-tab shadow/lock) regression.
@@ -140,6 +141,17 @@ resolved here. Core was rated EXCELLENT — these are targeted fixes.
 - **[MINOR] redundant empty-string guard** removed from
   `SqliteChatStore.getByClientMsgId` (the private `rowByClientMsgId` already
   guards identically).
+- **[Codex P2 — fixed] streaming partials weren't project-filtered.** The app
+  WS topic is per-user, so `agent_message_partial` streams for OTHER projects
+  arrive on the same socket; `useMobileChat`'s `onFrame` folded them
+  unconditionally, so a sibling project's stream could render in the current
+  project's chat until its final message landed and was filtered out. The
+  partial envelope carries an optional `project_id` (P5.2 parity), so a new pure
+  `frameMatchesProject(frame, projectId)` helper in `chat-render-model.ts`
+  applies the SAME filter as the durable `matchesProject` before folding;
+  `onFrame` drops a non-matching frame. (Server-side partials aren't emitted yet
+  — P5.1 ships the client primitive only — so this is forward-correct with zero
+  current-behavior regression.) Tests: 3 in `chat-core-render-model.test.ts`.
 
 ## 2026-06-20 — Proactive messaging: real morning brief + idle-topic nudge sweep (gap-audit P0-5)
 

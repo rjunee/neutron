@@ -36,6 +36,7 @@ import {
   buildRenderRows,
   emptyStreamState,
   foldStreamFrame,
+  frameMatchesProject,
   type RenderRow,
   type StreamState,
 } from './chat-render-model';
@@ -111,6 +112,11 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
           if (!disposed) setStatus(s);
         },
         onFrame: (frame) => {
+          // The app WS topic is per-user, so streams for OTHER projects arrive
+          // on this socket too. Drop a sibling project's stream before folding
+          // so it never renders in this project's view (mirrors the durable
+          // `matchesProject` filter above; Codex P2).
+          if (!frameMatchesProject(frame, projectId)) return;
           const next = foldStreamFrame(streamRef.current, frame);
           if (next !== streamRef.current) {
             streamRef.current = next;
