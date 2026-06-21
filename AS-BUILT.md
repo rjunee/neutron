@@ -2,6 +2,28 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — PR #13 post-merge CI red triage (flake, no code change)
+
+After `origin/main` was merged into `feat-integrations-admin-ui-wave2-clean` to
+resolve conflicts, CI `test` went red on one chunk. Triaged to a **flaky** test,
+not a merge regression — **no code change shipped**.
+
+- Failure: `scribe → GBrain real PGLite round-trip > (unnamed) [2320.95ms]`
+  (`scribe/__tests__/scribe-gbrain-roundtrip.test.ts`, chunk 7). A real
+  in-process PGLite round-trip (100+ migrations in `beforeAll`, shared engine
+  across the describe). The `(unnamed)` hook-level failure is the parallel-load
+  flake signature, not an assertion.
+- The file is **byte-identical to `origin/main`** and **never touched by this
+  branch** — the integrations feature does not depend on scribe/gbrain.
+- Could not reproduce: full `run-tests.sh` green twice (8/8 chunks, 0 fail);
+  chunk 7 green 4× at CI concurrency=4; standalone green 3×; integrations tests
+  23/23; `tsc --noEmit` clean.
+- Pre-merge commit CI was green (#27898064293); the merge commit (#27900099886)
+  tripped the flake after ~6 new test files shifted chunk boundaries.
+- Re-triggered CI; this docs-only commit re-triggers a fresh run. The flaky
+  real-PGLite test should be hardened repo-wide against `main` (out of scope here
+  since it is identical on `main`).
+
 ## 2026-06-21 — Integrations PR #13 fix-pass (Argus: 1 blocker + 2 important)
 
 Addresses the Argus review of PR #13 (`feat-integrations-admin-ui-wave2-clean`).
