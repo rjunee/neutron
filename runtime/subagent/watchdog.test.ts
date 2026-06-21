@@ -203,6 +203,39 @@ describe('agent-aware watchdog — surfacing semantics', () => {
     expect(registry.byRunId('r2')?.status).toBe('crashed')
   })
 
+  test('a run that completes WHILE the canceller awaits is not clobbered or false-surfaced', async () => {
+    // Race: the watchdog judges a stuck agent and kills it, but a real
+    // completion lands while the (async) canceller is in flight. failRun
+    // re-checks after the await, so the legitimate `finished` survives and no
+    // false failure event fires.
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    const rec = liveRecord(registry, { run_id: 'r-finish', last_event_at: 0 })
+    // The canceller yields, then a concurrent completion marks the run finished.
+    registerCanceller(ctrl, rec.run_id, async () => {
+      await Promise.resolve()
+      registry.update(rec.run_id, { status: 'finished', ended_at: 123 })
+    })
+
+    const notified: AgentWatchdogEvent[] = []
+    const res = await runAgentWatchdog({
+      control: ctrl,
+      registry,
+      now: () => DEFAULT_STUCK_THRESHOLD_MS + 1,
+      pid_alive: () => true,
+      notify: (e) => {
+        notified.push(e)
+      },
+    })
+
+    // No surfaced event, and the real terminal status is preserved.
+    expect(res.surfaced).toHaveLength(0)
+    expect(notified).toHaveLength(0)
+    const after = registry.byRunId('r-finish')!
+    expect(after.status).toBe('finished')
+    expect(after.failure_reason).toBeUndefined()
+  })
+
   test('a healthy idle registry surfaces nothing (no false positives)', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
