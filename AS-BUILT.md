@@ -61,6 +61,56 @@ across surfaces, no owner-specific leakage, per-context weighting) +
 describe (doctrine present in the ACTUAL composed per-turn prompt for both
 General and a project topic, and first-turn-only). tsc clean; full `bun test`
 green.
+## 2026-06-21 — #327: CI `test` PGLite-WASM-init flake — extend the boot helper's retry to the WASM-init shape
+
+**Symptom.** The CI `test` job failed on ≈every PR in the WAVE2-tail wave (#19,
+#21, #20) with `PGLite failed to initialize its WASM runtime` (gbrain #223) and
+PASSED on `gh run rerun --failed`. DISTINCT from the #79 boot-*probe* race that
+PR #13 root-fixed — this is the WASM-init step itself, not the post-create
+bootstrap probe.
+
+**Root cause.** `engine.connect()` → `@electric-sql/pglite`'s `PGlite.create()`
+`readFile`s `pglite.data` and `WebAssembly.instantiate()`s the ~Postgres-in-WASM
+module. PR #13's shared boot helper (`gbrain-memory/__tests__/boot-pglite-brain.ts`)
+already **serialises** boots behind a process-global mutex (so the first compile
+warms PGLite's module cache and later boots reuse it — the deterministic half is
+in place), but the FIRST large WASM compile still runs while the chunk's ~100
+sibling files saturate CI's small 2-vCPU/7-GB ubuntu runner, and the instantiate
+intermittently aborts. gbrain wraps every `PGlite.create()` throw with the header
+`PGLite failed to initialize its WASM runtime.` (`pglite-engine.ts:249`
+`buildPgliteInitErrorMessage`; classifier at `pglite-engine.ts:157`). The helper's
+bounded retry was scoped ONLY to the probe shape (`/evaluating 'probe\./`), so the
+WASM-init failure fell through to an immediate throw — no self-heal → CI red.
+
+**Why not the deterministic options (a/b).** PGLite reads `pglite.data`
+read-only from the package dir and instantiates the WASM in-memory — there is no
+writable-extraction-dir knob that changes this on Linux (the `$$bunfs`/read-only
+hint is the macOS *compiled-binary* case, not ubuntu `bun test` from source). And
+each `bun test` chunk is a FRESH process, so a `ci.yml` pre-warm step can't
+persist PGLite's per-process module cache. The correct minimal fix is to let the
+existing serialise+retry infrastructure recognise this shape too.
+
+**Fix** (no assertion weakened). In `boot-pglite-brain.ts`:
+- Generalised the transient classifier `isTransientBootProbe` → exported
+  `isTransientBoot`, a TIGHT allow-list that now matches BOTH the #79 probe race
+  AND the #327 WASM-init header (plus the raw PGLite `Invalid FS bundle size`
+  byteLength guard and WASM compile/abort `RuntimeError` shapes). A deterministic
+  error (SQL/migration/config) still returns `false` → never retried.
+- Extracted the retry loop into an exported, injectable
+  `withTransientBootRetry(boot, {maxAttempts, baseDelayMs, sleep, onRetry})`:
+  retries ONLY a transient shape, BOUNDED (default 4 attempts), and rethrows the
+  ORIGINAL error when exhausted — a genuinely broken runtime still fails loudly.
+  The retry runs inside the boot mutex (no sibling competes during backoff) and
+  boots a FRESH engine per attempt (disconnecting the half-booted one first).
+- New unit test `boot-pglite-brain.test.ts` (9 tests) pins the contract: #327
+  WASM-init + #79 probe + raw fs-bundle classified transient; schema/SQL/config
+  errors NOT retried (surface on first throw); self-heal after 2 transient
+  failures; bounded-exhaust rethrows the original; healthy boot never retries.
+
+**Verification.** `bunx tsc --noEmit` clean; new unit suite 9/9; the 5 real-PGLite
+suites run together at `--max-concurrency=4` 53/53 green; full
+`scripts/run-tests.sh` 762/762 files, 8/8 chunks, coverage audit PASS;
+`leak-gate.sh` SILENT. No production code touched — test-harness only.
 
 ## 2026-06-21 — #323 fix round 2: extract from `freeform_text`, not `state_delta` (Argus r1 BLOCKERs 1 & 2)
 
