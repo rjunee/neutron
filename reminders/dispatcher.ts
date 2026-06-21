@@ -50,6 +50,23 @@ export interface ReminderContextSource {
 }
 
 /**
+ * Maps a reminder's stored destination to the surface's actual topic key.
+ * The stored `topic_id` is engine-shaped (the Reminders Core persists the raw
+ * `project_id`, or `null` for instance-level reminders) and does NOT match the
+ * surface's routing key (Open's web chat routes on `web:<user_id>` /
+ * `web:<user_id>:<project_id>`). The composer injects a resolver that bridges
+ * the two; without one the dispatcher uses the explicit topic verbatim (the
+ * Telegram-style behaviour, and what tests assert against).
+ */
+export interface ReminderTopicResolver {
+  /**
+   * `explicit_topic` is the reminder's `topic_id`, else a `[ROUTING]` header,
+   * else `null` (no destination specified — resolve to the surface's General).
+   */
+  (ctx: { reminder: Reminder; explicit_topic: string | null }): string
+}
+
+/**
  * The fire-time composition seam. Production wraps the warm CC substrate via
  * `buildSubstrateReminderLlm`; tests inject a deterministic fake. `null`/absent
  * → the dispatcher composes nothing and posts the literal degrade body.
@@ -98,10 +115,16 @@ export interface BuildReminderDispatcherInput {
   llm?: ReminderLlm | null
   /** Live-context gatherer. Absent → compose from intent + clock only. */
   context?: ReminderContextSource
+  /**
+   * Maps the reminder's engine-shaped destination to the surface topic key
+   * (Open: `web:<user_id>[:<project_id>]`). Absent → the explicit topic is used
+   * verbatim, falling back to `general_topic_id`.
+   */
+  resolveTopicId?: ReminderTopicResolver
   /** Composition model. Defaults to the Haiku-class `FAST_MODEL`. */
   model?: string
   max_tokens?: number
-  /** Topic id used when a reminder has neither `topic_id` nor a routing header. */
+  /** Topic id used when no resolver is wired and a reminder has no destination. */
   general_topic_id?: string
   /** Override the read-only tool allow-list (tests). */
   tool_names?: ReadonlyArray<string>
@@ -170,17 +193,32 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     }
   }
 
+  const resolveTopicId = input.resolveTopicId
+
   return {
     async dispatch(reminder: Reminder): Promise<void> {
       const shape = classifyReminderMessage(reminder.message)
-      const topic_id = reminder.topic_id ?? shape.routing_topic ?? general_topic_id
+      const explicit_topic = reminder.topic_id ?? shape.routing_topic ?? null
+      const topic_id =
+        resolveTopicId !== undefined
+          ? resolveTopicId({ reminder, explicit_topic })
+          : (explicit_topic ?? general_topic_id)
       const body = await compose(reminder)
-      await input.outbound.post({
+      const accepted = await input.outbound.post({
         topic_id,
         project_slug: reminder.project_slug,
         body,
         reminder_id: reminder.id,
       })
+      // A rejected durable post (e.g. the chat history write failed) MUST NOT
+      // let the tick loop mark the row fired / advance its recurrence — that
+      // would silently consume a reminder that never reached the user. Throw
+      // so the tick's try/catch leaves the row pending to retry next tick.
+      if (accepted === false) {
+        throw new Error(
+          `reminder ${reminder.id} outbound post rejected for topic ${topic_id} — left pending for retry`,
+        )
+      }
     },
   }
 }

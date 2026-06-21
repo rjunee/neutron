@@ -129,6 +129,35 @@ describe('buildReminderDispatcher — composition + post', () => {
     expect(outbound.posts[0]!.topic_id).toBe('99')
   })
 
+  test('resolveTopicId maps the engine destination to the surface key', async () => {
+    const outbound = recordingOutbound()
+    const d = buildReminderDispatcher({
+      outbound,
+      llm: recordingLlm('x'),
+      resolveTopicId: ({ explicit_topic }) =>
+        explicit_topic === null ? 'web:owner' : `web:owner:${explicit_topic}`,
+    })
+
+    await d.dispatch(makeReminder({ topic_id: 'acme' }))
+    expect(outbound.posts[0]!.topic_id).toBe('web:owner:acme')
+
+    await d.dispatch(makeReminder({ topic_id: null }))
+    expect(outbound.posts[1]!.topic_id).toBe('web:owner')
+  })
+
+  test('a rejected (false) post throws so the tick leaves the row pending', async () => {
+    const rejecting: ReminderOutbound = { post: () => false }
+    const d = buildReminderDispatcher({ outbound: rejecting, llm: recordingLlm('x') })
+
+    await expect(d.dispatch(makeReminder())).rejects.toThrow(/post rejected/)
+  })
+
+  test('an accepted (true) post does not throw', async () => {
+    const outbound = recordingOutbound()
+    const d = buildReminderDispatcher({ outbound, llm: recordingLlm('x') })
+    await expect(d.dispatch(makeReminder())).resolves.toBeUndefined()
+  })
+
   test('context gather failure is non-fatal — still composes + posts', async () => {
     const outbound = recordingOutbound()
     const llm = recordingLlm('composed anyway')

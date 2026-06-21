@@ -77,6 +77,7 @@ import {
   buildButtonStoreReminderOutbound,
   buildStatusMdContextSource,
 } from '../reminders/index.ts'
+import { webTopicId } from '../gateway/http/web-topic-id.ts'
 
 import { buildLocalStartTokenAuth } from './local-start-token.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
@@ -816,6 +817,15 @@ export function buildOpenGraphComposer(
     //   • post — the composed body lands in the originating chat topic via
     //     the SAME `ButtonStore` + `WebChatSenderRegistry` the live-agent
     //     reply path uses (durable history row + best-effort live push).
+    // The engine stores a reminder's destination as the raw `project_id` (or
+    // null for instance-level reminders). Open's web chat routes on synthetic
+    // `web:<user_id>` (General) / `web:<user_id>:<project_id>` (project) keys —
+    // the SAME keys `chat-topics-surface` lists and the WS registry binds
+    // per-socket senders on. Bridge the two so a fired reminder lands on a
+    // topic a client actually subscribes to (else it writes history + live-
+    // pushes to a key nobody reads). Also forward an already-web-shaped topic
+    // and unwrap the Expo app's `app-project:<id>` form.
+    const reminderGeneralTopic = webTopicId(OWNER_USER_ID)
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: buildButtonStoreReminderOutbound({
         buttonStore: landing.buttonStore,
@@ -825,6 +835,16 @@ export function buildOpenGraphComposer(
         ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
+      resolveTopicId: ({ explicit_topic }): string => {
+        if (explicit_topic === null || explicit_topic.length === 0) {
+          return reminderGeneralTopic
+        }
+        if (explicit_topic.startsWith('web:')) return explicit_topic
+        const projectId = explicit_topic.startsWith('app-project:')
+          ? explicit_topic.slice('app-project:'.length)
+          : explicit_topic
+        return `${reminderGeneralTopic}:${projectId}`
+      },
     })
 
     return {

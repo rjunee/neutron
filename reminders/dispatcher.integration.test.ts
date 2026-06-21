@@ -139,6 +139,36 @@ describe('reminder fire path (tick → dispatcher → compose → post)', () => 
     expect(outbound.posts[0]!.topic_id).toBe('general')
   })
 
+  test('a rejected durable post leaves the row pending to retry next tick', async () => {
+    const store = new ReminderStore(db)
+    let now = 1_700_000_000_000
+    const r = await store.create({
+      project_slug: 'p',
+      topic_id: 't',
+      fire_at: now / 1000 - 60,
+      message: 'must reach the user',
+    })
+    const llm: ReminderLlm = { compose: async () => 'composed' }
+    // First post is rejected (durable persist failed), second succeeds.
+    let attempts = 0
+    const outbound: ReminderOutbound = {
+      post: () => {
+        attempts++
+        return attempts > 1
+      },
+    }
+    const dispatcher = buildReminderDispatcher({ outbound, llm, now: () => now })
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
+
+    // Tick 1: post rejected → dispatch throws → tick swallows → row stays pending.
+    expect((await loop.runOnce()).fired).toBe(0)
+    expect(store.get(r.id)?.status).toBe('pending')
+    // Tick 2: post accepted → row flips to fired.
+    expect((await loop.runOnce()).fired).toBe(1)
+    expect(store.get(r.id)?.status).toBe('fired')
+    expect(attempts).toBe(2)
+  })
+
   test('one reminder whose post throws does not block other due reminders', async () => {
     const store = new ReminderStore(db)
     let now = 1_700_000_000_000

@@ -32,6 +32,7 @@ export type {
   ReminderOutbound,
   ReminderOutboundInput,
   ReminderContextSource,
+  ReminderTopicResolver,
   ReminderLlm,
   BuildReminderDispatcherInput,
 } from './dispatcher.ts'
