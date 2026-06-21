@@ -38,6 +38,7 @@ function runWith(overrides: Partial<TridentRun> = {}): TridentRun {
     task: 'add a feature flag',
     chat_id: '12345',
     thread_id: '678',
+    channel_kind: 'telegram',
     failure_reason: null,
     started_at: '2026-01-01T00:00:00.000Z',
     last_advanced_at: '2026-01-01T01:00:00.000Z',
@@ -164,6 +165,37 @@ describe('buildTridentDelivery.onTerminal', () => {
     const hook = buildTridentDelivery({ sink })
     await hook.onTerminal(runWith({ phase: 'done', chat_id: null }))
     expect(sent.length).toBe(0)
+  })
+
+  // #317 — the delivery channel is derived PER RUN from `run.channel_kind`,
+  // not hard-coded to telegram. A `/code` build dispatched from the app-WS
+  // surface delivers its result back to that surface.
+  test('#317 derives the delivery channel from the run record (app_socket)', async () => {
+    const { sink, sent } = recordingSink()
+    const hook = buildTridentDelivery({ sink }) // no channel_kind override
+    await hook.onTerminal(
+      runWith({ phase: 'done', chat_id: 'web:u1', thread_id: null, channel_kind: 'app_socket' }),
+    )
+    expect(sent.length).toBe(1)
+    expect(sent[0]!.topic.channel_kind).toBe('app_socket')
+    expect(sent[0]!.topic.channel_topic_id).toBe('web:u1')
+  })
+
+  test('#317 a Telegram-origin run still delivers to telegram', async () => {
+    const { sink, sent } = recordingSink()
+    const hook = buildTridentDelivery({ sink })
+    await hook.onTerminal(runWith({ phase: 'done', chat_id: '500', channel_kind: 'telegram' }))
+    expect(sent[0]!.topic.channel_kind).toBe('telegram')
+  })
+
+  test('#317 the run record wins over the build-time fallback channel', async () => {
+    const { sink, sent } = recordingSink()
+    // Even with a telegram fallback, an app_socket run routes to app_socket.
+    const hook = buildTridentDelivery({ sink, channel_kind: 'telegram' })
+    await hook.onTerminal(
+      runWith({ phase: 'done', chat_id: 'web:u9', channel_kind: 'app_socket' }),
+    )
+    expect(sent[0]!.topic.channel_kind).toBe('app_socket')
   })
 
   test('a custom composer returning null suppresses the post', async () => {

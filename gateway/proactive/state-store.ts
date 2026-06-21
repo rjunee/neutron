@@ -1,7 +1,7 @@
 /**
  * @neutronai/gateway/proactive — bookkeeping store.
  *
- * Thin typed wrapper over the two tables in migration 0079:
+ * Thin typed wrapper over the two tables in migration 0080:
  *
  *   • `proactive_brief_log`   — once-per-owner-local-day morning-brief guard.
  *   • `proactive_topic_state` — per-topic idle-nudge dedupe ledger.

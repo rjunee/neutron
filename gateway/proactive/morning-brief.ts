@@ -79,6 +79,14 @@ export interface BriefContext {
   focus?: BriefFocusItem[]
   entities?: BriefEntityDelta[]
   projects?: BriefProjectStatus[]
+  /**
+   * Whether the calendar source actually ran and returned (even empty).
+   * `true` ⟺ a `calendarToday` provider was wired AND it resolved without
+   * throwing — so an empty calendar is a CONFIRMED-empty day. `false`/absent
+   * means the calendar was never checked (no provider, or it threw): the
+   * quiet-day copy must NOT then claim "nothing on the calendar" (#320).
+   */
+  calendar_checked?: boolean
 }
 
 /**
@@ -106,7 +114,14 @@ export async function gatherBriefContext(
 ): Promise<BriefContext> {
   const ctx: BriefContext = {}
   const calendar = await safeSource(() => sources.calendarToday?.(day), 'calendar', log)
-  if (calendar !== null && calendar.length > 0) ctx.calendar = calendar
+  // `safeSource` returns null when the provider is absent (returned undefined)
+  // OR threw — both mean "calendar not checked." A non-null result (possibly
+  // an empty array) means the calendar was actually consulted, so an empty day
+  // is CONFIRMED empty rather than merely unchecked (#320).
+  if (calendar !== null) {
+    ctx.calendar_checked = true
+    if (calendar.length > 0) ctx.calendar = calendar
+  }
   const focus = await safeSource(() => sources.focusQueue?.(), 'focus', log)
   if (focus !== null && focus.length > 0) ctx.focus = focus
   const entities = await safeSource(() => sources.entityDeltas?.(), 'entities', log)
@@ -147,7 +162,14 @@ export function composeMorningBrief(ctx: BriefContext, day: string): string {
 
   if (!hasAny) {
     lines.push('')
-    lines.push('Nothing on the calendar and no open focus items — a clear day.')
+    // Only claim the calendar is clear when it was actually checked (#320).
+    // If the calendar source is unwired or threw, say so honestly rather than
+    // over-claiming "nothing on the calendar."
+    if (ctx.calendar_checked === true) {
+      lines.push('Nothing on the calendar and no open focus items — a clear day.')
+    } else {
+      lines.push("No open focus items — a clear day. (I couldn't check your calendar.)")
+    }
     return lines.join('\n')
   }
 
@@ -213,7 +235,13 @@ export interface MorningBriefDeps {
 }
 
 export interface MorningBriefResult {
-  status: 'posted' | 'already_posted' | 'too_early'
+  /**
+   * `deliver_failed` is distinct from `too_early` (#320): a delivery outage
+   * must surface in cron telemetry as an ERROR, not be folded into the benign
+   * `too_early`/`skipped` bucket where outages would go unnoticed. The cron
+   * handler maps `deliver_failed` → `error` and every other status → ok/skipped.
+   */
+  status: 'posted' | 'already_posted' | 'too_early' | 'deliver_failed'
   day: string
   /** Length of the composed body (0 when nothing posted). */
   body_length: number
@@ -245,8 +273,10 @@ export async function runMorningBrief(deps: MorningBriefDeps): Promise<MorningBr
     await deps.sink.send({ topic, text: body })
   } catch (err) {
     deps.log?.(`[proactive] morning-brief deliver failed: ${err}`)
-    // Do NOT record the day — let the next tick retry.
-    return { status: 'too_early', day, body_length: 0 }
+    // Do NOT record the day — let the next tick retry. Return `deliver_failed`
+    // (NOT `too_early`) so the cron handler surfaces the outage as an error in
+    // telemetry instead of silently mapping it to `skipped` (#320).
+    return { status: 'deliver_failed', day, body_length: 0 }
   }
 
   await deps.store.recordBriefForDay(day, new Date(nowMs).toISOString(), deps.general_topic_id)

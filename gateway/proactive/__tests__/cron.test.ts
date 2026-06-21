@@ -97,6 +97,31 @@ describe('registerMorningBriefCron', () => {
     expect(h.sent[0]!.text).toContain('Do the thing')
   })
 
+  // #320 — a delivery outage must surface as an ERROR in cron telemetry, not
+  // be folded into the benign `skipped` bucket where outages go unnoticed.
+  it('#320 maps a delivery failure to error (not skipped)', async () => {
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    const handler = buildMorningBriefHandler({
+      store: h.store,
+      sources: { focusQueue: async () => [{ title: 'Do the thing' }] },
+      sink: {
+        async send(): Promise<string> {
+          throw new Error('telegram 500')
+        },
+      },
+      general_topic_id: '-100:7',
+      tz: TZ,
+      now: () => NOON_LA_MS,
+    })
+    const { job_name } = registerMorningBriefCron({ project_slug: 'demo', jobs, handlers, handler })
+    const result = await handlers.get(MORNING_BRIEF_HANDLER_NAME)!(ctx(job_name))
+    expect(result.status).toBe('error')
+    expect(result.detail).toContain('deliver_failed')
+    // The day was NOT recorded, so the next tick retries.
+    expect(h.store.hasBriefForDay('2026-06-20')).toBe(false)
+  })
+
   it('honors an interval override and is idempotent on the handler registration', () => {
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()

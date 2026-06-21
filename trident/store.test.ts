@@ -46,6 +46,8 @@ describe('TridentRunStore', () => {
     expect(run.merge_mode).toBe('local')
     expect(run.pr).toBeNull()
     expect(run.subagent_status).toBeNull()
+    // #317 — channel_kind defaults to telegram (migration 0081 column default).
+    expect(run.channel_kind).toBe('telegram')
 
     const got = store.get(run.id)
     expect(got).not.toBeNull()
@@ -53,6 +55,35 @@ describe('TridentRunStore', () => {
     expect(got?.task).toBe('Run /slfg to fix the reminder API')
     expect(got?.repo_path).toBe('/home/x/repos/neutron')
     expect(got?.started_at).toBe(run.started_at)
+    expect(got?.channel_kind).toBe('telegram')
+  })
+
+  test('#317 create persists a non-telegram originating channel_kind', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'app-ws-build',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'build from the app',
+      chat_id: 'web:u1',
+      channel_kind: 'app_socket',
+    })
+    expect(run.channel_kind).toBe('app_socket')
+    expect(store.get(run.id)?.channel_kind).toBe('app_socket')
+  })
+
+  test('#317 CHECK rejects an invalid channel_kind', async () => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'bad-ch',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        // @ts-expect-error — exercising the DB CHECK with an out-of-enum value
+        channel_kind: 'carrier-pigeon',
+      }),
+    ).rejects.toThrow()
   })
 
   test('create honours overrides (ralph, merge_mode, caps, routing)', async () => {

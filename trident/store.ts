@@ -16,6 +16,7 @@
  * rows; this PR lands the persistence so neither needs a schema change.
  */
 
+import type { Topic } from '../channels/types.ts'
 import type { ProjectDb } from '../persistence/index.ts'
 
 /**
@@ -71,6 +72,14 @@ export interface TridentRun {
   task: string
   chat_id: string | null
   thread_id: string | null
+  /**
+   * Originating channel of the run's `chat_id`/`thread_id` (#317). The
+   * terminal-delivery hook derives the result-post topic's `channel_kind` from
+   * THIS field, so a `/code` build dispatched from the app-WebSocket surface
+   * delivers back to that surface instead of misrouting to Telegram. Defaults
+   * to `'telegram'` (migration 0081) for legacy rows + Telegram-origin builds.
+   */
+  channel_kind: Topic['channel_kind']
   failure_reason: string | null
   /** ISO-8601 UTC. */
   started_at: string
@@ -99,6 +108,8 @@ export interface CreateTridentRunInput {
   worktree?: string | null
   chat_id?: string | null
   thread_id?: string | null
+  /** Originating channel of `chat_id`/`thread_id` (#317). Defaults 'telegram'. */
+  channel_kind?: Topic['channel_kind']
 }
 
 /**
@@ -139,6 +150,7 @@ interface TridentRunDbRow {
   task: string
   chat_id: string | null
   thread_id: string | null
+  channel_kind: Topic['channel_kind']
   failure_reason: string | null
   started_at: string
   last_advanced_at: string
@@ -147,7 +159,7 @@ interface TridentRunDbRow {
 const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
-  'repo_path, worktree, task, chat_id, thread_id, failure_reason, ' +
+  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
   'started_at, last_advanced_at'
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
@@ -183,13 +195,14 @@ export class TridentRunStore {
       task: input.task,
       chat_id: input.chat_id ?? null,
       thread_id: input.thread_id ?? null,
+      channel_kind: input.channel_kind ?? 'telegram',
       failure_reason: null,
       started_at: ts,
       last_advanced_at: ts,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.slug,
@@ -210,6 +223,7 @@ export class TridentRunStore {
         run.task,
         run.chat_id,
         run.thread_id,
+        run.channel_kind,
         run.failure_reason,
         run.started_at,
         run.last_advanced_at,
@@ -343,6 +357,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     task: row.task,
     chat_id: row.chat_id,
     thread_id: row.thread_id,
+    channel_kind: row.channel_kind,
     failure_reason: row.failure_reason,
     started_at: row.started_at,
     last_advanced_at: row.last_advanced_at,

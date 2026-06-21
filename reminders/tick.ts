@@ -116,42 +116,49 @@ export class ReminderTickLoop {
     try {
       const due = this.store.listDue(this.now() / 1000, this.per_tick_limit)
       for (const reminder of due) {
+        // #319 — CLAIM the row BEFORE dispatch. The terminal state-change
+        // (markFired for one-shot rows; advanceRecurrence for recurring rows,
+        // per P2 v2 S9 / Codex S9-r1 P1 so weekly/monthly nudges keep firing
+        // instead of vanishing after one fire) is committed FIRST, THEN the
+        // post happens. This closes the crash-window double-fire: previously
+        // the row stayed `pending` until AFTER the post, so a process crash
+        // between a successful post and `markFired` left a due `pending` row
+        // that re-fired (double-sent) on restart. Claiming first means a crash
+        // at any point leaves an already-fired/advanced row that listDue won't
+        // re-pick. `claimRevert` un-does the claim on a (caught) dispatch
+        // throw, which always means the post did NOT succeed — so the row goes
+        // back to pending and retries next tick, preserving the existing
+        // deliver-or-retry contract. Only a true crash (no catch runs) takes
+        // the at-most-once path, which is the whole point.
+        let claimRevert: (() => Promise<unknown>) | null = null
+        if (reminder.recurrence !== null) {
+          const next_fire_at_sec = computeNextRecurrence(
+            reminder.fire_at,
+            reminder.recurrence,
+            this.now() / 1000,
+          )
+          const advanced = await this.store.advanceRecurrence(reminder.id, next_fire_at_sec)
+          if (advanced) {
+            // Revert = restore the original (due) fire_at so it re-fires.
+            claimRevert = () => this.store.reschedule(reminder.id, reminder.fire_at)
+          } else {
+            // Defensive: the row stopped being a pending recurring row between
+            // listDue + now (e.g. cancelled mid-tick) — finalize as fired.
+            await this.store.markFired(reminder.id)
+            claimRevert = () => this.store.reopen(reminder.id)
+          }
+        } else {
+          await this.store.markFired(reminder.id)
+          claimRevert = () => this.store.reopen(reminder.id)
+        }
+
         try {
           await this.dispatcher.dispatch(reminder)
-          // P2 v2 S9 (Codex S9-r1 P1) — recurring rows roll forward
-          // instead of being marked fired; one-shot rows keep the v1
-          // behaviour (`markFired` → status='fired'). Without the
-          // recurrence branch the new interest-check-in action's
-          // weekly/monthly nudges would fire exactly once and then
-          // disappear forever.
-          if (reminder.recurrence !== null) {
-            const next_fire_at_sec = computeNextRecurrence(
-              reminder.fire_at,
-              reminder.recurrence,
-              this.now() / 1000,
-            )
-            const advanced = await this.store.advanceRecurrence(
-              reminder.id,
-              next_fire_at_sec,
-            )
-            if (!advanced) {
-              // Defensive: if the row stopped being a pending recurring
-              // row between listDue + dispatch (e.g. cancelled mid-tick),
-              // fall back to markFired so the row's status reflects what
-              // happened.
-              await this.store.markFired(reminder.id)
-            }
-          } else {
-            await this.store.markFired(reminder.id)
-          }
           fired++
-          // P5.6 — fire the optional push hook AFTER the row is
-          // advanced. The hook is wrapped in its own try/catch so a
-          // push-side failure (network, Expo 5xx) NEVER stops the
-          // tick from processing the next reminder. The dispatcher's
-          // own try/catch sits above; this inner one is independent
-          // so a push failure also can't undo the markFired we just
-          // committed.
+          // P5.6 — fire the optional push hook AFTER the claim + dispatch
+          // succeed. Wrapped in its own try/catch so a push-side failure
+          // (network, Expo 5xx) NEVER stops the tick from processing the next
+          // reminder and can't undo the claim we already committed.
           if (this.on_fired !== null) {
             try {
               await this.on_fired.onFired(reminder)
@@ -160,6 +167,14 @@ export class ReminderTickLoop {
             }
           }
         } catch (err) {
+          // A caught throw means the post did NOT succeed (the dispatcher
+          // throws on a rejected/failed post, never after a delivered one) —
+          // revert the claim so the row stays pending and retries next tick.
+          try {
+            await claimRevert()
+          } catch (rerr) {
+            console.error(`reminder ${reminder.id} claim-revert failed:`, rerr)
+          }
           console.error(`reminder dispatch failed for ${reminder.id}:`, err)
         }
       }

@@ -50,6 +50,7 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     task: 'Add a thing',
     chat_id: null,
     thread_id: null,
+    channel_kind: 'telegram',
     failure_reason: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',

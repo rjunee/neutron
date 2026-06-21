@@ -193,6 +193,23 @@ export class ReminderStore {
   }
 
   /**
+   * #319 — revert a row the tick loop just claimed (`markFired`) back to
+   * pending. Used ONLY when a claimed one-shot reminder's post was provably
+   * rejected (`ReminderPostRejectedError`) and must retry next tick. Guarded
+   * on `status = 'fired'` so it can never resurrect a cancelled row. Returns
+   * `true` iff a fired row was reopened.
+   */
+  async reopen(id: string): Promise<boolean> {
+    const before = this.get(id)
+    if (before === null || before.status !== 'fired') return false
+    await this.db.run(
+      `UPDATE reminders SET status = 'pending', fired_at = NULL WHERE id = ? AND status = 'fired'`,
+      [id],
+    )
+    return true
+  }
+
+  /**
    * P2 v2 S9 (Codex S9-r1 P1) — advance a recurring reminder's `fire_at`
    * to its next occurrence. Used by the tick loop INSTEAD of `markFired`
    * for rows where `recurrence !== null`: the row stays `pending` and

@@ -2,6 +2,91 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — WAVE 2 non-blocking follow-ups: trident channel-kind, reminders crash dedup, proactive minors, CI gate, persona escape (#317/#319/#320/#321/#322)
+
+**Problem.** Five non-blocking follow-ups opened during the WAVE 2 overnight wave
+(tracked in the managed repo's `ISSUES.md`):
+
+- **#317 (P2)** — trident terminal result-delivery hard-coded the delivery
+  `channel_kind` to `'telegram'` for every run, so a `/code` build originating on
+  the app-WebSocket surface would misroute its result post.
+- **#319 (P2)** — the reminders dispatcher could double-send across a crash/restart
+  window: the row was marked fired only AFTER the post, so a crash between a
+  successful post and `markFired` left a still-due `pending` row that re-fired on
+  restart.
+- **#320 (P3)** — proactive-messaging minors: the quiet-day brief over-claimed
+  "Nothing on the calendar" even when the calendar source was unwired/threw; a
+  morning-brief delivery outage returned `too_early` so the cron mapped it to
+  `skipped` (outages invisible in telemetry); a `state-store.ts` docstring cited
+  the wrong migration number (0079 → 0080).
+- **#321 (P2)** — `ci.yml`'s `test` job did not fire for PR #10 (a slashed `feat/…`
+  head): the `concurrency: ci-${{ github.ref }}` group keyed on a ref whose shape
+  varies by branch name, letting the `test` run be superseded/skipped so a PR
+  could merge with only CodeQL signal.
+- **#322 (P3)** — the per-project `<project_persona>` block was spliced RAW (no XML
+  escaping), unlike the skills/escalation blocks; a persona containing
+  `</project_persona>` could close the tag early (matters once `projects.persona`
+  becomes non-owner-writable in M2/M6).
+
+**What shipped.**
+
+- **#317 — derive the delivery channel from the run record.** New migration
+  `0081_code_trident_runs_channel_kind.sql` adds a `channel_kind` column
+  (`CHECK IN ('telegram','app_socket','webhook','cli')`, default `'telegram'`) to
+  `code_trident_runs`. `trident/store.ts` threads `channel_kind` through
+  `TridentRun`/`CreateTridentRunInput`/the DB row/COLS/`create`/`rowToRun`;
+  `trident/code-command.ts` accepts an originating `channel_kind` on
+  `TridentCodeContext` and persists it on dispatch; `trident/delivery.ts`'s
+  `onTerminal` now derives the topic's channel from `run.channel_kind` (the
+  build-time `opts.channel_kind` is demoted to a defensive fallback for pre-0081
+  rows). Existing rows + Telegram-origin `/code` default to `'telegram'`, so the
+  change is backward-compatible.
+
+- **#319 — claim-before-dispatch crash-window dedup.** `reminders/tick.ts` now
+  CLAIMS each due row (one-shot → `markFired`; recurring → `advanceRecurrence`)
+  BEFORE the post, then dispatches. A crash anywhere during the send leaves an
+  already-claimed (fired/advanced-past-due) row that a post-restart `listDue`
+  won't return — closing the double-send window. A caught dispatch throw (which
+  always means the post did NOT succeed, since the dispatcher only throws BEFORE a
+  delivered post) reverts the claim so the row stays pending and retries next tick
+  — preserving the existing deliver-or-retry contract. New `ReminderStore.reopen()`
+  reverts a just-claimed one-shot row (guarded on `status='fired'` so it can never
+  resurrect a cancelled row); recurring revert reuses `reschedule()`.
+
+- **#320 — proactive minors.** `morning-brief.ts` `BriefContext` gains
+  `calendar_checked` (set true only when a wired `calendarToday` source resolves
+  without throwing); the quiet-day copy now says "Nothing on the calendar" ONLY
+  when the calendar was actually checked, else an honest "(I couldn't check your
+  calendar.)". `MorningBriefResult.status` gains `'deliver_failed'`, returned on a
+  delivery outage instead of `'too_early'`; `cron.ts` maps `deliver_failed` →
+  `error` (and `posted` → ok, everything else → skipped). `state-store.ts`
+  docstring corrected 0079 → 0080.
+
+- **#321 — CI test-gate always fires on PRs to main.** `ci.yml` concurrency group
+  is now `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`
+  — PR runs key on the slash-free PR number, namespaced by workflow, so a head
+  branch's name shape can no longer supersede/skip the `test` job. The
+  `pull_request` trigger stays filter-free (every PR to any base gets `test`).
+
+- **#322 — XML-escape the project persona.** `build-live-agent-turn.ts` escapes the
+  persona body (`&`/`<`/`>`) via a local `escapeProjectPersonaText` before splicing
+  it inside `<project_persona>`, mirroring the escalation envelope's text escaping
+  rationale (anti-injection for an LLM-consumed envelope).
+
+**Tests (no bookkeeping-only).** `trident/store.test.ts` (channel_kind round-trip
++ default + CHECK rejection), `trident/delivery.test.ts` (per-run channel
+derivation, run wins over fallback), `trident/code-command.test.ts` (threading +
+default); `reminders/tick.test.ts` (claim-before-post for one-shot + recurring,
+restart no-double-send, throw-reverts-claim retry); `morning-brief.test.ts` +
+`cron.test.ts` (calendar_checked, quiet-day copy, `deliver_failed`→error);
+`build-live-agent-turn.test.ts` (persona injection neutralised, single closing
+boundary); `scripts/ci/ci-workflow.test.ts` (trigger + concurrency invariants).
+`migrations/runner.test.ts` updated for migration 81; schema snapshot regenerated.
+Full suite green; `tsc --noEmit` clean (root + `trident/tsconfig.json`).
+
+NOTE: closing the managed-repo `ISSUES.md` entries is out of scope (different
+repo) — the PR notes which issues are fixed.
+
 ## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
 
 **Problem.** The daily-driver gap audit flagged that the typed agent dispatch
