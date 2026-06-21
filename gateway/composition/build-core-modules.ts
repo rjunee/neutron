@@ -17,6 +17,7 @@ import { CronStateStore } from '../../cron/state.ts'
 import { McpServer } from '../../mcp/server.ts'
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
+import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
@@ -140,6 +141,12 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // live agent can search the owner's project docs mid-conversation.
       if (input.doc_search !== undefined) {
         registerDocSearchToolSurface(reg, input.doc_search.runtime)
+      }
+      // Message-search (chat-history twin) — register the `message_search`
+      // agent tool when the composer wired a runtime, so the live agent can
+      // full-text-search the conversation mid-turn.
+      if (input.message_search !== undefined) {
+        registerMessageSearchToolSurface(reg, input.message_search.runtime)
       }
       return reg
     },

@@ -19,6 +19,7 @@
     "tasks/**/*.ts",
     "cron/**/*.ts",
     "doc-search/**/*.ts",
+    "message-search/**/*.ts",
     "cores/**/*.ts",
     "prompts/**/*.ts",
     "mcp/**/*.ts",

@@ -84,4 +84,15 @@ export interface MiscCompositionInput {
   doc_search?: {
     runtime: import('../../../doc-search/runtime.ts').DocSearchRuntime
   }
+  /**
+   * Message-search (chat-history twin of doc-search) — when supplied, the
+   * `tools` module registers the `message_search` agent tool backed by this
+   * runtime, so the live chat agent can full-text-search the CHAT HISTORY
+   * mid-conversation ("where did we land on X earlier?"). The runtime is
+   * constructed by the production composer (which owns the per-topic history
+   * source); omitting it leaves the surface unregistered.
+   */
+  message_search?: {
+    runtime: import('../../../message-search/runtime.ts').MessageSearchRuntime
+  }
 }

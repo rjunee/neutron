@@ -65,6 +65,7 @@ import { join as joinPath } from 'node:path'
 import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
 import { DocSearchIndex } from '../doc-search/store.ts'
 import { DocSearchRuntime } from '../doc-search/runtime.ts'
+import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/message-search-wiring.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
@@ -917,6 +918,12 @@ export function buildOpenGraphComposer(
       // `tools` module when a runtime is present. Omitted if the index
       // failed to open (boot stays healthy without doc search).
       ...(docSearchRuntime !== null ? { doc_search: { runtime: docSearchRuntime } } : {}),
+      // Message-search agent tool (message_search) — chat-history twin of
+      // doc_search. Backed by this owner's ButtonStore turn history so the
+      // live agent can recall what was said earlier in the conversation.
+      message_search: {
+        runtime: buildButtonStoreMessageSearchRuntime(landing.buttonStore),
+      },
       // Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) — these
       // make `app-surfaces-input` mount the bare + chunked + resume routes so
       // a Claude/ChatGPT export upload succeeds during Open onboarding.

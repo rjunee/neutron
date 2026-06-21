@@ -140,6 +140,7 @@ describe('SyncEngine — resume replay is bounded (no O(N²) list scan)', () => 
       lastSeenSeq: (t: string) => inner.lastSeenSeq(t),
       pendingSends: (t: string) => inner.pendingSends(t),
       clear: (t: string) => inner.clear(t),
+      searchMessages: (q, opts) => inner.searchMessages(q, opts),
     }
     return { store, listCalls: () => listCalls, byMidCalls: () => byMidCalls }
   }

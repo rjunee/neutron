@@ -22,6 +22,12 @@
  */
 
 import { messageIdentity, type ChatMessage } from './types.ts'
+import {
+  clampSearchLimit,
+  searchMessagesInMemory,
+  type MessageSearchHit,
+  type MessageSearchOptions,
+} from './search.ts'
 
 export interface Store {
   /**
@@ -49,6 +55,15 @@ export interface Store {
   pendingSends(topic_id: string): Promise<ChatMessage[]>
   /** Drop all messages for a topic (e.g. account switch). */
   clear(topic_id: string): Promise<void>
+  /**
+   * Full-text search the transcript. `query` is free text; results are ranked
+   * by relevance + recency with `[`…`]`-highlighted snippets (research doc §5
+   * — "FTS5 over the local message store"). Scope with
+   * {@link MessageSearchOptions} (single topic / project, or omit both for a
+   * global search across the whole local store). A durable store backs this
+   * with SQLite FTS5; {@link InMemoryStore} with an equivalent tokenised scan.
+   */
+  searchMessages(query: string, opts?: MessageSearchOptions): Promise<MessageSearchHit[]>
 }
 
 /** Order two messages by the engine's ordering contract. */
@@ -176,5 +191,29 @@ export class InMemoryStore implements Store {
 
   async clear(topic_id: string): Promise<void> {
     this.byTopic.delete(topic_id)
+  }
+
+  async searchMessages(
+    query: string,
+    opts: MessageSearchOptions = {},
+  ): Promise<MessageSearchHit[]> {
+    const limit = clampSearchLimit(opts.limit)
+    const wantTopic = opts.topic_id !== undefined && opts.topic_id.length > 0 ? opts.topic_id : null
+    const wantProject =
+      opts.project_id !== undefined && opts.project_id.length > 0 ? opts.project_id : null
+
+    // Scope the candidate set first (topic and/or project), then hand the
+    // match + rank + highlight to the shared in-memory search so the JS path
+    // and the FTS path produce the same {@link MessageSearchHit} shape.
+    const candidates: ChatMessage[] = []
+    const topics = wantTopic !== null ? [this.byTopic.get(wantTopic)] : this.byTopic.values()
+    for (const topic of topics) {
+      if (topic === undefined) continue
+      for (const m of topic.values()) {
+        if (wantProject !== null && m.project_id !== wantProject) continue
+        candidates.push(m)
+      }
+    }
+    return searchMessagesInMemory(candidates, query, limit)
   }
 }

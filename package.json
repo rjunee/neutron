@@ -12,6 +12,7 @@
     "tasks",
     "cron",
     "doc-search",
+    "message-search",
     "cores",
     "cores/sdk",
     "cores/runtime",

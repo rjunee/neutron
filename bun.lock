@@ -268,6 +268,14 @@
         "@neutronai/tools": "workspace:*",
       },
     },
+    "message-search": {
+      "name": "@neutronai/message-search",
+      "dependencies": {
+        "@neutron/chat-core": "workspace:*",
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/tools": "workspace:*",
+      },
+    },
     "migrations": {
       "name": "@neutronai/migrations",
     },
@@ -788,6 +796,8 @@
     "@neutronai/landing": ["@neutronai/landing@workspace:landing"],
 
     "@neutronai/mcp": ["@neutronai/mcp@workspace:mcp"],
+
+    "@neutronai/message-search": ["@neutronai/message-search@workspace:message-search"],
 
     "@neutronai/migrations": ["@neutronai/migrations@workspace:migrations"],
 
