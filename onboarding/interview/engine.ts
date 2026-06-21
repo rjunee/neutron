@@ -7276,21 +7276,64 @@ export class InterviewEngine implements EngineInternals {
       )
       return null
     }
-    const delta = decision.state_delta
-    if (delta === null || delta === undefined) return null
-    const deltaRec = delta as Record<string, unknown>
     const extracted: ExtractedFields = {}
-    const raw_projects = deltaRec['primary_projects']
-    const projects = Array.isArray(raw_projects)
-      ? raw_projects.filter(
-          (p): p is string => typeof p === 'string' && p.trim().length > 0,
-        )
-      : []
-    if (projects.length > 0) extracted.primary_projects = projects
-    const interests = normalizeNonWorkInterestsForExtraction(
-      deltaRec['non_work_interests'],
-    )
-    if (interests.length > 0) extracted.non_work_interests = interests
+    // A non-null `state_delta` only ever arrives here in the REVIEW/CORRECTION
+    // hybrid case (or a future amend smuggled onto this best-effort path); read
+    // it first so that envelope still works.
+    const delta = decision.state_delta
+    if (delta !== null && delta !== undefined) {
+      const deltaRec = delta as Record<string, unknown>
+      const raw_projects = deltaRec['primary_projects']
+      const projects = Array.isArray(raw_projects)
+        ? raw_projects.filter(
+            (p): p is string => typeof p === 'string' && p.trim().length > 0,
+          )
+        : []
+      if (projects.length > 0) extracted.primary_projects = projects
+      const interests = normalizeNonWorkInterestsForExtraction(
+        deltaRec['non_work_interests'],
+      )
+      if (interests.length > 0) extracted.non_work_interests = interests
+    }
+
+    // ISSUES #323 (Argus r1 BLOCKER 1) — the real prod extraction seam.
+    // The router contract reserves a non-null `state_delta` on an `advance`
+    // for REVIEW/CORRECTION phases ONLY (llm-router.ts § REVIEW/CORRECTION —
+    // "the one case where an advance carries a non-null state_delta").
+    // `work_interview_gap_fill` is an OPEN ask ("what are you working on?"), so
+    // the prompt-faithful envelope a real Haiku/Sonnet emits is
+    // `action:'advance' + freeform_text:<verbatim reply> + state_delta:null`
+    // (phase-spec-resolver.ts advance_examples teach a state_delta-FREE
+    // free-text advance — "Topline, Northwind, Beacon, CC" → projects list →
+    // free-text advance). Reading `state_delta` ALONE therefore extracts
+    // nothing on the live path → the user's explicit project list is dropped →
+    // the "I didn't pin down concrete projects" re-ask. When the delta carried
+    // nothing, parse the field the gap-fill is currently collecting directly out
+    // of the model's `freeform_text` — the only structured signal the contract
+    // guarantees for this phase. Mirrors the established projects_proposed
+    // share-freeform fallback (`splitFreeformProjectList`), but uses the
+    // gap-fill list parser (`parseGapFillFreeformList`), which splits a direct
+    // list reply on every comma / sentence boundary / "and" + strips list
+    // lead-ins ("running three companies:", "side project", …). Gated on
+    // `action === 'advance'` so a tangent ("why three projects?", classified
+    // `answer`) is never mis-captured as the projects answer.
+    if (
+      Object.keys(extracted).length === 0 &&
+      decision.action === 'advance' &&
+      typeof decision.freeform_text === 'string' &&
+      decision.freeform_text.trim().length > 0
+    ) {
+      const target = auditRequiredFields(state.phase_state).next_to_collect
+      const items = parseGapFillFreeformList(decision.freeform_text)
+      if (items.length > 0) {
+        if (target === 'primary_projects') {
+          extracted.primary_projects = items
+        } else if (target === 'non_work_interests') {
+          extracted.non_work_interests = items.map((name) => ({ name }))
+        }
+      }
+    }
+
     return Object.keys(extracted).length > 0 ? extracted : null
   }
 
@@ -10268,6 +10311,99 @@ export function splitFreeformProjectList(raw: string): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const c of candidates) {
+    const key = c.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(c)
+    if (out.length >= 10) break
+  }
+  return out
+}
+
+/**
+ * ISSUES #323 — best-effort extract a `work_interview_gap_fill` freeform answer
+ * into a clean list of project/interest names. Unlike `splitFreeformProjectList`
+ * (which splits a comma ONLY before a capitalised token, so "Topline, Inc."
+ * stays glued), a gap-fill reply to "what are you working on?" is a DIRECT list
+ * answer, so we split on EVERY comma, semicolon, newline, sentence boundary, and
+ * " and "/" & " conjunction, then strip the natural-language wrappers a real
+ * reply carries — leading bullet/number markers, parenthetical asides ("Neutron
+ * (open source agent harness)" → "Neutron"), and list lead-ins ("running three
+ * companies:", "side project", "my projects are", "I'm working on", "also",
+ * "plus").
+ *
+ * CONSERVATIVE by design (Argus r1 — avoid garbage extraction from prose). The
+ * heuristic CANNOT reliably pull names out of a prose sentence ("I run Caldera,
+ * a fragrance brand, and I am building out its ops and automation" would yield
+ * fragments like "I run Caldera"), so we only emit a result when the answer is
+ * genuinely LIST-SHAPED: a MAJORITY of its segments must be "name-like" — short
+ * (≤ 6 words) and not opening with a pronoun/article/aux ("I", "a", "the",
+ * "we", …). When that bar isn't met we return `[]`, and the caller falls back to
+ * the unchanged advance-with-empty-patch behaviour (which parks at
+ * `projects_proposed` where the share-work flow + `splitFreeformProjectList` can
+ * still catch it). This recovers a tidy comma list ("Tabs, Pristine, Amascence,
+ * Neutron, Robobuddha, meditation") AND the proper-noun-rich shape Ryan actually
+ * typed ("Running three companies: Tabs, Pristine and Amascence. Side project
+ * Neutron (open source agent harness), side project Robobuddha, and
+ * meditation.") to the same six items, while leaving a single-company prose
+ * answer to the existing fallback rather than fabricating junk projects. Returns
+ * only the name-like segments (drops the prose ones), dedupes
+ * case-insensitively, caps at 10. Fine-grained project-vs-interest separation
+ * within one answer needs real LLM extraction (follow-up); everything kept maps
+ * to the single field the gap-fill is currently collecting.
+ */
+export function parseGapFillFreeformList(raw: string): string[] {
+  const candidates = raw
+    .split(/[\n;,.]+|\s+(?:and|&)\s+/i)
+    .map((s) => s.trim())
+    .map((s) => s.replace(/^(?:\d+[.)]\s*|[-*•]\s*)/, '').trim())
+    .map((s) => s.replace(/\([^)]*\)/g, '').trim())
+    .map((s) =>
+      s
+        .replace(
+          /^(?:running\s+(?:\w+\s+)?companies?:?\s*|side\s+projects?:?\s*|my\s+projects?\s+(?:are|is):?\s*|i'?m\s+working\s+on:?\s*|i\s+am\s+working\s+on:?\s*|working\s+on:?\s*|projects?:?\s*|also\s+|plus\s+)/i,
+          '',
+        )
+        .trim(),
+    )
+    .filter((s) => s.length > 0 && s.length <= 120)
+  if (candidates.length === 0) return []
+  // Stop-words a project name never opens with — their presence at the start of
+  // a segment marks it as a prose fragment, not a name.
+  const STOP_WORDS = new Set<string>([
+    'i',
+    'im',
+    'we',
+    'us',
+    'my',
+    'our',
+    'a',
+    'an',
+    'the',
+    'it',
+    'its',
+    'they',
+    'their',
+    'this',
+    'that',
+    'building',
+    'doing',
+    'making',
+  ])
+  const isNameLike = (s: string): boolean => {
+    const words = s.split(/\s+/)
+    if (words.length > 6) return false
+    const first = (words[0] ?? '').toLowerCase().replace(/[^a-z']/g, '')
+    return first.length > 0 && !STOP_WORDS.has(first)
+  }
+  const nameLike = candidates.filter(isNameLike)
+  // Require a list-shaped answer: at least one name-like segment AND a majority
+  // of all segments name-like. Prose ("I run Caldera, …") fails this and yields
+  // []; a clean list or a single bare name passes.
+  if (nameLike.length === 0 || nameLike.length * 2 < candidates.length) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const c of nameLike) {
     const key = c.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)

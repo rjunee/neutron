@@ -14,25 +14,30 @@
  *   - NO `promptDriver` — production wires `phaseSpecResolver` + `llmRouter`,
  *     never `promptDriver`, so the gap-fill `extracted_fields` drain is dead.
  *
- * Why a mocked LLM is faithful here: the fixture's envelope mirrors the shape a
- * real Haiku/Sonnet classifier emits for the work-interview answer (an `advance`
- * carrying `freeform_text` + a hybrid `state_delta.primary_projects`), exactly
- * the `advance_examples` shape the gap-fill knowledge pack prompts for
- * ("Topline, Northwind, Beacon, CC" → projects list → free-text advance). We do
- * NOT stub the router decision object; the router parses the raw envelope.
+ * Why a mocked LLM is faithful here: the fixture's envelope is the PROMPT-FAITHFUL
+ * shape a real Haiku/Sonnet classifier emits for an OPEN gap-fill answer — an
+ * `advance` carrying `freeform_text:<verbatim reply>` with `choice_value:null`
+ * AND `state_delta:null`. The router contract reserves a non-null `state_delta`
+ * on an `advance` for REVIEW/CORRECTION phases ONLY (llm-router.ts § "the one
+ * case"); the gap-fill pack teaches a project list as a state_delta-FREE
+ * free-text advance (phase-spec-resolver.ts advance_examples — "Topline,
+ * Northwind, Beacon, CC"). So the engine MUST recover the projects from
+ * `freeform_text`; reading `state_delta` alone gets nothing. We do NOT stub the
+ * router decision object; the router parses the raw envelope.
  *
  * ROOT CAUSE this pins: with the conversational flag off, `shouldConsultRouter`
  * gated the router OFF for `work_interview_gap_fill`, so the freeform answer fell
- * to `consumeWorkInterviewGapFillChoice`'s driver-unwired branch →
- * `fallbackGapFillToStaticAdvance(input, observed_at, {})` → advance with an
- * EMPTY patch → the project list was silently discarded → `primary_projects`
- * empty → `autoConfirmProjectsProposedAndAdvance` zero-state guard re-emits the
- * "I didn't pin down concrete projects" prompt.
+ * to `consumeWorkInterviewGapFillChoice`'s driver-unwired branch. The first fix
+ * consulted the router there but only read `decision.state_delta` — which the
+ * prompt-faithful gap-fill advance leaves null — so the answer was STILL dropped
+ * → `fallbackGapFillToStaticAdvance` advanced with an EMPTY patch →
+ * `primary_projects` empty → `autoConfirmProjectsProposedAndAdvance` zero-state
+ * guard re-emits the "I didn't pin down concrete projects" prompt.
  *
- * RED before the fix (projects dropped, zero-state prompt fires); GREEN after
- * (the router is consulted for this extraction-critical phase regardless of the
- * flag, the 5 projects land in `primary_projects` → `primary_projects_confirmed`,
- * and no zero-state prompt fires).
+ * RED before the freeform-parse fix (state_delta:null → projects dropped,
+ * zero-state prompt fires); GREEN after (the engine parses the projects out of
+ * `freeform_text` into the field gap-fill is collecting → they land in
+ * `primary_projects` → `primary_projects_confirmed`, and no zero-state fires).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -86,12 +91,21 @@ afterEach(() => {
 })
 
 /**
- * A realistic raw-model envelope for the work-interview answer: an `advance`
- * (the reply IS the answer to "what are you working on?") that ALSO records the
- * extracted facts via a hybrid `state_delta` — the `advance_examples` shape the
- * gap-fill knowledge pack prompts for. The `FixtureAnthropicClient` matches on a
- * distinctive token from the user's answer ("Amascence") so it never collides
- * with the pack's own in-prompt examples (Topline / Northwind / …).
+ * The PROMPT-FAITHFUL raw-model envelope for an open `work_interview_gap_fill`
+ * answer. The router contract reserves a non-null `state_delta` on an `advance`
+ * for REVIEW/CORRECTION phases ONLY (llm-router.ts § REVIEW/CORRECTION — "the
+ * one case where an advance carries a non-null state_delta"); the gap-fill
+ * knowledge pack teaches a project-list reply as a state_delta-FREE free-text
+ * advance (phase-spec-resolver.ts advance_examples — "Topline, Northwind,
+ * Beacon, CC" → projects list → free-text advance). So the shape a real
+ * Haiku/Sonnet emits here is `action:'advance'` + `freeform_text:<verbatim
+ * reply>` + `choice_value:null` + `state_delta:null` — NOT a fabricated
+ * state_delta. (A prior cut emitted a populated `state_delta`, which the prompt
+ * FORBIDS for this phase: a false green that stayed green while prod stayed
+ * broken — Argus r1 BLOCKER 2.) The engine must therefore recover the projects
+ * from `freeform_text`. The `FixtureAnthropicClient` matches on a distinctive
+ * token from the user's answer ("Amascence") so it never collides with the
+ * pack's own in-prompt examples (Topline / Northwind / …).
  */
 function workAnswerFixtureClient(): FixtureAnthropicClient {
   const envelope = JSON.stringify({
@@ -100,10 +114,7 @@ function workAnswerFixtureClient(): FixtureAnthropicClient {
     choice_value: null,
     freeform_text: WORK_ANSWER,
     response: null,
-    state_delta: {
-      primary_projects: [...STATED_PROJECTS],
-      non_work_interests: ['meditation'],
-    },
+    state_delta: null,
     reasoning:
       'User answered the work-interview question by naming three companies and two side projects plus a non-work interest.',
   })
@@ -221,14 +232,22 @@ describe('ISSUES #323 — work-interview project extraction on the real prod pat
 
     const state = await readState()
     const primary = (state.phase_state['primary_projects'] as string[] | undefined) ?? []
-    // RED before fix: primary === [] (the answer was dropped by the static
-    // fallback). GREEN after fix: all five stated projects extracted.
+    // RED before fix: primary === [] — the prompt-faithful `state_delta:null`
+    // envelope yields nothing from the (old) state_delta-only read, so the
+    // static fallback advances with an EMPTY patch and the answer is dropped.
+    // GREEN after fix: the engine parses the model's `freeform_text` into the
+    // field gap-fill is collecting (next_to_collect === 'primary_projects', name
+    // already captured) so all five stated projects land in `primary_projects`.
     for (const p of STATED_PROJECTS) {
       expect(primary).toContain(p)
     }
-    // The hybrid advance also recorded the non-work interest.
-    const interests = JSON.stringify(state.phase_state['non_work_interests'] ?? [])
-    expect(interests.toLowerCase()).toContain('meditation')
+    // The whole gap-fill answer maps to the single field being collected
+    // (primary_projects), so the volunteered non-work mention ("meditation")
+    // rides along in primary_projects rather than being separated into
+    // non_work_interests — fine-grained field separation within one freeform
+    // answer needs real LLM extraction (follow-up). The showstopper this pins
+    // is the TOTAL drop + zero-state re-ask, which is gone.
+    expect(primary.map((p) => p.toLowerCase())).toContain('meditation')
     // And it advanced past the gap-fill phase (the reply answered the question).
     expect(state.phase).toBe('personality_offered')
   })

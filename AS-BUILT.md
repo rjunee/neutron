@@ -2,6 +2,64 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — #323 fix round 2: extract from `freeform_text`, not `state_delta` (Argus r1 BLOCKERs 1 & 2)
+
+**Why a second pass.** Argus REQUEST-CHANGES on PR #20: the round-1 fix was
+*inert on the real prod path* and the new test was a *false green* — the same
+failure class (a passing test masking a broken live path) that shipped #323.
+
+- **BLOCKER 1 — read the wrong field.** `extractGapFillFieldsViaRouterBestEffort`
+  read ONLY `decision.state_delta`. But the router contract reserves a non-null
+  `state_delta` on an `advance` for REVIEW/CORRECTION phases ONLY (llm-router.ts
+  § "the one case where an advance carries a non-null state_delta");
+  `work_interview_gap_fill` is an OPEN ask, and the gap-fill pack teaches a
+  project-list reply as a state_delta-FREE free-text advance
+  (phase-spec-resolver.ts `advance_examples`). So the prompt-faithful envelope a
+  real Haiku/Sonnet emits is `action:'advance'` + `freeform_text:<verbatim
+  reply>` + `state_delta:null` → the round-1 read extracted nothing → projects
+  still dropped.
+- **BLOCKER 2 — false-green fixture.** The new test fabricated an
+  `advance` + populated `state_delta` envelope the prompt FORBIDS for this phase
+  (matched only on the token "Amascence"), so it stayed green while prod stayed
+  broken.
+
+**What shipped (round 2).**
+
+- **`extractGapFillFieldsViaRouterBestEffort` now parses `freeform_text`.** It
+  still reads a `state_delta` first (for the genuine hybrid/review envelope), but
+  when that yields nothing AND the decision is an `advance` carrying
+  `freeform_text`, it parses the answer into the field the gap-fill is currently
+  collecting (`auditRequiredFields(...).next_to_collect` —
+  `primary_projects` / `non_work_interests`). Gated on `action === 'advance'` so a
+  tangent (classified `answer`) is never mis-captured. Mirrors the established
+  `projects_proposed` share-freeform `splitFreeformProjectList` fallback.
+- **`parseGapFillFreeformList` (NEW, CONSERVATIVE).** Splits a gap-fill list
+  answer on every comma / semicolon / newline / sentence boundary / "and",
+  strips list lead-ins ("running three companies:", "side project", "I'm working
+  on", …) + parenthetical asides + bullet markers. To AVOID garbage extraction
+  from prose, it only emits a result when the answer is genuinely LIST-SHAPED — a
+  MAJORITY of segments must be "name-like" (≤ 6 words, not opening with a
+  pronoun/article/aux like "I"/"a"/"the"). Prose ("I run Caldera, a fragrance
+  brand, and I am building out its ops and automation") fails the bar → returns
+  `[]` → the caller falls back to the unchanged advance-with-empty-patch path
+  (parks at `projects_proposed`, where the share-work flow still catches it). A
+  tidy comma list AND the proper-noun-rich shape Ryan actually typed both recover
+  cleanly to the six items. KNOWN LIMITATION: the whole answer maps to the single
+  field being collected, so a volunteered non-work mention ("meditation") rides
+  along in `primary_projects` rather than splitting into `non_work_interests`;
+  fine-grained project-vs-interest separation needs real LLM extraction (follow-up).
+
+**Tests.** Regenerated the real-path fixture to the PROMPT-FAITHFUL envelope
+(`advance` + `freeform_text` + `state_delta:null`). Verified RED→GREEN: with the
+engine fix stashed the test fails (`primary_projects` `[]`); with it applied all
+five stated projects + "meditation" land in `primary_projects` and the flow
+advances past gap-fill with no "I didn't pin down concrete projects" re-ask. The
+`open-single-owner-walkthrough` E2E stays green because its prose gap-fill answer
+("I run Caldera, …") fails the list-shape bar → unchanged park-at-projects_proposed
+behaviour (no garbage). `bunx tsc --noEmit` clean; full partitioned `run-tests.sh`
+green (756 files / 8 chunks); leak-gate silent. Merged `origin/main` (AS-BUILT
+conflict only).
+
 ## 2026-06-21 — Onboarding no longer DROPS an explicitly-stated project list (ISSUES #323, P1 first-run showstopper)
 
 **Problem.** On a real fresh onboarding (no import) the user answered the
