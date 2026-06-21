@@ -31,6 +31,7 @@ function makeRun(overrides: Partial<TridentRun> = {}): TridentRun {
     task: 't',
     chat_id: null,
     thread_id: null,
+    channel_kind: 'telegram',
     failure_reason: null,
     started_at: '2026-01-01T00:00:00.000Z',
     last_advanced_at: '2026-01-01T00:00:00.000Z',

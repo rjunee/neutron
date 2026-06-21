@@ -65,6 +65,34 @@ describe('buildTridentCodeChatCommandFilter', () => {
     expect(res!.text).toContain('Trident run')
   })
 
+  // #317 — the app-WS filter stamps its surface channel onto created runs so
+  // terminal delivery routes back here, not to Telegram.
+  test('#317 stamps app_socket as the run channel by default', async () => {
+    const filter = buildTridentCodeChatCommandFilter({ resolve_context: () => ctxFor() })
+    const res = await filter.match(matchInput('/code build from the app'))
+    const run_id = (res!.data as { run_id: string }).run_id
+    expect(store.get(run_id)!.channel_kind).toBe('app_socket')
+  })
+
+  test('#317 a resolver-supplied channel_kind overrides the filter default', async () => {
+    const filter = buildTridentCodeChatCommandFilter({
+      resolve_context: () => ({ ...ctxFor(), channel_kind: 'webhook' }),
+    })
+    const res = await filter.match(matchInput('/code via webhook'))
+    const run_id = (res!.data as { run_id: string }).run_id
+    expect(store.get(run_id)!.channel_kind).toBe('webhook')
+  })
+
+  test('#317 an explicit deps.channel_kind sets the surface default', async () => {
+    const filter = buildTridentCodeChatCommandFilter({
+      resolve_context: () => ctxFor(),
+      channel_kind: 'telegram',
+    })
+    const res = await filter.match(matchInput('/code telegram surface'))
+    const run_id = (res!.data as { run_id: string }).run_id
+    expect(store.get(run_id)!.channel_kind).toBe('telegram')
+  })
+
   test('a non-/code body returns null (falls through to the LLM path)', async () => {
     const filter = buildTridentCodeChatCommandFilter({ resolve_context: () => ctxFor() })
     expect(await filter.match(matchInput('what is the weather'))).toBeNull()

@@ -107,6 +107,21 @@ describe('/code <task> creates a code_trident_runs row', () => {
     expect(res!.text).toContain('Ralph')
   })
 
+  test('#317 threads the originating channel_kind onto the run row', async () => {
+    const res = await parseAndExecuteCodeCommand(
+      '/code build from the app',
+      ctx({ chat_id: 'web:u1', channel_kind: 'app_socket' }),
+    )
+    const data = res!.data as { run_id: string }
+    expect(store.get(data.run_id)!.channel_kind).toBe('app_socket')
+  })
+
+  test('#317 defaults the run channel_kind to telegram when the context omits it', async () => {
+    const res = await parseAndExecuteCodeCommand('/code a telegram build', ctx({ chat_id: '-100' }))
+    const data = res!.data as { run_id: string }
+    expect(store.get(data.run_id)!.channel_kind).toBe('telegram')
+  })
+
   test('/code stop marks the most-recent in-flight run stopped', async () => {
     const a = (await parseAndExecuteCodeCommand('/code first', ctx()))!.data as { run_id: string }
     const b = (await parseAndExecuteCodeCommand('/code second', ctx()))!.data as { run_id: string }

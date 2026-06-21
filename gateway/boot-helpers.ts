@@ -620,8 +620,17 @@ export function buildTridentCodeChatCommandFilter(deps: {
   default_project_id?: string
   /** Message when `resolve_context` yields null (no build target wired). */
   unavailable_message?: string
+  /**
+   * Channel this filter's `/code` runs originate on (#317). This builder is
+   * wired into the app-WebSocket surface, so the default is `'app_socket'`;
+   * the value is stamped onto every created run (unless the resolved context
+   * already set one) so terminal result delivery routes the build's result
+   * back to THIS surface instead of defaulting to Telegram.
+   */
+  channel_kind?: import('../channels/types.ts').Topic['channel_kind']
 }): import('./http/app-ws-surface.ts').ChatCommandFilter {
   const default_pid = deps.default_project_id ?? 'default'
+  const channel_kind = deps.channel_kind ?? 'app_socket'
   const unavailable =
     deps.unavailable_message ??
     '`/code` is not available for this project — no repository is wired for autonomous builds here.'
@@ -643,6 +652,10 @@ export function buildTridentCodeChatCommandFilter(deps: {
         if (parsed.kind === 'help') return { text: unavailable }
         return { text: unavailable, error: { code: 'unavailable', message: 'no build target' } }
       }
+      // Stamp the originating channel onto the run so its terminal result is
+      // delivered back to this surface (#317). The resolver may override it
+      // per-run; otherwise the filter's surface default wins (NOT telegram).
+      if (ctx.channel_kind === undefined) ctx.channel_kind = channel_kind
       const response = await parseAndExecuteCodeCommand(input.body, ctx)
       if (response === null) return null
       const out: import('./http/app-ws-surface.ts').ChatCommandFilterResult = {

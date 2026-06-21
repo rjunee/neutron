@@ -66,6 +66,266 @@ used the "I didn't pin down concrete projects" copy. RED before the fix (project
 `[]`), GREEN after. `bunx tsc --noEmit` clean; full `onboarding/interview/__tests__`
 suite green (920 pass); the `open-single-owner-walkthrough` E2E (which a broader
 first cut had regressed into a 120s loop) stays green.
+## 2026-06-21 — WAVE 2 non-blocking follow-ups: trident channel-kind, reminders crash dedup, proactive minors, CI gate, persona escape (#317/#319/#320/#321/#322)
+
+**Problem.** Five non-blocking follow-ups opened during the WAVE 2 overnight wave
+(tracked in the managed repo's `ISSUES.md`):
+
+- **#317 (P2)** — trident terminal result-delivery hard-coded the delivery
+  `channel_kind` to `'telegram'` for every run, so a `/code` build originating on
+  the app-WebSocket surface would misroute its result post.
+- **#319 (P2)** — the reminders dispatcher could double-send across a crash/restart
+  window: the row was marked fired only AFTER the post, so a crash between a
+  successful post and `markFired` left a still-due `pending` row that re-fired on
+  restart.
+- **#320 (P3)** — proactive-messaging minors: the quiet-day brief over-claimed
+  "Nothing on the calendar" even when the calendar source was unwired/threw; a
+  morning-brief delivery outage returned `too_early` so the cron mapped it to
+  `skipped` (outages invisible in telemetry); a `state-store.ts` docstring cited
+  the wrong migration number (0079 → 0080).
+- **#321 (P2)** — `ci.yml`'s `test` job did not fire for PR #10 (a slashed `feat/…`
+  head): the `concurrency: ci-${{ github.ref }}` group keyed on a ref whose shape
+  varies by branch name, letting the `test` run be superseded/skipped so a PR
+  could merge with only CodeQL signal.
+- **#322 (P3)** — the per-project `<project_persona>` block was spliced RAW (no XML
+  escaping), unlike the skills/escalation blocks; a persona containing
+  `</project_persona>` could close the tag early (matters once `projects.persona`
+  becomes non-owner-writable in M2/M6).
+
+**What shipped.**
+
+- **#317 — derive the delivery channel from the run record.** New migration
+  `0081_code_trident_runs_channel_kind.sql` adds a `channel_kind` column
+  (`CHECK IN ('telegram','app_socket','webhook','cli')`, default `'telegram'`) to
+  `code_trident_runs`. `trident/store.ts` threads `channel_kind` through
+  `TridentRun`/`CreateTridentRunInput`/the DB row/COLS/`create`/`rowToRun`;
+  `trident/code-command.ts` accepts an originating `channel_kind` on
+  `TridentCodeContext` and persists it on dispatch; `trident/delivery.ts`'s
+  `onTerminal` now derives the topic's channel from `run.channel_kind` (the
+  build-time `opts.channel_kind` is demoted to a defensive fallback for pre-0081
+  rows). Existing rows + Telegram-origin `/code` default to `'telegram'`, so the
+  change is backward-compatible.
+
+- **#319 — claim-before-dispatch crash-window dedup.** `reminders/tick.ts` now
+  CLAIMS each due row (one-shot → `markFired`; recurring → `advanceRecurrence`)
+  BEFORE the post, then dispatches. A crash anywhere during the send leaves an
+  already-claimed (fired/advanced-past-due) row that a post-restart `listDue`
+  won't return — closing the double-send window. A caught dispatch throw (which
+  always means the post did NOT succeed, since the dispatcher only throws BEFORE a
+  delivered post) reverts the claim so the row stays pending and retries next tick
+  — preserving the existing deliver-or-retry contract. New `ReminderStore.reopen()`
+  reverts a just-claimed one-shot row (guarded on `status='fired'` so it can never
+  resurrect a cancelled row); recurring revert reuses `reschedule()`.
+
+- **#320 — proactive minors.** `morning-brief.ts` `BriefContext` gains
+  `calendar_checked` (set true only when a wired `calendarToday` source resolves
+  without throwing); the quiet-day copy now says "Nothing on the calendar" ONLY
+  when the calendar was actually checked, else an honest "(I couldn't check your
+  calendar.)". `MorningBriefResult.status` gains `'deliver_failed'`, returned on a
+  delivery outage instead of `'too_early'`; `cron.ts` maps `deliver_failed` →
+  `error` (and `posted` → ok, everything else → skipped). `state-store.ts`
+  docstring corrected 0079 → 0080.
+
+- **#321 — CI test-gate always fires on PRs to main.** `ci.yml` concurrency group
+  is now `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`
+  — PR runs key on the slash-free PR number, namespaced by workflow, so a head
+  branch's name shape can no longer supersede/skip the `test` job. The
+  `pull_request` trigger stays filter-free (every PR to any base gets `test`).
+
+- **#322 — XML-escape the project persona.** `build-live-agent-turn.ts` escapes the
+  persona body (`&`/`<`/`>`) via a local `escapeProjectPersonaText` before splicing
+  it inside `<project_persona>`, mirroring the escalation envelope's text escaping
+  rationale (anti-injection for an LLM-consumed envelope).
+
+**Tests (no bookkeeping-only).** `trident/store.test.ts` (channel_kind round-trip
++ default + CHECK rejection), `trident/delivery.test.ts` (per-run channel
+derivation, run wins over fallback), `trident/code-command.test.ts` (threading +
+default); `reminders/tick.test.ts` (claim-before-post for one-shot + recurring,
+restart no-double-send, throw-reverts-claim retry); `morning-brief.test.ts` +
+`cron.test.ts` (calendar_checked, quiet-day copy, `deliver_failed`→error);
+`build-live-agent-turn.test.ts` (persona injection neutralised, single closing
+boundary); `scripts/ci/ci-workflow.test.ts` (trigger + concurrency invariants).
+`migrations/runner.test.ts` updated for migration 81; schema snapshot regenerated.
+Full suite green; `tsc --noEmit` clean (root + `trident/tsconfig.json`).
+
+NOTE: closing the managed-repo `ISSUES.md` entries is out of scope (different
+repo) — the PR notes which issues are fixed.
+
+## 2026-06-21 — QMD-equivalent local doc search + `doc_search` / `doc_read` agent tools (gap-audit §(a) P1 #9 / §(b) cat 13)
+
+**Problem.** The daily-driver gap audit flagged that Neutron agents could read a
+KNOWN doc path (`runtime/doc-links.ts`) but had **no corpus search** over the
+owner's project folders. Vajra agents hit QMD across ~1700 docs BEFORE asking
+the user anything (Design Principle #4 — "research before asking"); without an
+equivalent that discipline can't function in Neutron. There was full-text search
+INSIDE individual Cores (`cores/free/research`, `cores/free/notes` — both
+project-scoped FTS5 over DB rows) but nothing that indexed the markdown files on
+disk under `<owner_home>/Projects/<id>/` (README / STATUS / CLAUDE / docs /
+research / notes / archive).
+
+**What shipped.** A new OSS-friendly workspace package `@neutronai/doc-search`
+(`doc-search/`) — a local BM25 markdown corpus index + query, exposed to the
+live agent as two tools. No SaaS / external-embedding dependency for the
+baseline (pure `bun:sqlite` FTS5).
+
+- **`doc-search/store.ts` — `DocSearchIndex` (NEW).** A `bun:sqlite` FTS5 index.
+  `doc_chunks` is the content table (one row per heading-scoped chunk);
+  `doc_fts` is an external-content FTS5 mirror over `(title, heading, body)` kept
+  in sync by AFTER INSERT/UPDATE/DELETE triggers (the canonical FTS5
+  contentless-sync pattern). Ranking is **BM25 with column weights** (title 10 ≫
+  heading 4 ≫ body 1) via SQLite's `bm25()`; scores are min-max normalised to a
+  [0,1] relevance. Results are **collapsed to the best chunk per file** so a
+  query returns ranked DOCUMENTS (with the matching section's heading + a
+  `snippet()` excerpt), not a flood of chunks. The FTS query is sanitised
+  (`doc-search/query.ts`, lifted from `cores/free/research`) so raw agent text
+  can't trip FTS5's `NEAR`/`NOT`/paren grammar. **Semantic search is OPTIONAL and
+  behind the `embedder` seam** — off by default (pure lexical); when an `Embedder`
+  is supplied, chunk embeddings are stored and the top lexical candidates are
+  cosine-reranked and blended (0.6 lex / 0.4 vec). The baseline never pulls an
+  external provider.
+
+- **`doc-search/chunk.ts` (NEW).** Deterministic markdown chunker: title = first
+  `# ` heading (else de-slugged filename); one chunk per ATX heading (`#`..
+  `######`) plus a preamble chunk; long sections split at paragraph boundaries to
+  a char budget; heading-looking lines inside ``` / ~~~ code fences are NOT
+  treated as headings.
+
+- **`doc-search/walk.ts` (NEW).** `walkProjectMarkdown(projectRoot)` enumerates
+  `.md`/`.markdown` files under a project, skipping hidden segments (`.git`,
+  dotfiles), `node_modules`, oversized files (>5 MB), and symlink escapes.
+  `readProjectDoc(ownerHome, project, relpath)` is the path-safe single-doc read
+  backing `doc_read` (project_id grammar + traversal/realpath-containment +
+  extension + size checks), scoped to `<owner_home>/Projects/<id>/`.
+
+- **`doc-search/indexer.ts` (NEW).** `refreshIndex({ownerHome, index})` walks
+  every project (`doc-search/projects.ts`, mirrors `gateway/projects/enumerate.ts`),
+  chunks each file, and upserts it. **Incremental:** unchanged files (by mtime)
+  are skipped, deleted files are dropped, removed projects are purged — a no-op
+  second run when nothing changed.
+
+- **`doc-search/runtime.ts` — `DocSearchRuntime` (NEW).** Binds the index to an
+  `owner_home`; exposes `search` / `read` / `ensureFresh`. `ensureFresh` is
+  throttled (default 5 s, shared in-flight) so calling it before every search
+  costs at most one incremental disk-diff per interval. Constructs synchronously
+  (so it slots into the gateway's synchronous `tools` module init); the first
+  refresh is lazy on the first tool call.
+
+- **`doc-search/tool.ts` (NEW).** `registerDocSearchToolSurface(registry, runtime)`
+  registers two read-only agent tools (capability `read:docs`, `approval: auto`)
+  into the shared `ToolRegistry`:
+  - **`doc_search`** `{query, project?, limit?}` -> ranked `{project, path, title,
+    heading, score, snippet}[]`.
+  - **`doc_read`** `{project, path}` -> `{found, project?, path?, content?}`.
+
+- **Wiring (agent-native).** `gateway/composition/build-core-modules.ts` — the
+  `tools` module registers the doc-search surface alongside
+  `registerNeutronToolsSurface` when the composer supplies
+  `input.doc_search.runtime` (new optional `MiscCompositionInput.doc_search`
+  field). `open/composer.ts` builds the index at
+  `<owner_home>/cache/doc-search/index.db` + the runtime, threads it into the
+  composition, and closes the handle on shutdown. Failure-isolated: a doc-search
+  open failure logs and disables the tools without sinking boot.
+
+**Verification (REAL).** New co-located tests, all green:
+`doc-search/chunk.test.ts`, `doc-search/store.test.ts` (BM25 ranking, per-file
+collapse, project scoping, incremental reindex, stats, optional semantic hybrid
+with a deterministic dependency-free embedder, cosine), `doc-search/indexer.test.ts`
+(indexes a **real on-disk fixture project tree**, asserts the right doc ranks
+first, incremental edit/add/delete/project-purge, path-safe read traversal
+rejection), `doc-search/tool.test.ts` (registration + handlers + ensureFresh
+throttle) — 38 doc-search tests pass. Full repo: `bunx tsc --noEmit` clean;
+`scripts/run-tests.sh` PASS — 746 files across 8 chunks green (gateway+open
+composition suites: 958 pass, confirming the wiring is intact).
+
+**Cross-model review (Codex).** Two correctness bugs Codex flagged were fixed in
+this PR: (1) hyphenated query terms (`daily-driver`, `gap-audit`) were passed to
+FTS5 unquoted where `-` is query syntax → the MATCH threw and the term became
+unsearchable; the sanitiser now only leaves `[A-Za-z0-9_]+` bare and phrase-quotes
+everything else (`doc-search/query.ts`). (2) the document `limit` was applied at
+the chunk level before the per-file collapse, so one large file with many matching
+sections could crowd out other documents; `search()` now pulls BM25-ordered
+candidates to a high safety cap (`CANDIDATE_CAP = 5000`), collapses to the best
+chunk per file, and applies the limit at the FILE level (`doc-search/store.ts`).
+Both have regression tests in `doc-search/store.test.ts`.
+
+**Known boundary (reachability).** Codex also flagged (P1) that the registered
+tools are not yet reachable by the *completed-phase live Claude Code chat agent*:
+that path builds its `--tools` allow-list from `DEFAULT_TOOL_NAMES` (`Read` /
+`Glob` / `Grep`) and the dev-channel MCP only exposes `reply` / `send_typing` —
+the `ToolRegistry` / `McpServer` is built in the module graph but is NOT bridged
+into the live CC substrate. This is a **pre-existing platform-wide gap that
+affects every registry tool** (the `registerNeutronToolsSurface` stubs and all
+Cores tools share it), not something this PR introduces; bridging the registry/MCP
+surface into the live CC REPL is substantial separate platform work. doc_search /
+doc_read register through the canonical `ToolRegistry` (reachable today via the
+MCP-server surface + programmatic callers); the live CC agent meanwhile can
+already `Grep`/`Read` the project tree (cwd = owner_home) — doc-search adds the
+BM25 ranking + structured surface the bridge will expose. Tracked as a follow-up.
+
+**Not in scope.** Indexing the entities wiki / non-project docs; a production
+local embedder (the semantic seam ships but no provider is wired); surfacing
+doc-search through the web UI; the live-CC-agent tool bridge (see Known boundary);
+the Obsidian `obs.*` redirector confirmation (the other half of gap-audit cat 13).
+
+## 2026-06-21 — React + assistant-ui web chat client, behind a flag (Track B Phase 3)
+
+**Problem.** The parity-research doc (`web-chat-telegram-parity-architecture-
+2026-06-20`) ranks the web chat as "nowhere near Telegram." Phase 1 shipped the
+hard part — `@neutron/chat-core` (WS client + send-queue + append-only sync
+engine + local Store) on the app-ws surface with a monotonic `seq` + resume.
+Phase 3 is the largest/riskiest chunk: replace the 4.5k-line bespoke vanilla-TS
+web client with the locked stack (**React + `@assistant-ui/react`, MIT, bring-
+your-own-transport**) — but ship it BEHIND A FLAG with the vanilla client intact
+as the default fallback, no cutover.
+
+**What shipped.**
+
+- **`chat-core/web-session.ts` — additive `onFrame` observer.** The sync layer
+  persists only final `user_message`/`agent_message`s; the UI also needs the
+  ephemeral `agent_message_partial` token stream + typing hints. `onFrame(frame)`
+  surfaces every raw inbound frame BEFORE the persist decision, as a pure
+  observer (errors swallowed) — so Phase-1 wiring is byte-for-byte unchanged.
+  Covered by a new web-session test.
+
+- **`landing/chat-react/` (NEW) — the React client.** Layered for testability:
+  `config.ts` (pure bootstrap: start-token `sub` → `app:<user_id>` topic +
+  app-ws URL; dev-bypass token default, `window.__neutron_app_ws_token`
+  override), `controller.ts` (`NeutronChatController` — framework-agnostic data
+  layer: streaming-partial accumulation into a live agent bubble the final
+  persisted message supersedes, `isRunning` typing derivation, connection +
+  offline-queue state, synchronous `ChatViewModel`; session injected via a
+  factory so it integration-tests against a real `WebChatSession` + fake socket),
+  `message-adapter.ts` (pure `RenderMessage → ThreadMessageLike`),
+  `useNeutronChat.ts` (thin React seam → assistant-ui `ExternalStoreRuntime`),
+  `ChatApp.tsx` (UI from assistant-ui PRIMITIVES — the styled `Thread` left the
+  core package in 0.14.x — styled to the existing dark theme: topic rail,
+  connection banner, offline-pending badge, streaming dots), `main.tsx` (entry,
+  bundled to `/chat-react.js`).
+
+- **`landing/web-chat-flag.ts` + `landing/server.ts` — the flag.**
+  `resolveWebChatClient({ envDefault, queryClient })`: env
+  `NEUTRON_WEB_CHAT_CLIENT` (deploy default) with a `?client=react|vanilla`
+  per-request override; default/garbage → vanilla. `GET /chat` serves the React
+  shell (`chat-react.html`) only when the flag resolves to `react` AND the assets
+  shipped (`existsSync`-guarded — else vanilla); `/chat-react.js` is lazily
+  bundled from `chat-react/main.tsx` via `Bun.build` (minified, ~0.6 MB),
+  mirroring the existing `chat.ts` → `/chat.js` path. Vanilla is otherwise
+  untouched.
+
+**Tests.** chat-core onFrame test; controller integration over a real
+`WebChatSession`+fake socket (optimistic send, streaming→final supersede,
+offline queue, status transitions, project tagging); pure adapter + config
+tests; happy-dom component smoke (full assistant-ui render: optimistic send +
+streamed-then-finalized agent reply reach the DOM); flag + flag-gated serving
+tests. `bunx tsc -p tsconfig.json` (root gate) + `bunx tsc -p
+landing/chat-react/tsconfig.json` (React leaf, isolated from the gate) both
+clean; `bun test chat-core landing` green (577 pass).
+
+**Parity gaps (documented, vanilla stays default until closed):** attachment
+compose-UI (rendering + data path done; upload affordance pending), "load
+earlier" paging beyond the resume window, and the production app-ws web token
+mint (the deferred identity sub-sprint the app-ws auth resolver itself notes).
+
 ## 2026-06-21 — Agent-aware watchdog + double-spawn guard for the dispatch layer (WAVE 2 P1, gap-audit §(b) #8)
 
 **Problem.** The daily-driver gap audit (§(b) #8) flagged two reliability holes

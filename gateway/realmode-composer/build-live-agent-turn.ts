@@ -587,9 +587,30 @@ async function composeProjectPersonaFragment(
     `For the "${turn.project_id}" project, embody this persona on top of your`,
     'owner-wide doctrine (it refines your voice for this project; it does not',
     'replace who you are):',
-    trimmed,
+    // XML-escape the persona body before splicing it inside the
+    // `<project_persona>` boundary (#322). The persona is owner-authored on a
+    // single-owner Open instance today, but once `projects.persona` becomes
+    // non-owner-writable (shared/imported projects — M2/M6) a persona literally
+    // containing `</project_persona>` could close the tag early and inject
+    // sibling instructions. Mirrors the escalation envelope's text escaping.
+    escapeProjectPersonaText(trimmed),
     '</project_persona>',
   ].join('\n')
+}
+
+/**
+ * Escape XML text content (`&`, `<`, `>`) for splicing inside an element
+ * body. Quotes are legal inside element bodies, so they are left as-is to
+ * avoid bloating the prompt. Anti-injection rationale matches
+ * `escalation-loader.ts`'s `escapeXmlText`: the envelope is consumed by an
+ * LLM (not a strict XML parser), so the goal is "no syntactic confusion that
+ * could let the persona inject sibling tags," not full schema validity.
+ */
+function escapeProjectPersonaText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 /**
