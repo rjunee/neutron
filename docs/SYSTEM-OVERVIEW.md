@@ -191,8 +191,12 @@ guards close gap-audit §(b) #8 ("watchdog is generic, not agent-aware"):
 The two are complementary: the watchdog reaps a registry-live-but-process-dead
 record so a legitimate re-spawn proceeds, while the guard blocks a concurrent
 duplicate while the first is genuinely in flight. Both are substrate-agnostic
-and injectable (`now` / `pid_alive` / `notify`); the generic `lifecycle.ts`
-prune/reap pass still runs alongside. They are library surfaces in S3
+and injectable (`now` / `pid_alive` / `notify`). The watchdog is the SOLE owner
+of live→terminal liveness transitions: `runLifecycleTick` (`lifecycle.ts`) no
+longer reaps `running` records (it would silently `cancel`/`crash` them with no
+notification, racing the watchdog at the same threshold) — it now only PRUNES
+already-terminal records past `cleanup_after`, so the two are disjoint and tick
+order is irrelevant. They are library surfaces in S3
 (in-process); the gateway wires a periodic tick + the `notify` sink (Telegram /
 the `watchdog/` AlertStore) when the registry moves to SQLite-backed
 persistence in S4. (Distinct from the OS-process-level `watchdog/` module, which
