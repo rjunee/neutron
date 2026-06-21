@@ -261,6 +261,23 @@ describe('inbox — apply', () => {
     expect(task?.completed_at).not.toBeNull()
   })
 
+  test('update with explicit null clears due_date and notes', async () => {
+    await applyInboxRow(
+      deps(),
+      parseInboxLine('{"action":"add","id":"clr","title":"clear me","due":"2026-06-30","notes":"some notes"}') as InboxRow,
+    )
+    expect(store.get('clr')?.due_date).not.toBeNull()
+    expect(store.get('clr')?.description).not.toBeNull()
+
+    const outcome = await applyInboxRow(
+      deps(),
+      parseInboxLine('{"action":"update","id":"clr","due":null,"notes":null}') as InboxRow,
+    )
+    expect(outcome.status).toBe('applied')
+    expect(store.get('clr')?.due_date).toBeNull()
+    expect(store.get('clr')?.description).toBeNull()
+  })
+
   test('update by id patches priority + due and recomputes focus_score', async () => {
     const add = await applyInboxRow(
       deps(),

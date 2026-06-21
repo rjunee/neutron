@@ -149,6 +149,22 @@ function isAction(value: unknown): value is InboxAction {
 }
 
 /**
+ * Read an aliased field by KEY PRESENCE: the primary key wins when
+ * present (even when its value is an explicit `null` clear), else the
+ * alias, else `undefined`. Using `??` here would drop a `null` clear
+ * through to the alias and lose the user's intent to clear the field.
+ */
+function pickAliased(
+  record: Record<string, unknown>,
+  primary: string,
+  alias: string,
+): unknown {
+  if (Object.prototype.hasOwnProperty.call(record, primary)) return record[primary]
+  if (Object.prototype.hasOwnProperty.call(record, alias)) return record[alias]
+  return undefined
+}
+
+/**
  * Parse a single inbox line into an {@link InboxRow}. Returns a string
  * error message on failure (caller wraps it with the line number).
  * Blank lines return `'blank'` so the scanner can silently skip them.
@@ -195,7 +211,9 @@ export function parseInboxLine(raw: string): InboxRow | string {
     row.priority = priority
   }
 
-  const rawDue = record['due'] ?? record['due_date']
+  // Aliased fields use KEY-PRESENCE (not `??`), so an explicit `null`
+  // clear isn't mistaken for "absent" and fall through to the alias.
+  const rawDue = pickAliased(record, 'due', 'due_date')
   if (rawDue !== undefined) {
     const due = normalizeDue(rawDue)
     if (due === undefined) {
@@ -204,7 +222,7 @@ export function parseInboxLine(raw: string): InboxRow | string {
     row.due_date = due
   }
 
-  const notes = record['notes'] ?? record['description']
+  const notes = pickAliased(record, 'notes', 'description')
   if (typeof notes === 'string') row.notes = notes
   else if (notes === null) row.notes = null
 
