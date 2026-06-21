@@ -18,6 +18,11 @@ import {
   SENTINEL_TOOL_DEFS,
   buildSentinelToolHandlers,
 } from '../src/tool-handlers.ts'
+// The persona system prompts that the trident dispatch path loads as each
+// agent's SYSTEM prompt. Loaded here (the real leaf @neutronai/prompts reader,
+// cwd-independent) to reconcile a persona's CONTRACT against the toolset it is
+// actually dispatched with — see the reconciliation describe block below.
+import { loadPrompt } from '../../../../prompts/index.ts'
 
 const FORGE_TOOL_DEFS: CodegenToolDefinition[] = [
   {
@@ -461,6 +466,78 @@ describe('buildRuntimeSubagentDispatch — per-kind toolset routing', () => {
     expect(dispatch(makeInput({ kind: 'atlas' }))).rejects.toThrow(
       /no tool defs configured for sub-agent kind 'atlas'/,
     )
+  })
+})
+
+/**
+ * Persona ↔ toolset reconciliation — the round-4 BLOCKER seam.
+ *
+ * The toolset-routing block above proves each kind is OFFERED its own tool
+ * set on the real substrate, but a correct toolset is only half the contract:
+ * the persona LOADED as that agent's system prompt (`prompts/<kind>.md`, the
+ * exact text the trident dispatch path hands the model) must not ORDER a tool
+ * the toolset lacks, nor carry the cross-runtime SELF-DELIVERY model.
+ *
+ * Round-3 fixed Atlas's toolset but the personas still mandated
+ * `tg-post.sh <CHAT_ID> <THREAD_ID>` + exit-code-0 self-POST — a Vajra/Nova
+ * runtime contract. In the substrate one-shot path there is no gateway and no
+ * `<CHAT_ID>`/`<THREAD_ID>`: the dispatch returns terminal text for the CALLER
+ * to deliver. So a Sentinel that followed its loaded contract emitted `bash`
+ * tool errors (read-only set, wrong-by-construction); Atlas POSTed into the
+ * void. These tests pin the reconciliation directly on the real persona files.
+ *
+ * A ```bash fence is the persona DEMONSTRATING the bash tool (a runnable shell
+ * command). The invariant: a persona may only demonstrate a tool its dispatched
+ * toolset actually offers.
+ */
+describe('persona prompt ↔ toolset reconciliation (no self-delivery leak)', () => {
+  const PERSONA_VARS = { OWNER_HOME: '/home/owner', TELEGRAM_CHAT_ID: '99' } as const
+
+  const PERSONAS = [
+    ['atlas', 'atlas.md', ATLAS_TOOL_DEFS],
+    ['sentinel', 'sentinel.md', SENTINEL_TOOL_DEFS],
+  ] as const
+
+  /** Bodies of every ```bash fenced block — the persona "ordering" bash. */
+  const bashFences = (md: string): string[] =>
+    [...md.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1] ?? '')
+
+  /** Bodies of every fenced code block regardless of language. */
+  const allFences = (md: string): string[] =>
+    [...md.matchAll(/```[a-z]*\n([\s\S]*?)```/g)].map((m) => m[1] ?? '')
+
+  for (const [kind, file, defs] of PERSONAS) {
+    const toolNames = defs.map((t) => t.name)
+    const hasBash = toolNames.includes('bash')
+
+    test(`${kind} persona demonstrates no tool its dispatched toolset lacks`, () => {
+      const md = loadPrompt(file, PERSONA_VARS)
+      const fences = bashFences(md)
+      if (!hasBash) {
+        // sentinel is dispatched read-only ([read, grep, glob]) — its persona
+        // must NOT order a shell command it physically cannot run.
+        expect(fences).toEqual([])
+      }
+    })
+
+    test(`${kind} persona carries no cross-runtime self-delivery mandate`, () => {
+      const md = loadPrompt(file, PERSONA_VARS)
+      // No runnable fence may invoke the gateway self-POST helper…
+      for (const body of bashFences(md)) {
+        expect(body).not.toContain('tg-post')
+      }
+      // …and no runnable fence may reference the chat/thread placeholders the
+      // substrate one-shot path never supplies (the caller delivers the result).
+      for (const body of allFences(md)) {
+        expect(body).not.toContain('<CHAT_ID>')
+        expect(body).not.toContain('<THREAD_ID>')
+      }
+    })
+  }
+
+  test('sentinel is read-only (no bash); atlas is write-capable (has bash) — the two persona shapes', () => {
+    expect(SENTINEL_TOOL_DEFS.map((t) => t.name)).not.toContain('bash')
+    expect(ATLAS_TOOL_DEFS.map((t) => t.name)).toContain('bash')
   })
 })
 

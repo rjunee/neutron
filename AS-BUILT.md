@@ -147,6 +147,62 @@ construction against the single real implementation.
   for Atlas/Sentinel yet — this round makes the substrate correctly SERVE the
   persona kinds; wiring a chat-surface trigger remains a follow-up.
 
+### Fix-round 3 (Argus REQUEST CHANGES — PR #14 round 4: persona ↔ toolset still mis-reconciled)
+
+Round-3's per-kind toolset routing stayed good (Atlas write-capable on the real
+substrate, forge/argus native, legacy-prompt regression fixed). Round-4 Argus +
+Codex/GPT-5 found the toolset was only HALF the contract: the **personas loaded
+as the agents' system prompts still carried the legacy Vajra/Nova SELF-DELIVERY
+operating model** — `bash {{OWNER_HOME}}/scripts/tg-post.sh <CHAT_ID> <THREAD_ID>`
++ a "verify exit code 0 before exiting; do NOT exit with a failed post" mandate.
+The substrate `dispatchAgent` is a one-shot path: it returns terminal text via
+`DispatchAgentOutcome.result` for the CALLER to deliver — there is no gateway and
+no `<CHAT_ID>`/`<THREAD_ID>` in this path. So:
+
+- **[BLOCKING] Sentinel was wrong-by-construction** (same class as round-3 Atlas).
+  Sentinel's loaded `prompts/sentinel.md` HARD-MANDATED a `bash` self-POST, but
+  `SENTINEL_TOOL_DEFS = [read, grep, glob]` has no bash — a Sentinel that followed
+  its loaded contract would emit `not available` tool errors on its mandated final
+  delivery step and could not complete as instructed.
+- **[IMPORTANT] Atlas carried the same self-delivery leak.** Atlas HAS bash so it
+  wouldn't hit "tool not available", but it would try to POST to a gateway that
+  isn't there and treat the failed post as "not done".
+
+**Fix (option (a), the architecturally-correct one per the verdict): adapt the
+loaded personas for the substrate one-shot path — strip the self-delivery
+mandate; the caller delivers the returned `result`.**
+
+- **`prompts/sentinel.md`.** Replaced the `tg-post`/`<CHAT_ID>`/`<THREAD_ID>` +
+  exit-code-0 "Post verdict" step with **"Return your verdict as your final
+  message"** — explicitly READ-ONLY (read/grep/glob; no shell, no write, no
+  chat/thread context), the caller delivers it. With the self-delivery mandate
+  gone, the read-only toolset is now CORRECTLY reconciled with the persona (a
+  non-code reviewer inspects the artifact and returns a verdict; it never produces
+  or self-delivers). The "write detail to a file" fallback was removed (Sentinel
+  has no write tool — that would itself order a tool the toolset lacks).
+- **`prompts/atlas.md`.** Replaced the `tg-post` "Post results" step with **"Return
+  your result as your final message"** — Atlas still WRITES its full deliverable to
+  a file (it has write/edit/bash) and returns a concise summary + the output path,
+  but no longer shells out to self-POST. Fixed the "Message Sam directly — post to
+  the Telegram topic and exit" line to "return your result as your terminal output
+  and exit; the caller delivers it". Atlas's write-capable toolset is unchanged and
+  correct (it produces deliverables).
+- **`substrate-runtime.test.ts` — reconciliation pinned on the real seam.** Added a
+  `persona prompt ↔ toolset reconciliation (no self-delivery leak)` suite that
+  loads the REAL `prompts/{atlas,sentinel}.md` (via the leaf `@neutronai/prompts`
+  reader) and asserts, per persona: (1) a persona whose dispatched toolset lacks
+  `bash` DEMONSTRATES no ```bash fence (Sentinel orders no tool it cannot run);
+  (2) no runnable fence invokes `tg-post` and no fence references `<CHAT_ID>` /
+  `<THREAD_ID>` (the cross-runtime self-delivery model the substrate never
+  supplies). This closes the round-3 caveat (the routing suite asserted Sentinel
+  read-only "as if correct" without reconciling the loaded prompt).
+
+**Verify (REAL).** `bunx tsc -p trident/tsconfig.json` 0 errors; root `bunx tsc
+--noEmit` 0 errors; `bun test cores/free/code-gen/__tests__/substrate-runtime.test.ts`
+→ 21 pass (was 16; +5 reconciliation tests); `bun test trident/` → 201 pass;
+`bun test cores/free/code-gen/` → 119 pass. No production caller invokes the
+persona dispatch yet — unchanged follow-up.
+
 ## 2026-06-21 — PR #13 post-merge CI red — root-caused & fixed (real-PGLite boot flake)
 
 After `origin/main` was merged into `feat-integrations-admin-ui-wave2-clean` to
