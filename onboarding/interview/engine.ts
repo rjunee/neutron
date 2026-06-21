@@ -6932,7 +6932,49 @@ export class InterviewEngine implements EngineInternals {
     // `next_phase_on_default` (advance to personality_offered).
     const driver_did_fire = this.driverDidFireForOwner.has(input.project_slug)
     if (!driver_did_fire) {
-      return await this.fallbackGapFillToStaticAdvance(input, observed_at, choice)
+      // ISSUES #323 — the driver-unwired branch is the PRODUCTION path:
+      // production wires `phaseSpecResolver` + `llmRouter`, never
+      // `promptDriver`, so `driverDidFireForOwner` is never set and the
+      // `extracted` drain above is always null. Pre-fix this fell straight to
+      // `fallbackGapFillToStaticAdvance`, which advances with an EMPTY patch and
+      // SILENTLY DISCARDS the user's freeform answer — so an explicit project
+      // list ("Tabs, Pristine and Amascence, Neutron, Robobuddha…") was dropped
+      // and the flow re-asked at `projects_proposed` ("I didn't pin down
+      // concrete projects"). The router is the only production extraction seam
+      // but, in a default Open install, it is gated OFF here by
+      // `NEUTRON_ONBOARDING_CONVERSATIONAL` (unset → off), so it never runs over
+      // the gap-fill answer.
+      //
+      // Consult the router DIRECTLY for best-effort extraction, independent of
+      // that flag — gap-fill is fundamentally an LLM-extraction phase. Crucially
+      // this is best-effort: a missing router, a router error, a parse-fail, or
+      // a no-delta classification yields an empty patch and we STILL advance via
+      // the static fallback. We do NOT route through `dispatchRouterDecision`'s
+      // synthesised-advance re-prompt path, so a garbage/unparseable model reply
+      // can never trap the user in a gap-fill loop (the deterministic
+      // LLM-less / E2E-mock walk is unchanged — it just advances with {}).
+      //
+      // Guard against a double router call: when the conversational flag IS on
+      // for this phase, `advance` already consulted the router upstream and
+      // `consumeChoice` merged its `state_delta` into `phase_state` BEFORE this
+      // handler ran — so the projects are already persisted and re-calling here
+      // would double-bill the LLM. Only extract when the router was NOT consulted
+      // upstream (`shouldConsultRouter` false — the prod-default Open install,
+      // where the drop happened).
+      const active_sub_step = deriveActiveSubStep(state.phase, state.phase_state)
+      const router_extracted = this.shouldConsultRouter(state.phase, active_sub_step)
+        ? null
+        : await this.extractGapFillFieldsViaRouterBestEffort(input, state, reply_text)
+      const fallback_patch = this.mergeGapFillExtractedFields(
+        state.phase_state,
+        router_extracted,
+      )
+      return await this.advanceFromGapFillToPersonality(
+        input,
+        observed_at,
+        fallback_patch,
+        choice,
+      )
     }
 
     // Merge the extracted fields into a working patch + a projected
@@ -7168,6 +7210,140 @@ export class InterviewEngine implements EngineInternals {
     choice: ButtonChoice,
   ): Promise<AdvanceResult> {
     return await this.advanceFromGapFillToPersonality(input, observed_at, {}, choice)
+  }
+
+  /**
+   * ISSUES #323 — best-effort gap-fill extraction via the LLM router.
+   *
+   * `work_interview_gap_fill`'s only PRODUCTION extraction seam is the
+   * `llmRouter` (production wires `phaseSpecResolver` + `llmRouter`, never
+   * `promptDriver`). In `advance`, the router is gated behind
+   * `NEUTRON_ONBOARDING_CONVERSATIONAL` (`shouldConsultRouter`), which defaults
+   * OFF, so a default Open install never routes the gap-fill answer through it
+   * and the freeform reply (e.g. an explicit project list) was being dropped.
+   * This consults the router DIRECTLY to pull `primary_projects` /
+   * `non_work_interests` out of the reply, independent of that flag — gap-fill
+   * is fundamentally an extraction phase.
+   *
+   * Best-effort by contract: returns `null` (→ the caller advances with an
+   * empty patch, the prior behavior) when no router is wired, the router throws,
+   * the model output doesn't parse, or the decision carries no usable
+   * `state_delta`. It does NOT re-prompt or loop on a parse-fail/synthesised
+   * decision (unlike `dispatchRouterDecision`'s input-preserving advance), so an
+   * unparseable model reply can never trap the user in a gap-fill loop — the
+   * deterministic LLM-less / E2E-mock walk just advances with `{}` as before.
+   */
+  private async extractGapFillFieldsViaRouterBestEffort(
+    input: AdvanceInput,
+    state: OnboardingState,
+    user_text: string | null,
+  ): Promise<ExtractedFields | null> {
+    const router = this.deps.llmRouter
+    if (router === undefined) return null
+    if (typeof user_text !== 'string' || user_text.trim().length === 0) return null
+    const knowledge = getKnowledgeForPhase(state.phase)
+    if (knowledge === null) return null
+    const spec = STATIC_PHASE_SPECS[state.phase]
+    if (spec === undefined) return null
+    let decision: RouterDecision
+    try {
+      decision = await router.route({
+        phase: state.phase,
+        active_prompt: {
+          body: spec.body,
+          options: spec.options.map((o) => ({
+            label: o.label,
+            body: o.body,
+            value: o.value,
+          })),
+          allow_freeform: spec.allow_freeform,
+          pick_only: !spec.allow_freeform,
+        },
+        user_text,
+        knowledge,
+        captured: extractCapturedFromState(state.phase_state),
+        recent_turns: recentTurnsForRouter(this.deps.transcript, 6),
+        project_slug: input.project_slug,
+        user_id: input.user_id,
+        // Gap-fill is never the first session turn (signup precedes it), so the
+        // steady-state budget is correct; never widen to the cold-spawn ceiling.
+        first_turn: false,
+      })
+    } catch (err) {
+      console.warn(
+        `[engine] gap-fill best-effort router extraction threw for project=${input.project_slug}:`,
+        err instanceof Error ? err.message : err,
+      )
+      return null
+    }
+    // Codex r1 [P2] — a SYNTHESISED advance is the router's timeout/parse-fail
+    // fallback (`synthesised: 'timeout' | 'unparseable'`), whose `freeform_text`
+    // is just the echoed/truncated user input, NOT a real classification.
+    // `dispatchRouterDecision` treats it as a re-prompt, never an extraction, so
+    // we must not persist projects parsed from an unclassified fallback (it could
+    // be truncated, or a tangent/clarifying question the router couldn't read).
+    // Bail to the existing advance-with-empty-patch path (the share-work flow at
+    // projects_proposed still catches the list on a later, now-warm turn).
+    if (decision.synthesised !== undefined) return null
+    const extracted: ExtractedFields = {}
+    // A non-null `state_delta` only ever arrives here in the REVIEW/CORRECTION
+    // hybrid case (or a future amend smuggled onto this best-effort path); read
+    // it first so that envelope still works.
+    const delta = decision.state_delta
+    if (delta !== null && delta !== undefined) {
+      const deltaRec = delta as Record<string, unknown>
+      const raw_projects = deltaRec['primary_projects']
+      const projects = Array.isArray(raw_projects)
+        ? raw_projects.filter(
+            (p): p is string => typeof p === 'string' && p.trim().length > 0,
+          )
+        : []
+      if (projects.length > 0) extracted.primary_projects = projects
+      const interests = normalizeNonWorkInterestsForExtraction(
+        deltaRec['non_work_interests'],
+      )
+      if (interests.length > 0) extracted.non_work_interests = interests
+    }
+
+    // ISSUES #323 (Argus r1 BLOCKER 1) — the real prod extraction seam.
+    // The router contract reserves a non-null `state_delta` on an `advance`
+    // for REVIEW/CORRECTION phases ONLY (llm-router.ts § REVIEW/CORRECTION —
+    // "the one case where an advance carries a non-null state_delta").
+    // `work_interview_gap_fill` is an OPEN ask ("what are you working on?"), so
+    // the prompt-faithful envelope a real Haiku/Sonnet emits is
+    // `action:'advance' + freeform_text:<verbatim reply> + state_delta:null`
+    // (phase-spec-resolver.ts advance_examples teach a state_delta-FREE
+    // free-text advance — "Topline, Northwind, Beacon, CC" → projects list →
+    // free-text advance). Reading `state_delta` ALONE therefore extracts
+    // nothing on the live path → the user's explicit project list is dropped →
+    // the "I didn't pin down concrete projects" re-ask. When the delta carried
+    // nothing, parse the field the gap-fill is currently collecting directly out
+    // of the model's `freeform_text` — the only structured signal the contract
+    // guarantees for this phase. Mirrors the established projects_proposed
+    // share-freeform fallback (`splitFreeformProjectList`), but uses the
+    // gap-fill list parser (`parseGapFillFreeformList`), which splits a direct
+    // list reply on every comma / sentence boundary / "and" + strips list
+    // lead-ins ("running three companies:", "side project", …). Gated on
+    // `action === 'advance'` so a tangent ("why three projects?", classified
+    // `answer`) is never mis-captured as the projects answer.
+    if (
+      Object.keys(extracted).length === 0 &&
+      decision.action === 'advance' &&
+      typeof decision.freeform_text === 'string' &&
+      decision.freeform_text.trim().length > 0
+    ) {
+      const target = auditRequiredFields(state.phase_state).next_to_collect
+      const items = parseGapFillFreeformList(decision.freeform_text)
+      if (items.length > 0) {
+        if (target === 'primary_projects') {
+          extracted.primary_projects = items
+        } else if (target === 'non_work_interests') {
+          extracted.non_work_interests = items.map((name) => ({ name }))
+        }
+      }
+    }
+
+    return Object.keys(extracted).length > 0 ? extracted : null
   }
 
   /**
@@ -9803,6 +9979,44 @@ function extractCapturedFromState(
 }
 
 /**
+ * ISSUES #323 — normalize a router `state_delta.non_work_interests` (which a
+ * real model emits as either plain strings — "meditation" — or `{name}` objects)
+ * into the `ExtractedFields.non_work_interests` `{name, cadence_hint?}[]` shape
+ * `mergeGapFillExtractedFields` expects. Drops empty/blank entries; preserves a
+ * valid `cadence_hint` when present. Returns `[]` on a non-array input.
+ */
+function normalizeNonWorkInterestsForExtraction(
+  raw: unknown,
+): Array<{ name: string; cadence_hint?: 'weekly' | 'monthly' | 'occasional' }> {
+  if (!Array.isArray(raw)) return []
+  const out: Array<{
+    name: string
+    cadence_hint?: 'weekly' | 'monthly' | 'occasional'
+  }> = []
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      const name = entry.trim()
+      if (name.length > 0) out.push({ name })
+      continue
+    }
+    if (entry !== null && typeof entry === 'object') {
+      const rec = entry as Record<string, unknown>
+      const rawName = rec['name']
+      if (typeof rawName !== 'string' || rawName.trim().length === 0) continue
+      const item: { name: string; cadence_hint?: 'weekly' | 'monthly' | 'occasional' } = {
+        name: rawName.trim(),
+      }
+      const cadence = rec['cadence_hint']
+      if (cadence === 'weekly' || cadence === 'monthly' || cadence === 'occasional') {
+        item.cadence_hint = cadence
+      }
+      out.push(item)
+    }
+  }
+  return out
+}
+
+/**
  * P2-v3 S2 (2026-05-18) — read the last N transcript turns + project
  * to the router's `RouterRecentTurn` shape (drops `system` entries +
  * collapses `phase` / `button_prompt_id` fields the router doesn't
@@ -10106,6 +10320,99 @@ export function splitFreeformProjectList(raw: string): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const c of candidates) {
+    const key = c.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(c)
+    if (out.length >= 10) break
+  }
+  return out
+}
+
+/**
+ * ISSUES #323 — best-effort extract a `work_interview_gap_fill` freeform answer
+ * into a clean list of project/interest names. Unlike `splitFreeformProjectList`
+ * (which splits a comma ONLY before a capitalised token, so "Topline, Inc."
+ * stays glued), a gap-fill reply to "what are you working on?" is a DIRECT list
+ * answer, so we split on EVERY comma, semicolon, newline, sentence boundary, and
+ * " and "/" & " conjunction, then strip the natural-language wrappers a real
+ * reply carries — leading bullet/number markers, parenthetical asides ("Neutron
+ * (open source agent harness)" → "Neutron"), and list lead-ins ("running three
+ * companies:", "side project", "my projects are", "I'm working on", "also",
+ * "plus").
+ *
+ * CONSERVATIVE by design (Argus r1 — avoid garbage extraction from prose). The
+ * heuristic CANNOT reliably pull names out of a prose sentence ("I run Caldera,
+ * a fragrance brand, and I am building out its ops and automation" would yield
+ * fragments like "I run Caldera"), so we only emit a result when the answer is
+ * genuinely LIST-SHAPED: a MAJORITY of its segments must be "name-like" — short
+ * (≤ 6 words) and not opening with a pronoun/article/aux ("I", "a", "the",
+ * "we", …). When that bar isn't met we return `[]`, and the caller falls back to
+ * the unchanged advance-with-empty-patch behaviour (which parks at
+ * `projects_proposed` where the share-work flow + `splitFreeformProjectList` can
+ * still catch it). This recovers a tidy comma list ("Tabs, Pristine, Amascence,
+ * Neutron, Robobuddha, meditation") AND the proper-noun-rich shape Ryan actually
+ * typed ("Running three companies: Tabs, Pristine and Amascence. Side project
+ * Neutron (open source agent harness), side project Robobuddha, and
+ * meditation.") to the same six items, while leaving a single-company prose
+ * answer to the existing fallback rather than fabricating junk projects. Returns
+ * only the name-like segments (drops the prose ones), dedupes
+ * case-insensitively, caps at 10. Fine-grained project-vs-interest separation
+ * within one answer needs real LLM extraction (follow-up); everything kept maps
+ * to the single field the gap-fill is currently collecting.
+ */
+export function parseGapFillFreeformList(raw: string): string[] {
+  const candidates = raw
+    .split(/[\n;,.]+|\s+(?:and|&)\s+/i)
+    .map((s) => s.trim())
+    .map((s) => s.replace(/^(?:\d+[.)]\s*|[-*•]\s*)/, '').trim())
+    .map((s) => s.replace(/\([^)]*\)/g, '').trim())
+    .map((s) =>
+      s
+        .replace(
+          /^(?:running\s+(?:\w+\s+)?companies?:?\s*|side\s+projects?:?\s*|my\s+projects?\s+(?:are|is):?\s*|i'?m\s+working\s+on:?\s*|i\s+am\s+working\s+on:?\s*|working\s+on:?\s*|projects?:?\s*|also\s+|plus\s+)/i,
+          '',
+        )
+        .trim(),
+    )
+    .filter((s) => s.length > 0 && s.length <= 120)
+  if (candidates.length === 0) return []
+  // Stop-words a project name never opens with — their presence at the start of
+  // a segment marks it as a prose fragment, not a name.
+  const STOP_WORDS = new Set<string>([
+    'i',
+    'im',
+    'we',
+    'us',
+    'my',
+    'our',
+    'a',
+    'an',
+    'the',
+    'it',
+    'its',
+    'they',
+    'their',
+    'this',
+    'that',
+    'building',
+    'doing',
+    'making',
+  ])
+  const isNameLike = (s: string): boolean => {
+    const words = s.split(/\s+/)
+    if (words.length > 6) return false
+    const first = (words[0] ?? '').toLowerCase().replace(/[^a-z']/g, '')
+    return first.length > 0 && !STOP_WORDS.has(first)
+  }
+  const nameLike = candidates.filter(isNameLike)
+  // Require a list-shaped answer: at least one name-like segment AND a majority
+  // of all segments name-like. Prose ("I run Caldera, …") fails this and yields
+  // []; a clean list or a single bare name passes.
+  if (nameLike.length === 0 || nameLike.length * 2 < candidates.length) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const c of nameLike) {
     const key = c.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
