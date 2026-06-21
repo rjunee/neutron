@@ -1,6 +1,8 @@
 import type { TaskStore } from '../../../tasks/store.ts'
 import type { LlmCallFn } from '../../../onboarding/interview/phase-spec-resolver.ts'
 import type { PersonaPromptLoader } from '../../realmode-composer/persona-loader.ts'
+import type { ProactiveContextSources } from '../../proactive/morning-brief.ts'
+import type { ProactiveTopicCandidate } from '../../proactive/idle-nudge-sweep.ts'
 
 export interface TasksCompositionInput {
   /**
@@ -77,6 +79,53 @@ export interface TasksCompositionInput {
       }) => { dir: string; name?: string } | null
       /** Override the 500ms coalesce window. */
       debounce_ms?: number
+    }
+    /**
+     * P0-5 — proactive messaging (gap-audit WAVE 2 Track A). When supplied,
+     * the composer wires the daily morning brief and/or the idle-topic
+     * nudge sweep onto the shared cron registry, posting through the
+     * production `ChannelRouter`. Both reuse the existing cron infra + the
+     * P6 nudge ranker (`current_focus_pick`); this block only supplies the
+     * production-specific seams (which topic to post to, how to enumerate
+     * idle topics, optional extra context sources).
+     *
+     * Optional — when omitted neither cron registers (unchanged Open
+     * default). Each half is independently gated:
+     *   • The morning brief registers only when `resolveGeneralTopic` is
+     *     set and returns a topic; absent → no brief.
+     *   • The idle-nudge sweep registers only when `listIdleTopics` is set;
+     *     absent → no sweep (Neutron has no generic last-activity index yet,
+     *     so the host supplies the enumeration).
+     */
+    proactive?: {
+      /**
+       * Resolve the General/main topic's `channel_topic_id` the brief posts
+       * to (`<chat_id>[:<thread_id>]` for Telegram). Return null to disable
+       * the brief for this instance (e.g. onboarding not yet complete).
+       */
+      resolveGeneralTopic?: () => string | null
+      /**
+       * Extra brief context providers (calendar / entity deltas / project
+       * STATUS). Each is optional + gathered behind its own try/catch. The
+       * focus-queue source defaults to the canonical TaskStore when this
+       * omits `focusQueue`.
+       */
+      sources?: ProactiveContextSources
+      /**
+       * Enumerate the active project-bound topics + their last-activity
+       * watermark for the idle sweep. Required to enable the sweep.
+       */
+      listIdleTopics?: () => ProactiveTopicCandidate[] | Promise<ProactiveTopicCandidate[]>
+      /** Owner IANA timezone (defaults to America/Los_Angeles). */
+      timezone?: string
+      /** Owner-local hour at/after which the brief may post (default 7). */
+      brief_hour?: number
+      /** Override the morning-brief tick cadence (testing seam). */
+      brief_interval_ms?: number
+      /** Override the idle threshold (default 4h). */
+      idle_threshold_ms?: number
+      /** Override the sweep cadence (default hourly). */
+      sweep_interval_ms?: number
     }
   }
 }
