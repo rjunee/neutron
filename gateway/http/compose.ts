@@ -577,6 +577,15 @@ export interface ComposeHttpHandlerInput {
    */
   coresOAuth?: CoresSurfaceHandler
   /**
+   * WAVE 2 Track A — unified Integrations admin surface. Owns
+   * `GET /api/cores/integrations` + `/api/cores/api-keys/*`. Mounted BEFORE
+   * `cores` (which 404s those shapes) and independent of `coresOAuth`, so
+   * standalone API-key management works with no Google OAuth client.
+   *
+   * Surface factory: `gateway/http/cores-integrations-surface.ts`.
+   */
+  coresIntegrations?: CoresSurfaceHandler
+  /**
    * E2E onboarding walkthrough — optional synthetic session-mint
    * surface. Owns `POST /api/dev/mint-session`. Mounted FIRST in the
    * precedence chain so it bypasses every other surface; the route is
@@ -794,6 +803,7 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
     appBackups,
     cores,
     coresOAuth,
+    coresIntegrations,
     notesDrawerBrowser,
     devMintSession,
     authGate,
@@ -1150,6 +1160,16 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       if (coresOAuth !== undefined) {
         const coresOAuthRes = await coresOAuth.handler(req)
         if (coresOAuthRes !== null) return coresOAuthRes
+      }
+      // 0m0b. Cores Integrations surface — WAVE 2 Track A. Owns
+      //       `/api/cores/integrations` + `/api/cores/api-keys/*`. Mounted
+      //       BEFORE the bundled-Cores admin surface (which would 404 these
+      //       shapes) and independent of the OAuth surface above, so
+      //       standalone API-key management works with no Google OAuth
+      //       client. Returns `null` for non-owned paths.
+      if (coresIntegrations !== undefined) {
+        const coresIntegrationsRes = await coresIntegrations.handler(req)
+        if (coresIntegrationsRes !== null) return coresIntegrationsRes
       }
       // 0m. Bundled-Cores admin surface — P3. Owns `/api/cores[/<slug>]`.
       //     Mounted ahead of landing/cross-instance chains so the path is

@@ -14,6 +14,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import type { McpClient } from '../memory-store.ts'
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'
+import { bootPgliteBrain } from './boot-pglite-brain.ts'
 
 // ─── Layer 1: real GBrain PGLite round-trip ──────────────────────────────
 
@@ -22,20 +23,8 @@ describe('GBrainMemoryStore — real GBrain PGLite round-trip', () => {
   let client: McpClient
 
   beforeAll(async () => {
-    const engMod = (await import('gbrain' + '/pglite-engine')) as {
-      PGLiteEngine: new () => {
-        connect(o: { database_url: string }): Promise<void>
-        initSchema(): Promise<void>
-        setConfig(key: string, value: string): Promise<void>
-        disconnect(): Promise<void>
-      }
-    }
-    const opsMod = (await import('gbrain' + '/operations')) as {
-      operations: Array<{ name: string; handler: (ctx: unknown, p: unknown) => Promise<unknown> }>
-    }
-    const eng = new engMod.PGLiteEngine()
-    await eng.connect({ database_url: '' })
-    await eng.initSchema()
+    // Serialised + retry-hardened real-PGLite boot (see boot-pglite-brain.ts).
+    const { engine: eng, operations } = await bootPgliteBrain()
     // No embedding provider is configured under `bun test` (no API key), so the
     // default cheap-hybrid `search` would have no vectors to rank. Force the
     // keyword-only (BM25/ILIKE over `chunk_text`) path so the non-empty search
@@ -52,7 +41,7 @@ describe('GBrainMemoryStore — real GBrain PGLite round-trip', () => {
     }
     client = {
       async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-        const op = opsMod.operations.find((o) => o.name === name)
+        const op = operations.find((o) => o.name === name)
         if (op === undefined) throw new Error(`no gbrain op: ${name}`)
         return op.handler(ctx, args)
       },

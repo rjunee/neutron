@@ -147,6 +147,175 @@ construction against the single real implementation.
   for Atlas/Sentinel yet — this round makes the substrate correctly SERVE the
   persona kinds; wiring a chat-surface trigger remains a follow-up.
 
+## 2026-06-21 — PR #13 post-merge CI red — root-caused & fixed (real-PGLite boot flake)
+
+After `origin/main` was merged into `feat-integrations-admin-ui-wave2-clean` to
+resolve conflicts, CI `test` went red on one chunk per run — a **different test
+each run**, always an `(unnamed)` failure in a real-GBrain round-trip suite
+(`scribe → GBrain real PGLite round-trip` in chunk 7; `B2 memory mirror — real
+GBrain round-trip` in chunk 2). Not the integrations feature — those tests pass
+23/23 — and not a merge regression: every one of these suites is green standalone
+and byte-identical to `main`.
+
+**Root cause** (from the CI stack, run #27900992736):
+
+```
+TypeError: undefined is not an object (evaluating 'probe.pages_exists')
+  at applyForwardReferenceBootstrap (node_modules/gbrain/.../pglite-engine.ts:475)
+  at async initSchema (gbrain/.../pglite-engine.ts:299)
+  at async bootBrain (connect/__tests__/shared-project-memory-mirror.test.ts:82)
+```
+
+PGLite is a single-threaded in-process WASM Postgres. `scripts/run-tests.sh`
+runs each chunk at `--max-concurrency=4` and bun loads a whole chunk into ONE
+process, so multiple real-PGLite test files boot their engines concurrently — or
+one boots while sibling files starve the CPU. gbrain's pre-schema bootstrap
+probe (`const probe = rows[0]`) then intermittently sees a 0-row result, leaving
+`probe` undefined → the throw above, surfacing as an `(unnamed)` `beforeAll`
+failure. The merge added ~6 test files, shifting chunk boundaries so two
+real-PGLite files (scribe-cores-source idx 659 + scribe-gbrain idx 661) now share
+chunk 7, tipping a **pre-existing latent flake** (it affects `main` too).
+
+**Fix** (no assertion weakened): extracted the duplicated real-PGLite boot from
+all five GBrain round-trip suites into a shared
+`gbrain-memory/__tests__/boot-pglite-brain.ts` that (1) serialises engine boots
+behind a process-global async mutex so two heavy PGLite inits never overlap
+within a chunk, and (2) bounded-retries a fresh engine ONLY on the known
+transient bootstrap-probe error (`/evaluating 'probe\./`) — any other boot error
+rethrows, so a genuine schema regression still fails. Files: new helper +
+`gbrain-memory/__tests__/{sync-hook,memory-store}.test.ts`,
+`scribe/__tests__/{scribe-cores-source,scribe-gbrain-roundtrip}.test.ts`,
+`connect/__tests__/shared-project-memory-mirror.test.ts`.
+
+**Verification:** `bunx tsc --noEmit` clean; full `scripts/run-tests.sh` GREEN
+(8/8 chunks, 0 fail, 737 files, coverage audit PASS); the 5 PGLite files green
+5×5 in one process at `--max-concurrency=5` (all boots forced to compete — a
+harder stress than CI); integrations feature tests 23/23.
+
+## 2026-06-21 — Integrations PR #13 fix-pass (Argus: 1 blocker + 2 important)
+
+Addresses the Argus review of PR #13 (`feat-integrations-admin-ui-wave2-clean`).
+
+**[BLOCKING] Session-hydration redirect bounced authenticated users to /login.**
+`app/app/integrations.tsx`'s redirect effect fired whenever `user === null`
+without guarding on the hydration state — so a direct load / refresh / deep-link
+of `/integrations` bounced an already-signed-in user to `/login` while the token
+was still being read from storage (`user` is transiently null during
+`status === 'hydrating'`). FIX: extracted the decision into a pure, unit-tested
+helper `shouldRedirectToLogin({status, user})` (`app/lib/auth-helpers.ts`) that
+redirects ONLY on `status === 'ready' && user === null`, and routed BOTH
+`integrations.tsx` and `settings.tsx` through it (DRY — settings already had the
+correct guard inline). Tests: `app/__tests__/auth-helpers.test.ts` — hydrated+authed
+user NOT redirected, mid-hydration user NOT redirected, resolved-unauthenticated
+IS redirected.
+
+**[IMPORTANT] Standalone API-key surface was gated on the Google-OAuth client.**
+The `/api/cores/integrations` + `/api/cores/api-keys/*` routes AND the
+`integrations_*` chat tools were mounted only inside the `input.cores.oauth !==
+undefined` branch of `wire-cores-surfaces.ts`, so a Cores + bearer-auth
+deployment with NO Google OAuth client 404'd on ALL standalone API-key
+management (e.g. Tavily) — even though API keys never need Google OAuth. FIX:
+extracted a dedicated **`gateway/http/cores-integrations-surface.ts`** owning
+those routes, mounted under the AUTH gate (new `cores_integrations_surface`
+composition slot, chained ahead of `/api/cores` in `compose.ts`), INDEPENDENT of
+the OAuth-client gate. The OAuth token manager is now built under the auth gate
+too (empty client creds when no Google client — `getStatus`/`disconnect` only
+read/delete SecretsStore rows). `integrations_connect` on an OAuth slot returns a
+clear `oauth_not_configured` error when no client is wired; API-key connect works
+regardless. Tests: `cores-integrations-surface.test.ts` now constructs the
+surface with NO Google client (empty creds) and proves list/set/delete all work.
+
+**[IMPORTANT] OAuth-disconnect parity (chat ≠ UI).** The UI/HTTP disconnect
+revoked tokens AND flagged every affected Core `install_failed_dependency_missing`;
+the chat `integrations_disconnect` tool revoked tokens ONLY (its deps didn't even
+carry `projectDb`), so after a chat disconnect `/api/cores` still reported the
+Core `installed` with a silently-broken dependency. FIX: extracted a shared
+**`disconnectOAuth({tokens, registry, projectDb, project_slug, label})`** brain in
+`gateway/cores/integrations.ts` that BOTH the HTTP `handleDisconnect` and the chat
+tool now call (mirrors how `runOAuthStart`/`startOAuth` unifies connect); threaded
+`input.db` into `buildIntegrationsTools`. Tests: `integrations-tools.test.ts` —
+chat disconnect flips the affected Core's `install_state` to
+`install_failed_dependency_missing` (real DB mutation) + returns `affected_cores`.
+
+**Verification:** `bunx tsc --noEmit` clean (root + `app/`); FULL
+`scripts/run-tests.sh` GREEN — 731 files / 8 bounded-memory chunks, 0 failed,
+coverage audit PASS. `composer.ts` untouched.
+
+## 2026-06-21 — Integrations admin UI + agent-native parity (WAVE 2 Track A, gap-audit §(b) cat 9)
+
+One surface that SHOWS everything a project has connected — per-Core Google
+OAuth accounts (Calendar `google_calendar`, Email `gmail_compose`, Google
+Workspace `google_workspace`) AND standalone API keys (Research Core's
+`tavily`) — each with connect / disconnect / status, plus the SAME actions
+available in chat. Named **Integrations** (NOT "Connections" — avoids collision
+with the existing Connect collaboration feature). Scope: settings UI + chat
+tools + reading/writing per-Core connection state. NO `composer.ts`, no new
+global connection registry — the integration set is DERIVED from the bundled
+Cores' own `manifest.secrets[]`, so per-Core ownership stays intact.
+
+**The gap this closed.** Per-Core Google OAuth already had a full path
+(`/api/cores/oauth/google/*` + `OAuthTokenManager` + the per-Core `[slug].tsx`
+setup screen). What was missing: (1) there was NO surface at all to set/list/
+clear standalone `byo_api_key` slots (Tavily etc. could only be set by hand in
+the DB), (2) no unified view of everything connected, and (3) no agent-native
+path — the agent couldn't connect/disconnect anything.
+
+**NEW: `gateway/cores/integrations.ts`** — the shared brain behind BOTH the HTTP
+surface and the chat tools (one code path, no drift):
+- `buildIntegrationsStatus()` — unified status. OAuth status reads through the
+  existing `OAuthTokenManager.getStatus()`; API-key `connected` is a presence
+  check over the `byo_api_key` rows. NO plaintext ever leaves the function.
+- `setApiKey()` / `deleteApiKey()` — store/rotate (via `SecretsStore.replaceAtomic`,
+  so set-or-rotate is one transaction) and clear a key under the manifest-declared
+  label, exactly where the owning Core reads it via its `SecretsAccessor`.
+  Rejects labels no bundled Core declares + empty values.
+- `collectOAuthSlots()` / `collectApiKeySlots()` — derive the slot set from the
+  bundled registry's manifests.
+
+**NEW: agent-native chat tools (`gateway/cores/integrations-tools.ts`).** Three
+tools registered against the per-process `ToolRegistry` in
+`wire-cores-surfaces.ts` (sharing the same `tokens` + `secretsStore` + registry
+the HTTP surface holds):
+- `integrations_list` — every OAuth account + API-key slot with status (no secrets).
+- `integrations_connect` — OAuth label → runs the SAME in-process OAuth start
+  the UI runs (`CoresOAuthSurface.startOAuth`, shared with `GET /start`) and
+  hands back the PUBLIC Google `authorize_url` (`accounts.google.com/…`) the user
+  opens — NOT a bearer-gated gateway `/start` link (which 401s in a browser —
+  Codex round-1 P2); API-key label + `value` → stores the key.
+- `integrations_disconnect` — OAuth → `tokens.disconnect()` (revoke + delete);
+  API-key → clears the stored key.
+
+**HTTP surface (folded into `cores-oauth-surface.ts`).** Three routes, bearer-gated:
+- `GET    /api/cores/integrations`     → unified OAuth + API-key status
+- `POST   /api/cores/api-keys/<label>` → set/rotate a key (body `{value}`)
+- `DELETE /api/cores/api-keys/<label>` → clear a key
+
+Folded into the existing OAuth surface (not a new mounted surface) because that
+surface already receives the registry + `tokens` + `secretsStore` + `auth` +
+`project_slug` — zero new composition wiring, no `compose.ts`/`composer.ts`
+edits. The handler's owned-prefix check broadened from the single OAuth base to
+also own `/api/cores/integrations` + `/api/cores/api-keys/*`. Unknown label →
+400; empty/invalid value → 422.
+
+**App.** `app/lib/cores-client.ts` gains `integrations()` / `setApiKey()` /
+`deleteApiKey()`. New screen `app/app/integrations.tsx` (linked from Settings)
+lists both sections with connect/disconnect/paste-key/clear. The list+status
+logic is the pure, unit-tested `app/lib/integrations-view.ts`.
+
+### Tests (all real, no mocked SQL — `installBundledCores` walks the repo so the
+slots are the genuine manifest declarations)
+- `gateway/cores/__tests__/integrations.test.ts` — slot derivation; status
+  reflects a connected OAuth account + a stored key; `setApiKey` store→rotate
+  keeps a single row; `deleteApiKey` clears + is idempotent; unknown/empty reject.
+- `gateway/cores/__tests__/integrations-tools.test.ts` — the AGENT TOOL PATH
+  mutates stored state: chat-connect of `tavily` writes the secret; chat-connect
+  of an OAuth label returns the start URL; chat-disconnect deletes OAuth tokens
+  and clears API keys; unknown-label + missing-value reject.
+- `gateway/__tests__/cores-integrations-surface.test.ts` — `GET /integrations`
+  lists both with correct status (and never leaks plaintext); `POST` then
+  `DELETE /api-keys/tavily` mutates the store; unknown label 400; no bearer 401.
+- `app/__tests__/integrations-view.test.ts` — view-model status/labels/counts.
+
 ## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
 
 **Problem.** The daily-driver gap audit flagged that Open collapses multi-project
