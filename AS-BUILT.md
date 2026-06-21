@@ -102,6 +102,51 @@ verdicts / spinning the fix loop). A real regression, live in prod.
 - **PR/AS-BUILT wording corrected** to scope the safety claim to the wiring +
   native round-trip (see "Scope of the safety claim" above), not real-LLM behavior.
 
+### Fix-round 2 (Argus REQUEST CHANGES — PR #14 round 3: persona dispatch mis-tooled)
+
+The legacy-prompt regression fix above stayed good. Round-3 Argus + Codex/GPT-5
+surfaced a **new blocker**: persona dispatch was wired to the persona PROMPTS but
+not the persona TOOLS. `buildRuntimeSubagentDispatch` (the only real substrate
+dispatcher, `cores/free/code-gen/src/substrate-runtime.ts`) picked its toolset with
+`input.kind === 'forge' ? forge_tool_defs : argus_tool_defs`. Every non-`forge`
+kind — including the new `atlas`/`sentinel` — fell to `ARGUS_TOOL_DEFS` (`[read,
+bash]`, bash allowlist-gated to read-only). So Atlas (research / analysis / ops /
+strategy / **writing**) would load its persona correctly but be physically unable
+to write its deliverable. The PR's `agent-dispatch.test.ts` masked this: it stubbed
+the dispatch and asserted only that the persona reached `system`, never the TOOLS.
+Codex rated it P2 (dormant — no production caller yet); Argus elevated to BLOCKING
+because the headline capability ("Atlas/Sentinel dispatch works") was wrong-by-
+construction against the single real implementation.
+
+- **[BLOCKING → fixed] per-kind toolset routing on the real substrate.**
+  `buildRuntimeSubagentDispatch` now resolves BOTH tool defs and handlers from
+  per-kind maps (`tool_defs_by_kind` / `tool_handlers_by_kind`, keyed by the new
+  `CodegenSubagentKind = 'forge'|'argus'|'atlas'|'sentinel'`) instead of a
+  forge/else branch + a single merged handler map. There is **no silent fallback**:
+  a kind dispatched with no configured surface THROWS rather than inheriting
+  another role's tools. New role toolsets in `tool-handlers.ts`:
+  - `ATLAS_TOOL_DEFS` + `buildAtlasToolHandlers()` — full read/write/edit/grep/glob
+    plus UNRESTRICTED bash (Atlas writes deliverables and runs ops).
+  - `SENTINEL_TOOL_DEFS` + `buildSentinelToolHandlers()` — read + grep/glob only
+    (a non-code reviewer inspects the artifact; no shell, no write).
+  Keying handlers by kind (not one merged map) also lets the shared tool name
+  `bash` carry different gating per role — Forge/Atlas unrestricted, Argus
+  allowlist-gated read-only, Sentinel none — instead of Argus's gated bash silently
+  clobbering Forge's in the merged map.
+- **[BLOCKING → de-stubbed] real toolset assertions on the substrate seam.**
+  `substrate-runtime.test.ts` adds a `per-kind toolset routing` suite that runs the
+  REAL `buildRuntimeSubagentDispatch` against the REAL production tool defs and
+  asserts the toolset that actually reaches `llm_call` for each kind (forge/atlas
+  write-capable, argus/sentinel read-only — and no persona kind collapses onto
+  Argus's set), that Atlas's `write` tool_use is dispatched to a real handler, that
+  Sentinel's `write` tool_use is rejected (`not available`), and that an
+  unconfigured kind throws (no silent fallback). `wiring-production.ts` supplies all
+  four kinds' defs+handlers; the gateway prod-wiring tests stay green.
+
+  Still out of scope (unchanged): no production *caller* invokes `dispatchAgent`
+  for Atlas/Sentinel yet — this round makes the substrate correctly SERVE the
+  persona kinds; wiring a chat-surface trigger remains a follow-up.
+
 ## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
 
 **Problem.** The daily-driver gap audit flagged that Open collapses multi-project

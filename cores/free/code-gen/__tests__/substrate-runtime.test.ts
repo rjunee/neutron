@@ -11,6 +11,13 @@ import {
   type CodegenToolDefinition,
   type CodegenToolHandler,
 } from '../src/substrate-runtime.ts'
+import {
+  ARGUS_TOOL_DEFS as REAL_ARGUS_TOOL_DEFS,
+  ATLAS_TOOL_DEFS,
+  FORGE_TOOL_DEFS as REAL_FORGE_TOOL_DEFS,
+  SENTINEL_TOOL_DEFS,
+  buildSentinelToolHandlers,
+} from '../src/tool-handlers.ts'
 
 const FORGE_TOOL_DEFS: CodegenToolDefinition[] = [
   {
@@ -90,9 +97,8 @@ describe('buildRuntimeSubagentDispatch', () => {
 
     const dispatch = buildRuntimeSubagentDispatch({
       llm_call: llm,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: stubHandlers,
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: stubHandlers },
     })
 
     const result = await dispatch(makeInput())
@@ -127,9 +133,8 @@ describe('buildRuntimeSubagentDispatch', () => {
 
     const dispatch = buildRuntimeSubagentDispatch({
       llm_call: llm,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: handlers,
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: handlers },
     })
 
     const result = await dispatch(makeInput())
@@ -168,9 +173,8 @@ describe('buildRuntimeSubagentDispatch', () => {
 
     const dispatch = buildRuntimeSubagentDispatch({
       llm_call: llm,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: stubHandlers,
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: stubHandlers },
     })
 
     // Force the deadline to elapse BEFORE the second tool-use call by
@@ -197,9 +201,8 @@ describe('buildRuntimeSubagentDispatch', () => {
     })
     const dispatch2 = buildRuntimeSubagentDispatch({
       llm_call: llm2,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: stubHandlers,
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: stubHandlers },
     })
 
     const result = await dispatch2(makeInput({ timeout_ms: 50 }))
@@ -228,9 +231,8 @@ describe('buildRuntimeSubagentDispatch', () => {
 
     const dispatch = buildRuntimeSubagentDispatch({
       llm_call: llm,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: stubHandlers,
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: stubHandlers },
       max_turns_per_subagent: 50,
     })
 
@@ -261,9 +263,8 @@ describe('buildRuntimeSubagentDispatch', () => {
 
     const dispatch = buildRuntimeSubagentDispatch({
       llm_call: llm,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: {}, // no handlers
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: {} }, // no handlers
     })
 
     const result = await dispatch(makeInput())
@@ -295,9 +296,8 @@ describe('buildRuntimeSubagentDispatch', () => {
 
     const dispatch = buildRuntimeSubagentDispatch({
       llm_call: llm,
-      forge_tool_defs: FORGE_TOOL_DEFS,
-      argus_tool_defs: ARGUS_TOOL_DEFS,
-      tool_handlers: stubHandlers,
+      tool_defs_by_kind: { forge: FORGE_TOOL_DEFS, argus: ARGUS_TOOL_DEFS },
+      tool_handlers_by_kind: { forge: stubHandlers },
       mint_run_id: () => 'run-fixed-id',
       on_subagent_start: async (input, run_id) => {
         started = { input, run_id }
@@ -314,6 +314,153 @@ describe('buildRuntimeSubagentDispatch', () => {
     expect(completed).toBeDefined()
     expect(completed!.run_id).toBe('run-fixed-id')
     expect(completed!.result.status).toBe('completed')
+  })
+})
+
+/**
+ * Per-kind toolset routing — the seam the round-3 BLOCKER lived at.
+ *
+ * Before this fix `buildRuntimeSubagentDispatch` branched
+ * `kind === 'forge' ? forge_defs : argus_defs`, so EVERY non-forge kind —
+ * including the persona agents atlas/sentinel — fell to Argus's read-only
+ * `[read, bash]` set and was physically unable to write its deliverable.
+ * The trident-side test masked this by stubbing the dispatch and asserting
+ * only the system prompt. These tests run the REAL substrate against the
+ * REAL production tool defs/handlers and assert the TOOLSET that reaches
+ * the model (and the handler that runs) for each kind.
+ */
+describe('buildRuntimeSubagentDispatch — per-kind toolset routing', () => {
+  const realToolDefsByKind = () => ({
+    forge: REAL_FORGE_TOOL_DEFS,
+    argus: REAL_ARGUS_TOOL_DEFS,
+    atlas: ATLAS_TOOL_DEFS,
+    sentinel: SENTINEL_TOOL_DEFS,
+  })
+
+  const KIND_DEFS = [
+    ['forge', REAL_FORGE_TOOL_DEFS],
+    ['argus', REAL_ARGUS_TOOL_DEFS],
+    ['atlas', ATLAS_TOOL_DEFS],
+    ['sentinel', SENTINEL_TOOL_DEFS],
+  ] as const
+
+  for (const [kind, expected] of KIND_DEFS) {
+    test(`${kind} is offered its OWN toolset on the real substrate seam`, async () => {
+      const llm = buildCannedCodegenLlmCall({
+        responses: [{ text: 'done', tool_calls: [], stop_reason: 'end_turn' }],
+      })
+      const dispatch = buildRuntimeSubagentDispatch({
+        llm_call: llm,
+        tool_defs_by_kind: realToolDefsByKind(),
+        tool_handlers_by_kind: { forge: {}, argus: {}, atlas: {}, sentinel: {} },
+      })
+
+      await dispatch(makeInput({ kind }))
+
+      const offered = (llm.calls[0]?.tools ?? []).map((t) => t.name)
+      expect(offered).toEqual(expected.map((t) => t.name))
+      // None of the persona kinds silently collapse onto Argus's set.
+      if (kind !== 'argus') {
+        expect(offered).not.toEqual(REAL_ARGUS_TOOL_DEFS.map((t) => t.name))
+      }
+    })
+  }
+
+  test('atlas is write-capable; sentinel + argus are read-only (no write/edit)', () => {
+    const atlas = ATLAS_TOOL_DEFS.map((t) => t.name)
+    expect(atlas).toContain('write')
+    expect(atlas).toContain('edit')
+    for (const defs of [SENTINEL_TOOL_DEFS, REAL_ARGUS_TOOL_DEFS]) {
+      const names = defs.map((t) => t.name)
+      expect(names).not.toContain('write')
+      expect(names).not.toContain('edit')
+    }
+  })
+
+  test("atlas's write tool_use is dispatched to a real handler (Atlas can write)", async () => {
+    const writes: Record<string, unknown>[] = []
+    const atlasHandlers: Record<string, CodegenToolHandler> = {
+      write: async (input) => {
+        writes.push(input)
+        return { content: 'wrote out.md' }
+      },
+    }
+    const llm = buildCannedCodegenLlmCall({
+      responses: [
+        {
+          text: 'writing the deliverable',
+          tool_calls: [
+            {
+              type: 'tool_use',
+              id: 'w',
+              name: 'write',
+              input: { file: 'out.md', content: 'hi' },
+            },
+          ],
+          stop_reason: 'tool_use',
+        },
+        { text: 'done', tool_calls: [], stop_reason: 'end_turn' },
+      ],
+    })
+    const dispatch = buildRuntimeSubagentDispatch({
+      llm_call: llm,
+      tool_defs_by_kind: realToolDefsByKind(),
+      tool_handlers_by_kind: { atlas: atlasHandlers },
+    })
+
+    const out = await dispatch(makeInput({ kind: 'atlas' }))
+    expect(out.status).toBe('completed')
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toEqual({ file: 'out.md', content: 'hi' })
+  })
+
+  test("sentinel's write tool_use is rejected — it has no write handler", async () => {
+    const llm = buildCannedCodegenLlmCall({
+      responses: [
+        {
+          text: 'attempting to mutate',
+          tool_calls: [
+            { type: 'tool_use', id: 'w', name: 'write', input: { file: 'x' } },
+          ],
+          stop_reason: 'tool_use',
+        },
+        { text: 'gave up', tool_calls: [], stop_reason: 'end_turn' },
+      ],
+    })
+    const dispatch = buildRuntimeSubagentDispatch({
+      llm_call: llm,
+      tool_defs_by_kind: realToolDefsByKind(),
+      tool_handlers_by_kind: { sentinel: buildSentinelToolHandlers() },
+    })
+
+    await dispatch(makeInput({ kind: 'sentinel' }))
+
+    const secondCall = llm.calls[1]
+    expect(secondCall).toBeDefined()
+    const lastMsg = secondCall!.messages[secondCall!.messages.length - 1]
+    const arr = lastMsg!.content as Array<{
+      type: string
+      content?: string
+      is_error?: boolean
+    }>
+    expect(arr[0]!.type).toBe('tool_result')
+    expect(arr[0]!.is_error).toBe(true)
+    expect(arr[0]!.content).toContain('not available')
+  })
+
+  test('a kind with no configured toolset throws (no silent fallback)', async () => {
+    const llm = buildCannedCodegenLlmCall({
+      responses: [{ text: 'x', tool_calls: [], stop_reason: 'end_turn' }],
+    })
+    const dispatch = buildRuntimeSubagentDispatch({
+      llm_call: llm,
+      tool_defs_by_kind: { forge: REAL_FORGE_TOOL_DEFS }, // atlas omitted
+      tool_handlers_by_kind: { forge: {} },
+    })
+
+    expect(dispatch(makeInput({ kind: 'atlas' }))).rejects.toThrow(
+      /no tool defs configured for sub-agent kind 'atlas'/,
+    )
   })
 })
 

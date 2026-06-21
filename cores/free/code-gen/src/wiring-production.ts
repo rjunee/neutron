@@ -46,9 +46,13 @@ import {
 } from './substrate-runtime.ts'
 import {
   ARGUS_TOOL_DEFS,
+  ATLAS_TOOL_DEFS,
   FORGE_TOOL_DEFS,
+  SENTINEL_TOOL_DEFS,
   buildArgusToolHandlers,
+  buildAtlasToolHandlers,
   buildForgeToolHandlers,
+  buildSentinelToolHandlers,
 } from './tool-handlers.ts'
 
 export interface BuildCodegenWiringOptions {
@@ -125,11 +129,22 @@ export function buildCodegenWiring(
         }
       : buildRuntimeSubagentDispatch({
           llm_call: opts.llm_call,
-          forge_tool_defs: FORGE_TOOL_DEFS,
-          argus_tool_defs: ARGUS_TOOL_DEFS,
-          tool_handlers: {
-            ...buildForgeToolHandlers(),
-            ...buildArgusToolHandlers(),
+          // Each kind gets its own role-appropriate surface. Keyed by
+          // kind (NOT a single merged handler map) so a shared tool name
+          // — `bash` — can carry different gating per role: Forge/Atlas
+          // run unrestricted bash, Argus is allowlist-gated read-only,
+          // Sentinel has no shell at all.
+          tool_defs_by_kind: {
+            forge: FORGE_TOOL_DEFS,
+            argus: ARGUS_TOOL_DEFS,
+            atlas: ATLAS_TOOL_DEFS,
+            sentinel: SENTINEL_TOOL_DEFS,
+          },
+          tool_handlers_by_kind: {
+            forge: buildForgeToolHandlers(),
+            argus: buildArgusToolHandlers(),
+            atlas: buildAtlasToolHandlers(),
+            sentinel: buildSentinelToolHandlers(),
           },
         })
 
