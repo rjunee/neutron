@@ -383,7 +383,7 @@ describe('FIX 8 — model routing defaults', () => {
     const models = await captureModels({})
     expect(models['forge']).toBe('claude-sonnet-4-6')
     expect(models['argus']).toBe('claude-sonnet-4-6')
-    expect(models['forge'].length).toBeGreaterThan(0)
+    expect((models['forge'] ?? '').length).toBeGreaterThan(0)
   })
 
   test('explicit forge/argus model overrides route through', async () => {

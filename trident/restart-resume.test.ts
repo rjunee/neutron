@@ -57,7 +57,10 @@ interface DispatchSpy {
 function spyDispatch(handler: (input: Parameters<TridentDispatch>[0]) => string): DispatchSpy {
   const byPhase = new Map<string, number>()
   const dispatch: TridentDispatch = async (input) => {
-    byPhase.set(input.phase, (byPhase.get(input.phase) ?? 0) + 1)
+    // Orchestrator-spawned forge/argus always carry a phase; the `?? phaseless`
+    // key only guards the type (a phase-less dispatchAgent never hits this spy).
+    const phaseKey = input.phase ?? 'phaseless'
+    byPhase.set(phaseKey, (byPhase.get(phaseKey) ?? 0) + 1)
     return { result: handler(input), status: 'completed' }
   }
   return { dispatch, byPhase, total: () => [...byPhase.values()].reduce((a, b) => a + b, 0) }
