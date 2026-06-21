@@ -97,6 +97,19 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   each. Registered as the `trident` module in
   `gateway/composition/build-core-modules.ts`, started/stopped with the
   graph exactly like the reminders loop.
+- **Async result delivery** — when a run transitions into a terminal phase
+  (`done` / `failed`), the loop posts the result back to the chat topic the
+  build came from. Each run persists its originating `chat_id` / `thread_id`
+  at dispatch; on the terminal transition the loop fires its `on_terminal`
+  hook (mirroring the reminder loop's `on_fired`): `buildTridentDelivery`
+  (`trident/delivery.ts`) composes a per-state result message and posts it
+  through the `ChannelRouter`. It is **generic** — keyed on the run's own
+  routing fields, not on `/code`, so any background agent that lands a
+  `code_trident_runs` row delivers through the same seam; runs with no
+  originating chat (`chat_id` null, e.g. cron-seeded) no-op. The hook is
+  failure-safe: a posting outage is logged and never un-terminates a
+  finished build nor aborts the tick. The composer is a pure function so
+  the exact copy per terminal state is unit-tested in isolation.
 - **git-mode auto-detect** — `detectMergeMode(repoPath, probe)`
   (`trident/git-mode.ts`): `'pr'` when the repo has a GitHub `origin` AND
   `gh` is available, else `'local'`. Persisted per run; no user config
