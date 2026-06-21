@@ -1,0 +1,6 @@
+{
+  "name": "@neutron/chat-core",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true
+}

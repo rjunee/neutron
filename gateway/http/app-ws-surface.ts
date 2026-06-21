@@ -33,6 +33,7 @@ import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
 import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
 import {
   decodeAppWsInbound,
+  decodeAppWsResume,
   appWsTopicId,
   MAX_USER_MESSAGE_LEN,
   payloadIsEmpty,
@@ -243,6 +244,18 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           ts: Date.now(),
         }
         if (data.project_id !== undefined) ready.project_id = data.project_id
+        // Chat-sync foundation — tell the client the current high-water seq
+        // so it can decide whether a `resume` is even needed (its local
+        // cursor already at last_seen_seq → skip the round-trip). Cheap MAX
+        // query; 0 / unset when no durable log is wired.
+        if (adapter.hasChatLog) {
+          try {
+            const last_seen_seq = await adapter.currentMaxSeq(data.channel_topic_id)
+            if (last_seen_seq > 0) ready.last_seen_seq = last_seen_seq
+          } catch {
+            /* non-fatal: omit last_seen_seq, client resumes from its cursor */
+          }
+        }
         send(ready)
         console.info(
           `[app-ws] instance=${data.project_slug} user=${data.user_id} topic=${data.channel_topic_id} project=${data.project_id ?? '-'} platform=${data.platform ?? '-'} event=open`,
@@ -260,6 +273,27 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           )
           return
         }
+        // Chat-sync foundation — gap-fill request. Replay everything after
+        // the client's cursor to THIS socket only (the requesting device),
+        // so a reconnect / cold-open fills its gap without re-broadcasting
+        // to other live devices. No-op (replayAfter returns []) when no
+        // durable log is wired. Checked BEFORE the message decoder so the
+        // user_message path keeps its narrow type.
+        const resume = decodeAppWsResume(parsed)
+        if (resume !== null) {
+          try {
+            const replay = await adapter.replayAfter(data.channel_topic_id, resume.after_seq)
+            const send = data.send
+            for (const env of replay) {
+              if (send !== undefined) send(env)
+              else ws.send(JSON.stringify(env))
+            }
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : 'resume error'
+            ws.send(JSON.stringify({ v: 1, type: 'error', code: 'resume_failed', message: reason }))
+          }
+          return
+        }
         const inbound = decodeAppWsInbound(parsed)
         if (inbound === null) {
           ws.send(
@@ -267,7 +301,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
               v: 1,
               type: 'error',
               code: 'malformed_envelope',
-              message: 'expected { v:1, type:"user_message", body, ... }',
+              message: 'expected { v:1, type:"user_message", body, ... } or { v:1, type:"resume", after_seq }',
             }),
           )
           return
@@ -282,7 +316,10 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           data.project_id = inbound.project_id
         }
         try {
-          adapter.emitUserMessageEcho({
+          // Chat-sync foundation — persist + stamp seq + fan out the echo
+          // (de-dups on client_msg_id when a durable log is wired). Falls
+          // back to the legacy in-memory echo when no log is configured.
+          const { was_new } = await adapter.ingestUserMessage({
             channel_topic_id: data.channel_topic_id,
             user_id: data.user_id,
             body: inbound.body,
@@ -290,6 +327,15 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             ...(inbound_project_id !== undefined ? { project_id: inbound_project_id } : {}),
             ...(inbound.attachments !== undefined ? { attachments: inbound.attachments } : {}),
           })
+          // DOUBLE-DISPATCH GUARD (Argus + Codex P1, PR #6): when the durable
+          // log de-duped a re-sent client_msg_id (`was_new === false`), the
+          // echo above already re-rendered the message (the client de-dupes it
+          // on client_msg_id), but the side-effecting work below — the
+          // chat-command filter and the agent dispatch — MUST NOT run again, or
+          // a re-send (offline-queue flush, double-tap, HTTP/WS race) fires the
+          // agent / a command twice. Storage idempotency alone doesn't make the
+          // surface idempotent; this gate does.
+          if (!was_new) return
           // Pre-dispatch chat-command filter — when matched, the
           // filter has already executed its side effect (e.g. captured
           // a note); we post a tool-result envelope back and SKIP
@@ -446,30 +492,42 @@ async function handleSend(
   }
   if (project_id !== null) echoOpts.project_id = project_id
   if (cleaned_attachments !== null) echoOpts.attachments = cleaned_attachments
-  const message_id = ctx.adapter.emitUserMessageEcho(echoOpts)
+  // Chat-sync foundation — persist + stamp seq + fan out the echo (de-dups
+  // on client_msg_id). Falls back to the legacy in-memory echo when no
+  // durable log is wired. The returned seq rides on the HTTP response echo
+  // so an HTTP-fallback client orders this send identically to the WS path.
+  const { message_id, seq, was_new } = await ctx.adapter.ingestUserMessage(echoOpts)
   const ts = Date.now()
-  // Pre-dispatch chat-command filter — when matched, short-circuit
-  // the LLM dispatch and stash a tool-result envelope to ship in the
-  // response body. Per docs/plans/notes-core-tier1-brief.md § 3.2.
+  // DOUBLE-DISPATCH GUARD (Argus + Codex P1, PR #6): a re-sent client_msg_id
+  // (HTTP retry, or the HTTP fallback racing the WS echo of the same send)
+  // de-dupes to the existing row (`was_new === false`). The echo above already
+  // reconciled the client's bubble; the side-effecting chat-command filter +
+  // agent dispatch below MUST be skipped so the agent / a command never fires
+  // twice. We still return the canonical echo so the client renders correctly.
   let command_result: ChatCommandFilterResult | null = null
-  if (ctx.chat_command_filter !== undefined) {
-    const matchInput: Parameters<ChatCommandFilter['match']>[0] = {
-      user_id: resolved.user_id,
-      project_slug: ctx.project_slug,
-      channel_topic_id,
-      body: text,
+  if (was_new) {
+    // Pre-dispatch chat-command filter — when matched, short-circuit
+    // the LLM dispatch and stash a tool-result envelope to ship in the
+    // response body. Per docs/plans/notes-core-tier1-brief.md § 3.2.
+    if (ctx.chat_command_filter !== undefined) {
+      const matchInput: Parameters<ChatCommandFilter['match']>[0] = {
+        user_id: resolved.user_id,
+        project_slug: ctx.project_slug,
+        channel_topic_id,
+        body: text,
+      }
+      if (project_id !== null) matchInput.project_id = project_id
+      command_result = await ctx.chat_command_filter.match(matchInput)
     }
-    if (project_id !== null) matchInput.project_id = project_id
-    command_result = await ctx.chat_command_filter.match(matchInput)
-  }
-  if (command_result === null) {
-    await ctx.adapter.dispatchInbound({
-      user_id: resolved.user_id,
-      channel_topic_id,
-      body: text,
-      ...(project_id !== null ? { project_id } : {}),
-      ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
-    })
+    if (command_result === null) {
+      await ctx.adapter.dispatchInbound({
+        user_id: resolved.user_id,
+        channel_topic_id,
+        body: text,
+        ...(project_id !== null ? { project_id } : {}),
+        ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
+      })
+    }
   }
   // Return the canonical user_message envelope in the response so the
   // Expo client can render it locally when the WS path is down (the
@@ -486,6 +544,7 @@ async function handleSend(
     ...(echoOpts.client_msg_id !== undefined ? { client_msg_id: echoOpts.client_msg_id } : {}),
     ...(project_id !== null ? { project_id } : {}),
     ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
+    ...(seq !== null ? { seq } : {}),
   }
   const responseBody: Record<string, unknown> = { ok: true, message_id, echo }
   if (command_result !== null) {

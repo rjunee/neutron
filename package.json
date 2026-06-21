@@ -30,6 +30,7 @@
     "core-sdk",
     "jwt-validator",
     "channels",
+    "chat-core",
     "connect",
     "watchdog",
     "auth",

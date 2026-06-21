@@ -2,6 +2,168 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Chat-sync foundation fix-round (Argus REQUEST CHANGES): double-dispatch guard + wiring split
+
+Argus (cross-model with Codex/GPT-5) requested changes on PR #6 with two
+BLOCKING findings. This round resolves both.
+
+**BLOCKING #1 — double-dispatch (the headline).** `AppWsAdapter.ingestUserMessage`
+de-duped the persisted row on `client_msg_id` (the `AppChatStore.append`
+idempotency: a re-sent id returns the existing row with `was_new:false`), but it
+**discarded `was_new`** and returned only `{ message_id, seq }`. The app-ws
+surface therefore had no idea a send was a duplicate and *unconditionally* ran
+the **side-effecting** chat-command filter (`chat_command_filter.match`, which
+executes the command, e.g. captures a note) **and** `dispatchInbound` (the agent
+loop). So a re-sent `client_msg_id` — an offline-queue flush retry, a double-tap,
+or the HTTP fallback racing the WS echo of the same send — fired the agent / a
+command **twice**. Storage was idempotent; *behaviour* wasn't, defeating the
+spec's idempotency guarantee. Confirmed at `app-ws-surface.ts:322-355` (Codex P1
+independently).
+
+*Fix:* `ingestUserMessage` now returns `was_new` (true when no durable log is
+wired — legacy mode never de-dupes, so every send dispatches, unchanged; true on
+a persist failure — we couldn't prove it a duplicate, so dispatch rather than
+silently drop). Both surface paths (WS `message` handler + HTTP `handleSend`)
+**gate the chat-command filter + `dispatchInbound` on `was_new`**. The echo is
+still re-emitted on a duplicate (the client de-dupes it on `client_msg_id`, so a
+reconnecting device still reconciles its bubble) — only the side-effecting
+agent/command work is now exactly-once. Files: `channels/adapters/app-ws/adapter.ts`,
+`gateway/http/app-ws-surface.ts`.
+
+*Test (real, RED→GREEN):* NEW `gateway/__tests__/app-ws-no-double-dispatch.test.ts`
+(4 tests) stands up the REAL surface over `Bun.serve` against a REAL `AppChatStore`
+(SQLite temp file) with a counting receiver + counting command filter, and asserts
+that re-sending the same `client_msg_id` over WS — and over HTTP, and HTTP-racing-
+WS — dispatches the agent + command **exactly once** while re-emitting the echo
+both times with the same canonical `seq`/`message_id`. A fourth test wires the
+real server append/replay into the real client `SyncEngine` and asserts a single
+message yields **exactly one row per device** even with optimistic-insert +
+server-echo + a duplicate ingest + a reconnect replay overlapping (the spec's
+exactly-once-per-device convergence). Verified RED on the pre-fix tree (3/4 fail
+without the gate).
+
+**BLOCKING #2 — "feature inert" (wiring) — cross-repo, clarified.** Argus noted
+every `new AppWsAdapter`/`new AppChatStore` lives in `__tests__` and no
+production boot in this PUBLIC repo wires `chat_log`. On investigation (Argus
+agreed in its own notes) the production boot that constructs the adapter/registry
+and calls `createAppWsSurface` lives in the **private `neutron-managed` repo**
+(the managed/private split) — it opts into the durable log by passing `chat_log`,
+exactly as documented in §2 of the entry below. That boot is **out of scope for
+this public PR** (brief: OPEN-repo only, never touch managed). The open-repo half
+of the wiring — the adapter's optional `chat_log` seam, graceful degrade when
+absent, and the `createWebStore()` OPFS-or-in-memory web store — is complete and
+tested here. The one open-repo loose end (a speculative unused `@neutron/chat-core`
+dep on `landing/package.json`) is removed (see the web-wiring note below).
+
+**Cross-model review (Codex/GPT-5) — one fix taken, three follow-ups logged.**
+The fix-round Codex pass surfaced four correctness gaps in the *original*
+Phase-1 design (none in the double-dispatch fix itself; all pre-existing, not in
+Argus's blocking set). Triaged:
+
+- **TAKEN — sent-but-unacked sends are now retried on reconnect (Codex P1).**
+  `SendQueue` marked a row `sent` the instant `WebSocket.send()` accepted the
+  frame; if the socket dropped before the server persisted + echoed it, the row
+  was stranded `sent` and a plain `flush` (which only drains `queued`) never
+  retried it — a silently lost send. NEW `SendQueue.flushUnacked` re-drives every
+  not-`acked` row (queued + sent) oldest-first; `WebChatSession.resumeAndFlush`
+  now calls it on every (re)connect. This is SAFE precisely because of this PR's
+  guarantees: every send carries a `client_msg_id`, so the server de-dupes the
+  retry, and the new `was_new` guard means the re-delivery never re-fires the
+  agent. `acked` rows are never re-sent. Tests: 3 in `send-queue.test.ts` +
+  1 reconnect-retry in `web-session.test.ts` (RED→GREEN).
+- **FOLLOW-UP (Codex P1) — rich agent envelopes are flattened on replay.**
+  `AppChatStore.append` persists only `body/project/created_at`, so
+  `replayAfter` reconstructs a bare `agent_message` — a device that reconnects
+  loses `options`/`image_urls`/`citations`/`doc_refs`/`deep_link`/
+  `upload_affordance` that live devices saw. Proper fix needs a schema change
+  (store the full envelope JSON) + a migration; deferred to a dedicated PR rather
+  than widen this fix-round into the persistence schema.
+- **FOLLOW-UP (Codex P1) — resume does not page past the first 500 rows.**
+  The server caps each replay at `DEFAULT_REPLAY_LIMIT` (500); a cold/long-
+  offline client sends one `resume` and stops, so topics with >500 persisted
+  messages never pull the tail. Robust paging needs a server "resume
+  complete / has-more" marker (a protocol addition) so the client knows to
+  re-resume from the new high-water mark; deferred.
+- **FOLLOW-UP (Codex P2) — mixed web+native fan-out uses one platform.**
+  `getPlatform` returns only the most-recently-registered platform, used to pick
+  the doc-link scheme for the whole fan-out, so a simultaneously-connected
+  web+native account gets one device's links in the wrong scheme. Needs
+  per-device envelope encoding in the registry fan-out; deferred (P2).
+
+## 2026-06-21 — Chat-sync foundation (Phase 1): server `seq`/`resume`/multi-device + `@neutron/chat-core`
+
+The first phase of web↔mobile Telegram-parity (research:
+`web-chat-telegram-parity-architecture-2026-06-20`). Delivers the defining
+"Telegram feel" — offline send, gap-free reconnect, instant cold-open,
+multi-device consistency — with **zero UI-framework change**. Append-only
+chat → a hand-rolled sync engine (server monotonic `seq` + per-client cursor +
+idempotent send-queue), not a CRDT/RxDB.
+
+**1. Durable per-topic message log + monotonic `seq` (server).** Until now the
+app-ws surface (`/ws/app/chat`) emitted user/agent messages in-memory only —
+nothing persisted, so a message sent while a socket was down was lost and there
+was no ordering key for multi-device. New migration `0079_app_chat_messages.sql`
++ `persistence/app-chat-store.ts` (`AppChatStore`) append every message with a
+monotonic, per-topic `seq` (`PRIMARY KEY (topic_id, seq)`), de-duplicated on
+`(topic_id, client_msg_id)`. `replayAfter(topic, after_seq)` is the resume
+query (`WHERE seq > ? ORDER BY seq`). The store is wired through an
+`AppChatMessageLog` interface so the adapter stays DB-agnostic + unit-testable.
+
+**2. `resume` replay + `seq` on the wire (app-ws).** New inbound control frame
+`{ v:1, type:'resume', after_seq:N }` (decoded by the new `decodeAppWsResume`,
+kept separate from the message decoder so the `user_message` path keeps its
+narrow type). The surface replays the gap to the *requesting* socket only.
+`seq` now rides on every outbound `user_message`/`agent_message`; `session_ready`
+carries `last_seen_seq` so a client can skip an unneeded resume. The
+`AppWsAdapter` gained an optional `chat_log` — when wired it persists +
+stamps `seq` (back-compat: absent → legacy in-memory behaviour, all existing
+tests unchanged). Production boot (managed) opts in by passing `chat_log`.
+
+**3. Multi-device session registry.** `InMemoryAppWsSessionRegistry` changed
+from `Map<topic, sender>` (last-wins, silently dropped a second device) to
+`Map<topic, Set<sender>>` with fan-out to every live device on the account,
+identity-aware per-device unregister, and a dead-socket sweep that never aborts
+the fan-out. Combined with per-client `seq` cursors, web + phone converge on
+one transcript.
+
+**4. `@neutron/chat-core` — transport-agnostic client lib (new workspace).**
+The shared logic the web (and, Phase 2, mobile) clients consume:
+- `Store` interface + `InMemoryStore` (ordering: by `seq`, never clock;
+  optimistic tail last) and an OPFS-backed `OpfsChatStore` with
+  `createWebStore()` that **degrades gracefully** to in-memory when OPFS /
+  `createWritable` is unavailable (scope-guard requirement);
+- `SendQueue` — idempotent on `client_msg_id`, offline-buffering, flush-on-
+  reconnect, never double-sends;
+- `SyncEngine` — append-only apply (UPSERT dedup + optimistic reconcile),
+  `last_seen_seq` cursor, `resume` request builder;
+- `ChatWsClient` — reconnect with exponential backoff + jitter, AppState-aware
+  (pause/resume), injectable socket + timers;
+- `WebChatSession` — the high-level composition a web client instantiates to
+  get optimistic send + offline queue + gap-free reconnect + instant cold-open
+  against the seq-aware app-ws protocol.
+
+**Web wiring decision (noted per autonomy mandate):** the only existing
+vanilla-TS web client, `landing/chat.ts`, talks to the *onboarding* `/ws/chat`
+bridge (a different protocol with no `seq`), not `/ws/app/chat`. Rather than
+risk destabilising that 4,476-line client by retrofitting it onto a different
+surface, the chat-core integration is delivered as the fully-tested
+`WebChatSession` composition (consumed by the seq-aware app web client).
+Repointing `landing/chat.ts` itself — and adopting `createWebStore()` there — is
+deferred to the Phase-3 web UI uplift, where the client is migrated anyway.
+(Fix-round: the speculative `@neutron/chat-core` dep that had been added to
+`landing/package.json` was removed — `landing/` imports nothing from chat-core,
+so the declaration was a decoupled artifact that bundled nothing; it'll be added
+back when the client is actually migrated. Argus BLOCKING #2.)
+
+**Out of scope (later phases):** React/assistant-ui migration (P3), mobile
+op-sqlite wiring (P2), FTS5 search / read receipts (P4). The `Store` interface
+is the seam a Phase-2 wasm-SQLite engine drops into.
+
+**Tests:** 73 new tests — chat-core (`sync-engine`, `send-queue`, `ws-client`,
+`store`, `web-session`), `AppChatStore` seq/idempotency/resume, multi-device
+registry, adapter seq/resume end-to-end, `resume` decode. `bunx tsc --noEmit`
+clean; schema snapshot + migration-list regenerated.
+
 ## 2026-06-20 — CI green on the public runner: grep falls back to POSIX grep + least-privilege workflow token
 
 Post-public-flip hardening on rjunee/neutron. Two CI/security fixes; PR-A.
