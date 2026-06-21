@@ -60,6 +60,9 @@ import {
   buildGatewayLlmRouter,
 } from '../gateway/realmode-composer/build-llm-router.ts'
 import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
+import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
+import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
+import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
 import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
@@ -296,6 +299,74 @@ export function buildOpenGraphComposer(
           })
         : null
 
+    // Realmode teardown sinks (upload sweeper + the scribe GBrain child below).
+    // Declared here so the scribe wiring — which is constructed BEFORE
+    // `buildLandingStack` (it needs `scribeOnUserTurn`) — can register the
+    // `gbrain serve` close hook. Returned on `realmode_cleanups`.
+    const realmodeCleanups: Array<() => void> = []
+
+    // ── Scribe: chat-time entity extraction → GBrain (P0 daily-driver) ─────
+    // gap-audit P0-3 / cat 7: the scribe package (`scribe/`) ships the whole
+    // extract→GBrain path AND the chat-bridge fires `scribeOnUserTurn` after
+    // every real user turn — but the param is OPTIONAL and the Open self-host
+    // composer never threaded it, so chat-time extraction was DEAD in Open:
+    // every person/company mention stayed a manual wiki entry. This wires it ON.
+    //
+    // A DEDICATED `cc-scribe-*` substrate (not the conversational `cc-agent-*`
+    // one) keeps background extraction isolated from the live chat REPL — scribe
+    // is a stateless one-shot caller (build-llm-call-substrate.ts names it
+    // explicitly), so `ephemeral: true` gives per-extraction isolation on the
+    // persistent substrate rather than accumulating extraction prompts into a
+    // chat transcript. Gated on `llmPool` exactly like every other substrate:
+    // LLM-less boxes have no extractor, so scribe stays off and the chat path is
+    // unaffected (`scribeOnUserTurn` omitted → bridge no-ops).
+    const scribeSubstrate =
+      llmPool !== null
+        ? buildLlmCallSubstrate({
+            pool: llmPool,
+            substrate_instance_id: `cc-scribe-${internal_handle}`,
+            cwd: owner_home,
+            internal_handle,
+            user_id: OWNER_USER_ID,
+            project_slug,
+            skip_permissions: true,
+            ephemeral: true,
+            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+          })
+        : null
+
+    // GBrain memory wiring is the scribe write target. `buildGBrainMemory` is
+    // LAZY + FAIL-SOFT by contract: it emits ONE loud boot warning when the
+    // `gbrain` binary is absent from PATH, then every memory op degrades to a
+    // single latched failure (the entity page still lands on disk; only the
+    // GBrain fan-out no-ops). So a missing/unresolvable GBrain NEVER crashes a
+    // chat turn — it degrades with a clear log, exactly as the spec requires.
+    // Built only when scribe can run (there is no point standing up a write
+    // target with no extractor to feed it).
+    const scribe: Scribe | null =
+      scribeSubstrate !== null
+        ? ((): Scribe => {
+            const gbrain = buildGBrainMemory({ owner_home, project_slug, env })
+            realmodeCleanups.push(() => {
+              void gbrain.close().catch(() => undefined)
+            })
+            return createScribe({
+              substrate: scribeSubstrate,
+              syncHook: gbrain.syncHook,
+              ownerDataDir: owner_home,
+              project_slug,
+              budget: createState(defaultStatePath(owner_home)),
+            })
+          })()
+        : null
+
+    // Production-shape hook threaded into `buildLandingStack` → the chat-bridge.
+    // `scribe` is `const`, so TS preserves the `!== null` narrowing inside the
+    // closure (the extraction is fire-and-forget; `handleUserTurn` returns void
+    // and swallows its own errors — it never throws into the chat path).
+    const scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined =
+      scribe !== null ? (input: UserTurnInput): void => scribe.handleUserTurn(input) : undefined
+
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
       env,
@@ -476,6 +547,10 @@ export function buildOpenGraphComposer(
       // opts THIS single-owner composer onto the synthesis runner.
       ...(importSubstrate !== null ? { importSubstrate } : {}),
       importUseSynthesis: true,
+      // Scribe chat-time extraction (P0 daily-driver, gap-audit cat 7). When the
+      // box has LLM creds, a real user turn fans into scribe's extract→GBrain
+      // path; LLM-less, this is omitted and the chat-bridge no-ops the hook.
+      ...(scribeOnUserTurn !== undefined ? { scribeOnUserTurn } : {}),
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────
@@ -488,7 +563,8 @@ export function buildOpenGraphComposer(
     // Open composer never set these handlers, so the import-upload surface was
     // unmounted and `POST /api/upload/<source>/start` 404'd → import was
     // impossible during a self-hosted onboarding.
-    const realmodeCleanups: Array<() => void> = []
+    // (`realmodeCleanups` is declared earlier — the scribe GBrain child
+    // registers its close hook there before `buildLandingStack` runs.)
     const engineForUpload = landing.engine
     // Single-owner POSIX identity — the process uid/gid the owner runs as.
     const uploadUid = process.getuid?.() ?? 0
