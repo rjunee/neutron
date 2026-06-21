@@ -2,6 +2,198 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — PR #15 Argus fix-pass #2: abort the scan on an infra store exception (apply-path data loss)
+
+Argus (Codex/GPT-5 cross-model + Claude correctness trace) found the SAME
+silent-data-loss-on-infra-failure class as fix-pass #1, but on the
+store-WRITE path rather than the requeue path:
+
+**Blocker — a transient store failure permanently dropped the inbox row
+(`tasks/inbox/apply.ts` + `drainClaimed`/`finalizeProcessing`).**
+`applyInboxRow`'s outer `catch` converted ANY store throw into an `errored`
+outcome. The per-action helpers already handle the EXPECTED per-row cases
+(unique→`duplicate`, `TaskNotFoundError`→`not_found`), so what reached the
+outer catch was an UNEXPECTED store/infra error — most importantly
+`BusyRetryExhaustedError` after the 15-retry `withBusyRetry` budget under
+sustained contention, or a disk/IO error. Because `drainClaimed` advances
+the baseline BEFORE applying, that `errored` row sat behind `finalBaseline`;
+`runTaskScan` archived it, `finalizeProcessing` found no residual past the
+baseline, and the sidecar was unlinked → the valid row was lost, never
+retried.
+
+**Fix — distinguish TRANSIENT infra exceptions from deterministic per-row
+rejections.** New `isTransientStoreError()` (`apply.ts`) classifies an
+exception as transient iff it is a `BusyRetryExhaustedError`, carries a
+transient Node IO `code` (ENOSPC/EIO/EACCES/EAGAIN/EBUSY/EMFILE/ENFILE/
+EROFS/EDQUOT/…), or matches a transient SQLite message (disk I/O error /
+disk full / database is locked / SQLITE_BUSY / unable to open database).
+`applyInboxRow` now RE-THROWS a transient error (so the scan aborts) but
+still captures everything else as an `errored` outcome. `drainClaimed`
+wraps a transient throw in the new `TaskScanAbortedError` and aborts the
+scan WITHOUT advancing the baseline; `runTaskScan` therefore never archives,
+renders, or finalizes — the claimed rows stay in the `.processing` sidecar
+and the next scan recovers + retries them idempotently (stable ids /
+skip-on-missing). The baseline now advances ONLY after a clean apply.
+
+**Why classify instead of "any throw aborts":** a deterministic per-row
+rejection (an unexpected constraint/validation error, a programming bug)
+would re-fail identically every scan; aborting on it would LIVELOCK the whole
+queue, because `claimInbox` always drains the sidecar before the live inbox.
+Deterministic failures keep the prior non-blocking behavior (archived as
+`errored`, baseline advanced, sidecar dropped), so one poison row can never
+wedge the queue.
+
+**Minor (deferred per the verdict):** the residual-unlink TOCTOU in
+`finalizeProcessing` (a pre-rename fd appending between the length re-check
+and `unlinkSync`) is documented as unreachable under the blessed atomic
+`appendInboxRow` API. Closing it by renaming the sidecar to a unique
+`.processed-<id>` would need a new orphan-cleanup pass (those files are never
+re-claimed) — non-trivial, so left as a follow-up.
+
+**Tests (real):** `inbox-scanner.test.ts` gains: a `BusyRetryExhaustedError`
+on `create` ABORTS the scan (throws `TaskScanAbortedError`), LEAVES the
+sidecar intact, never reaches the store, archives nothing, and the next scan
+applies the row; a transient disk/IO error (`code:'ENOSPC'`) aborts the same
+way; and a DETERMINISTIC store error is archived as `errored` + skipped (NOT
+aborted) with the queue advanced and a later row unblocked (no livelock).
+`bunx tsc --noEmit` clean; full `bash scripts/run-tests.sh` green (739 files,
+0 failed chunks).
+
+## 2026-06-21 — PR #15 Argus fix-pass: close the scanner finalize data-loss windows + resolve main conflicts
+
+Argus (Codex/GPT-5 cross-model + Claude correctness reviewer, independently
+converged) flagged two IMPORTANT correctness holes in
+`tasks/inbox/scanner.ts`'s drain/finalize path. Both fixed:
+
+1. **Unlink-after-failed-requeue lost residual rows — `finalizeProcessing`.**
+   If the residual `appendFileSync(inboxPath, tail)` requeue threw (disk full,
+   EACCES on the live inbox), control fell to the catch and then
+   UNCONDITIONALLY `unlinkSync`'d the sidecar → residual neither applied nor
+   left for recovery (silent loss). Now the sidecar is dropped ONLY when the
+   requeue actually succeeded (or there was no complete residual); a failed
+   requeue LEAVES the sidecar so the next scan recovers it (reprocessing is
+   idempotent via stable ids / skip-on-missing).
+
+2. **Byte-boundary line split + unlink TOCTOU — `drainClaimed` + `finalizeProcessing`.**
+   The drain/finalize tail was sliced purely by byte count
+   (`subarray(baseline)`), so a reader observing a sidecar mid-append could
+   split a JSON line at a non-newline boundary — the committed row recorded as
+   two parse errors and lost. The drain/finalize now read the sidecar from
+   disk through a single `readConsumable()` reader. Complete (newline-
+   terminated) lines are always safe. A trailing line WITHOUT a newline is
+   resolved without relying on timing alone: (1) if it is a complete JSONL row
+   (valid JSON — and since no proper byte-prefix of a complete JSON object is
+   itself valid JSON, a fragment never masquerades as one) it is consumed, so
+   a hand-edited final row with no trailing newline drains instead of
+   livelocking the sidecar; (2) a malformed tail uses GROWTH as the tiebreaker
+   — still growing ⇒ an active writer is mid-line, so only whole lines are
+   consumed and the partial is left (`partial`); stable ⇒ a settled bad
+   hand-edit, consumed and archived as a parse error so it can never block the
+   queue. (The lone unhandled case — an out-of-band fd that pauses mid-line
+   exactly across the two reads — is unreachable under the blessed atomic-
+   append API and accepted.) `finalizeProcessing` also re-reads the sidecar
+   immediately before `unlinkSync` and removes it only when the length is
+   unchanged since the read — closing the read→unlink TOCTOU window (on BOTH
+   the residual and no-residual paths); an unreadable sidecar is left, never
+   blind-unlinked.
+
+Note (minor, documented): DASHBOARD.md task lines are rendered inline (richer
+human "today" view) and intentionally bypass `renderTaskLine`, so the "locked
+Nova tag format lives in exactly one place" claim covers tasks.md/STATUS.md but
+not DASHBOARD.md.
+
+**Tests (real):** `inbox-scanner.test.ts` gains: a FAILED requeue write LEAVES
+the sidecar intact (no data loss) AND the next scan recovers both rows; a
+hand-edited final row without a trailing newline is applied, not stranded; a
+stable malformed final line without a newline is archived as a parse error and
+never blocks later rows (no livelock); a newline-less residual is requeued
+newline-terminated so it can't livelock; plus `completeLineTail` newline-snap
+unit tests. `bunx tsc --noEmit` clean; full `bash scripts/run-tests.sh` green
+(two passes). Hardened across several Codex cross-model review rounds.
+
+Also resolved the PR #15 vs `main` conflict (only `AS-BUILT.md`; both the
+markdown-task-surface entry and main's per-topic-session-isolation entry kept).
+
+## 2026-06-21 — Markdown task surface: task-inbox append-queue + tasks.md / DASHBOARD.md scanner (gap-audit P1 #11)
+
+Closes gap-audit §(a) #11 / §(b) cat 11: the focus-score formula
+(`tasks/focus-score.ts`) was ported and runs on a 4h cron, but tasks lived
+only in SQLite + the web app — there was **no markdown surface**. Ryan's
+workflow is markdown-first (modelled on Vajra's `tasks.md` /
+`gateway/task-inbox.jsonl` / `scripts/task-scanner.py`). This adds the
+markdown-first surface **on top of** the canonical `TaskStore` — the store
+stays the source of truth and the markdown is a pure projection.
+
+New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
+
+- **`types.ts`** — the JSONL append-queue row schema + a total, pure parser.
+  Rows: `add` / `complete` / `update` / `cancel` / `delete`. Human forms
+  (`P0..P3`, `YYYY-MM-DD`) are normalized to the store's scales (priority
+  0..3, ISO due). Malformed lines surface as `ParseError`s (1-based line
+  numbers) instead of throwing — one bad row never blocks the queue. A
+  PRESENT-but-invalid `priority`/`due` (e.g. `"P9"`, `"not-a-date"`) is a hard
+  parse error, not a silent drop, so a typo can't quietly create an
+  unprioritized/undated task.
+- **`apply.ts`** — maps a parsed row to the matching `TaskStore` mutation,
+  returning a structured `ApplyOutcome`. `add` with a stable `id` is
+  idempotent (PK collision → `skipped:'duplicate'`); edit-ops locate by `id`
+  or exact open-title match; missing targets → `skipped:'not_found'`. Both
+  resolution paths are scoped to the scanner's `project_slug` — an explicit
+  `id` is verified to belong to this slug before any mutation, since the
+  store's by-id methods are global (no cross-slug task can be touched). Inbox
+  writes stamp `source='inbox'`. `listAllTasks` pages through the store so the
+  rendered markdown never drops tasks past a fixed cap.
+- **`render.ts`** — pure renderers. `tasks.md` = flat focus-ordered active
+  list (cross-project) + recent-Done tail. `DASHBOARD.md` = open tasks grouped
+  into **auto-promoted P0/P1/P2/P3 sections**: `effectiveBucket` is the
+  more-urgent of raw priority and due-date urgency, with bands (overdue /
+  ≤2d / ≤7d) matching `focus-score.ts` exactly. Ordering **reuses**
+  `computeFocusScore` (recomputed against render-time `now`).
+- **`scanner.ts`** — `appendInboxRow` (atomic per-line `O_APPEND`) +
+  `runTaskScan`: **claim** the queue (atomic `rename` to a `.processing`
+  sidecar) → apply → archive every row+outcome to `task-inbox.archive.jsonl`
+  → re-render `tasks.md` + `DASHBOARD.md` (atomic writes via
+  `runtime/atomic-write.ts`) → requeue any late writes to the rotated inode,
+  then drop the sidecar. Concurrent-append safety: a racing append targets
+  the live `task-inbox.jsonl`, which the rename moved aside, so it survives
+  in a freshly-recreated inbox the next scan drains; a pre-rename-opened fd
+  that writes DURING the apply window is drained IN ORDER within the same
+  scan (bounded passes), so a dependent `add`→`update` pair across the rotate
+  boundary stays ordered — only a vanishing residual past the drain bound
+  requeues, acceptable for the single-scanner, human/agent-cadence usage. At most one sidecar exists at a time: a leftover
+  from a crashed scan is drained first and the live inbox waits one cycle, so
+  un-committed rows are never clobbered. Crash recovery is idempotent because
+  `appendInboxRow` stamps a stable UUID on every id-less `add` AT APPEND
+  TIME, so replay collides on the PK and skips instead of double-inserting.
+  (Boundary, documented: the blessed `appendInboxRow` API is exactly-once;
+  a row HAND-WRITTEN directly to the JSONL with no `id` is at-least-once —
+  no content-derivable id can both dedupe a replay and still allow a future
+  identical re-add, and we prefer a rare duplicate over losing rows. Hand
+  editors include an `"id"` for exactly-once.)
+  A re-scan of a drained queue is a no-op. Path resolution is injected so
+  composition wires the real `<NEUTRON_HOME>` project-folder paths and the
+  scanner stays testable. (Two rounds of Codex cross-model review hardened
+  this drain path: the original byte-prefix truncate had a TOCTOU window, and
+  id-less `add` replay could duplicate — both fixed here.)
+
+Refactor: `tasks/projection/format.ts` now exports `renderTaskLine` /
+`renderDoneLine` (was a private `renderActiveLine`) so the STATUS.md
+projection and the new tasks.md surface emit byte-identical task lines — the
+locked Nova tag format lives in exactly one place.
+
+**Tests (real, not scaffolding):** `tasks/__tests__/inbox.test.ts` (parse +
+priority/due normalization, focus ordering, section promotion, apply against a
+real migrated store) and `tasks/__tests__/inbox-scanner.test.ts` (end-to-end:
+an inbox append mutates the store AND is reflected in the rendered
+tasks.md/DASHBOARD content; idempotent re-scan; concurrent-append survival;
+parse errors archived + non-blocking; focus ordering in the rendered file).
+23 new tests. `bunx tsc --noEmit` clean; full `bun test` green (7727 pass /
+90 skip / 0 fail).
+
+Deferred: composition wiring of the scanner to a cron tick + real
+`<NEUTRON_HOME>` paths (a small build-core-modules follow-up; the seam is the
+injected `TaskScanPaths`).
+
 ## 2026-06-21 — PR #13 post-merge CI red — root-caused & fixed (real-PGLite boot flake)
 
 After `origin/main` was merged into `feat-integrations-admin-ui-wave2-clean` to
