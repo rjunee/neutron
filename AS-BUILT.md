@@ -49,6 +49,13 @@ failure class (a passing test masking a broken live path) that shipped #323.
   along in `primary_projects` rather than splitting into `non_work_interests`;
   fine-grained project-vs-interest separation needs real LLM extraction (follow-up).
 
+- **Synthesised-fallback guard (Codex r2 P2).** A synthesised `advance`
+  (`synthesised: 'timeout' | 'unparseable'`) is the router's failure fallback —
+  its `freeform_text` is just echoed/truncated user input, which
+  `dispatchRouterDecision` treats as a re-prompt, not a classification. The
+  extractor now returns `null` for `decision.synthesised` before parsing, so a
+  router failure can't persist projects from an unclassified fallback.
+
 **Tests.** Regenerated the real-path fixture to the PROMPT-FAITHFUL envelope
 (`advance` + `freeform_text` + `state_delta:null`). Verified RED→GREEN: with the
 engine fix stashed the test fails (`primary_projects` `[]`); with it applied all
