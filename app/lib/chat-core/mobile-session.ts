@@ -15,14 +15,17 @@
  *   - gap-free reconnect: every `session_ready` resumes from the local
  *     cursor (`{type:'resume', after_seq}`) and applies the replay;
  *   - instant cold-open: the op-sqlite Store already holds the transcript;
- *   - push catch-up: a data push calls {@link MobileChatSession.catchUp},
- *     which wakes the backgrounded socket → `session_ready` → resume.
+ *   - push catch-up: a foreground push (or any reconnect) calls
+ *     {@link MobileChatSession.catchUp}, which wakes a paused socket →
+ *     `session_ready` → resume. (Foreground-only — the RN hook does not run JS
+ *     on a backgrounded data push; the gap is filled on next foreground.)
  *
  * Two mobile-specific seams beyond `WebChatSession`:
  *   - {@link MobileChatSessionOptions.onFrame}: every raw inbound frame is
  *     handed to the UI so it can render streaming partials + the typing
  *     indicator (chat-core only persists finalized messages).
- *   - {@link MobileChatSession.catchUp}: the background-wake entry point.
+ *   - {@link MobileChatSession.catchUp}: the catch-up entry point (foreground
+ *     push / reconnect).
  *
  * RN-free on purpose (no `react-native` import) so the whole send-queue +
  * resume integration is unit-testable under bun with a fake socket. AppState
@@ -122,10 +125,11 @@ export class MobileChatSession {
   }
 
   /**
-   * Background-wake catch-up (research doc §6): a data push fires this. If the
-   * socket is live we gap-fill immediately; otherwise we wake it and the
-   * `session_ready` handler resumes once it (re)opens. Idempotent + safe to
-   * call on every push.
+   * Catch-up gap-fill (research doc §6): a foreground push or a reconnect fires
+   * this. If the socket is live we gap-fill immediately; otherwise we wake it
+   * and the `session_ready` handler resumes once it (re)opens. Idempotent +
+   * safe to call on every push. (Foreground-only: the RN hook can only invoke
+   * this while the app is foregrounded — see `use-mobile-chat.ts`.)
    */
   async catchUp(): Promise<void> {
     if (this.status() === 'open') {

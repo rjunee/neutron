@@ -228,7 +228,7 @@ describe('MobileChatSession — offline send-queue + resume', () => {
     expect(userSend).toMatchObject({ body: 'survive restart', client_msg_id: 'persist-1' });
   });
 
-  it('catchUp() gap-fills a live socket (push background-wake)', async () => {
+  it('catchUp() gap-fills a live socket (foreground push catch-up)', async () => {
     const store = await freshStore();
     const { session, sockets } = makeSession(store);
     session.start();
@@ -243,6 +243,38 @@ describe('MobileChatSession — offline send-queue + resume', () => {
     await tick();
     const resume = sockets[0]!.sentEnvelopes().find((e) => e['type'] === 'resume');
     expect(resume).toMatchObject({ after_seq: 5 });
+  });
+
+  it('catchUp() is a safe no-op when the socket is not open (foreground push, offline)', async () => {
+    // The foreground push listener calls catchUp() on every received
+    // notification; when the socket isn't open it must not throw or send a
+    // resume on a dead socket — it wakes the socket and the resume rides the
+    // next session_ready instead.
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start(); // socket created but never opened → offline
+
+    await session.catchUp();
+    await tick();
+
+    const resumes = (sockets[0]?.sentEnvelopes() ?? []).filter((e) => e['type'] === 'resume');
+    expect(resumes.length).toBe(0);
+
+    // And once it DOES open, the resume is sent on session_ready — proving the
+    // deferred catch-up actually gap-fills rather than being lost.
+    sockets[sockets.length - 1]!.open();
+    sockets[sockets.length - 1]!.deliver({
+      v: 1,
+      type: 'session_ready',
+      user_id: 'sam',
+      topic_id: TOPIC,
+      ts: 1,
+    });
+    await tick();
+    const afterOpen = sockets[sockets.length - 1]!
+      .sentEnvelopes()
+      .find((e) => e['type'] === 'resume');
+    expect(afterOpen).toMatchObject({ type: 'resume', after_seq: 0 });
   });
 
   it('hands every raw inbound frame to onFrame (streaming/typing seam)', async () => {

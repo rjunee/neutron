@@ -86,6 +86,10 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect((await store.pendingSends(TOPIC)).map((m) => m.body)).toEqual(['pending']);
 
     expect((await store.getByClientMsgId(TOPIC, 'c2'))?.body).toBe('one');
+    // Indexed point lookup by message_id (idx_chat_messages_topic_mid) — the
+    // resume-replay path; bounds it to O(1) per message instead of a scan.
+    expect((await store.getByMessageId(TOPIC, 'm1'))?.body).toBe('one');
+    expect(await store.getByMessageId(TOPIC, 'no-such-id')).toBeNull();
 
     await store.clear(TOPIC);
     expect((await store.list(TOPIC)).length).toBe(0);

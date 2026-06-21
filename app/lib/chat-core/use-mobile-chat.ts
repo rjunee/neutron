@@ -9,9 +9,16 @@
  *   - re-read the transcript from the local store on every `onChange` and
  *     expose the merged render rows (durable + live streaming bubbles);
  *   - bridge RN `AppState` → `session.setActive` so the socket pauses in the
- *     background and catches up on foreground (the §6 reconnect pattern);
- *   - bridge an inbound push → `session.catchUp()` so a data-push wake
- *     triggers a `resume after_seq` gap-fill while still backgrounded.
+ *     background and catches up on foreground (the §6 reconnect pattern) —
+ *     this is the gap-fill after any backgrounded period;
+ *   - bridge a notification that arrives WHILE FOREGROUNDED → `session.catchUp()`
+ *     so a push during an active session triggers an immediate `resume
+ *     after_seq` without waiting for an AppState transition.
+ *
+ * Catch-up is FOREGROUND-ONLY by design (see the note on the notification
+ * effect below): `addNotificationReceivedListener` runs JS only while the app
+ * is foregrounded, so a push that lands while backgrounded does not sync in
+ * the background — the gap is filled the next time AppState returns to active.
  *
  * The view is dumb: it renders `rows`, shows `status` + `typing`, and calls
  * `send`. Everything else is the session's job.
@@ -145,8 +152,15 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     return () => sub.remove();
   }, []);
 
-  // Push → catch-up. A data-push (or any received notification) wakes a
-  // background catch-up sync via `resume after_seq`.
+  // Foreground push → immediate catch-up. `addNotificationReceivedListener`
+  // fires ONLY while the app is foregrounded, so this covers a push that
+  // arrives mid-session (when no AppState 'active' transition occurs) — it
+  // triggers a `resume after_seq` gap-fill right away. It is deliberately NOT
+  // a background-wake path: true background data-push sync would require a
+  // headless `expo-task-manager` task that reconstructs the session outside
+  // React (impractical/unverifiable in this Expo setup), so background gaps
+  // are instead filled by the AppState→active catch-up above on next
+  // foreground. Honest scope: foreground catch-up, not background gap-fill.
   useEffect(() => {
     const sub = Notifications.addNotificationReceivedListener(() => {
       void sessionRef.current?.catchUp();

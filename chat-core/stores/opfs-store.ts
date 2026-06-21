@@ -86,6 +86,10 @@ export class OpfsChatStore implements Store {
     return this.mem.getByClientMsgId(topic_id, client_msg_id)
   }
 
+  getByMessageId(topic_id: string, message_id: string): Promise<ChatMessage | null> {
+    return this.mem.getByMessageId(topic_id, message_id)
+  }
+
   lastSeenSeq(topic_id: string): Promise<number> {
     return this.mem.lastSeenSeq(topic_id)
   }

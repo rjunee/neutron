@@ -6,9 +6,12 @@ Running log of notable build-time changes, what shipped, and why. Newest first.
 
 Builds on Phase 1 (#6 — server `seq`/resume/multi-device + the `@neutron/chat-core`
 engine). Phase 2 gives the Expo/RN app durable local persistence, offline send,
-gap-free reconnect, instant cold-open, push catch-up, and a Telegram-grade
+gap-free reconnect, instant cold-open, foreground push catch-up, and a Telegram-grade
 FlashList v2 UI — all by REUSING the existing chat-core engine, not re-implementing
-sync. Everything new lives under `app/` (scope guard); chat-core is untouched.
+sync. The surface lives under `app/`; the only chat-core change is the additive
+`Store.getByMessageId` point lookup from the fix-round below (it bounds resume
+replay) — sync/ordering/merge stay the engine's. See the "fix-round" subsection
+at the end of this entry for the Argus-driven corrections.
 
 **1. RN local store — op-sqlite behind the chat-core `Store` seam.**
 - `app/lib/chat-core/sqlite-store.ts` — `SqliteChatStore implements Store` (the
@@ -20,7 +23,8 @@ sync. Everything new lives under `app/` (scope guard); chat-core is untouched.
   merge (`mergeMessage`), and display ordering (`compareForDisplay`) are imported
   from chat-core, not re-derived. SQLite is pure storage; the semantics stay the
   engine's. Schema: one `chat_messages` table keyed on the message identity, with
-  `(topic_id, seq)` + `(topic_id, client_msg_id)` indexes.
+  `(topic_id, seq)`, `(topic_id, client_msg_id)` + `(topic_id, message_id)` indexes
+  (the last one backs `getByMessageId` — the bounded resume-replay lookup).
 - `app/lib/chat-core/op-sqlite-store.ts` — the op-sqlite adapter + `createMobileStore()`
   factory. op-sqlite is dynamically imported and the factory falls back to chat-core's
   `InMemoryStore` when the native module is absent (RN-for-Web, Expo Go, the unit
@@ -31,7 +35,7 @@ sync. Everything new lives under `app/` (scope guard); chat-core is untouched.
   `WebChatSession`: composes `ChatWsClient` + `SendQueue` + `SyncEngine` + `Store`.
   No sync logic re-implemented. Adds two mobile seams: an `onFrame` raw-frame tap
   (so the UI can render `agent_message_partial` streaming + typing, which chat-core
-  doesn't persist) and `catchUp()` (the push background-wake → `resume after_seq`).
+  doesn't persist) and `catchUp()` (foreground push / reconnect → `resume after_seq`).
   RN-free (no `react-native` import) so the send-queue + resume integration is
   unit-tested under bun with a fake socket.
 - Local topic = `app:<user_id>` (matches the server's per-user topic; seq is per
@@ -46,8 +50,13 @@ sync. Everything new lives under `app/` (scope guard); chat-core is untouched.
   connection/offline-queue status strip.
 - `app/lib/chat-core/use-mobile-chat.ts` — the React hook: builds the store + session
   per (user, project), re-reads the transcript on `onChange`, bridges RN `AppState`
-  → `session.setActive` + `catchUp` (the §6 foreground reconnect), and bridges an
-  inbound push (`expo-notifications`) → `catchUp` (background gap-fill).
+  → `session.setActive` + `catchUp` (the §6 foreground reconnect — fills the gap
+  after any backgrounded period), and bridges a notification that arrives WHILE
+  FOREGROUNDED (`expo-notifications`) → `catchUp` (an immediate resume without
+  waiting for an AppState change). Catch-up is FOREGROUND-ONLY:
+  `addNotificationReceivedListener` runs JS only while foregrounded, so a push
+  that lands in the background is not synced in the background — that gap is
+  filled on the next foreground (see fix-round below).
 - `app/lib/chat-core/chat-render-model.ts` — pure (no-React) render helpers:
   the streaming-fold state machine, the durable↔streaming merge, the delivery ladder.
 - `app/app/projects/[id]/chat-sync.tsx` — a new route hosting the surface, landed
@@ -69,14 +78,68 @@ sync. Everything new lives under `app/` (scope guard); chat-core is untouched.
   real SQLite: seq ordering, idempotent dedup, optimistic↔echo reconcile, pending-
   queue isolation, resume cursor, attachment round-trip, cold-open hydration over a
   reopened DB, topic isolation.
-- `app/__tests__/chat-core-mobile-session.test.ts` (6) — offline optimistic send,
+- `app/__tests__/chat-core-mobile-session.test.ts` (7) — offline optimistic send,
   flush-on-connect + echo→acked reconcile, gap-free reconnect resuming from the LOCAL
   seq cursor (+ dedup of a re-delivered seq), cold-open + re-drive of a stranded send
-  across a simulated restart, `catchUp()` gap-fill, and the `onFrame` streaming seam.
+  across a simulated restart, `catchUp()` gap-fill, `catchUp()` no-op-when-not-open
+  (deferred resume rides next session_ready), and the `onFrame` streaming seam.
 - `app/__tests__/chat-core-render-model.test.ts` (10) — streaming fold state machine,
   durable↔streaming merge + stable keys, delivery ladder.
+- `app/__tests__/active-tab.test.ts` (5, fix-round) — `activeTabFromSegments` mapping:
+  legal tab leaves, bare-route default, and the chat-sync/notes/cores/backups → null
+  (no Chat-tab shadow/lock) regression.
 - Verify: `bunx tsc --noEmit` clean (app + root gate + chat-core); FULL `bun test`
-  green (7630 pass / 0 fail); `eslint` clean on new files.
+  green; `eslint` clean on new files.
+
+### Fix-round (Argus REQUEST CHANGES — PR #11: 1 blocker + 2 important)
+
+Argus (cross-model with Codex/GPT-5) requested changes on three points; all
+resolved here. Core was rated EXCELLENT — these are targeted fixes.
+
+- **[BLOCKING → resolved by honest downgrade] push catch-up is FOREGROUND-only,
+  not background gap-fill.** The hook wired catch-up via
+  `Notifications.addNotificationReceivedListener`, which runs JS only while the
+  app is foregrounded — so a backgrounded data-push never ran `catchUp()`, yet
+  this entry + the PR body claimed "background gap-fill". A real background-wake
+  needs a headless `expo-task-manager` task that reconstructs the session
+  OUTSIDE React (no live `MobileChatSession` exists in a headless context) and
+  depends on native push/background-mode config that cannot be verified in this
+  Expo setup — shipping a no-op background task would itself be a false claim.
+  Decision (the brief's authorized fallback): downgrade the claim to the honest,
+  verified behavior. The foreground listener stays (it gives an immediate resume
+  when a push lands mid-session, where no AppState 'active' transition fires);
+  the post-background gap is filled by the existing AppState→active `catchUp` on
+  next foreground. Comments in `use-mobile-chat.ts` + `mobile-session.ts`, this
+  AS-BUILT, and the PR body are corrected to "foreground catch-up". Test:
+  `catchUp()`-not-open no-op + deferred-resume-on-session_ready
+  (`chat-core-mobile-session.test.ts`).
+- **[IMPORTANT → fixed] chat-sync route shadowed + locked the Chat tab.**
+  `activeTabFromSegments` returned the `'chat'` fallback for the unknown
+  `chat-sync` leaf, so the route highlighted Chat AND — because the tab bar
+  treats `key === activeTab` as a no-op — made tapping Chat dead, stranding the
+  user. The mapping moved to a pure, RN-free `app/lib/active-tab.ts` that returns
+  `null` for the known non-tab sub-routes (`chat-sync`/`notes`/`cores`/`backups`)
+  so no tab is highlighted and every tab tap navigates; only the bare project
+  route defaults to `chat`. `_layout.tsx` consumes it (nullable `activeTab`, with
+  the slot-fade now keyed off the real route leaf and the last-tab write skipped
+  on a null tab); `ProjectTabBar.active` widened to `ProjectTabKey | null`. Test:
+  `app/__tests__/active-tab.test.ts`.
+- **[IMPORTANT → fixed, incl. chat-core root cause] O(N²) resume replay.**
+  `SyncEngine.findExisting` fell back to `store.list(topic_id)` (a full read +
+  sort) for every agent message with no `client_msg_id`, so replaying N messages
+  on resume was O(N²) — a real cliff at thousands. Added an additive
+  `Store.getByMessageId(topic_id, message_id)` point lookup
+  (`chat-core/store.ts` interface + `InMemoryStore`; delegated by `OpfsChatStore`;
+  served from a new `(topic_id, message_id)` SQLite index in `SqliteChatStore`)
+  and pointed `findExisting` at it. Replay is now linear. This is the small, safe
+  chat-core root-cause fix the brief authorized; the engine's sync/ordering/merge
+  semantics are unchanged. Tests: `getByMessageId` in both Store contracts +
+  a `SyncEngine` bounded-replay test asserting the apply path hits the index and
+  never `list()` (`chat-core/__tests__/{store,sync-engine}.test.ts`,
+  `app/__tests__/chat-core-sqlite-store.test.ts`).
+- **[MINOR] redundant empty-string guard** removed from
+  `SqliteChatStore.getByClientMsgId` (the private `rowByClientMsgId` already
+  guards identically).
 
 ## 2026-06-20 — Proactive messaging: real morning brief + idle-topic nudge sweep (gap-audit P0-5)
 

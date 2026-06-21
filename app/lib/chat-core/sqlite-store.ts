@@ -72,6 +72,9 @@ const SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_cmid ON ${TABLE} (topic_id, client_msg_id)`,
+  // Backs `getByMessageId` — the sync engine's resume-replay point lookup for
+  // agent messages. Without it, replaying N messages was O(N²) (full scans).
+  `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_mid ON ${TABLE} (topic_id, message_id)`,
 ];
 
 export class SqliteChatStore implements Store {
@@ -134,8 +137,19 @@ export class SqliteChatStore implements Store {
   }
 
   async getByClientMsgId(topic_id: string, client_msg_id: string): Promise<ChatMessage | null> {
-    if (client_msg_id.length === 0) return null;
     return this.rowByClientMsgId(topic_id, client_msg_id);
+  }
+
+  async getByMessageId(topic_id: string, message_id: string): Promise<ChatMessage | null> {
+    if (message_id.length === 0) return null;
+    // Indexed point lookup (idx_chat_messages_topic_mid) — keeps the sync
+    // engine's resume replay linear instead of a full-table scan per message.
+    const { rows } = await this.db.execute(
+      `SELECT * FROM ${TABLE} WHERE topic_id = ? AND message_id = ? LIMIT 1`,
+      [topic_id, message_id],
+    );
+    const row = rows[0];
+    return row !== undefined ? rowToMessage(row) : null;
   }
 
   async lastSeenSeq(topic_id: string): Promise<number> {

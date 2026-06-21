@@ -35,6 +35,13 @@ export interface Store {
   list(topic_id: string): Promise<ChatMessage[]>
   /** Look up by client idempotency key (reconcile / dedup). */
   getByClientMsgId(topic_id: string, client_msg_id: string): Promise<ChatMessage | null>
+  /**
+   * Look up by server `message_id` (agent messages, or a re-delivered message
+   * whose `client_msg_id` we never held). A point lookup so the sync engine's
+   * resume replay stays O(N) — a backing store should index `(topic_id,
+   * message_id)` rather than scan the whole topic per applied message.
+   */
+  getByMessageId(topic_id: string, message_id: string): Promise<ChatMessage | null>
   /** Highest `seq` applied for a topic; 0 when the topic has none. This is
    *  the resume cursor. */
   lastSeenSeq(topic_id: string): Promise<number>
@@ -133,6 +140,19 @@ export class InMemoryStore implements Store {
     if (topic === undefined) return null
     const found = this.findByClientMsgId(topic, client_msg_id)
     return found !== undefined ? { ...found } : null
+  }
+
+  async getByMessageId(topic_id: string, message_id: string): Promise<ChatMessage | null> {
+    if (message_id.length === 0) return null
+    const topic = this.byTopic.get(topic_id)
+    if (topic === undefined) return null
+    // A scan, but bounded to a single pass with no clone-all / sort — strictly
+    // cheaper than the old `list()` (which sorted + cloned the whole topic) the
+    // sync engine used to call per applied message.
+    for (const m of topic.values()) {
+      if (m.message_id === message_id) return { ...m }
+    }
+    return null
   }
 
   async lastSeenSeq(topic_id: string): Promise<number> {

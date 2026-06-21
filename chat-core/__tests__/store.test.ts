@@ -35,6 +35,9 @@ async function storeContract(store: Store): Promise<void> {
   expect((await store.pendingSends(TOPIC)).map((m) => m.body)).toEqual(['pending'])
   // Lookup + clear.
   expect((await store.getByClientMsgId(TOPIC, 'c2'))?.body).toBe('one')
+  // Point lookup by server message_id (the indexed resume-replay path).
+  expect((await store.getByMessageId(TOPIC, 'm1'))?.body).toBe('one')
+  expect(await store.getByMessageId(TOPIC, 'no-such-id')).toBeNull()
   await store.clear(TOPIC)
   expect((await store.list(TOPIC)).length).toBe(0)
 }
