@@ -77,7 +77,12 @@ export function renderStatusBlock(input: RenderStatusBlockInput): string {
     lines.push('_No active tasks._')
   } else {
     for (const task of input.active) {
-      lines.push(renderActiveLine(task, includeProject, includeFocus))
+      lines.push(
+        renderTaskLine(task, {
+          include_project_tag: includeProject,
+          include_focus_score: includeFocus,
+        }),
+      )
     }
   }
   lines.push('')
@@ -93,27 +98,48 @@ export function renderStatusBlock(input: RenderStatusBlockInput): string {
   return lines.join('\n')
 }
 
-function renderActiveLine(
+export interface RenderTaskLineOptions {
+  /** Emit a `[project:<slug>]` tag when the row is project-scoped. */
+  include_project_tag?: boolean
+  /** Emit `[focus:X.Y]` when the row carries a non-null focus_score. Default true. */
+  include_focus_score?: boolean
+  /** Override the rendered focus value (e.g. a freshly recomputed score). */
+  focus_score_override?: number | null
+}
+
+/**
+ * Render a single open-task checkbox line in the locked Nova tag format.
+ * Exported so every markdown surface (STATUS.md projection, the
+ * instance-wide tasks.md / DASHBOARD.md surface) emits byte-identical
+ * lines — the tag format lives in exactly one place.
+ */
+export function renderTaskLine(
   task: Task,
-  include_project_tag: boolean,
-  include_focus_score: boolean,
+  opts: RenderTaskLineOptions = {},
 ): string {
+  const includeProject = opts.include_project_tag ?? false
+  const includeFocus = opts.include_focus_score ?? true
   const tags: string[] = []
   const prio = formatPriorityTag(task.priority)
   if (prio !== null) tags.push(`[${prio}]`)
   const due = formatDueDateTag(task.due_date)
   if (due !== null) tags.push(`[due:${due}]`)
-  if (include_project_tag && task.project_id !== NO_PROJECT) {
+  if (includeProject && task.project_id !== NO_PROJECT) {
     tags.push(`[project:${task.project_id}]`)
   }
-  if (include_focus_score && task.focus_score !== null) {
-    tags.push(`[focus:${formatFocusScoreValue(task.focus_score)}]`)
+  const focus =
+    opts.focus_score_override !== undefined
+      ? opts.focus_score_override
+      : task.focus_score
+  if (includeFocus && focus !== null) {
+    tags.push(`[focus:${formatFocusScoreValue(focus)}]`)
   }
   const suffix = tags.length > 0 ? ` ${tags.join(' ')}` : ''
   return `- [ ] ${task.title}${suffix}`
 }
 
-function renderDoneLine(task: Task): string {
+/** Render a single completed-task line (`- [x] ~~title~~ ✅ YYYY-MM-DD`). */
+export function renderDoneLine(task: Task): string {
   const completed = task.completed_at !== null
     ? formatDueDateTag(task.completed_at)
     : null
@@ -178,7 +204,7 @@ export function renderActionsFile(input: RenderActionsFileInput): string {
     lines.push('_No active tasks._')
   } else {
     for (const task of input.active) {
-      lines.push(renderActiveLine(task, false, true))
+      lines.push(renderTaskLine(task, { include_focus_score: true }))
     }
   }
   lines.push('')
