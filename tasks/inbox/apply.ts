@@ -117,6 +117,17 @@ export async function applyInboxRow(
 
 async function applyAdd(deps: ApplyDeps, row: InboxRow): Promise<ApplyOutcome> {
   // `parseInbox` guarantees title is present for `add`.
+  //
+  // Replay semantics: an `add` carrying an `id` is exactly-once — a replay
+  // (e.g. crash between create and sidecar unlink) collides on the PK and
+  // is skipped. `appendInboxRow` stamps an id on every id-less add, so the
+  // blessed append API is always exactly-once. A row hand-written directly
+  // to the JSONL with NO id is at-least-once: there is no content-derivable
+  // id that both dedupes a replay AND still permits a future identical
+  // re-add, so the scanner can't retroactively make it exactly-once. We
+  // deliberately prefer this over losing rows — see `drainClaimed`, which
+  // keeps the higher-severity loss case covered. Hand-editors who want
+  // exactly-once include an `"id"`.
   const input: CreateTaskInput = {
     project_slug: deps.project_slug,
     project_id: row.project ?? NO_PROJECT,

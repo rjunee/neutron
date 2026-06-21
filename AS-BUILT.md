@@ -53,6 +53,11 @@ New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
   un-committed rows are never clobbered. Crash recovery is idempotent because
   `appendInboxRow` stamps a stable UUID on every id-less `add` AT APPEND
   TIME, so replay collides on the PK and skips instead of double-inserting.
+  (Boundary, documented: the blessed `appendInboxRow` API is exactly-once;
+  a row HAND-WRITTEN directly to the JSONL with no `id` is at-least-once —
+  no content-derivable id can both dedupe a replay and still allow a future
+  identical re-add, and we prefer a rare duplicate over losing rows. Hand
+  editors include an `"id"` for exactly-once.)
   A re-scan of a drained queue is a no-op. Path resolution is injected so
   composition wires the real `<NEUTRON_HOME>` project-folder paths and the
   scanner stays testable. (Two rounds of Codex cross-model review hardened
