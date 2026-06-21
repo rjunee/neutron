@@ -54,6 +54,12 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_LANDING_STATIC_DIR',
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
+  // ISSUES #318 — the auth gate is keyed on `resolveOpenLlmPool(env) === null`,
+  // which is null only when BOTH substrate credentials are absent. A dev/CI box
+  // with an ambient `CLAUDE_CODE_OAUTH_TOKEN` would otherwise disable the gate
+  // and make the no-credential 503 assertions return the 200 shell. Save +
+  // clear it alongside ANTHROPIC_API_KEY so these tests are env-independent.
+  'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
   'NEUTRON_GRAPH_COMPOSER_MODULE',
 ] as const
@@ -73,6 +79,7 @@ beforeEach(() => {
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   delete process.env['ANTHROPIC_API_KEY'] // LLM-less → static onboarding prompts
+  delete process.env['CLAUDE_CODE_OAUTH_TOKEN'] // ISSUES #318 — keep the auth gate ACTIVE
   delete process.env['NOTIFY_SOCKET']
   delete process.env['NEUTRON_GRAPH_COMPOSER_MODULE']
 })
