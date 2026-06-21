@@ -2,6 +2,65 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — React + assistant-ui web chat client, behind a flag (Track B Phase 3)
+
+**Problem.** The parity-research doc (`web-chat-telegram-parity-architecture-
+2026-06-20`) ranks the web chat as "nowhere near Telegram." Phase 1 shipped the
+hard part — `@neutron/chat-core` (WS client + send-queue + append-only sync
+engine + local Store) on the app-ws surface with a monotonic `seq` + resume.
+Phase 3 is the largest/riskiest chunk: replace the 4.5k-line bespoke vanilla-TS
+web client with the locked stack (**React + `@assistant-ui/react`, MIT, bring-
+your-own-transport**) — but ship it BEHIND A FLAG with the vanilla client intact
+as the default fallback, no cutover.
+
+**What shipped.**
+
+- **`chat-core/web-session.ts` — additive `onFrame` observer.** The sync layer
+  persists only final `user_message`/`agent_message`s; the UI also needs the
+  ephemeral `agent_message_partial` token stream + typing hints. `onFrame(frame)`
+  surfaces every raw inbound frame BEFORE the persist decision, as a pure
+  observer (errors swallowed) — so Phase-1 wiring is byte-for-byte unchanged.
+  Covered by a new web-session test.
+
+- **`landing/chat-react/` (NEW) — the React client.** Layered for testability:
+  `config.ts` (pure bootstrap: start-token `sub` → `app:<user_id>` topic +
+  app-ws URL; dev-bypass token default, `window.__neutron_app_ws_token`
+  override), `controller.ts` (`NeutronChatController` — framework-agnostic data
+  layer: streaming-partial accumulation into a live agent bubble the final
+  persisted message supersedes, `isRunning` typing derivation, connection +
+  offline-queue state, synchronous `ChatViewModel`; session injected via a
+  factory so it integration-tests against a real `WebChatSession` + fake socket),
+  `message-adapter.ts` (pure `RenderMessage → ThreadMessageLike`),
+  `useNeutronChat.ts` (thin React seam → assistant-ui `ExternalStoreRuntime`),
+  `ChatApp.tsx` (UI from assistant-ui PRIMITIVES — the styled `Thread` left the
+  core package in 0.14.x — styled to the existing dark theme: topic rail,
+  connection banner, offline-pending badge, streaming dots), `main.tsx` (entry,
+  bundled to `/chat-react.js`).
+
+- **`landing/web-chat-flag.ts` + `landing/server.ts` — the flag.**
+  `resolveWebChatClient({ envDefault, queryClient })`: env
+  `NEUTRON_WEB_CHAT_CLIENT` (deploy default) with a `?client=react|vanilla`
+  per-request override; default/garbage → vanilla. `GET /chat` serves the React
+  shell (`chat-react.html`) only when the flag resolves to `react` AND the assets
+  shipped (`existsSync`-guarded — else vanilla); `/chat-react.js` is lazily
+  bundled from `chat-react/main.tsx` via `Bun.build` (minified, ~0.6 MB),
+  mirroring the existing `chat.ts` → `/chat.js` path. Vanilla is otherwise
+  untouched.
+
+**Tests.** chat-core onFrame test; controller integration over a real
+`WebChatSession`+fake socket (optimistic send, streaming→final supersede,
+offline queue, status transitions, project tagging); pure adapter + config
+tests; happy-dom component smoke (full assistant-ui render: optimistic send +
+streamed-then-finalized agent reply reach the DOM); flag + flag-gated serving
+tests. `bunx tsc -p tsconfig.json` (root gate) + `bunx tsc -p
+landing/chat-react/tsconfig.json` (React leaf, isolated from the gate) both
+clean; `bun test chat-core landing` green (577 pass).
+
+**Parity gaps (documented, vanilla stays default until closed):** attachment
+compose-UI (rendering + data path done; upload affordance pending), "load
+earlier" paging beyond the resume window, and the production app-ws web token
+mint (the deferred identity sub-sprint the app-ws auth resolver itself notes).
+
 ## 2026-06-21 — Agent-aware watchdog + double-spawn guard for the dispatch layer (WAVE 2 P1, gap-audit §(b) #8)
 
 **Problem.** The daily-driver gap audit (§(b) #8) flagged two reliability holes

@@ -355,6 +355,84 @@ even after the topic is live.
   fake indicator paints. (Field + client mechanism retained for a future
   real last-read seam.)
 
+## React web chat client (`landing/chat-react/`, Track B Phase 3) — behind a flag
+
+The vanilla-TS client above (`landing/chat.ts`, ~4.5k lines, served on the
+legacy `/ws/chat` surface) is the DEFAULT and is untouched. Track B Phase 3
+adds a second, React-based web chat surface — the parity-research doc's
+recommended stack (**React + `@assistant-ui/react`, MIT, bring-your-own-
+transport**) — that reuses the Phase-1 `@neutron/chat-core` sync engine. It
+ships **behind a flag with no cutover**; parity is proven before any default
+flip.
+
+**Transport.** The React client connects through chat-core's `WebChatSession`
+to the **app-ws** surface (`/ws/app/chat`, `app:<user_id>` topic) — the Phase-1
+transport with a monotonic per-topic `seq` + `resume after_seq` replay + the
+OPFS/wasm local Store. That is a DIFFERENT surface from the vanilla client's
+`/ws/chat`; the two run side by side. Identity is derived client-side from the
+same start-token `sub` claim the vanilla shell stashes; the app-ws token
+defaults to the dev-bypass form (`dev:<user_id>`) and is overridden by
+`window.__neutron_app_ws_token` once the production EdDSA mint lands.
+
+**The flag (`landing/web-chat-flag.ts`).** `GET /chat` picks the client via
+`resolveWebChatClient({ envDefault, queryClient })` — env
+`NEUTRON_WEB_CHAT_CLIENT` (deploy-wide default; `react` opts in) with a
+per-request `?client=react|vanilla` override. Default + unrecognized → vanilla.
+The React assets are also `existsSync`-guarded, so even with the flag on an
+instance that didn't ship them falls back to vanilla rather than 404ing the
+chat surface. The React shell (`chat-react.html`) loads `/chat-react.js`, which
+the landing server lazily bundles from `chat-react/main.tsx` via `Bun.build`
+(minified, ~0.6 MB — React + assistant-ui + chat-core), exactly mirroring the
+existing `chat.ts` → `/chat.js` lazy-bundle path.
+
+**Layering (testable seams).**
+- `chat-core/web-session.ts` gained one additive, optional `onFrame(frame)`
+  observer: the sync layer only persists final `user_message`/`agent_message`s,
+  but the UI needs the ephemeral `agent_message_partial` stream + typing hints.
+  `onFrame` surfaces every raw frame without touching persistence/ordering, so
+  the Phase-1 vanilla wiring is unchanged.
+- `chat-react/controller.ts` (`NeutronChatController`) is the framework-agnostic
+  data layer: it wraps a `WebChatSession`, accumulates streaming partials into a
+  live (not-yet-persisted) agent bubble that the final persisted message
+  supersedes, derives `isRunning` (typing) from "awaiting a reply OR streaming",
+  tracks connection status + the offline-queue depth, and caches a synchronous
+  `ChatViewModel`. The session is injected via a factory, so the controller
+  unit-tests against a real `WebChatSession` + a fake socket — real integration
+  coverage over the chat-core contract with no DOM.
+- `chat-react/message-adapter.ts` is the pure `RenderMessage → ThreadMessageLike`
+  mapping (assistant-only `status`, user-only attachments, image-part URL
+  absolutization).
+- `chat-react/useNeutronChat.ts` is the thin React seam that mirrors the
+  controller's view-model into state and builds assistant-ui's
+  `ExternalStoreRuntime` (the bring-your-own-transport runtime).
+- `chat-react/ChatApp.tsx` composes the UI from assistant-ui **primitives**
+  (`ThreadPrimitive`/`MessagePrimitive`/`ComposerPrimitive` — the styled
+  `Thread` was removed from the core package in 0.14.x), styled to the existing
+  dark theme; topic rail (project tags), connection banner, offline-pending
+  badge, streaming typing dots.
+
+**Parity reached:** optimistic send, token streaming, typing indicator,
+reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect
+(seq/resume), multi-device (falls out of seq/resume + the Phase-1 `Set<sender>`
+registry), project topics, attachment rendering. **Not yet at parity (documented
+gaps):** attachment *compose* UI (upload-and-send affordance — rendering is
+done; the data path through `WebChatSession.send(attachments)` exists); "load
+earlier" history paging beyond the resume replay window; and the production
+app-ws token mint for web (the same deferred identity sub-sprint the app-ws auth
+resolver itself notes). These are incremental follow-ups; the vanilla client
+remains the default until they close.
+
+**Tests.** `chat-react/__tests__/` — controller integration over a real
+`WebChatSession`+fake socket, pure adapter + bootstrap-config tests, and a
+happy-dom component smoke test that renders the full assistant-ui composition
+and asserts an optimistic send + a streamed-then-finalized agent reply reach the
+DOM. `landing/__tests__/web-chat-flag.test.ts` + `chat-react-serving.test.ts`
+cover the flag + flag-gated `/chat` + `/chat-react.js` serving. The React leaf
+typechecks via `landing/chat-react/tsconfig.json` (`bunx tsc -p
+landing/chat-react/tsconfig.json`) — isolated from the root deploy gate, which
+has no JSX/React; the only chat-react file the root gate sees is the pure
+`landing/web-chat-flag.ts` (imported by `server.ts`).
+
 ## Onboarding project removal ("ignore X")
 
 At `projects_proposed` the freeform reply routes through the LLM router

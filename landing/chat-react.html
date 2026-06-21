@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Neutron — chat</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="apple-mobile-web-app-title" content="Neutron" />
+<meta name="theme-color" content="#0b0d10" />
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface: #16181d;
+    --border: #1d2026;
+    --fg: #e9eaee;
+    --muted: #8a8f99;
+    --accent: #6cf;
+    --user-bubble: #0a84ff;
+    --user-fg: #ffffff;
+    --agent-bubble: #1d2026;
+    --agent-fg: #e9eaee;
+    --agent-avatar-bg: #2b3037;
+    --bubble-radius: 18px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #root { height: 100dvh; }
+  .car-shell { display: flex; height: 100dvh; }
+  .car-rail {
+    width: 220px;
+    flex: 0 0 220px;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    padding: 12px 8px;
+    overflow-y: auto;
+  }
+  .car-rail-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 8px 8px; }
+  .car-rail-item {
+    display: block; width: 100%; text-align: left;
+    background: transparent; color: var(--fg); border: 0; border-radius: 8px;
+    padding: 8px 10px; margin: 2px 0; cursor: pointer; font: inherit;
+  }
+  .car-rail-item:hover { background: rgba(255,255,255,.05); }
+  .car-rail-item-active { background: rgba(108,170,255,.16); color: #cfe6ff; }
+  @media (max-width: 720px) { .car-rail { display: none; } }
+  .car-main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+  .car-banner {
+    text-align: center; font-size: 13px; padding: 6px 12px;
+    background: #2a2410; color: #ffd479; border-bottom: 1px solid var(--border);
+  }
+  .car-banner-connecting, .car-banner-reconnecting { background: #18222e; color: #8cc6ff; }
+  .car-banner-closed { background: #2a1416; color: #ff8a8a; }
+  .car-thread { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  .car-viewport { flex: 1 1 auto; overflow-y: auto; padding: 18px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
+  .car-empty { margin: auto; text-align: center; color: var(--muted); }
+  .car-empty-title { font-size: 22px; color: var(--fg); margin-bottom: 6px; }
+  .car-row { display: flex; gap: 8px; align-items: flex-end; max-width: 100%; }
+  .car-row-user { justify-content: flex-end; }
+  .car-row-agent { justify-content: flex-start; }
+  .car-avatar {
+    flex: 0 0 28px; width: 28px; height: 28px; border-radius: 50%;
+    background: var(--agent-avatar-bg); color: var(--fg);
+    display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600;
+  }
+  .car-bubble {
+    max-width: min(60ch, 80%);
+    padding: 9px 13px; border-radius: var(--bubble-radius);
+    white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
+  }
+  .car-bubble-user { background: var(--user-bubble); color: var(--user-fg); border-bottom-right-radius: 4px; }
+  .car-bubble-agent { background: var(--agent-bubble); color: var(--agent-fg); border-bottom-left-radius: 4px; }
+  .car-bubble img { max-width: 100%; border-radius: 12px; display: block; margin-top: 6px; }
+  .car-typing { display: inline-flex; gap: 4px; align-items: center; }
+  .car-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: car-blink 1.4s infinite both; }
+  .car-dot:nth-child(2) { animation-delay: .2s; }
+  .car-dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes car-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  .car-pending { text-align: center; font-size: 12px; color: var(--muted); padding: 4px; }
+  .car-scroll-bottom {
+    position: absolute; right: 16px; bottom: 78px; z-index: 5;
+    width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);
+    background: var(--surface); color: var(--fg); cursor: pointer; font-size: 16px;
+  }
+  .car-scroll-bottom[data-state="hidden"] { display: none; }
+  .car-composer {
+    display: flex; gap: 8px; align-items: flex-end;
+    padding: 10px 12px; border-top: 1px solid var(--border); background: var(--surface);
+  }
+  .car-input {
+    flex: 1 1 auto; resize: none; max-height: 160px;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px 12px; font: inherit; outline: none;
+  }
+  .car-input:focus { border-color: var(--accent); }
+  .car-send {
+    flex: 0 0 auto; background: var(--user-bubble); color: var(--user-fg);
+    border: 0; border-radius: 12px; padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .car-send:disabled { opacity: .5; cursor: default; }
+  .car-cancel { background: #3a3f47; }
+  .car-fatal { margin: 40px auto; max-width: 480px; text-align: center; color: #ff8a8a; padding: 20px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  // Mirror chat.html: scrub the start_token from the URL BEFORE loading the
+  // bundle so the same-origin Referer on /chat-react.js does not leak it, and
+  // the browser history does not retain it. Stash on window for the bundle to
+  // read (chat-react/config.ts → resolveBootstrapConfig). Best-effort.
+  (function () {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var token = params.get('start');
+      if (params.get('debug') === '1') { window.__neutron_debug = true; }
+      if (token) {
+        window.__neutron_start_token = token;
+        // Preserve the client flag across the scrub so a refresh stays on React.
+        var clean = window.location.pathname + '?client=react';
+        window.history.replaceState(null, '', clean);
+      }
+    } catch (e) { /* sandboxed — config.ts falls back to location.search */ }
+  })();
+</script>
+<script type="module" src="/chat-react.js"></script>
+</body>
+</html>

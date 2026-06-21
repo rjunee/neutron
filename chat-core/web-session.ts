@@ -40,6 +40,18 @@ export interface WebChatSessionOptions {
   onChange?: () => void
   /** Called on every connection-status transition. */
   onStatus?: (status: ConnStatus) => void
+  /**
+   * Called for EVERY parsed inbound frame, before the session decides whether
+   * it's a renderable message. The sync layer only persists final
+   * `user_message` echoes + `agent_message`s (everything else normalizes to
+   * `null`), but a UI needs the ephemeral control frames too — chiefly
+   * `agent_message_partial` (token streaming) and the typing/affordance hints.
+   * This is a pure observer: it never affects persistence or ordering, so a
+   * client that ignores it (the vanilla Phase-1 wiring) is unchanged. The
+   * React/assistant-ui surface uses it to drive the live stream + "typing…"
+   * indicator while the durable transcript still flows through the Store.
+   */
+  onFrame?: (frame: unknown) => void
   generateId?: () => string
   now?: () => number
 }
@@ -51,6 +63,7 @@ export class WebChatSession {
   private readonly engine: SyncEngine
   private readonly ws: ChatWsClient
   private readonly onChange: (() => void) | undefined
+  private readonly onFrame: ((frame: unknown) => void) | undefined
 
   constructor(opts: WebChatSessionOptions) {
     this.topic_id = opts.topic_id
@@ -61,6 +74,7 @@ export class WebChatSession {
     this.queue = new SendQueue(this.store, queueOpts)
     this.engine = new SyncEngine(this.store)
     this.onChange = opts.onChange
+    this.onFrame = opts.onFrame
 
     const wsOpts: ConstructorParameters<typeof ChatWsClient>[0] = {
       url: opts.url,
@@ -125,6 +139,16 @@ export class WebChatSession {
 
   private async handleInbound(data: unknown): Promise<void> {
     if (typeof data !== 'object' || data === null) return
+    // Surface the raw frame to any UI observer FIRST (streaming partials,
+    // typing/affordance hints) — independent of whether it's a persisted
+    // message. Failures in the observer must never break the sync path.
+    if (this.onFrame !== undefined) {
+      try {
+        this.onFrame(data)
+      } catch {
+        /* observer error is the UI's problem, not the sync engine's */
+      }
+    }
     const env = data as Record<string, unknown>
     // On (re)connect the server announces the topic + high-water seq. That's
     // our trigger to fill the gap and flush anything queued while offline.
