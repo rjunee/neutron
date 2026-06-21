@@ -8,16 +8,17 @@
  *
  *   1. nested authorization (only when `parent_run_id` is set):
  *        a. parent exists + spawn_depth ≤ MAX_SPAWN_DEPTH
- *        b. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT
- *        c. delegation token present, verifies, and its claims match the
+ *        b. delegation token present, verifies, and its claims match the
  *           requested instance + depth
  *   2. double-spawn guard: if `spawn_key` is set and a same-instance LIVE
  *      record already holds it, coalesce (return the in-flight record) or
- *      refuse (throw). Runs AFTER step 1 so a coalesce only ever returns an
- *      authorized caller their own in-flight twin, and after the step-1 `await`
- *      so the check-then-create is atomic (no TOCTOU); runs BEFORE step 3 so a
- *      coalesced duplicate is never blocked by the concurrency cap.
- *   3. live registry size < MAX_CONCURRENT_SUBAGENTS
+ *      refuse (throw). Runs AFTER step 1's authorization so a coalesce only
+ *      ever returns an authorized caller their own twin, and after step 1's
+ *      `await` so the check-then-create is atomic (no TOCTOU); runs BEFORE
+ *      steps 3-4 so a coalescing retry (which adds no child + reuses the live
+ *      slot) is never blocked by the child or concurrency caps.
+ *   3. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT (new children only)
+ *   4. live registry size < MAX_CONCURRENT_SUBAGENTS
  *
  * Returns the freshly-created `SubagentRecord` (status=`pending`). The caller
  * is responsible for kicking off the actual substrate dispatch and calling
@@ -130,12 +131,6 @@ export async function spawnSubagent(
         `subagent spawn: depth ${spawn_depth} exceeds MAX_SPAWN_DEPTH=${MAX_SPAWN_DEPTH}`,
       )
     }
-    const childCount = deps.registry.byParent(input.parent_run_id).filter((r) => r.status === 'pending' || r.status === 'running').length
-    if (childCount >= MAX_CHILDREN_PER_AGENT) {
-      throw new Error(
-        `subagent spawn: parent ${input.parent_run_id} already has ${childCount} live children (cap ${MAX_CHILDREN_PER_AGENT})`,
-      )
-    }
     if (!input.delegation_token) {
       throw new Error('subagent spawn: nested spawn requires a signed delegation token')
     }
@@ -150,18 +145,23 @@ export async function spawnSubagent(
         `subagent spawn: delegation authorizes depth ${claims.depth} but spawn requires depth ${spawn_depth}`,
       )
     }
+    // NOTE: the child-count cap is intentionally checked AFTER the double-spawn
+    // guard below — a coalescing retry adds no child, so it must not be
+    // rejected by a parent that is already at MAX_CHILDREN_PER_AGENT (the
+    // in-flight twin it coalesces onto is itself one of those children).
   }
 
-  // Double-spawn guard. Runs here — after nested authorization (P2) and after
-  // the only `await` above (P1) — but BEFORE the concurrency cap, so coalescing
-  // a duplicate is never blocked by the cap (the in-flight twin already counts
-  // toward it) and never mints a wasted run_id. The `liveByKey` read and the
-  // synchronous `create` below are not separated by any `await`, so the
-  // check-then-create is atomic against a concurrent duplicate. Scoped to the
-  // same instance: a key only coalesces against a record this caller owns.
+  // Double-spawn guard. Runs here — after nested AUTHORIZATION (parent +
+  // delegation token verified, so a coalesce only ever returns an authorized
+  // caller their own record) and after the only `await` above (so the
+  // `liveByKey` read and the synchronous `create` below are not separated by
+  // any `await` → check-then-create is atomic against a concurrent duplicate),
+  // but BEFORE the child + concurrency caps so a coalesced duplicate is never
+  // cap-blocked. The lookup is instance-scoped, so a cross-instance key
+  // collision can neither hide a same-instance duplicate nor leak across.
   if (input.spawn_key !== undefined) {
-    const inflight = deps.registry.liveByKey(input.spawn_key)
-    if (inflight && inflight.instance_key === input.instance_key) {
+    const inflight = deps.registry.liveByKey(input.spawn_key, input.instance_key)
+    if (inflight) {
       if (input.on_duplicate === 'refuse') {
         throw new Error(
           `subagent spawn: duplicate in-flight spawn for key ${JSON.stringify(input.spawn_key)} ` +
@@ -171,6 +171,19 @@ export async function spawnSubagent(
       // Coalesce: hand back the existing run so the caller awaits the one
       // genuine process instead of starting a second.
       return inflight
+    }
+  }
+
+  // Child-count cap — only a genuinely-new nested child reaches here (a
+  // coalescing retry already returned above).
+  if (input.parent_run_id !== undefined) {
+    const childCount = deps.registry
+      .byParent(input.parent_run_id)
+      .filter((r) => r.status === 'pending' || r.status === 'running').length
+    if (childCount >= MAX_CHILDREN_PER_AGENT) {
+      throw new Error(
+        `subagent spawn: parent ${input.parent_run_id} already has ${childCount} live children (cap ${MAX_CHILDREN_PER_AGENT})`,
+      )
     }
   }
 

@@ -214,6 +214,73 @@ describe('double-spawn guard', () => {
     ).rejects.toThrow(/bad signature/)
   })
 
+  test('nested: a coalescing retry succeeds even when the parent is at the child cap', async () => {
+    // The key-holding child itself counts toward MAX_CHILDREN_PER_AGENT, so a
+    // retry for it must coalesce (adds no child) rather than be rejected by the
+    // child cap. Regression: the child-cap check used to run before the guard.
+    const registry = new SubagentRegistry()
+    const parent = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: verify, mint_run_id: () => 'parent' },
+    )
+    const ids = makeIds('child')
+    const keys: string[] = []
+    // Saturate the parent with MAX_CHILDREN_PER_AGENT (5) live children, each
+    // with its own spawn_key.
+    for (let i = 0; i < 5; i++) {
+      const k = `instance-a:child-${i}:atlas`
+      keys.push(k)
+      // eslint-disable-next-line no-await-in-loop
+      await spawnSubagent(
+        { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: k },
+        { registry, verify_delegation: verify, mint_run_id: ids },
+      )
+    }
+    expect(registry.byParent(parent.run_id)).toHaveLength(5)
+
+    // A retry for an already-live child coalesces despite the saturated parent…
+    const retry = await spawnSubagent(
+      { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: keys[0]! },
+      { registry, verify_delegation: verify, mint_run_id: () => 'should-not-mint' },
+    )
+    expect(retry.spawn_key).toBe(keys[0]!)
+    expect(registry.byParent(parent.run_id)).toHaveLength(5) // no new child
+
+    // …but a genuinely-NEW child under the saturated parent is still rejected.
+    await expect(
+      spawnSubagent(
+        { parent_run_id: parent.run_id, instance_key: 'instance-a', agent_kind: 'atlas', delegation_token: 'tok', spawn_key: 'instance-a:child-new:atlas' },
+        { registry, verify_delegation: verify, mint_run_id: () => 'nope' },
+      ),
+    ).rejects.toThrow(/already has 5 live children/)
+  })
+
+  test('cross-instance key collision does NOT mask a same-instance duplicate', async () => {
+    // If instance A's record with key K sorts first, an instance-scoped lookup
+    // must still find instance B's live K — not fall through and create a 2nd B.
+    const registry = new SubagentRegistry()
+    const key = 'colliding-key'
+    const a = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'A-run' },
+    )
+    registry.update(a.run_id, { status: 'running' })
+    const b1 = await spawnSubagent(
+      { instance_key: 'instance-b', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'B-run' },
+    )
+    registry.update(b1.run_id, { status: 'running' })
+    // A second instance-B spawn for K must coalesce onto B-run, NOT mint a 3rd.
+    const b2 = await spawnSubagent(
+      { instance_key: 'instance-b', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: () => 'B-run-2' },
+    )
+    expect(b2.run_id).toBe('B-run')
+    expect(registry.byRunId('B-run-2')).toBeUndefined()
+    // Exactly two records: one per instance.
+    expect(registry.snapshot()).toHaveLength(2)
+  })
+
   test('the guard is instance-scoped: a same key on a different instance does NOT coalesce', async () => {
     const registry = new SubagentRegistry()
     const key = 'shared-key'

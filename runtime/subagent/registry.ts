@@ -137,11 +137,16 @@ export class SubagentRegistry {
    * the second attempt is coalesced/refused. A terminal record (finished /
    * crashed / cancelled) with the same key does NOT match — once the prior run
    * is done (or the watchdog has reaped it), a fresh spawn is allowed through.
+   *
+   * When `instance_key` is given the match is scoped to that instance, so a
+   * cross-instance key collision can never hide a same-instance duplicate (nor
+   * leak another instance's record). The guard always passes it.
    */
-  liveByKey(spawn_key: string): SubagentRecord | undefined {
+  liveByKey(spawn_key: string, instance_key?: string): SubagentRecord | undefined {
     return [...this.byId.values()].find(
       (r) =>
         r.spawn_key === spawn_key &&
+        (instance_key === undefined || r.instance_key === instance_key) &&
         (r.status === 'pending' || r.status === 'running'),
     )
   }
