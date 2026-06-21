@@ -91,6 +91,81 @@ list, now Calendar + Email + Google Workspace).
 **Verify.** `bunx tsc --noEmit` clean. Full `bun test`: 7624 pass / 90 skip /
 0 fail across 722 files — INCLUDING every cores registration test
 (`cores-composition`, `cores-surface`, `cores-oauth-surface`, install-lifecycle).
+## 2026-06-20 — Proactive messaging: real morning brief + idle-topic nudge sweep (gap-audit P0-5)
+
+Closes gap-audit P0-5 (WAVE 2 Track A) — "Neutron only speaks when spoken to."
+Two proactive paths now POST to chat, both reusing the existing cron registry +
+the P6 nudge ranker, both posting through the channel-agnostic `OutboundSink`
+(the production `ChannelRouter`, exactly like trident async-delivery P0-1).
+
+**1. Real morning brief** (`gateway/proactive/morning-brief.ts`). The prior
+"morning brief" (`onboarding/overnight/morning-brief.ts`) reports ONLY overnight
+Trident completions and ONLY fires if something ran overnight. The new brief
+composes a real daily brief from whatever live context is available — today's
+calendar, the focus/task queue, recent entity/memory deltas, project STATUS —
+and posts it EVERY owner-local day regardless of overnight activity.
+- Context sources are INDEPENDENT, OPTIONAL async providers
+  (`ProactiveContextSources`), each gathered behind its own try/catch
+  (`gatherBriefContext`): a missing/throwing source degrades to "section
+  omitted", never a failed brief. The focus-queue source defaults to the
+  canonical `TaskStore` (top open tasks by focus score) so the brief is useful
+  out of the box; calendar/entities/STATUS layer in when the host supplies them.
+- `composeMorningBrief` is PURE (sections → body); an empty section is dropped
+  and a fully-quiet day yields an honest "clear day" line — never a fabricated
+  section.
+- Same-day idempotency lives in the new `proactive_brief_log` table (migration
+  0080): the handler ticks every 30 min but posts at most one brief per
+  owner-local day, at/after a configurable local hour (default 07:00), so a
+  gateway restart mid-morning cannot double-post. A deliver failure does NOT
+  record the day, so the next tick retries.
+
+**2. Idle-topic nudge sweep** (`gateway/proactive/idle-nudge-sweep.ts`). The P6
+ranker already picks the single highest-leverage open task per project per day
+and persists it to `current_focus_pick` — but never posted it. This sweep adds
+the post path behind a strict quality gate. Per hourly tick, for each active
+project-bound topic it:
+- SKIPS active topics (activity inside the 4h idle threshold — a live
+  conversation needs no nudge);
+- SKIPS empty topics (no `current_focus_pick` for today, or the picked task is
+  no longer open — `readTodayPick` joins the pick to its task and returns null
+  unless the task is still `open`);
+- DEDUPES via the new `proactive_topic_state` ledger — never re-nudges the same
+  idle topic about the same task until the user has returned (activity advanced
+  past the watermark stored at the last nudge).
+The gate (`evaluateNudgeGate`) is PURE so all branches are unit-tested without a
+DB or sink. The ranker stays the single source of "what to do next"; this module
+is purely the gate + the post path.
+
+**Wiring.** Both register on the shared cron registries via
+`gateway/proactive/cron.ts` (`registerMorningBriefCron` /
+`registerIdleNudgeSweepCron`, mirroring the nudge engine's register shape — no
+new scheduler). The composition layer wires them in `tasksModule`
+(`build-core-modules.ts`, now `deps: ['cron','reminders','channels']`) gated on a
+new optional `tasks.proactive` config block (`tasks-input.ts`): the morning brief
+registers only when `resolveGeneralTopic` returns a topic; the sweep registers
+only when `listIdleTopics` is supplied (Neutron has no generic last-activity
+index yet, so the host enumerates idle topics). Absent → neither cron registers
+(unchanged Open default).
+
+**Tests (REAL, per CLAUDE.md).** `gateway/proactive/__tests__/` (28 tests):
+- `morning-brief.test.ts` — pure composer (sections / drop-empty / quiet-day);
+  graceful degradation (a throwing source is omitted, the brief still composes);
+  `runMorningBrief` against a REAL in-memory DB + recording sink asserts the
+  outbound post carries the composed brief body, the once-per-local-day guard
+  (no second post), the too-early gate, and the deliver-failure retry path.
+- `idle-nudge-sweep.test.ts` — real `current_focus_pick ⋈ tasks` read; pure
+  gate (active / no_pick / dedupe / re-nudge-after-return / null-activity);
+  `runIdleNudgeSweep` posts a nudge for an idle topic, SKIPS an active topic +
+  an empty topic in one sweep, dedupes across sweeps, and survives a per-topic
+  deliver failure without writing the ledger.
+- `cron.test.ts` — registration on the shared registries (job names, interval
+  schedules, idempotent handler registration) + the wrapped handlers run and
+  report structured status.
+
+Files: `migrations/0080_proactive_messaging.sql` (+ regenerated
+`expected-schema.txt`), `gateway/proactive/{sink,state-store,morning-brief,idle-nudge-sweep,cron,index}.ts`,
+`gateway/proactive/__tests__/*`, `gateway/composition/input/tasks-input.ts`,
+`gateway/composition/build-core-modules.ts`.
 
 ## 2026-06-21 — Chat-sync foundation fix-round (Argus REQUEST CHANGES): double-dispatch guard + wiring split
 
