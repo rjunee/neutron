@@ -83,4 +83,14 @@ describe('buildStatusMdContextSource', () => {
     // A slash-bearing id is not a valid project id — sanitize rejects it.
     expect(src.gather(reminder(), 'acme/../acme')).toBe('')
   })
+
+  test('rejects a bare ".." project id (no slash) that join would collapse', () => {
+    // `..` passes sanitizeProjectId (dots allowed) and join() collapses it to
+    // `<owner_home>/STATUS.md` — the dot-segment + containment guard must catch it.
+    writeFileSync(join(owner_home, 'STATUS.md'), 'SECRET owner-home status', 'utf8')
+    const src = buildStatusMdContextSource({ owner_home })
+
+    expect(src.gather(reminder(), '..')).toBe('')
+    expect(src.gather(reminder(), '.')).toBe('')
+  })
 })

@@ -14,7 +14,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 
 import { sanitizeProjectId } from '../channels/adapters/app-ws/envelope.ts'
 import type { ReminderContextSource } from './dispatcher.ts'
@@ -39,14 +39,18 @@ export interface BuildStatusMdContextSourceInput {
  * it is NOT `reminder.project_slug` (the fixed instance/owner slug), which for
  * project reminders would point at the wrong / empty STATUS.md.
  *
- * The id is sanitized (`sanitizeProjectId`) before it becomes a path segment
- * so a malformed/hostile project id can't traverse out of `Projects/`. Returns
- * an empty string when the id is unsafe, or the file is absent or unreadable.
+ * The id is sanitized (`sanitizeProjectId`) before it becomes a path segment,
+ * AND the resolved path is verified to stay under `<owner_home>/Projects/` —
+ * `sanitizeProjectId` permits dots, so a bare `..` segment passes the charset
+ * check but would resolve to `<owner_home>/STATUS.md`; the containment check
+ * rejects it. Returns an empty string when the id is unsafe, escapes the
+ * projects root, or the file is absent or unreadable.
  */
 export function buildStatusMdContextSource(
   input: BuildStatusMdContextSourceInput,
 ): ReminderContextSource {
   const cap = input.char_cap ?? STATUS_MD_CHAR_CAP
+  const projectsRoot = resolve(input.owner_home, 'Projects')
   return {
     gather(_reminder: Reminder, project_id: string): string {
       const safe = sanitizeProjectId(project_id)
@@ -54,7 +58,18 @@ export function buildStatusMdContextSource(
         input.log?.(`[reminder-context] unsafe project id ${JSON.stringify(project_id)} — skipping STATUS.md`)
         return ''
       }
-      const path = join(input.owner_home, 'Projects', safe, 'STATUS.md')
+      // `sanitizeProjectId` allows dots, so a `.`/`..` segment slips the charset
+      // gate. Reject dot-only ids outright, then verify the resolved path is
+      // still strictly inside `Projects/` before any read (defense in depth).
+      if (safe === '.' || safe === '..') {
+        input.log?.(`[reminder-context] project id ${JSON.stringify(project_id)} is a dot segment — skipping STATUS.md`)
+        return ''
+      }
+      const path = join(projectsRoot, safe, 'STATUS.md')
+      if (!path.startsWith(projectsRoot + sep)) {
+        input.log?.(`[reminder-context] project id ${JSON.stringify(project_id)} escapes Projects/ — skipping STATUS.md`)
+        return ''
+      }
       try {
         if (!existsSync(path)) return ''
         const body = readFileSync(path, 'utf8')
