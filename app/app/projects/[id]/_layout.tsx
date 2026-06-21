@@ -43,15 +43,10 @@ import {
   type ProjectTabKey,
 } from '../../../components/ProjectTabBar';
 import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
-import { isLegalTab, lastTabStorage } from '../../../lib/last-tab-storage';
+import { activeTabFromSegments } from '../../../lib/active-tab';
+import { lastTabStorage } from '../../../lib/last-tab-storage';
 import { ProjectStateProvider, useProjectState } from '../../../lib/project-state';
 import { useAuthSession } from '../../../lib/session';
-
-function activeTabFromSegments(segments: readonly string[]): ProjectTabKey {
-  const last = segments[segments.length - 1];
-  if (isLegalTab(last)) return last;
-  return 'chat';
-}
 
 export default function ProjectLayout() {
   const router = useRouter();
@@ -89,7 +84,12 @@ function ProjectShell({ project_id }: { project_id: string }) {
   const segments = useSegments() as readonly string[];
   const { user } = useAuthSession();
   const { project, loading, error, generateInvite } = useProjectState();
+  // `null` on a non-tab sub-route (chat-sync/notes/cores/backups): no tab is
+  // highlighted there and `handleTabSelect` then lets every tab tap navigate.
   const activeTab = activeTabFromSegments(segments);
+  // The slot fade keys off the actual route leaf (not the highlighted tab) so
+  // it animates across non-tab routes too, and never receives a null key.
+  const slotKey = segments[segments.length - 1] ?? 'chat';
   const [drawerOpen, setDrawerOpen] = useState(false);
   const { width } = useWindowDimensions();
   const wide = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
@@ -125,7 +125,9 @@ function ProjectShell({ project_id }: { project_id: string }) {
   };
 
   useEffect(() => {
-    void lastTabStorage().set(project_id, activeTab);
+    // Only persist a real tab — a non-tab sub-route (activeTab === null) leaves
+    // the last-tab preference untouched.
+    if (activeTab !== null) void lastTabStorage().set(project_id, activeTab);
   }, [project_id, activeTab]);
 
   if (loading && project === null) {
@@ -178,7 +180,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
         <View style={styles.wideBody}>
           <ProjectTabBar active={activeTab} onSelect={handleTabSelect} />
           <View style={styles.wideContent}>
-            <SlotFader keyId={activeTab}>
+            <SlotFader keyId={slotKey}>
               <Slot />
             </SlotFader>
           </View>
@@ -187,7 +189,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
         <>
           <ProjectTabBar active={activeTab} onSelect={handleTabSelect} />
           <View style={styles.narrowContent}>
-            <SlotFader keyId={activeTab}>
+            <SlotFader keyId={slotKey}>
               <Slot />
             </SlotFader>
           </View>

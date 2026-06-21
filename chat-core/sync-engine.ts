@@ -83,9 +83,12 @@ export class SyncEngine {
       const byCmid = await this.store.getByClientMsgId(topic_id, env.client_msg_id)
       if (byCmid !== null) return byCmid
     }
-    // Fall back to a message_id scan (agent messages, or a re-delivered
-    // message whose client_msg_id we never held).
-    const all = await this.store.list(topic_id)
-    return all.find((m) => m.message_id === env.message_id) ?? null
+    // Fall back to an indexed point lookup by message_id (agent messages, or a
+    // re-delivered message whose client_msg_id we never held). This was a
+    // `store.list(topic_id)` full scan + `.find()` — O(N) per applied message,
+    // so replaying a resume tail of N agent messages was O(N²) (a real cliff at
+    // thousands of messages). `getByMessageId` lets a backing store serve it
+    // from a `(topic_id, message_id)` index instead.
+    return this.store.getByMessageId(topic_id, env.message_id)
   }
 }

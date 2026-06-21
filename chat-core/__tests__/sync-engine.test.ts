@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 
-import { InMemoryStore } from '../store.ts'
+import { InMemoryStore, type Store } from '../store.ts'
 import { SyncEngine } from '../sync-engine.ts'
 import { SendQueue } from '../send-queue.ts'
-import type { InboundChatMessage } from '../types.ts'
+import type { ChatMessage, InboundChatMessage } from '../types.ts'
 
 const TOPIC = 'app:sam'
 
@@ -114,6 +114,60 @@ describe('SyncEngine — reconnect replay fills the gap', () => {
     await engine.applyInbound(TOPIC, inbound({ message_id: 'm3', seq: 3 }))
     const msgs = await engine.messages(TOPIC)
     expect(msgs.length).toBe(3)
+  })
+})
+
+describe('SyncEngine — resume replay is bounded (no O(N²) list scan)', () => {
+  // A Store that counts how the engine resolves existing rows: the old apply
+  // path called `list(topic)` (a full scan + sort) per message → O(N²) over a
+  // resume tail. The fix routes agent-message lookups through the indexed
+  // `getByMessageId` point lookup, so `list()` must NOT be hit on apply.
+  function countingStore(): { store: Store; listCalls: () => number; byMidCalls: () => number } {
+    const inner = new InMemoryStore()
+    let listCalls = 0
+    let byMidCalls = 0
+    const store: Store = {
+      upsert: (m: ChatMessage) => inner.upsert(m),
+      list: (t: string) => {
+        listCalls += 1
+        return inner.list(t)
+      },
+      getByClientMsgId: (t: string, c: string) => inner.getByClientMsgId(t, c),
+      getByMessageId: (t: string, m: string) => {
+        byMidCalls += 1
+        return inner.getByMessageId(t, m)
+      },
+      lastSeenSeq: (t: string) => inner.lastSeenSeq(t),
+      pendingSends: (t: string) => inner.pendingSends(t),
+      clear: (t: string) => inner.clear(t),
+    }
+    return { store, listCalls: () => listCalls, byMidCalls: () => byMidCalls }
+  }
+
+  it('resolves replayed agent messages via the message_id index, never a full list scan', async () => {
+    const { store, listCalls, byMidCalls } = countingStore()
+    const engine = new SyncEngine(store)
+    // Replay a tail of agent messages (no client_msg_id), as on reconnect.
+    for (const s of [1, 2, 3, 4, 5]) {
+      await engine.applyInbound(TOPIC, inbound({ message_id: `m${s}`, seq: s }))
+    }
+    // Each apply did exactly one indexed point lookup...
+    expect(byMidCalls()).toBe(5)
+    // ...and the apply path never fell back to a whole-topic `list()` scan.
+    expect(listCalls()).toBe(0)
+    // Correctness still holds: ordered + de-duped.
+    expect((await engine.messages(TOPIC)).map((m) => m.seq)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('still de-dups a re-delivered agent message through the point lookup', async () => {
+    const { store, byMidCalls } = countingStore()
+    const engine = new SyncEngine(store)
+    const first = await engine.applyInbound(TOPIC, inbound({ message_id: 'm9', seq: 9 }))
+    expect(first.applied).toBe(true)
+    const again = await engine.applyInbound(TOPIC, inbound({ message_id: 'm9', seq: 9 }))
+    expect(again.applied).toBe(false) // de-duped via getByMessageId, not a scan
+    expect(byMidCalls()).toBe(2)
+    expect((await engine.messages(TOPIC)).length).toBe(1)
   })
 })
 
