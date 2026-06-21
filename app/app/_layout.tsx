@@ -94,6 +94,7 @@ export default function RootLayout() {
         <Stack.Screen name="projects/index" />
         <Stack.Screen name="projects/[id]" />
         <Stack.Screen name="settings" />
+        <Stack.Screen name="integrations" />
         <Stack.Screen name="admin" />
       </Stack>
     </AuthSessionProvider>
