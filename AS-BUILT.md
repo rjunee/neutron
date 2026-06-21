@@ -25,10 +25,26 @@ explicit least-privilege top-level `permissions: { contents: read }` block to
 setup, no committed codeql.yml). CI only reads the checkout + runs
 typecheck/tests, so no write scopes are granted.
 
+**3. Midnight-boundary flake in `restore-ui.test.ts` (the actual red on the
+first CI run).** With the ripgrep cause fixed, CI still failed on a SEPARATE,
+date-dependent test: `groupSnapshotsByDay > labels today / yesterday correctly`.
+The run executed at `00:00:30 UTC` (the runner's tz is UTC), and the test built
+a "today" snapshot at a fixed `60_000 ms` ago — which at 30 s past local midnight
+lands at `23:59:30` YESTERDAY, so "Today" had 1 snapshot instead of 2. The
+`groupSnapshotsByDay` implementation is correct; the test was fragile. Fixed by
+anchoring the today snapshots to instants guaranteed within the local calendar
+day (`[startOfToday, now]`: midnight-today + the midpoint to now), mirroring the
+existing noon-yesterday anchor. Hardened the sibling "preserves order within a
+day" test the same way (it had the same latent ~3 s post-midnight flake). Proven
+against the exact failure instant (`now = 2026-06-21T00:00:30Z`, tz UTC):
+Today=2 / Yesterday=1.
+
 **Verify.** `bun test cores/free/code-gen/__tests__/tool-handlers.test.ts` →
 16/16 pass with ripgrep present AND with `rg` removed from PATH (grep-fallback
 path exercised on BSD grep; GNU grep on the Linux runner supports the same
-flags). `bunx tsc --noEmit` clean.
+flags). `bun test app/__tests__/restore-ui.test.ts` → 19/19. `bunx tsc --noEmit`
+clean. First CI run confirmed both `grepScoped` tests PASS on the stock runner
+(grep fallback works) — only the unrelated date flake was red, now fixed.
 
 ## 2026-06-20 — #314: deterministic port bind on restart (no silent random-port fallback)
 

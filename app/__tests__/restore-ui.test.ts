@@ -380,10 +380,19 @@ describe('groupSnapshotsByDay', () => {
     const startOfToday = new Date(now);
     startOfToday.setHours(0, 0, 0, 0);
     const yesterdayAgoMs = now - (startOfToday.getTime() - 12 * 3_600_000);
+    // The two "today" snapshots must also be anchored to the local calendar
+    // day, not a fixed N-ms offset: a snapshot "60 s ago" lands in YESTERDAY
+    // when the test runs in the first minute after local midnight (the CI
+    // runner's tz is UTC and a run at 00:00:30 made today-2 cross the
+    // boundary). Anchor both within [startOfToday, now] — start-of-today and
+    // the midpoint to now — so they are always today, in any tz, at any hour.
+    const elapsedToday = now - startOfToday.getTime();
+    const todayOldAgoMs = elapsedToday; // exactly local midnight today
+    const todayNewAgoMs = Math.floor(elapsedToday / 2); // midday-ish, more recent
     const groups = groupSnapshotsByDay(
       [
-        fakeSnap('a'.repeat(40), 'today-1', 1_000),
-        fakeSnap('b'.repeat(40), 'today-2', 60_000),
+        fakeSnap('a'.repeat(40), 'today-1', todayNewAgoMs),
+        fakeSnap('b'.repeat(40), 'today-2', todayOldAgoMs),
         fakeSnap('c'.repeat(40), 'yest', yesterdayAgoMs),
       ],
       now,
@@ -406,11 +415,17 @@ describe('groupSnapshotsByDay', () => {
 
   it('preserves snapshot order within a day', () => {
     const now = Date.now();
+    // Anchor all three within today (same midnight-boundary safety as the
+    // today/yesterday test) so they cannot split across days in the first
+    // seconds after local midnight.
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const elapsedToday = now - startOfToday.getTime();
     const groups = groupSnapshotsByDay(
       [
-        fakeSnap('a'.repeat(40), 'first', 1_000),
-        fakeSnap('b'.repeat(40), 'second', 2_000),
-        fakeSnap('c'.repeat(40), 'third', 3_000),
+        fakeSnap('a'.repeat(40), 'first', Math.floor(elapsedToday * 0.25)),
+        fakeSnap('b'.repeat(40), 'second', Math.floor(elapsedToday * 0.5)),
+        fakeSnap('c'.repeat(40), 'third', Math.floor(elapsedToday * 0.75)),
       ],
       now,
     );
