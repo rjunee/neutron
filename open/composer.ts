@@ -80,6 +80,7 @@ import {
 import { webTopicId } from '../gateway/http/web-topic-id.ts'
 
 import { buildLocalStartTokenAuth } from './local-start-token.ts'
+import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
 import { createChatHistorySurface } from '../gateway/http/chat-history-surface.ts'
 import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './owner-identity.ts'
@@ -467,6 +468,15 @@ export function buildOpenGraphComposer(
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
         : undefined
 
+    // WAVE 2 Track A — per-project persona resolver. Reads the canonical
+    // `projects.persona` label (the same column the settings drawer + onboarding
+    // write) for a project topic so each project topic's dedicated warm CC
+    // session adopts ITS persona on top of the owner-wide SOUL/USER doctrine.
+    // A closure over `db` (NOT a captured value), re-run per first-turn so a
+    // persona edited mid-session lands on the next cold topic. Best-effort: a
+    // transient SQLite error degrades to the owner-wide persona alone.
+    const projectPersonaResolver = buildProjectPersonaResolver(db)
+
     const liveAgentTurnFactory =
       liveAgentSubstrate !== null
         ? (pieces: {
@@ -476,6 +486,7 @@ export function buildOpenGraphComposer(
             buildLiveAgentTurn({
               substrate: liveAgentSubstrate,
               personaLoader,
+              projectPersonaResolver,
               buttonStore: pieces.buttonStore,
               transcript: pieces.transcript,
               project_slug,

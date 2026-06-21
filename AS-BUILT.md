@@ -2,6 +2,76 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
+
+**Problem.** The daily-driver gap audit flagged that Open collapses multi-project
+chat into one shared agent identity: every Telegram/web topic spoke with the
+same instance-wide persona. Two sub-problems, one VERIFIED, one new:
+
+1. **Per-topic session isolation** — already *mostly* wired but never asserted at
+   the key level. `build-live-agent-turn.ts` stamps
+   `spec.metering_context.project_id = scope` (`'general'` or the project id) and
+   `build-llm-call-substrate.ts` folds that into
+   `ClaudeCodeSubstrateOptions.project_id`, which `poolKeyFor()` keys the
+   module-level warm-REPL pool on `(substrate_instance_id, user_id, project_id,
+   credential_identity)`. So distinct topics already resolve to distinct warm CC
+   sessions — but the existing test only asserted `metering_context` was *set*,
+   not that distinct **session keys** result. The audit's "ONE shared substrate"
+   read of composer.ts:207 predates this keying (the `cc-agent-*` live substrate
+   produces a *keyed pool*, not one session).
+
+2. **Per-project persona** — the real gap. `projects.persona` (a free-form label
+   like "Forge — pragmatic build agent", written by the settings drawer +
+   onboarding) was NEVER read into a chat turn. `composeFirstTurnPrompt` only
+   loaded the owner-wide `PersonaPromptLoader` (`<owner_home>/persona/*.md`).
+
+**What shipped.**
+
+- **`open/project-persona-resolver.ts` (NEW).** `buildProjectPersonaResolver(db)`
+  → `(project_id) => string | null`, reading the canonical
+  `projects.persona` column (`WHERE id = ? AND deleted_at IS NULL`). A closure
+  over the live `ProjectDb` (re-run per cold turn, NOT a captured value), so a
+  persona edited mid-session lands on the next cold topic. Best-effort: a
+  transient SQLite error logs + returns null (degrade to owner-wide persona,
+  never hard-fail — mirrors the persona-loader's rule).
+
+- **`build-live-agent-turn.ts`.** New optional `projectPersonaResolver` on
+  `BuildLiveAgentTurnInput`. `composeFirstTurnPrompt` now splices a
+  `<project_persona>` fragment ABOVE the scope fragment for project topics, so
+  the project topic's dedicated warm session adopts ITS persona on top of — not
+  in place of — the owner-wide SOUL/USER `base_persona`. NEVER consulted for
+  General (`turn.project_id === undefined`). A null/empty/throwing resolver
+  degrades silently. First-turn-only (the warm REPL carries it forward); the
+  degraded system-prompt-assembly fallback path also carries the fragment.
+
+- **`open/composer.ts`.** Builds the resolver via `buildProjectPersonaResolver(db)`
+  and threads it into the `liveAgentTurnFactory`. Surgical: one import + one
+  call + one passthrough field. LLM-less boot is unaffected (the factory only
+  exists when `liveAgentSubstrate !== null`).
+
+**Why reuse, not rebuild.** Per the scope guard, the warm-session lifecycle
+(spawn/warm/resume/respawn) and the keyed pool already exist in
+`persistent-repl-substrate.ts`; the metering→`project_id`→`poolKeyFor` fold
+already gives per-topic sessions. This change does NOT touch that machinery — it
+adds the per-project persona seam and PROVES the isolation at the key level.
+
+**Verify (REAL).**
+- `gateway/realmode-composer/__tests__/build-live-agent-turn-session-isolation.test.ts`
+  (NEW) — wires the REAL `buildLlmCallSubstrate` (production seam) under the
+  live-agent runner with a capturing `substrateFactory`, dispatches General +
+  two project topics, and asserts the computed `poolKeyFor` yields THREE
+  DISTINCT keys (not one shared), a STABLE key across turns on the same topic,
+  and that the single-topic path still replies. This is the "assert distinct
+  session keys, not just that a session exists" the spec demands.
+- `build-live-agent-turn.test.ts` (+6 tests) — project topic injects its persona
+  into the first-turn prompt; General never consults the resolver; null/empty →
+  no block; a throwing resolver degrades; two topics each get their OWN persona;
+  persona is a first-turn-only splice.
+- `open/__tests__/project-persona-resolver.test.ts` (NEW) — REAL migrated
+  project.db: trimmed persona for a live project, null for unknown/NULL/empty,
+  soft-deleted ignored, closed-db → null (never throws).
+- `bunx tsc --noEmit` clean. Full `bun test` → 7684 pass / 90 skip / 0 fail.
+
 ## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
 
 Argus round 2 (Codex/GPT-5 cross-model + Claude shell/test cross-check) cleared
