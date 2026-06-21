@@ -88,10 +88,35 @@ throttle) — 38 doc-search tests pass. Full repo: `bunx tsc --noEmit` clean;
 `scripts/run-tests.sh` PASS — 746 files across 8 chunks green (gateway+open
 composition suites: 958 pass, confirming the wiring is intact).
 
+**Cross-model review (Codex).** Two correctness bugs Codex flagged were fixed in
+this PR: (1) hyphenated query terms (`daily-driver`, `gap-audit`) were passed to
+FTS5 unquoted where `-` is query syntax → the MATCH threw and the term became
+unsearchable; the sanitiser now only leaves `[A-Za-z0-9_]+` bare and phrase-quotes
+everything else (`doc-search/query.ts`). (2) the document `limit` was applied at
+the chunk level before the per-file collapse, so one large file with many matching
+sections could crowd out other documents; `search()` now pulls BM25-ordered
+candidates to a high safety cap (`CANDIDATE_CAP = 5000`), collapses to the best
+chunk per file, and applies the limit at the FILE level (`doc-search/store.ts`).
+Both have regression tests in `doc-search/store.test.ts`.
+
+**Known boundary (reachability).** Codex also flagged (P1) that the registered
+tools are not yet reachable by the *completed-phase live Claude Code chat agent*:
+that path builds its `--tools` allow-list from `DEFAULT_TOOL_NAMES` (`Read` /
+`Glob` / `Grep`) and the dev-channel MCP only exposes `reply` / `send_typing` —
+the `ToolRegistry` / `McpServer` is built in the module graph but is NOT bridged
+into the live CC substrate. This is a **pre-existing platform-wide gap that
+affects every registry tool** (the `registerNeutronToolsSurface` stubs and all
+Cores tools share it), not something this PR introduces; bridging the registry/MCP
+surface into the live CC REPL is substantial separate platform work. doc_search /
+doc_read register through the canonical `ToolRegistry` (reachable today via the
+MCP-server surface + programmatic callers); the live CC agent meanwhile can
+already `Grep`/`Read` the project tree (cwd = owner_home) — doc-search adds the
+BM25 ranking + structured surface the bridge will expose. Tracked as a follow-up.
+
 **Not in scope.** Indexing the entities wiki / non-project docs; a production
 local embedder (the semantic seam ships but no provider is wired); surfacing
-doc-search through the web UI (it's an agent tool only); the Obsidian `obs.*`
-redirector confirmation (the other half of gap-audit cat 13).
+doc-search through the web UI; the live-CC-agent tool bridge (see Known boundary);
+the Obsidian `obs.*` redirector confirmation (the other half of gap-audit cat 13).
 
 ## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
 

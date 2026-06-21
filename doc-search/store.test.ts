@@ -67,6 +67,30 @@ describe('DocSearchIndex (lexical BM25)', () => {
     expect(hits.length).toBeGreaterThan(0)
   })
 
+  test('hyphenated query terms are searchable (not parsed as FTS operators)', async () => {
+    await index.indexFile(
+      fileInput('p', 'docs/audit.md', '# Audit\n\nThe daily-driver gap-audit lists the QMD-equivalent doc search.'),
+    )
+    const hits = await index.search({ query: 'daily-driver gap-audit' })
+    expect(hits.length).toBe(1)
+    expect(hits[0]!.path).toBe('docs/audit.md')
+  })
+
+  test('document limit is applied per-file, not per-chunk (no single-file starvation)', async () => {
+    // One huge file with MANY matching sections (> limit*4 chunks) must not
+    // crowd out other relevant documents.
+    const bigSections = Array.from({ length: 60 }, (_, i) => `## Section ${i}\n\nwidget widget widget`).join('\n\n')
+    await index.indexFile(fileInput('p', 'docs/big.md', `# Big\n\n${bigSections}`))
+    for (let i = 0; i < 5; i++) {
+      await index.indexFile(fileInput('p', `docs/small-${i}.md`, `# Small ${i}\n\na single widget mention`))
+    }
+    const hits = await index.search({ query: 'widget', limit: 4 })
+    expect(hits).toHaveLength(4)
+    // The big file appears at most once, and other files get represented.
+    expect(hits.filter((h) => h.path === 'docs/big.md')).toHaveLength(1)
+    expect(new Set(hits.map((h) => h.path)).size).toBe(4)
+  })
+
   test('empty / whitespace queries return nothing', async () => {
     await index.indexFile(fileInput('p', 'docs/a.md', '# A\n\nbody'))
     expect(await index.search({ query: '' })).toEqual([])

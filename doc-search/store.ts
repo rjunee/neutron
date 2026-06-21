@@ -90,8 +90,8 @@ export interface IndexStats {
   chunks: number
 }
 
+/** A matched chunk row returned by the candidate query in `search`. */
 interface ChunkRow {
-  rowid: number
   project: string
   relpath: string
   title: string
@@ -99,6 +99,7 @@ interface ChunkRow {
   ordinal: number
   bm25: number
   snippet: string
+  embedding: string | null
 }
 
 const SCHEMA = `
@@ -146,6 +147,14 @@ const BM25_WEIGHTS = { title: 10.0, heading: 4.0, body: 1.0 } as const
 
 /** Blend weight for the lexical score when hybrid (semantic) mode is on. */
 const HYBRID_LEX_WEIGHT = 0.6
+
+/**
+ * Hard cap on BM25-ordered candidate chunks pulled before the per-file
+ * collapse. High enough that the document `limit` is never starved by one
+ * big file's matching sections, bounded so a pathological broad query
+ * over a huge corpus can't load unbounded rows into memory.
+ */
+const CANDIDATE_CAP = 5000
 
 export interface DocSearchIndexOptions {
   /** Optional semantic embedder. Omit for the pure-lexical baseline. */
@@ -268,30 +277,38 @@ export class DocSearchIndex {
   }
 
   /**
-   * BM25 search, collapsed to the best chunk per file, returned as
-   * ranked documents. In semantic mode the lexical candidate set is
-   * re-ranked by query↔chunk cosine similarity blended with BM25.
+   * BM25 search returned as ranked DOCUMENTS (best chunk per file). In
+   * semantic mode the top lexical files are re-ranked by query↔best-chunk
+   * cosine similarity blended with BM25.
+   *
+   * Candidate chunks are pulled BM25-ordered up to a high safety cap,
+   * then collapsed to the best chunk per file, and ONLY THEN is the
+   * document `limit` applied. Collapsing before the limit means a single
+   * large file with many matching sections can't crowd other relevant
+   * documents out of the result set. (SQLite's `bm25()` auxiliary
+   * function can't be used inside an aggregate / grouped query, so the
+   * per-file collapse is done in application code rather than via
+   * `GROUP BY MIN(bm25(...))`.)
    */
   async search(input: SearchInput): Promise<DocSearchHit[]> {
     const limit = Math.min(Math.max(input.limit ?? 10, 1), 50)
     const match = sanitizeFtsQuery(input.query)
     if (match.length === 0) return []
 
-    // Pull a wider candidate pool than `limit` so the per-file collapse
-    // (and the optional semantic re-rank) has material to work with.
-    const poolSize = limit * 4
     const params: Array<string | number> = [match]
     let projectClause = ''
     if (input.project !== undefined && input.project.length > 0) {
       projectClause = ' AND c.project = ?'
       params.push(input.project)
     }
-    params.push(poolSize)
+    params.push(CANDIDATE_CAP)
 
     const sql =
-      `SELECT c.id AS rowid, c.project, c.relpath, c.title, c.heading, c.ordinal,
+      `SELECT c.project AS project, c.relpath AS relpath, c.title AS title,
+              c.heading AS heading, c.ordinal AS ordinal,
               bm25(doc_fts, ${BM25_WEIGHTS.title}, ${BM25_WEIGHTS.heading}, ${BM25_WEIGHTS.body}) AS bm25,
-              snippet(doc_fts, 2, '[', ']', ' … ', 12) AS snippet
+              snippet(doc_fts, 2, '[', ']', ' … ', 12) AS snippet,
+              c.embedding AS embedding
          FROM doc_fts
          JOIN doc_chunks c ON c.id = doc_fts.rowid
         WHERE doc_fts MATCH ?${projectClause}
@@ -307,38 +324,36 @@ export class DocSearchIndex {
     }
     if (rows.length === 0) return []
 
-    // Lexical relevance: min-max normalise -bm25 (higher = better).
-    const rels = rows.map((r) => -r.bm25)
-    const lexNorm = minMaxNormalise(rels)
-
-    let blended: number[]
-    if (this.embedder !== null) {
-      blended = await this.blendSemantic(input.query, rows, lexNorm)
-    } else {
-      blended = lexNorm
-    }
-
-    // Collapse to best chunk per file.
-    const bestByFile = new Map<string, DocSearchHit>()
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i]!
-      const score = blended[i]!
-      const key = `${r.project} ${r.relpath}`
+    // Collapse to the best (lowest-bm25) chunk per file BEFORE limiting.
+    const bestByFile = new Map<string, ChunkRow>()
+    for (const r of rows) {
+      const key = `${r.project} ${r.relpath}`
       const existing = bestByFile.get(key)
-      if (existing === undefined || score > existing.score) {
-        bestByFile.set(key, {
-          project: r.project,
-          path: r.relpath,
-          title: r.title,
-          heading: r.heading,
-          score,
-          snippet: r.snippet,
-          ordinal: r.ordinal,
-        })
-      }
+      if (existing === undefined || r.bm25 < existing.bm25) bestByFile.set(key, r)
     }
+    const files = [...bestByFile.values()]
 
-    return [...bestByFile.values()]
+    // Lexical relevance: min-max normalise -bm25 (higher = better).
+    const lexNorm = minMaxNormalise(files.map((f) => -f.bm25))
+    const scores =
+      this.embedder !== null
+        ? await this.blendSemantic(
+            input.query,
+            files.map((f) => f.embedding),
+            lexNorm,
+          )
+        : lexNorm
+
+    return files
+      .map((f, i) => ({
+        project: f.project,
+        path: f.relpath,
+        title: f.title,
+        heading: f.heading,
+        score: scores[i]!,
+        snippet: f.snippet,
+        ordinal: f.ordinal,
+      }))
       .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
       .slice(0, limit)
   }
@@ -352,35 +367,33 @@ export class DocSearchIndex {
   }
 
   /**
-   * Re-rank the lexical candidates by cosine similarity to the query
-   * embedding, then blend with the lexical score. Rows with no stored
-   * embedding fall back to their lexical score alone.
+   * Blend the lexical scores with query↔chunk cosine similarity for the
+   * supplied per-file best-chunk embeddings. Candidates with no stored
+   * embedding fall back to the lowest present cosine so they aren't
+   * spuriously boosted. Returns the lexical scores unchanged when the
+   * query can't be embedded or nothing has an embedding.
    */
   private async blendSemantic(
     query: string,
-    rows: ChunkRow[],
+    embeddings: Array<string | null>,
     lexNorm: number[],
   ): Promise<number[]> {
     const embedder = this.embedder!
     const [queryVec] = await embedder.embed([query])
     if (queryVec === undefined) return lexNorm
 
-    const getEmb = this.db.query<{ embedding: string | null }, [number]>(
-      `SELECT embedding FROM doc_chunks WHERE id = ?`,
-    )
-    const cosines = rows.map((r) => {
-      const row = getEmb.get(r.rowid)
-      if (row === null || row.embedding === null) return null
+    const cosines = embeddings.map((raw) => {
+      if (raw === null) return null
       try {
-        const vec = JSON.parse(row.embedding) as number[]
-        return cosineSimilarity(queryVec, vec)
+        return cosineSimilarity(queryVec, JSON.parse(raw) as number[])
       } catch {
         return null
       }
     })
     const present = cosines.filter((c): c is number => c !== null)
     if (present.length === 0) return lexNorm
-    const cosNorm = minMaxNormalise(cosines.map((c) => c ?? Math.min(...present)))
+    const floor = Math.min(...present)
+    const cosNorm = minMaxNormalise(cosines.map((c) => c ?? floor))
 
     return lexNorm.map((lex, i) => HYBRID_LEX_WEIGHT * lex + (1 - HYBRID_LEX_WEIGHT) * cosNorm[i]!)
   }
