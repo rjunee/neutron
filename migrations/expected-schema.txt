@@ -125,6 +125,10 @@ CREATE INDEX idx_overnight_queue_project
 CREATE INDEX idx_overnight_queue_status
     ON overnight_queue (status)
 
+[index] idx_proactive_topic_state_project (tbl=proactive_topic_state)
+CREATE INDEX idx_proactive_topic_state_project
+    ON proactive_topic_state (project_slug)
+
 [index] idx_project_members_user (tbl=project_members)
 CREATE INDEX idx_project_members_user
     ON project_members (user_id)
@@ -824,6 +828,38 @@ CREATE TABLE persona_drafts (
     created_at INTEGER NOT NULL,
     committed_at INTEGER,
     git_sha TEXT
+) STRICT
+
+[table] proactive_brief_log (tbl=proactive_brief_log)
+CREATE TABLE proactive_brief_log (
+    -- Owner-local YYYY-MM-DD the brief was posted for (resolved from
+    -- `instance_metadata.timezone`, default America/Los_Angeles when unset).
+    day        TEXT PRIMARY KEY NOT NULL,
+    -- ISO-8601 UTC instant the brief was actually delivered.
+    posted_at  TEXT NOT NULL,
+    -- The topic the brief landed in (channel_topic_id), recorded for audit.
+    topic_id   TEXT
+) STRICT
+
+[table] proactive_topic_state (tbl=proactive_topic_state)
+CREATE TABLE proactive_topic_state (
+    -- The channel topic id (`<chat_id>[:<thread_id>]` for Telegram) the
+    -- nudge was posted to. PK so the upsert is a single-row write.
+    topic_id            TEXT PRIMARY KEY NOT NULL,
+    project_slug        TEXT NOT NULL,
+    -- ISO-8601 UTC instant of the most recent idle-nudge post.
+    last_nudged_at      TEXT,
+    -- The `current_focus_pick.task_id` the last nudge was about. The sweep
+    -- skips re-nudging while this matches today's pick (no churn on the same
+    -- recommendation).
+    last_nudged_task_id TEXT,
+    -- The topic's last-activity instant (epoch ms, as TEXT) observed at the
+    -- time of the last nudge. The sweep only re-nudges once the topic has
+    -- seen fresh activity AND gone idle again past this watermark — so an
+    -- idle topic the user never returns to is nudged at most once per pick.
+    last_activity_at_ms TEXT,
+    -- ISO-8601 UTC, stamped on every write.
+    updated_at          TEXT NOT NULL
 ) STRICT
 
 [table] profile_pic_candidates (tbl=profile_pic_candidates)
