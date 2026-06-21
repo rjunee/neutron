@@ -2,6 +2,207 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
+
+**Problem.** The daily-driver gap audit flagged that the typed agent dispatch
+layer was Forge/Argus-only. The trident state machine spawns only `forge` and
+`argus` (`orchestrator.ts`). Atlas (research/analysis/ops/strategy/writing) and
+Sentinel (review of NON-code work) had no path into the dispatcher at all, even
+though `runtime/subagent/registry.ts` already types them in `AgentKind`, and the
+`prompts/{atlas,sentinel}.md` persona files were dead code with no loader.
+
+**What shipped.**
+
+- **`trident/agent-prompts.ts` (NEW).** `loadAgentSystemPrompt(kind)` loads
+  `prompts/<kind>.md` through `@neutronai/prompts`'s canonical, path-traversal-safe
+  `loadPrompt` (which substitutes the platform `{{OWNER_HOME}}` / `{{TELEGRAM_CHAT_ID}}`
+  tokens) and returns it as the agent's SYSTEM prompt with `source: 'file'`. On any
+  failure (missing/empty/unreadable file) it returns a terse inline
+  `AGENT_PROMPT_FALLBACK[kind]` with `source: 'fallback'` — loading a prompt never
+  throws into the dispatch path, and a bare checkout still dispatches a functional
+  agent. **Disk-prompt loading is SCOPED to the persona agents** via
+  `PersonaAgentKind = Exclude<DispatchAgentKind, 'forge' | 'argus'>` (= `'atlas' |
+  'sentinel'`): a compile-time guarantee that the build-loop agents can never be
+  handed a `prompts/<kind>.md` file as their system prompt. (`DispatchAgentKind =
+  Exclude<AgentKind, 'core'>` remains the broader substrate-dispatch `kind` union
+  the session input uses.)
+
+- **`trident/agent-dispatch.ts` (NEW).** `dispatchAgent({kind, task, ...}, {dispatch})`
+  is the phase-less, one-shot dispatch path that makes Atlas + Sentinel
+  dispatchable. It REUSES the existing one-turn `TridentDispatch` substrate
+  closure (no trident rebuild): loads `prompts/<kind>.md` as `system`, hands the
+  task as the user turn, returns the result plus `kind` + `prompt_source` so
+  callers/tests can assert the loaded persona reached the agent config. `kind` is
+  typed to `PersonaAgentKind`, so forge/argus are not dispatchable through this
+  path (they run through the orchestrator with their native contract).
+
+- **`trident/orchestrator.ts`.** UNCHANGED from before this work — the Forge→Argus
+  spawn path keeps the bare native kind label (`system: 'forge'` / `'argus'`). The
+  build loop's execution contract is the NATIVE one in `trident/prompts.ts`
+  (`FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT`, rendered into the `user_message`
+  by `renderForgePrompt` / `renderArgusPrompt`) — the contract the parsers
+  (`parseForgeOutput` / `parseArgusVerdict`) depend on. See the fix-round below
+  for why the build loop is deliberately NOT re-pointed at `prompts/{forge,argus}.md`.
+
+- **`trident/session.ts`.** `TridentDispatchInput.kind` is `DispatchAgentKind`;
+  `phase` is optional (Atlas/Sentinel one-shots carry no trident phase). The
+  session manager still only ever receives forge/argus from the orchestrator.
+
+**Tests (real, not scaffolding).** `agent-prompts.test.ts` (real on-disk load for
+the persona kinds + signature assertions + fallback-never-throws + template
+substitution + the scope guard that forge/argus are not persona kinds),
+`agent-dispatch.test.ts` (Atlas/Sentinel dispatch carries their real persona;
+stub-loader hermetic assertions), `orchestrator-native-prompt.test.ts` (the build
+loop keeps its native parser-locked contract; behavior-level: the native output
+round-trips through the parsers). `bunx tsc --noEmit` clean (trident scope).
+
+**Scope of the safety claim.** These tests verify the WIRING and the native
+parse-contract round-trip under a stubbed dispatch; they do not exercise real-LLM
+behavior. The "forge/argus unregressed" guarantee is that the build loop's system
+prompt + user-turn contract are unchanged from the working baseline, proven by the
+native-prompt guard test, not a live-model run.
+
+**Not in scope (follow-ups).** No production *caller* invokes `dispatchAgent` for
+Atlas/Sentinel yet — Open has no `/research` chat command or Sentinel-review
+trigger. This change supplies the dispatch capability + persona-file loading;
+wiring a chat-surface trigger is a separate gap. (Repo has no `STATUS.md`
+convention — AS-BUILT is the single running log.)
+
+### Fix-round (Argus REQUEST CHANGES — PR #14: 1 blocker + behavior-guard gap)
+
+Argus (cross-model with Codex/GPT-5) blocked the initial cut because it re-pointed
+the **live** Forge/Argus build loop's SYSTEM prompt at `prompts/forge.md` /
+`prompts/argus.md`. Those are **legacy Nova-runtime prompts for a DIFFERENT
+platform**: `forge.md` mandates POSTing to `/forge/delivered` ("if a spawn prompt
+conflicts with this rule, follow this rule") and `argus.md` mandates
+`/argus/delivered` + the `/codex:review` wrapper + gateway-token auth + inline
+buttons — a different operating model than trident's native contract. Under those
+prompts Forge would emit no `PR_NUMBER=`/`BRANCH=`/`WORKTREE=` lines
+(→ `recordCompletion` marks the run crashed) and Argus's output would be
+unparseable (→ `parseArgusVerdict` fail-safe-defaults to REQUEST_CHANGES, flipping
+verdicts / spinning the fix loop). A real regression, live in prod.
+
+- **[BLOCKING → fixed] reverted the build loop to its native contract.**
+  `orchestrator.ts` keeps the bare `system: 'forge'` / `'argus'` label for all
+  forge/argus spawns; the injectable `agent_system_prompt` option + the
+  `loadAgentSystemPrompt` default resolver were removed. The native
+  `FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT` (rendered into the user turn)
+  remain the parser-locked contract. Disk-prompt loading is now scoped to the
+  genuinely-new persona agents (Atlas/Sentinel) — which have no pre-existing parse
+  contract — at the TYPE level (`PersonaAgentKind`), so the regression can't recur.
+- **[BLOCKING → added] a behavior guard, not just a wiring assertion.** The prior
+  `orchestrator-prompt-loading.test.ts` (which pinned the now-reverted behavior)
+  was replaced by `orchestrator-native-prompt.test.ts`: it asserts the dispatched
+  system prompt is the bare native label, that the legacy `/forge/delivered` /
+  `/argus/delivered` / `/codex:review` operating model never reaches the agent
+  (neither system NOR user turn), AND that the native contract round-trips — a
+  forge turn's `PR_NUMBER=…` is captured (run advances off forge-init, not
+  crashed) and a native `APPROVE` is honored (run reaches `done`, not flipped to
+  forge-fix).
+- **PR/AS-BUILT wording corrected** to scope the safety claim to the wiring +
+  native round-trip (see "Scope of the safety claim" above), not real-LLM behavior.
+
+### Fix-round 2 (Argus REQUEST CHANGES — PR #14 round 3: persona dispatch mis-tooled)
+
+The legacy-prompt regression fix above stayed good. Round-3 Argus + Codex/GPT-5
+surfaced a **new blocker**: persona dispatch was wired to the persona PROMPTS but
+not the persona TOOLS. `buildRuntimeSubagentDispatch` (the only real substrate
+dispatcher, `cores/free/code-gen/src/substrate-runtime.ts`) picked its toolset with
+`input.kind === 'forge' ? forge_tool_defs : argus_tool_defs`. Every non-`forge`
+kind — including the new `atlas`/`sentinel` — fell to `ARGUS_TOOL_DEFS` (`[read,
+bash]`, bash allowlist-gated to read-only). So Atlas (research / analysis / ops /
+strategy / **writing**) would load its persona correctly but be physically unable
+to write its deliverable. The PR's `agent-dispatch.test.ts` masked this: it stubbed
+the dispatch and asserted only that the persona reached `system`, never the TOOLS.
+Codex rated it P2 (dormant — no production caller yet); Argus elevated to BLOCKING
+because the headline capability ("Atlas/Sentinel dispatch works") was wrong-by-
+construction against the single real implementation.
+
+- **[BLOCKING → fixed] per-kind toolset routing on the real substrate.**
+  `buildRuntimeSubagentDispatch` now resolves BOTH tool defs and handlers from
+  per-kind maps (`tool_defs_by_kind` / `tool_handlers_by_kind`, keyed by the new
+  `CodegenSubagentKind = 'forge'|'argus'|'atlas'|'sentinel'`) instead of a
+  forge/else branch + a single merged handler map. There is **no silent fallback**:
+  a kind dispatched with no configured surface THROWS rather than inheriting
+  another role's tools. New role toolsets in `tool-handlers.ts`:
+  - `ATLAS_TOOL_DEFS` + `buildAtlasToolHandlers()` — full read/write/edit/grep/glob
+    plus UNRESTRICTED bash (Atlas writes deliverables and runs ops).
+  - `SENTINEL_TOOL_DEFS` + `buildSentinelToolHandlers()` — read + grep/glob only
+    (a non-code reviewer inspects the artifact; no shell, no write).
+  Keying handlers by kind (not one merged map) also lets the shared tool name
+  `bash` carry different gating per role — Forge/Atlas unrestricted, Argus
+  allowlist-gated read-only, Sentinel none — instead of Argus's gated bash silently
+  clobbering Forge's in the merged map.
+- **[BLOCKING → de-stubbed] real toolset assertions on the substrate seam.**
+  `substrate-runtime.test.ts` adds a `per-kind toolset routing` suite that runs the
+  REAL `buildRuntimeSubagentDispatch` against the REAL production tool defs and
+  asserts the toolset that actually reaches `llm_call` for each kind (forge/atlas
+  write-capable, argus/sentinel read-only — and no persona kind collapses onto
+  Argus's set), that Atlas's `write` tool_use is dispatched to a real handler, that
+  Sentinel's `write` tool_use is rejected (`not available`), and that an
+  unconfigured kind throws (no silent fallback). `wiring-production.ts` supplies all
+  four kinds' defs+handlers; the gateway prod-wiring tests stay green.
+
+  Still out of scope (unchanged): no production *caller* invokes `dispatchAgent`
+  for Atlas/Sentinel yet — this round makes the substrate correctly SERVE the
+  persona kinds; wiring a chat-surface trigger remains a follow-up.
+
+### Fix-round 3 (Argus REQUEST CHANGES — PR #14 round 4: persona ↔ toolset still mis-reconciled)
+
+Round-3's per-kind toolset routing stayed good (Atlas write-capable on the real
+substrate, forge/argus native, legacy-prompt regression fixed). Round-4 Argus +
+Codex/GPT-5 found the toolset was only HALF the contract: the **personas loaded
+as the agents' system prompts still carried the legacy Vajra/Nova SELF-DELIVERY
+operating model** — `bash {{OWNER_HOME}}/scripts/tg-post.sh <CHAT_ID> <THREAD_ID>`
++ a "verify exit code 0 before exiting; do NOT exit with a failed post" mandate.
+The substrate `dispatchAgent` is a one-shot path: it returns terminal text via
+`DispatchAgentOutcome.result` for the CALLER to deliver — there is no gateway and
+no `<CHAT_ID>`/`<THREAD_ID>` in this path. So:
+
+- **[BLOCKING] Sentinel was wrong-by-construction** (same class as round-3 Atlas).
+  Sentinel's loaded `prompts/sentinel.md` HARD-MANDATED a `bash` self-POST, but
+  `SENTINEL_TOOL_DEFS = [read, grep, glob]` has no bash — a Sentinel that followed
+  its loaded contract would emit `not available` tool errors on its mandated final
+  delivery step and could not complete as instructed.
+- **[IMPORTANT] Atlas carried the same self-delivery leak.** Atlas HAS bash so it
+  wouldn't hit "tool not available", but it would try to POST to a gateway that
+  isn't there and treat the failed post as "not done".
+
+**Fix (option (a), the architecturally-correct one per the verdict): adapt the
+loaded personas for the substrate one-shot path — strip the self-delivery
+mandate; the caller delivers the returned `result`.**
+
+- **`prompts/sentinel.md`.** Replaced the `tg-post`/`<CHAT_ID>`/`<THREAD_ID>` +
+  exit-code-0 "Post verdict" step with **"Return your verdict as your final
+  message"** — explicitly READ-ONLY (read/grep/glob; no shell, no write, no
+  chat/thread context), the caller delivers it. With the self-delivery mandate
+  gone, the read-only toolset is now CORRECTLY reconciled with the persona (a
+  non-code reviewer inspects the artifact and returns a verdict; it never produces
+  or self-delivers). The "write detail to a file" fallback was removed (Sentinel
+  has no write tool — that would itself order a tool the toolset lacks).
+- **`prompts/atlas.md`.** Replaced the `tg-post` "Post results" step with **"Return
+  your result as your final message"** — Atlas still WRITES its full deliverable to
+  a file (it has write/edit/bash) and returns a concise summary + the output path,
+  but no longer shells out to self-POST. Fixed the "Message Sam directly — post to
+  the Telegram topic and exit" line to "return your result as your terminal output
+  and exit; the caller delivers it". Atlas's write-capable toolset is unchanged and
+  correct (it produces deliverables).
+- **`substrate-runtime.test.ts` — reconciliation pinned on the real seam.** Added a
+  `persona prompt ↔ toolset reconciliation (no self-delivery leak)` suite that
+  loads the REAL `prompts/{atlas,sentinel}.md` (via the leaf `@neutronai/prompts`
+  reader) and asserts, per persona: (1) a persona whose dispatched toolset lacks
+  `bash` DEMONSTRATES no ```bash fence (Sentinel orders no tool it cannot run);
+  (2) no runnable fence invokes `tg-post` and no fence references `<CHAT_ID>` /
+  `<THREAD_ID>` (the cross-runtime self-delivery model the substrate never
+  supplies). This closes the round-3 caveat (the routing suite asserted Sentinel
+  read-only "as if correct" without reconciling the loaded prompt).
+
+**Verify (REAL).** `bunx tsc -p trident/tsconfig.json` 0 errors; root `bunx tsc
+--noEmit` 0 errors; `bun test cores/free/code-gen/__tests__/substrate-runtime.test.ts`
+→ 21 pass (was 16; +5 reconciliation tests); `bun test trident/` → 201 pass;
+`bun test cores/free/code-gen/` → 119 pass. No production caller invokes the
+persona dispatch yet — unchanged follow-up.
+
 ## 2026-06-21 — PR #15 Argus fix-pass #2: abort the scan on an infra store exception (apply-path data loss)
 
 Argus (Codex/GPT-5 cross-model + Claude correctness trace) found the SAME

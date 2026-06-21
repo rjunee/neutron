@@ -79,11 +79,24 @@ export interface SubagentDispatch {
   (input: SubagentDispatchInput): Promise<SubagentDispatchResult>
 }
 
+/**
+ * Every sub-agent kind the substrate dispatch closure can serve. The
+ * RuntimeCodegenRunner's Forge→Argus build loop only ever dispatches
+ * `'forge'` / `'argus'`; the phase-less persona path (trident's
+ * `dispatchAgent`) dispatches `'atlas'` / `'sentinel'` through the SAME
+ * closure. Each kind resolves its OWN toolset in
+ * `buildRuntimeSubagentDispatch` (see `substrate-runtime.ts`) — there is
+ * no silent fallback, so a persona kind never inherits Argus's read-only
+ * surface. Mirrors trident's `DispatchAgentKind` by value; declared here
+ * so the Core carries no dependency on the trident package.
+ */
+export type CodegenSubagentKind = 'forge' | 'argus' | 'atlas' | 'sentinel'
+
 export interface SubagentDispatchInput {
   /** Instance key (passed through to the registry). */
   instance_key: string
-  /** Sub-agent kind — 'forge' or 'argus'. */
-  kind: 'forge' | 'argus'
+  /** Sub-agent kind — forge / argus (build loop) or atlas / sentinel (persona). */
+  kind: CodegenSubagentKind
   /** Sub-agent model id. */
   model: string
   /** Fully-rendered system prompt. */

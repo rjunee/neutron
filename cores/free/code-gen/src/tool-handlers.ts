@@ -159,6 +159,36 @@ export const ARGUS_TOOL_DEFS: readonly CodegenToolDefinition[] = [
 ]
 
 /**
+ * Tool defs exposed to Atlas sub-agents. Atlas is the research / analysis
+ * / ops / strategy / **writing** persona — it produces deliverables, so it
+ * needs the full read/write/edit surface plus unrestricted bash for ops
+ * (NOT Argus's read-only set, which would leave it physically unable to
+ * write its result). Equivalent to `FORGE_TOOL_DEFS`, named separately so
+ * the two roles can diverge.
+ */
+export const ATLAS_TOOL_DEFS: readonly CodegenToolDefinition[] = [
+  READ_TOOL_DEF,
+  WRITE_TOOL_DEF,
+  EDIT_TOOL_DEF,
+  BASH_TOOL_DEF,
+  GREP_TOOL_DEF,
+  GLOB_TOOL_DEF,
+]
+
+/**
+ * Tool defs exposed to Sentinel sub-agents. Sentinel reviews NON-code work
+ * (e.g. an Atlas deliverable) — it verifies, it never produces — so its
+ * surface is read-only: read + search, no shell, no write. Distinct from
+ * Argus's read+bash set: a document reviewer needs grep/glob over the
+ * artifact, not a build shell.
+ */
+export const SENTINEL_TOOL_DEFS: readonly CodegenToolDefinition[] = [
+  READ_TOOL_DEF,
+  GREP_TOOL_DEF,
+  GLOB_TOOL_DEF,
+]
+
+/**
  * Default bash-command allowlist for Argus sub-agents. Every `command`
  * must match one of these regex prefixes (anchored at start of string).
  */
@@ -489,6 +519,35 @@ export function buildArgusToolHandlers(
   return {
     read: readFileScoped,
     bash: bashScopedFactory(allowlist),
+  }
+}
+
+/**
+ * Atlas handler bundle — full read/write/edit/grep/glob plus UNRESTRICTED
+ * bash. Atlas writes its own deliverable and runs ops commands, so (unlike
+ * Argus) its bash is not allowlist-gated. Matches `ATLAS_TOOL_DEFS`.
+ */
+export function buildAtlasToolHandlers(): Record<string, CodegenToolHandler> {
+  return {
+    read: readFileScoped,
+    write: writeFileScoped,
+    edit: editFileScoped,
+    bash: bashScopedFactory(null),
+    grep: grepScoped,
+    glob: globScoped,
+  }
+}
+
+/**
+ * Sentinel handler bundle — read + search only, matching
+ * `SENTINEL_TOOL_DEFS`. No bash and no write/edit: a non-code reviewer
+ * inspects the artifact, it never mutates it or shells out.
+ */
+export function buildSentinelToolHandlers(): Record<string, CodegenToolHandler> {
+  return {
+    read: readFileScoped,
+    grep: grepScoped,
+    glob: globScoped,
   }
 }
 

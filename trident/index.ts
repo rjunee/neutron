@@ -85,6 +85,31 @@ export type {
   ForgeMeta,
 } from './session.ts'
 
+// WAVE 2 P1 #7 — persona agent dispatch (Atlas/Sentinel) with the lifted
+// `prompts/<kind>.md` personas loaded as the system prompt (previously those
+// files were dead code). `dispatchAgent` is the phase-less path that makes
+// Atlas + Sentinel dispatchable. Forge/Argus stay on their NATIVE
+// `trident/prompts.ts` contract (the parser-locked one) — disk-prompt
+// loading is deliberately scoped to the persona agents.
+export {
+  loadAgentSystemPrompt,
+  AGENT_PROMPT_FALLBACK,
+  PERSONA_AGENT_KINDS,
+} from './agent-prompts.ts'
+export type {
+  DispatchAgentKind,
+  PersonaAgentKind,
+  AgentSystemPrompt,
+  LoadAgentPromptDeps,
+} from './agent-prompts.ts'
+
+export { dispatchAgent } from './agent-dispatch.ts'
+export type {
+  DispatchAgentInput,
+  DispatchAgentDeps,
+  DispatchAgentOutcome,
+} from './agent-dispatch.ts'
+
 export {
   buildMergeCleanupDeps,
   detectBaseBranch,

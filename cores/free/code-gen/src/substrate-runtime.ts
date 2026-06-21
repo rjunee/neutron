@@ -10,13 +10,18 @@
  * `gateway/cores/code-gen-factory.ts` — this Core never imports the
  * Anthropic SDK package directly.
  *
- * `buildRuntimeSubagentDispatch` wraps an `(llm_call, tool_handlers,
- * tool_defs)` triple into the `SubagentDispatch` shape the existing
- * `RuntimeCodegenRunner` consumes. It runs a multi-turn loop:
+ * `buildRuntimeSubagentDispatch` wraps an `(llm_call,
+ * tool_defs_by_kind, tool_handlers_by_kind)` triple into the
+ * `SubagentDispatch` shape the existing `RuntimeCodegenRunner` consumes.
+ * It runs a multi-turn loop:
  *
  *   1. Render the first user message into `messages: CodegenMessage[]`.
- *   2. Pick the tool defs (`forge_tool_defs` for kind=forge,
- *      `argus_tool_defs` for kind=argus).
+ *   2. Resolve the tool defs AND handlers for `input.kind` from the
+ *      per-kind maps (`tool_defs_by_kind` / `tool_handlers_by_kind`).
+ *      Each kind gets its OWN surface — forge/atlas write-capable,
+ *      argus/sentinel read-only — with NO silent fallback: a kind with
+ *      no configured entry throws rather than inheriting a wrong (e.g.
+ *      Argus read-only) toolset.
  *   3. Loop up to `max_turns_per_subagent` (default 50):
  *      a. Bail with `status: 'timed_out'` if the deadline has elapsed.
  *      b. `llm_call({system, messages, tools, max_tokens, model})`.
@@ -39,6 +44,7 @@
  */
 
 import type {
+  CodegenSubagentKind,
   SubagentDispatch,
   SubagentDispatchInput,
   SubagentDispatchResult,
@@ -148,15 +154,27 @@ export interface CodegenToolHandler {
 
 export interface BuildRuntimeSubagentDispatchOptions {
   llm_call: CodegenLlmCall
-  /** Tool definitions exposed to Forge sub-agents. */
-  forge_tool_defs: readonly CodegenToolDefinition[]
-  /** Tool definitions exposed to Argus sub-agents (narrower). */
-  argus_tool_defs: readonly CodegenToolDefinition[]
   /**
-   * Tool name → handler map. Tools listed in `*_tool_defs` but missing
-   * from this map will emit `is_error: true` tool_results at runtime.
+   * Tool definitions exposed to the model, keyed by sub-agent kind. Each
+   * kind gets its role-appropriate surface (forge/atlas write-capable,
+   * argus/sentinel read-only). A kind dispatched without an entry throws
+   * at dispatch time — there is deliberately NO fallback, so a persona
+   * kind can never silently inherit a wrong (e.g. Argus read-only) set.
    */
-  tool_handlers: Record<string, CodegenToolHandler>
+  tool_defs_by_kind: Partial<
+    Record<CodegenSubagentKind, readonly CodegenToolDefinition[]>
+  >
+  /**
+   * Tool name → handler map, keyed by sub-agent kind. Resolved alongside
+   * the defs so each kind's bash gating / write surface matches the tools
+   * it is offered (e.g. Atlas's bash is unrestricted; Argus/Sentinel get
+   * no write handler at all). Tools offered in `tool_defs_by_kind` but
+   * missing from the kind's handler map emit `is_error: true` at runtime;
+   * a kind dispatched with no handler map at all throws.
+   */
+  tool_handlers_by_kind: Partial<
+    Record<CodegenSubagentKind, Record<string, CodegenToolHandler>>
+  >
   /** Max tokens per Messages-API call. Default 8192. */
   max_tokens_per_turn?: number
   /** Hard cap on loop iterations. Default 50. */
@@ -226,10 +244,20 @@ export function buildRuntimeSubagentDispatch(
       await opts.on_subagent_start(input, run_id)
     }
 
-    const tools =
-      input.kind === 'forge'
-        ? [...opts.forge_tool_defs]
-        : [...opts.argus_tool_defs]
+    // Resolve this kind's OWN toolset + handlers. No silent fallback: a
+    // kind with no configured surface throws rather than inheriting
+    // another role's (the bug where atlas/sentinel fell to Argus's
+    // read-only set and could not write their deliverable).
+    const tool_defs = opts.tool_defs_by_kind[input.kind]
+    const tool_handlers = opts.tool_handlers_by_kind[input.kind]
+    if (tool_defs === undefined || tool_handlers === undefined) {
+      throw new Error(
+        `buildRuntimeSubagentDispatch: no ${
+          tool_defs === undefined ? 'tool defs' : 'tool handlers'
+        } configured for sub-agent kind '${input.kind}'`,
+      )
+    }
+    const tools = [...tool_defs]
     const messages: CodegenMessage[] = [
       { role: 'user', content: input.user_message },
     ]
@@ -280,7 +308,7 @@ export function buildRuntimeSubagentDispatch(
       // parallel tool_use in a single assistant turn.
       const tool_results: CodegenToolResultBlock[] = await Promise.all(
         res.tool_calls.map(async (tc) => {
-          const handler = opts.tool_handlers[tc.name]
+          const handler = tool_handlers[tc.name]
           if (handler === undefined) {
             return {
               type: 'tool_result',
