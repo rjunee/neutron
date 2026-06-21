@@ -145,6 +145,35 @@ describe('WebChatSession — gap-free reconnect (resume)', () => {
     ).toBe(true)
   })
 
+  it('forwards every raw inbound frame to onFrame without affecting persistence', async () => {
+    const captured: FakeSocket[] = []
+    const frames: unknown[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store: new InMemoryStore(),
+      createSocket: () => { const s = new FakeSocket(); captured.push(s); return s },
+      onFrame: (f) => { frames.push(f) },
+      generateId: () => 'cmid-y',
+      now: () => 1,
+    })
+    session.start()
+    captured[0]!.open()
+    // Streaming partials (NOT persisted messages) reach onFrame so the UI can
+    // render the live token stream; only the final agent_message persists.
+    captured[0]!.deliver(readyFrame())
+    captured[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'Hel', ts: 1 })
+    captured[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'lo', ts: 2 })
+    captured[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm9', seq: 1, body: 'Hello', ts: 3 })
+    await new Promise((r) => setTimeout(r, 0))
+    const types = frames.map((f) => (f as Record<string, unknown>)['type'])
+    expect(types).toEqual(['session_ready', 'agent_message_partial', 'agent_message_partial', 'agent_message'])
+    // Persistence is unchanged: only the final agent_message lands in the store.
+    const msgs = await session.messages()
+    expect(msgs.map((m) => m.body)).toEqual(['Hello'])
+    expect(msgs.length).toBe(1)
+  })
+
   it('reconciles the optimistic bubble when its server echo (with seq) arrives', async () => {
     const { session, sockets } = setup()
     session.start()

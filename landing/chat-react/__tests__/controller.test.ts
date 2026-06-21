@@ -1,0 +1,169 @@
+/**
+ * Integration test: the React data layer (NeutronChatController) over a REAL
+ * `@neutron/chat-core` WebChatSession + a fake socket. Exercises the whole
+ * chat-core contract end-to-end (sync engine + store + send-queue + the
+ * additive onFrame stream) the way the React UI drives it — no DOM, no network.
+ */
+
+import { describe, expect, it } from 'bun:test'
+import { InMemoryStore, WebChatSession } from '@neutron/chat-core'
+import type { SocketLike } from '@neutron/chat-core'
+
+import { NeutronChatController } from '../controller.ts'
+
+const TOPIC = 'app:sam'
+
+class FakeSocket implements SocketLike {
+  onopen: ((ev?: unknown) => void) | null = null
+  onmessage: ((ev: { data: unknown }) => void) | null = null
+  onclose: ((ev?: unknown) => void) | null = null
+  onerror: ((ev?: unknown) => void) | null = null
+  readonly sent: string[] = []
+  closed = false
+  send(data: string): void {
+    if (this.closed) throw new Error('closed')
+    this.sent.push(data)
+  }
+  close(): void {
+    this.closed = true
+  }
+  open(): void {
+    this.onopen?.()
+  }
+  deliver(obj: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(obj) })
+  }
+  userMessages(): Array<Record<string, unknown>> {
+    return this.sent
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((e) => e['type'] === 'user_message')
+  }
+}
+
+function setup(projectId: string | null = null) {
+  const sockets: FakeSocket[] = []
+  let id = 0
+  const controller = new NeutronChatController({
+    projectId,
+    createSession: (sinks) =>
+      new WebChatSession({
+        url: 'wss://t/ws/app/chat',
+        topic_id: TOPIC,
+        store: new InMemoryStore(),
+        createSocket: () => {
+          const s = new FakeSocket()
+          sockets.push(s)
+          return s
+        },
+        onChange: sinks.onChange,
+        onStatus: sinks.onStatus,
+        onFrame: sinks.onFrame,
+        generateId: () => `cmid-${++id}`,
+        now: (() => {
+          let t = 0
+          return () => ++t
+        })(),
+      }),
+  })
+  return { controller, sockets }
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0))
+const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+
+describe('NeutronChatController — view model over chat-core', () => {
+  it('renders an optimistic user bubble and flips the typing indicator on send', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('hello')
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.messages.map((m) => m.text)).toEqual(['hello'])
+    expect(vm.messages[0]?.role).toBe('user')
+    // Awaiting a reply → typing indicator on.
+    expect(vm.isRunning).toBe(true)
+    expect(vm.status).toBe('open')
+  })
+
+  it('accumulates streaming partials into a live agent bubble, then the final message supersedes it', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    // Stream three tokens for message m9 (not yet persisted).
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'Hel', ts: 1 })
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'lo ', ts: 2 })
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'Sam', ts: 3 })
+    await tick()
+    let vm = controller.getViewModel()
+    const live = vm.messages.find((m) => m.streaming)
+    expect(live?.text).toBe('Hello Sam')
+    expect(live?.role).toBe('agent')
+    expect(vm.isRunning).toBe(true)
+    // The final canonical agent_message persists (with a seq) and replaces it.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm9', seq: 1, body: 'Hello Sam', ts: 4 })
+    await tick()
+    vm = controller.getViewModel()
+    expect(vm.messages.filter((m) => m.streaming).length).toBe(0)
+    const agent = vm.messages.find((m) => m.role === 'agent')
+    expect(agent?.text).toBe('Hello Sam')
+    expect(agent?.streaming).toBe(false)
+    // No reply pending, no stream → indicator off.
+    expect(vm.isRunning).toBe(false)
+    // User bubble + final agent message, no duplicate.
+    expect(vm.messages.length).toBe(2)
+  })
+
+  it('queues a send while offline (pending) and surfaces it optimistically', async () => {
+    const { controller, sockets } = setup()
+    controller.start() // socket created but not opened
+    await controller.send('queued while offline')
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.messages.map((m) => m.text)).toEqual(['queued while offline'])
+    expect(vm.pending).toBe(1)
+    expect(sockets[0]!.userMessages().length).toBe(0)
+  })
+
+  it('reflects connection status transitions', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    expect(['connecting', 'reconnecting']).toContain(controller.getViewModel().status)
+    sockets[0]!.open()
+    await tick()
+    expect(controller.getViewModel().status).toBe('open')
+  })
+
+  it('tags sends with the active project after setProject', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    controller.setProject('proj-7')
+    expect(controller.getViewModel().projectId).toBe('proj-7')
+    await controller.send('tagged')
+    await tick()
+    const env = sockets[0]!.userMessages().at(-1)
+    expect(env?.['project_id']).toBe('proj-7')
+  })
+
+  it('notifies subscribers on every change', async () => {
+    const { controller, sockets } = setup()
+    let notifications = 0
+    controller.subscribe(() => {
+      notifications++
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('x')
+    await tick()
+    expect(notifications).toBeGreaterThan(0)
+  })
+})
