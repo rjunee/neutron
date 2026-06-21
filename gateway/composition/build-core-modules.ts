@@ -57,6 +57,22 @@ import {
   buildNudgeEngineHandler,
   registerNudgeEngineCron,
 } from '../tasks/p6/nudge-engine.ts'
+import { ProactiveStateStore } from '../proactive/state-store.ts'
+import {
+  buildIdleNudgeSweepHandler,
+  buildMorningBriefHandler,
+  registerIdleNudgeSweepCron,
+  registerMorningBriefCron,
+} from '../proactive/cron.ts'
+import type {
+  IdleNudgeSweepDeps,
+  ProactiveTopicCandidate,
+} from '../proactive/idle-nudge-sweep.ts'
+import type {
+  BriefFocusItem,
+  MorningBriefDeps,
+  ProactiveContextSources,
+} from '../proactive/morning-brief.ts'
 import { attachReminderLinkSubscriber } from '../../tasks/reminder-link.ts'
 import {
   buildProjectionWriter,
@@ -545,7 +561,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
     overnightHook: (event: OvernightWorkCompletedEvent) => Promise<Task>
   }> = {
     name: 'tasks',
-    deps: ['cron', 'reminders'],
+    deps: ['cron', 'reminders', 'channels'],
     init: (ctx) => {
       const tasksCfg = input.tasks ?? {}
       // Use the composer-supplied canonical store when present so HTTP
@@ -645,6 +661,93 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           nudgeRegisterInput.interval_ms = tasksCfg.nudge_engine_interval_ms
         }
         registerNudgeEngineCron(nudgeRegisterInput)
+      }
+
+      // P0-5 — proactive messaging (gap-audit WAVE 2 Track A). The daily
+      // morning brief + the idle-topic nudge sweep, both posting through the
+      // production `ChannelRouter` and reusing the shared cron registry + the
+      // P6 nudge ranker. Each half is independently gated on the
+      // production-specific seam it needs (a topic to post the brief to; an
+      // enumeration of idle topics for the sweep). Absent → neither cron
+      // registers (unchanged Open default).
+      const proactiveCfg = tasksCfg.proactive
+      if (proactiveCfg !== undefined) {
+        const channelRouter = ctx.graph.get<ChannelRouter>('channels')
+        const proactiveStore = new ProactiveStateStore(input.db)
+
+        // Morning brief — gated on a resolvable General topic.
+        const generalTopic = proactiveCfg.resolveGeneralTopic?.() ?? null
+        if (generalTopic !== null && generalTopic.length > 0) {
+          // Default the focus-queue source to the canonical TaskStore (top
+          // open tasks by focus score) so the brief is useful out of the box;
+          // any caller-supplied source wins per-key.
+          const defaultSources: ProactiveContextSources = {
+            focusQueue: async (): Promise<BriefFocusItem[]> =>
+              store
+                .list({
+                  project_slug: input.project_slug,
+                  status: 'open',
+                  order: 'focus_score',
+                  limit: 5,
+                })
+                .map((t) => ({
+                  title: t.title,
+                  due: t.due_date !== null ? `due ${t.due_date.slice(0, 10)}` : null,
+                })),
+          }
+          const sources: ProactiveContextSources = {
+            ...defaultSources,
+            ...(proactiveCfg.sources ?? {}),
+          }
+          const briefDeps: MorningBriefDeps = {
+            store: proactiveStore,
+            sources,
+            sink: channelRouter,
+            general_topic_id: generalTopic,
+            now: () => Date.now(),
+          }
+          if (proactiveCfg.timezone !== undefined) briefDeps.tz = proactiveCfg.timezone
+          if (proactiveCfg.brief_hour !== undefined) briefDeps.brief_hour = proactiveCfg.brief_hour
+          const briefHandler = buildMorningBriefHandler(briefDeps)
+          const briefRegister: Parameters<typeof registerMorningBriefCron>[0] = {
+            project_slug: input.project_slug,
+            jobs: cronDeps.jobs,
+            handlers: cronDeps.handlers,
+            handler: briefHandler,
+          }
+          if (proactiveCfg.brief_interval_ms !== undefined) {
+            briefRegister.interval_ms = proactiveCfg.brief_interval_ms
+          }
+          registerMorningBriefCron(briefRegister)
+        }
+
+        // Idle-topic nudge sweep — gated on an idle-topic enumeration.
+        if (proactiveCfg.listIdleTopics !== undefined) {
+          const listIdleTopics = proactiveCfg.listIdleTopics
+          const sweepDeps: IdleNudgeSweepDeps = {
+            db: input.db,
+            store: proactiveStore,
+            sink: channelRouter,
+            listTopics: (): Promise<ProactiveTopicCandidate[]> | ProactiveTopicCandidate[] =>
+              listIdleTopics(),
+            now: () => Date.now(),
+          }
+          if (proactiveCfg.timezone !== undefined) sweepDeps.tz = proactiveCfg.timezone
+          if (proactiveCfg.idle_threshold_ms !== undefined) {
+            sweepDeps.idle_threshold_ms = proactiveCfg.idle_threshold_ms
+          }
+          const sweepHandler = buildIdleNudgeSweepHandler(sweepDeps)
+          const sweepRegister: Parameters<typeof registerIdleNudgeSweepCron>[0] = {
+            project_slug: input.project_slug,
+            jobs: cronDeps.jobs,
+            handlers: cronDeps.handlers,
+            handler: sweepHandler,
+          }
+          if (proactiveCfg.sweep_interval_ms !== undefined) {
+            sweepRegister.interval_ms = proactiveCfg.sweep_interval_ms
+          }
+          registerIdleNudgeSweepCron(sweepRegister)
+        }
       }
 
       let projection: ProjectionWriter | null = null
