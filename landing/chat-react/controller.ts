@@ -26,7 +26,14 @@
  * over the chat-core contract without a DOM or a socket.
  */
 
-import type { ChatMessage, ConnStatus, SendStatus } from '@neutron/chat-core'
+import { groupReactions } from '@neutron/chat-core'
+import type {
+  ChatMessage,
+  ConnStatus,
+  ReactionAction,
+  ReactionChip,
+  SendStatus,
+} from '@neutron/chat-core'
 
 export type RenderRole = 'user' | 'agent'
 
@@ -42,6 +49,10 @@ export interface RenderMessage {
   /** Stable identity: client_msg_id for user sends, message_id for agent /
    *  streaming bubbles. Drives assistant-ui's message keying. */
   id: string
+  /** Track B Phase 4 — the server message id (null until acked / for a
+   *  streaming bubble). Reactions are keyed by this, NOT the render `id`
+   *  (which is the client_msg_id for user sends). */
+  messageId: string | null
   role: RenderRole
   text: string
   status: SendStatus
@@ -51,6 +62,9 @@ export interface RenderMessage {
   createdAt: number
   /** Delivery ladder for user messages (null for agent / streaming bubbles). */
   delivery: DeliveryState | null
+  /** Track B Phase 4 — per-emoji reaction chips for this message (empty when
+   *  none). `reactedBySelf` marks chips this client added. */
+  reactions: ReactionChip[]
 }
 
 export interface ChatViewModel {
@@ -81,6 +95,9 @@ export interface ControllerSession {
   /** Track B Phase 4 — report read messages (optional so legacy fakes still
    *  satisfy the interface). */
   markRead?(messageIds: readonly string[]): void
+  /** Track B Phase 4 — add/remove an emoji reaction (optional so legacy fakes
+   *  still satisfy the interface). */
+  react?(messageId: string, emoji: string, action: ReactionAction): boolean
   /** This client's device id, for read-tick self-exclusion (optional). */
   readonly device_id?: string
 }
@@ -260,6 +277,17 @@ export class NeutronChatController {
     this.session.markRead?.(messageIds)
   }
 
+  /**
+   * Track B Phase 4 — toggle an emoji reaction on a message. `add` / `remove`
+   * is sent to the server, which fans the authoritative `reaction_update` back
+   * (applied via the session's `onChange`). A no-op when the session predates
+   * reactions (legacy fake) or the message id is empty.
+   */
+  react(messageId: string, emoji: string, action: ReactionAction): void {
+    if (messageId.length === 0 || emoji.length === 0) return
+    this.session.react?.(messageId, emoji, action)
+  }
+
   private publish(): void {
     this.vm = this.computeVm()
     for (const fn of this.listeners) fn(this.vm)
@@ -268,6 +296,7 @@ export class NeutronChatController {
   private computeVm(): ChatViewModel {
     const rendered: RenderMessage[] = this.msgs.map((m) => ({
       id: m.client_msg_id.length > 0 ? m.client_msg_id : (m.message_id ?? `seq:${m.seq ?? 0}`),
+      messageId: m.message_id,
       role: m.role,
       text: m.body,
       status: m.status,
@@ -275,6 +304,7 @@ export class NeutronChatController {
       attachments: m.attachments,
       createdAt: m.created_at,
       delivery: deliveryFor(m, this.deviceId),
+      reactions: groupReactions(m.reactions, this.deviceId),
     }))
     // Append live streaming bubbles whose final message hasn't persisted yet.
     const persistedIds = new Set<string>()
@@ -284,6 +314,7 @@ export class NeutronChatController {
       if (persistedIds.has(messageId)) continue
       liveStreams.push({
         id: `stream:${messageId}`,
+        messageId,
         role: 'agent',
         text: entry.text,
         status: 'sent',
@@ -291,6 +322,7 @@ export class NeutronChatController {
         attachments: null,
         createdAt: entry.createdAt,
         delivery: null,
+        reactions: [],
       })
     }
     liveStreams.sort((a, b) => a.createdAt - b.createdAt)

@@ -6,6 +6,7 @@ import { absolutize, toThreadMessage } from '../message-adapter.ts'
 function msg(over: Partial<RenderMessage> = {}): RenderMessage {
   return {
     id: 'm1',
+    messageId: 'm1',
     role: 'user',
     text: 'hello',
     status: 'acked',
@@ -13,6 +14,7 @@ function msg(over: Partial<RenderMessage> = {}): RenderMessage {
     attachments: null,
     createdAt: 1,
     delivery: null,
+    reactions: [],
     ...over,
   }
 }

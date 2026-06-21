@@ -33,6 +33,7 @@ import {
   sanitizeFtsQuery,
   toHit,
   type ChatMessage,
+  type MessageReaction,
   type MessageSearchHit,
   type MessageSearchOptions,
   type Store,
@@ -77,6 +78,8 @@ const SCHEMA = [
      status        TEXT NOT NULL,
      delivered_to  TEXT,
      read_by       TEXT,
+     reactions     TEXT,
+     reactions_rev INTEGER,
      PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
@@ -146,6 +149,11 @@ export class SqliteChatStore implements Store {
     // expected steady state and must not fail the store open.
     await ensureColumn(db, TABLE, 'delivered_to');
     await ensureColumn(db, TABLE, 'read_by');
+    // Track B Phase 4 (reactions) — additive columns, same idempotent ADD COLUMN
+    // migration as the receipt columns above. `reactions` holds the JSON-encoded
+    // `MessageReaction[]`; `reactions_rev` the monotonic LWW revision.
+    await ensureColumn(db, TABLE, 'reactions');
+    await ensureColumn(db, TABLE, 'reactions_rev', 'INTEGER');
     if (!ftsPreexisted) {
       await backfillFts(db);
     }
@@ -315,8 +323,8 @@ export class SqliteChatStore implements Store {
   private async write(identity: string, msg: ChatMessage): Promise<void> {
     await this.db.execute(
       `INSERT OR REPLACE INTO ${TABLE}
-         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         identity,
         msg.topic_id,
@@ -331,6 +339,8 @@ export class SqliteChatStore implements Store {
         msg.status,
         encodeDeviceIds(msg.delivered_to),
         encodeDeviceIds(msg.read_by),
+        encodeReactions(msg.reactions),
+        msg.reactions_rev ?? null,
       ],
     );
   }
@@ -355,7 +365,37 @@ function rowToMessage(row: SqlRow): ChatMessage {
     status: normalizeStatus(row['status']),
     delivered_to: parseDeviceIds(row['delivered_to']),
     read_by: parseDeviceIds(row['read_by']),
+    reactions: parseReactionsCol(row['reactions']),
+    reactions_rev: typeof row['reactions_rev'] === 'number' ? row['reactions_rev'] : null,
   };
+}
+
+/** Encode a reaction list as a JSON column value, or NULL when empty. */
+function encodeReactions(reactions: readonly MessageReaction[] | null | undefined): SqlValue {
+  return reactions !== null && reactions !== undefined && reactions.length > 0
+    ? JSON.stringify(reactions)
+    : null;
+}
+
+/** Parse the JSON reactions column back into a clean `MessageReaction[]` (or
+ *  null). Drops any malformed entry rather than throwing. */
+function parseReactionsCol(raw: SqlValue | undefined): readonly MessageReaction[] | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const cleaned: MessageReaction[] = [];
+    for (const x of parsed) {
+      if (x === null || typeof x !== 'object') continue;
+      const r = x as Record<string, unknown>;
+      if (typeof r['emoji'] !== 'string' || r['emoji'].length === 0) continue;
+      if (typeof r['device_id'] !== 'string' || r['device_id'].length === 0) continue;
+      cleaned.push({ emoji: r['emoji'], device_id: r['device_id'] });
+    }
+    return cleaned.length > 0 ? cleaned : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Encode a device-id list as a JSON column value, or NULL when empty. */
@@ -400,9 +440,14 @@ function normalizeStatus(raw: SqlValue | undefined): ChatMessage['status'] {
  * swallowed (the column simply won't be present and the row mappers tolerate
  * its absence), so a migration hiccup never bricks the chat surface.
  */
-async function ensureColumn(db: SqliteExecutor, table: string, column: string): Promise<void> {
+async function ensureColumn(
+  db: SqliteExecutor,
+  table: string,
+  column: string,
+  type: 'TEXT' | 'INTEGER' = 'TEXT',
+): Promise<void> {
   try {
-    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   } catch {
     // Column already exists (steady state) or ALTER unsupported — non-fatal.
   }

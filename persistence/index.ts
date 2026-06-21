@@ -17,6 +17,16 @@ export {
   type AppChatReceiptAggregate,
   type AppChatReceiptStoreOptions,
 } from './app-chat-receipts.ts'
+export {
+  AppChatReactionStore,
+  DEFAULT_REACTION_REPLAY_LIMIT,
+  type AppChatReactionLog,
+  type AppChatReactionAction,
+  type AppChatReaction,
+  type AppChatReactionRecordInput,
+  type AppChatReactionAggregate,
+  type AppChatReactionStoreOptions,
+} from './app-chat-reactions.ts'
 export { PersistenceError, BusyRetryExhaustedError } from './errors.ts'
 export {
   withBusyRetry,

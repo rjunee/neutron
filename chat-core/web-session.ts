@@ -26,9 +26,12 @@ import { InMemoryStore, type Store } from './store.ts'
 import { SyncEngine } from './sync-engine.ts'
 import {
   normalizeInbound,
+  normalizeReactionUpdate,
   normalizeReceiptUpdate,
   type ChatMessage,
+  type OutboundReaction,
   type OutboundReceipt,
+  type ReactionAction,
 } from './types.ts'
 import { ChatWsClient, type ConnStatus, type SocketLike } from './ws-client.ts'
 
@@ -185,6 +188,16 @@ export class WebChatSession {
       if (applied) this.emitChange()
       return
     }
+    // Track B Phase 4 (reactions) — a reaction_update carries the full current
+    // reaction set + monotonic rev for an already-applied message. Apply it
+    // (rev-LWW) so the message's chips update; no-op if the message isn't local
+    // yet or the update is stale.
+    const reaction = normalizeReactionUpdate(data)
+    if (reaction !== null) {
+      const { applied } = await this.engine.applyReactionUpdate(this.topic_id, reaction)
+      if (applied) this.emitChange()
+      return
+    }
     const msg = normalizeInbound(data)
     if (msg === null) return
     await this.engine.applyInbound(this.topic_id, msg)
@@ -208,6 +221,22 @@ export class WebChatSession {
       const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' }
       if (this.ws.send(env)) this.readSent.add(message_id)
     }
+  }
+
+  /**
+   * Add or remove an emoji reaction on a message (Track B Phase 4). Sends a
+   * `reaction` frame over the socket; the server attributes it to THIS socket's
+   * device id and fans a `reaction_update` (full aggregate + rev) back to every
+   * device, which {@link handleInbound} applies. Best-effort over the open
+   * socket (reactions are not on the lossless message critical path); a frame
+   * sent while offline is dropped and the UI can re-issue on the next tap. The
+   * optimistic local echo is left to the UI layer — the authoritative state is
+   * the server's fanned aggregate.
+   */
+  react(message_id: string, emoji: string, action: ReactionAction): boolean {
+    if (message_id.length === 0 || emoji.length === 0) return false
+    const env: OutboundReaction = { v: 1, type: 'reaction', message_id, emoji, action }
+    return this.ws.send(env)
   }
 
   /** Send the resume request from our local cursor, then re-drive every

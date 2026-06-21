@@ -21,7 +21,7 @@
  * rather than duplicates.
  */
 
-import { messageIdentity, type ChatMessage } from './types.ts'
+import { messageIdentity, sortReactions, type ChatMessage, type MessageReaction } from './types.ts'
 import {
   clampSearchLimit,
   searchMessagesInMemory,
@@ -102,7 +102,102 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
     // "un-read" a message, and two devices' acks both survive.
     delivered_to: unionDeviceIds(existing.delivered_to, incoming.delivered_to),
     read_by: unionDeviceIds(existing.read_by, incoming.read_by),
+    // Track B Phase 4 (reactions) — NOT a union: reactions are removable, so the
+    // higher-`rev` aggregate replaces the lower one wholesale. A re-delivered
+    // message (carrying no reaction info) leaves the stored reactions untouched.
+    ...pickReactionState(existing, incoming),
   }
+}
+
+/**
+ * Pick a message's reaction state when merging an `incoming` onto an `existing`
+ * row. Reactions can be removed, so — unlike receipts — they are NOT unioned;
+ * the aggregate carrying the higher monotonic `rev` wins (last-writer-wins),
+ * which is what lets a removal actually clear a reaction:
+ *
+ *   - incoming has NO reaction info (`reactions_rev` absent) → keep existing
+ *     (a normal message apply / re-delivery never clobbers reactions);
+ *   - incoming `rev` >= existing `rev` (or existing has none) → take incoming
+ *     (an empty incoming set with a higher rev correctly clears everything);
+ *   - otherwise the incoming update is stale → keep existing.
+ *
+ * Idempotent + order-independent: replaying the same or an older update is a
+ * no-op on the rendered set.
+ */
+export function pickReactionState(
+  existing: Pick<ChatMessage, 'reactions' | 'reactions_rev'>,
+  incoming: Pick<ChatMessage, 'reactions' | 'reactions_rev'>,
+): { reactions: readonly MessageReaction[] | null; reactions_rev: number | null } {
+  const incomingRev = incoming.reactions_rev
+  if (incomingRev === null || incomingRev === undefined) {
+    return {
+      reactions: normalizeReactions(existing.reactions),
+      reactions_rev: existing.reactions_rev ?? null,
+    }
+  }
+  const existingRev = existing.reactions_rev
+  if (existingRev === null || existingRev === undefined || incomingRev >= existingRev) {
+    return { reactions: normalizeReactions(incoming.reactions), reactions_rev: incomingRev }
+  }
+  return {
+    reactions: normalizeReactions(existing.reactions),
+    reactions_rev: existingRev,
+  }
+}
+
+/**
+ * Track B Phase 4 (reactions) — one rendered reaction chip: an emoji, how many
+ * devices reacted with it, and whether THIS device is among them (so a UI can
+ * highlight the chip + know a tap should REMOVE rather than add). Framework-free
+ * so web (React) and mobile (RN) render from the same derivation.
+ */
+export interface ReactionChip {
+  emoji: string
+  count: number
+  reactedBySelf: boolean
+}
+
+/**
+ * Group a message's flat `(emoji, device_id)` reaction set into the per-emoji
+ * chips a UI renders ("👍 3"), ordered by descending count then emoji so the
+ * row is stable. `selfDeviceId` marks the chips this device contributed to.
+ */
+export function groupReactions(
+  reactions: readonly MessageReaction[] | null | undefined,
+  selfDeviceId?: string,
+): ReactionChip[] {
+  const byEmoji = new Map<string, { count: number; reactedBySelf: boolean }>()
+  for (const r of reactions ?? []) {
+    if (r.emoji.length === 0) continue
+    const entry = byEmoji.get(r.emoji) ?? { count: 0, reactedBySelf: false }
+    entry.count += 1
+    if (selfDeviceId !== undefined && r.device_id === selfDeviceId) entry.reactedBySelf = true
+    byEmoji.set(r.emoji, entry)
+  }
+  const chips: ReactionChip[] = []
+  for (const [emoji, { count, reactedBySelf }] of byEmoji) {
+    chips.push({ emoji, count, reactedBySelf })
+  }
+  chips.sort((a, b) => (b.count !== a.count ? b.count - a.count : a.emoji < b.emoji ? -1 : 1))
+  return chips
+}
+
+/** Clean + canonically sort a reaction list, returning `null` when empty (so an
+ *  all-removed message persists as "no reactions"). */
+export function normalizeReactions(
+  reactions: readonly MessageReaction[] | null | undefined,
+): readonly MessageReaction[] | null {
+  if (reactions === null || reactions === undefined) return null
+  const seen = new Set<string>()
+  const cleaned: MessageReaction[] = []
+  for (const r of reactions) {
+    if (r.emoji.length === 0 || r.device_id.length === 0) continue
+    const key = `${r.emoji} ${r.device_id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    cleaned.push({ emoji: r.emoji, device_id: r.device_id })
+  }
+  return cleaned.length > 0 ? sortReactions(cleaned) : null
 }
 
 const STATUS_RANK = { queued: 0, sent: 1, acked: 2 } as const

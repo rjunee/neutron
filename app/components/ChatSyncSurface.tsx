@@ -40,10 +40,14 @@ import type { ConnStatus } from '@neutron/chat-core';
 import {
   deliveryGlyph,
   deliveryState,
+  groupReactions,
   type RenderRow,
 } from '../lib/chat-core/chat-render-model';
 import { useMobileChat } from '../lib/chat-core/use-mobile-chat';
 import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+
+/** Quick-reaction palette the long-press tray offers (Track B Phase 4). */
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const;
 
 export interface ChatSyncSurfaceProps {
   /** The project this chat is scoped to (empty string = global transcript). */
@@ -57,12 +61,23 @@ interface ViewableItemsChange {
 }
 
 export function ChatSyncSurface({ projectId }: ChatSyncSurfaceProps): React.JSX.Element {
-  const { rows, status, typing, pendingCount, ready, send, markRead, selfDeviceId } =
+  const { rows, status, typing, pendingCount, ready, send, markRead, react, selfDeviceId } =
     useMobileChat(projectId);
 
+  // Track B Phase 4 — toggle a reaction: tap an existing self-chip to remove,
+  // else add. The picker tray (long-press) always adds.
+  const onToggleReaction = useCallback(
+    (messageId: string, emoji: string, reactedBySelf: boolean): void => {
+      react(messageId, emoji, reactedBySelf ? 'remove' : 'add');
+    },
+    [react],
+  );
+
   const renderItem = useCallback(
-    ({ item }: { item: RenderRow }) => <ChatRow row={item} selfDeviceId={selfDeviceId} />,
-    [selfDeviceId],
+    ({ item }: { item: RenderRow }) => (
+      <ChatRow row={item} selfDeviceId={selfDeviceId} onToggleReaction={onToggleReaction} />
+    ),
+    [selfDeviceId, onToggleReaction],
   );
 
   // Track B Phase 4 — when agent messages scroll into view, report them read.
@@ -128,10 +143,14 @@ function keyForRow(row: RenderRow): string {
 function ChatRow({
   row,
   selfDeviceId,
+  onToggleReaction,
 }: {
   row: RenderRow;
   selfDeviceId: string;
+  onToggleReaction: (messageId: string, emoji: string, reactedBySelf: boolean) => void;
 }): React.JSX.Element {
+  const [pickerOpen, setPickerOpen] = useState(false);
+
   if (row.kind === 'streaming') {
     return (
       <View style={[styles.bubbleWrap, styles.agentWrap]}>
@@ -145,17 +164,71 @@ function ChatRow({
   const { message } = row;
   const isUser = message.role === 'user';
   const delivery = deliveryState(message, selfDeviceId);
+  const chips = groupReactions(message, selfDeviceId);
+  // Only a server-acked message (with a real message_id) can carry reactions —
+  // you can't react to an optimistic bubble the server hasn't seen yet.
+  const canReact = message.message_id !== null;
+
+  const react = (emoji: string, reactedBySelf: boolean): void => {
+    if (message.message_id === null) return;
+    onToggleReaction(message.message_id, emoji, reactedBySelf);
+    setPickerOpen(false);
+  };
+
   return (
     <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
-      <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
-        <Text style={isUser ? styles.userText : styles.agentText}>{message.body}</Text>
-        {delivery !== null ? (
-          <Text
-            style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
-            accessibilityLabel={`delivery: ${delivery}`}
-          >
-            {deliveryGlyph(delivery)}
-          </Text>
+      <View style={styles.bubbleColumn}>
+        <Pressable
+          onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
+          delayLongPress={250}
+          accessibilityLabel={canReact ? 'Long-press to react' : undefined}
+        >
+          <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
+            <Text style={isUser ? styles.userText : styles.agentText}>{message.body}</Text>
+            {delivery !== null ? (
+              <Text
+                style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
+                accessibilityLabel={`delivery: ${delivery}`}
+              >
+                {deliveryGlyph(delivery)}
+              </Text>
+            ) : null}
+          </View>
+        </Pressable>
+        {pickerOpen ? (
+          <View style={[styles.reactionTray, isUser ? styles.trayUser : styles.trayAgent]}>
+            {QUICK_REACTIONS.map((emoji) => (
+              <Pressable
+                key={emoji}
+                onPress={() => {
+                  const existing = chips.find((c) => c.emoji === emoji);
+                  react(emoji, existing?.reactedBySelf ?? false);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={`React ${emoji}`}
+                style={styles.trayEmojiBtn}
+              >
+                <Text style={styles.trayEmoji}>{emoji}</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        {chips.length > 0 ? (
+          <View style={[styles.reactionRow, isUser ? styles.trayUser : styles.trayAgent]}>
+            {chips.map((chip) => (
+              <Pressable
+                key={chip.emoji}
+                onPress={() => react(chip.emoji, chip.reactedBySelf)}
+                accessibilityRole="button"
+                accessibilityLabel={`${chip.emoji} ${chip.count}${chip.reactedBySelf ? ', reacted' : ''}`}
+                style={[styles.chip, chip.reactedBySelf ? styles.chipSelf : null]}
+              >
+                <Text style={styles.chipText}>
+                  {chip.emoji} {chip.count}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
         ) : null}
       </View>
     </View>
@@ -284,6 +357,41 @@ const styles = StyleSheet.create({
     color: THEME.accent,
     opacity: 1,
   },
+  // Track B Phase 4 (reactions) — chip row + long-press picker tray.
+  bubbleColumn: { maxWidth: '82%' },
+  reactionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.xs,
+    marginTop: SPACING.xs,
+  },
+  reactionTray: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.xs,
+    marginTop: SPACING.xs,
+    padding: SPACING.xs,
+    borderRadius: 16,
+    backgroundColor: THEME.surface_raised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: THEME.hairline,
+  },
+  trayUser: { justifyContent: 'flex-end' },
+  trayAgent: { justifyContent: 'flex-start' },
+  trayEmojiBtn: { paddingHorizontal: SPACING.xs, paddingVertical: 2 },
+  trayEmoji: { ...TYPOGRAPHY.h3 },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 2,
+    borderRadius: 12,
+    backgroundColor: THEME.surface_raised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: THEME.hairline,
+  },
+  chipSelf: { borderColor: THEME.accent, backgroundColor: THEME.surface },
+  chipText: { ...TYPOGRAPHY.caption, color: THEME.text_primary },
   typingBubble: { paddingVertical: SPACING.xs },
   typingText: { ...TYPOGRAPHY.h2, color: THEME.text_muted, letterSpacing: 2 },
   emptyText: { ...TYPOGRAPHY.body, color: THEME.text_muted },

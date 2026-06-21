@@ -26,6 +26,23 @@ export type ReceiptState = 'delivered' | 'read'
  *  human device required. */
 export const AGENT_DEVICE_ID = 'agent'
 
+/** Track B Phase 4 — an emoji reaction a user (device) adds to / removes from
+ *  a single message. */
+export type ReactionAction = 'add' | 'remove'
+
+/**
+ * Track B Phase 4 — one active emoji reaction on a message, attributed to the
+ * device that added it. The canonical per-message reaction state is a set of
+ * these `(emoji, device_id)` pairs; the render layer groups them by emoji into
+ * the "👍 3" chips a UI shows. Attribution is server-set from the socket's
+ * device id (a client can't forge another device's reaction), mirroring how
+ * read receipts are attributed.
+ */
+export interface MessageReaction {
+  emoji: string
+  device_id: string
+}
+
 /**
  * Lifecycle of a locally-originated message:
  *  - `queued` — written to the local store, not yet handed to the socket
@@ -73,6 +90,25 @@ export interface ChatMessage {
    * set-union; monotonic.
    */
   read_by?: readonly string[] | null
+  /**
+   * Track B Phase 4 (reactions) — the FULL current set of active emoji
+   * reactions on this message, one `(emoji, device_id)` pair per reaction.
+   * Optional + additive; absent/null means no reactions. Unlike receipts (which
+   * only ever accumulate), reactions can be REMOVED, so this set is NOT merged
+   * by union — it is replaced wholesale by the highest-{@link reactions_rev}
+   * aggregate the server fans (last-writer-wins by `rev`), which is what lets a
+   * removal actually clear a reaction. See {@link pickReactionState}.
+   */
+  reactions?: readonly MessageReaction[] | null
+  /**
+   * Track B Phase 4 (reactions) — monotonic per-message reaction revision. The
+   * server bumps it on every add/remove for the message; the client keeps the
+   * `reactions` aggregate carrying the highest `rev` and ignores a stale lower
+   * one, so applying reaction updates is idempotent + order-independent even
+   * though the set itself isn't monotonic. Null when the message has never had
+   * a reaction.
+   */
+  reactions_rev?: number | null
 }
 
 /**
@@ -112,6 +148,22 @@ export interface InboundReceiptUpdate {
   read_by: readonly string[]
 }
 
+/**
+ * A reaction-state update for a single message (Track B Phase 4). Carries the
+ * FULL current set of active reactions (not a delta) plus the monotonic `rev`,
+ * so applying it is idempotent + order-independent: the client keeps whichever
+ * aggregate has the highest `rev` and drops a stale one. Produced by {@link
+ * normalizeReactionUpdate} from a `reaction_update` wire frame.
+ */
+export interface InboundReactionUpdate {
+  message_id: string
+  seq: number | null
+  /** Monotonic per-message reaction revision (last-writer-wins key). */
+  rev: number
+  /** The full current set of active `(emoji, device_id)` reactions. */
+  reactions: readonly MessageReaction[]
+}
+
 /** Wire envelope a client sends to deliver a user message. */
 export interface OutboundUserMessage {
   v: 1
@@ -141,6 +193,22 @@ export interface OutboundReceipt {
   type: 'receipt'
   message_id: string
   state: ReceiptState
+  seq?: number
+}
+
+/**
+ * Wire envelope a client sends to add or remove an emoji reaction on a message
+ * (Track B Phase 4). The server attributes it to the SOCKET's device id — the
+ * client never self-reports a device id here, so it can't forge another
+ * device's reaction (same anti-forge posture as {@link OutboundReceipt}). `seq`
+ * is the message's server seq when the client knows it; omitted otherwise.
+ */
+export interface OutboundReaction {
+  v: 1
+  type: 'reaction'
+  message_id: string
+  emoji: string
+  action: ReactionAction
   seq?: number
 }
 
@@ -231,6 +299,59 @@ export function normalizeReceiptUpdate(raw: unknown): InboundReceiptUpdate | nul
     delivered_by: parseStringArray(e['delivered_by']) ?? [],
     read_by: parseStringArray(e['read_by']) ?? [],
   }
+}
+
+/**
+ * Normalize a parsed `reaction_update` wire frame into an {@link
+ * InboundReactionUpdate}, or `null` when the frame is malformed. Defensive
+ * (drop, never throw), matching {@link normalizeReceiptUpdate}. The reaction
+ * list defaults to empty (an all-removed message) and `rev` to 0 when absent.
+ */
+export function normalizeReactionUpdate(raw: unknown): InboundReactionUpdate | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'reaction_update') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0) return null
+
+  let seq: number | null = null
+  const rawSeq = e['seq']
+  if (typeof rawSeq === 'number' && Number.isFinite(rawSeq)) seq = Math.trunc(rawSeq)
+
+  let rev = 0
+  const rawRev = e['rev']
+  if (typeof rawRev === 'number' && Number.isFinite(rawRev)) rev = Math.max(0, Math.trunc(rawRev))
+
+  return { message_id, seq, rev, reactions: parseReactions(e['reactions']) }
+}
+
+/** Parse an untrusted value into a clean `MessageReaction[]` (drops malformed
+ *  entries; de-dups + sorts canonically so the value is byte-stable). */
+export function parseReactions(raw: unknown): readonly MessageReaction[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: MessageReaction[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const r = entry as Record<string, unknown>
+    const emoji = r['emoji']
+    const device_id = r['device_id']
+    if (typeof emoji !== 'string' || emoji.length === 0) continue
+    if (typeof device_id !== 'string' || device_id.length === 0) continue
+    const key = `${emoji} ${device_id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ emoji, device_id })
+  }
+  return sortReactions(out)
+}
+
+/** Canonical order for a reaction set: by emoji, then device id. Keeps the
+ *  stored/wire value byte-stable regardless of arrival order. */
+export function sortReactions(reactions: readonly MessageReaction[]): MessageReaction[] {
+  return [...reactions].sort((a, b) =>
+    a.emoji < b.emoji ? -1 : a.emoji > b.emoji ? 1 : a.device_id < b.device_id ? -1 : a.device_id > b.device_id ? 1 : 0,
+  )
 }
 
 /** Parse an untrusted value into a clean string array, or `null` when it isn't

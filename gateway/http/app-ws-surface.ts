@@ -33,6 +33,7 @@ import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
 import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
 import {
   decodeAppWsInbound,
+  decodeAppWsReaction,
   decodeAppWsReceipt,
   decodeAppWsResume,
   appWsTopicId,
@@ -321,6 +322,17 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
               if (send !== undefined) send(env)
               else ws.send(JSON.stringify(env))
             }
+            // Track B Phase 4 (reactions) — likewise replay current reaction
+            // state (one reaction_update per message with reactions) AFTER the
+            // messages so each update's target message is already applied.
+            const reactions = await adapter.replayReactionsAfter(
+              data.channel_topic_id,
+              resume.after_seq,
+            )
+            for (const env of reactions) {
+              if (send !== undefined) send(env)
+              else ws.send(JSON.stringify(env))
+            }
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'resume error'
             ws.send(JSON.stringify({ v: 1, type: 'error', code: 'resume_failed', message: reason }))
@@ -345,6 +357,28 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'receipt error'
             ws.send(JSON.stringify({ v: 1, type: 'error', code: 'receipt_failed', message: reason }))
+          }
+          return
+        }
+        // Track B Phase 4 (reactions) — an add/remove reaction from this device.
+        // Attributed to the SOCKET's device id (never the frame), then fanned to
+        // every device as a reaction_update. Checked before the message decoder
+        // so the user_message path keeps its narrow type.
+        const reaction = decodeAppWsReaction(parsed)
+        if (reaction !== null) {
+          const device_id = data.device_id ?? `conn-${data.user_id}`
+          try {
+            await adapter.recordReaction({
+              channel_topic_id: data.channel_topic_id,
+              message_id: reaction.message_id,
+              device_id,
+              emoji: reaction.emoji,
+              action: reaction.action,
+              ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+            })
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : 'reaction error'
+            ws.send(JSON.stringify({ v: 1, type: 'error', code: 'reaction_failed', message: reason }))
           }
           return
         }

@@ -18,6 +18,7 @@ import {
   emptyStreamState,
   foldStreamFrame,
   frameMatchesProject,
+  groupReactions,
 } from '../lib/chat-core/chat-render-model';
 
 function userMsg(p: Partial<ChatMessage> & { client_msg_id: string }): ChatMessage {
@@ -185,5 +186,29 @@ describe('deliveryState', () => {
     expect(deliveryGlyph('sent')).toBe('✓');
     expect(deliveryGlyph('delivered')).toBe('✓✓');
     expect(deliveryGlyph('read')).toBe('✓✓');
+  });
+});
+
+describe('groupReactions (Track B Phase 4)', () => {
+  it('groups a message’s reactions into per-emoji chips with a self flag', () => {
+    const chips = groupReactions(
+      agentMsg({
+        message_id: 'a1',
+        reactions: [
+          { emoji: '👍', device_id: 'devA' },
+          { emoji: '👍', device_id: 'self' },
+          { emoji: '❤️', device_id: 'devB' },
+        ],
+      }),
+      'self',
+    );
+    expect(chips).toEqual([
+      { emoji: '👍', count: 2, reactedBySelf: true },
+      { emoji: '❤️', count: 1, reactedBySelf: false },
+    ]);
+  });
+
+  it('returns [] for a message with no reactions', () => {
+    expect(groupReactions(agentMsg({ message_id: 'a1' }))).toEqual([]);
   });
 });

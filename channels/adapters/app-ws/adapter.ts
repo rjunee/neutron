@@ -42,6 +42,8 @@ import type {
 } from '../../types.ts'
 import type {
   AppChatMessageLog,
+  AppChatReactionAction,
+  AppChatReactionLog,
   AppChatReceiptLog,
   AppChatReceiptState,
   AppChatRow,
@@ -53,6 +55,7 @@ import {
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentMessageDocRef,
   type AppWsOutboundAgentMessageUploadAffordance,
+  type AppWsOutboundReactionUpdate,
   type AppWsOutboundReceiptUpdate,
   type AppWsOutboundUserMessageEcho,
 } from './envelope.ts'
@@ -90,6 +93,14 @@ export interface AppWsAdapterOptions {
    * delivered_by/read_by.
    */
   receipt_log?: AppChatReceiptLog
+  /**
+   * Track B Phase 4 (message reactions) — durable per-(message, device, emoji)
+   * reaction log. When supplied, the adapter records add/remove reactions via
+   * {@link AppWsAdapter.recordReaction} (attributing device_id to the socket)
+   * and fans the full reaction aggregate as a `reaction_update`, and replays
+   * reaction state on resume. ABSENT → reactions are inert (legacy behaviour).
+   */
+  reaction_log?: AppChatReactionLog
 }
 
 export class AppWsAdapter implements ChannelAdapter {
@@ -100,6 +111,7 @@ export class AppWsAdapter implements ChannelAdapter {
   private readonly generate_message_id: () => string
   private readonly chat_log: AppChatMessageLog | undefined
   private readonly receipt_log: AppChatReceiptLog | undefined
+  private readonly reaction_log: AppChatReactionLog | undefined
 
   constructor(opts: AppWsAdapterOptions) {
     this.registry = opts.registry
@@ -108,6 +120,7 @@ export class AppWsAdapter implements ChannelAdapter {
     this.generate_message_id = opts.generate_message_id ?? (() => crypto.randomUUID())
     this.chat_log = opts.chat_log
     this.receipt_log = opts.receipt_log
+    this.reaction_log = opts.reaction_log
   }
 
   /** Whether a durable message log is wired (enables seq + resume). */
@@ -118,6 +131,11 @@ export class AppWsAdapter implements ChannelAdapter {
   /** Whether the receipt log is wired (enables delivery + read receipts). */
   get hasReceipts(): boolean {
     return this.receipt_log !== undefined
+  }
+
+  /** Whether the reaction log is wired (enables emoji reactions). */
+  get hasReactions(): boolean {
+    return this.reaction_log !== undefined
   }
 
   /**
@@ -449,6 +467,86 @@ export class AppWsAdapter implements ChannelAdapter {
         message_id: agg.message_id,
         delivered_by: agg.delivered_by,
         read_by: agg.read_by,
+        ts,
+      }
+      if (agg.seq > 0) env.seq = agg.seq
+      return env
+    })
+  }
+
+  /**
+   * Track B Phase 4 (message reactions) — record an add/remove reaction for a
+   * message (attributed to the supplied device id, which the surface sets from
+   * the socket) and fan a `reaction_update` carrying the FULL post-record
+   * aggregate (+ monotonic `rev`) to EVERY device on the topic, so each
+   * device's chips converge. Returns the fanned envelope (for tests /
+   * telemetry), or `null` when the reaction log isn't wired / the input is
+   * empty. Failure-isolated: a persist error returns `null` rather than
+   * throwing into the socket loop.
+   */
+  async recordReaction(input: {
+    channel_topic_id: string
+    message_id: string
+    device_id: string
+    emoji: string
+    action: AppChatReactionAction
+    project_id?: string
+  }): Promise<AppWsOutboundReactionUpdate | null> {
+    if (this.reaction_log === undefined) return null
+    if (input.message_id.length === 0 || input.device_id.length === 0) return null
+    if (input.emoji.length === 0) return null
+    let agg
+    try {
+      agg = await this.reaction_log.record({
+        topic_id: input.channel_topic_id,
+        message_id: input.message_id,
+        device_id: input.device_id,
+        emoji: input.emoji,
+        action: input.action,
+        at: this.now(),
+      })
+    } catch (err) {
+      console.warn(
+        `[app-ws] topic=${input.channel_topic_id} reaction persist failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      return null
+    }
+    const env: AppWsOutboundReactionUpdate = {
+      v: 1,
+      type: 'reaction_update',
+      message_id: input.message_id,
+      rev: agg.rev,
+      reactions: agg.reactions.map((r) => ({ emoji: r.emoji, device_id: r.device_id })),
+      ts: this.now(),
+    }
+    if (agg.seq > 0) env.seq = agg.seq
+    if (input.project_id !== undefined) env.project_id = input.project_id
+    this.registry.send(input.channel_topic_id, env)
+    return env
+  }
+
+  /**
+   * Track B Phase 4 (message reactions) — replay reaction state to a
+   * reconnecting device after the message replay. Returns one `reaction_update`
+   * per message (with seq > after_seq) that has any reaction, ascending by seq.
+   * `[]` when the reaction log isn't wired.
+   */
+  async replayReactionsAfter(
+    channel_topic_id: string,
+    after_seq: number,
+  ): Promise<AppWsOutboundReactionUpdate[]> {
+    if (this.reaction_log === undefined) return []
+    const aggregates = await this.reaction_log.aggregatesAfter(channel_topic_id, after_seq)
+    const ts = this.now()
+    return aggregates.map((agg) => {
+      const env: AppWsOutboundReactionUpdate = {
+        v: 1,
+        type: 'reaction_update',
+        message_id: agg.message_id,
+        rev: agg.rev,
+        reactions: agg.reactions.map((r) => ({ emoji: r.emoji, device_id: r.device_id })),
         ts,
       }
       if (agg.seq > 0) env.seq = agg.seq

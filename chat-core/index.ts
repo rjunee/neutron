@@ -12,17 +12,24 @@
 export {
   normalizeInbound,
   normalizeReceiptUpdate,
+  normalizeReactionUpdate,
+  parseReactions,
+  sortReactions,
   messageIdentity,
   AGENT_DEVICE_ID,
   type MessageRole,
   type SendStatus,
   type ReceiptState,
+  type ReactionAction,
+  type MessageReaction,
   type ChatMessage,
   type InboundChatMessage,
   type InboundReceiptUpdate,
+  type InboundReactionUpdate,
   type OutboundUserMessage,
   type OutboundResume,
   type OutboundReceipt,
+  type OutboundReaction,
 } from './types.ts'
 
 export {
@@ -30,6 +37,10 @@ export {
   compareForDisplay,
   mergeMessage,
   unionDeviceIds,
+  pickReactionState,
+  normalizeReactions,
+  groupReactions,
+  type ReactionChip,
   type Store,
 } from './store.ts'
 

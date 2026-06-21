@@ -12,22 +12,106 @@
  * CSS framework is bundled.
  */
 
+import { createContext, useContext, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
   ComposerPrimitive,
   MessagePartPrimitive,
+  useMessage,
 } from '@assistant-ui/react'
 
-import type { ChatViewModel } from './controller.ts'
+import type { ReactionChip } from '@neutron/chat-core'
+import type { ChatViewModel, RenderMessage } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
+
+/** Quick-reaction palette the web "add reaction" affordance offers. */
+const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const
+
+/**
+ * Track B Phase 4 — per-message reaction data + an add/remove callback, shared
+ * down to the assistant-ui message components (which only receive the rendered
+ * message id via `useMessage`). Keyed by the render `id` so a bubble can look
+ * up its own chips + the wire message id to react against.
+ */
+interface ReactionsCtx {
+  byRenderId: Map<string, { messageId: string | null; reactions: ReactionChip[] }>
+  onReact: (messageId: string, emoji: string, reactedBySelf: boolean) => void
+}
+const ReactionsContext = createContext<ReactionsCtx | null>(null)
+
+/**
+ * Reaction chips + an add-reaction affordance for a single message bubble.
+ * Reads the current message id from assistant-ui's `useMessage`, looks up its
+ * reactions from context, and renders the chip row. Tapping a self-chip removes
+ * it; the "＋" opens a small emoji palette. A bubble with no wire message id yet
+ * (optimistic, not server-acked) can't be reacted to, so we render nothing.
+ */
+function MessageReactions(): React.JSX.Element | null {
+  const ctx = useContext(ReactionsContext)
+  const message = useMessage()
+  const [pickerOpen, setPickerOpen] = useState(false)
+  if (ctx === null) return null
+  const entry = ctx.byRenderId.get(message.id)
+  if (entry === undefined || entry.messageId === null) return null
+  const messageId = entry.messageId
+  const { reactions } = entry
+
+  const toggle = (emoji: string, reactedBySelf: boolean): void => {
+    ctx.onReact(messageId, emoji, reactedBySelf)
+    setPickerOpen(false)
+  }
+
+  return (
+    <div className="car-reactions">
+      {reactions.map((chip) => (
+        <button
+          key={chip.emoji}
+          type="button"
+          className={`car-reaction${chip.reactedBySelf ? ' car-reaction-self' : ''}`}
+          onClick={() => toggle(chip.emoji, chip.reactedBySelf)}
+          aria-label={`${chip.emoji} ${chip.count}${chip.reactedBySelf ? ', reacted' : ''}`}
+        >
+          {chip.emoji} {chip.count}
+        </button>
+      ))}
+      <button
+        type="button"
+        className="car-reaction car-reaction-add"
+        onClick={() => setPickerOpen((v) => !v)}
+        aria-label="Add reaction"
+      >
+        ＋
+      </button>
+      {pickerOpen ? (
+        <span className="car-reaction-picker" role="menu">
+          {QUICK_REACTIONS.map((emoji) => {
+            const existing = reactions.find((c) => c.emoji === emoji)
+            return (
+              <button
+                key={emoji}
+                type="button"
+                className="car-reaction-pick"
+                onClick={() => toggle(emoji, existing?.reactedBySelf ?? false)}
+                aria-label={`React ${emoji}`}
+              >
+                {emoji}
+              </button>
+            )
+          })}
+        </span>
+      ) : null}
+    </div>
+  )
+}
 
 function UserMessage(): React.JSX.Element {
   return (
     <MessagePrimitive.Root className="car-row car-row-user">
       <div className="car-bubble car-bubble-user">
         <MessagePrimitive.Parts />
+        <MessageReactions />
       </div>
     </MessagePrimitive.Root>
   )
@@ -41,12 +125,24 @@ function AssistantMessage(): React.JSX.Element {
       </div>
       <div className="car-bubble car-bubble-agent">
         <MessagePrimitive.Parts />
+        <MessageReactions />
       </div>
     </MessagePrimitive.Root>
   )
 }
 
 const MESSAGE_COMPONENTS = { UserMessage, AssistantMessage } as const
+
+/** Build the render-id → {messageId, reactions} lookup the bubbles read. */
+function buildReactionIndex(
+  messages: readonly RenderMessage[],
+): Map<string, { messageId: string | null; reactions: ReactionChip[] }> {
+  const map = new Map<string, { messageId: string | null; reactions: ReactionChip[] }>()
+  for (const m of messages) {
+    map.set(m.id, { messageId: m.messageId, reactions: m.reactions })
+  }
+  return map
+}
 
 function TypingIndicator(): React.JSX.Element {
   return (
@@ -187,7 +283,13 @@ export function ChatApp({
   controller: NeutronChatController
   config: BootstrapConfig
 }): React.JSX.Element {
+  const reactionsCtx: ReactionsCtx = {
+    byRenderId: buildReactionIndex(vm.messages),
+    onReact: (messageId, emoji, reactedBySelf) =>
+      controller.react(messageId, emoji, reactedBySelf ? 'remove' : 'add'),
+  }
   return (
+    <ReactionsContext.Provider value={reactionsCtx}>
     <div className="car-shell">
       {config.projects.length > 0 && (
         <TopicRail
@@ -220,6 +322,7 @@ export function ChatApp({
         </ThreadPrimitive.Root>
       </main>
     </div>
+    </ReactionsContext.Provider>
   )
 }
 

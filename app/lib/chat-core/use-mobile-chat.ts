@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
-import type { ChatMessage, ConnStatus } from '@neutron/chat-core';
+import type { ChatMessage, ConnStatus, ReactionAction } from '@neutron/chat-core';
 
 import { httpToWs, loadAppConfig } from '../config';
 import { useAuthSession } from '../session';
@@ -58,6 +58,8 @@ export interface UseMobileChatResult {
   send: (body: string, attachments?: readonly string[]) => void;
   /** Report messages the user has viewed (Track B Phase 4 read receipts). */
   markRead: (messageIds: readonly string[]) => void;
+  /** Add or remove an emoji reaction on a message (Track B Phase 4). */
+  react: (messageId: string, emoji: string, action: ReactionAction) => void;
   /** This device's id — passed to `deliveryState` so a message's read tick
    *  excludes the sender's own device. Empty until the session constructs. */
   selfDeviceId: string;
@@ -216,9 +218,27 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     sessionRef.current?.markRead(messageIds);
   }, []);
 
+  const react = useCallback(
+    (messageId: string, emoji: string, action: ReactionAction): void => {
+      if (messageId.length === 0 || emoji.length === 0) return;
+      sessionRef.current?.react(messageId, emoji, action);
+    },
+    [],
+  );
+
   const rows = useMemo(() => buildRenderRows(messages, stream), [messages, stream]);
 
-  return { rows, status, typing: stream.typing, pendingCount, ready, send, markRead, selfDeviceId };
+  return {
+    rows,
+    status,
+    typing: stream.typing,
+    pendingCount,
+    ready,
+    send,
+    markRead,
+    react,
+    selfDeviceId,
+  };
 }
 
 /** A message belongs to this project view when its project_id matches, or

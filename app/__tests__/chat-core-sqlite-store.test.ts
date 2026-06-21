@@ -161,6 +161,49 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect(row?.read_by).toEqual(['agent']);
   });
 
+  it('round-trips reactions + rev, and a higher-rev empty set clears them (Track B Phase 4)', async () => {
+    const store = await SqliteChatStore.open(bunExecutor(freshDb()));
+    await store.upsert(
+      msg({
+        client_msg_id: 'c1',
+        message_id: 'm1',
+        seq: 1,
+        status: 'acked',
+        reactions: [{ emoji: '👍', device_id: 'devA' }],
+        reactions_rev: 1,
+      }),
+    );
+    let [row] = await store.list(TOPIC);
+    expect(row?.reactions).toEqual([{ emoji: '👍', device_id: 'devA' }]);
+    expect(row?.reactions_rev).toBe(1);
+    // A higher-rev empty aggregate (a removal) clears the set.
+    await store.upsert(
+      msg({ client_msg_id: 'c1', message_id: 'm1', seq: 1, status: 'acked', reactions: null, reactions_rev: 2 }),
+    );
+    [row] = await store.list(TOPIC);
+    expect(row?.reactions ?? null).toBeNull();
+    expect(row?.reactions_rev).toBe(2);
+  });
+
+  it('persists reactions across a cold reopen (migrated columns)', async () => {
+    const db = freshDb();
+    const first = await SqliteChatStore.open(bunExecutor(db));
+    await first.upsert(
+      msg({
+        client_msg_id: 'c1',
+        message_id: 'm1',
+        seq: 1,
+        status: 'acked',
+        reactions: [{ emoji: '🎉', device_id: 'devA' }],
+        reactions_rev: 3,
+      }),
+    );
+    const reopened = await SqliteChatStore.open(bunExecutor(db));
+    const [row] = await reopened.list(TOPIC);
+    expect(row?.reactions).toEqual([{ emoji: '🎉', device_id: 'devA' }]);
+    expect(row?.reactions_rev).toBe(3);
+  });
+
   it('persists receipts across a cold reopen (migrated columns)', async () => {
     const db = freshDb();
     const first = await SqliteChatStore.open(bunExecutor(db));

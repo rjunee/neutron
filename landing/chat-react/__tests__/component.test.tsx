@@ -153,6 +153,21 @@ describe('ChatApp render (happy-dom)', () => {
     // Reply done → composer shows Send again, not Stop.
     expect(container.textContent).toContain('Send')
 
+    // Track B Phase 4 — a reaction_update on the agent message renders a chip.
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'reaction_update',
+        message_id: 'm1',
+        seq: 1,
+        rev: 1,
+        reactions: [{ emoji: '👍', device_id: 'devB' }],
+        ts: 4,
+      })
+      await tick()
+    })
+    expect(container.textContent).toContain('👍 1')
+
     await act(async () => {
       root.unmount()
     })

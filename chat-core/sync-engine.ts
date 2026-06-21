@@ -20,6 +20,7 @@ import { InMemoryStore, type Store } from './store.ts'
 import type {
   ChatMessage,
   InboundChatMessage,
+  InboundReactionUpdate,
   InboundReceiptUpdate,
   OutboundResume,
 } from './types.ts'
@@ -94,6 +95,37 @@ export class SyncEngine {
     const patch: ChatMessage = { ...existing }
     if (update.delivered_by.length > 0) patch.delivered_to = update.delivered_by
     if (update.read_by.length > 0) patch.read_by = update.read_by
+    await this.store.upsert(patch)
+    return { applied: true }
+  }
+
+  /**
+   * Apply a reaction-state update for an already-delivered message (Track B
+   * Phase 4). Looks the message up by `message_id` and writes the new aggregate
+   * via the same idempotent UPSERT path messages use (NOT a fork): the Store's
+   * {@link pickReactionState} keeps whichever aggregate has the higher `rev`, so
+   * a stale (lower-rev) update is a no-op and an empty higher-rev set clears all
+   * reactions. Returns `{ applied:false }` when the message isn't local yet (a
+   * reaction can't precede its message on the wire) or the update is stale.
+   */
+  async applyReactionUpdate(
+    topic_id: string,
+    update: InboundReactionUpdate,
+  ): Promise<{ applied: boolean }> {
+    if (update.message_id.length === 0) return { applied: false }
+    const existing = await this.store.getByMessageId(topic_id, update.message_id)
+    if (existing === null) return { applied: false }
+    // Stale-update short-circuit: don't churn the store / re-render for an
+    // update we'd discard anyway. (mergeMessage would keep the existing state,
+    // but avoiding the upsert keeps applyReactionUpdate's verdict honest.)
+    if (existing.reactions_rev !== null && existing.reactions_rev !== undefined) {
+      if (update.rev < existing.reactions_rev) return { applied: false }
+    }
+    const patch: ChatMessage = {
+      ...existing,
+      reactions: update.reactions.length > 0 ? update.reactions : null,
+      reactions_rev: update.rev,
+    }
     await this.store.upsert(patch)
     return { applied: true }
   }
