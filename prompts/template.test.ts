@@ -87,8 +87,10 @@ describe('loadPrompt', () => {
     const out = loadPrompt('atlas.md', { OWNER_HOME: SYNTHETIC_OWNER_HOME })
     // The substitution actually fired in body content (not just the header
     // comment): every owner-home token now points at the synthetic owner
-    // home.
-    expect(out).toContain(`${SYNTHETIC_OWNER_HOME}/scripts/tg-post.sh`)
+    // home. (The persona was adapted for the substrate one-shot path, so the
+    // owner-home token is now exercised via the obsidian-spec reference rather
+    // than the removed tg-post self-delivery line.)
+    expect(out).toContain(`${SYNTHETIC_OWNER_HOME}/docs/reference/tools/obsidian.md`)
     // The clean header block is still present (loadPrompt does not strip it);
     // scan only the body below it.
     const headerEnd = out.indexOf('-->')

@@ -533,6 +533,18 @@ describe('persona prompt ↔ toolset reconciliation (no self-delivery leak)', ()
         expect(body).not.toContain('<THREAD_ID>')
       }
     })
+
+    test(`${kind} persona scopes its tools to the substrate one-shot dispatch`, () => {
+      const md = loadPrompt(file, PERSONA_VARS).toLowerCase()
+      // The persona must declare the one-shot substrate execution context so
+      // its richer-runtime tool sections (/search, GBrain, Agent(...) etc.) are
+      // framed as conditional, not mandated against a toolset that lacks them.
+      expect(md).toContain('substrate one-shot')
+      // It must name the actual tools it is dispatched with.
+      for (const tool of toolNames) {
+        expect(md).toContain(tool)
+      }
+    })
   }
 
   test('sentinel is read-only (no bash); atlas is write-capable (has bash) — the two persona shapes', () => {
