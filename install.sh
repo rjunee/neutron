@@ -91,6 +91,14 @@ BACKUP_REMOTE=${NEUTRON_BACKUP_REMOTE:-}
 # functional first chat when auth is still required.
 CLAUDE_AUTH_PENDING=0
 
+# Set to 1 by apply_auth_gate when CLAUDE_AUTH_PENDING is still 1 after the auth
+# step — the HARD GATE (ISSUES #318). A chat with no Claude substrate credential
+# is unusable, so when auth never completed we MUST NOT install/boot the service,
+# start the server, or open the browser onto a dead chat. The install stops at
+# "one step left" instead. (The app-level chat-surface gate is the defense-in-
+# depth backstop for a box started by other means.)
+APP_GATED_ON_AUTH=0
+
 # Set to 1 ONLY when ensure_claude_auth actually ran the interactive
 # `claude setup-token` path (real tty or the NEUTRON_FORCE_INTERACTIVE_AUTH
 # seam). That path scrolls the `claude` CLI's onboarding noise over our branded
@@ -600,11 +608,48 @@ run_setup_token_capture() {
   _tmp=$(mktemp 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/neutron-claude-token.$$")
   if [ -n "${NEUTRON_CLAUDE_SETUP_CMD:-}" ]; then
     sh -c "$NEUTRON_CLAUDE_SETUP_CMD" 2>&1 | tee "$_tmp" >&2 || true
-  else
+  elif [ -t 0 ]; then
     claude setup-token 2>&1 | tee "$_tmp" >&2 || true
+  else
+    # Behind a pipe (`curl … | sh -s -- --yes`) stdin is the script, not a
+    # keyboard, so the setup-token TUI/OAuth handoff cannot read input. Bind it
+    # to the controlling terminal (/dev/tty) so the AUTH step still runs even on
+    # a non-interactive-stdin install. _terminal_available() guarantees /dev/tty
+    # is usable before we reach this branch.
+    claude setup-token </dev/tty 2>&1 | tee "$_tmp" >&2 || true
   fi
   grep -oE 'sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+' "$_tmp" 2>/dev/null | tail -n1
   rm -f "$_tmp" 2>/dev/null || true
+}
+
+# True when an interactive terminal is reachable for the `claude setup-token`
+# OAuth handoff. stdin-tty is the classic case; but the headline install is
+# `curl … | sh` where stdin is the PIPE, not a tty — yet the user is still at a
+# real terminal reachable via /dev/tty. We probe /dev/tty (openable r+w) so the
+# AUTH step can run even under `--yes`. Test seams: NEUTRON_FORCE_INTERACTIVE_AUTH
+# forces true (capture/persist path is exercised without a real tty);
+# NEUTRON_ASSUME_NO_TTY forces false (the hard-stop gate is exercised
+# deterministically regardless of the test runner's /dev/tty).
+_terminal_available() {
+  [ "${NEUTRON_ASSUME_NO_TTY:-0}" = 1 ] && return 1
+  [ "${NEUTRON_FORCE_INTERACTIVE_AUTH:-0}" = 1 ] && return 0
+  [ -t 0 ] && return 0
+  ( exec 3<>/dev/tty ) 2>/dev/null && return 0
+  return 1
+}
+
+# The HARD AUTH GATE (ISSUES #318). Call right after ensure_claude_auth: when
+# auth never completed (CLAUDE_AUTH_PENDING=1) the box has no working Claude
+# substrate, so a started chat is a dead chat. Flip the gate and force
+# start/open OFF so the rest of the script skips the service install, the
+# background start, and the browser open — the owner is left at a clear
+# "authenticate first" banner instead of an unusable chat window.
+apply_auth_gate() {
+  if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
+    APP_GATED_ON_AUTH=1
+    DO_START=0
+    DO_OPEN=0
+  fi
 }
 
 # Persist a captured subscription token to the checkout .env as
@@ -671,10 +716,12 @@ ensure_claude_auth() {
   fi
 
   # claude present but not authed. setup-token needs a real interactive terminal
-  # to complete the browser OAuth handoff — only run it when stdin is a tty (or
-  # the test seam forces it). --yes alone does NOT trigger it: a piped
-  # `curl | sh -s -- --yes` has no tty and cannot complete the OAuth.
-  if [ -t 0 ] || [ "${NEUTRON_FORCE_INTERACTIVE_AUTH:-0}" = 1 ]; then
+  # to complete the browser OAuth handoff. We run it whenever ANY terminal is
+  # reachable — stdin-tty OR /dev/tty behind a pipe — so even a non-interactive
+  # `curl | sh -s -- --yes` performs the AUTH step (ISSUES #318: the owner's
+  # `--yes` install used to SKIP auth and land in a dead chat). Only a box with
+  # truly no terminal (CI, headless) falls through to the hard-stop below.
+  if _terminal_available; then
     # We are about to let `claude setup-token` take over the terminal. Mark that
     # the interactive path ran so the call site can reclaim the screen + redraw
     # the banner once the CLI's onboarding noise is done.
@@ -696,11 +743,13 @@ ensure_claude_auth() {
     return 0
   fi
 
-  # No TTY (curl | sh, --yes pipe, CI). setup-token CANNOT complete a browser
-  # OAuth here, so we do NOT run it — we print exactly what to run and mark auth
-  # pending so the banner is honest.
+  # Truly no terminal (CI / headless, no stdin tty AND no /dev/tty). setup-token
+  # CANNOT complete a browser OAuth here, so we do NOT run it — we print exactly
+  # what to run and mark auth PENDING. apply_auth_gate then HARD-STOPS the
+  # install before any service/start/open, so the box never lands in a dead chat.
   warn "Claude is not authenticated yet — this is the LAST step before first chat."
-  warn "Run ONE of these, then (re)start Neutron:"
+  warn "No interactive terminal is available, so the install will STOP here (it will"
+  warn "not start an unusable chat). Run ONE of these, then re-run the installer:"
   warn "  claude setup-token                       # subscription OAuth (opens a browser); then add the"
   warn "                                           # printed CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat… line to $_envfile"
   warn "  or set ANTHROPIC_API_KEY=sk-ant-… in $_envfile   # API billing"
@@ -788,10 +837,17 @@ fi
 # auth-state branches (detected / CLI-absent) without a full install.
 if [ "${NEUTRON_INSTALL_PRINT_AUTH:-}" = "1" ]; then
   ensure_claude_auth
+  apply_auth_gate
   # Surface the screen-reclaim flag so the harness can assert it is SET only on
   # the interactive setup-token path and UNSET on the pre-authed / CLI-absent /
   # no-TTY paths (the call-site redraw itself is real-TTY-gated, untestable here).
   printf 'CLAUDE_AUTH_RAN_INTERACTIVE=%s\n' "$CLAUDE_AUTH_RAN_INTERACTIVE"
+  # Surface the auth-gate decision (ISSUES #318) so the harness can assert that a
+  # no-token / no-tty install HARD-STOPS: gated → start/open forced OFF.
+  printf 'CLAUDE_AUTH_PENDING=%s\n' "$CLAUDE_AUTH_PENDING"
+  printf 'APP_GATED_ON_AUTH=%s\n' "$APP_GATED_ON_AUTH"
+  printf 'DO_START=%s\n' "$DO_START"
+  printf 'DO_OPEN=%s\n' "$DO_OPEN"
   exit 0
 fi
 
@@ -924,6 +980,11 @@ ui_phase "4/6" "Claude auth"
 # .env; otherwise it prints exactly what to run and marks auth pending. It never
 # reports auth complete unless a credential is actually present.
 ensure_claude_auth
+# HARD GATE (ISSUES #318): if auth never completed, flip APP_GATED_ON_AUTH and
+# force start/open OFF so the service install, server start, and browser open all
+# skip — the owner gets a clear "authenticate first" banner instead of a dead
+# chat. MUST run before the service/start/open phases below.
+apply_auth_gate
 # If setup-token took over the terminal (interactive path), its onboarding noise
 # scrolled the banner away. In FANCY mode on a real TTY, reclaim the screen and
 # redraw the wordmark so phase 5/6 resumes on the Neutron logo. No-op otherwise.
@@ -942,7 +1003,12 @@ ui_reclaim_after_auth
 # back to a foreground/nohup background start (an honest "running"), never a lie.
 ui_phase "5/6" "Service & autostart"
 SERVICE_INSTALLED=0
-if [ "$DO_SERVICE" = 1 ]; then
+if [ "$APP_GATED_ON_AUTH" = 1 ]; then
+  # Auth gate (ISSUES #318): installing the service would RunAtLoad-start the
+  # server (launchd/systemd), landing the owner in a credential-less dead chat —
+  # the exact thing the gate prevents. Hold off until Claude is authenticated.
+  warn "holding off on the boot service + autostart until Claude is authenticated"
+elif [ "$DO_SERVICE" = 1 ]; then
   if [ -f "$SRC_DIR/neutron-service.sh" ]; then
     spin_start "installing the boot + crash-restart service"
     if [ "$FANCY" = 1 ]; then
@@ -1045,11 +1111,12 @@ if [ "$FANCY" = 1 ]; then
   printf '\n  %s╭─%s %s%s%s %s──────────────────────────────%s\n' \
     "$C_BRAND2" "$C_RESET" "$C_BOLD$_hc" "$_hl" "$C_RESET" "$C_BRAND2$C_DIM" "$C_RESET"
   printf '  %s\n' "$_g"
-  if [ "$DO_START" = 1 ]; then
-    if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
-      printf '  %s  %sRunning%s  %s(chat is LLM-less until you authenticate, below)%s\n' \
-        "$_g" "$C_MUTE" "$C_RESET" "$C_DIM" "$C_RESET"
-    fi
+  if [ "$APP_GATED_ON_AUTH" = 1 ]; then
+    # ISSUES #318: gated on auth — NOT started, NO open URL. The chat would be
+    # unusable without a Claude credential, so we never present one here.
+    printf '  %s  %sStatus%s   %snot started — authenticate Claude first (below)%s\n' \
+      "$_g" "$C_MUTE" "$C_RESET" "$C_WARN" "$C_RESET"
+  elif [ "$DO_START" = 1 ]; then
     printf '  %s  %sOpen%s     %s%s%s\n' "$_g" "$C_MUTE" "$C_RESET" "$C_ACCENT$C_BOLD" "$CHAT_URL" "$C_RESET"
   else
     printf '  %s  %sStart%s    %sneutron start%s   %s(or: cd %s && bun run start)%s\n' \
@@ -1064,15 +1131,22 @@ if [ "$FANCY" = 1 ]; then
   printf '  %s  %sData%s     %s%s%s\n' "$_g" "$C_MUTE" "$C_RESET" "$C_DIM" "$NEUTRON_HOME_RESOLVED" "$C_RESET"
   if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
     printf '  %s\n' "$_g"
-    printf '  %s  %sAuthenticate before first chat, then restart:%s\n' "$_g" "$C_WARN" "$C_RESET"
+    printf '  %s  %sAuthenticate Claude, then start Neutron:%s\n' "$_g" "$C_WARN" "$C_RESET"
     printf '  %s    %sclaude setup-token%s  %s→ add CLAUDE_CODE_OAUTH_TOKEN=… to %s/.env%s\n' \
       "$_g" "$C_ACCENT" "$C_RESET" "$C_DIM" "$SRC_DIR" "$C_RESET"
     printf '  %s    %sor%s set %sANTHROPIC_API_KEY=sk-ant-…%s in %s/.env\n' \
       "$_g" "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$SRC_DIR"
+    printf '  %s    %sthen%s %sneutron start%s   %s→ %s%s\n' \
+      "$_g" "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$C_DIM" "$CHAT_URL" "$C_RESET"
   fi
   printf '  %s\n' "$_g"
-  printf '  %s╰─%s %s▸ Open the URL above to start orchestrating your Claude Code sessions.%s\n\n' \
-    "$C_BRAND2" "$C_RESET" "$C_ACCENT" "$C_RESET"
+  if [ "$APP_GATED_ON_AUTH" = 1 ]; then
+    printf '  %s╰─%s %s▸ Authenticate Claude (above), then start Neutron to open chat.%s\n\n' \
+      "$C_BRAND2" "$C_RESET" "$C_ACCENT" "$C_RESET"
+  else
+    printf '  %s╰─%s %s▸ Open the URL above to start orchestrating your Claude Code sessions.%s\n\n' \
+      "$C_BRAND2" "$C_RESET" "$C_ACCENT" "$C_RESET"
+  fi
 else
   if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
     info "install complete — but Claude auth is STILL REQUIRED before first chat."
@@ -1087,29 +1161,23 @@ else
   fi
   printf '\n'
 
-  # When auth is still pending, restate the exact next action here so the user
-  # does not have to scroll back. Chat boots LLM-less (static onboarding prompts)
-  # until a credential is present.
+  # When auth is still pending the box is GATED (ISSUES #318): we did NOT start
+  # the server or install the service, because a chat with no Claude credential is
+  # unusable. Restate the exact next action so the user does not scroll back.
   if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
-    info "Before chat works, authenticate with EITHER:"
+    info "Neutron is NOT started yet — authenticate Claude first with EITHER:"
     printf '    claude setup-token   # then add the printed CLAUDE_CODE_OAUTH_TOKEN=… to %s/.env\n' "$SRC_DIR"
     printf '    or set ANTHROPIC_API_KEY=sk-ant-… in %s/.env\n' "$SRC_DIR"
-    if [ "$SERVICE_INSTALLED" = 1 ]; then
-      printf '    then: neutron restart\n'
-    fi
+    printf '    then: neutron start   (or: cd %s && bun run start)\n' "$SRC_DIR"
+    printf '    open: %s\n' "$CHAT_URL"
     printf '\n'
-  fi
-
-  if [ "$DO_START" = 1 ]; then
-    if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
-      info "Neutron is running — chat is LLM-less until you authenticate (above)."
-    else
-      info "Neutron is running."
-    fi
+  elif [ "$DO_START" = 1 ]; then
+    info "Neutron is running."
     printf '  Open Neutron:  %s\n' "$CHAT_URL"
+    printf '\n'
   else
     printf '  Start Neutron:  neutron start    (or: cd %s && bun run start)\n' "$SRC_DIR"
     printf '  Then open:      %s\n' "$CHAT_URL"
+    printf '\n'
   fi
-  printf '\n'
 fi

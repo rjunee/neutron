@@ -2,6 +2,85 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Installer must NOT skip Claude auth into a dead chat (ISSUES #318)
+
+Owner hit this on a fresh `curl …/install.sh | sh -s -- --yes`: the
+non-interactive `--yes` install **SKIPPED** the Claude-auth step (printed a
+"Claude not authenticated — run `claude setup-token`" warning) and then
+**PROCEEDED to start the server and open the chat window** — which is unusable
+with no `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`. Owner: *"it shouldnt just
+proceed and open chat window. its unusable without claude."* Two-part fix:
+make Claude auth a **gate, not a warning**.
+
+**Part 1 — installer hard gate (`install.sh`).** Claude auth is now mandatory
+before the app is usable.
+- `_terminal_available()` (new) — true when *any* interactive terminal is
+  reachable: stdin-tty **OR** `/dev/tty` openable behind a pipe. The headline
+  install is `curl … | sh` where stdin is the PIPE, not a keyboard, yet the user
+  is at a real terminal. `ensure_claude_auth` now runs the `claude setup-token`
+  OAuth handoff whenever a terminal is reachable — **even under `--yes`** — by
+  binding setup-token's stdin to `/dev/tty` (`run_setup_token_capture`). So the
+  owner's `--yes` install now actually *runs* auth instead of skipping it.
+- `apply_auth_gate()` (new) — when auth never completed (`CLAUDE_AUTH_PENDING=1`,
+  i.e. truly no terminal / CI / cancelled sign-in), flips `APP_GATED_ON_AUTH=1`
+  and forces `DO_START=0`/`DO_OPEN=0`. The service install, background start, and
+  browser-open phases all skip; the run **hard-stops at a clear "authenticate
+  first" banner** with the `claude setup-token` + `ANTHROPIC_API_KEY`
+  instructions. It never lands in a started-app/open-chat state without a
+  credential. Final banner reworked for the gated state (no more "Running —
+  LLM-less" line; now "not started — authenticate Claude first").
+- Test seams: `NEUTRON_ASSUME_NO_TTY=1` forces the no-terminal branch
+  deterministically (independent of the test runner's `/dev/tty`); the existing
+  `NEUTRON_INSTALL_PRINT_AUTH` seam now also prints
+  `CLAUDE_AUTH_PENDING`/`APP_GATED_ON_AUTH`/`DO_START`/`DO_OPEN`.
+
+**Part 2 — app-level auth gate, defense in depth (`landing/server.ts` +
+`gateway/realmode-composer/build-landing-stack.ts` + `open/composer.ts`).** When
+the Open server boots with no working substrate credential
+(`resolveOpenLlmPool(env) === null`), `GET /chat` now renders a clear
+**"Authenticate Claude to continue"** page (HTTP 503, `no-store`) **instead of**
+the interactive chat shell that silently produces nothing.
+- `LandingServerOptions.chatAuthGate?: { isUnauthenticated: () => boolean }`
+  (new, optional) — evaluated **per request** so a restart-with-token clears the
+  gate without rebuilding the server. `renderChatAuthGateHtml()` is a
+  self-contained, CSP-safe page (one inline `<style>`, NO script, NO external
+  asset) whose copy mirrors the installer's setup-token guidance.
+- Threaded through `BuildLandingStackInput.chatAuthGate` (pass-through) and wired
+  ONLY from the Open composer (`isUnauthenticated: () => resolveOpenLlmPool(env)
+  === null`). **Managed leaves it unset** — its substrate is per-user Max OAuth /
+  BYO key resolved elsewhere — so the gate is inert there and `GET /chat` serves
+  the shell exactly as before. `composer.ts` edits kept minimal (one wired
+  option); the gate logic lives in the render layer.
+
+**Contract change (intentional, per owner).** A no-credential Open box used to
+boot LLM-less and serve a static onboarding walk at `/chat`. The owner deemed
+that "unusable without claude", so the page now gates regardless of session
+(credential-, not session-, scoped). The onboarding *engine* mechanics are
+unaffected (the `/ws/chat` layer still serves the static signup prompt + accepts
+a turn) — the flow works the moment a credential is added. The two headline
+`open-boot-shell` tests that asserted the old "serves chat.html LLM-less"
+behavior were updated to assert the gate (kept LLM-less + fast; no real `claude`
+spawn).
+
+**Tests (real, RED→GREEN):**
+- NEW `tests/integration/install-auth-gate.test.ts` (4) — shells out to the real
+  `install.sh` via the auth seam: `--yes` + no token + no terminal HARD-STOPS
+  (gated, `DO_START=0`/`DO_OPEN=0`, setup-token instructions printed); a present
+  `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` is NOT gated; `--yes` with a
+  reachable terminal RUNS auth, CAPTURES + persists the token to `.env`.
+- NEW `landing/__tests__/chat-auth-gate.test.ts` (5) — `GET /chat` with no
+  credential → 503 gate page (not the shell); credential present / gate unset →
+  200 shell; per-request evaluation clears the gate on a flip; the gate page has
+  no inline script / external asset.
+- UPDATED `open/__tests__/open-boot-shell.test.ts` — the two GET-/chat tests now
+  assert the gate; WS onboarding/resume mechanics retained.
+
+Files: `install.sh`, `landing/server.ts`,
+`gateway/realmode-composer/build-landing-stack.ts`, `open/composer.ts`,
+`tests/integration/install-auth-gate.test.ts`,
+`landing/__tests__/chat-auth-gate.test.ts`,
+`open/__tests__/open-boot-shell.test.ts`.
+
 ## 2026-06-21 — Chat-sync foundation fix-round (Argus REQUEST CHANGES): double-dispatch guard + wiring split
 
 Argus (cross-model with Codex/GPT-5) requested changes on PR #6 with two

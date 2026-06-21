@@ -524,6 +524,13 @@ export function buildOpenGraphComposer(
       platform,
       cookieToUserClaim,
       cronJobs,
+      // ISSUES #318 — app-level Claude-auth gate (defense in depth for the
+      // installer gate). When the box boots with NO substrate credential,
+      // `GET /chat` renders an "Authenticate Claude" page instead of a chat
+      // that silently produces nothing. Evaluated per request (reads live env)
+      // so a restart-with-token clears it. Same credential predicate the
+      // composer's substrate wiring uses (`resolveOpenLlmPool`).
+      chatAuthGate: { isUnauthenticated: () => resolveOpenLlmPool(env) === null },
       ...(phaseSpecResolver !== null ? { phaseSpecResolver } : {}),
       ...(liveAgentTurnFactory !== undefined ? { liveAgentTurnFactory } : {}),
       // ONE warm LLM path (see construction above) — wiring these is the
