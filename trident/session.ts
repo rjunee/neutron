@@ -54,9 +54,12 @@ export interface TridentDispatchInput {
    */
   phase?: TridentPhase
   /**
-   * Fully-rendered SYSTEM prompt — the agent's execution contract, loaded
-   * from `prompts/<kind>.md` via `loadAgentSystemPrompt` (was previously
-   * just the literal kind label).
+   * Fully-rendered SYSTEM prompt. For the build-loop agents this is the
+   * NATIVE bare kind label (`'forge'` / `'argus'`) — their execution
+   * contract rides the `user_message` (rendered from `trident/prompts.ts`),
+   * which is what `parseForgeOutput` / `parseArgusVerdict` depend on. For a
+   * phase-less Atlas / Sentinel dispatch it is the persona loaded from
+   * `prompts/<kind>.md` via `loadAgentSystemPrompt` (see `agent-dispatch.ts`).
    */
   system: string
   /** Fully-rendered user message. */

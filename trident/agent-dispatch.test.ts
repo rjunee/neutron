@@ -1,15 +1,20 @@
 import { describe, expect, test } from 'bun:test'
 import { dispatchAgent } from './agent-dispatch.ts'
-import { AGENT_PROMPT_FALLBACK, DISPATCH_AGENT_KINDS } from './agent-prompts.ts'
+import { AGENT_PROMPT_FALLBACK, PERSONA_AGENT_KINDS } from './agent-prompts.ts'
 import type { TridentDispatch, TridentDispatchInput } from './session.ts'
 
 /**
  * Atlas + Sentinel were not dispatchable before this — the dispatch layer
- * was Forge/Argus-only. These tests pin that all four typed agents can be
+ * was Forge/Argus-only. These tests pin that the two PERSONA agents can be
  * dispatched through the SAME one-turn closure, AND that each agent's
- * on-disk `prompts/<kind>.md` contract reaches the dispatch as its system
- * prompt (the explicit VERIFY: "assert the loaded prompt reached the agent
- * config, not the inline string").
+ * on-disk `prompts/<kind>.md` persona reaches the dispatch as its system
+ * prompt.
+ *
+ * Forge/Argus are deliberately NOT dispatchable through this path — they are
+ * build-loop agents with a native parser-locked contract; `kind` is typed to
+ * `PersonaAgentKind` so `dispatchAgent({ kind: 'forge', … })` is a compile
+ * error. The build-loop's native contract is exercised in
+ * orchestrator-native-prompt.test.ts.
  */
 
 function recordingDispatch(): {
@@ -24,8 +29,8 @@ function recordingDispatch(): {
   return { dispatch, calls }
 }
 
-describe('dispatchAgent — Atlas + Sentinel now dispatchable alongside Forge/Argus', () => {
-  for (const kind of DISPATCH_AGENT_KINDS) {
+describe('dispatchAgent — Atlas + Sentinel persona dispatch', () => {
+  for (const kind of PERSONA_AGENT_KINDS) {
     test(`${kind}: loaded prompts/${kind}.md reaches the dispatch as system`, async () => {
       const { dispatch, calls } = recordingDispatch()
       // Inject a stub loader so the assertion is hermetic — the system
@@ -93,27 +98,11 @@ describe('dispatchAgent — Atlas + Sentinel now dispatchable alongside Forge/Ar
     expect(calls[0]?.system).toBe(AGENT_PROMPT_FALLBACK.atlas)
   })
 
-  test('forge + argus still dispatch (no regression to the existing kinds)', async () => {
-    const { dispatch, calls } = recordingDispatch()
-    const forge = await dispatchAgent(
-      { kind: 'forge', task: 'build', repo_path: '/r', model: 'm', timeout_ms: 1 },
-      { dispatch, prompt_deps: { load_prompt: () => 'FORGE SYS' } },
-    )
-    const argus = await dispatchAgent(
-      { kind: 'argus', task: 'review', repo_path: '/r', model: 'm', timeout_ms: 1 },
-      { dispatch, prompt_deps: { load_prompt: () => 'ARGUS SYS' } },
-    )
-    expect(forge.kind).toBe('forge')
-    expect(argus.kind).toBe('argus')
-    expect(calls[0]?.system).toBe('FORGE SYS')
-    expect(calls[1]?.system).toBe('ARGUS SYS')
-  })
-
   test('uses the supplied trident_run_id for audit, else mints one', async () => {
     const { dispatch, calls } = recordingDispatch()
     await dispatchAgent(
       {
-        kind: 'forge',
+        kind: 'atlas',
         task: 't',
         repo_path: '/r',
         model: 'm',
@@ -123,7 +112,7 @@ describe('dispatchAgent — Atlas + Sentinel now dispatchable alongside Forge/Ar
       { dispatch },
     )
     await dispatchAgent(
-      { kind: 'forge', task: 't', repo_path: '/r', model: 'm', timeout_ms: 1 },
+      { kind: 'atlas', task: 't', repo_path: '/r', model: 'm', timeout_ms: 1 },
       { dispatch, mint_run_id: () => 'minted-xyz' },
     )
     expect(calls[0]?.trident_run_id).toBe('run-abc')

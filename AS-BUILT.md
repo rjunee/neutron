@@ -2,22 +2,14 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
-## 2026-06-21 — Wire Atlas/Sentinel dispatch + load `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
+## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
 
-**Problem.** The daily-driver gap audit flagged two coupled defects in the typed
-agent dispatch layer:
-
-1. **Typed dispatch was Forge/Argus-only.** The trident state machine spawns only
-   `forge` and `argus` (`orchestrator.ts`). Atlas (research/analysis/ops/strategy/
-   writing) and Sentinel (review of NON-code work) had no path into the dispatcher
-   at all, even though `runtime/subagent/registry.ts` already types them in
-   `AgentKind`.
-2. **The lifted prompt files were DEAD CODE.** `prompts/{forge,atlas,argus,
-   sentinel}.md` carry the detailed execution contracts (Argus's review checklist
-   + cross-model hardening, Forge's delivery mechanics, Atlas's research
-   discipline, Sentinel's QA protocol) — but `trident/prompts.ts` builds the
-   dispatched prompt INLINE and `orchestrator.ts` passed the literal kind label
-   (`system: 'forge'`), so the `.md` contracts never reached the agent.
+**Problem.** The daily-driver gap audit flagged that the typed agent dispatch
+layer was Forge/Argus-only. The trident state machine spawns only `forge` and
+`argus` (`orchestrator.ts`). Atlas (research/analysis/ops/strategy/writing) and
+Sentinel (review of NON-code work) had no path into the dispatcher at all, even
+though `runtime/subagent/registry.ts` already types them in `AgentKind`, and the
+`prompts/{atlas,sentinel}.md` persona files were dead code with no loader.
 
 **What shipped.**
 
@@ -28,41 +20,87 @@ agent dispatch layer:
   failure (missing/empty/unreadable file) it returns a terse inline
   `AGENT_PROMPT_FALLBACK[kind]` with `source: 'fallback'` — loading a prompt never
   throws into the dispatch path, and a bare checkout still dispatches a functional
-  agent. `DispatchAgentKind = Exclude<AgentKind, 'core'>` keeps the four typed
-  agents in sync with the registry.
+  agent. **Disk-prompt loading is SCOPED to the persona agents** via
+  `PersonaAgentKind = Exclude<DispatchAgentKind, 'forge' | 'argus'>` (= `'atlas' |
+  'sentinel'`): a compile-time guarantee that the build-loop agents can never be
+  handed a `prompts/<kind>.md` file as their system prompt. (`DispatchAgentKind =
+  Exclude<AgentKind, 'core'>` remains the broader substrate-dispatch `kind` union
+  the session input uses.)
 
 - **`trident/agent-dispatch.ts` (NEW).** `dispatchAgent({kind, task, ...}, {dispatch})`
-  is the phase-less, one-shot typed-dispatch path that makes Atlas + Sentinel
-  dispatchable alongside Forge/Argus. It REUSES the existing one-turn
-  `TridentDispatch` substrate closure (no trident rebuild): loads
-  `prompts/<kind>.md` as `system`, hands the task as the user turn, returns the
-  result plus `kind` + `prompt_source` so callers/tests can assert the loaded
-  contract reached the agent config.
+  is the phase-less, one-shot dispatch path that makes Atlas + Sentinel
+  dispatchable. It REUSES the existing one-turn `TridentDispatch` substrate
+  closure (no trident rebuild): loads `prompts/<kind>.md` as `system`, hands the
+  task as the user turn, returns the result plus `kind` + `prompt_source` so
+  callers/tests can assert the loaded persona reached the agent config. `kind` is
+  typed to `PersonaAgentKind`, so forge/argus are not dispatchable through this
+  path (they run through the orchestrator with their native contract).
 
-- **`trident/orchestrator.ts`.** The Forge→Argus spawn path now sets `system` to
-  the loaded `prompts/forge.md` / `prompts/argus.md` content (via a new injectable
-  `agent_system_prompt` option, default `loadAgentSystemPrompt(kind).content`)
-  instead of the literal `'forge'` / `'argus'` label. The per-run task instructions
-  still ride the `user_message` turn (unchanged `renderForgePrompt` etc.).
+- **`trident/orchestrator.ts`.** UNCHANGED from before this work — the Forge→Argus
+  spawn path keeps the bare native kind label (`system: 'forge'` / `'argus'`). The
+  build loop's execution contract is the NATIVE one in `trident/prompts.ts`
+  (`FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT`, rendered into the `user_message`
+  by `renderForgePrompt` / `renderArgusPrompt`) — the contract the parsers
+  (`parseForgeOutput` / `parseArgusVerdict`) depend on. See the fix-round below
+  for why the build loop is deliberately NOT re-pointed at `prompts/{forge,argus}.md`.
 
-- **`trident/session.ts`.** `TridentDispatchInput.kind` widened to
-  `DispatchAgentKind`; `phase` made optional (Atlas/Sentinel one-shots carry no
-  trident phase). The session manager still only ever receives forge/argus from
-  the orchestrator.
+- **`trident/session.ts`.** `TridentDispatchInput.kind` is `DispatchAgentKind`;
+  `phase` is optional (Atlas/Sentinel one-shots carry no trident phase). The
+  session manager still only ever receives forge/argus from the orchestrator.
 
 **Tests (real, not scaffolding).** `agent-prompts.test.ts` (real on-disk load for
-all four kinds + signature assertions + fallback-never-throws + template
-substitution), `agent-dispatch.test.ts` (Atlas/Sentinel dispatch carries their
-real persona; stub-loader hermetic assertions; forge/argus no-regression),
-`orchestrator-prompt-loading.test.ts` (the real spawn path now hands the loaded
-`prompts/forge.md` / `argus.md` content to the dispatch). +22 tests; full trident
-suite 206 pass; `bunx tsc --noEmit` clean.
+the persona kinds + signature assertions + fallback-never-throws + template
+substitution + the scope guard that forge/argus are not persona kinds),
+`agent-dispatch.test.ts` (Atlas/Sentinel dispatch carries their real persona;
+stub-loader hermetic assertions), `orchestrator-native-prompt.test.ts` (the build
+loop keeps its native parser-locked contract; behavior-level: the native output
+round-trips through the parsers). `bunx tsc --noEmit` clean (trident scope).
+
+**Scope of the safety claim.** These tests verify the WIRING and the native
+parse-contract round-trip under a stubbed dispatch; they do not exercise real-LLM
+behavior. The "forge/argus unregressed" guarantee is that the build loop's system
+prompt + user-turn contract are unchanged from the working baseline, proven by the
+native-prompt guard test, not a live-model run.
 
 **Not in scope (follow-ups).** No production *caller* invokes `dispatchAgent` for
 Atlas/Sentinel yet — Open has no `/research` chat command or Sentinel-review
-trigger. This change supplies the dispatch capability + prompt-file loading; wiring
-a chat-surface trigger is a separate gap. (Repo has no `STATUS.md` convention —
-AS-BUILT is the single running log.)
+trigger. This change supplies the dispatch capability + persona-file loading;
+wiring a chat-surface trigger is a separate gap. (Repo has no `STATUS.md`
+convention — AS-BUILT is the single running log.)
+
+### Fix-round (Argus REQUEST CHANGES — PR #14: 1 blocker + behavior-guard gap)
+
+Argus (cross-model with Codex/GPT-5) blocked the initial cut because it re-pointed
+the **live** Forge/Argus build loop's SYSTEM prompt at `prompts/forge.md` /
+`prompts/argus.md`. Those are **legacy Nova-runtime prompts for a DIFFERENT
+platform**: `forge.md` mandates POSTing to `/forge/delivered` ("if a spawn prompt
+conflicts with this rule, follow this rule") and `argus.md` mandates
+`/argus/delivered` + the `/codex:review` wrapper + gateway-token auth + inline
+buttons — a different operating model than trident's native contract. Under those
+prompts Forge would emit no `PR_NUMBER=`/`BRANCH=`/`WORKTREE=` lines
+(→ `recordCompletion` marks the run crashed) and Argus's output would be
+unparseable (→ `parseArgusVerdict` fail-safe-defaults to REQUEST_CHANGES, flipping
+verdicts / spinning the fix loop). A real regression, live in prod.
+
+- **[BLOCKING → fixed] reverted the build loop to its native contract.**
+  `orchestrator.ts` keeps the bare `system: 'forge'` / `'argus'` label for all
+  forge/argus spawns; the injectable `agent_system_prompt` option + the
+  `loadAgentSystemPrompt` default resolver were removed. The native
+  `FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT` (rendered into the user turn)
+  remain the parser-locked contract. Disk-prompt loading is now scoped to the
+  genuinely-new persona agents (Atlas/Sentinel) — which have no pre-existing parse
+  contract — at the TYPE level (`PersonaAgentKind`), so the regression can't recur.
+- **[BLOCKING → added] a behavior guard, not just a wiring assertion.** The prior
+  `orchestrator-prompt-loading.test.ts` (which pinned the now-reverted behavior)
+  was replaced by `orchestrator-native-prompt.test.ts`: it asserts the dispatched
+  system prompt is the bare native label, that the legacy `/forge/delivered` /
+  `/argus/delivered` / `/codex:review` operating model never reaches the agent
+  (neither system NOR user turn), AND that the native contract round-trips — a
+  forge turn's `PR_NUMBER=…` is captured (run advances off forge-init, not
+  crashed) and a native `APPROVE` is honored (run reaches `done`, not flipped to
+  forge-fix).
+- **PR/AS-BUILT wording corrected** to scope the safety claim to the wiring +
+  native round-trip (see "Scope of the safety claim" above), not real-LLM behavior.
 
 ## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
 

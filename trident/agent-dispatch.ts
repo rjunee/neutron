@@ -1,10 +1,9 @@
 /**
- * @neutronai/trident — typed agent dispatch.
+ * @neutronai/trident — persona agent dispatch (Atlas / Sentinel).
  *
- * Dispatches any of the four typed agents (Forge / Argus / Atlas /
- * Sentinel) through the SAME one-turn `TridentDispatch` substrate closure
- * the Forge→Argus loop uses, with the agent's on-disk `prompts/<kind>.md`
- * execution contract loaded as its SYSTEM prompt.
+ * Dispatches a persona agent (Atlas or Sentinel) through the SAME one-turn
+ * `TridentDispatch` substrate closure the Forge→Argus loop uses, with the
+ * agent's on-disk `prompts/<kind>.md` persona loaded as its SYSTEM prompt.
  *
  * Why this exists: the dispatch layer was Forge/Argus-only. The trident
  * state machine spawns only those two (`orchestrator.ts`), and the lifted
@@ -14,22 +13,28 @@
  * path: a phase-less, one-shot typed dispatch that REUSES the existing
  * `TridentDispatch` machinery rather than rebuilding trident.
  *
- * It deliberately does NOT run inside the Forge→Argus state machine —
- * Atlas and Sentinel are not build-loop phases. A caller (e.g. a future
- * `/research` chat command, or Sentinel review of an Atlas deliverable)
- * invokes this directly with the per-instance substrate dispatch closure.
+ * SCOPE — Atlas/Sentinel only. Forge and Argus are NOT dispatchable here:
+ * they are build-loop agents driven by the orchestrator with their NATIVE
+ * `trident/prompts.ts` contract (the one the `parseForgeOutput` /
+ * `parseArgusVerdict` parsers depend on). Loading the cross-runtime
+ * `prompts/{forge,argus}.md` files as their system prompt is a regression,
+ * so `DispatchAgentInput.kind` is restricted to `PersonaAgentKind` at the
+ * type level. This path deliberately does NOT run inside the Forge→Argus
+ * state machine — a caller (e.g. a future `/research` chat command, or
+ * Sentinel review of an Atlas deliverable) invokes it directly with the
+ * per-instance substrate dispatch closure.
  */
 
 import {
   loadAgentSystemPrompt,
-  type DispatchAgentKind,
   type LoadAgentPromptDeps,
+  type PersonaAgentKind,
 } from './agent-prompts.ts'
 import type { TridentDispatch, TridentDispatchResult } from './session.ts'
 
 export interface DispatchAgentInput {
-  /** Which typed agent to dispatch. */
-  kind: DispatchAgentKind
+  /** Which persona agent to dispatch (Atlas or Sentinel). */
+  kind: PersonaAgentKind
   /** The task / artifact instructions handed to the agent (user turn). */
   task: string
   /** Repo / working dir the agent operates in. */
@@ -52,14 +57,14 @@ export interface DispatchAgentDeps {
 }
 
 export interface DispatchAgentOutcome extends TridentDispatchResult {
-  kind: DispatchAgentKind
+  kind: PersonaAgentKind
   /** Whether the system prompt came from `prompts/<kind>.md` or the
    *  inline fallback (observability — a `'fallback'` flags a missing file). */
   prompt_source: 'file' | 'fallback'
 }
 
 /**
- * Dispatch a typed agent: load `prompts/<kind>.md` as the SYSTEM prompt
+ * Dispatch a persona agent: load `prompts/<kind>.md` as the SYSTEM prompt
  * (falling back to the inline identity if the file is missing), hand the
  * task as the user turn, and run one substrate turn to terminal text.
  *

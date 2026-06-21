@@ -1,30 +1,33 @@
 import { describe, expect, test } from 'bun:test'
 import {
   AGENT_PROMPT_FALLBACK,
-  DISPATCH_AGENT_KINDS,
+  PERSONA_AGENT_KINDS,
   loadAgentSystemPrompt,
-  type DispatchAgentKind,
+  type PersonaAgentKind,
 } from './agent-prompts.ts'
 
 /**
- * The lifted `prompts/<kind>.md` files were dead code before this module —
- * trident built every dispatched prompt inline. These tests pin that the
- * REAL on-disk execution contracts now load and reach the dispatch as the
- * agent's system prompt, and that a missing/broken file degrades to the
- * inline fallback rather than throwing into the dispatch path.
+ * The lifted `prompts/{atlas,sentinel}.md` persona files were dead code
+ * before this module — trident built every dispatched prompt inline. These
+ * tests pin that the REAL on-disk personas now load and reach the dispatch
+ * as the agent's system prompt, and that a missing/broken file degrades to
+ * the inline fallback rather than throwing into the dispatch path.
+ *
+ * Disk loading is scoped to the persona agents (Atlas / Sentinel) ONLY —
+ * Forge/Argus keep their native `trident/prompts.ts` contract and are not a
+ * `PersonaAgentKind`, so `loadAgentSystemPrompt('forge')` is a compile error
+ * (the regression guard lives in the type, see orchestrator-native-prompt.test.ts).
  */
 
-/** A signature line unique to each agent's real `prompts/<kind>.md`. */
-const SIGNATURE: Record<DispatchAgentKind, string> = {
-  forge: 'You are Forge',
-  argus: 'You are Argus',
+/** A signature line unique to each persona's real `prompts/<kind>.md`. */
+const SIGNATURE: Record<PersonaAgentKind, string> = {
   atlas: 'You are Atlas',
   sentinel: 'You are Sentinel',
 }
 
 describe('loadAgentSystemPrompt — real prompts/<kind>.md (the dead-code fix)', () => {
-  for (const kind of DISPATCH_AGENT_KINDS) {
-    test(`${kind}: loads the on-disk contract, not the inline fallback`, () => {
+  for (const kind of PERSONA_AGENT_KINDS) {
+    test(`${kind}: loads the on-disk persona, not the inline fallback`, () => {
       const got = loadAgentSystemPrompt(kind)
       expect(got.kind).toBe(kind)
       expect(got.source).toBe('file')
@@ -36,19 +39,17 @@ describe('loadAgentSystemPrompt — real prompts/<kind>.md (the dead-code fix)',
     })
   }
 
-  test('forge.md is the detailed contract (delivery mechanics), not a stub', () => {
-    const got = loadAgentSystemPrompt('forge')
-    // A load-bearing line from the real forge.md execution contract.
-    expect(got.content.toLowerCase()).toContain('contract')
-  })
-
-  test('argus.md carries the cross-model review contract', () => {
-    const got = loadAgentSystemPrompt('argus')
-    expect(got.content.toLowerCase()).toContain('cross-model')
+  test('persona loading is scoped to atlas/sentinel — forge/argus are not persona kinds', () => {
+    // The only dispatchable disk-prompt kinds are the persona agents. Forge
+    // and Argus deliberately have NO entry here; their contract is native.
+    expect([...PERSONA_AGENT_KINDS].sort()).toEqual(['atlas', 'sentinel'])
+    expect(PERSONA_AGENT_KINDS).not.toContain('forge' as never)
+    expect(PERSONA_AGENT_KINDS).not.toContain('argus' as never)
+    expect(Object.keys(AGENT_PROMPT_FALLBACK).sort()).toEqual(['atlas', 'sentinel'])
   })
 
   test('template tokens are substituted away (no raw {{OWNER_HOME}} ships)', () => {
-    for (const kind of DISPATCH_AGENT_KINDS) {
+    for (const kind of PERSONA_AGENT_KINDS) {
       const got = loadAgentSystemPrompt(kind)
       expect(got.content).not.toContain('{{OWNER_HOME}}')
     }
@@ -75,7 +76,7 @@ describe('loadAgentSystemPrompt — substitution', () => {
 
 describe('loadAgentSystemPrompt — fallback never throws into dispatch', () => {
   test('a thrown read error falls back to the inline identity', () => {
-    for (const kind of DISPATCH_AGENT_KINDS) {
+    for (const kind of PERSONA_AGENT_KINDS) {
       const got = loadAgentSystemPrompt(kind, {
         load_prompt: () => {
           throw new Error('ENOENT: prompts dir missing')
@@ -93,8 +94,8 @@ describe('loadAgentSystemPrompt — fallback never throws into dispatch', () => 
     expect(got.content).toBe(AGENT_PROMPT_FALLBACK.sentinel)
   })
 
-  test('every kind has a non-empty inline fallback', () => {
-    for (const kind of DISPATCH_AGENT_KINDS) {
+  test('every persona kind has a non-empty inline fallback', () => {
+    for (const kind of PERSONA_AGENT_KINDS) {
       expect(AGENT_PROMPT_FALLBACK[kind].trim().length).toBeGreaterThan(0)
     }
   })

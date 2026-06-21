@@ -1,18 +1,28 @@
 /**
- * @neutronai/trident — agent system-prompt loader.
+ * @neutronai/trident — persona-agent system-prompt loader.
  *
- * Bridges the dispatch layer to the lifted `prompts/{forge,atlas,argus,
- * sentinel}.md` execution contracts.
+ * Bridges the dispatch layer to the lifted `prompts/{atlas,sentinel}.md`
+ * persona contracts — and ONLY those two.
  *
- * BEFORE this module those files were DEAD CODE: `trident/prompts.ts`
- * builds the dispatched agent's prompt INLINE, so the detailed contracts
- * in the `.md` files (Argus's review checklist + cross-model hardening,
- * Forge's delivery mechanics, Atlas's research discipline, Sentinel's
- * QA protocol) never reached the agent. `loadAgentSystemPrompt` reads the
- * on-disk file through `@neutronai/prompts` — the canonical, path-traversal
- * -safe reader that substitutes the platform `{{OWNER_HOME}}` /
- * `{{TELEGRAM_CHAT_ID}}` template tokens — and uses it as the dispatched
- * agent's SYSTEM prompt.
+ * SCOPE — atlas/sentinel only, deliberately. Forge and Argus are the
+ * build-loop agents and their execution contract is the NATIVE one in
+ * `trident/prompts.ts` (`FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT`,
+ * rendered into the dispatch's `user_message`). That native contract is
+ * what `parseForgeOutput` / `parseArgusVerdict` depend on: Forge emits
+ * `PR_NUMBER=`/`BRANCH=`/`WORKTREE=`; Argus emits `APPROVE` / `REQUEST
+ * CHANGES`. The on-disk `prompts/{forge,argus}.md` files target a DIFFERENT
+ * runtime (a `/forge/delivered` + `/argus/delivered` + inline-button model)
+ * and would FIGHT that parse contract, so they are never loaded here —
+ * loading them as the build loop's system prompt is a regression (see the
+ * orchestrator: forge/argus keep their bare native label).
+ *
+ * Atlas (research / analysis / ops / strategy / writing) and Sentinel
+ * (review of NON-code work) have NO pre-existing parse contract — they are
+ * the genuinely-new dispatch path, so loading their persona from disk is
+ * safe. `loadAgentSystemPrompt` reads the on-disk file through
+ * `@neutronai/prompts` — the canonical, path-traversal-safe reader that
+ * substitutes the platform `{{OWNER_HOME}}` / `{{TELEGRAM_CHAT_ID}}`
+ * template tokens — and uses it as the dispatched agent's SYSTEM prompt.
  *
  * It NEVER throws into the dispatch path: a missing or empty prompt file
  * (bare checkout, partial deploy) falls back to a minimal inline identity
@@ -23,23 +33,28 @@ import { buildPromptVars, loadPrompt } from '../prompts/index.ts'
 import type { AgentKind } from '../runtime/subagent/registry.ts'
 
 /**
- * The dispatchable typed agents — every `AgentKind` that carries a
- * `prompts/<kind>.md` execution contract. This is `AgentKind` minus the
- * generic `'core'` (which is not a persona-driven agent and ships no
- * prompt file).
+ * Every kind the substrate dispatch closure can serve — `AgentKind` minus
+ * the generic `'core'`. The Forge→Argus state machine spawns `'forge'` /
+ * `'argus'`; the phase-less `dispatchAgent` path serves `'atlas'` /
+ * `'sentinel'`. Used for the `kind` field on a dispatch input.
  */
 export type DispatchAgentKind = Exclude<AgentKind, 'core'>
 
-/** Every dispatchable typed agent, in a stable order (tests iterate it). */
-export const DISPATCH_AGENT_KINDS: readonly DispatchAgentKind[] = [
-  'forge',
-  'argus',
-  'atlas',
-  'sentinel',
-]
+/**
+ * The persona agents whose SYSTEM prompt is loaded from `prompts/<kind>.md`
+ * — `DispatchAgentKind` minus the build-loop agents `'forge'` / `'argus'`,
+ * which keep their NATIVE `trident/prompts.ts` contract (see module docs).
+ * Disk-prompt loading is scoped to exactly these two at the type level so a
+ * build-loop agent can never accidentally be handed a cross-runtime legacy
+ * prompt.
+ */
+export type PersonaAgentKind = Exclude<DispatchAgentKind, 'forge' | 'argus'>
+
+/** Every persona agent, in a stable order (tests iterate it). */
+export const PERSONA_AGENT_KINDS: readonly PersonaAgentKind[] = ['atlas', 'sentinel']
 
 export interface AgentSystemPrompt {
-  kind: DispatchAgentKind
+  kind: PersonaAgentKind
   /** The system-prompt text handed to the dispatched agent. */
   content: string
   /**
@@ -56,11 +71,7 @@ export interface AgentSystemPrompt {
  * `.md` file; this is the degraded-but-functional path so a missing file
  * never dispatches an agent with no role.
  */
-export const AGENT_PROMPT_FALLBACK: Readonly<Record<DispatchAgentKind, string>> = {
-  forge:
-    "You are Forge — Neutron's autonomous build sub-agent. Make the smallest correct change for the task, run the tests until green, commit, push, and open a PR. Never block on human input.",
-  argus:
-    "You are Argus — Neutron's autonomous code-review sub-agent. Review the branch's changes and return an APPROVE or REQUEST CHANGES verdict. Be specific; never exit silently.",
+export const AGENT_PROMPT_FALLBACK: Readonly<Record<PersonaAgentKind, string>> = {
   atlas:
     "You are Atlas — Neutron's research, analysis, ops, strategy, and writing agent (everything that isn't code). Read context first, do the work in this session, write the result, and exit.",
   sentinel:
@@ -91,7 +102,7 @@ export interface LoadAgentPromptDeps {
  * checkout must still dispatch a functional agent.
  */
 export function loadAgentSystemPrompt(
-  kind: DispatchAgentKind,
+  kind: PersonaAgentKind,
   deps: LoadAgentPromptDeps = {},
 ): AgentSystemPrompt {
   const load = deps.load_prompt ?? loadPrompt
