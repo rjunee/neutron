@@ -126,6 +126,76 @@ slots are the genuine manifest declarations)
   `DELETE /api-keys/tavily` mutates the store; unknown label 400; no bearer 401.
 - `app/__tests__/integrations-view.test.ts` — view-model status/labels/counts.
 
+## 2026-06-21 — Per-topic session isolation + per-project persona injection (WAVE 2 Track A, gap-audit P0-4 / §(b) cat 2)
+
+**Problem.** The daily-driver gap audit flagged that Open collapses multi-project
+chat into one shared agent identity: every Telegram/web topic spoke with the
+same instance-wide persona. Two sub-problems, one VERIFIED, one new:
+
+1. **Per-topic session isolation** — already *mostly* wired but never asserted at
+   the key level. `build-live-agent-turn.ts` stamps
+   `spec.metering_context.project_id = scope` (`'general'` or the project id) and
+   `build-llm-call-substrate.ts` folds that into
+   `ClaudeCodeSubstrateOptions.project_id`, which `poolKeyFor()` keys the
+   module-level warm-REPL pool on `(substrate_instance_id, user_id, project_id,
+   credential_identity)`. So distinct topics already resolve to distinct warm CC
+   sessions — but the existing test only asserted `metering_context` was *set*,
+   not that distinct **session keys** result. The audit's "ONE shared substrate"
+   read of composer.ts:207 predates this keying (the `cc-agent-*` live substrate
+   produces a *keyed pool*, not one session).
+
+2. **Per-project persona** — the real gap. `projects.persona` (a free-form label
+   like "Forge — pragmatic build agent", written by the settings drawer +
+   onboarding) was NEVER read into a chat turn. `composeFirstTurnPrompt` only
+   loaded the owner-wide `PersonaPromptLoader` (`<owner_home>/persona/*.md`).
+
+**What shipped.**
+
+- **`open/project-persona-resolver.ts` (NEW).** `buildProjectPersonaResolver(db)`
+  → `(project_id) => string | null`, reading the canonical
+  `projects.persona` column (`WHERE id = ? AND deleted_at IS NULL`). A closure
+  over the live `ProjectDb` (re-run per cold turn, NOT a captured value), so a
+  persona edited mid-session lands on the next cold topic. Best-effort: a
+  transient SQLite error logs + returns null (degrade to owner-wide persona,
+  never hard-fail — mirrors the persona-loader's rule).
+
+- **`build-live-agent-turn.ts`.** New optional `projectPersonaResolver` on
+  `BuildLiveAgentTurnInput`. `composeFirstTurnPrompt` now splices a
+  `<project_persona>` fragment ABOVE the scope fragment for project topics, so
+  the project topic's dedicated warm session adopts ITS persona on top of — not
+  in place of — the owner-wide SOUL/USER `base_persona`. NEVER consulted for
+  General (`turn.project_id === undefined`). A null/empty/throwing resolver
+  degrades silently. First-turn-only (the warm REPL carries it forward); the
+  degraded system-prompt-assembly fallback path also carries the fragment.
+
+- **`open/composer.ts`.** Builds the resolver via `buildProjectPersonaResolver(db)`
+  and threads it into the `liveAgentTurnFactory`. Surgical: one import + one
+  call + one passthrough field. LLM-less boot is unaffected (the factory only
+  exists when `liveAgentSubstrate !== null`).
+
+**Why reuse, not rebuild.** Per the scope guard, the warm-session lifecycle
+(spawn/warm/resume/respawn) and the keyed pool already exist in
+`persistent-repl-substrate.ts`; the metering→`project_id`→`poolKeyFor` fold
+already gives per-topic sessions. This change does NOT touch that machinery — it
+adds the per-project persona seam and PROVES the isolation at the key level.
+
+**Verify (REAL).**
+- `gateway/realmode-composer/__tests__/build-live-agent-turn-session-isolation.test.ts`
+  (NEW) — wires the REAL `buildLlmCallSubstrate` (production seam) under the
+  live-agent runner with a capturing `substrateFactory`, dispatches General +
+  two project topics, and asserts the computed `poolKeyFor` yields THREE
+  DISTINCT keys (not one shared), a STABLE key across turns on the same topic,
+  and that the single-topic path still replies. This is the "assert distinct
+  session keys, not just that a session exists" the spec demands.
+- `build-live-agent-turn.test.ts` (+6 tests) — project topic injects its persona
+  into the first-turn prompt; General never consults the resolver; null/empty →
+  no block; a throwing resolver degrades; two topics each get their OWN persona;
+  persona is a first-turn-only splice.
+- `open/__tests__/project-persona-resolver.test.ts` (NEW) — REAL migrated
+  project.db: trimmed persona for a live project, null for unknown/NULL/empty,
+  soft-deleted ignored, closed-db → null (never throws).
+- `bunx tsc --noEmit` clean. Full `bun test` → 7684 pass / 90 skip / 0 fail.
+
 ## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
 
 Argus round 2 (Codex/GPT-5 cross-model + Claude shell/test cross-check) cleared
@@ -363,6 +433,158 @@ list, now Calendar + Email + Google Workspace).
 **Verify.** `bunx tsc --noEmit` clean. Full `bun test`: 7624 pass / 90 skip /
 0 fail across 722 files — INCLUDING every cores registration test
 (`cores-composition`, `cores-surface`, `cores-oauth-surface`, install-lifecycle).
+
+
+## 2026-06-20 — Mobile chat Phase 2: Telegram-grade RN chat over @neutron/chat-core (WAVE 2 Track B)
+
+Builds on Phase 1 (#6 — server `seq`/resume/multi-device + the `@neutron/chat-core`
+engine). Phase 2 gives the Expo/RN app durable local persistence, offline send,
+gap-free reconnect, instant cold-open, foreground push catch-up, and a Telegram-grade
+FlashList v2 UI — all by REUSING the existing chat-core engine, not re-implementing
+sync. The surface lives under `app/`; the only chat-core change is the additive
+`Store.getByMessageId` point lookup from the fix-round below (it bounds resume
+replay) — sync/ordering/merge stay the engine's. See the "fix-round" subsection
+at the end of this entry for the Argus-driven corrections.
+
+**1. RN local store — op-sqlite behind the chat-core `Store` seam.**
+- `app/lib/chat-core/sqlite-store.ts` — `SqliteChatStore implements Store` (the
+  `@neutron/chat-core` interface). Driver-agnostic: it talks to a minimal async
+  `SqliteExecutor`, not to op-sqlite directly, so the SAME class is verified on a
+  REAL SQLite engine (`bun:sqlite`) in the unit suite and runs on op-sqlite on
+  device. It is the op-sqlite analog of chat-core's OPFS web store.
+- Contract parity can't drift: identity (`messageIdentity`), the optimistic↔echo
+  merge (`mergeMessage`), and display ordering (`compareForDisplay`) are imported
+  from chat-core, not re-derived. SQLite is pure storage; the semantics stay the
+  engine's. Schema: one `chat_messages` table keyed on the message identity, with
+  `(topic_id, seq)`, `(topic_id, client_msg_id)` + `(topic_id, message_id)` indexes
+  (the last one backs `getByMessageId` — the bounded resume-replay lookup).
+- `app/lib/chat-core/op-sqlite-store.ts` — the op-sqlite adapter + `createMobileStore()`
+  factory. op-sqlite is dynamically imported and the factory falls back to chat-core's
+  `InMemoryStore` when the native module is absent (RN-for-Web, Expo Go, the unit
+  suite) — the surface NEVER fails to construct a Store (mirrors `createWebStore`).
+
+**2. MobileChatSession — the RN composition over the chat-core engine.**
+- `app/lib/chat-core/mobile-session.ts` — the RN analog of chat-core's
+  `WebChatSession`: composes `ChatWsClient` + `SendQueue` + `SyncEngine` + `Store`.
+  No sync logic re-implemented. Adds two mobile seams: an `onFrame` raw-frame tap
+  (so the UI can render `agent_message_partial` streaming + typing, which chat-core
+  doesn't persist) and `catchUp()` (foreground push / reconnect → `resume after_seq`).
+  RN-free (no `react-native` import) so the send-queue + resume integration is
+  unit-tested under bun with a fake socket.
+- Local topic = `app:<user_id>` (matches the server's per-user topic; seq is per
+  that topic). Project scoping is a render-time filter on `project_id`.
+
+**3. Telegram-grade FlashList v2 UI.**
+- `app/components/ChatSyncSurface.tsx` — message list on FlashList v2 (Shopify, MIT).
+  v2 deprecated the buggy `inverted` prop (issue #1844); we keep data chronological
+  and pin to the bottom with `maintainVisibleContentPosition.startRenderingFromBottom`,
+  the v2 chat primitive. Optimistic offline-safe send, per-message delivery ladder
+  (🕓 pending → ✓ sent → ✓✓ delivered), a live streaming/typing bubble, and a
+  connection/offline-queue status strip.
+- `app/lib/chat-core/use-mobile-chat.ts` — the React hook: builds the store + session
+  per (user, project), re-reads the transcript on `onChange`, bridges RN `AppState`
+  → `session.setActive` + `catchUp` (the §6 foreground reconnect — fills the gap
+  after any backgrounded period), and bridges a notification that arrives WHILE
+  FOREGROUNDED (`expo-notifications`) → `catchUp` (an immediate resume without
+  waiting for an AppState change). Catch-up is FOREGROUND-ONLY:
+  `addNotificationReceivedListener` runs JS only while foregrounded, so a push
+  that lands in the background is not synced in the background — that gap is
+  filled on the next foreground (see fix-round below).
+- `app/lib/chat-core/chat-render-model.ts` — pure (no-React) render helpers:
+  the streaming-fold state machine, the durable↔streaming merge, the delivery ladder.
+- `app/app/projects/[id]/chat-sync.tsx` — a new route hosting the surface, landed
+  ALONGSIDE the legacy `chat.tsx` tab (not wired into the locked 5-tab bar) so it
+  can be exercised before the cutover. Not a tab swap.
+
+**4. Build plumbing.**
+- `app/metro.config.js` — monorepo Metro config (watch the repo root + resolve from
+  both node_modules) so the app bundles the workspace `@neutron/chat-core` source.
+- `app/package.json` — adds `@neutron/chat-core` (workspace), `@op-engineering/op-sqlite@17.0.0`,
+  `@shopify/flash-list@2.3.2`. `app/tsconfig.json` — `allowImportingTsExtensions`
+  (chat-core is consumed as raw TS with `.ts` import specifiers; noEmit already set).
+- op-sqlite + FlashList v2 both require the New Architecture, already on
+  (`newArchEnabled: true`). EAS / `expo prebuild` (op-sqlite native link) is the
+  operator step, as planned in the research doc.
+
+### Tests (REAL — bun:sqlite + fake socket, no mocked SQL/sync)
+- `app/__tests__/chat-core-sqlite-store.test.ts` (7) — the full `Store` contract on
+  real SQLite: seq ordering, idempotent dedup, optimistic↔echo reconcile, pending-
+  queue isolation, resume cursor, attachment round-trip, cold-open hydration over a
+  reopened DB, topic isolation.
+- `app/__tests__/chat-core-mobile-session.test.ts` (7) — offline optimistic send,
+  flush-on-connect + echo→acked reconcile, gap-free reconnect resuming from the LOCAL
+  seq cursor (+ dedup of a re-delivered seq), cold-open + re-drive of a stranded send
+  across a simulated restart, `catchUp()` gap-fill, `catchUp()` no-op-when-not-open
+  (deferred resume rides next session_ready), and the `onFrame` streaming seam.
+- `app/__tests__/chat-core-render-model.test.ts` (13) — streaming fold state machine,
+  durable↔streaming merge + stable keys, delivery ladder, and the fix-round
+  `frameMatchesProject` filter (own/sibling/untagged streams per view).
+- `app/__tests__/active-tab.test.ts` (5, fix-round) — `activeTabFromSegments` mapping:
+  legal tab leaves, bare-route default, and the chat-sync/notes/cores/backups → null
+  (no Chat-tab shadow/lock) regression.
+- Verify: `bunx tsc --noEmit` clean (app + root gate + chat-core); FULL `bun test`
+  green; `eslint` clean on new files.
+
+### Fix-round (Argus REQUEST CHANGES — PR #11: 1 blocker + 2 important)
+
+Argus (cross-model with Codex/GPT-5) requested changes on three points; all
+resolved here. Core was rated EXCELLENT — these are targeted fixes.
+
+- **[BLOCKING → resolved by honest downgrade] push catch-up is FOREGROUND-only,
+  not background gap-fill.** The hook wired catch-up via
+  `Notifications.addNotificationReceivedListener`, which runs JS only while the
+  app is foregrounded — so a backgrounded data-push never ran `catchUp()`, yet
+  this entry + the PR body claimed "background gap-fill". A real background-wake
+  needs a headless `expo-task-manager` task that reconstructs the session
+  OUTSIDE React (no live `MobileChatSession` exists in a headless context) and
+  depends on native push/background-mode config that cannot be verified in this
+  Expo setup — shipping a no-op background task would itself be a false claim.
+  Decision (the brief's authorized fallback): downgrade the claim to the honest,
+  verified behavior. The foreground listener stays (it gives an immediate resume
+  when a push lands mid-session, where no AppState 'active' transition fires);
+  the post-background gap is filled by the existing AppState→active `catchUp` on
+  next foreground. Comments in `use-mobile-chat.ts` + `mobile-session.ts`, this
+  AS-BUILT, and the PR body are corrected to "foreground catch-up". Test:
+  `catchUp()`-not-open no-op + deferred-resume-on-session_ready
+  (`chat-core-mobile-session.test.ts`).
+- **[IMPORTANT → fixed] chat-sync route shadowed + locked the Chat tab.**
+  `activeTabFromSegments` returned the `'chat'` fallback for the unknown
+  `chat-sync` leaf, so the route highlighted Chat AND — because the tab bar
+  treats `key === activeTab` as a no-op — made tapping Chat dead, stranding the
+  user. The mapping moved to a pure, RN-free `app/lib/active-tab.ts` that returns
+  `null` for the known non-tab sub-routes (`chat-sync`/`notes`/`cores`/`backups`)
+  so no tab is highlighted and every tab tap navigates; only the bare project
+  route defaults to `chat`. `_layout.tsx` consumes it (nullable `activeTab`, with
+  the slot-fade now keyed off the real route leaf and the last-tab write skipped
+  on a null tab); `ProjectTabBar.active` widened to `ProjectTabKey | null`. Test:
+  `app/__tests__/active-tab.test.ts`.
+- **[IMPORTANT → fixed, incl. chat-core root cause] O(N²) resume replay.**
+  `SyncEngine.findExisting` fell back to `store.list(topic_id)` (a full read +
+  sort) for every agent message with no `client_msg_id`, so replaying N messages
+  on resume was O(N²) — a real cliff at thousands. Added an additive
+  `Store.getByMessageId(topic_id, message_id)` point lookup
+  (`chat-core/store.ts` interface + `InMemoryStore`; delegated by `OpfsChatStore`;
+  served from a new `(topic_id, message_id)` SQLite index in `SqliteChatStore`)
+  and pointed `findExisting` at it. Replay is now linear. This is the small, safe
+  chat-core root-cause fix the brief authorized; the engine's sync/ordering/merge
+  semantics are unchanged. Tests: `getByMessageId` in both Store contracts +
+  a `SyncEngine` bounded-replay test asserting the apply path hits the index and
+  never `list()` (`chat-core/__tests__/{store,sync-engine}.test.ts`,
+  `app/__tests__/chat-core-sqlite-store.test.ts`).
+- **[MINOR] redundant empty-string guard** removed from
+  `SqliteChatStore.getByClientMsgId` (the private `rowByClientMsgId` already
+  guards identically).
+- **[Codex P2 — fixed] streaming partials weren't project-filtered.** The app
+  WS topic is per-user, so `agent_message_partial` streams for OTHER projects
+  arrive on the same socket; `useMobileChat`'s `onFrame` folded them
+  unconditionally, so a sibling project's stream could render in the current
+  project's chat until its final message landed and was filtered out. The
+  partial envelope carries an optional `project_id` (P5.2 parity), so a new pure
+  `frameMatchesProject(frame, projectId)` helper in `chat-render-model.ts`
+  applies the SAME filter as the durable `matchesProject` before folding;
+  `onFrame` drops a non-matching frame. (Server-side partials aren't emitted yet
+  — P5.1 ships the client primitive only — so this is forward-correct with zero
+  current-behavior regression.) Tests: 3 in `chat-core-render-model.test.ts`.
 
 ## 2026-06-20 — Proactive messaging: real morning brief + idle-topic nudge sweep (gap-audit P0-5)
 

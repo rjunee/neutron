@@ -150,6 +150,23 @@ export interface BuildLiveAgentTurnInput {
   substrate: Substrate
   /** The shared per-owner `PersonaPromptLoader` instance (gateway boot). */
   personaLoader: { load(): Promise<string> }
+  /**
+   * WAVE 2 Track A — per-project persona injection. For a PROJECT topic, returns
+   * THAT project's free-form persona label (`projects.persona`, e.g. "Forge —
+   * pragmatic build agent") so the project topic's FIRST turn — and therefore
+   * its dedicated warm CC session (each topic keys a distinct warm REPL via
+   * `metering_context.project_id`, see step 3) — carries its own personality
+   * spliced ABOVE the owner-wide SOUL/USER doctrine. Re-evaluated per first
+   * turn so a persona edited mid-session lands on the next cold topic.
+   *
+   * Returns null / empty (or the whole resolver is omitted) → the topic falls
+   * back to the owner-wide persona alone (the pre-WAVE-2 behaviour). NEVER
+   * consulted for the General topic (`turn.project_id === undefined`): General
+   * is the cross-project surface and has no project persona. A resolver that
+   * throws is swallowed (degrade to owner-wide persona) — a pathological
+   * projects-table read must never kill the turn.
+   */
+  projectPersonaResolver?: (project_id: string) => Promise<string | null> | string | null
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -487,6 +504,14 @@ async function composeFirstTurnPrompt(
           'This is a live chat turn: answer the user directly and concisely.',
           '</live_agent_context>',
         ].join('\n')
+  // WAVE 2 Track A — per-project persona. For a project topic, splice THAT
+  // project's persona label (from `projects.persona`) as its OWN fragment so
+  // this topic's dedicated warm session adopts its personality on top of the
+  // owner-wide SOUL/USER doctrine. Never for General; best-effort (a missing
+  // persona or a throwing resolver degrades to the owner-wide persona alone).
+  const projectPersonaFragment = await composeProjectPersonaFragment(input, turn)
+  const instance_fragments =
+    projectPersonaFragment !== null ? [projectPersonaFragment, scopeFragment] : [scopeFragment]
   let system: string
   try {
     system = await assembleSystemPrompt({
@@ -494,19 +519,23 @@ async function composeFirstTurnPrompt(
       agent_kind:
         turn.project_id !== undefined ? `project-agent:${turn.project_id}` : 'general-agent',
       owner_home: input.owner_home,
-      instance_fragments: [scopeFragment],
+      instance_fragments,
       channel: 'web',
       active_skills: [],
     })
   } catch (err) {
     // Assembler reads owner workspace files — a pathological owner_home
-    // must not kill the turn. Degrade to persona + scope fragment.
+    // must not kill the turn. Degrade to persona + (project persona) + scope.
     console.warn(
       `${LOG_TAG} event=system_prompt_assembly_failed project=${turn.project_slug} err=${
         err instanceof Error ? err.message : String(err)
       }`,
     )
-    system = `${persona.trim().length > 0 ? persona : FALLBACK_PERSONA}\n\n${scopeFragment}`
+    system = [
+      persona.trim().length > 0 ? persona : FALLBACK_PERSONA,
+      ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
+      scopeFragment,
+    ].join('\n\n')
   }
   const history = await renderRecentHistoryBlock(input.buttonStore, turn.topic_id, wall_now)
   const parts = [system]
@@ -515,6 +544,52 @@ async function composeFirstTurnPrompt(
     `The user's message follows. Reply to it directly.\n\n${turn.user_text}`,
   )
   return parts.join('\n\n')
+}
+
+/**
+ * WAVE 2 Track A — resolve THIS project topic's persona into a spliceable
+ * `<project_persona>` fragment, or null when there is none to inject.
+ *
+ * Returns null (no fragment) when:
+ *   - this is the General topic (`turn.project_id === undefined`) — General is
+ *     the cross-project surface and carries no project persona;
+ *   - no `projectPersonaResolver` is wired (the LLM-less / pre-WAVE-2 path);
+ *   - the resolver returns null / empty / whitespace for this project;
+ *   - the resolver throws (a pathological projects-table read must degrade to
+ *     the owner-wide persona, never kill the turn).
+ *
+ * The label is wrapped so the model can attribute the instruction to its
+ * project and is told it sits ON TOP of the owner-wide doctrine, not in place
+ * of it (the owner's SOUL/USER is still the base_persona).
+ */
+async function composeProjectPersonaFragment(
+  input: BuildLiveAgentTurnInput,
+  turn: LiveAgentTurnRequest,
+): Promise<string | null> {
+  if (turn.project_id === undefined) return null
+  if (input.projectPersonaResolver === undefined) return null
+  let label: string | null
+  try {
+    label = await input.projectPersonaResolver(turn.project_id)
+  } catch (err) {
+    console.warn(
+      `${LOG_TAG} event=project_persona_resolve_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return null
+  }
+  if (label === null) return null
+  const trimmed = label.trim()
+  if (trimmed.length === 0) return null
+  return [
+    '<project_persona>',
+    `For the "${turn.project_id}" project, embody this persona on top of your`,
+    'owner-wide doctrine (it refines your voice for this project; it does not',
+    'replace who you are):',
+    trimmed,
+    '</project_persona>',
+  ].join('\n')
 }
 
 /**

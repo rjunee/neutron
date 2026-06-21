@@ -80,6 +80,9 @@ function makeRunner(over: {
   substrate: Substrate
   persona?: string | null
   transcriptEntries?: Array<Record<string, unknown>>
+  projectPersonaResolver?: (
+    project_id: string,
+  ) => Promise<string | null> | string | null
 }) {
   const personaLoader = {
     async load(): Promise<string> {
@@ -99,6 +102,9 @@ function makeRunner(over: {
   return buildLiveAgentTurn({
     substrate: over.substrate,
     personaLoader,
+    ...(over.projectPersonaResolver !== undefined
+      ? { projectPersonaResolver: over.projectPersonaResolver }
+      : {}),
     buttonStore: store,
     ...(transcript !== undefined ? { transcript } : {}),
     project_slug: 'alice',
@@ -204,7 +210,126 @@ describe('build-live-agent-turn — reply path', () => {
     await run(makeTurn({ sent }))
     expect(specs[0]!.tools.map((t) => t.name)).toEqual(['Read', 'Glob', 'Grep'])
   })
+})
 
+describe('build-live-agent-turn — per-project persona injection (WAVE 2 Track A)', () => {
+  test("a project topic splices THAT project's persona into the first-turn prompt", async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const seen: string[] = []
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      persona: '<persona_file name="SOUL.md">Owner-wide doctrine.</persona_file>',
+      projectPersonaResolver: (project_id) => {
+        seen.push(project_id)
+        return project_id === 'minas-tirith' ? 'Forge — pragmatic build agent' : null
+      },
+    })
+    await run(
+      makeTurn({ sent, topic_id: 'web:u-1:minas-tirith', project_id: 'minas-tirith' }),
+    )
+    // Resolver consulted with the topic's project id.
+    expect(seen).toEqual(['minas-tirith'])
+    const prompt = specs[0]!.prompt
+    // The project persona lands inside a labelled block...
+    expect(prompt).toContain('<project_persona>')
+    expect(prompt).toContain('Forge — pragmatic build agent')
+    // ...ON TOP OF — not in place of — the owner-wide doctrine.
+    expect(prompt).toContain('Owner-wide doctrine.')
+  })
+
+  test('General topic NEVER consults the project-persona resolver and gets no block', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    let consulted = false
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      projectPersonaResolver: () => {
+        consulted = true
+        return 'should-never-appear'
+      },
+    })
+    // General topic: no project_id.
+    await run(makeTurn({ sent }))
+    expect(consulted).toBe(false)
+    expect(specs[0]!.prompt).not.toContain('<project_persona>')
+    expect(specs[0]!.prompt).not.toContain('should-never-appear')
+  })
+
+  test('a null/empty project persona → no block, turn still replies', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      projectPersonaResolver: () => '   ', // whitespace-only ⇒ treated as absent
+    })
+    const result = await run(
+      makeTurn({ sent, topic_id: 'web:u-1:rivendell', project_id: 'rivendell' }),
+    )
+    expect(result.outcome).toBe('replied')
+    expect(specs[0]!.prompt).not.toContain('<project_persona>')
+  })
+
+  test('a THROWING project-persona resolver degrades gracefully (turn still replies)', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      persona: 'OWNER-DOCTRINE',
+      projectPersonaResolver: () => {
+        throw new Error('projects table read exploded')
+      },
+    })
+    const result = await run(
+      makeTurn({ sent, topic_id: 'web:u-1:gondor', project_id: 'gondor' }),
+    )
+    expect(result.outcome).toBe('replied')
+    // Degrades to owner-wide persona alone — no project block, no hard-fail.
+    expect(specs[0]!.prompt).not.toContain('<project_persona>')
+    expect(specs[0]!.prompt).toContain('OWNER-DOCTRINE')
+  })
+
+  test('two different project topics each inject their OWN persona', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const personas: Record<string, string> = {
+      gondor: 'Aragorn — steward of the white city',
+      rohan: 'Éomer — marshal of the riddermark',
+    }
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      projectPersonaResolver: (project_id) => personas[project_id] ?? null,
+    })
+    await run(makeTurn({ sent, topic_id: 'web:u-1:gondor', project_id: 'gondor' }))
+    await run(makeTurn({ sent, topic_id: 'web:u-1:rohan', project_id: 'rohan' }))
+    expect(specs[0]!.prompt).toContain('Aragorn — steward of the white city')
+    expect(specs[0]!.prompt).not.toContain('Éomer')
+    expect(specs[1]!.prompt).toContain('Éomer — marshal of the riddermark')
+    expect(specs[1]!.prompt).not.toContain('Aragorn')
+  })
+
+  test('project persona is a FIRST-turn-only splice; warm later turns send only user text', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      projectPersonaResolver: () => 'Forge — pragmatic build agent',
+    })
+    await run(makeTurn({ sent, topic_id: 'web:u-1:isengard', project_id: 'isengard' }))
+    await run(
+      makeTurn({
+        sent,
+        topic_id: 'web:u-1:isengard',
+        project_id: 'isengard',
+        user_text: 'follow-up',
+      }),
+    )
+    expect(specs[0]!.prompt).toContain('Forge — pragmatic build agent')
+    expect(specs[1]!.prompt).toBe('follow-up')
+  })
+})
+
+describe('build-live-agent-turn — operator transcript', () => {
   test('appends user + agent turns to the operator transcript', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []

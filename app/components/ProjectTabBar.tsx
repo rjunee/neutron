@@ -41,7 +41,8 @@ export const PROJECT_TABS: readonly ProjectTabSpec[] = [
 ];
 
 export interface ProjectTabBarProps {
-  active: ProjectTabKey;
+  /** The highlighted tab, or `null` on a non-tab sub-route (no tab active). */
+  active: ProjectTabKey | null;
   onSelect: (key: ProjectTabKey) => void;
   tabs?: readonly ProjectTabSpec[];
 }
@@ -62,7 +63,7 @@ function NarrowTabBar({
   onSelect,
 }: {
   tabs: readonly ProjectTabSpec[];
-  active: ProjectTabKey;
+  active: ProjectTabKey | null;
   onSelect: (key: ProjectTabKey) => void;
 }) {
   return (
@@ -105,7 +106,7 @@ function WideTabBar({
   onSelect,
 }: {
   tabs: readonly ProjectTabSpec[];
-  active: ProjectTabKey;
+  active: ProjectTabKey | null;
   onSelect: (key: ProjectTabKey) => void;
 }) {
   return (
