@@ -6,6 +6,8 @@
  *
  * Validation chain (each step throws on violation):
  *
+ *   0. double-spawn guard: if `spawn_key` is set and a LIVE record already
+ *      holds it, coalesce (return the in-flight record) or refuse (throw)
  *   1. spawn_depth ≤ MAX_SPAWN_DEPTH (walk parent ancestry)
  *   2. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT
  *   3. live registry size < MAX_CONCURRENT_SUBAGENTS
@@ -14,6 +16,16 @@
  * Returns the freshly-created `SubagentRecord` (status=`pending`). The caller
  * is responsible for kicking off the actual substrate dispatch and calling
  * `registry.update(run_id, { status: 'running', ... })` once the child is alive.
+ *
+ * The double-spawn guard (step 0) mirrors the Vajra incident class where a
+ * registry-only pid that was never killed let two processes attach to one
+ * logical session. By keying on a caller-supplied logical `spawn_key`
+ * (e.g. `code-gen:<task_id>:forge`), a duplicate in-flight spawn for the same
+ * task coalesces onto the existing run instead of starting a second process.
+ * It pairs with the agent-aware watchdog (`watchdog.ts`): the watchdog reaps a
+ * registry-live-but-process-dead record so a legitimate re-spawn can proceed,
+ * while the guard blocks a concurrent duplicate while the first is genuinely
+ * in flight.
  */
 
 import {
@@ -53,6 +65,21 @@ export interface SpawnInput {
   delegation_token?: string
   parent_session_id?: string
   delivery_target?: { channel: string; binding_id: string }
+  /**
+   * Logical de-dup key for the double-spawn guard. When set, a spawn for a key
+   * already held by a LIVE (`pending`|`running`) record is coalesced/refused
+   * rather than starting a second process for the same task. Callers should
+   * namespace it so distinct logical tasks never collide — e.g.
+   * `${instance_key}:${task_id}:${agent_kind}`. Omit to opt out of the guard.
+   */
+  spawn_key?: string
+  /**
+   * Behaviour when `spawn_key` collides with a live record:
+   *   - `'coalesce'` (default): return the existing in-flight record (no new
+   *     process, no throw) — the safe "don't double-spawn" default.
+   *   - `'refuse'`: throw, so the caller learns a duplicate was attempted.
+   */
+  on_duplicate?: 'coalesce' | 'refuse'
 }
 
 export interface SpawnDeps {
@@ -66,6 +93,24 @@ export async function spawnSubagent(
   input: SpawnInput,
   deps: SpawnDeps,
 ): Promise<SubagentRecord> {
+  // (0) Double-spawn guard. Consulted FIRST so coalescing a duplicate is never
+  // blocked by the concurrency cap (the in-flight twin already counts toward
+  // it) and never mints a wasted run_id.
+  if (input.spawn_key !== undefined) {
+    const inflight = deps.registry.liveByKey(input.spawn_key)
+    if (inflight) {
+      if (input.on_duplicate === 'refuse') {
+        throw new Error(
+          `subagent spawn: duplicate in-flight spawn for key ${JSON.stringify(input.spawn_key)} ` +
+            `(live run_id=${inflight.run_id}, status=${inflight.status}); refusing`,
+        )
+      }
+      // Coalesce: hand back the existing run so the caller awaits the one
+      // genuine process instead of starting a second.
+      return inflight
+    }
+  }
+
   const live = deps.registry.live()
   if (live.length >= MAX_CONCURRENT_SUBAGENTS) {
     throw new Error(
@@ -121,6 +166,7 @@ export async function spawnSubagent(
   if (input.parent_session_id !== undefined) createInput.parent_session_id = input.parent_session_id
   if (input.delivery_target !== undefined) createInput.delivery_target = input.delivery_target
   if (claims !== undefined) createInput.delegation_claims = claims
+  if (input.spawn_key !== undefined) createInput.spawn_key = input.spawn_key
   return deps.registry.create(createInput)
 }
 

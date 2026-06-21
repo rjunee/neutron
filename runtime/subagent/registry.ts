@@ -37,6 +37,20 @@ export interface SubagentRecord {
   last_event_at: number
   /** Signed delegation token claims — see spawn.ts. */
   delegation_claims?: { instance: string; depth: number; scope: string[]; jti: string }
+  /**
+   * Logical de-dup key for the double-spawn guard. Two spawn attempts that
+   * carry the same `spawn_key` describe the SAME logical task (e.g.
+   * `code-gen:<task_id>:forge`); the guard coalesces/refuses the second while
+   * the first is still live. See `spawn.ts` + `registry.liveByKey`.
+   */
+  spawn_key?: string
+  /**
+   * Why a record reached a terminal-failed state. Set by the agent-aware
+   * watchdog (`watchdog.ts`) when it reaps a dead/stuck dispatch:
+   * `'process_dead'` (pid gone before a terminal event) or `'stuck'` (no
+   * progress past the per-kind timeout). Undefined for clean finishes.
+   */
+  failure_reason?: 'process_dead' | 'stuck'
 }
 
 export interface CreateRecordInput {
@@ -48,6 +62,8 @@ export interface CreateRecordInput {
   parent_session_id?: string
   delivery_target?: { channel: string; binding_id: string }
   delegation_claims?: { instance: string; depth: number; scope: string[]; jti: string }
+  /** Logical de-dup key for the double-spawn guard — see SubagentRecord. */
+  spawn_key?: string
 }
 
 /**
@@ -76,6 +92,7 @@ export class SubagentRegistry {
     if (input.parent_session_id !== undefined) rec.parent_session_id = input.parent_session_id
     if (input.delivery_target !== undefined) rec.delivery_target = input.delivery_target
     if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
+    if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
     this.byId.set(input.run_id, rec)
     return rec
   }
@@ -111,6 +128,22 @@ export class SubagentRegistry {
   /** Live records — `pending` or `running`. Used by spawn caps + watchdog. */
   live(): SubagentRecord[] {
     return [...this.byId.values()].filter((r) => r.status === 'pending' || r.status === 'running')
+  }
+
+  /**
+   * The single LIVE (`pending`|`running`) record holding `spawn_key`, if any.
+   * The double-spawn guard (`spawn.ts`) consults this before minting a new
+   * run: a hit means an in-flight dispatch already owns this logical task, so
+   * the second attempt is coalesced/refused. A terminal record (finished /
+   * crashed / cancelled) with the same key does NOT match — once the prior run
+   * is done (or the watchdog has reaped it), a fresh spawn is allowed through.
+   */
+  liveByKey(spawn_key: string): SubagentRecord | undefined {
+    return [...this.byId.values()].find(
+      (r) =>
+        r.spawn_key === spawn_key &&
+        (r.status === 'pending' || r.status === 'running'),
+    )
   }
 
   /** Records eligible for prune. Caller decides whether to actually delete. */

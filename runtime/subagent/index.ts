@@ -22,6 +22,7 @@ export {
   newControlState,
   registerCanceller,
   cancelRun,
+  failRun,
   statusOf,
   waitForCompletion,
 } from './control.ts'
@@ -32,3 +33,13 @@ export type { AnnouncementPayload, FormatAnnouncementInput } from './announce.ts
 
 export { runLifecycleTick, STALE_THRESHOLD_MS } from './lifecycle.ts'
 export type { LifecycleDeps } from './lifecycle.ts'
+
+export { runAgentWatchdog, DEFAULT_STUCK_THRESHOLD_MS } from './watchdog.ts'
+export type {
+  AgentWatchdogDeps,
+  AgentWatchdogEvent,
+  AgentWatchdogNotifier,
+  AgentWatchdogResult,
+  StuckThresholdConfig,
+  WatchdogReason,
+} from './watchdog.ts'

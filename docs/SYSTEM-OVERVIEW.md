@@ -155,6 +155,49 @@ Threading the production gateway credential closure into a live
 `TridentDispatch` so boot drives the loop (and the run-creation call site that
 calls `detectRalphMode`) is PR-5.
 
+## Agent-dispatch reliability — double-spawn guard + agent-aware watchdog (`runtime/subagent/`)
+
+The substrate-agnostic dispatch layer (`runtime/subagent/`) owns the
+`SubagentRegistry` of logical dispatched agents (forge / argus / atlas /
+sentinel / core), `spawnSubagent` (the validated spawn entry point), the
+`control` surface (cancel / wait / status), and the watchdogs. Two reliability
+guards close gap-audit §(b) #8 ("watchdog is generic, not agent-aware"):
+
+- **Double-spawn guard (`spawn.ts`).** Each spawn may carry a logical
+  `spawn_key` (callers namespace it, e.g. `${instance_key}:${task_id}:${kind}`).
+  Step 0 of `spawnSubagent` — before the concurrency/depth checks — consults
+  `registry.liveByKey(spawn_key)`; a LIVE (`pending`|`running`) holder means an
+  in-flight dispatch already owns this task, so the second attempt **coalesces**
+  (returns the existing record — default) or **refuses** (throws), per
+  `on_duplicate`. This mirrors the Vajra incident class where a registry-only
+  pid that was never killed let two processes attach to one session. A TERMINAL
+  record with the same key does not match, so a finished/reaped task can be
+  cleanly re-spawned. Omitting `spawn_key` leaves the guard inert (back-compat).
+
+- **Agent-aware watchdog (`watchdog.ts`).** `runAgentWatchdog` is a periodic
+  liveness pass over LIVE dispatched agents. For each it detects + SURFACES one
+  terminal condition: `process_dead` (a record with a `pid` whose process is
+  gone before completion) or `stuck` (no progress past the per-`AgentKind`
+  inactivity threshold; default 5 min). Surfacing = mark the run failed via the
+  `failRun` control verb (terminal `status='crashed'` + `failure_reason`,
+  distinct from a deliberate `cancelRun`) AND emit an `AgentWatchdogEvent`
+  (`run_id`, `agent_kind`, `instance_key`, `reason`, `delivery_target`,
+  `age_ms`) through an injected `notify` sink — so a crashed/stuck agent is
+  reported instead of leaving its awaiter hung forever. A `stuck` agent's
+  process is killed (via its canceller) before surfacing; a `process_dead` one
+  is already gone. It does not auto-respawn (deferred); the event carries enough
+  context for a caller to retry/notify.
+
+The two are complementary: the watchdog reaps a registry-live-but-process-dead
+record so a legitimate re-spawn proceeds, while the guard blocks a concurrent
+duplicate while the first is genuinely in flight. Both are substrate-agnostic
+and injectable (`now` / `pid_alive` / `notify`); the generic `lifecycle.ts`
+prune/reap pass still runs alongside. They are library surfaces in S3
+(in-process); the gateway wires a periodic tick + the `notify` sink (Telegram /
+the `watchdog/` AlertStore) when the registry moves to SQLite-backed
+persistence in S4. (Distinct from the OS-process-level `watchdog/` module, which
+runs the same liveness idea over `tools/process-registry.ts` for crons/tools.)
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority

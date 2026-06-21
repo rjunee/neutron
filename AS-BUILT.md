@@ -2,6 +2,74 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Agent-aware watchdog + double-spawn guard for the dispatch layer (WAVE 2 P1, gap-audit §(b) #8)
+
+**Problem.** The daily-driver gap audit (§(b) #8) flagged two reliability holes
+in the agent-dispatch layer (`runtime/subagent/`):
+
+1. **Double-spawn.** `spawnSubagent` minted a fresh `run_id` on every call, so
+   two dispatches for the SAME logical task each started their own process —
+   the Vajra incident class (registry-only pid never killed → two processes on
+   one session). Nothing keyed spawns to the task.
+2. **No agent-aware liveness surfacing.** The generic `lifecycle.ts` reaper
+   silently `cancel`s stale `running` records and marks pid-gone ones
+   `crashed`, but it never SURFACES the failure. A crashed/stuck dispatched
+   agent just dropped out of `live()`; a caller awaiting it (`waitForCompletion`)
+   hung forever with no signal, no failure reason, no notification.
+
+**What shipped** (scoped to the dispatch layer — `runtime/subagent/` only):
+
+- **Double-spawn GUARD (`spawn.ts` + `registry.ts`).** `SpawnInput` gains an
+  optional logical `spawn_key` (callers namespace it, e.g.
+  `${instance_key}:${task_id}:${agent_kind}`) and `on_duplicate: 'coalesce' |
+  'refuse'` (default `coalesce`). Step **0** of `spawnSubagent` — run BEFORE the
+  concurrency/depth checks — consults the new `registry.liveByKey(spawn_key)`:
+  if a LIVE (`pending`|`running`) record already holds the key it either returns
+  that in-flight record (coalesce — no second process, no wasted `run_id`, no
+  concurrency slot consumed) or throws (refuse). A TERMINAL record with the same
+  key does NOT match, so once the prior run finishes — or the watchdog reaps it
+  — a fresh spawn is allowed through. `spawn_key` persists on the record. With
+  no `spawn_key` the guard is inert (full back-compat).
+
+- **Agent-aware WATCHDOG (`watchdog.ts`, NEW).** `runAgentWatchdog(deps)` walks
+  the dispatched-agent registry and, for each LIVE record, detects + SURFACES
+  one of two terminal conditions:
+  - **`process_dead`** — the record has a `pid` whose OS process is gone yet it
+    never reached terminal. (Takes precedence over `stuck`.)
+  - **`stuck`** — `last_event_at` is older than the per-agent-kind inactivity
+    threshold (`StuckThresholdConfig`: a flat number or a per-`AgentKind` map;
+    default `DEFAULT_STUCK_THRESHOLD_MS` = 5 min). A wedged process may still be
+    alive, so it is killed via the registered canceller before surfacing.
+  Surfacing = mark the run **failed** (new `failRun` control verb → terminal
+  `status='crashed'` + `failure_reason`, distinct from a deliberate
+  `cancelRun`) **AND** emit a structured `AgentWatchdogEvent` (`run_id`,
+  `agent_kind`, `instance_key`, `reason`, `delivery_target`, `age_ms`, `pid`)
+  through an injected `notify` sink (Telegram / the `watchdog/` AlertStore / a
+  log). It does NOT auto-respawn (out of scope) but the event carries enough
+  context for a caller to retry/notify. Pure + injectable (`now` / `pid_alive` /
+  `notify`); idempotent and safe to run alongside `runLifecycleTick`.
+
+  Guard + watchdog are complementary: the watchdog reaps a registry-live-but-
+  process-dead record so a legitimate re-spawn can proceed, while the guard
+  blocks a concurrent duplicate while the first is genuinely in flight.
+
+**Tests** (real, both surfaces): `runtime/subagent/spawn-guard.test.ts` (7) —
+duplicate coalesced/refused, coalesce holds while running, terminal key
+recycles, distinct keys don't collide, back-compat without a key, coalesce
+bypasses the concurrency cap. `runtime/subagent/watchdog.test.ts` (10) — dead
+detected→crashed+notified, `process_dead` precedence, stuck killed+surfaced,
+healthy-not-surfaced, per-kind + flat thresholds, `delivery_target` rides along,
+throwing notifier doesn't abort the tick, idempotent across ticks. Full suite:
+`bun test runtime/ trident/ cores/free/code-gen/` → 1164 pass / 0 fail; `tsc
+--noEmit` clean.
+
+**Not in scope (follow-ups).** No production *caller* sets `spawn_key` or runs
+`runAgentWatchdog` on a tick yet — the gateway wires the registry's `notify`
+sink + a periodic tick when the dispatch layer leaves S3 (in-process only) for
+S4 (SQLite-backed, restart-surviving). Per-agent retry/auto-respawn (audit #8's
+"scribe auto-respawn") is deliberately deferred. This change supplies the guard
++ surfacing capability; the wiring is a one-liner at the dispatch call site.
+
 ## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
 
 **Problem.** The daily-driver gap audit flagged that the typed agent dispatch
