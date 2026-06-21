@@ -5,21 +5,26 @@
  * This is the neutron analogue of `~/vajra/scripts/task-scanner.py`, but
  * the store (not the markdown) is the source of truth:
  *
- *   1. ROTATE the inbox: atomically `rename` `task-inbox.jsonl` to a
- *      `.processing` sidecar, then read it. A concurrent appender always
- *      writes to the path `task-inbox.jsonl`, so anything it opened before
- *      the rename lands in the rotated file we read; anything after lands
- *      in a freshly-recreated inbox the NEXT scan drains. No append is ever
- *      lost — there is no read-modify-rewrite window (see `rotateInbox`).
- *   2. Parse every rotated line (`parseInbox`).
+ *   1. CLAIM the queue (`claimInbox`): atomically `rename`
+ *      `task-inbox.jsonl` to a `.processing` sidecar and read it. A
+ *      concurrent appender always targets `task-inbox.jsonl`, so anything
+ *      opened after the rename lands in a freshly-recreated inbox the NEXT
+ *      scan drains; anything opened before but written during the apply
+ *      window is recovered by the late-write guard in step 5. If a
+ *      `.processing` sidecar already exists (a crashed prior scan), drain
+ *      THAT first and let the live inbox wait one cycle — at most one
+ *      sidecar exists at a time, so leftover rows are never clobbered.
+ *   2. Parse every claimed line (`parseInbox`).
  *   3. Apply each row to the `TaskStore` (`applyInboxRows`).
  *   4. Archive every processed row + its outcome to
  *      `task-inbox.archive.jsonl` (append-only audit log).
- *   5. Re-render `tasks.md` + `DASHBOARD.md` from the post-mutation
- *      store state (atomic writes), then delete the `.processing` sidecar.
- *      A crash before that delete is recovered on the next scan (the
- *      sidecar is read back in), and reprocessing is safe because `add`
- *      is idempotent on a stable id and edit-ops on missing rows skip.
+ *   5. Re-render `tasks.md` + `DASHBOARD.md` from the post-mutation store
+ *      state (atomic writes), then `finalizeProcessing`: requeue any late
+ *      writes to the rotated inode and delete the sidecar. A crash before
+ *      that delete is recovered on the next scan; reprocessing is safe
+ *      because every `add` row carries a stable id (stamped at append) so
+ *      replay collides on the PK and skips, and edit-ops on missing rows
+ *      skip.
  *
  * Designed to be driven by a cron tick (mirroring the focus-score
  * recompute cron) OR invoked ad-hoc. Path resolution is injected so the
@@ -27,6 +32,7 @@
  * `<NEUTRON_HOME>` project-folder paths.
  */
 
+import { randomUUID } from 'node:crypto'
 import {
   appendFileSync,
   existsSync,
@@ -98,14 +104,25 @@ export interface InboxAppendInput {
 
 /**
  * Append one intent to the inbox queue. Atomic per line via `O_APPEND`
- * (a single `appendFileSync` is one `write(2)`), so concurrent
- * appenders never interleave a partial line. Creates the parent dir on
- * first use.
+ * (a single `appendFileSync` is one `write(2)`), so concurrent appenders
+ * never interleave a partial line. Creates the parent dir on first use.
+ *
+ * An `add` row with no caller-supplied `id` gets a stable UUID stamped
+ * HERE, at append time, so the persisted row carries an id from the
+ * moment it lands on disk. That makes crash recovery idempotent: if a
+ * scan applies the row then dies before clearing the sidecar, replay
+ * collides on the primary key and is skipped instead of creating a
+ * duplicate task (a randomly-id'd `TaskStore.create` would otherwise
+ * double-insert).
  */
 export function appendInboxRow(inboxPath: string, input: InboxAppendInput): void {
   mkdirSync(dirname(inboxPath), { recursive: true })
+  const row: InboxAppendInput =
+    input.action === 'add' && input.id === undefined
+      ? { ...input, id: randomUUID() }
+      : input
   // JSON.stringify drops `undefined` fields; `null` survives (explicit clear).
-  const line = JSON.stringify(input) + '\n'
+  const line = JSON.stringify(row) + '\n'
   appendFileSync(inboxPath, line, { mode: 0o600 })
 }
 
@@ -114,35 +131,69 @@ function processingPathFor(inboxPath: string): string {
   return `${inboxPath}.processing`
 }
 
-/**
- * Atomically claim the queue for processing and return its contents.
- *
- * The rotate (`rename`) is the crux of the concurrent-append guarantee:
- * appenders always target `inboxPath`, so the rename moves a CONSISTENT
- * snapshot out of the way in one atomic step — there is no
- * read-then-rewrite window where a racing append could be clobbered. A
- * leftover `.processing` sidecar from a crashed prior scan is read back
- * FIRST (older rows), then the rename brings the current queue in behind
- * it. Returns the full body to parse + apply.
- */
-function rotateInbox(inboxPath: string): string {
-  const processingPath = processingPathFor(inboxPath)
-  let body = ''
-  // Recover a leftover sidecar from a crashed scan BEFORE the rename
-  // below would clobber it on disk (we've already captured its bytes).
-  if (existsSync(processingPath)) {
-    body += readFileSync(processingPath, 'utf8')
-  }
-  if (existsSync(inboxPath)) {
-    renameSync(inboxPath, processingPath)
-    body += readFileSync(processingPath, 'utf8')
-  }
-  return body
+interface ClaimedInbox {
+  body: string
+  /** Bytes read from the sidecar at claim time (for the late-write guard). */
+  baselineBytes: number
+  /** True when we rotated the live inbox this scan (vs. draining a leftover). */
+  rotated: boolean
 }
 
-/** Remove the in-flight sidecar once the scan has fully committed. */
-function clearProcessing(inboxPath: string): void {
+/**
+ * Claim the queue for processing and return its contents. At most ONE
+ * sidecar exists at a time, which keeps crash recovery simple + lossless:
+ *
+ *   - If a `.processing` sidecar already exists, it's a leftover from a
+ *     crashed scan. Drain THAT first (its rows replay idempotently — see
+ *     `appendInboxRow`); the live inbox waits one cycle. We do NOT rotate
+ *     this scan, so we never clobber un-committed leftover rows.
+ *   - Otherwise atomically `rename` the live inbox to the sidecar. The
+ *     rename claims a consistent snapshot in one step: appenders always
+ *     target `inboxPath`, so anything opened after the rename lands in a
+ *     freshly-recreated inbox the next scan drains. Anything opened
+ *     before the rename but written after our read is caught by the
+ *     late-write guard in `finalizeProcessing`.
+ *
+ * Returns null when there is nothing to do.
+ */
+function claimInbox(inboxPath: string): ClaimedInbox | null {
   const processingPath = processingPathFor(inboxPath)
+  if (existsSync(processingPath)) {
+    const body = readFileSync(processingPath, 'utf8')
+    return { body, baselineBytes: Buffer.byteLength(body, 'utf8'), rotated: false }
+  }
+  if (!existsSync(inboxPath)) return null
+  renameSync(inboxPath, processingPath)
+  const body = readFileSync(processingPath, 'utf8')
+  return { body, baselineBytes: Buffer.byteLength(body, 'utf8'), rotated: true }
+}
+
+/**
+ * Commit the scan: requeue any rows an appender wrote to the rotated
+ * inode AFTER our claim-time read (a pre-rename-opened fd writing during
+ * the multi-step apply window), then delete the sidecar.
+ *
+ * The guard re-reads the sidecar and, if it grew past the claim-time
+ * baseline, copies the new tail back onto the live inbox so the next
+ * scan picks it up — no loss across the entire apply window. A residual
+ * sub-syscall window remains (a write landing strictly between this
+ * re-read and the unlink); for the expected single-scanner,
+ * human/agent-cadence usage that is acceptable, and a crash there simply
+ * defers those rows to the next scan via the leftover-sidecar path.
+ */
+function finalizeProcessing(inboxPath: string, claim: ClaimedInbox): void {
+  const processingPath = processingPathFor(inboxPath)
+  try {
+    if (claim.rotated) {
+      const latest = readFileSync(processingPath)
+      if (latest.length > claim.baselineBytes) {
+        const tail = latest.subarray(claim.baselineBytes).toString('utf8')
+        if (tail.length > 0) appendFileSync(inboxPath, tail, { mode: 0o600 })
+      }
+    }
+  } catch {
+    /* re-read best-effort; fall through to unlink */
+  }
   try {
     if (existsSync(processingPath)) unlinkSync(processingPath)
   } catch {
@@ -190,18 +241,19 @@ function appendArchive(
 
 /**
  * Run one full scan cycle. Idempotent end-to-end: rendering reflects the
- * post-mutation store state, and the inbox is truncated by the exact
- * bytes consumed so a re-run never double-applies an already-drained
- * queue.
+ * post-mutation store state, and the queue is claimed via an atomic
+ * rotate so a re-run never double-applies an already-drained queue.
  */
 export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult> {
-  // 1. Rotate the queue out of the way atomically, then parse it. The
-  // rename claims a consistent snapshot — appends racing the scan land in
-  // a freshly-recreated inbox the next scan drains, never lost.
-  const consumedBody = rotateInbox(deps.paths.inbox)
+  // 1. Claim the queue (atomic rotate, or drain a crashed leftover), then
+  // parse it. A null claim (nothing pending) still re-renders below so a
+  // bare cron tick refreshes the time-sensitive focus ordering.
+  const claim = claimInbox(deps.paths.inbox)
   const now = deps.now?.() ?? new Date()
   const nowIso = now.toISOString()
-  const { rows, errors } = parseInbox(consumedBody)
+  const { rows, errors } = claim === null
+    ? { rows: [], errors: [] }
+    : parseInbox(claim.body)
 
   // 2. Apply every parsed row to the store, in order.
   const outcomes = await applyInboxRows(
@@ -231,9 +283,10 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   await atomicWriteFile(deps.paths.tasks_md, tasksMd, { mode: 0o600 })
   await atomicWriteFile(deps.paths.dashboard, dashboard, { mode: 0o600 })
 
-  // 5. Commit: drop the in-flight sidecar now the store + markdown are
-  // both durable. A crash before here leaves the sidecar for recovery.
-  clearProcessing(deps.paths.inbox)
+  // 5. Commit: requeue any late writes to the rotated inode, then drop
+  // the sidecar now the store + markdown are both durable. A crash before
+  // here leaves the sidecar for the next scan to recover.
+  if (claim !== null) finalizeProcessing(deps.paths.inbox, claim)
 
   const applied = outcomes.filter((o) => o.status === 'applied').length
   const skipped = outcomes.filter((o) => o.status === 'skipped').length

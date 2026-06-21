@@ -123,16 +123,64 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
   })
 
   test('a leftover .processing sidecar from a crashed scan is recovered', async () => {
-    // Simulate a scan that mutated nothing yet crashed after rotate: a
-    // sidecar holds an un-applied row, and the live inbox has a newer one.
+    // Simulate a scan that crashed after rotate: a sidecar holds an
+    // un-applied row, and the live inbox has a newer one. The leftover is
+    // drained FIRST (live inbox waits one cycle); a second scan catches up.
     appendFileSync(`${paths.inbox}.processing`, JSON.stringify({ action: 'add', id: 'crashed', title: 'from crash' }) + '\n')
     appendInboxRow(paths.inbox, { action: 'add', id: 'fresh', title: 'after restart' })
 
-    const result = await scan()
-    expect(result.applied).toBe(2) // both the recovered + the fresh row
+    const first = await scan()
+    expect(first.applied).toBe(1) // the recovered leftover row
     expect(store.get('crashed')?.title).toBe('from crash')
-    expect(store.get('fresh')?.title).toBe('after restart')
     expect(existsSync(`${paths.inbox}.processing`)).toBe(false)
+
+    const second = await scan()
+    expect(second.applied).toBe(1) // the live row, one cycle later
+    expect(store.get('fresh')?.title).toBe('after restart')
+    expect(store.list({ project_slug: 't1', status: 'all' }).length).toBe(2)
+  })
+
+  test('id-less add gets a stable id at append time (replay-safe)', async () => {
+    appendInboxRow(paths.inbox, { action: 'add', title: 'no explicit id' })
+    // The persisted line carries an id even though the caller omitted it.
+    const persisted = readFileSync(`${paths.inbox}`, 'utf8')
+    expect(JSON.parse(persisted.trim()).id).toBeDefined()
+
+    await scan()
+    // Replay the SAME row (simulating crash-before-clear) — must skip, not dup.
+    const replayLine = persisted
+    appendFileSync(paths.inbox, replayLine)
+    const replay = await scan()
+    expect(replay.skipped).toBe(1)
+    expect(replay.outcomes[0]?.reason).toBe('duplicate')
+    expect(store.list({ project_slug: 't1', status: 'all' }).length).toBe(1)
+  })
+
+  test('a write to the rotated inode during apply is requeued, not lost', async () => {
+    appendInboxRow(paths.inbox, { action: 'add', id: 'a', title: 'first row' })
+    // During the apply window, simulate a pre-rename-opened fd writing to
+    // the already-rotated sidecar (the exact race the guard protects).
+    let injected = false
+    const result = await runTaskScan({
+      store,
+      project_slug: 't1',
+      paths,
+      now: () => {
+        if (!injected) {
+          injected = true
+          appendFileSync(
+            `${paths.inbox}.processing`,
+            JSON.stringify({ action: 'add', id: 'b', title: 'racing row' }) + '\n',
+          )
+        }
+        return NOW
+      },
+    })
+    expect(result.applied).toBe(1) // only 'a' was in the claimed snapshot
+    // 'b' was requeued to the live inbox and survives for the next scan.
+    const second = await scan()
+    expect(second.applied).toBe(1)
+    expect(store.get('b')?.title).toBe('racing row')
   })
 
   test('complete via inbox flips the task to Done in tasks.md', async () => {

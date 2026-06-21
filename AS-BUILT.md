@@ -31,19 +31,26 @@ New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
   ≤2d / ≤7d) matching `focus-score.ts` exactly. Ordering **reuses**
   `computeFocusScore` (recomputed against render-time `now`).
 - **`scanner.ts`** — `appendInboxRow` (atomic per-line `O_APPEND`) +
-  `runTaskScan`: **rotate** the queue (atomic `rename` to a `.processing`
+  `runTaskScan`: **claim** the queue (atomic `rename` to a `.processing`
   sidecar) → apply → archive every row+outcome to `task-inbox.archive.jsonl`
   → re-render `tasks.md` + `DASHBOARD.md` (atomic writes via
-  `runtime/atomic-write.ts`) → drop the sidecar. Rotate-then-process (not
-  read-modify-rewrite) is what makes concurrent appends loss-proof: a racing
-  append always targets the live `task-inbox.jsonl`, which the rename has
-  already moved aside, so it survives in a freshly-recreated inbox the next
-  scan drains. A crash mid-scan leaves the sidecar for recovery on the next
-  run; reprocessing is safe (idempotent `add`, skipping edit-ops). A re-scan
-  of a drained queue is a no-op. Path resolution is injected so composition
-  wires the real `<NEUTRON_HOME>` project-folder paths and the scanner stays
-  testable. (Codex cross-model review caught a TOCTOU window in the original
-  byte-prefix truncate; this is the fix.)
+  `runtime/atomic-write.ts`) → requeue any late writes to the rotated inode,
+  then drop the sidecar. Concurrent-append safety: a racing append targets
+  the live `task-inbox.jsonl`, which the rename moved aside, so it survives
+  in a freshly-recreated inbox the next scan drains; a pre-rename-opened fd
+  that writes DURING the apply window is caught by the late-write guard
+  (re-read the sidecar before unlink, copy the new tail back) — leaving only
+  a sub-syscall residual window, acceptable for the single-scanner,
+  human/agent-cadence usage. At most one sidecar exists at a time: a leftover
+  from a crashed scan is drained first and the live inbox waits one cycle, so
+  un-committed rows are never clobbered. Crash recovery is idempotent because
+  `appendInboxRow` stamps a stable UUID on every id-less `add` AT APPEND
+  TIME, so replay collides on the PK and skips instead of double-inserting.
+  A re-scan of a drained queue is a no-op. Path resolution is injected so
+  composition wires the real `<NEUTRON_HOME>` project-folder paths and the
+  scanner stays testable. (Two rounds of Codex cross-model review hardened
+  this drain path: the original byte-prefix truncate had a TOCTOU window, and
+  id-less `add` replay could duplicate — both fixed here.)
 
 Refactor: `tasks/projection/format.ts` now exports `renderTaskLine` /
 `renderDoneLine` (was a private `renderActiveLine`) so the STATUS.md
