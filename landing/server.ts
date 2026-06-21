@@ -797,6 +797,23 @@ export interface LandingServerOptions {
     user_id: string
     set_cookie?: string
   } | null>
+  /**
+   * ISSUES #318 (2026-06-21) — Open self-host Claude-auth gate (defense in
+   * depth for the installer gate). When provided AND `isUnauthenticated()`
+   * returns true, a `GET /chat` serves the "Authenticate Claude to continue"
+   * page instead of the chat shell — so a box booted with NO Claude substrate
+   * credential (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` both unset)
+   * never presents an interactive-looking chat that silently produces nothing.
+   *
+   * `isUnauthenticated` is evaluated per request (a closure over the live
+   * environment) so a restart that finally has the token clears the gate
+   * without rebuilding the server. Managed leaves this UNSET — its substrate is
+   * per-user Max OAuth / BYO key resolved elsewhere, not from this process's
+   * env — so the gate is inert there and `GET /chat` serves the shell as before.
+   */
+  chatAuthGate?: {
+    isUnauthenticated: () => boolean
+  }
 }
 
 interface SocketState {
@@ -891,6 +908,75 @@ interface SocketState {
 export interface LandingServer {
   fetch: (req: Request, server: import('bun').Server<SocketState>) => Response | Promise<Response>
   websocket: import('bun').WebSocketHandler<SocketState>
+}
+
+/**
+ * ISSUES #318 — the Open Claude-auth gate page served at `GET /chat` when the
+ * box has no working Claude substrate credential. Self-contained: a single
+ * inline `<style>`, NO inline script and NO external assets, so it renders
+ * under any CSP and never itself depends on the unauthenticated substrate. The
+ * copy mirrors the installer's `claude setup-token` guidance so the web surface
+ * and the CLI agree on the one step left.
+ */
+export function renderChatAuthGateHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Authenticate Claude — Neutron</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 24px;
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #e6e6f0; background: #0e0e16;
+  }
+  .card {
+    max-width: 560px; width: 100%; background: #16161f;
+    border: 1px solid #2a2a3a; border-radius: 14px; padding: 32px;
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; color: #fff; }
+  p.lead { margin: 0 0 20px; color: #a6a6c0; }
+  ol { margin: 0 0 12px; padding-left: 20px; }
+  li { margin: 0 0 14px; }
+  code {
+    display: block; margin-top: 6px; padding: 10px 12px; border-radius: 8px;
+    background: #0a0a12; border: 1px solid #2a2a3a; color: #7cf;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    word-break: break-all; white-space: pre-wrap;
+  }
+  .alt { color: #a6a6c0; font-size: 13px; margin: 0 0 18px; }
+  .foot { color: #6f6f88; font-size: 13px; border-top: 1px solid #2a2a3a; padding-top: 16px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         background: #f0a020; margin-right: 8px; vertical-align: middle; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1><span class="dot"></span>Authenticate Claude to continue</h1>
+    <p class="lead">This Neutron box has no Claude credential yet, so chat can't run.
+       Connect Claude, then restart Neutron.</p>
+    <ol>
+      <li>Run this where Neutron is installed — it opens a browser and prints a token:
+        <code>claude setup-token</code>
+      </li>
+      <li>Add the printed token to your <code>.env</code>:
+        <code>CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat…</code>
+      </li>
+      <li>Restart Neutron, then reload this page.</li>
+    </ol>
+    <p class="alt">Prefer API billing? Set <code>ANTHROPIC_API_KEY=sk-ant-…</code> in
+       <code>.env</code> instead, then restart.</p>
+    <p class="foot">Neutron spawns the <code>claude</code> CLI as its LLM substrate —
+       it never calls api.anthropic.com directly. One of the two credentials above
+       is required before the first chat.</p>
+  </main>
+</body>
+</html>`
 }
 
 /**
@@ -1074,6 +1160,22 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         })
       }
       if (url.pathname === '/chat' && req.method === 'GET') {
+        // ISSUES #318 — app-level Claude-auth gate. A box with no working
+        // substrate credential would render an interactive-looking chat that
+        // silently produces nothing; show a clear "authenticate Claude" page
+        // instead. Evaluated per request so a restart-with-token clears it.
+        if (options.chatAuthGate?.isUnauthenticated() === true) {
+          return new Response(renderChatAuthGateHtml(), {
+            // 503: the chat surface is intentionally unavailable until a
+            // credential is present (not a 200 "here's your chat" lie, not a
+            // 404 "no such page"). Browsers render the HTML body regardless.
+            status: 503,
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+              'cache-control': 'no-store',
+            },
+          })
+        }
         return new Response(chat_html, {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })

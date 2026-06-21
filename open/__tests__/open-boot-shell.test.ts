@@ -10,17 +10,23 @@
  *   1. /healthz answers (liveness preserved).
  *   2. A fresh GET /chat (no session) mints the owner cookie + a local
  *      start-token and bounces to /chat?start=<token>.
- *   3. GET /chat?start=<token> serves the chat UI shell (chat.html).
+ *   3. ISSUES #318 — with NO Claude substrate credential, GET /chat renders the
+ *      "Authenticate Claude to continue" gate (503) INSTEAD of the chat shell,
+ *      so a fresh box never presents an interactive-looking chat that can't run.
  *   4. Opening /ws/chat?start=<token> serves the FIRST onboarding interview
- *      prompt on connect (engine.start → static signup spec, no LLM creds).
+ *      prompt on connect (engine.start → static signup spec, no LLM creds): the
+ *      onboarding engine mechanics stay intact under the page gate, so the flow
+ *      works the moment a credential is added.
  *   5. The chat WS ACCEPTS A TURN — a user_message advances the engine and a
  *      follow-up agent envelope arrives.
  *   6. The cookie-only resume path works — a returning visit with the owner
  *      session cookie upgrades /ws/chat WITHOUT a token and the session goes
  *      live (session_ready).
  *
- * No ANTHROPIC_API_KEY is set, so the engine walks its static phase prompts
- * (the documented LLM-less fallback) — the first prompt is deterministic.
+ * No ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN is set, so (a) the chat PAGE is
+ * gated on auth per ISSUES #318, and (b) the engine walks its static phase
+ * prompts (the documented LLM-less fallback) at the WS layer — the first prompt
+ * is deterministic.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -48,6 +54,12 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_LANDING_STATIC_DIR',
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
+  // ISSUES #318 — the auth gate is keyed on `resolveOpenLlmPool(env) === null`,
+  // which is null only when BOTH substrate credentials are absent. A dev/CI box
+  // with an ambient `CLAUDE_CODE_OAUTH_TOKEN` would otherwise disable the gate
+  // and make the no-credential 503 assertions return the 200 shell. Save +
+  // clear it alongside ANTHROPIC_API_KEY so these tests are env-independent.
+  'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
   'NEUTRON_GRAPH_COMPOSER_MODULE',
 ] as const
@@ -67,6 +79,7 @@ beforeEach(() => {
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   delete process.env['ANTHROPIC_API_KEY'] // LLM-less → static onboarding prompts
+  delete process.env['CLAUDE_CODE_OAUTH_TOKEN'] // ISSUES #318 — keep the auth gate ACTIVE
   delete process.env['NOTIFY_SOCKET']
   delete process.env['NEUTRON_GRAPH_COMPOSER_MODULE']
 })
@@ -186,7 +199,7 @@ describe('Sprint D — Open single-owner boot shell', () => {
     expect(setCookie!).toContain('__neutron_chat_session=')
   }, 30_000)
 
-  test('serves the FIRST onboarding prompt on /ws/chat connect AND accepts a turn', async () => {
+  test('no-credential GET /chat gates on auth; the onboarding WS still serves the first prompt AND accepts a turn', async () => {
     const h = await bootOpen()
     const base = `http://127.0.0.1:${h.server.port}`
 
@@ -196,13 +209,18 @@ describe('Sprint D — Open single-owner boot shell', () => {
     const token = new URL(gate.headers.get('location')!, base).searchParams.get('start')
     expect(token).not.toBeNull()
 
-    // 2. /chat?start serves the chat UI shell.
+    // 2. ISSUES #318 — with NO Claude credential, /chat?start renders the auth
+    //    gate (503), NOT the chat shell. The box must never present an
+    //    interactive-looking chat it can't actually run.
     const chatRes = await fetch(`${base}/chat?start=${encodeURIComponent(token!)}`)
-    expect(chatRes.status).toBe(200)
+    expect(chatRes.status).toBe(503)
     const html = await chatRes.text()
-    expect(html).toContain('id="log"')
+    expect(html).toContain('Authenticate Claude to continue')
+    expect(html).toContain('claude setup-token')
+    expect(html).not.toContain('id="log"')
 
-    // 3. Open the chat WS with the start-token → engine.start fires the first
+    // 3. The onboarding engine itself is intact under the page gate — open the
+    //    chat WS with the start-token → engine.start fires the first
     //    onboarding prompt on connect.
     const ws = new WebSocket(
       `ws://127.0.0.1:${h.server.port}/ws/chat?start=${encodeURIComponent(token!)}`,
@@ -227,7 +245,7 @@ describe('Sprint D — Open single-owner boot shell', () => {
     await sleep(50)
   }, 30_000)
 
-  test('returning visit WITH a real resumable session serves chat.html (no regression)', async () => {
+  test('returning visit WITH a real resumable session still gates the page on auth; resume WS mechanics intact (ISSUES #318)', async () => {
     const h = await bootOpen()
     const base = `http://127.0.0.1:${h.server.port}`
 
@@ -238,20 +256,25 @@ describe('Sprint D — Open single-owner boot shell', () => {
 
     // Establish REAL resumable state — persist an `onboarding_state` row for
     // the owner (same effect `engine.start` has, but deterministic without the
-    // LLM). With state present, the stale-cookie fallback must NOT fire.
+    // LLM). With state present, the stale-cookie fallback must NOT fire — the
+    // request reaches the chat handler (no 302 bounce).
     await seedOnboardingState()
 
-    // A returning visit WITH the cookie now serves chat.html directly (no
-    // bounce) because there IS resumable state — the happy resume path.
+    // ISSUES #318 — a returning visit with a resumable session reaches the chat
+    // handler (no bounce), but with NO Claude credential the page renders the
+    // auth gate (503), not the chat shell. The gate is credential-, not
+    // session-, scoped: nobody gets a working chat until the box is authed.
     const chatRes = await fetch(`${base}/chat`, {
       headers: { cookie },
       redirect: 'manual',
     })
-    expect(chatRes.status).toBe(200)
+    expect(chatRes.status).toBe(503)
     const html = await chatRes.text()
-    expect(html).toContain('id="log"')
+    expect(html).toContain('Authenticate Claude to continue')
+    expect(html).not.toContain('id="log"')
 
-    // Cookie-only WS upgrade (no ?start) → session goes live (resume path).
+    // The resume MECHANICS are unaffected by the page gate: a cookie-only WS
+    // upgrade (no ?start) still goes live (session_ready).
     const ws = new WebSocket(`ws://127.0.0.1:${h.server.port}/ws/chat`, {
       headers: { cookie },
     } as unknown as string)

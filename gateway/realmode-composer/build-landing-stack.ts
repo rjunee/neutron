@@ -607,6 +607,16 @@ export interface BuildLandingStackInput {
     set_cookie?: string
   } | null>
   /**
+   * ISSUES #318 (2026-06-21) — Open Claude-auth gate, threaded straight
+   * through to `createLandingServer({chatAuthGate: …})`. When supplied and
+   * `isUnauthenticated()` returns true, `GET /chat` renders the
+   * "Authenticate Claude" page instead of the chat shell. The Open composer
+   * wires it to `resolveOpenLlmPool(env) === null`; Managed leaves it unset.
+   */
+  chatAuthGate?: {
+    isUnauthenticated: () => boolean
+  }
+  /**
    * Sprint B (2026-05-17) — PlatformAdapter seam. When supplied, the
    * landing stack threads `platform.slugAvailability` into the
    * InterviewEngine so `computeSlugSuggestionsForPhase` runs through
@@ -1407,6 +1417,9 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
   }
   if (input.cookieToUserClaim !== undefined) {
     landingOpts.cookieToUserClaim = input.cookieToUserClaim
+  }
+  if (input.chatAuthGate !== undefined) {
+    landingOpts.chatAuthGate = input.chatAuthGate
   }
   const landing = createLandingServer(landingOpts)
   // Trident 6 (2026-05-13) — expose the engine instance so the boot

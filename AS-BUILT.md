@@ -2,6 +2,154 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
+
+Argus round 2 (Codex/GPT-5 cross-model + Claude shell/test cross-check) cleared
+the feature and CI-fix as GOOD but found **1 blocker + 2 minor**. All addressed.
+
+**[BLOCKING] Gated-banner recovery command died (`install.sh`).** The gate
+intentionally SKIPS installing the launchd/systemd unit, yet the no-token banner
+told the user to run `neutron start` → `neutron-service.sh do_start` →
+`launchctl kickstart/bootstrap $PLIST_PATH` (a unit never written) →
+`die "could not start — is it installed?"`. So the primary recovery command
+died on the exact no-token path this PR fixes; the FANCY banner offered no
+fallback at all. Fix: both the FANCY (≈1139) and plain (≈1171) pending banners
+now lead with **`neutron install`** — which writes the unit AND starts the
+server (passing the app gate with the freshly-added token) — and explicitly
+offer the foreground `cd <src> && bun run start` fallback if launchd is unhappy.
+
+**[MINOR] False-negative gate messaging + ANSI-robust capture (`install.sh`).**
+A `claude setup-token` run that authenticates claude to its *own* store but
+prints no `sk-ant-oat…` token used to hard-stop with a "cancelled sign-in?"
+message — implying the user failed to auth. Neutron reads the credential from
+`.env` (`open/composer.ts resolveOpenLlmPool` keys on `CLAUDE_CODE_OAUTH_TOKEN`
+/ `ANTHROPIC_API_KEY`, *not* claude's ambient store), so the gate is the right
+call either way — but the message was wrong. The empty-capture branch now stays
+gated and explains honestly: *no token was captured for Neutron to store; even
+if claude is signed in, Neutron reads the token from `.env` — so add one of …*.
+Separately, `run_setup_token_capture` now strips ANSI escape codes before the
+token grep, so a token printed with color/formatting is still captured (a real
+source of false-negatives).
+
+**[MINOR] Real `claude setup-token <tty` binding now has coverage.** Every prior
+test routed through the `NEUTRON_CLAUDE_SETUP_CMD` stub, never exercising the
+production `</dev/tty` redirect the headline `curl | sh` flow depends on. Added a
+`NEUTRON_CLAUDE_SETUP_TTY` seam that overrides only the device path (default
+`/dev/tty`), plus a test that drives the *real* `claude setup-token <device`
+branch with a fake `claude` echoing its bound stdin — proving the `<` binding
+actually fed the device (a broken redirect would capture nothing).
+
+Tests (`tests/integration/install-auth-gate.test.ts`, +4): a stateful fake
+`launchctl` proves bare `neutron start` DIES pre-install while `neutron install`
+writes the unit and leaves Neutron startable; the false-negative message is
+honest yet still gated; the tty-binding captures the bound token; a banner-string
+guard locks `neutron install` (no regression to bare `neutron start`).
+Verification: `bunx tsc --noEmit` clean; full `bun test` suite GREEN
+(7620 pass / 0 fail / 90 pre-existing skips, 724 files).
+
+## 2026-06-21 — PR #9 CI fix-round: merge `origin/main` to clear flaky-segfault chunk crash (ISSUES #318)
+
+PR #9 (the auth-gate change below) reported a RED `test` check while `main` was
+green. Root cause was NOT the auth-gate logic: CI's bounded-memory partitioned
+runner crashed **chunk#2** with a Bun 1.3.9 `panic(main thread): Segmentation
+fault` during file *load* (on `connect/__tests__/*`, 0 tests run, a 100-file
+coverage hole) — the known flaky #79. The dispatcher mis-read the log: every
+"1 fail"/"2 fail" and the "FATAL, NOT a cooldown: no reportFailure" string it
+grepped are **passing** test *names*, not failures.
+
+Why it surfaced on #9 and not `main`: the branch was 2 commits behind
+`origin/main`, which had concurrently advanced `gateway/realmode-composer/
+build-landing-stack.ts` and `open/composer.ts` — the *same* files this PR
+touches — and this PR's 2 new test files shifted the runner's chunk
+composition, tripping the latent Bun segfault. Fix: merge `origin/main` into the
+branch so the working tree matches CI's tested merge commit. Code auto-merged
+cleanly (the auth-gate `chatAuthGate` wiring and main's proactive/reminders
+additions are orthogonal); only this `AS-BUILT.md` conflicted (two newest-first
+entries) and was resolved keeping both.
+
+Verification: `bunx tsc --noEmit` clean; the FULL partitioned suite
+(`scripts/run-tests.sh`, 724 files / 8 chunks) ran GREEN **twice** with full
+coverage and no segfault; the re-triggered GitHub `test` check is now PASS.
+
+
+
+Owner hit this on a fresh `curl …/install.sh | sh -s -- --yes`: the
+non-interactive `--yes` install **SKIPPED** the Claude-auth step (printed a
+"Claude not authenticated — run `claude setup-token`" warning) and then
+**PROCEEDED to start the server and open the chat window** — which is unusable
+with no `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`. Owner: *"it shouldnt just
+proceed and open chat window. its unusable without claude."* Two-part fix:
+make Claude auth a **gate, not a warning**.
+
+**Part 1 — installer hard gate (`install.sh`).** Claude auth is now mandatory
+before the app is usable.
+- `_terminal_available()` (new) — true when *any* interactive terminal is
+  reachable: stdin-tty **OR** `/dev/tty` openable behind a pipe. The headline
+  install is `curl … | sh` where stdin is the PIPE, not a keyboard, yet the user
+  is at a real terminal. `ensure_claude_auth` now runs the `claude setup-token`
+  OAuth handoff whenever a terminal is reachable — **even under `--yes`** — by
+  binding setup-token's stdin to `/dev/tty` (`run_setup_token_capture`). So the
+  owner's `--yes` install now actually *runs* auth instead of skipping it.
+- `apply_auth_gate()` (new) — when auth never completed (`CLAUDE_AUTH_PENDING=1`,
+  i.e. truly no terminal / CI / cancelled sign-in), flips `APP_GATED_ON_AUTH=1`
+  and forces `DO_START=0`/`DO_OPEN=0`. The service install, background start, and
+  browser-open phases all skip; the run **hard-stops at a clear "authenticate
+  first" banner** with the `claude setup-token` + `ANTHROPIC_API_KEY`
+  instructions. It never lands in a started-app/open-chat state without a
+  credential. Final banner reworked for the gated state (no more "Running —
+  LLM-less" line; now "not started — authenticate Claude first").
+- Test seams: `NEUTRON_ASSUME_NO_TTY=1` forces the no-terminal branch
+  deterministically (independent of the test runner's `/dev/tty`); the existing
+  `NEUTRON_INSTALL_PRINT_AUTH` seam now also prints
+  `CLAUDE_AUTH_PENDING`/`APP_GATED_ON_AUTH`/`DO_START`/`DO_OPEN`.
+
+**Part 2 — app-level auth gate, defense in depth (`landing/server.ts` +
+`gateway/realmode-composer/build-landing-stack.ts` + `open/composer.ts`).** When
+the Open server boots with no working substrate credential
+(`resolveOpenLlmPool(env) === null`), `GET /chat` now renders a clear
+**"Authenticate Claude to continue"** page (HTTP 503, `no-store`) **instead of**
+the interactive chat shell that silently produces nothing.
+- `LandingServerOptions.chatAuthGate?: { isUnauthenticated: () => boolean }`
+  (new, optional) — evaluated **per request** so a restart-with-token clears the
+  gate without rebuilding the server. `renderChatAuthGateHtml()` is a
+  self-contained, CSP-safe page (one inline `<style>`, NO script, NO external
+  asset) whose copy mirrors the installer's setup-token guidance.
+- Threaded through `BuildLandingStackInput.chatAuthGate` (pass-through) and wired
+  ONLY from the Open composer (`isUnauthenticated: () => resolveOpenLlmPool(env)
+  === null`). **Managed leaves it unset** — its substrate is per-user Max OAuth /
+  BYO key resolved elsewhere — so the gate is inert there and `GET /chat` serves
+  the shell exactly as before. `composer.ts` edits kept minimal (one wired
+  option); the gate logic lives in the render layer.
+
+**Contract change (intentional, per owner).** A no-credential Open box used to
+boot LLM-less and serve a static onboarding walk at `/chat`. The owner deemed
+that "unusable without claude", so the page now gates regardless of session
+(credential-, not session-, scoped). The onboarding *engine* mechanics are
+unaffected (the `/ws/chat` layer still serves the static signup prompt + accepts
+a turn) — the flow works the moment a credential is added. The two headline
+`open-boot-shell` tests that asserted the old "serves chat.html LLM-less"
+behavior were updated to assert the gate (kept LLM-less + fast; no real `claude`
+spawn).
+
+**Tests (real, RED→GREEN):**
+- NEW `tests/integration/install-auth-gate.test.ts` (4) — shells out to the real
+  `install.sh` via the auth seam: `--yes` + no token + no terminal HARD-STOPS
+  (gated, `DO_START=0`/`DO_OPEN=0`, setup-token instructions printed); a present
+  `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` is NOT gated; `--yes` with a
+  reachable terminal RUNS auth, CAPTURES + persists the token to `.env`.
+- NEW `landing/__tests__/chat-auth-gate.test.ts` (5) — `GET /chat` with no
+  credential → 503 gate page (not the shell); credential present / gate unset →
+  200 shell; per-request evaluation clears the gate on a flip; the gate page has
+  no inline script / external asset.
+- UPDATED `open/__tests__/open-boot-shell.test.ts` — the two GET-/chat tests now
+  assert the gate; WS onboarding/resume mechanics retained.
+
+Files: `install.sh`, `landing/server.ts`,
+`gateway/realmode-composer/build-landing-stack.ts`, `open/composer.ts`,
+`tests/integration/install-auth-gate.test.ts`,
+`landing/__tests__/chat-auth-gate.test.ts`,
+`open/__tests__/open-boot-shell.test.ts`.
+
 ## 2026-06-21 — External-tool floor: Google Workspace Core (Drive/Sheets/Docs) + Gmail send (gap-audit P0-6)
 
 Closes the gap-audit external-tool floor (P0-6 / §(b) cat 9,
@@ -91,6 +239,7 @@ list, now Calendar + Email + Google Workspace).
 **Verify.** `bunx tsc --noEmit` clean. Full `bun test`: 7624 pass / 90 skip /
 0 fail across 722 files — INCLUDING every cores registration test
 (`cores-composition`, `cores-surface`, `cores-oauth-surface`, install-lifecycle).
+
 ## 2026-06-20 — Proactive messaging: real morning brief + idle-topic nudge sweep (gap-audit P0-5)
 
 Closes gap-audit P0-5 (WAVE 2 Track A) — "Neutron only speaks when spoken to."
