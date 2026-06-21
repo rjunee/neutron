@@ -18,6 +18,7 @@
     "reminders/**/*.ts",
     "tasks/**/*.ts",
     "cron/**/*.ts",
+    "doc-search/**/*.ts",
     "cores/**/*.ts",
     "prompts/**/*.ts",
     "mcp/**/*.ts",

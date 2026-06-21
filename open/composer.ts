@@ -60,7 +60,11 @@ import {
   buildGatewayLlmRouter,
 } from '../gateway/realmode-composer/build-llm-router.ts'
 import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
+import { mkdirSync } from 'node:fs'
+import { join as joinPath } from 'node:path'
 import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
+import { DocSearchIndex } from '../doc-search/store.ts'
+import { DocSearchRuntime } from '../doc-search/runtime.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
@@ -313,6 +317,35 @@ export function buildOpenGraphComposer(
     // `buildLandingStack` (it needs `scribeOnUserTurn`) — can register the
     // `gbrain serve` close hook. Returned on `realmode_cleanups`.
     const realmodeCleanups: Array<() => void> = []
+
+    // ── Doc search (QMD-equivalent) — index + agent tools ──────────────────
+    // gap-audit P1 #9 / cat 13: Neutron agents could read a KNOWN doc path
+    // but had no corpus search over the owner's project folders, so the
+    // "research before asking" discipline couldn't function. This builds a
+    // local BM25 (SQLite FTS5) index over every project's markdown
+    // (`<owner_home>/Projects/<id>/`) and registers the `doc_search` +
+    // `doc_read` agent tools so the live chat agent can search docs
+    // mid-conversation. OSS-friendly: no external embedding provider; the
+    // index opens synchronously and refreshes lazily (incremental, mtime-
+    // diffed) on the first tool call. Failure-isolated: a doc-search open
+    // failure must never sink the whole boot.
+    let docSearchRuntime: DocSearchRuntime | null = null
+    try {
+      const docIndexPath = joinPath(owner_home, 'cache', 'doc-search', 'index.db')
+      mkdirSync(joinPath(owner_home, 'cache', 'doc-search'), { recursive: true })
+      const docIndex = DocSearchIndex.open(docIndexPath)
+      docSearchRuntime = new DocSearchRuntime({ ownerHome: owner_home, index: docIndex })
+      realmodeCleanups.push(() => {
+        try {
+          docIndex.close()
+        } catch {
+          // best-effort on shutdown
+        }
+      })
+    } catch (err) {
+      console.warn('[open] doc-search index unavailable; doc_search tools disabled:', err)
+      docSearchRuntime = null
+    }
 
     // ── Scribe: chat-time entity extraction → GBrain (P0 daily-driver) ─────
     // gap-audit P0-3 / cat 7: the scribe package (`scribe/`) ships the whole
@@ -880,6 +913,10 @@ export function buildOpenGraphComposer(
       heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
       platform,
       cron_jobs: cronJobs,
+      // Doc-search agent tools (doc_search / doc_read) — registered by the
+      // `tools` module when a runtime is present. Omitted if the index
+      // failed to open (boot stays healthy without doc search).
+      ...(docSearchRuntime !== null ? { doc_search: { runtime: docSearchRuntime } } : {}),
       // Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) — these
       // make `app-surfaces-input` mount the bare + chunked + resume routes so
       // a Claude/ChatGPT export upload succeeds during Open onboarding.

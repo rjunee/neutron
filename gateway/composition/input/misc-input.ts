@@ -72,4 +72,16 @@ export interface MiscCompositionInput {
    * own registry as before (the pre-r3 behaviour).
    */
   cron_jobs?: CronJobRegistry
+  /**
+   * Doc-search (QMD-equivalent) — when supplied, the `tools` module
+   * registers the `doc_search` + `doc_read` agent tools backed by this
+   * runtime, so the live chat agent can keyword/BM25-search the owner's
+   * project docs mid-conversation ("research before asking"). The
+   * runtime is constructed by the production composer (which owns
+   * `owner_home` + the index DB path); omitting it leaves the surface
+   * unregistered (the unchanged pre-doc-search behaviour).
+   */
+  doc_search?: {
+    runtime: import('../../../doc-search/runtime.ts').DocSearchRuntime
+  }
 }
