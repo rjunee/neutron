@@ -11,6 +11,8 @@ import {
   type SubagentOutcome,
 } from './state-machine.ts'
 import { TridentTickLoop } from './tick.ts'
+import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
+import type { OutgoingMessage } from '../channels/types.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -31,6 +33,20 @@ const fixedNow = '2026-01-01T01:00:00.000Z'
 /** Deps that report a fixed outcome for whichever run is classified. */
 function depsWith(outcome: SubagentOutcome): AdvanceDeps {
   return { now: () => fixedNow, classify: async () => outcome }
+}
+
+/** A recording outbound sink — captures every message the delivery hook sends. */
+function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
+  const sent: OutgoingMessage[] = []
+  return {
+    sent,
+    sink: {
+      async send(message) {
+        sent.push(message)
+        return `msg-${sent.length}`
+      },
+    },
+  }
 }
 
 describe('TridentTickLoop.runOnce', () => {
@@ -105,6 +121,159 @@ describe('TridentTickLoop.runOnce', () => {
     const res = await loop.runOnce()
     // one threw, the other advanced
     expect(res.advanced).toBe(1)
+  })
+
+  // ── Async result delivery (gap-audit P0-1) ──────────────────────────
+  //
+  // Integration: a REAL store + REAL loop + REAL delivery hook (only the
+  // channel boundary is faked) — prove that a run reaching a terminal
+  // phase actually invokes the outbound post with the run's persisted
+  // chat_id/thread_id + the expected payload.
+  describe('terminal delivery', () => {
+    test('a run reaching `done` posts the result to its originating chat topic', async () => {
+      const store = new TridentRunStore(db)
+      // Seed a run mid-review (phase=argus) carrying the originating chat.
+      const created = await store.create({
+        slug: 'add-flag',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 'add a feature flag',
+        branch: 'trident/add-flag',
+        chat_id: '12345',
+        thread_id: '678',
+      })
+      await store.save({ ...store.get(created.id)!, phase: 'argus' })
+
+      const { sink, sent } = recordingSink()
+      const loop = new TridentTickLoop({
+        store,
+        // Argus APPROVE → done (terminal). No orchestrator/merge — the pure
+        // state machine reaches `done`, which is the delivery trigger.
+        deps: depsWith({ status: 'completed', result: { approved: true } }),
+        on_terminal: buildTridentDelivery({ sink }),
+      })
+
+      const res = await loop.runOnce()
+
+      expect(res.advanced).toBe(1)
+      expect(store.get(created.id)?.phase).toBe('done')
+      // The outbound post fired exactly once, addressed to the run's chat.
+      expect(sent.length).toBe(1)
+      expect(sent[0]!.topic.channel_kind).toBe('telegram')
+      expect(sent[0]!.topic.channel_topic_id).toBe('12345:678')
+      expect(sent[0]!.text).toContain('build complete')
+      expect(sent[0]!.text).toContain('add a feature flag')
+      expect(loop.stats().delivered).toBe(1)
+    })
+
+    test('a run reaching `failed` also delivers (terminal, not just the happy path)', async () => {
+      const store = new TridentRunStore(db)
+      // A crashed sub-agent drives forge-init → failed in one step.
+      const run = await store.create({
+        slug: 'boom',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 'do a risky thing',
+        chat_id: '999',
+        thread_id: null,
+      })
+
+      const { sink, sent } = recordingSink()
+      const loop = new TridentTickLoop({
+        store,
+        deps: depsWith({ status: 'crashed', reason: 'sub-agent crashed' }),
+        on_terminal: buildTridentDelivery({ sink }),
+      })
+
+      await loop.runOnce()
+
+      expect(store.get(run.id)?.phase).toBe('failed')
+      expect(sent.length).toBe(1)
+      // chat_id only (no thread) → bare channel_topic_id.
+      expect(sent[0]!.topic.channel_topic_id).toBe('999')
+      expect(sent[0]!.text).toContain('build failed')
+      expect(sent[0]!.text).toContain('sub-agent crashed')
+    })
+
+    test('a NON-terminal transition does not deliver', async () => {
+      const store = new TridentRunStore(db)
+      // forge-init → argus is a real (changed) transition but NOT terminal.
+      await store.create({
+        slug: 'mid',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        chat_id: '1',
+        thread_id: '2',
+      })
+      const { sink, sent } = recordingSink()
+      const loop = new TridentTickLoop({
+        store,
+        deps: depsWith({ status: 'completed', result: {} }),
+        on_terminal: buildTridentDelivery({ sink }),
+      })
+
+      const res = await loop.runOnce()
+      expect(res.advanced).toBe(1) // advanced forge-init → argus
+      expect(sent.length).toBe(0) // but did not post — argus is non-terminal
+      expect(loop.stats().delivered).toBe(0)
+    })
+
+    test('a run with no originating chat reaches done WITHOUT posting', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 'cron', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.save({ ...store.get(run.id)!, phase: 'argus' })
+
+      const { sink, sent } = recordingSink()
+      const loop = new TridentTickLoop({
+        store,
+        deps: depsWith({ status: 'completed', result: { approved: true } }),
+        on_terminal: buildTridentDelivery({ sink }),
+      })
+
+      await loop.runOnce()
+      expect(store.get(run.id)?.phase).toBe('done')
+      expect(sent.length).toBe(0) // chat_id === null → no-op inside the hook
+    })
+
+    test('a delivery failure does not un-terminate the run nor abort the tick', async () => {
+      const store = new TridentRunStore(db)
+      const a = await store.create({
+        slug: 'a',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 'first',
+        chat_id: '1',
+        thread_id: null,
+      })
+      const b = await store.create({
+        slug: 'b',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 'second',
+        chat_id: '2',
+        thread_id: null,
+      })
+      await store.save({ ...store.get(a.id)!, phase: 'argus' })
+      await store.save({ ...store.get(b.id)!, phase: 'argus' })
+
+      const failingHook = buildTridentDelivery({
+        sink: { async send() { throw new Error('telegram down') } },
+      })
+      const loop = new TridentTickLoop({
+        store,
+        deps: depsWith({ status: 'completed', result: { approved: true } }),
+        on_terminal: failingHook,
+      })
+
+      // The tick must not throw, both runs must still land `done`.
+      const res = await loop.runOnce()
+      expect(res.advanced).toBe(2)
+      expect(store.get(a.id)?.phase).toBe('done')
+      expect(store.get(b.id)?.phase).toBe('done')
+      // Delivery never succeeded, so the delivered counter stays 0.
+      expect(loop.stats().delivered).toBe(0)
+    })
   })
 
   test('start is idempotent; stop clears the timer', () => {

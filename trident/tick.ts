@@ -20,7 +20,7 @@
  * Default interval is 90 s — matches the skill's ScheduleWakeup cadence.
  */
 
-import { advanceTridentRun, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
+import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 
 /**
@@ -32,6 +32,39 @@ import type { TridentRun, TridentRunStore } from './store.ts'
  */
 export interface TridentStepFn {
   (run: TridentRun): Promise<AdvanceOutcome>
+}
+
+/**
+ * Async result delivery — the seam that posts a run's terminal result
+ * back to its originating chat topic (gap-audit P0-1). Mirrors the
+ * reminder loop's `on_fired` hook (`reminders/tick.ts`): a failure-safe,
+ * fire-after-persist callback the loop invokes ONCE per run that
+ * transitions into a terminal phase (`done` / `failed`).
+ *
+ * The loop never knows HOW a result is delivered — `onTerminal` owns the
+ * channel posting. Production wires `buildTridentDelivery(...)`
+ * (`trident/delivery.ts`), which reads the run's persisted
+ * `chat_id`/`thread_id` and pushes a result message through the
+ * `ChannelRouter`. Test/dev paths leave it unset → the loop runs
+ * unchanged. The hook is GENERIC: any background-agent run that lands on
+ * a terminal phase carrying a `chat_id`/`thread_id` delivers through the
+ * same seam, not just `/code`.
+ *
+ * Why a transition-time hook and not an end-of-run special case: the loop
+ * is the single writer that observes each `changed` transition and is the
+ * only place that already loads every non-terminal run each tick. Firing
+ * here means a result is delivered the instant a run reaches ANY terminal
+ * state (done OR failed), restart-safe and without a second sweep.
+ */
+export interface TridentTerminalHook {
+  /**
+   * Fired AFTER the terminal-phase row is persisted, with the SAME
+   * next-state run the loop just saved. Thrown errors are caught + logged
+   * by the loop and never block the tick from advancing other runs (the
+   * row is already committed, so a delivery outage cannot un-terminate a
+   * finished build).
+   */
+  onTerminal(run: TridentRun): Promise<void>
 }
 
 export interface TridentTickOptions {
@@ -53,6 +86,14 @@ export interface TridentTickOptions {
   tick_interval_ms?: number
   /** Per-tick max runs to advance. Default 50. */
   per_tick_limit?: number
+  /**
+   * Async result delivery (gap-audit P0-1). When supplied, the loop calls
+   * `on_terminal.onTerminal(run)` exactly once for each run that
+   * transitions into a terminal phase this tick — AFTER the row is
+   * persisted, in a dedicated try/catch so a delivery failure never
+   * aborts the tick. Omitted in tests / Open dev that don't post results.
+   */
+  on_terminal?: TridentTerminalHook
 }
 
 export class TridentTickLoop {
@@ -60,10 +101,12 @@ export class TridentTickLoop {
   private readonly step: TridentStepFn
   private readonly interval_ms: number
   private readonly per_tick_limit: number
+  private readonly on_terminal: TridentTerminalHook | null
   private timer: ReturnType<typeof setInterval> | null = null
   private running = false
   private skippedTicks = 0
   private advancedCount = 0
+  private deliveredCount = 0
 
   constructor(options: TridentTickOptions) {
     this.store = options.store
@@ -77,6 +120,7 @@ export class TridentTickLoop {
     }
     this.interval_ms = options.tick_interval_ms ?? 90_000
     this.per_tick_limit = options.per_tick_limit ?? 50
+    this.on_terminal = options.on_terminal ?? null
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
@@ -114,6 +158,25 @@ export class TridentTickLoop {
           if (outcome.changed) {
             await this.store.save(outcome.run)
             advanced++
+            // Async result delivery (gap-audit P0-1). `listNonTerminal`
+            // only ever returns non-terminal rows, so a `changed` outcome
+            // whose next phase is terminal is, by construction, a FRESH
+            // terminal transition this tick — fire the delivery hook
+            // exactly once. The hook runs in its own try/catch (below) so
+            // a posting failure can't undo the save we just committed nor
+            // stop the next run from advancing — same isolation the
+            // reminder loop gives its `on_fired` push hook.
+            if (this.on_terminal !== null && isTerminalPhase(outcome.run.phase)) {
+              try {
+                await this.on_terminal.onTerminal(outcome.run)
+                this.deliveredCount++
+              } catch (err) {
+                console.error(
+                  `trident terminal delivery failed for run ${run.id} (${run.slug}):`,
+                  err,
+                )
+              }
+            }
           }
         } catch (err) {
           // A single run's failure to advance must not abort the tick —
@@ -128,7 +191,11 @@ export class TridentTickLoop {
     return { advanced, skipped_due_to_overlap: false }
   }
 
-  stats(): { advanced: number; skipped_ticks: number } {
-    return { advanced: this.advancedCount, skipped_ticks: this.skippedTicks }
+  stats(): { advanced: number; skipped_ticks: number; delivered: number } {
+    return {
+      advanced: this.advancedCount,
+      skipped_ticks: this.skippedTicks,
+      delivered: this.deliveredCount,
+    }
   }
 }

@@ -42,10 +42,11 @@ import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
 import { ReminderStore } from '../../reminders/store.ts'
 import { ReminderTickLoop } from '../../reminders/tick.ts'
 import { TridentRunStore } from '../../trident/store.ts'
-import { TridentTickLoop } from '../../trident/tick.ts'
+import { TridentTickLoop, type TridentTerminalHook } from '../../trident/tick.ts'
 import { stubAdvanceDeps } from '../../trident/state-machine.ts'
 import { TridentSessionManager } from '../../trident/session.ts'
 import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
+import { buildTridentDelivery } from '../../trident/delivery.ts'
 import { spawnCapture } from '../../trident/git-mode.ts'
 import { TaskStore } from '../../tasks/store.ts'
 import {
@@ -200,8 +201,22 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
   const tridentWiring = input.trident
   const tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop }> = {
     name: 'trident',
-    init: () => {
+    // Depend on `channels` so the SAME `ChannelRouter` instance the gateway
+    // routes inbound events through is the one Trident delivers terminal
+    // results back through (gap-audit P0-1). The dep also fixes init order:
+    // the router is constructed before this module reads it.
+    deps: ['channels'],
+    init: (ctx) => {
       const store = new TridentRunStore(input.db)
+      // Async result delivery (gap-audit P0-1) — post each run's terminal
+      // result (done / failed) back to its originating chat topic via the
+      // run's persisted chat_id/thread_id. Generic: ANY background-agent
+      // run that lands terminal with a chat_id delivers through this seam,
+      // not just `/code`. Runs with no originating chat no-op inside the
+      // hook. Failure-safe: the tick loop wraps `onTerminal` in its own
+      // try/catch so a posting outage never un-terminates a finished build.
+      const router = ctx.graph.get<ChannelRouter>('channels')
+      const on_terminal: TridentTerminalHook = buildTridentDelivery({ sink: router })
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
         const session = new TridentSessionManager({ dispatch: tridentWiring.dispatch })
@@ -218,9 +233,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
         }
         const { step } = buildTridentOrchestrator(orchestratorOpts)
-        loop = new TridentTickLoop({ store, step })
+        loop = new TridentTickLoop({ store, step, on_terminal })
       } else {
-        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps() })
+        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal })
       }
       loop.start()
       return { store, loop }
