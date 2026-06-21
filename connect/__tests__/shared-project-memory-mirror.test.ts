@@ -55,6 +55,7 @@ import {
   type GraphSnapshot,
   type SharedProjectGraphSource,
 } from '../shared-project-memory-mirror.ts'
+import { bootPgliteBrain } from '../../gbrain-memory/__tests__/boot-pglite-brain.ts'
 
 const RECEIVING = 'owner-host' // the host / owner instance slug
 
@@ -66,20 +67,8 @@ interface Brain {
 }
 
 async function bootBrain(): Promise<Brain> {
-  // Computed specifiers: keep gbrain's .ts out of the tsc program.
-  const engMod = (await import('gbrain' + '/pglite-engine')) as {
-    PGLiteEngine: new () => {
-      connect(o: { database_url: string }): Promise<void>
-      initSchema(): Promise<void>
-      disconnect(): Promise<void>
-    }
-  }
-  const opsMod = (await import('gbrain' + '/operations')) as {
-    operations: Array<{ name: string; handler: (ctx: unknown, p: unknown) => Promise<unknown> }>
-  }
-  const eng = new engMod.PGLiteEngine()
-  await eng.connect({ database_url: '' })
-  await eng.initSchema()
+  // Serialised + retry-hardened real-PGLite boot (see boot-pglite-brain.ts).
+  const { engine: eng, operations } = await bootPgliteBrain()
   const ctx = {
     engine: eng,
     config: { engine: 'pglite' },
@@ -90,7 +79,7 @@ async function bootBrain(): Promise<Brain> {
   }
   const client: McpClient = {
     async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-      const op = opsMod.operations.find((o) => o.name === name)
+      const op = operations.find((o) => o.name === name)
       if (op === undefined) throw new Error(`no gbrain op: ${name}`)
       return op.handler(ctx, args)
     },

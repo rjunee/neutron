@@ -108,6 +108,19 @@ export interface CoresCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * WAVE 2 Track A — unified Integrations admin surface. Owns
+   * `GET /api/cores/integrations` + `/api/cores/api-keys/*`. Auto-built by
+   * `wireCoresSurfaces` whenever Cores + a bearer-auth resolver are present,
+   * INDEPENDENT of the Google-OAuth client gate, so standalone API-key
+   * management works on a deployment with no OAuth client (Argus PR #13
+   * IMPORTANT #2). Mounted ahead of `/api/cores` so its paths are unambiguous.
+   *
+   * Surface factory: `gateway/http/cores-integrations-surface.ts`.
+   */
+  cores_integrations_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P3 — post-compose hook fired with the live `CoresModuleState`
    * after `composeProductionGraph` lands the `cores` module. The
    * production composer wires this to populate the launcher store's

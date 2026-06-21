@@ -83,6 +83,42 @@ export interface OAuthDisconnectResponse {
   affected_cores: string[];
 }
 
+/** A per-Core Google OAuth account slot + its live connection status. */
+export interface OAuthAccountIntegration extends OAuthStatusLabel {
+  kind: 'oauth';
+  scope: string;
+  core_slugs: string[];
+}
+
+/** A standalone API-key slot + whether a key is currently stored. */
+export interface ApiKeyIntegration {
+  kind: 'api_key';
+  label: string;
+  name: string;
+  core_slugs: string[];
+  required: boolean;
+  install_prompt: string;
+  connected: boolean;
+}
+
+export interface IntegrationsResponse {
+  ok: boolean;
+  oauth: OAuthAccountIntegration[];
+  api_keys: ApiKeyIntegration[];
+}
+
+export interface ApiKeySetResponse {
+  ok: boolean;
+  label: string;
+  connected: boolean;
+}
+
+export interface ApiKeyDeleteResponse {
+  ok: boolean;
+  label: string;
+  deleted: boolean;
+}
+
 export class CoresClientError extends Error {
   readonly code: string;
   readonly status: number;
@@ -138,6 +174,27 @@ export class CoresClient {
     return await this.req<OAuthDisconnectResponse>(
       `/api/cores/oauth/google/disconnect/${encodeURIComponent(label)}`,
       { method: 'POST' },
+    );
+  }
+
+  /** Unified Integrations status: OAuth accounts + standalone API-key slots. */
+  async integrations(): Promise<IntegrationsResponse> {
+    return await this.req<IntegrationsResponse>('/api/cores/integrations');
+  }
+
+  /** Store (or rotate) a standalone API key for a `byo_api_key` slot. */
+  async setApiKey(label: string, value: string): Promise<ApiKeySetResponse> {
+    return await this.req<ApiKeySetResponse>(
+      `/api/cores/api-keys/${encodeURIComponent(label)}`,
+      { method: 'POST', body: { value } },
+    );
+  }
+
+  /** Clear a stored API key for a `byo_api_key` slot. */
+  async deleteApiKey(label: string): Promise<ApiKeyDeleteResponse> {
+    return await this.req<ApiKeyDeleteResponse>(
+      `/api/cores/api-keys/${encodeURIComponent(label)}`,
+      { method: 'DELETE' },
     );
   }
 
