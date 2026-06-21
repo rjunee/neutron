@@ -107,7 +107,7 @@ export const BASH_TOOL_DEF: CodegenToolDefinition = {
 export const GREP_TOOL_DEF: CodegenToolDefinition = {
   name: 'grep',
   description:
-    'Search for `pattern` in worktree files using ripgrep. Returns matching lines (rg `-n --color=never`). Optional `path` narrows the search root; optional `glob` filters by file pattern.',
+    'Search for `pattern` in worktree files (ripgrep when available, POSIX grep otherwise). Returns matching `path:line:text`. Optional `path` narrows the search root; optional `glob` filters by file pattern.',
   input_schema: {
     type: 'object',
     properties: {
@@ -376,13 +376,39 @@ export const grepScoped: CodegenToolHandler = async (input, ctx) => {
     if (!resolved.ok) return resolved.error
     search_root = resolved.absolute
   }
-  const args = ['--color=never', '-n']
-  if (typeof input.glob === 'string' && input.glob.length > 0) {
-    args.push('--glob', input.glob)
-  }
-  args.push('--', pattern, search_root)
+  const glob =
+    typeof input.glob === 'string' && input.glob.length > 0 ? input.glob : null
+
+  // Prefer ripgrep, but fall back to POSIX grep when `rg` is not on PATH —
+  // a stock GitHub runner (and many self-hosters' CI boxes) ship without
+  // ripgrep, which otherwise makes this tool error out. Both binaries emit
+  // `path:line:text` with `-n` and exit 1 on no-match, so the caller sees an
+  // identical shape either way. grep is given the recursion + ignore flags
+  // that rg applies implicitly (skip .git/node_modules) to keep results sane.
+  const cmd =
+    Bun.which('rg') !== null
+      ? [
+          'rg',
+          '--color=never',
+          '-n',
+          ...(glob ? ['--glob', glob] : []),
+          '--',
+          pattern,
+          search_root,
+        ]
+      : [
+          'grep',
+          '-rn',
+          '--color=never',
+          '--exclude-dir=.git',
+          '--exclude-dir=node_modules',
+          ...(glob ? [`--include=${glob}`] : []),
+          '-e',
+          pattern,
+          search_root,
+        ]
   try {
-    const proc = Bun.spawn(['rg', ...args], {
+    const proc = Bun.spawn(cmd, {
       cwd: ctx.worktree_path,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -393,7 +419,7 @@ export const grepScoped: CodegenToolHandler = async (input, ctx) => {
       new Response(proc.stderr).text(),
       proc.exited,
     ])
-    // rg exits 1 on no-matches (not an error condition).
+    // rg and grep both exit 1 on no-matches (not an error condition).
     if (exit_code !== 0 && exit_code !== 1) {
       return {
         content: `${stdout_text}\nSTDERR: ${stderr_text}\nEXIT: ${exit_code}`,

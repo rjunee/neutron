@@ -2,6 +2,50 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-20 — CI green on the public runner: grep falls back to POSIX grep + least-privilege workflow token
+
+Post-public-flip hardening on rjunee/neutron. Two CI/security fixes; PR-A.
+
+**1. `grepScoped` CI failure — ripgrep is not on the GitHub runner.** The
+`grep` codegen tool (`cores/free/code-gen/src/tool-handlers.ts:grepScoped`)
+shelled out unconditionally to `rg` (ripgrep). It passes locally (rg installed)
+but the stock `ubuntu-latest` runner has no ripgrep, so `Bun.spawn(['rg', …])`
+fails and the two `grepScoped` tests error in CI. Fix (the more robust option in
+the brief): the tool now prefers ripgrep but **falls back to POSIX `grep`** when
+`Bun.which('rg')` returns null — robust for any self-hoster's CI too, not just
+GitHub's. Both binaries emit `path:line:text` with `-n` and exit 1 on no-match,
+so the caller sees an identical shape either way; the fallback adds `-r` plus
+`--exclude-dir=.git --exclude-dir=node_modules` (the ignores rg applies
+implicitly) and maps `--glob` → `--include=`. Tool description + the stale
+"using ripgrep" wording updated to match.
+
+**2. `actions/missing-workflow-permissions` (1 CodeQL alert).** Added an
+explicit least-privilege top-level `permissions: { contents: read }` block to
+`.github/workflows/ci.yml` (the only workflow; CodeQL runs via GitHub default
+setup, no committed codeql.yml). CI only reads the checkout + runs
+typecheck/tests, so no write scopes are granted.
+
+**3. Midnight-boundary flake in `restore-ui.test.ts` (the actual red on the
+first CI run).** With the ripgrep cause fixed, CI still failed on a SEPARATE,
+date-dependent test: `groupSnapshotsByDay > labels today / yesterday correctly`.
+The run executed at `00:00:30 UTC` (the runner's tz is UTC), and the test built
+a "today" snapshot at a fixed `60_000 ms` ago — which at 30 s past local midnight
+lands at `23:59:30` YESTERDAY, so "Today" had 1 snapshot instead of 2. The
+`groupSnapshotsByDay` implementation is correct; the test was fragile. Fixed by
+anchoring the today snapshots to instants guaranteed within the local calendar
+day (`[startOfToday, now]`: midnight-today + the midpoint to now), mirroring the
+existing noon-yesterday anchor. Hardened the sibling "preserves order within a
+day" test the same way (it had the same latent ~3 s post-midnight flake). Proven
+against the exact failure instant (`now = 2026-06-21T00:00:30Z`, tz UTC):
+Today=2 / Yesterday=1.
+
+**Verify.** `bun test cores/free/code-gen/__tests__/tool-handlers.test.ts` →
+16/16 pass with ripgrep present AND with `rg` removed from PATH (grep-fallback
+path exercised on BSD grep; GNU grep on the Linux runner supports the same
+flags). `bun test app/__tests__/restore-ui.test.ts` → 19/19. `bunx tsc --noEmit`
+clean. First CI run confirmed both `grepScoped` tests PASS on the stock runner
+(grep fallback works) — only the unrelated date flake was red, now fixed.
+
 ## 2026-06-20 — #314: deterministic port bind on restart (no silent random-port fallback)
 
 Owner-confirmed P1 self-host defect (#314), fixed on
