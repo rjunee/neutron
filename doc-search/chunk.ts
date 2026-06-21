@@ -92,11 +92,14 @@ function parseAtxHeading(line: string): { hashes: string; text: string } | null 
  * — so `C#` (no preceding space) is left intact and there is no ReDoS.
  */
 function stripClosingFence(text: string): string {
-  const m = /#+$/.exec(text)
-  if (m === null || m.index === 0) return text
-  const before = text.charCodeAt(m.index - 1)
-  if (before !== 0x20 && before !== 0x09) return text
-  return text.slice(0, m.index).trimEnd()
+  // Walk back over a trailing run of '#' (linear; no regex → no ReDoS).
+  let end = text.length
+  while (end > 0 && text.charCodeAt(end - 1) === 0x23 /* # */) end--
+  if (end === text.length) return text // no trailing '#'
+  if (end === 0) return text // the whole string is '#'
+  const before = text.charCodeAt(end - 1)
+  if (before !== 0x20 && before !== 0x09) return text // must be space/tab-preceded
+  return text.slice(0, end).trimEnd()
 }
 
 /** A raw section captured during the first pass (heading + its lines). */
