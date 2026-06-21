@@ -152,6 +152,25 @@ describe('evaluateNudgeGate (pure quality gate)', () => {
     ).toEqual({ post: true })
   })
 
+  it('re-nudges after a null-watermark first nudge once known activity appears', () => {
+    // First nudge fired with unknown activity → watermark stored as null.
+    // The user later returns (known timestamp) and goes idle again: that must
+    // count as advancement, not stay deduped forever (Codex review P2).
+    const prior = { last_nudged_task_id: 't1', last_activity_at_ms: null }
+    const candidate = { ...idleCandidate, last_activity_ms: NOW_MS - IDLE_MS - 1000 }
+    expect(
+      evaluateNudgeGate({ candidate, pick, prior, now_ms: NOW_MS, idle_threshold_ms: IDLE_MS }),
+    ).toEqual({ post: true })
+  })
+
+  it('still dedupes a null-watermark nudge while activity stays unknown', () => {
+    const prior = { last_nudged_task_id: 't1', last_activity_at_ms: null }
+    const candidate = { ...idleCandidate, last_activity_ms: null }
+    expect(
+      evaluateNudgeGate({ candidate, pick, prior, now_ms: NOW_MS, idle_threshold_ms: IDLE_MS }),
+    ).toEqual({ post: false, reason: 'already_nudged' })
+  })
+
   it('treats unknown last-activity (null) as idle', () => {
     const candidate = { ...idleCandidate, last_activity_ms: null }
     expect(

@@ -149,10 +149,15 @@ export function evaluateNudgeGate(input: {
   //    task AND the user has not returned (activity has not advanced past the
   //    watermark we stored at the last nudge).
   if (prior !== null && prior.last_nudged_task_id === pick.task_id) {
+    // "The user came back and went idle again." Advancement requires a known
+    // current activity timestamp. When the watermark we stored at the last
+    // nudge was null (the first nudge fired with unknown activity), ANY later
+    // known activity counts as a return — otherwise a null watermark would
+    // dedupe the topic forever for that task (Codex review P2).
     const activityAdvanced =
       candidate.last_activity_ms !== null &&
-      prior.last_activity_at_ms !== null &&
-      candidate.last_activity_ms > prior.last_activity_at_ms
+      (prior.last_activity_at_ms === null ||
+        candidate.last_activity_ms > prior.last_activity_at_ms)
     if (!activityAdvanced) return { post: false, reason: 'already_nudged' }
   }
 
