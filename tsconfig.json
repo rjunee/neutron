@@ -24,6 +24,7 @@
     "tools/**/*.ts",
     "migrations/**/*.ts",
     "persistence/**/*.ts",
+    "chat-core/**/*.ts",
     "tests/integration/**/*.ts",
     "scripts/**/*.ts",
     "core-sdk/**/*.ts",

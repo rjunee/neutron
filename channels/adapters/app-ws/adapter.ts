@@ -40,6 +40,7 @@ import type {
   IncomingEventReceiver,
   OutgoingMessage,
 } from '../../types.ts'
+import type { AppChatMessageLog, AppChatRow } from '../../../persistence/index.ts'
 import type { AppWsSessionRegistry } from './session-registry.ts'
 import {
   sanitizeProjectId,
@@ -64,6 +65,15 @@ export interface AppWsAdapterOptions {
   now?: () => number
   /** Override the message-id generator for tests. */
   generate_message_id?: () => string
+  /**
+   * Chat-sync foundation — durable per-topic message log. When supplied,
+   * every user echo + agent message is persisted with a monotonic per-topic
+   * `seq` (stamped on the outbound envelope) and a `{type:'resume'}` request
+   * can replay the gap. When ABSENT the adapter keeps its legacy
+   * in-memory-only behaviour (no seq, no replay) so existing wiring + tests
+   * are unaffected.
+   */
+  chat_log?: AppChatMessageLog
 }
 
 export class AppWsAdapter implements ChannelAdapter {
@@ -72,12 +82,19 @@ export class AppWsAdapter implements ChannelAdapter {
   private readonly receiver: IncomingEventReceiver
   private readonly now: () => number
   private readonly generate_message_id: () => string
+  private readonly chat_log: AppChatMessageLog | undefined
 
   constructor(opts: AppWsAdapterOptions) {
     this.registry = opts.registry
     this.receiver = opts.receiver
     this.now = opts.now ?? (() => Date.now())
     this.generate_message_id = opts.generate_message_id ?? (() => crypto.randomUUID())
+    this.chat_log = opts.chat_log
+  }
+
+  /** Whether a durable message log is wired (enables seq + resume). */
+  get hasChatLog(): boolean {
+    return this.chat_log !== undefined
   }
 
   /**
@@ -85,9 +102,37 @@ export class AppWsAdapter implements ChannelAdapter {
    * whose `channel_kind === 'app_socket'`. We render the
    * channel-agnostic `OutgoingMessage` into the locked Expo envelope
    * and push it to the live socket via the session registry.
+   *
+   * Chat-sync foundation: when a durable log is wired, the agent message is
+   * persisted FIRST (assigning the per-topic `seq`) and the `seq` is stamped
+   * on the envelope before fan-out, so every live device — and any later
+   * `resume` replay — sees the same ordering key.
    */
   async send(message: OutgoingMessage): Promise<string> {
     const envelope = this.outgoingToEnvelope(message)
+    if (this.chat_log !== undefined) {
+      try {
+        const result = await this.chat_log.append({
+          topic_id: message.topic.channel_topic_id,
+          message_id: envelope.message_id,
+          role: 'agent',
+          body: envelope.body,
+          project_id: envelope.project_id ?? null,
+          created_at: envelope.ts,
+        })
+        envelope.seq = result.row.seq
+      } catch (err) {
+        // Persistence failure must not drop a live agent reply — fall back
+        // to the legacy in-memory fan-out (no seq) and log. A client that
+        // later resumes simply won't see this message in the replay; it's
+        // still rendered live.
+        console.warn(
+          `[app-ws] topic=${message.topic.channel_topic_id} agent-message persist failed — emitting without seq: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
     const delivered = this.registry.send(message.topic.channel_topic_id, envelope)
     if (!delivered) {
       // Mirror landing/server's silent-drop posture: no live socket for
@@ -180,6 +225,93 @@ export class AppWsAdapter implements ChannelAdapter {
     }
     this.registry.send(input.channel_topic_id, env)
     return message_id
+  }
+
+  /**
+   * Chat-sync foundation — durable counterpart to {@link emitUserMessageEcho}.
+   * Persists the inbound user message (assigning the per-topic `seq` and
+   * de-duplicating on `client_msg_id`), stamps `seq` on the echo, then fans
+   * the echo out to every live device. Returns the canonical id + seq so the
+   * surface can render the HTTP-fallback echo identically.
+   *
+   * When NO durable log is wired this delegates to the legacy
+   * {@link emitUserMessageEcho} (no seq) so the in-memory-only path is
+   * unchanged.
+   */
+  async ingestUserMessage(input: {
+    channel_topic_id: string
+    user_id: string
+    body: string
+    client_msg_id?: string
+    project_id?: string
+    attachments?: ReadonlyArray<string>
+  }): Promise<{ message_id: string; seq: number | null }> {
+    if (this.chat_log === undefined) {
+      const message_id = this.emitUserMessageEcho(input)
+      return { message_id, seq: null }
+    }
+    const message_id = this.generate_message_id()
+    const ts = this.now()
+    let seq: number | null = null
+    let canonical_id = message_id
+    try {
+      const result = await this.chat_log.append({
+        topic_id: input.channel_topic_id,
+        message_id,
+        role: 'user',
+        body: input.body,
+        client_msg_id: input.client_msg_id ?? null,
+        project_id: input.project_id ?? null,
+        attachments: input.attachments ?? null,
+        created_at: ts,
+      })
+      seq = result.row.seq
+      // Idempotent re-send: an existing row owns the canonical id, so the
+      // echo correlates to the message the client already holds.
+      canonical_id = result.row.message_id
+    } catch (err) {
+      console.warn(
+        `[app-ws] topic=${input.channel_topic_id} user-message persist failed — echoing without seq: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
+    const env: AppWsOutboundUserMessageEcho = {
+      v: 1,
+      type: 'user_message',
+      user_id: input.user_id,
+      body: input.body,
+      message_id: canonical_id,
+      ts,
+    }
+    if (input.client_msg_id !== undefined) env.client_msg_id = input.client_msg_id
+    if (input.project_id !== undefined) env.project_id = input.project_id
+    if (input.attachments !== undefined && input.attachments.length > 0) {
+      env.attachments = [...input.attachments]
+    }
+    if (seq !== null) env.seq = seq
+    this.registry.send(input.channel_topic_id, env)
+    return { message_id: canonical_id, seq }
+  }
+
+  /**
+   * Chat-sync foundation — replay every persisted message after `after_seq`
+   * for a topic as wire envelopes, ascending by seq. The surface sends these
+   * to the single requesting socket (NOT a fan-out) so a reconnecting device
+   * fills its gap without re-broadcasting to other devices. Returns `[]` when
+   * no durable log is wired.
+   */
+  async replayAfter(channel_topic_id: string, after_seq: number): Promise<AppWsOutbound[]> {
+    if (this.chat_log === undefined) return []
+    const rows = await this.chat_log.replayAfter(channel_topic_id, after_seq)
+    return rows.map((r) => appChatRowToEnvelope(r))
+  }
+
+  /** Chat-sync foundation — highest persisted seq for a topic (0 when none /
+   *  no durable log), for `session_ready.last_seen_seq`. */
+  async currentMaxSeq(channel_topic_id: string): Promise<number> {
+    if (this.chat_log === undefined) return 0
+    return this.chat_log.maxSeq(channel_topic_id)
   }
 
   /**
@@ -294,6 +426,50 @@ export class AppWsAdapter implements ChannelAdapter {
     }
     return env
   }
+}
+
+/**
+ * Chat-sync foundation — reconstruct a wire envelope from a persisted row so
+ * a `resume` replay re-emits the message in its original `user_message` /
+ * `agent_message` shape, carrying its `seq` for ordering + cursor advance.
+ */
+export function appChatRowToEnvelope(row: AppChatRow): AppWsOutbound {
+  if (row.role === 'user') {
+    const env: AppWsOutboundUserMessageEcho = {
+      v: 1,
+      type: 'user_message',
+      // The persisted user message has no separate user_id column (topic is
+      // app:<user_id>); the client keys its own bubbles by client_msg_id /
+      // message_id, so an empty user_id on replay is harmless. Derive it from
+      // the topic when shaped that way so the field is still populated.
+      user_id: topicUserId(row.topic_id),
+      body: row.body,
+      message_id: row.message_id,
+      ts: row.created_at,
+      seq: row.seq,
+    }
+    if (row.client_msg_id !== null) env.client_msg_id = row.client_msg_id
+    if (row.project_id !== null) env.project_id = row.project_id
+    if (row.attachments !== null && row.attachments.length > 0) {
+      env.attachments = [...row.attachments]
+    }
+    return env
+  }
+  const env: AppWsOutboundAgentMessage = {
+    v: 1,
+    type: 'agent_message',
+    body: row.body,
+    message_id: row.message_id,
+    ts: row.created_at,
+    seq: row.seq,
+  }
+  if (row.project_id !== null) env.project_id = row.project_id
+  return env
+}
+
+/** Best-effort `app:<user_id>` → `<user_id>`; returns '' on a non-app topic. */
+function topicUserId(topic_id: string): string {
+  return topic_id.startsWith('app:') ? topic_id.slice('app:'.length) : ''
 }
 
 /**

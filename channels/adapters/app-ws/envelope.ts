@@ -40,6 +40,21 @@ export interface AppWsInboundUserMessage {
   attachments?: ReadonlyArray<string>
 }
 
+/**
+ * Chat-sync foundation (Phase 1) — gap-fill request. A reconnecting (or
+ * second) device sends `{ v:1, type:'resume', after_seq:N }` and the surface
+ * replays `WHERE topic_id = ? AND seq > N ORDER BY seq` from the durable
+ * message log so the client fills the gap it missed while the socket was
+ * down. `after_seq:0` (a cold client with an empty local store) replays the
+ * whole transcript (bounded by the server's replay page size).
+ */
+export interface AppWsInboundResume {
+  v: 1
+  type: 'resume'
+  /** Highest server `seq` the client has already applied locally. */
+  after_seq: number
+}
+
 export type AppWsInbound = AppWsInboundUserMessage
 
 export interface AppWsOutboundSessionReady {
@@ -51,6 +66,14 @@ export interface AppWsOutboundSessionReady {
   ts: number
   /** P5.2 — project_id carried on the upgrade query string. */
   project_id?: string
+  /**
+   * Chat-sync foundation — the highest persisted `seq` for this topic at
+   * connect time. Lets a client that already holds the full transcript skip
+   * an unnecessary `resume` round-trip (it only resumes when its local
+   * cursor < `last_seen_seq`). Absent when the topic has no persisted
+   * messages or the durable log isn't wired.
+   */
+  last_seen_seq?: number
 }
 
 export interface AppWsOutboundUserMessageEcho {
@@ -66,6 +89,13 @@ export interface AppWsOutboundUserMessageEcho {
   project_id?: string
   /** P5.1 — echoed attachments so the optimistic bubble can reconcile. */
   attachments?: ReadonlyArray<string>
+  /**
+   * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
+   * The client orders by `seq` (never by clock) and advances its resume
+   * cursor to `max(seq)`. Absent when the durable log isn't wired (legacy
+   * in-memory-only behaviour).
+   */
+  seq?: number
 }
 
 export interface AppWsOutboundAgentMessageOption {
@@ -146,6 +176,12 @@ export interface AppWsOutboundAgentMessage {
    * phases.
    */
   upload_affordance?: AppWsOutboundAgentMessageUploadAffordance
+  /**
+   * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
+   * Ordering + resume-cursor key, same semantics as the user echo's `seq`.
+   * Absent when the durable log isn't wired.
+   */
+  seq?: number
 }
 
 /**
@@ -224,6 +260,24 @@ export function decodeAppWsInbound(raw: unknown): AppWsInbound | null {
     out.attachments = cleaned_attachments
   }
   return out
+}
+
+/**
+ * Chat-sync foundation — decode a `{ v:1, type:'resume', after_seq:N }`
+ * gap-fill control frame. Kept SEPARATE from {@link decodeAppWsInbound} (the
+ * message decoder) so message-path consumers keep their narrow
+ * `AppWsInboundUserMessage` type. Returns `null` for anything that isn't a
+ * well-formed resume; `after_seq` is clamped to a non-negative integer so a
+ * malformed cursor can't drive a negative / fractional replay query.
+ */
+export function decodeAppWsResume(raw: unknown): AppWsInboundResume | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'resume') return null
+  const raw_after = e['after_seq']
+  if (typeof raw_after !== 'number' || !Number.isFinite(raw_after)) return null
+  return { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
 }
 
 /**

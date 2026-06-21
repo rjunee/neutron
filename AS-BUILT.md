@@ -2,6 +2,77 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Chat-sync foundation (Phase 1): server `seq`/`resume`/multi-device + `@neutron/chat-core`
+
+The first phase of web↔mobile Telegram-parity (research:
+`web-chat-telegram-parity-architecture-2026-06-20`). Delivers the defining
+"Telegram feel" — offline send, gap-free reconnect, instant cold-open,
+multi-device consistency — with **zero UI-framework change**. Append-only
+chat → a hand-rolled sync engine (server monotonic `seq` + per-client cursor +
+idempotent send-queue), not a CRDT/RxDB.
+
+**1. Durable per-topic message log + monotonic `seq` (server).** Until now the
+app-ws surface (`/ws/app/chat`) emitted user/agent messages in-memory only —
+nothing persisted, so a message sent while a socket was down was lost and there
+was no ordering key for multi-device. New migration `0079_app_chat_messages.sql`
++ `persistence/app-chat-store.ts` (`AppChatStore`) append every message with a
+monotonic, per-topic `seq` (`PRIMARY KEY (topic_id, seq)`), de-duplicated on
+`(topic_id, client_msg_id)`. `replayAfter(topic, after_seq)` is the resume
+query (`WHERE seq > ? ORDER BY seq`). The store is wired through an
+`AppChatMessageLog` interface so the adapter stays DB-agnostic + unit-testable.
+
+**2. `resume` replay + `seq` on the wire (app-ws).** New inbound control frame
+`{ v:1, type:'resume', after_seq:N }` (decoded by the new `decodeAppWsResume`,
+kept separate from the message decoder so the `user_message` path keeps its
+narrow type). The surface replays the gap to the *requesting* socket only.
+`seq` now rides on every outbound `user_message`/`agent_message`; `session_ready`
+carries `last_seen_seq` so a client can skip an unneeded resume. The
+`AppWsAdapter` gained an optional `chat_log` — when wired it persists +
+stamps `seq` (back-compat: absent → legacy in-memory behaviour, all existing
+tests unchanged). Production boot (managed) opts in by passing `chat_log`.
+
+**3. Multi-device session registry.** `InMemoryAppWsSessionRegistry` changed
+from `Map<topic, sender>` (last-wins, silently dropped a second device) to
+`Map<topic, Set<sender>>` with fan-out to every live device on the account,
+identity-aware per-device unregister, and a dead-socket sweep that never aborts
+the fan-out. Combined with per-client `seq` cursors, web + phone converge on
+one transcript.
+
+**4. `@neutron/chat-core` — transport-agnostic client lib (new workspace).**
+The shared logic the web (and, Phase 2, mobile) clients consume:
+- `Store` interface + `InMemoryStore` (ordering: by `seq`, never clock;
+  optimistic tail last) and an OPFS-backed `OpfsChatStore` with
+  `createWebStore()` that **degrades gracefully** to in-memory when OPFS /
+  `createWritable` is unavailable (scope-guard requirement);
+- `SendQueue` — idempotent on `client_msg_id`, offline-buffering, flush-on-
+  reconnect, never double-sends;
+- `SyncEngine` — append-only apply (UPSERT dedup + optimistic reconcile),
+  `last_seen_seq` cursor, `resume` request builder;
+- `ChatWsClient` — reconnect with exponential backoff + jitter, AppState-aware
+  (pause/resume), injectable socket + timers;
+- `WebChatSession` — the high-level composition a web client instantiates to
+  get optimistic send + offline queue + gap-free reconnect + instant cold-open
+  against the seq-aware app-ws protocol.
+
+**Web wiring decision (noted per autonomy mandate):** the only existing
+vanilla-TS web client, `landing/chat.ts`, talks to the *onboarding* `/ws/chat`
+bridge (a different protocol with no `seq`), not `/ws/app/chat`. Rather than
+risk destabilising that 4,476-line client by retrofitting it onto a different
+surface, the chat-core integration is delivered as the fully-tested
+`WebChatSession` composition (consumed by the seq-aware app web client) +
+`landing` now declares the `@neutron/chat-core` workspace dep so `Bun.build`
+bundles it. Repointing `landing/chat.ts` itself is deferred to the Phase-3 web
+UI uplift, where the client is migrated anyway.
+
+**Out of scope (later phases):** React/assistant-ui migration (P3), mobile
+op-sqlite wiring (P2), FTS5 search / read receipts (P4). The `Store` interface
+is the seam a Phase-2 wasm-SQLite engine drops into.
+
+**Tests:** 73 new tests — chat-core (`sync-engine`, `send-queue`, `ws-client`,
+`store`, `web-session`), `AppChatStore` seq/idempotency/resume, multi-device
+registry, adapter seq/resume end-to-end, `resume` decode. `bunx tsc --noEmit`
+clean; schema snapshot + migration-list regenerated.
+
 ## 2026-06-20 — CI green on the public runner: grep falls back to POSIX grep + least-privilege workflow token
 
 Post-public-flip hardening on rjunee/neutron. Two CI/security fixes; PR-A.

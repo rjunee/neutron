@@ -1,19 +1,29 @@
 /**
  * @neutronai/channels/app-ws — per-session sender registry.
  *
- * Maps `channel_topic_id` → live WebSocket `send` callback. Mirrors the
- * `WebChatSenderRegistry` shape in `gateway/http/chat-bridge.ts` (which
- * owns the onboarding-chat surface) so a future consolidation can fold
- * both into one cross-channel registry. For P5.1 we keep the file
- * separate so the Expo surface stays composable when the landing
- * surface is unwired.
+ * Maps `channel_topic_id` → the set of live WebSocket `send` callbacks for
+ * that topic. Mirrors the `WebChatSenderRegistry` shape in
+ * `gateway/http/chat-bridge.ts` (which owns the onboarding-chat surface) so
+ * a future consolidation can fold both into one cross-channel registry. For
+ * P5.1 we keep the file separate so the Expo surface stays composable when
+ * the landing surface is unwired.
  *
- * Concurrency posture: identity-aware unregister — only delete a
- * topic's sender entry when the currently registered callback is
- * reference-equal to the one being torn down. This prevents a
- * losing-tap's `close` event from accidentally evicting a newer
- * reconnect's sender (Argus Sprint 18 r1 pattern — same incident
- * class).
+ * MULTI-DEVICE (chat-sync foundation, Phase 1): a topic is `app:<user_id>`,
+ * so "multiple devices on one account" (laptop + phone, both live) map to
+ * the SAME topic. The registry therefore holds a `Set<sender>` per topic and
+ * FANS OUT every emit to all of them — a `Map<topic, sender>` last-wins
+ * registry would silently drop one device. Combined with the server `seq`
+ * each device carries its own resume cursor, so both converge on the same
+ * ordered transcript. (Research doc §4: "change the registry from
+ * Map<topic, sender> (last-wins) to Map<topic, Set<sender>> so the same user
+ * on web + phone both receive emits.")
+ *
+ * Concurrency posture: identity-aware unregister — only delete a specific
+ * sender entry when the registered callback is reference-equal to the one
+ * being torn down. This prevents a losing-tap's `close` event from
+ * accidentally evicting a newer reconnect's sender (Argus Sprint 18 r1
+ * pattern — same incident class) AND prevents one device's close from
+ * evicting another device on the same account.
  */
 
 import type { AppWsOutbound } from './envelope.ts'
@@ -40,12 +50,17 @@ export interface AppWsSessionRegistry {
     opts?: AppWsRegisterOptions,
   ): void
   unregister(channel_topic_id: string, send: (env: AppWsOutbound) => void): void
+  /** Fan-out: deliver `env` to EVERY live device on the topic. Returns true
+   *  if at least one device received it. */
   send(channel_topic_id: string, env: AppWsOutbound): boolean
   has(channel_topic_id: string): boolean
-  /** Returns the registered platform for a session, or `null` when
-   * the session is offline / no platform was reported (back-compat
-   * with P5.1 clients that don't send the field). */
+  /** Returns a registered platform for a session, or `null` when the
+   *  session is offline / no platform was reported (back-compat with P5.1
+   *  clients that don't send the field). When multiple devices are
+   *  connected the most-recently-registered platform wins. */
   getPlatform(channel_topic_id: string): AppWsClientPlatform | null
+  /** Number of live devices on a topic (0 when offline). */
+  deviceCount(channel_topic_id: string): number
   topics(): string[]
 }
 
@@ -55,7 +70,9 @@ interface SessionEntry {
 }
 
 export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
-  private readonly entries = new Map<string, SessionEntry>()
+  // One topic → many devices. Insertion order is preserved by Set, so
+  // `getPlatform` can return the most-recent registrant.
+  private readonly entries = new Map<string, Set<SessionEntry>>()
 
   register(
     channel_topic_id: string,
@@ -64,46 +81,75 @@ export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
   ): void {
     const entry: SessionEntry = { send }
     if (opts?.platform !== undefined) entry.platform = opts.platform
-    this.entries.set(channel_topic_id, entry)
+    let set = this.entries.get(channel_topic_id)
+    if (set === undefined) {
+      set = new Set<SessionEntry>()
+      this.entries.set(channel_topic_id, set)
+    }
+    set.add(entry)
   }
 
   unregister(channel_topic_id: string, send: (env: AppWsOutbound) => void): void {
-    const existing = this.entries.get(channel_topic_id)
-    if (existing !== undefined && existing.send === send) {
-      this.entries.delete(channel_topic_id)
+    const set = this.entries.get(channel_topic_id)
+    if (set === undefined) return
+    // Identity-aware: evict only the entry whose `send` is reference-equal.
+    for (const entry of set) {
+      if (entry.send === send) {
+        set.delete(entry)
+        break
+      }
     }
+    if (set.size === 0) this.entries.delete(channel_topic_id)
   }
 
   send(channel_topic_id: string, env: AppWsOutbound): boolean {
-    const entry = this.entries.get(channel_topic_id)
-    if (entry === undefined) return false
-    try {
-      entry.send(env)
-    } catch (err) {
-      // The send lambda throws when the underlying WebSocket has
-      // closed (per `gateway/http/app-ws-surface.ts:open`'s T10
-      // pattern). Downgrade to a dropped-marker so the channel
-      // router knows the emit was not delivered. Sweep the stale
-      // entry — the identity-aware unregister on the next `close`
-      // event is a no-op once we evict here. Per Codex P2 review
-      // on PR #142.
-      console.warn(
-        `[app-ws-registry] topic=${channel_topic_id} sender threw — treating as dropped: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
-      this.entries.delete(channel_topic_id)
-      return false
+    const set = this.entries.get(channel_topic_id)
+    if (set === undefined || set.size === 0) return false
+    let delivered = false
+    // Snapshot so a sweep during iteration (a throwing sender we evict
+    // below) can't invalidate the live Set we're walking.
+    for (const entry of [...set]) {
+      try {
+        entry.send(env)
+        delivered = true
+      } catch (err) {
+        // The send lambda throws when the underlying WebSocket has
+        // closed (per `gateway/http/app-ws-surface.ts:open`'s T10
+        // pattern). Sweep the stale entry — the identity-aware
+        // unregister on the next `close` event is a no-op once we evict
+        // here. Per Codex P2 review on PR #142. With multi-device we
+        // must NOT abort the fan-out: a dead laptop socket can't stop
+        // the phone from receiving the emit.
+        console.warn(
+          `[app-ws-registry] topic=${channel_topic_id} a sender threw — treating as dropped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+        set.delete(entry)
+      }
     }
-    return true
+    if (set.size === 0) this.entries.delete(channel_topic_id)
+    return delivered
   }
 
   has(channel_topic_id: string): boolean {
-    return this.entries.has(channel_topic_id)
+    const set = this.entries.get(channel_topic_id)
+    return set !== undefined && set.size > 0
   }
 
   getPlatform(channel_topic_id: string): AppWsClientPlatform | null {
-    return this.entries.get(channel_topic_id)?.platform ?? null
+    const set = this.entries.get(channel_topic_id)
+    if (set === undefined || set.size === 0) return null
+    // Most-recently-registered device wins (Set preserves insertion order).
+    let platform: AppWsClientPlatform | null = null
+    for (const entry of set) {
+      if (entry.platform !== undefined) platform = entry.platform
+    }
+    return platform
+  }
+
+  deviceCount(channel_topic_id: string): number {
+    return this.entries.get(channel_topic_id)?.size ?? 0
   }
 
   topics(): string[] {

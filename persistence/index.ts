@@ -1,4 +1,13 @@
 export { ProjectDb, type OpenOptions } from './db.ts'
+export {
+  AppChatStore,
+  DEFAULT_REPLAY_LIMIT,
+  type AppChatMessageLog,
+  type AppChatRow,
+  type AppChatAppendInput,
+  type AppChatAppendResult,
+  type AppChatStoreOptions,
+} from './app-chat-store.ts'
 export { PersistenceError, BusyRetryExhaustedError } from './errors.ts'
 export {
   withBusyRetry,
