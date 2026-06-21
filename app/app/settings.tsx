@@ -112,6 +112,22 @@ export default function SettingsScreen() {
 
         <Pressable
           accessibilityRole="button"
+          accessibilityLabel="Integrations"
+          testID="settings-integrations"
+          onPress={() => router.push('/integrations')}
+          style={({ pressed }) => [styles.navRow, pressed && styles.pressed]}
+        >
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>Integrations</Text>
+            <Text style={styles.navRowSubtitle}>
+              Google accounts + API keys your Cores connect to.
+            </Text>
+          </View>
+          <Text style={styles.navRowChevron}>›</Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="button"
           accessibilityLabel="Sign out"
           testID="settings-sign-out"
           onPress={handleSignOut}
@@ -124,7 +140,7 @@ export default function SettingsScreen() {
         </Pressable>
 
         <Text style={styles.footnote}>
-          Personality, push toggles, and connector management land in future P5.x sprints.
+          Personality and push toggles land in future P5.x sprints.
         </Text>
       </ScrollView>
     </View>
@@ -216,6 +232,20 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 0.6,
   },
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: THEME.surface,
+    borderWidth: 1,
+    borderColor: THEME.hairline,
+  },
+  navRowText: { flex: 1, gap: 3 },
+  navRowTitle: { color: THEME.text_primary, fontSize: 15, fontWeight: '600' },
+  navRowSubtitle: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
+  navRowChevron: { color: THEME.text_muted, fontSize: 22, fontWeight: '400' },
   signOutBtn: {
     height: 48,
     borderRadius: 12,

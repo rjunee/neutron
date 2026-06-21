@@ -110,6 +110,30 @@ export async function wireCoresSurfaces(
       })
       input.cores_oauth_surface = { handler: surface.handler }
 
+      // WAVE 2 Track A — agent-native Integrations parity. Register the
+      // `integrations_list` / `integrations_connect` / `integrations_disconnect`
+      // chat tools against the same ToolRegistry the Cores register into,
+      // sharing the OAuth `tokens` manager + `secretsStore` + registry the
+      // HTTP surface holds so chat and UI hit one code path. Idempotent on
+      // a re-wire: skip tools already registered (the registry throws on
+      // duplicate name).
+      const { buildIntegrationsTools } = await import('../cores/integrations-tools.ts')
+      const toolRegistry = graph.get<ToolRegistry>('tools')
+      const integrationsTools = buildIntegrationsTools({
+        registry: coresState.registry,
+        tokens,
+        secretsStore: input.cores.secretsStore,
+        project_slug: input.project_slug,
+        // Reuse the OAuth surface's in-process start so chat-connect hands
+        // back the SAME public Google authorize_url the UI uses.
+        startOAuth: (labels) => surface.startOAuth(labels),
+      })
+      for (const tool of integrationsTools) {
+        if (toolRegistry.get(tool.name) === undefined) {
+          toolRegistry.register(tool)
+        }
+      }
+
       // Argus PR #210 minor #1 — register the cores_oauth_pending sweep
       // cron so abandoned flows (user closes the tab, callback never
       // fires) don't leak SQLite rows. The store's docblock has

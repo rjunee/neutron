@@ -2,6 +2,81 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Integrations admin UI + agent-native parity (WAVE 2 Track A, gap-audit §(b) cat 9)
+
+One surface that SHOWS everything a project has connected — per-Core Google
+OAuth accounts (Calendar `google_calendar`, Email `gmail_compose`, Google
+Workspace `google_workspace`) AND standalone API keys (Research Core's
+`tavily`) — each with connect / disconnect / status, plus the SAME actions
+available in chat. Named **Integrations** (NOT "Connections" — avoids collision
+with the existing Connect collaboration feature). Scope: settings UI + chat
+tools + reading/writing per-Core connection state. NO `composer.ts`, no new
+global connection registry — the integration set is DERIVED from the bundled
+Cores' own `manifest.secrets[]`, so per-Core ownership stays intact.
+
+**The gap this closed.** Per-Core Google OAuth already had a full path
+(`/api/cores/oauth/google/*` + `OAuthTokenManager` + the per-Core `[slug].tsx`
+setup screen). What was missing: (1) there was NO surface at all to set/list/
+clear standalone `byo_api_key` slots (Tavily etc. could only be set by hand in
+the DB), (2) no unified view of everything connected, and (3) no agent-native
+path — the agent couldn't connect/disconnect anything.
+
+**NEW: `gateway/cores/integrations.ts`** — the shared brain behind BOTH the HTTP
+surface and the chat tools (one code path, no drift):
+- `buildIntegrationsStatus()` — unified status. OAuth status reads through the
+  existing `OAuthTokenManager.getStatus()`; API-key `connected` is a presence
+  check over the `byo_api_key` rows. NO plaintext ever leaves the function.
+- `setApiKey()` / `deleteApiKey()` — store/rotate (via `SecretsStore.replaceAtomic`,
+  so set-or-rotate is one transaction) and clear a key under the manifest-declared
+  label, exactly where the owning Core reads it via its `SecretsAccessor`.
+  Rejects labels no bundled Core declares + empty values.
+- `collectOAuthSlots()` / `collectApiKeySlots()` — derive the slot set from the
+  bundled registry's manifests.
+
+**NEW: agent-native chat tools (`gateway/cores/integrations-tools.ts`).** Three
+tools registered against the per-process `ToolRegistry` in
+`wire-cores-surfaces.ts` (sharing the same `tokens` + `secretsStore` + registry
+the HTTP surface holds):
+- `integrations_list` — every OAuth account + API-key slot with status (no secrets).
+- `integrations_connect` — OAuth label → runs the SAME in-process OAuth start
+  the UI runs (`CoresOAuthSurface.startOAuth`, shared with `GET /start`) and
+  hands back the PUBLIC Google `authorize_url` (`accounts.google.com/…`) the user
+  opens — NOT a bearer-gated gateway `/start` link (which 401s in a browser —
+  Codex round-1 P2); API-key label + `value` → stores the key.
+- `integrations_disconnect` — OAuth → `tokens.disconnect()` (revoke + delete);
+  API-key → clears the stored key.
+
+**HTTP surface (folded into `cores-oauth-surface.ts`).** Three routes, bearer-gated:
+- `GET    /api/cores/integrations`     → unified OAuth + API-key status
+- `POST   /api/cores/api-keys/<label>` → set/rotate a key (body `{value}`)
+- `DELETE /api/cores/api-keys/<label>` → clear a key
+
+Folded into the existing OAuth surface (not a new mounted surface) because that
+surface already receives the registry + `tokens` + `secretsStore` + `auth` +
+`project_slug` — zero new composition wiring, no `compose.ts`/`composer.ts`
+edits. The handler's owned-prefix check broadened from the single OAuth base to
+also own `/api/cores/integrations` + `/api/cores/api-keys/*`. Unknown label →
+400; empty/invalid value → 422.
+
+**App.** `app/lib/cores-client.ts` gains `integrations()` / `setApiKey()` /
+`deleteApiKey()`. New screen `app/app/integrations.tsx` (linked from Settings)
+lists both sections with connect/disconnect/paste-key/clear. The list+status
+logic is the pure, unit-tested `app/lib/integrations-view.ts`.
+
+### Tests (all real, no mocked SQL — `installBundledCores` walks the repo so the
+slots are the genuine manifest declarations)
+- `gateway/cores/__tests__/integrations.test.ts` — slot derivation; status
+  reflects a connected OAuth account + a stored key; `setApiKey` store→rotate
+  keeps a single row; `deleteApiKey` clears + is idempotent; unknown/empty reject.
+- `gateway/cores/__tests__/integrations-tools.test.ts` — the AGENT TOOL PATH
+  mutates stored state: chat-connect of `tavily` writes the secret; chat-connect
+  of an OAuth label returns the start URL; chat-disconnect deletes OAuth tokens
+  and clears API keys; unknown-label + missing-value reject.
+- `gateway/__tests__/cores-integrations-surface.test.ts` — `GET /integrations`
+  lists both with correct status (and never leaks plaintext); `POST` then
+  `DELETE /api-keys/tavily` mutates the store; unknown label 400; no bearer 401.
+- `app/__tests__/integrations-view.test.ts` — view-model status/labels/counts.
+
 ## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
 
 Argus round 2 (Codex/GPT-5 cross-model + Claude shell/test cross-check) cleared

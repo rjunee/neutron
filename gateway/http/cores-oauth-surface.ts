@@ -1,19 +1,28 @@
 /**
- * @neutronai/gateway/http — Cores OAuth secret-resolution surface.
+ * @neutronai/gateway/http — Cores OAuth + Integrations secret-resolution surface.
  *
- * Owns four routes on the per-instance gateway:
+ * Owns the per-instance gateway's connection-management routes:
  *
  *   - `GET  /api/cores/oauth/google/start`              start a grant
  *   - `POST /api/cores/oauth/google/ingest`             identity → gateway code-exchange hand-off
  *   - `POST /api/cores/oauth/google/disconnect/<label>` revoke + clean up
  *   - `GET  /api/cores/oauth/google/status`             admin tab view
  *
+ * Plus the WAVE 2 Track A Integrations admin routes — one surface that
+ * shows EVERYTHING connected (OAuth accounts + standalone API keys) and
+ * lets the user manage standalone API keys:
+ *
+ *   - `GET    /api/cores/integrations`         unified OAuth + API-key status
+ *   - `POST   /api/cores/api-keys/<label>`     set/rotate an API key (body {value})
+ *   - `DELETE /api/cores/api-keys/<label>`     clear a stored API key
+ *
  * The ingest route is gated by a platform-signed bearer (the same
  * shared-secret HMAC pattern install-token uses) — identity is the only
  * caller. Every other route is gated by the standard `AppWsAuthResolver`
  * bearer.
  *
- * Per docs/plans/cores-oauth-secret-resolution-sprint-brief.md § 4.
+ * Per docs/plans/cores-oauth-secret-resolution-sprint-brief.md § 4 +
+ * the WAVE 2 Track A Integrations spec.
  */
 
 import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
@@ -49,8 +58,26 @@ import {
 import type { SecretsStore } from '../../auth/secrets-store.ts'
 import type { ProjectDb } from '../../persistence/index.ts'
 import type { ToolRegistry } from '../../tools/registry.ts'
+import {
+  buildIntegrationsStatus,
+  deleteApiKey,
+  setApiKey,
+  IntegrationsError,
+} from '../cores/integrations.ts'
 
 const PATH_BASE = '/api/cores/oauth/google'
+const INTEGRATIONS_PATH = '/api/cores/integrations'
+const API_KEYS_BASE = '/api/cores/api-keys'
+
+/** True for any path this surface owns (OAuth + Integrations + API keys). */
+function ownsPath(pathname: string): boolean {
+  return (
+    pathname.startsWith(PATH_BASE) ||
+    pathname === INTEGRATIONS_PATH ||
+    pathname.startsWith(`${API_KEYS_BASE}/`) ||
+    pathname === API_KEYS_BASE
+  )
+}
 
 export const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 
@@ -117,6 +144,14 @@ export interface CoresOAuthSurfaceOptions {
 
 export interface CoresOAuthSurface {
   handler: (req: Request) => Promise<Response | null>
+  /**
+   * Start a Google OAuth grant in-process for the given labels and return
+   * the PUBLIC Google `authorize_url`. Same server-side round-trip as the
+   * bearer-gated `GET /start` route, exposed so the agent-native
+   * `integrations_connect` tool can hand the user a working consent link
+   * (a raw `/start` link would 401 in a browser).
+   */
+  startOAuth: (labels: string[]) => Promise<StartOAuthResult>
 }
 
 export function createCoresOAuthSurface(
@@ -146,11 +181,29 @@ export function createCoresOAuthSurface(
   const log = opts.log
   const knownLabels = collectKnownLabels(cores)
 
+  const startOAuth = (labels: string[]): Promise<StartOAuthResult> =>
+    runOAuthStart({
+      labels,
+      knownLabels,
+      pending,
+      project_slug,
+      identityBaseUrl,
+      ownerBaseUrl,
+      redirectUri,
+      clientId,
+      internalSharedSecret,
+      fetch: fetchImpl,
+      now,
+      generateState: genState,
+      generatePkce: genPkce,
+    })
+
   return {
+    startOAuth,
     handler: async (req) => {
       const url = new URL(req.url)
       const pathname = url.pathname
-      if (!pathname.startsWith(PATH_BASE)) return null
+      if (!ownsPath(pathname)) return null
 
       // /ingest is the only route that does NOT use the user bearer —
       // identity hits this with a platform HMAC. Handle it first.
@@ -212,6 +265,48 @@ export function createCoresOAuthSurface(
         return await handleStatus({ tokens, knownLabels })
       }
 
+      // WAVE 2 Track A — unified Integrations status (OAuth + API keys).
+      if (pathname === INTEGRATIONS_PATH && req.method === 'GET') {
+        const status = await buildIntegrationsStatus({
+          registry: cores.registry,
+          tokens,
+          secretsStore,
+          project_slug,
+        })
+        return jsonResponse(200, { ok: true, ...status })
+      }
+
+      // WAVE 2 Track A — standalone API-key set/clear. `<label>` is a
+      // manifest-declared `byo_api_key` slot (e.g. `tavily`).
+      const apiKeyMatch = /^\/api\/cores\/api-keys\/([A-Za-z0-9_\-:.]+)\/?$/.exec(
+        pathname,
+      )
+      if (apiKeyMatch !== null) {
+        const label = apiKeyMatch[1] ?? ''
+        if (req.method === 'POST') {
+          return await handleSetApiKey({
+            req,
+            label,
+            cores,
+            secretsStore,
+            project_slug,
+          })
+        }
+        if (req.method === 'DELETE') {
+          return await handleDeleteApiKey({
+            label,
+            cores,
+            secretsStore,
+            project_slug,
+          })
+        }
+        return jsonResponse(405, {
+          ok: false,
+          code: 'method_not_allowed',
+          message: `${req.method} not allowed on ${pathname}`,
+        })
+      }
+
       const disconnectMatch = /^\/api\/cores\/oauth\/google\/disconnect\/([A-Za-z0-9_\-:.]+)\/?$/.exec(
         pathname,
       )
@@ -236,8 +331,17 @@ export function createCoresOAuthSurface(
   }
 }
 
-async function handleStart(input: {
-  url: URL
+/**
+ * Result of starting a Google OAuth grant. `authorize_url` is the PUBLIC
+ * Google consent URL (`accounts.google.com/...`) — NOT a gateway link —
+ * so it is safe to hand to a user to open in any browser without a bearer.
+ */
+export type StartOAuthResult =
+  | { ok: true; authorize_url: string; state: string; expires_at: number }
+  | { ok: false; status: number; code: string; message: string }
+
+interface RunOAuthStartInput {
+  labels: string[]
   knownLabels: Map<string, BundledLabelEntry>
   pending: CoresOAuthPendingStore
   project_slug: string
@@ -250,26 +354,37 @@ async function handleStart(input: {
   now: () => number
   generateState: () => string
   generatePkce: () => { codeVerifier: string; codeChallenge: string }
-}): Promise<Response> {
-  const labelsRaw = input.url.searchParams.get('labels') ?? ''
-  const labels = labelsRaw
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+}
+
+/**
+ * Start a Google OAuth grant for one or more manifest-declared labels:
+ * mint PKCE + state, persist the pending row, pre-register the dispatch
+ * with identity, and build the public Google `authorize_url`. Shared by
+ * the bearer-gated `GET /start` HTTP route AND the agent-native
+ * `integrations_connect` tool — both need the same server-side round-trip,
+ * and both hand back the SAME public `authorize_url` (never a gateway link
+ * that would 401 in a browser).
+ */
+async function runOAuthStart(
+  input: RunOAuthStartInput,
+): Promise<StartOAuthResult> {
+  const labels = input.labels
   if (labels.length === 0) {
-    return jsonResponse(400, {
+    return {
       ok: false,
+      status: 400,
       code: 'missing_labels',
-      message: 'query param `labels` is required (comma-separated label list)',
-    })
+      message: 'at least one label is required',
+    }
   }
   for (const l of labels) {
     if (!input.knownLabels.has(l)) {
-      return jsonResponse(400, {
+      return {
         ok: false,
+        status: 400,
         code: 'unknown_label',
         message: `label='${l}' is not declared by any bundled Core's manifest.secrets[]`,
-      })
+      }
     }
   }
   const scopes = new Set<string>()
@@ -321,11 +436,12 @@ async function handleStart(input: {
     },
   )
   if (!registerRes.ok) {
-    return jsonResponse(502, {
+    return {
       ok: false,
+      status: 502,
       code: 'identity_register_failed',
       message: `identity dispatch register returned ${registerRes.status}`,
-    })
+    }
   }
 
   const authorize = new URL(GOOGLE_AUTHORIZE_URL)
@@ -343,11 +459,43 @@ async function handleStart(input: {
   // which would break getAccessToken's refresh path on the next expiry.
   authorize.searchParams.set('prompt', 'consent')
 
-  return jsonResponse(200, {
+  return {
     ok: true,
     authorize_url: authorize.toString(),
     state,
     expires_at: persisted.expires_at,
+  }
+}
+
+async function handleStart(input: {
+  url: URL
+} & Omit<RunOAuthStartInput, 'labels'>): Promise<Response> {
+  const labelsRaw = input.url.searchParams.get('labels') ?? ''
+  const labels = labelsRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+  // The HTTP route reports the empty-list case with its historical message.
+  if (labels.length === 0) {
+    return jsonResponse(400, {
+      ok: false,
+      code: 'missing_labels',
+      message: 'query param `labels` is required (comma-separated label list)',
+    })
+  }
+  const result = await runOAuthStart({ ...input, labels })
+  if (!result.ok) {
+    return jsonResponse(result.status, {
+      ok: false,
+      code: result.code,
+      message: result.message,
+    })
+  }
+  return jsonResponse(200, {
+    ok: true,
+    authorize_url: result.authorize_url,
+    state: result.state,
+    expires_at: result.expires_at,
   })
 }
 
@@ -541,6 +689,65 @@ async function handleStatus(input: {
     ok: true,
     google: { connected, labels },
   })
+}
+
+async function handleSetApiKey(input: {
+  req: Request
+  label: string
+  cores: InstallBundledCoresResult
+  secretsStore: SecretsStore
+  project_slug: string
+}): Promise<Response> {
+  let body: { value?: unknown }
+  try {
+    body = (await input.req.json()) as { value?: unknown }
+  } catch {
+    return jsonResponse(400, {
+      ok: false,
+      code: 'malformed_json',
+      message: 'request body must be JSON with a `value` field',
+    })
+  }
+  const value = typeof body.value === 'string' ? body.value : ''
+  try {
+    await setApiKey({
+      registry: input.cores.registry,
+      secretsStore: input.secretsStore,
+      project_slug: input.project_slug,
+      label: input.label,
+      value,
+    })
+  } catch (err) {
+    return integrationsErrorResponse(err)
+  }
+  return jsonResponse(200, { ok: true, label: input.label, connected: true })
+}
+
+async function handleDeleteApiKey(input: {
+  label: string
+  cores: InstallBundledCoresResult
+  secretsStore: SecretsStore
+  project_slug: string
+}): Promise<Response> {
+  try {
+    const { deleted } = await deleteApiKey({
+      registry: input.cores.registry,
+      secretsStore: input.secretsStore,
+      project_slug: input.project_slug,
+      label: input.label,
+    })
+    return jsonResponse(200, { ok: true, label: input.label, deleted })
+  } catch (err) {
+    return integrationsErrorResponse(err)
+  }
+}
+
+function integrationsErrorResponse(err: unknown): Response {
+  if (err instanceof IntegrationsError) {
+    const status = err.code === 'unknown_label' ? 400 : 422
+    return jsonResponse(status, { ok: false, code: err.code, message: err.message })
+  }
+  throw err
 }
 
 function collectKnownLabels(
