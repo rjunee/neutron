@@ -10,6 +10,7 @@
     "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/email-managed-core": "workspace:*",
     "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/google-workspace-core": "workspace:*",
     "@neutronai/notes": "workspace:*",
     "@neutronai/reminders-core": "workspace:*",
     "@neutronai/research-core": "workspace:*",

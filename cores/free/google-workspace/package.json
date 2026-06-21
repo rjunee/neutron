@@ -1,0 +1,298 @@
+{
+  "name": "@neutronai/google-workspace-core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": [
+      "read:google_workspace_core.drive",
+      "write:google_workspace_core.drive",
+      "read:google_workspace_core.sheets",
+      "write:google_workspace_core.sheets",
+      "read:google_workspace_core.docs",
+      "write:google_workspace_core.docs"
+    ],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "drive_list",
+        "description": "List Google Drive files the user can access, newest-first by modifiedTime. Optionally filter by a Drive `query` (the Drive v3 `q` syntax, e.g. \"name contains 'invoice'\") and/or scope to a single `folder_id` parent. Returns one row per file (id, name, mime_type, modified_time, size, web_view_link) — NOT the file body. Use drive_read for content.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "description": "Drive v3 `q` filter (e.g. \"name contains 'report' and trashed = false\"). When omitted, lists non-trashed files." },
+            "folder_id": { "type": "string", "description": "Restrict the listing to direct children of this Drive folder id." },
+            "page_size": { "type": "integer", "description": "Maximum files to return. Backend default applies when omitted." },
+            "page_token": { "type": "string", "description": "Opaque cursor returned by a prior call. Omit on the first page." }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id":            { "type": "string" },
+                  "name":          { "type": "string" },
+                  "mime_type":     { "type": "string" },
+                  "modified_time": { "type": "string", "description": "ISO-8601 RFC 3339 modifiedTime." },
+                  "size":          { "type": ["integer", "null"], "description": "Byte size; null for Google-native files (Docs/Sheets) which report no size." },
+                  "web_view_link": { "type": "string" }
+                },
+                "required": ["id", "name", "mime_type"]
+              }
+            },
+            "next_page_token": { "type": "string" }
+          },
+          "required": ["files"]
+        },
+        "capability_required": "read:google_workspace_core.drive"
+      },
+      {
+        "name": "drive_read",
+        "description": "Fetch the text content + metadata of a single Drive file by id. Google-native files (Docs/Sheets/Slides) are EXPORTED to a text format (Docs→text/plain, Sheets→text/csv) — pass `export_mime_type` to override. Binary/plain files are downloaded via alt=media and returned as UTF-8 text (callers should only read text files; binary returns best-effort decoded text).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_id":          { "type": "string" },
+            "export_mime_type": { "type": "string", "description": "Override the export MIME type for Google-native files (e.g. 'text/csv', 'text/plain', 'text/markdown')." }
+          },
+          "required": ["file_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "object",
+              "properties": {
+                "id":            { "type": "string" },
+                "name":          { "type": "string" },
+                "mime_type":     { "type": "string" },
+                "content_text":  { "type": "string", "description": "Exported / downloaded UTF-8 text content." },
+                "exported_as":   { "type": ["string", "null"], "description": "The export MIME type used for Google-native files; null for direct-download files." }
+              },
+              "required": ["id", "name", "mime_type", "content_text"]
+            }
+          },
+          "required": ["file"]
+        },
+        "capability_required": "read:google_workspace_core.drive"
+      },
+      {
+        "name": "drive_upload",
+        "description": "Create a new Drive file from text content via a multipart upload. Sets name + mime_type and (optionally) a parent `folder_id`. Returns the new file's id + metadata row. v1 is text-upload only (no resumable/binary uploads).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "name":      { "type": "string" },
+            "mime_type": { "type": "string", "description": "MIME type to store the file as (e.g. 'text/plain', 'text/csv', 'text/markdown')." },
+            "content":   { "type": "string", "description": "UTF-8 text body of the new file." },
+            "folder_id": { "type": "string", "description": "Optional parent folder id. When omitted, the file lands in My Drive root." }
+          },
+          "required": ["name", "mime_type", "content"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "object",
+              "properties": {
+                "id":            { "type": "string" },
+                "name":          { "type": "string" },
+                "mime_type":     { "type": "string" },
+                "web_view_link": { "type": "string" }
+              },
+              "required": ["id", "name", "mime_type"]
+            }
+          },
+          "required": ["file"]
+        },
+        "capability_required": "write:google_workspace_core.drive"
+      },
+      {
+        "name": "sheets_read",
+        "description": "Read a rectangular range of cell values from a Google Sheet via spreadsheets.values.get. Returns the resolved A1 range + a 2-D array of stringified cell values (row-major). Empty trailing cells/rows are omitted by the Sheets API.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "spreadsheet_id": { "type": "string" },
+            "range":          { "type": "string", "description": "A1 notation (e.g. 'Sheet1!A1:C10' or 'Sheet1')." }
+          },
+          "required": ["spreadsheet_id", "range"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "range":  { "type": "string", "description": "The A1 range the API actually resolved." },
+            "values": {
+              "type": "array",
+              "items": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "required": ["range", "values"]
+        },
+        "capability_required": "read:google_workspace_core.sheets"
+      },
+      {
+        "name": "sheets_append",
+        "description": "Append rows of values AFTER the last row of a table in a Google Sheet via spreadsheets.values.append (valueInputOption=USER_ENTERED, so formulas/dates are parsed). Returns the updated range + counts. Does NOT overwrite existing rows.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "spreadsheet_id": { "type": "string" },
+            "range":          { "type": "string", "description": "A1 notation of the table to append to (e.g. 'Sheet1!A1')." },
+            "values": {
+              "type": "array",
+              "description": "Rows to append; each row is an array of cell values.",
+              "items": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "required": ["spreadsheet_id", "range", "values"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "updated_range": { "type": "string" },
+            "updated_rows":  { "type": "integer" },
+            "updated_cells": { "type": "integer" }
+          },
+          "required": ["updated_range", "updated_rows", "updated_cells"]
+        },
+        "capability_required": "write:google_workspace_core.sheets"
+      },
+      {
+        "name": "sheets_update",
+        "description": "Overwrite a rectangular range of cells in a Google Sheet via spreadsheets.values.update (valueInputOption=USER_ENTERED). Writes the supplied 2-D values starting at the range's top-left cell. Returns the updated range + counts.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "spreadsheet_id": { "type": "string" },
+            "range":          { "type": "string", "description": "A1 notation anchoring the top-left of the write (e.g. 'Sheet1!A1:C3')." },
+            "values": {
+              "type": "array",
+              "description": "Rows to write; each row is an array of cell values.",
+              "items": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "required": ["spreadsheet_id", "range", "values"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "updated_range": { "type": "string" },
+            "updated_rows":  { "type": "integer" },
+            "updated_cells": { "type": "integer" }
+          },
+          "required": ["updated_range", "updated_rows", "updated_cells"]
+        },
+        "capability_required": "write:google_workspace_core.sheets"
+      },
+      {
+        "name": "docs_read",
+        "description": "Fetch a Google Doc's title + flattened plain-text body via documents.get. The structured document model is collapsed to text (paragraph runs concatenated, newlines between paragraphs) for downstream summarisation/editing.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string" }
+          },
+          "required": ["document_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "document": {
+              "type": "object",
+              "properties": {
+                "document_id": { "type": "string" },
+                "title":       { "type": "string" },
+                "body_text":   { "type": "string" }
+              },
+              "required": ["document_id", "title", "body_text"]
+            }
+          },
+          "required": ["document"]
+        },
+        "capability_required": "read:google_workspace_core.docs"
+      },
+      {
+        "name": "docs_create",
+        "description": "Create a new Google Doc with a title and (optionally) an initial text body via documents.create followed by a documents.batchUpdate insertText. Returns the new document id + title.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "body":  { "type": "string", "description": "Optional initial text body inserted at the top of the new document." }
+          },
+          "required": ["title"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string" },
+            "title":       { "type": "string" }
+          },
+          "required": ["document_id", "title"]
+        },
+        "capability_required": "write:google_workspace_core.docs"
+      },
+      {
+        "name": "docs_update",
+        "description": "Insert text into an existing Google Doc via documents.batchUpdate (insertText). By default appends to the end of the body; pass `index` to insert at a specific 1-based character offset. Returns the document id + the number of batchUpdate replies applied.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "document_id": { "type": "string" },
+            "text":        { "type": "string", "description": "Text to insert." },
+            "index":       { "type": "integer", "description": "Optional 1-based insertion offset. When omitted, text is appended at the end of the document body." }
+          },
+          "required": ["document_id", "text"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "document_id":   { "type": "string" },
+            "replies_count": { "type": "integer" }
+          },
+          "required": ["document_id", "replies_count"]
+        },
+        "capability_required": "write:google_workspace_core.docs"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [
+      {
+        "kind": "google-drive",
+        "scope": "read_write",
+        "target_kinds": ["user"],
+        "description": "Google Drive v3 + Sheets v4 + Docs v1 — list/read/upload Drive files, read/append/update Sheet ranges, read/create/update Docs on the user's account. The Core requests THREE Google OAuth scopes under one grant: `drive` (Drive file read + create), `spreadsheets` (Sheets read/append/update), and `documents` (Docs read/create/update)."
+      }
+    ],
+    "secrets": [
+      {
+        "name": "google_workspace_oauth",
+        "kind": "oauth_token",
+        "label": "google_workspace",
+        "scope": "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/documents",
+        "required": true,
+        "install_prompt": "Connect your Google account so Neutron can read and create files in Drive (drive), read and write Sheets (spreadsheets), and read and edit Docs (documents)."
+      }
+    ],
+    "compat": { "coreApi": "^0.1.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}

@@ -20,6 +20,7 @@ import type { NeutronManifest } from '@neutronai/cores-sdk'
 import {
   CORE_SLUG,
   READ_CAPABILITY,
+  SEND_CAPABILITY,
   WRITE_CAPABILITY,
 } from './manifest.ts'
 import { applyDraftVisibilityLabels } from './draft-policy.ts'
@@ -35,6 +36,8 @@ import {
   type GmailMessageFull,
   type GmailMessageMeta,
   type GmailSearchInput,
+  type GmailSendInput,
+  type GmailSendResult,
 } from './backend.ts'
 import {
   briefTemplateHash,
@@ -77,6 +80,9 @@ export interface EmailSummarizeToolOutput {
 
 export interface EmailDraftPrepareToolInput extends GmailDraftInput {}
 export interface EmailDraftPrepareToolOutput extends GmailDraftResult {}
+
+export interface EmailSendToolInput extends GmailSendInput {}
+export interface EmailSendToolOutput extends GmailSendResult {}
 
 export interface EmailTriageToolInput {
   lookback_messages?: number
@@ -134,6 +140,7 @@ export interface BuiltTools {
     input: EmailDraftPrepareToolInput,
   ) => Promise<EmailDraftPrepareToolOutput>
   email_triage: (input: EmailTriageToolInput) => Promise<EmailTriageToolOutput>
+  email_send: (input: EmailSendToolInput) => Promise<EmailSendToolOutput>
 }
 
 const NULL_LLM: (prompt: string) => Promise<string> = () =>
@@ -304,6 +311,37 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     },
   })
 
+  const email_send = guard.wrapToolHandler<EmailSendToolInput, EmailSendToolOutput>({
+    tool_name: 'email_send',
+    capability_required: SEND_CAPABILITY,
+    fn: async (input: EmailSendToolInput): Promise<EmailSendToolOutput> => {
+      // messages.send + the post-send owner visibility-label apply
+      // (INBOX + IMPORTANT + UNREAD, + Neutron/<project_id>) live inside
+      // the backend's `sendMessage`; header-injection is blocked at the
+      // shared `buildRawMessage` MIME layer. Record a draft-audit-style
+      // row when a project cache is wired so sends are observable
+      // alongside drafts.
+      const result = await deps.client.sendMessage(input)
+      if (deps.cacheFor !== undefined && input.project_id !== undefined) {
+        try {
+          const cache = await deps.cacheFor(input.project_id)
+          cache.recordDraftAudit({
+            draft_id: `sent:${result.message_id}`,
+            thread_id: result.thread_id,
+            message_id: result.message_id,
+            project_id: input.project_id,
+            applied_labels: result.applied_labels,
+            outcome: 'ok',
+            response_excerpt: input.body.slice(0, 240),
+          })
+        } catch {
+          /* best-effort */
+        }
+      }
+      return result
+    },
+  })
+
   void DEFAULT_LABEL
 
   return {
@@ -313,5 +351,6 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     email_summarize,
     email_draft_prepare,
     email_triage,
+    email_send,
   }
 }
