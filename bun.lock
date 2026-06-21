@@ -136,6 +136,15 @@
         "@neutronai/runtime": "workspace:*",
       },
     },
+    "cores/free/google-workspace": {
+      "name": "@neutronai/google-workspace-core",
+      "version": "0.1.0",
+      "dependencies": {
+        "@neutronai/cores-runtime": "workspace:*",
+        "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+      },
+    },
     "cores/free/notes": {
       "name": "@neutronai/notes",
       "version": "0.2.0",
@@ -204,6 +213,7 @@
         "@neutronai/cores-sdk": "workspace:*",
         "@neutronai/email-managed-core": "workspace:*",
         "@neutronai/gbrain-memory": "workspace:*",
+        "@neutronai/google-workspace-core": "workspace:*",
         "@neutronai/notes": "workspace:*",
         "@neutronai/reminders-core": "workspace:*",
         "@neutronai/research-core": "workspace:*",
@@ -737,6 +747,8 @@
     "@neutronai/gateway": ["@neutronai/gateway@workspace:gateway"],
 
     "@neutronai/gbrain-memory": ["@neutronai/gbrain-memory@workspace:gbrain-memory"],
+
+    "@neutronai/google-workspace-core": ["@neutronai/google-workspace-core@workspace:cores/free/google-workspace"],
 
     "@neutronai/jwt-validator": ["@neutronai/jwt-validator@workspace:jwt-validator"],
 

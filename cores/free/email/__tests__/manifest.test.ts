@@ -7,6 +7,7 @@ import {
   CORE_SLUG,
   OAUTH_SECRET_LABEL,
   READ_CAPABILITY,
+  SEND_CAPABILITY,
   TOOL_NAMES,
   WRITE_CAPABILITY,
   loadManifest,
@@ -26,7 +27,7 @@ describe('Email-Managed Core — manifest', () => {
     expect(m.build.neutronVersion).toBe('0.1.0')
   })
 
-  test('manifest declares one required Gmail OAuth secret with the THREE-scope split (readonly + modify + compose, NOT send)', () => {
+  test('manifest declares one required Gmail OAuth secret with the FOUR-scope grant (readonly + modify + compose + send)', () => {
     const m = loadManifest()
     expect(m.secrets).toHaveLength(1)
     const secret = m.secrets[0]
@@ -48,6 +49,9 @@ describe('Email-Managed Core — manifest', () => {
     expect(scope).toContain('https://www.googleapis.com/auth/gmail.readonly')
     expect(scope).toContain('https://www.googleapis.com/auth/gmail.modify')
     expect(scope).toContain('https://www.googleapis.com/auth/gmail.compose')
+    // gap-audit P0 (2026-06-20) — Gmail-send shipped; the grant now
+    // also covers gmail.send for the email_send tool.
+    expect(scope).toContain('https://www.googleapis.com/auth/gmail.send')
     expect(secret?.install_prompt.length).toBeGreaterThan(0)
   })
 
@@ -60,42 +64,44 @@ describe('Email-Managed Core — manifest', () => {
     expect(ls?.target_kinds).toContain('user')
   })
 
-  test('six tools declared with locked capability_required values — only ONE tool gets write capability (drafts), five are read', () => {
+  test('seven tools declared with locked capability_required values — drafts vs send write capabilities, five read', () => {
     const m = loadManifest()
     const byName = new Map(m.tools.map((t) => [t.name, t]))
-    expect(byName.size).toBe(6)
+    expect(byName.size).toBe(7)
     expect(byName.get('email_list')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_read')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_search')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_summarize')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_triage')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_draft_prepare')?.capability_required).toBe(WRITE_CAPABILITY)
+    // Send gets its OWN write capability (distinct from drafts) for
+    // clean audit attribution.
+    expect(byName.get('email_send')?.capability_required).toBe(SEND_CAPABILITY)
   })
 
-  test('NO send tool declared AND gmail.send NOT in OAuth scope — Tier 1 drafts-only at product AND OAuth-grant layers', () => {
-    // Hard regression guard. Send is intentionally Tier 2 territory;
-    // anyone adding a `messages.send` / `drafts.send` surface to this
-    // Core has broken the Tier 1 guarantee. The spec-conformance
-    // 5-line diff at the top of the sprint brief explicitly carves
-    // send OUT of scope.
-    //
-    // Argus r1 BLOCKER #2 (2026-05-21) — the no-send guarantee is
-    // now enforced at THREE layers: product (no send tool here),
-    // OAuth grant (gmail.send NOT in the scope set), and audit
-    // (CapabilityGuard wraps every dispatch). Tier 2 Email-Private
-    // will request gmail.send under a distinct secret label so audit
-    // attribution stays clean.
+  test('email_send tool shipped with its own send capability + gmail.send grant (gap-audit P0 reversal)', () => {
+    // HISTORY: send was originally carved OUT (Tier 1 drafts-only,
+    // reserved for a Tier 2 paid Core). The gap-audit (2026-06-20, P0)
+    // reversed that product decision — Gmail-send is a daily-driver
+    // need — so this guard now asserts the INVERSE of the old one:
+    // the email_send tool is declared, it requires its OWN distinct
+    // send capability (clean audit attribution), and the OAuth grant
+    // includes gmail.send. The 4-point DRAFT rule is unchanged (see
+    // the draft-prepare + draft-policy tests).
     const m = loadManifest()
     const toolNames = m.tools.map((t) => t.name)
-    expect(toolNames).not.toContain('email_send')
-    expect(toolNames).not.toContain('email_reply')
-    expect(toolNames).not.toContain('email_forward')
-    // gmail.send is intentionally EXCLUDED from the OAuth grant.
-    // (gmail.modify IS included now — required for threads.modify
-    // in the Sam 4-point draft policy; tests above assert it's
-    // present in the scope tuple.)
+    expect(toolNames).toContain('email_send')
+    const send = m.tools.find((t) => t.name === 'email_send')
+    expect(send?.capability_required).toBe(SEND_CAPABILITY)
+    expect(SEND_CAPABILITY).toBe('write:email_managed_core.send')
+    // Send capability is DISTINCT from the drafts write capability.
+    expect(SEND_CAPABILITY).not.toBe(WRITE_CAPABILITY)
+    expect(m.capabilities).toContain(SEND_CAPABILITY)
     const scope = m.secrets[0]?.scope ?? ''
-    expect(scope).not.toContain('gmail.send')
+    expect(scope).toContain('gmail.send')
+    // email_send applied_labels output is part of the contract.
+    const out = send?.output_schema as { properties?: Record<string, unknown> }
+    expect(out.properties?.['applied_labels']).toBeDefined()
   })
 
   test('NO `.db`-suffixed capability — Email-Managed Core delegates persistence to Gmail (tables layout, no sidecar)', () => {

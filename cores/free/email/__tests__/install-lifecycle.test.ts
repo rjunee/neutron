@@ -257,18 +257,20 @@ describe('bundled registry — Email-Managed Core discovery', () => {
       'email_list',
       'email_read',
       'email_search',
+      'email_send',
       'email_summarize',
       'email_triage',
     ])
-    // Exactly one required OAuth secret carrying the 3-scope split
-    // (readonly + modify + compose; send is intentionally excluded).
+    // Exactly one required OAuth secret carrying the 4-scope grant
+    // (readonly + modify + compose + send).
     expect(em?.manifest.secrets).toHaveLength(1)
     expect(em?.manifest.secrets[0]?.required).toBe(true)
     const scope = em?.manifest.secrets[0]?.scope ?? ''
     expect(scope).toContain('https://www.googleapis.com/auth/gmail.readonly')
     expect(scope).toContain('https://www.googleapis.com/auth/gmail.modify')
     expect(scope).toContain('https://www.googleapis.com/auth/gmail.compose')
-    expect(scope).not.toContain('gmail.send')
+    // gap-audit P0 (2026-06-20) — gmail.send now part of the grant.
+    expect(scope).toContain('https://www.googleapis.com/auth/gmail.send')
   })
 
   test('Email-Managed coexists with another bundled Core under the same registry root', () => {

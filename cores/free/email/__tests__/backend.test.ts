@@ -983,3 +983,159 @@ describe('buildGoogleGmailClient — OAuth + REST wrapper', () => {
     expect(results.map((r) => r.id)).toEqual(['b', 'a'])
   })
 })
+
+describe('sendMessage — Gmail send (gap-audit P0)', () => {
+  test('in-memory: send marks the message SENT and applies the owner visibility labels', async () => {
+    const c = buildSeededInMemoryGmailClient()
+    const result = await c.sendMessage({
+      to: ['alice@example.com'],
+      subject: 'hello',
+      body: 'body text',
+    })
+    expect(result.message_id.length).toBeGreaterThan(0)
+    expect(result.thread_id.length).toBeGreaterThan(0)
+    // Send-path counterpart to the 4-point draft rule: the sent thread
+    // surfaces in the inbox via INBOX + IMPORTANT + UNREAD (DRAFT is
+    // N/A for a sent message).
+    expect(result.applied_labels).toContain('INBOX')
+    expect(result.applied_labels).toContain('IMPORTANT')
+    expect(result.applied_labels).toContain('UNREAD')
+    // The stored message carries SENT, not DRAFT.
+    const fetched = await c.getMessage({ message_id: result.message_id })
+    expect(fetched.label_ids).toContain('SENT')
+    expect(fetched.label_ids).not.toContain('DRAFT')
+  })
+
+  test('in-memory: send on a reply threads onto the source message', async () => {
+    const c = buildSeededInMemoryGmailClient()
+    const srcId = c.seed({ subject: 'Q', from: 'bob@example.com', thread_id: 'thread-xyz' })
+    const result = await c.sendMessage({
+      to: ['bob@example.com'],
+      subject: 'Re: Q',
+      body: 'A',
+      reply_to_message_id: srcId,
+    })
+    expect(result.thread_id).toBe('thread-xyz')
+  })
+
+  test('in-memory: send rejects header injection in the subject (CRLF)', async () => {
+    const c = buildSeededInMemoryGmailClient()
+    await expect(
+      c.sendMessage({
+        to: ['alice@example.com'],
+        subject: 'ok\r\nBcc: evil@x.com',
+        body: 'b',
+      }),
+    ).rejects.toThrow(/CR\/LF\/NUL|injection/i)
+  })
+
+  test('in-memory: send against an unknown reply_to_message_id throws MessageNotFoundError', async () => {
+    const c = buildSeededInMemoryGmailClient()
+    await expect(
+      c.sendMessage({ to: ['x@y.com'], subject: 's', body: 'b', reply_to_message_id: 'nope' }),
+    ).rejects.toBeInstanceOf(MessageNotFoundError)
+  })
+
+  test('google client: send POSTs /messages/send then applies visibility labels via threads.modify', async () => {
+    let sendBody = ''
+    let modifyBody = ''
+    let modifyPath = ''
+    const client = buildGoogleGmailClient({
+      accessToken: async () => 'ya29.test',
+      fetchImpl: async (input, init) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        const method = (init?.method as string) ?? 'GET'
+        if (method === 'POST' && url.includes('/messages/send')) {
+          sendBody = typeof init?.body === 'string' ? init.body : ''
+          return new Response(
+            JSON.stringify({ id: 'sent-1', threadId: 'thread-sent-1' }),
+            { status: 200 },
+          )
+        }
+        if (method === 'POST' && url.includes('/threads/') && url.endsWith('/modify')) {
+          modifyPath = url
+          modifyBody = typeof init?.body === 'string' ? init.body : ''
+          return new Response(
+            JSON.stringify({ id: 'thread-sent-1', labelIds: ['INBOX', 'IMPORTANT', 'UNREAD'] }),
+            { status: 200 },
+          )
+        }
+        return new Response('{}', { status: 200 })
+      },
+    })
+    const result = await client.sendMessage({
+      to: ['alice@example.com'],
+      subject: 'Hello',
+      body: 'Body',
+    })
+    expect(result.message_id).toBe('sent-1')
+    expect(result.thread_id).toBe('thread-sent-1')
+    expect(result.applied_labels).toEqual(['INBOX', 'IMPORTANT', 'UNREAD'])
+    // The send payload carries a base64url raw MIME.
+    const parsedSend = JSON.parse(sendBody) as { raw: string; threadId?: string }
+    expect(typeof parsedSend.raw).toBe('string')
+    expect(parsedSend.raw.length).toBeGreaterThan(0)
+    expect(parsedSend.threadId).toBeUndefined()
+    // The post-send modify applies exactly the 3 visibility labels.
+    expect(modifyPath).toContain('/threads/thread-sent-1/modify')
+    expect(JSON.parse(modifyBody)).toEqual({ addLabelIds: ['INBOX', 'IMPORTANT', 'UNREAD'] })
+  })
+
+  test('google client: send on a reply sets threadId from the source message', async () => {
+    let sendBody = ''
+    const client = buildGoogleGmailClient({
+      accessToken: async () => 'ya29.test',
+      fetchImpl: async (input, init) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        const method = (init?.method as string) ?? 'GET'
+        if (method === 'GET' && url.includes('/messages/')) {
+          return new Response(
+            JSON.stringify({
+              id: 'src',
+              threadId: 'thread-reply',
+              payload: { headers: [{ name: 'Message-ID', value: '<orig@x>' }] },
+            }),
+            { status: 200 },
+          )
+        }
+        if (method === 'POST' && url.includes('/messages/send')) {
+          sendBody = typeof init?.body === 'string' ? init.body : ''
+          return new Response(
+            JSON.stringify({ id: 'sent-2', threadId: 'thread-reply' }),
+            { status: 200 },
+          )
+        }
+        return new Response(JSON.stringify({ id: 't', labelIds: [] }), { status: 200 })
+      },
+    })
+    const result = await client.sendMessage({
+      to: ['bob@example.com'],
+      subject: 'Re: x',
+      body: 'reply',
+      reply_to_message_id: 'src',
+    })
+    expect(result.thread_id).toBe('thread-reply')
+    const parsed = JSON.parse(sendBody) as { raw: string; threadId?: string }
+    expect(parsed.threadId).toBe('thread-reply')
+    const padded = parsed.raw
+      .replace(/-/g, '+')
+      .replace(/_/g, '/')
+      .padEnd(parsed.raw.length + ((4 - (parsed.raw.length % 4)) % 4), '=')
+    expect(atob(padded)).toContain('In-Reply-To: <orig@x>')
+  })
+
+  test('google client: a null access token blocks send before any fetch', async () => {
+    let calls = 0
+    const client = buildGoogleGmailClient({
+      accessToken: async () => null,
+      fetchImpl: async () => {
+        calls++
+        return new Response('{}', { status: 200 })
+      },
+    })
+    await expect(
+      client.sendMessage({ to: ['a@b.com'], subject: 's', body: 'b' }),
+    ).rejects.toBeInstanceOf(OAuthMissingError)
+    expect(calls).toBe(0)
+  })
+})

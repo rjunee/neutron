@@ -147,6 +147,35 @@ export interface GmailDraftResult {
   applied_labels: string[]
 }
 
+export interface GmailSendInput {
+  to: string[]
+  subject: string
+  body: string
+  reply_to_message_id?: string
+  cc?: string[]
+  /**
+   * Optional project scope. When supplied, the per-project Gmail
+   * user-label `Neutron/<project_id>` is applied to the sent thread
+   * alongside the owner visibility labels.
+   */
+  project_id?: string
+}
+
+/**
+ * Result of `messages.send` + the post-send threads.modify step.
+ * Gmail returns the sent message id + its threadId. `applied_labels`
+ * echoes the owner visibility labels applied to the sent thread after
+ * the post-send labels-apply step — always includes `INBOX +
+ * IMPORTANT + UNREAD` (the owner's "every Neutron-touched thread
+ * surfaces in the inbox" rule; the DRAFT label is N/A for a sent
+ * message), plus `Neutron/<project_id>` when `project_id` was supplied.
+ */
+export interface GmailSendResult {
+  message_id: string
+  thread_id: string
+  applied_labels: string[]
+}
+
 export interface GmailLabelEnsureInput {
   project_id: string
 }
@@ -202,6 +231,19 @@ export interface GmailClient {
    * idempotently.
    */
   createDraft(input: GmailDraftInput): Promise<GmailDraftResult>
+  /**
+   * Send a NEW message (or a reply when `reply_to_message_id` is set)
+   * via `messages.send`, then atomically apply the owner visibility
+   * labels (INBOX + IMPORTANT + UNREAD, + `Neutron/<project_id>` when
+   * supplied) to the sent thread via `threads.modify` so the
+   * conversation surfaces in the owner's inbox — the send-path
+   * counterpart to the 4-point draft policy. Header-injection is
+   * blocked at the `buildRawMessage` MIME layer (shared with the draft
+   * path). On partial completion (send OK but threads.modify failed)
+   * throws `DraftLabelingError` carrying the sent message id so the
+   * caller can retry the labelling step idempotently.
+   */
+  sendMessage(input: GmailSendInput): Promise<GmailSendResult>
   /**
    * Ensure the per-project Gmail user-label `Neutron/<project_id>`
    * exists; create it via `users.labels.create` on first use.
@@ -504,6 +546,54 @@ export function buildInMemoryGmailClient(
       return result
     },
 
+    async sendMessage(input: GmailSendInput): Promise<GmailSendResult> {
+      // Validate the MIME header inputs through the shared sanitizer —
+      // the send path inherits the same header-injection guard the
+      // draft path uses (a CRLF in `to`/`subject` throws before send).
+      buildRawMessage({
+        to: input.to,
+        subject: input.subject,
+        body: input.body,
+        ...(input.cc !== undefined ? { cc: input.cc } : {}),
+      })
+      const message_id = nextId()
+      let thread_id: string
+      if (input.reply_to_message_id !== undefined) {
+        const src = messages.get(input.reply_to_message_id)
+        if (src === undefined) {
+          throw new MessageNotFoundError(input.reply_to_message_id)
+        }
+        thread_id = src.thread_id
+      } else {
+        thread_id = `thread-${nextId()}`
+      }
+      const sentMsg: GmailMessageFull = {
+        id: message_id,
+        thread_id,
+        subject: input.subject,
+        from: 'me',
+        to: [...input.to],
+        cc: input.cc !== undefined ? [...input.cc] : [],
+        snippet: input.body.slice(0, 200),
+        internal_date: epochMsToIso(now()),
+        label_ids: ['SENT'],
+        body_text: input.body,
+      }
+      messages.set(message_id, sentMsg)
+      const addLabels: string[] = [...DEFAULT_DRAFT_LABEL_IDS]
+      if (input.project_id !== undefined) {
+        const labelName = projectLabelName(input.project_id)
+        if (!labels.has(labelName)) labels.set(labelName, `Label_${nextId()}`)
+        addLabels.push(labelName)
+      }
+      const finalLabels = applyLabelsToThread(thread_id, addLabels)
+      return {
+        message_id,
+        thread_id,
+        applied_labels: finalLabels.filter((l) => addLabels.includes(l)),
+      }
+    },
+
     async ensureProjectLabel(
       input: GmailLabelEnsureInput,
     ): Promise<GmailLabelEnsureResult> {
@@ -761,6 +851,51 @@ export function buildSeededInMemoryGmailClient(
       const finalLabels = applyLabelsToThread(thread_id, addLabels)
       return {
         draft_id,
+        message_id,
+        thread_id,
+        applied_labels: finalLabels.filter((l) => addLabels.includes(l)),
+      }
+    },
+
+    async sendMessage(input: GmailSendInput): Promise<GmailSendResult> {
+      buildRawMessage({
+        to: input.to,
+        subject: input.subject,
+        body: input.body,
+        ...(input.cc !== undefined ? { cc: input.cc } : {}),
+      })
+      const message_id = nextId()
+      let thread_id: string
+      if (input.reply_to_message_id !== undefined) {
+        const src = messages.get(input.reply_to_message_id)
+        if (src === undefined) {
+          throw new MessageNotFoundError(input.reply_to_message_id)
+        }
+        thread_id = src.thread_id
+      } else {
+        thread_id = `thread-${nextId()}`
+      }
+      const sentMsg: GmailMessageFull = {
+        id: message_id,
+        thread_id,
+        subject: input.subject,
+        from: 'me',
+        to: [...input.to],
+        cc: input.cc !== undefined ? [...input.cc] : [],
+        snippet: input.body.slice(0, 200),
+        internal_date: epochMsToIso(now()),
+        label_ids: ['SENT'],
+        body_text: input.body,
+      }
+      messages.set(message_id, sentMsg)
+      const addLabels: string[] = [...DEFAULT_DRAFT_LABEL_IDS]
+      if (input.project_id !== undefined) {
+        const labelName = projectLabelName(input.project_id)
+        if (!labels.has(labelName)) labels.set(labelName, `Label_${nextId()}`)
+        addLabels.push(labelName)
+      }
+      const finalLabels = applyLabelsToThread(thread_id, addLabels)
+      return {
         message_id,
         thread_id,
         applied_labels: finalLabels.filter((l) => addLabels.includes(l)),
@@ -1479,6 +1614,65 @@ export function buildGoogleGmailClient(
       } catch (err) {
         const underlying = err instanceof Error ? err : new Error(String(err))
         throw new DraftLabelingError(draft_id, thread_id, message_id, underlying)
+      }
+    },
+
+    async sendMessage(input: GmailSendInput): Promise<GmailSendResult> {
+      // Mirror the draft path's reply handling: resolve the source
+      // message's RFC Message-ID (for In-Reply-To/References) + Gmail
+      // threadId so the sent message threads onto the conversation.
+      let inReplyTo: string | undefined
+      let sourceThreadId: string | undefined
+      if (input.reply_to_message_id !== undefined) {
+        const src = (await call(
+          'GET',
+          `/messages/${encodeURIComponent(input.reply_to_message_id)}?format=metadata&metadataHeaders=Message-ID`,
+          undefined,
+          { message_id_for_not_found: input.reply_to_message_id },
+        )) as GmailMessageResource
+        const headers = src.payload?.headers ?? []
+        inReplyTo = headerValue(headers, 'Message-ID')
+        if (typeof src.threadId === 'string' && src.threadId.length > 0) {
+          sourceThreadId = src.threadId
+        }
+      }
+      const rawMessage = buildRawMessage({
+        to: input.to,
+        subject: input.subject,
+        body: input.body,
+        ...(input.cc !== undefined ? { cc: input.cc } : {}),
+        ...(inReplyTo !== undefined ? { in_reply_to: inReplyTo } : {}),
+      })
+      const sendPayload = {
+        raw: encodeGmailBase64Url(rawMessage),
+        ...(sourceThreadId !== undefined ? { threadId: sourceThreadId } : {}),
+      }
+      const sent = (await call('POST', '/messages/send', sendPayload)) as GmailMessageResource
+      const message_id = sent.id ?? ''
+      const thread_id = sent.threadId ?? ''
+      // Apply the owner visibility labels (INBOX + IMPORTANT + UNREAD,
+      // + Neutron/<project_id> when supplied) to the sent thread so the
+      // conversation surfaces in the owner's inbox — the send-path
+      // counterpart to the 4-point draft policy. On failure throw
+      // DraftLabelingError carrying the sent message id for idempotent
+      // retry.
+      const addLabels: string[] = [...DEFAULT_DRAFT_LABEL_IDS]
+      if (input.project_id !== undefined) {
+        const ensure = await ensureLabelImpl(input.project_id)
+        addLabels.push(ensure.label_id)
+      }
+      try {
+        const modify = (await call(
+          'POST',
+          `/threads/${encodeURIComponent(thread_id)}/modify`,
+          { addLabelIds: addLabels },
+        )) as { id?: string; labelIds?: string[] }
+        const applied = modify.labelIds ?? addLabels
+        const echoed = addLabels.filter((l) => applied.includes(l))
+        return { message_id, thread_id, applied_labels: echoed }
+      } catch (err) {
+        const underlying = err instanceof Error ? err : new Error(String(err))
+        throw new DraftLabelingError(message_id, thread_id, message_id, underlying)
       }
     },
 
