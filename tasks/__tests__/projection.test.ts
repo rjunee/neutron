@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -140,6 +140,24 @@ describe('projection — parse', () => {
   })
 })
 
+/**
+ * Poll a condition until true or a generous deadline elapses. Replaces fixed
+ * `setTimeout(debounce + slack)` sleeps so these debounce-timing tests stay
+ * green under heavy concurrent CI load (the bounded-memory chunk runner packs
+ * ~100 files / 1000+ tests into one process, where a fixed 70 ms slack over a
+ * 50 ms debounce reliably slips — a load flake, not a real regression). The
+ * semantics are unchanged: the debounce still fires on its own; we just wait
+ * for its effect instead of guessing how long it takes.
+ */
+async function waitUntil(check: () => boolean, timeoutMs = 4000, stepMs = 10): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (check()) return
+    if (Date.now() - start >= timeoutMs) return
+    await new Promise((r) => setTimeout(r, stepMs))
+  }
+}
+
 describe('projection — writer (debounced atomic write)', () => {
   let tmp: string
   let db: ProjectDb
@@ -172,9 +190,11 @@ describe('projection — writer (debounced atomic write)', () => {
       title: 'one',
       priority: 2,
     })
-    await new Promise((r) => setTimeout(r, 120))
     const statusPath = join(projectsDir, 'proj-A', 'STATUS.md')
     const actionsPath = join(projectsDir, 'proj-A', 'ACTIONS.md')
+    // Wait for the debounce to fire on its own (load-robust poll, not a fixed
+    // sleep over a 50 ms debounce).
+    await waitUntil(() => existsSync(statusPath) && existsSync(actionsPath))
     const status = readFileSync(statusPath, 'utf8')
     const actions = readFileSync(actionsPath, 'utf8')
     expect(status).toContain('- [ ] one [P1]')
@@ -246,8 +266,9 @@ describe('projection — writer (debounced atomic write)', () => {
         title: `t-${i}`,
       })
     }
-    // Wait past the debounce window for the single coalesced write.
-    await new Promise((r) => setTimeout(r, 220))
+    // Wait for the single coalesced write to land (load-robust poll past the
+    // 100 ms debounce window).
+    await waitUntil(() => writer.stats().writes >= 1)
     const stats = writer.stats()
     expect(stats.writes).toBe(1)
     expect(stats.coalesced).toBeGreaterThan(0)
