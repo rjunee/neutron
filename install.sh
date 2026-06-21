@@ -615,10 +615,18 @@ run_setup_token_capture() {
     # keyboard, so the setup-token TUI/OAuth handoff cannot read input. Bind it
     # to the controlling terminal (/dev/tty) so the AUTH step still runs even on
     # a non-interactive-stdin install. _terminal_available() guarantees /dev/tty
-    # is usable before we reach this branch.
-    claude setup-token </dev/tty 2>&1 | tee "$_tmp" >&2 || true
+    # is usable before we reach this branch. NEUTRON_CLAUDE_SETUP_TTY overrides
+    # the device so this real-`claude … <tty` binding path is testable without a
+    # genuine controlling terminal (ISSUES #318, Argus minor — see the
+    # tty-binding test in tests/integration/install-auth-gate.test.ts).
+    claude setup-token <"${NEUTRON_CLAUDE_SETUP_TTY:-/dev/tty}" 2>&1 | tee "$_tmp" >&2 || true
   fi
-  grep -oE 'sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+' "$_tmp" 2>/dev/null | tail -n1
+  # Strip ANSI color/formatting before matching: some `claude` builds wrap the
+  # printed token in escape codes, which would defeat a raw grep and cause a
+  # spurious "no token captured" → false-negative auth gate (ISSUES #318, Argus
+  # minor). Then pull out the long-lived subscription token.
+  sed "s/$(printf '\033')\[[0-9;]*[A-Za-z]//g" "$_tmp" 2>/dev/null \
+    | grep -oE 'sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]+' | tail -n1
   rm -f "$_tmp" 2>/dev/null || true
 }
 
@@ -734,10 +742,19 @@ ensure_claude_auth() {
       info "✓ Claude auth detected"
       return 0
     fi
-    warn "claude setup-token did not complete — no token was captured (cancelled sign-in?)."
-    warn "Authenticate before first chat with EITHER:"
-    warn "  claude setup-token                       # subscription OAuth (opens a browser),"
-    warn "                                           # then add the printed CLAUDE_CODE_OAUTH_TOKEN=… to $_envfile"
+    # No sk-ant-oat… token reached us. Two cases land here: the user cancelled
+    # sign-in (genuinely unauth'd), OR this `claude` build authenticated to its
+    # OWN credential store but printed no token to stdout. Either way Neutron's
+    # substrate reads the credential from .env (open/composer.ts
+    # resolveOpenLlmPool keys on CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY —
+    # NOT claude's ambient store), so we still cannot start a working chat. Stay
+    # gated, but explain WHY honestly rather than only blaming a cancelled
+    # sign-in (ISSUES #318, Argus minor — false-negative gate messaging).
+    warn "claude setup-token finished but no token was captured for Neutron to store."
+    warn "Even if claude itself is now signed in, Neutron reads the subscription token"
+    warn "from $_envfile — so first chat still needs ONE of:"
+    warn "  claude setup-token                       # re-run, then copy the printed"
+    warn "                                           # CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat… line into $_envfile"
     warn "  or set ANTHROPIC_API_KEY=sk-ant-… in $_envfile"
     CLAUDE_AUTH_PENDING=1
     return 0
@@ -1136,8 +1153,14 @@ if [ "$FANCY" = 1 ]; then
       "$_g" "$C_ACCENT" "$C_RESET" "$C_DIM" "$SRC_DIR" "$C_RESET"
     printf '  %s    %sor%s set %sANTHROPIC_API_KEY=sk-ant-…%s in %s/.env\n' \
       "$_g" "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$SRC_DIR"
-    printf '  %s    %sthen%s %sneutron start%s   %s→ %s%s\n' \
+    # The gate SKIPPED the service install, so `neutron start` alone would die
+    # (no plist to kickstart). `neutron install` writes the unit AND starts the
+    # server, which now passes the app gate with the freshly-added token
+    # (ISSUES #318, Argus BLOCKING). Foreground fallback if launchd is unhappy.
+    printf '  %s    %sthen%s %sneutron install%s   %s→ installs + starts → %s%s\n' \
       "$_g" "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$C_DIM" "$CHAT_URL" "$C_RESET"
+    printf '  %s         %sor foreground:%s %scd %s && bun run start%s\n' \
+      "$_g" "$C_DIM" "$C_RESET" "$C_ACCENT" "$SRC_DIR" "$C_RESET"
   fi
   printf '  %s\n' "$_g"
   if [ "$APP_GATED_ON_AUTH" = 1 ]; then
@@ -1168,7 +1191,10 @@ else
     info "Neutron is NOT started yet — authenticate Claude first with EITHER:"
     printf '    claude setup-token   # then add the printed CLAUDE_CODE_OAUTH_TOKEN=… to %s/.env\n' "$SRC_DIR"
     printf '    or set ANTHROPIC_API_KEY=sk-ant-… in %s/.env\n' "$SRC_DIR"
-    printf '    then: neutron start   (or: cd %s && bun run start)\n' "$SRC_DIR"
+    # The gate SKIPPED the service install, so `neutron start` would die (no unit
+    # to kickstart). `neutron install` writes the unit AND starts it; foreground
+    # `bun run start` is the fallback (ISSUES #318, Argus BLOCKING).
+    printf '    then: neutron install   # installs the service + starts (or foreground: cd %s && bun run start)\n' "$SRC_DIR"
     printf '    open: %s\n' "$CHAT_URL"
     printf '\n'
   elif [ "$DO_START" = 1 ]; then

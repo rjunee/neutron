@@ -2,6 +2,51 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
+
+Argus round 2 (Codex/GPT-5 cross-model + Claude shell/test cross-check) cleared
+the feature and CI-fix as GOOD but found **1 blocker + 2 minor**. All addressed.
+
+**[BLOCKING] Gated-banner recovery command died (`install.sh`).** The gate
+intentionally SKIPS installing the launchd/systemd unit, yet the no-token banner
+told the user to run `neutron start` → `neutron-service.sh do_start` →
+`launchctl kickstart/bootstrap $PLIST_PATH` (a unit never written) →
+`die "could not start — is it installed?"`. So the primary recovery command
+died on the exact no-token path this PR fixes; the FANCY banner offered no
+fallback at all. Fix: both the FANCY (≈1139) and plain (≈1171) pending banners
+now lead with **`neutron install`** — which writes the unit AND starts the
+server (passing the app gate with the freshly-added token) — and explicitly
+offer the foreground `cd <src> && bun run start` fallback if launchd is unhappy.
+
+**[MINOR] False-negative gate messaging + ANSI-robust capture (`install.sh`).**
+A `claude setup-token` run that authenticates claude to its *own* store but
+prints no `sk-ant-oat…` token used to hard-stop with a "cancelled sign-in?"
+message — implying the user failed to auth. Neutron reads the credential from
+`.env` (`open/composer.ts resolveOpenLlmPool` keys on `CLAUDE_CODE_OAUTH_TOKEN`
+/ `ANTHROPIC_API_KEY`, *not* claude's ambient store), so the gate is the right
+call either way — but the message was wrong. The empty-capture branch now stays
+gated and explains honestly: *no token was captured for Neutron to store; even
+if claude is signed in, Neutron reads the token from `.env` — so add one of …*.
+Separately, `run_setup_token_capture` now strips ANSI escape codes before the
+token grep, so a token printed with color/formatting is still captured (a real
+source of false-negatives).
+
+**[MINOR] Real `claude setup-token <tty` binding now has coverage.** Every prior
+test routed through the `NEUTRON_CLAUDE_SETUP_CMD` stub, never exercising the
+production `</dev/tty` redirect the headline `curl | sh` flow depends on. Added a
+`NEUTRON_CLAUDE_SETUP_TTY` seam that overrides only the device path (default
+`/dev/tty`), plus a test that drives the *real* `claude setup-token <device`
+branch with a fake `claude` echoing its bound stdin — proving the `<` binding
+actually fed the device (a broken redirect would capture nothing).
+
+Tests (`tests/integration/install-auth-gate.test.ts`, +4): a stateful fake
+`launchctl` proves bare `neutron start` DIES pre-install while `neutron install`
+writes the unit and leaves Neutron startable; the false-negative message is
+honest yet still gated; the tty-binding captures the bound token; a banner-string
+guard locks `neutron install` (no regression to bare `neutron start`).
+Verification: `bunx tsc --noEmit` clean; full `bun test` suite GREEN
+(7620 pass / 0 fail / 90 pre-existing skips, 724 files).
+
 ## 2026-06-21 — PR #9 CI fix-round: merge `origin/main` to clear flaky-segfault chunk crash (ISSUES #318)
 
 PR #9 (the auth-gate change below) reported a RED `test` check while `main` was
