@@ -2,6 +2,82 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-20 — Mobile chat Phase 2: Telegram-grade RN chat over @neutron/chat-core (WAVE 2 Track B)
+
+Builds on Phase 1 (#6 — server `seq`/resume/multi-device + the `@neutron/chat-core`
+engine). Phase 2 gives the Expo/RN app durable local persistence, offline send,
+gap-free reconnect, instant cold-open, push catch-up, and a Telegram-grade
+FlashList v2 UI — all by REUSING the existing chat-core engine, not re-implementing
+sync. Everything new lives under `app/` (scope guard); chat-core is untouched.
+
+**1. RN local store — op-sqlite behind the chat-core `Store` seam.**
+- `app/lib/chat-core/sqlite-store.ts` — `SqliteChatStore implements Store` (the
+  `@neutron/chat-core` interface). Driver-agnostic: it talks to a minimal async
+  `SqliteExecutor`, not to op-sqlite directly, so the SAME class is verified on a
+  REAL SQLite engine (`bun:sqlite`) in the unit suite and runs on op-sqlite on
+  device. It is the op-sqlite analog of chat-core's OPFS web store.
+- Contract parity can't drift: identity (`messageIdentity`), the optimistic↔echo
+  merge (`mergeMessage`), and display ordering (`compareForDisplay`) are imported
+  from chat-core, not re-derived. SQLite is pure storage; the semantics stay the
+  engine's. Schema: one `chat_messages` table keyed on the message identity, with
+  `(topic_id, seq)` + `(topic_id, client_msg_id)` indexes.
+- `app/lib/chat-core/op-sqlite-store.ts` — the op-sqlite adapter + `createMobileStore()`
+  factory. op-sqlite is dynamically imported and the factory falls back to chat-core's
+  `InMemoryStore` when the native module is absent (RN-for-Web, Expo Go, the unit
+  suite) — the surface NEVER fails to construct a Store (mirrors `createWebStore`).
+
+**2. MobileChatSession — the RN composition over the chat-core engine.**
+- `app/lib/chat-core/mobile-session.ts` — the RN analog of chat-core's
+  `WebChatSession`: composes `ChatWsClient` + `SendQueue` + `SyncEngine` + `Store`.
+  No sync logic re-implemented. Adds two mobile seams: an `onFrame` raw-frame tap
+  (so the UI can render `agent_message_partial` streaming + typing, which chat-core
+  doesn't persist) and `catchUp()` (the push background-wake → `resume after_seq`).
+  RN-free (no `react-native` import) so the send-queue + resume integration is
+  unit-tested under bun with a fake socket.
+- Local topic = `app:<user_id>` (matches the server's per-user topic; seq is per
+  that topic). Project scoping is a render-time filter on `project_id`.
+
+**3. Telegram-grade FlashList v2 UI.**
+- `app/components/ChatSyncSurface.tsx` — message list on FlashList v2 (Shopify, MIT).
+  v2 deprecated the buggy `inverted` prop (issue #1844); we keep data chronological
+  and pin to the bottom with `maintainVisibleContentPosition.startRenderingFromBottom`,
+  the v2 chat primitive. Optimistic offline-safe send, per-message delivery ladder
+  (🕓 pending → ✓ sent → ✓✓ delivered), a live streaming/typing bubble, and a
+  connection/offline-queue status strip.
+- `app/lib/chat-core/use-mobile-chat.ts` — the React hook: builds the store + session
+  per (user, project), re-reads the transcript on `onChange`, bridges RN `AppState`
+  → `session.setActive` + `catchUp` (the §6 foreground reconnect), and bridges an
+  inbound push (`expo-notifications`) → `catchUp` (background gap-fill).
+- `app/lib/chat-core/chat-render-model.ts` — pure (no-React) render helpers:
+  the streaming-fold state machine, the durable↔streaming merge, the delivery ladder.
+- `app/app/projects/[id]/chat-sync.tsx` — a new route hosting the surface, landed
+  ALONGSIDE the legacy `chat.tsx` tab (not wired into the locked 5-tab bar) so it
+  can be exercised before the cutover. Not a tab swap.
+
+**4. Build plumbing.**
+- `app/metro.config.js` — monorepo Metro config (watch the repo root + resolve from
+  both node_modules) so the app bundles the workspace `@neutron/chat-core` source.
+- `app/package.json` — adds `@neutron/chat-core` (workspace), `@op-engineering/op-sqlite@17.0.0`,
+  `@shopify/flash-list@2.3.2`. `app/tsconfig.json` — `allowImportingTsExtensions`
+  (chat-core is consumed as raw TS with `.ts` import specifiers; noEmit already set).
+- op-sqlite + FlashList v2 both require the New Architecture, already on
+  (`newArchEnabled: true`). EAS / `expo prebuild` (op-sqlite native link) is the
+  operator step, as planned in the research doc.
+
+### Tests (REAL — bun:sqlite + fake socket, no mocked SQL/sync)
+- `app/__tests__/chat-core-sqlite-store.test.ts` (7) — the full `Store` contract on
+  real SQLite: seq ordering, idempotent dedup, optimistic↔echo reconcile, pending-
+  queue isolation, resume cursor, attachment round-trip, cold-open hydration over a
+  reopened DB, topic isolation.
+- `app/__tests__/chat-core-mobile-session.test.ts` (6) — offline optimistic send,
+  flush-on-connect + echo→acked reconcile, gap-free reconnect resuming from the LOCAL
+  seq cursor (+ dedup of a re-delivered seq), cold-open + re-drive of a stranded send
+  across a simulated restart, `catchUp()` gap-fill, and the `onFrame` streaming seam.
+- `app/__tests__/chat-core-render-model.test.ts` (10) — streaming fold state machine,
+  durable↔streaming merge + stable keys, delivery ladder.
+- Verify: `bunx tsc --noEmit` clean (app + root gate + chat-core); FULL `bun test`
+  green (7630 pass / 0 fail); `eslint` clean on new files.
+
 ## 2026-06-20 — Proactive messaging: real morning brief + idle-topic nudge sweep (gap-audit P0-5)
 
 Closes gap-audit P0-5 (WAVE 2 Track A) — "Neutron only speaks when spoken to."
