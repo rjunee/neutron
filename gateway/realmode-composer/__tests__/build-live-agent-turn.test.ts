@@ -212,6 +212,53 @@ describe('build-live-agent-turn — reply path', () => {
   })
 })
 
+describe('build-live-agent-turn — operating-doctrine layer (gap-audit item 10)', () => {
+  test('the lived doctrine is spliced into the composed first-turn prompt (General)', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({
+      substrate: makeStubSubstrate({ specs }),
+      persona: '<persona_file name="SOUL.md">You are Kairos.</persona_file>',
+    })
+    await run(makeTurn({ sent }))
+    const prompt = specs[0]!.prompt
+    // The doctrine block is present ON TOP OF the owner's SOUL (who you are).
+    expect(prompt).toContain('You are Kairos.')
+    expect(prompt).toContain('<operating_doctrine scope="general">')
+    // "How you act every turn" — the principles the static SOUL didn't guarantee.
+    expect(prompt.toLowerCase()).toContain('no sycophancy')
+    expect(prompt.toLowerCase()).toContain('calibrated confidence')
+    expect(prompt.toLowerCase()).toContain('grounding reframe')
+    // General weighting = cross-project breadth.
+    expect(prompt.toLowerCase()).toContain('cross-project')
+  })
+
+  test('a project topic carries the doctrine with PROJECT weighting', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+    await run(makeTurn({ sent, topic_id: 'web:u-1:gondor', project_id: 'gondor' }))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain('<operating_doctrine scope="project">')
+    expect(prompt).toContain('the "gondor" project')
+    // Same core principles, regardless of surface.
+    expect(prompt.toLowerCase()).toContain('truth first')
+    expect(prompt.toLowerCase()).toContain('no sycophancy')
+  })
+
+  test('the doctrine is FIRST-turn-only (warm later turns send only user text)', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+    await run(makeTurn({ sent }))
+    await run(makeTurn({ sent, user_text: 'follow-up' }))
+    expect(specs[0]!.prompt).toContain('<operating_doctrine')
+    // The warm session anchors the doctrine; the second turn rides its
+    // transcript and carries no re-splice.
+    expect(specs[1]!.prompt).toBe('follow-up')
+  })
+})
+
 describe('build-live-agent-turn — per-project persona injection (WAVE 2 Track A)', () => {
   test("a project topic splices THAT project's persona into the first-turn prompt", async () => {
     const specs: AgentSpec[] = []

@@ -393,6 +393,27 @@ even after the topic is live.
 > reuses it and answers its own question in order. Distinct topics keep distinct
 > chains and still run concurrently.
 
+**First-turn system-prompt composition (`composeFirstTurnPrompt`).** The cold
+first turn on a (instance, topic) assembles the system prompt that anchors that
+topic's warm CC session (subsequent turns ride the REPL transcript and send only
+the user text). Layer order, top to bottom:
+1. `base_persona` — the owner's generated SOUL/USER/priority-map (`personaLoader`),
+   or a generic fallback when none exist. This is "who you are."
+2. `<operating_doctrine>` — gap-audit item 10: the owner-AGNOSTIC "how you act on
+   every turn" doctrine (`gateway/realmode-composer/operating-doctrine.ts`):
+   truth-first, essence-over-excess, calibrated confidence, explicit
+   anti-sycophancy / pushback discipline, and a grounding ("dharma") reframe used
+   only when it genuinely fits. Composed consistently on EVERY topic, independent
+   of whatever the generated SOUL text happened to contain, and per-context
+   weighted (General → cross-project breadth; a project topic → that project's
+   craft, lighter reframes). It is a FLOOR, not a ceiling — the fragment defers to
+   any sharper rule the owner's SOUL states. Spliced into both the assembled path
+   and the degraded fallback, so the floor never depends on `assembleSystemPrompt`.
+3. `<project_persona>` — WAVE 2 Track A: a project topic's own `projects.persona`
+   voice, refining the register for that project (never for General).
+4. `<live_agent_context>` — the this-turn scope block + a `<recent_conversation>`
+   short-term-memory splice.
+
 **Client surface (`landing/chat.ts`).**
 - *First-load loader.* The "Setting things up…" indicator covers a FRESH
   onboarding's page-load → WS-open → first-prompt window and clears on first

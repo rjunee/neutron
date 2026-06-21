@@ -2,6 +2,66 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — SOUL/dharma as LIVED per-turn doctrine (WAVE 2 P1 tail, gap-audit item 10)
+
+**Problem.** Onboarding's persona-gen writes the owner's SOUL/USER/priority-map
+and `build-live-agent-turn.ts` splices them into each (instance, topic) warm
+session's first turn — but the generated persona is mostly STATIC IDENTITY text
+("who you are": archetypal blend, voice register, a few facts). The "how you act
+on every turn" doctrine — truth-first, essence-over-excess, calibrated
+confidence, the explicit anti-sycophancy / pushback discipline, and the
+grounding-reframe ("dharma") move — was present only if the *generated* SOUL text
+happened to include it, and the reframe layer only when the owner's interview
+captured contemplative phrases. Gap-audit item 10: "Vajra's SOUL.md is active
+doctrine consulted every turn; Neutron's is onboarding-only, not lived."
+
+**What shipped.**
+- **New `gateway/realmode-composer/operating-doctrine.ts`** — a pure,
+  deterministic `buildOperatingDoctrineFragment({ scope, project_id? })` that
+  emits an `<operating_doctrine>` block carrying the owner-AGNOSTIC operating
+  principles (exported as `DOCTRINE_PRINCIPLES`). Owner-agnostic by design: NO
+  owner name, NO archetypes, NO owner-private reframes — a self-hoster gets a
+  sensible doctrine floor out of the box, and their own generated SOUL (spliced
+  ABOVE this) supplies the personal voice. The fragment says so explicitly
+  ("your SOUL defines who you are; this defines how you act; where your SOUL
+  states a sharper rule, follow it") so it's a floor, not a ceiling.
+- **Per-context weighting.** Identical principle BODY on every surface
+  (consistency); only the closing weighting tail differs — General favours
+  cross-project breadth + whole-picture judgment; a project topic favours that
+  project's craft and keeps reframes especially light (the user is in flow).
+- **Wired into `composeFirstTurnPrompt`** (`build-live-agent-turn.ts`): the
+  doctrine fragment is spliced as the FIRST `instance_fragment` (right after the
+  SOUL `base_persona`, before the project-voice refinement and the this-turn
+  scope block), and ALSO into the degraded hand-assembled fallback — the floor
+  cannot depend on `assembleSystemPrompt` succeeding. Because the first turn
+  anchors the topic's warm CC session, the doctrine governs every subsequent
+  turn on that session (the warm-REPL analogue of Vajra re-reading SOUL.md each
+  turn).
+
+**Spec-conformance note (persona composition: now vs should).**
+1. SHOULD: the agent's per-turn system prompt carries lived operating doctrine,
+   not just identity. NOW: it does — `<operating_doctrine>` is composed into
+   every topic's first-turn prompt, guaranteed independent of generated-SOUL
+   contents.
+2. SHOULD: doctrine present on EVERY turn. NOW: present on the session-anchoring
+   first turn that governs the warm session; warm follow-up turns still send only
+   user text by design (the REPL transcript carries it) — a true per-message
+   re-splice would defeat the warm-session contract and is explicitly NOT done.
+3. SHOULD: per-context rules (General vs project). NOW: scope-weighted tail,
+   same core principles.
+4. SHOULD: owner-derived / general, not Ryan-specific. NOW: owner-agnostic
+   constant; the owner's generated SOUL remains the personal layer above it.
+5. SHOULD: anti-sycophancy + dharma reframe as live constraints. NOW: both are
+   explicit numbered principles, the reframe kept general and "only when it
+   genuinely fits."
+
+**Tests.** `__tests__/operating-doctrine.test.ts` (principle set, consistency
+across surfaces, no owner-specific leakage, per-context weighting) +
+`__tests__/build-live-agent-turn.test.ts` new `operating-doctrine layer`
+describe (doctrine present in the ACTUAL composed per-turn prompt for both
+General and a project topic, and first-turn-only). tsc clean; full `bun test`
+green.
+
 ## 2026-06-21 — #323 fix round 2: extract from `freeform_text`, not `state_delta` (Argus r1 BLOCKERs 1 & 2)
 
 **Why a second pass.** Argus REQUEST-CHANGES on PR #20: the round-1 fix was
