@@ -1514,6 +1514,38 @@ export function buildLlmPhaseSpecResolver(
         })
         return null
       }
+      // BODY↔OPTIONS DESYNC GUARD (onboarding-bodyoptions-desync, 2026-06-20)
+      // — the launch showstopper. The phase-spec LLM runs on ONE warm,
+      // ACCUMULATING `cc-llm` REPL (open/composer.ts), so a cold-start /
+      // accumulated-context turn can return the PREVIOUS phase's body (e.g. a
+      // "what's your first name?" re-ask emitted while the engine has already
+      // advanced to `ai_substrate_offered`). When that lagged body arrives with
+      // an EMPTY options array, the old `materializeSpec` hardening grafted the
+      // CURRENT phase's static options onto it — manufacturing the live defect:
+      // a NAME body wearing the IMPORT buttons (Yes ChatGPT / Yes Claude /
+      // Neither), and a phantom second name-ask. body and options came from
+      // DIFFERENT phases.
+      //
+      // The invariant: a prompt's body and its options MUST come from the SAME
+      // phase. So when an option-bearing phase resolves option-less, do NOT
+      // splice static options onto the LLM body — discard the whole LLM spec and
+      // let the engine fall back to the FULL static spec (body AND options both
+      // from this phase). A NON-empty option subset is still a legitimate
+      // narrowing and is preserved by `materializeSpec`. This also subsumes the
+      // BUG-2 phantom-buttons fix more robustly: an option-bearing phase can no
+      // longer emit a body without its buttons.
+      if (intent.allowed_option_values.length > 0 && parsed.options.length === 0) {
+        log(
+          'warn',
+          'option-bearing phase resolved option-less; using static spec to keep body/options in-phase',
+          {
+            phase: bundle.phase,
+            project_slug: bundle.project_slug,
+            body_head: parsed.body.slice(0, 80),
+          },
+        )
+        return null
+      }
       return materializeSpec(parsed, intent, bundle.phase)
     },
   }
@@ -1581,6 +1613,15 @@ export function buildSystemPrompt(intent: PhaseIntent): string {
       : intent.allowed_option_values.map((v) => `"${v}"`).join(', ')
   return [
     `You are the onboarding agent rephrasing one prompt for the user.`,
+    ``,
+    // Cross-phase body-lag guard (onboarding-bodyoptions-desync, 2026-06-20).
+    // This resolver runs on ONE warm, ACCUMULATING `cc-llm` session, so prior
+    // turns (and the questions they asked) are in your context. Each call is a
+    // STANDALONE rephrase of the CURRENT phase below — never continue or re-ask
+    // a PRIOR turn's question. If the conversation already moved past a step
+    // (e.g. the name was given), do not ask for it again; rephrase ONLY the
+    // current phase intent.
+    `This is a standalone rephrase of the CURRENT phase only. Ignore any task or question from earlier turns — generate the prompt for the phase intent below and nothing else.`,
     ``,
     `Phase intent: ${intent.goal}`,
     `Shape: ${intent.shape}`,
@@ -1785,19 +1826,20 @@ export function materializeSpec(
       `materializeSpec: no static fallback for phase=${phase} (illegal state — engine should not call resolver here)`,
     )
   }
-  // BUG 2 hardening (onboarding-opening-fix, 2026-06-19) — a phase that
-  // structurally needs buttons must never resolve option-less. The LLM
-  // resolver is only meant to restyle the body; if it returns an empty
-  // options array for an option-bearing phase (e.g. ai_substrate_offered),
-  // the rendered keyboard vanishes while the buttons-only nudge still says
-  // "tap one of the buttons above" — the phantom-button dead-end. Restore
-  // the static fallback's options in that case. A NON-empty subset from the
-  // LLM is preserved (legitimate narrowing); only a full drop is treated as
-  // a regression to repair.
-  const options =
-    parsed.options.length === 0 && fallback.options.length > 0
-      ? fallback.options
-      : parsed.options
+  // BODY↔OPTIONS in-phase invariant (onboarding-bodyoptions-desync,
+  // 2026-06-20). Body and options are used here EXACTLY as the LLM produced
+  // them on this single call for this single phase — never spliced across
+  // sources. The earlier BUG-2 hardening grafted the static fallback's
+  // options onto the LLM body when the LLM dropped its options; on the warm
+  // accumulating `cc-llm` session that grafted the CURRENT phase's buttons
+  // onto a LAGGED (previous-phase) body — the live "name body + import
+  // buttons" desync. The option-less case for an option-bearing phase is now
+  // caught one level up in `resolve()`, which discards the whole LLM spec and
+  // falls back to the FULL static spec (body AND options both in-phase). So
+  // by the time we materialize, `parsed.options` is the LLM's own in-phase
+  // set (a possibly-narrowed subset for option-bearing phases, or `[]` for
+  // free-text phases whose static fallback is also option-less).
+  const options = parsed.options
   const out: PhasePromptSpec = {
     phase,
     body: parsed.body,

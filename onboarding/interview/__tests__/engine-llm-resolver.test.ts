@@ -36,7 +36,9 @@ const S1_PROMPT_OPTIONS = { length: STATIC_PHASE_SPECS['signup']!.options.length
 import type {
   PhaseContextBundle,
   PhaseSpecResolver,
+  LlmCallFn,
 } from '../phase-spec-resolver.ts'
+import { buildLlmPhaseSpecResolver } from '../phase-spec-resolver.ts'
 
 interface Harness {
   tmp: string
@@ -492,5 +494,119 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     } finally {
       tearDown(h)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// REAL-PATH body↔options desync reproduction (onboarding-bodyoptions-desync,
+// 2026-06-20). The launch showstopper: a fresh install emitted a prompt whose
+// BODY was the "what's your first name?" question but whose BUTTONS were the
+// import offer (Yes ChatGPT / Yes Claude / Neither), and asked the name twice.
+//
+// WHY PRIOR TESTS MISSED IT: every test above stubs `phaseSpecResolver` with a
+// hand-written clean per-phase spec, so the bug — which lives in the REAL
+// resolver's parse → materialize → engine-emit seam — was never exercised.
+// These tests wire the PRODUCTION `buildLlmPhaseSpecResolver` (real
+// `parseLlmSpec` + `materializeSpec`) and feed the `LlmCallFn` the exact raw
+// JSON the warm, ACCUMULATING `cc-llm` session produced live: a LAGGED
+// previous-phase body (a name re-ask) with an EMPTY options array, emitted
+// while the engine has already advanced to `ai_substrate_offered`.
+//
+// PRE-FIX: `materializeSpec` grafted the CURRENT phase's static import buttons
+// onto the lagged name body → name body + import buttons (the desync).
+// POST-FIX: the resolver discards the option-less LLM spec for an option-bearing
+// phase, the engine falls back to the FULL static `ai_substrate_offered` spec,
+// and body + options are guaranteed in-phase.
+describe('InterviewEngine — REAL resolver body↔options desync (option-bearing phase)', () => {
+  const AI_SUBSTRATE_STATIC = STATIC_PHASE_SPECS['ai_substrate_offered']!
+  // The verbatim lagged body the warm session re-emitted live (a name re-ask
+  // while the phase had already advanced to the import offer).
+  const LAGGED_NAME_BODY = "Hey, welcome in! What's your first name?"
+
+  async function seedAndEmit(llm: LlmCallFn): Promise<ButtonPrompt> {
+    const resolver = buildLlmPhaseSpecResolver({
+      llm,
+      enabled_phases: new Set(['signup', 'ai_substrate_offered'] as const),
+    })
+    const h = buildHarness({ resolver })
+    try {
+      // Engine has advanced past signup; it is now emitting the import offer.
+      await h.stateStore.upsert({
+        project_slug: 't1',
+        user_id: 'u-1',
+        phase: 'ai_substrate_offered',
+        phase_state_patch: {
+          topic_id: 'web:user-1',
+          signup_via: 'web',
+          user_first_name: 'Ryan',
+        },
+      })
+      await h.engine.emitPhasePrompt({
+        project_slug: 't1',
+        user_id: 'u-1',
+        topic_id: 'web:user-1',
+        phase: 'ai_substrate_offered',
+        observed_at: Date.now(),
+      })
+      expect(h.sentPrompts.length).toBe(1)
+      return h.sentPrompts[0]!.prompt
+    } finally {
+      tearDown(h)
+    }
+  }
+
+  test('lagged name body + empty options NEVER ships with import buttons grafted on', async () => {
+    // The warm session returns the PREVIOUS phase's body with no options.
+    const laggedLlm: LlmCallFn = async () =>
+      JSON.stringify({ body: LAGGED_NAME_BODY, options: [] })
+    const prompt = await seedAndEmit(laggedLlm)
+
+    // The defect: a name body wearing import buttons. This MUST NOT happen.
+    const isDesynced =
+      prompt.body === LAGGED_NAME_BODY && prompt.options.length > 0
+    expect(isDesynced).toBe(false)
+
+    // Concretely: the engine fell back to the FULL static import spec, so body
+    // AND options are both the import phase's own — never cross-phase.
+    expect(prompt.body).toBe(AI_SUBSTRATE_STATIC.body)
+    expect(prompt.body).not.toContain('first name')
+    expect(prompt.options.length).toBe(AI_SUBSTRATE_STATIC.options.length)
+    expect(prompt.options.map((o) => o.value)).toEqual(
+      AI_SUBSTRATE_STATIC.options.map((o) => o.value),
+    )
+  })
+
+  test('a legitimate in-phase LLM spec (proper body + full options) is preserved', async () => {
+    const goodLlm: LlmCallFn = async () =>
+      JSON.stringify({
+        body: 'Do you have ChatGPT or Claude history I can import?',
+        options: [
+          { label: 'A', body: 'Yes, ChatGPT', value: 'chatgpt' },
+          { label: 'B', body: 'Yes, Claude', value: 'claude' },
+          { label: 'C', body: 'Neither', value: 'neither' },
+        ],
+      })
+    const prompt = await seedAndEmit(goodLlm)
+    expect(prompt.body).toBe('Do you have ChatGPT or Claude history I can import?')
+    expect(prompt.options.map((o) => o.value)).toEqual([
+      'chatgpt',
+      'claude',
+      'neither',
+    ])
+  })
+
+  test('a legitimate NARROWED option subset from the LLM is preserved (not over-corrected)', async () => {
+    const subsetLlm: LlmCallFn = async () =>
+      JSON.stringify({
+        body: 'Want me to import your ChatGPT or Claude history?',
+        options: [
+          { label: 'A', body: 'Yes, ChatGPT', value: 'chatgpt' },
+          { label: 'B', body: 'Yes, Claude', value: 'claude' },
+        ],
+      })
+    const prompt = await seedAndEmit(subsetLlm)
+    expect(prompt.body).toBe('Want me to import your ChatGPT or Claude history?')
+    // A non-empty subset is a legitimate narrowing — kept, not replaced.
+    expect(prompt.options.map((o) => o.value)).toEqual(['chatgpt', 'claude'])
   })
 })

@@ -85,6 +85,67 @@ non-image-`data:` reject for `safeImageSrc`. Existing
 `option-grid-layout.test.ts`, `chat-rendering.test.ts` (39 combined) stay green
 — behaviour for legitimate http(s) targets is unchanged. `bunx tsc --noEmit`
 clean.
+## 2026-06-20 — onboarding: prompt body↔options desync + double name-ask (first-run showstopper)
+
+Owner-confirmed P0 launch defect on a fresh public install. First-run onboarding
+asked the name TWICE and emitted a prompt whose BODY was the "what's your first
+name?" question but whose BUTTONS were the import offer (Yes ChatGPT / Yes Claude
+/ Neither) — body and options came from DIFFERENT phases. Server-log proof
+(`~/neutron/data/logs/server.log`): after the required-fields audit confirmed the
+name was collected and the engine had advanced to `ai_substrate_offered`, the
+emitted prompt `5dcdf824` had `body_len=40` (a name re-ask) with `options=3`
+(the import buttons).
+
+**Why the prior #308/#310 fixes didn't close it.** They were verified against
+mocked phase-spec resolvers that returned clean per-phase specs, so they never
+exercised the REAL resolver's parse → materialize → engine-emit seam where the
+defect actually lives. The bug only reproduces on the production LLM path.
+
+**Root cause (two interacting parts).**
+1. *Lagged body.* On Open, the phase-spec LLM ("rephrase this phase's prompt")
+   runs on ONE warm, ACCUMULATING `cc-llm` REPL session (`open/composer.ts` —
+   intentionally not `ephemeral`, no `/clear`). On a cold-start / accumulated-
+   context turn the model can return the PREVIOUS phase's body — a name re-ask
+   emitted while the engine has already advanced to the import offer. The
+   resolver's `withTimeout` also deliberately does not cancel a slow turn, so the
+   warm session keeps drifting. (`onboarding/interview/phase-spec-resolver.ts`,
+   `runtime/.../persistent-repl-substrate.ts`, `open/composer.ts:185`.)
+2. *The graft that made it user-visible.* The #7264779 "BUG-2" hardening in
+   `materializeSpec` grafted the CURRENT phase's static options onto an LLM spec
+   whenever the LLM returned an empty options array. So a lagged NAME body (which
+   the model emits option-less, thinking it's the free-text signup step) got the
+   `ai_substrate_offered` import buttons stapled on — manufacturing the exact
+   "name body + import buttons" desync and the phantom second name-ask.
+
+**The fix — body and options must always come from the SAME phase.**
+`onboarding/interview/phase-spec-resolver.ts`:
+- `resolve()` now discards the whole LLM spec when an *option-bearing* phase
+  (`intent.allowed_option_values.length > 0`) comes back *option-less*. The engine
+  then falls back to the FULL static spec for that phase (body AND options both
+  in-phase). This subsumes the BUG-2 phantom-buttons fix more robustly: an
+  option-bearing phase can no longer emit a body without its buttons. A NON-empty
+  option *subset* from the LLM is still a legitimate narrowing and is preserved.
+- `materializeSpec` no longer grafts static options onto an LLM body — body and
+  options are used exactly as the LLM produced them on that one in-phase call.
+- The resolver system prompt now instructs the warm accumulating model that each
+  call is a STANDALONE rephrase of the CURRENT phase — ignore prior turns'
+  questions — reducing cross-phase body drift on free-text phases too.
+
+Net effect: the name is asked exactly once, and every prompt's body matches its
+buttons. With the lagged name-body discarded, the import step renders the proper
+static import prompt instead of a second name-ask.
+
+**Tests (RED→GREEN on the REAL path).**
+- `onboarding/interview/__tests__/engine-llm-resolver.test.ts` — NEW block drives
+  the PRODUCTION `buildLlmPhaseSpecResolver` (real `parseLlmSpec` +
+  `materializeSpec`) through a real `InterviewEngine.emitPhasePrompt`, feeding the
+  `LlmCallFn` the exact lagged JSON the warm session produced live (name body,
+  empty options) and asserting the emitted prompt's body↔options are in-phase.
+- `onboarding/interview/__tests__/phase-spec-resolver.test.ts` — NEW block locks
+  the invariant at the resolver + materializer (no graft; option-less option-
+  bearing phase → static fallback; subset preserved; free-text unaffected).
+- Both fail on the pre-fix tree and pass after. `bunx tsc --noEmit` clean;
+  `bun test` 7438 pass / 0 fail; leak-gate silent.
 
 ## 2026-06-20 — #314: deterministic port bind on restart (no silent random-port fallback)
 

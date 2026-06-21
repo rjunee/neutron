@@ -1106,3 +1106,74 @@ describe('withTimeout', () => {
     ).rejects.toThrow('input boom')
   })
 })
+
+// ---------------------------------------------------------------------------
+// BODY↔OPTIONS in-phase invariant (onboarding-bodyoptions-desync, 2026-06-20).
+// The launch showstopper was a NAME body wearing the IMPORT buttons. Root
+// cause: on the warm accumulating `cc-llm` session the LLM could return a
+// lagged previous-phase body with EMPTY options, and `materializeSpec` then
+// grafted the CURRENT phase's static options onto it. Lock the invariant at
+// both the resolver and materializer.
+describe('body↔options in-phase invariant', () => {
+  const aiSubstrateIntent = PHASE_INTENTS['ai_substrate_offered']!
+  const signupIntent = PHASE_INTENTS['signup']!
+
+  test('materializeSpec NEVER grafts static options onto an option-less LLM spec', () => {
+    // An option-bearing phase whose LLM dropped its options must NOT come back
+    // wearing the static phase's buttons (the pre-fix graft).
+    const spec = materializeSpec(
+      { body: "Hey, welcome in! What's your first name?", options: [] },
+      aiSubstrateIntent,
+      'ai_substrate_offered',
+    )
+    expect(spec.body).toBe("Hey, welcome in! What's your first name?")
+    expect(spec.options.length).toBe(0)
+  })
+
+  test('resolve() discards an option-less LLM spec for an option-bearing phase (→ static fallback)', async () => {
+    const resolver = buildLlmPhaseSpecResolver({
+      llm: async () =>
+        JSON.stringify({ body: "Hey, welcome in! What's your first name?", options: [] }),
+      enabled_phases: new Set(['ai_substrate_offered']),
+    })
+    const spec = await resolver.resolve(
+      makeBundle({ phase: 'ai_substrate_offered', intent: aiSubstrateIntent }),
+    )
+    // null → the engine falls back to the FULL static spec (body + options both
+    // in-phase). It must NOT be a name body grafted with import buttons.
+    expect(spec).toBeNull()
+  })
+
+  test('resolve() preserves a non-empty option subset (legitimate narrowing)', async () => {
+    const resolver = buildLlmPhaseSpecResolver({
+      llm: async () =>
+        JSON.stringify({
+          body: 'Import your ChatGPT or Claude history?',
+          options: [
+            { label: 'A', body: 'Yes, ChatGPT', value: 'chatgpt' },
+            { label: 'B', body: 'Yes, Claude', value: 'claude' },
+          ],
+        }),
+      enabled_phases: new Set(['ai_substrate_offered']),
+    })
+    const spec = await resolver.resolve(
+      makeBundle({ phase: 'ai_substrate_offered', intent: aiSubstrateIntent }),
+    )
+    expect(spec).not.toBeNull()
+    expect(spec!.body).toBe('Import your ChatGPT or Claude history?')
+    expect(spec!.options.map((o) => o.value)).toEqual(['chatgpt', 'claude'])
+  })
+
+  test('free-text phase still resolves option-less without triggering the guard', async () => {
+    const resolver = buildLlmPhaseSpecResolver({
+      llm: async () => JSON.stringify({ body: 'What should I call you?' }),
+      enabled_phases: new Set(['signup']),
+    })
+    const spec = await resolver.resolve(
+      makeBundle({ phase: 'signup', intent: signupIntent }),
+    )
+    expect(spec).not.toBeNull()
+    expect(spec!.body).toBe('What should I call you?')
+    expect(spec!.options.length).toBe(0)
+  })
+})
