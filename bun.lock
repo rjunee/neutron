@@ -203,6 +203,13 @@
         "@neutronai/persistence": "workspace:*",
       },
     },
+    "doc-search": {
+      "name": "@neutronai/doc-search",
+      "dependencies": {
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/tools": "workspace:*",
+      },
+    },
     "gateway": {
       "name": "@neutronai/gateway",
       "dependencies": {
@@ -741,6 +748,8 @@
     "@neutronai/cores-sdk": ["@neutronai/cores-sdk@workspace:cores/sdk"],
 
     "@neutronai/cron": ["@neutronai/cron@workspace:cron"],
+
+    "@neutronai/doc-search": ["@neutronai/doc-search@workspace:doc-search"],
 
     "@neutronai/email-managed-core": ["@neutronai/email-managed-core@workspace:cores/free/email"],
 

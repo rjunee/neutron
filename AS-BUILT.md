@@ -2,6 +2,97 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — QMD-equivalent local doc search + `doc_search` / `doc_read` agent tools (gap-audit §(a) P1 #9 / §(b) cat 13)
+
+**Problem.** The daily-driver gap audit flagged that Neutron agents could read a
+KNOWN doc path (`runtime/doc-links.ts`) but had **no corpus search** over the
+owner's project folders. Vajra agents hit QMD across ~1700 docs BEFORE asking
+the user anything (Design Principle #4 — "research before asking"); without an
+equivalent that discipline can't function in Neutron. There was full-text search
+INSIDE individual Cores (`cores/free/research`, `cores/free/notes` — both
+project-scoped FTS5 over DB rows) but nothing that indexed the markdown files on
+disk under `<owner_home>/Projects/<id>/` (README / STATUS / CLAUDE / docs /
+research / notes / archive).
+
+**What shipped.** A new OSS-friendly workspace package `@neutronai/doc-search`
+(`doc-search/`) — a local BM25 markdown corpus index + query, exposed to the
+live agent as two tools. No SaaS / external-embedding dependency for the
+baseline (pure `bun:sqlite` FTS5).
+
+- **`doc-search/store.ts` — `DocSearchIndex` (NEW).** A `bun:sqlite` FTS5 index.
+  `doc_chunks` is the content table (one row per heading-scoped chunk);
+  `doc_fts` is an external-content FTS5 mirror over `(title, heading, body)` kept
+  in sync by AFTER INSERT/UPDATE/DELETE triggers (the canonical FTS5
+  contentless-sync pattern). Ranking is **BM25 with column weights** (title 10 ≫
+  heading 4 ≫ body 1) via SQLite's `bm25()`; scores are min-max normalised to a
+  [0,1] relevance. Results are **collapsed to the best chunk per file** so a
+  query returns ranked DOCUMENTS (with the matching section's heading + a
+  `snippet()` excerpt), not a flood of chunks. The FTS query is sanitised
+  (`doc-search/query.ts`, lifted from `cores/free/research`) so raw agent text
+  can't trip FTS5's `NEAR`/`NOT`/paren grammar. **Semantic search is OPTIONAL and
+  behind the `embedder` seam** — off by default (pure lexical); when an `Embedder`
+  is supplied, chunk embeddings are stored and the top lexical candidates are
+  cosine-reranked and blended (0.6 lex / 0.4 vec). The baseline never pulls an
+  external provider.
+
+- **`doc-search/chunk.ts` (NEW).** Deterministic markdown chunker: title = first
+  `# ` heading (else de-slugged filename); one chunk per ATX heading (`#`..
+  `######`) plus a preamble chunk; long sections split at paragraph boundaries to
+  a char budget; heading-looking lines inside ``` / ~~~ code fences are NOT
+  treated as headings.
+
+- **`doc-search/walk.ts` (NEW).** `walkProjectMarkdown(projectRoot)` enumerates
+  `.md`/`.markdown` files under a project, skipping hidden segments (`.git`,
+  dotfiles), `node_modules`, oversized files (>5 MB), and symlink escapes.
+  `readProjectDoc(ownerHome, project, relpath)` is the path-safe single-doc read
+  backing `doc_read` (project_id grammar + traversal/realpath-containment +
+  extension + size checks), scoped to `<owner_home>/Projects/<id>/`.
+
+- **`doc-search/indexer.ts` (NEW).** `refreshIndex({ownerHome, index})` walks
+  every project (`doc-search/projects.ts`, mirrors `gateway/projects/enumerate.ts`),
+  chunks each file, and upserts it. **Incremental:** unchanged files (by mtime)
+  are skipped, deleted files are dropped, removed projects are purged — a no-op
+  second run when nothing changed.
+
+- **`doc-search/runtime.ts` — `DocSearchRuntime` (NEW).** Binds the index to an
+  `owner_home`; exposes `search` / `read` / `ensureFresh`. `ensureFresh` is
+  throttled (default 5 s, shared in-flight) so calling it before every search
+  costs at most one incremental disk-diff per interval. Constructs synchronously
+  (so it slots into the gateway's synchronous `tools` module init); the first
+  refresh is lazy on the first tool call.
+
+- **`doc-search/tool.ts` (NEW).** `registerDocSearchToolSurface(registry, runtime)`
+  registers two read-only agent tools (capability `read:docs`, `approval: auto`)
+  into the shared `ToolRegistry`:
+  - **`doc_search`** `{query, project?, limit?}` -> ranked `{project, path, title,
+    heading, score, snippet}[]`.
+  - **`doc_read`** `{project, path}` -> `{found, project?, path?, content?}`.
+
+- **Wiring (agent-native).** `gateway/composition/build-core-modules.ts` — the
+  `tools` module registers the doc-search surface alongside
+  `registerNeutronToolsSurface` when the composer supplies
+  `input.doc_search.runtime` (new optional `MiscCompositionInput.doc_search`
+  field). `open/composer.ts` builds the index at
+  `<owner_home>/cache/doc-search/index.db` + the runtime, threads it into the
+  composition, and closes the handle on shutdown. Failure-isolated: a doc-search
+  open failure logs and disables the tools without sinking boot.
+
+**Verification (REAL).** New co-located tests, all green:
+`doc-search/chunk.test.ts`, `doc-search/store.test.ts` (BM25 ranking, per-file
+collapse, project scoping, incremental reindex, stats, optional semantic hybrid
+with a deterministic dependency-free embedder, cosine), `doc-search/indexer.test.ts`
+(indexes a **real on-disk fixture project tree**, asserts the right doc ranks
+first, incremental edit/add/delete/project-purge, path-safe read traversal
+rejection), `doc-search/tool.test.ts` (registration + handlers + ensureFresh
+throttle) — 38 doc-search tests pass. Full repo: `bunx tsc --noEmit` clean;
+`scripts/run-tests.sh` PASS — 746 files across 8 chunks green (gateway+open
+composition suites: 958 pass, confirming the wiring is intact).
+
+**Not in scope.** Indexing the entities wiki / non-project docs; a production
+local embedder (the semantic seam ships but no provider is wired); surfacing
+doc-search through the web UI (it's an agent tool only); the Obsidian `obs.*`
+redirector confirmation (the other half of gap-audit cat 13).
+
 ## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
 
 **Problem.** The daily-driver gap audit flagged that the typed agent dispatch

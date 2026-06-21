@@ -28,6 +28,38 @@ share one backend instance. Examples:
   (`gateway/cores/build-production-codegen-wiring.ts`, gateway-side
   because its Anthropic credential factory is gateway-side).
 
+## Doc search (QMD-equivalent) — `@neutronai/doc-search`
+
+The agent-native corpus search over the owner's project docs, so the live
+agent can "research before asking" by searching every project's markdown
+mid-conversation. It is the Neutron equivalent of Vajra's QMD.
+
+- **Index (`doc-search/store.ts`).** A `bun:sqlite` FTS5 index over
+  heading-scoped markdown chunks. `doc_chunks` holds the content; `doc_fts`
+  is an external-content FTS5 mirror over `(title, heading, body)` kept in
+  sync by triggers. Ranking is **BM25** with column weights (title ≫ heading
+  ≫ body), normalised to a [0,1] relevance and collapsed to the best chunk
+  per file, so a query returns ranked DOCUMENTS with the matching section's
+  heading + a snippet. Pure-lexical baseline — no external dependency.
+  Semantic re-rank is OPTIONAL behind the `embedder` seam (off by default).
+- **Corpus (`doc-search/walk.ts`, `indexer.ts`, `projects.ts`).** Indexes
+  `.md`/`.markdown` under every `<owner_home>/Projects/<id>/` (README /
+  STATUS / CLAUDE / docs / research / notes / archive), skipping hidden dirs
+  (`.git`), `node_modules`, oversized files, and symlink escapes. Reindex is
+  incremental (mtime-diffed): unchanged files skip, deleted files/projects are
+  purged.
+- **Runtime + tools (`doc-search/runtime.ts`, `tool.ts`).**
+  `DocSearchRuntime` binds the index to `owner_home` and refreshes lazily +
+  throttled before each search. `registerDocSearchToolSurface` registers two
+  read-only `read:docs` agent tools: **`doc_search`** `{query, project?,
+  limit?}` and **`doc_read`** `{project, path}` (path-safe, scoped to
+  `Projects/<id>/`).
+- **Wiring.** The `tools` module
+  (`gateway/composition/build-core-modules.ts`) registers the surface when the
+  composer supplies `MiscCompositionInput.doc_search.runtime`. `open/composer.ts`
+  builds the index at `<owner_home>/cache/doc-search/index.db`, threads the
+  runtime in, and closes it on shutdown (failure-isolated).
+
 ## `/code` → foundational Trident (DONE — Trident-port PR-5)
 
 The ~5-PR port folding Vajra's full Trident into Neutron Open as
