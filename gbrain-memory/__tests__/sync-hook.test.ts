@@ -22,6 +22,7 @@ import type { Triple } from '../../runtime/auto-link.ts'
 import { GBrainUnavailableError, type McpClient, type MemoryStore } from '../memory-store.ts'
 import { GBrainSyncHook, type SyncHookFailureEvent, _parseEntityPath } from '../GBrainSyncHook.ts'
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'
+import { bootPgliteBrain } from './boot-pglite-brain.ts'
 
 const PERSON = '/srv/owner/entities/people/jane-doe.md'
 const BODY = '---\nkind: person\n---\n\nSam runs things.\n'
@@ -37,20 +38,8 @@ describe('GBrainSyncHook — real GBrain PGLite round-trip', () => {
   let client: McpClient
 
   beforeAll(async () => {
-    // Computed specifiers: keep gbrain's .ts out of the tsc program.
-    const engMod = (await import('gbrain' + '/pglite-engine')) as {
-      PGLiteEngine: new () => {
-        connect(o: { database_url: string }): Promise<void>
-        initSchema(): Promise<void>
-        disconnect(): Promise<void>
-      }
-    }
-    const opsMod = (await import('gbrain' + '/operations')) as {
-      operations: Array<{ name: string; handler: (ctx: unknown, p: unknown) => Promise<unknown> }>
-    }
-    const eng = new engMod.PGLiteEngine()
-    await eng.connect({ database_url: '' })
-    await eng.initSchema()
+    // Serialised + retry-hardened real-PGLite boot (see boot-pglite-brain.ts).
+    const { engine: eng, operations } = await bootPgliteBrain()
     engine = eng
     const ctx = {
       engine: eng,
@@ -62,7 +51,7 @@ describe('GBrainSyncHook — real GBrain PGLite round-trip', () => {
     }
     client = {
       async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-        const op = opsMod.operations.find((o) => o.name === name)
+        const op = operations.find((o) => o.name === name)
         if (op === undefined) throw new Error(`no gbrain op: ${name}`)
         return op.handler(ctx, args)
       },

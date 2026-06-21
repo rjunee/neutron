@@ -31,6 +31,7 @@ import {
   composeEmailPayload,
   type WriteEntityFn,
 } from '../index.ts'
+import { bootPgliteBrain } from '../../gbrain-memory/__tests__/boot-pglite-brain.ts'
 
 const t0 = Date.now()
 const PROJECT = 'acme-project'
@@ -71,19 +72,8 @@ describe('scribe phase-2 — Cores-source extract (real GBrain round-trip)', () 
   let client: McpClient
 
   beforeAll(async () => {
-    const engMod = (await import('gbrain' + '/pglite-engine')) as {
-      PGLiteEngine: new () => {
-        connect(o: { database_url: string }): Promise<void>
-        initSchema(): Promise<void>
-        disconnect(): Promise<void>
-      }
-    }
-    const opsMod = (await import('gbrain' + '/operations')) as {
-      operations: Array<{ name: string; handler: (ctx: unknown, p: unknown) => Promise<unknown> }>
-    }
-    const eng = new engMod.PGLiteEngine()
-    await eng.connect({ database_url: '' })
-    await eng.initSchema()
+    // Serialised + retry-hardened real-PGLite boot (see boot-pglite-brain.ts).
+    const { engine: eng, operations } = await bootPgliteBrain()
     engine = eng
     const ctx = {
       engine: eng,
@@ -95,7 +85,7 @@ describe('scribe phase-2 — Cores-source extract (real GBrain round-trip)', () 
     }
     client = {
       async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-        const op = opsMod.operations.find((o) => o.name === name)
+        const op = operations.find((o) => o.name === name)
         if (op === undefined) throw new Error(`no gbrain op: ${name}`)
         return op.handler(ctx, args)
       },

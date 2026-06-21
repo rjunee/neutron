@@ -2,27 +2,50 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
-## 2026-06-21 — PR #13 post-merge CI red triage (flake, no code change)
+## 2026-06-21 — PR #13 post-merge CI red — root-caused & fixed (real-PGLite boot flake)
 
 After `origin/main` was merged into `feat-integrations-admin-ui-wave2-clean` to
-resolve conflicts, CI `test` went red on one chunk. Triaged to a **flaky** test,
-not a merge regression — **no code change shipped**.
+resolve conflicts, CI `test` went red on one chunk per run — a **different test
+each run**, always an `(unnamed)` failure in a real-GBrain round-trip suite
+(`scribe → GBrain real PGLite round-trip` in chunk 7; `B2 memory mirror — real
+GBrain round-trip` in chunk 2). Not the integrations feature — those tests pass
+23/23 — and not a merge regression: every one of these suites is green standalone
+and byte-identical to `main`.
 
-- Failure: `scribe → GBrain real PGLite round-trip > (unnamed) [2320.95ms]`
-  (`scribe/__tests__/scribe-gbrain-roundtrip.test.ts`, chunk 7). A real
-  in-process PGLite round-trip (100+ migrations in `beforeAll`, shared engine
-  across the describe). The `(unnamed)` hook-level failure is the parallel-load
-  flake signature, not an assertion.
-- The file is **byte-identical to `origin/main`** and **never touched by this
-  branch** — the integrations feature does not depend on scribe/gbrain.
-- Could not reproduce: full `run-tests.sh` green twice (8/8 chunks, 0 fail);
-  chunk 7 green 4× at CI concurrency=4; standalone green 3×; integrations tests
-  23/23; `tsc --noEmit` clean.
-- Pre-merge commit CI was green (#27898064293); the merge commit (#27900099886)
-  tripped the flake after ~6 new test files shifted chunk boundaries.
-- Re-triggered CI; this docs-only commit re-triggers a fresh run. The flaky
-  real-PGLite test should be hardened repo-wide against `main` (out of scope here
-  since it is identical on `main`).
+**Root cause** (from the CI stack, run #27900992736):
+
+```
+TypeError: undefined is not an object (evaluating 'probe.pages_exists')
+  at applyForwardReferenceBootstrap (node_modules/gbrain/.../pglite-engine.ts:475)
+  at async initSchema (gbrain/.../pglite-engine.ts:299)
+  at async bootBrain (connect/__tests__/shared-project-memory-mirror.test.ts:82)
+```
+
+PGLite is a single-threaded in-process WASM Postgres. `scripts/run-tests.sh`
+runs each chunk at `--max-concurrency=4` and bun loads a whole chunk into ONE
+process, so multiple real-PGLite test files boot their engines concurrently — or
+one boots while sibling files starve the CPU. gbrain's pre-schema bootstrap
+probe (`const probe = rows[0]`) then intermittently sees a 0-row result, leaving
+`probe` undefined → the throw above, surfacing as an `(unnamed)` `beforeAll`
+failure. The merge added ~6 test files, shifting chunk boundaries so two
+real-PGLite files (scribe-cores-source idx 659 + scribe-gbrain idx 661) now share
+chunk 7, tipping a **pre-existing latent flake** (it affects `main` too).
+
+**Fix** (no assertion weakened): extracted the duplicated real-PGLite boot from
+all five GBrain round-trip suites into a shared
+`gbrain-memory/__tests__/boot-pglite-brain.ts` that (1) serialises engine boots
+behind a process-global async mutex so two heavy PGLite inits never overlap
+within a chunk, and (2) bounded-retries a fresh engine ONLY on the known
+transient bootstrap-probe error (`/evaluating 'probe\./`) — any other boot error
+rethrows, so a genuine schema regression still fails. Files: new helper +
+`gbrain-memory/__tests__/{sync-hook,memory-store}.test.ts`,
+`scribe/__tests__/{scribe-cores-source,scribe-gbrain-roundtrip}.test.ts`,
+`connect/__tests__/shared-project-memory-mirror.test.ts`.
+
+**Verification:** `bunx tsc --noEmit` clean; full `scripts/run-tests.sh` GREEN
+(8/8 chunks, 0 fail, 737 files, coverage audit PASS); the 5 PGLite files green
+5×5 in one process at `--max-concurrency=5` (all boots forced to compete — a
+harder stress than CI); integrations feature tests 23/23.
 
 ## 2026-06-21 — Integrations PR #13 fix-pass (Argus: 1 blocker + 2 important)
 
