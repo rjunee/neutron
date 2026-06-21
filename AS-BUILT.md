@@ -2,6 +2,70 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Onboarding no longer DROPS an explicitly-stated project list (ISSUES #323, P1 first-run showstopper)
+
+**Problem.** On a real fresh onboarding (no import) the user answered the
+work-interview question with an explicit list — *"Running three companies: Tabs,
+Pristine and Amascence. Side project Neutron (open source agent harness), side
+project Robobuddha, and meditation."* — yet the flow re-asked at the end with
+the zero-state prompt *"I didn't pin down concrete projects from what we talked
+about."* (`buildProjectsProposedPromptSpec` empty branch, surfaced by
+`autoConfirmProjectsProposedAndAdvance`'s zero-state guard). A perfectly explicit
+6-item answer was silently discarded — duplication + data loss.
+
+**Root cause (`onboarding/interview/engine.ts`).** `work_interview_gap_fill` is an
+LLM-extraction phase, but it has only TWO extraction seams and BOTH miss in a
+default Open install:
+
+- `promptDriver` is the only dep that populates `extracted_fields` — and
+  production **never wires it** (it wires `phaseSpecResolver` + `llmRouter`). So
+  `driverDidFireForOwner` is never set and the `drainPendingExtractedFieldsRaw`
+  result is always null in prod.
+- the `llmRouter` (the real prod extraction engine) is gated behind
+  `shouldConsultRouter`, i.e. `NEUTRON_ONBOARDING_CONVERSATIONAL` — which
+  `resolveOnboardingConversational` defaults **OFF**, and `install.sh` never sets.
+
+With both off, `consumeWorkInterviewGapFillChoice` hit its driver-unwired branch
+→ `fallbackGapFillToStaticAdvance(input, observed_at, {})`, advancing with an
+**empty patch** that drops the user's answer → `primary_projects` empty →
+zero-state prompt. (The existing `v2-phase-walk` test masked this exact class by
+wiring a `promptDriver` stub that production doesn't have.)
+
+**What shipped.**
+
+- **`extractGapFillFieldsViaRouterBestEffort` (NEW private method).** In the
+  driver-unwired gap-fill branch, consult the `llmRouter` DIRECTLY to pull
+  `primary_projects` / `non_work_interests` out of the freeform answer,
+  independent of the conversational flag — gap-fill is fundamentally an
+  extraction phase. **Best-effort by contract:** a missing router, a router
+  throw, an unparseable model reply, or a no-`state_delta` classification yields
+  `null` → the caller advances with `{}` exactly as before. It does NOT route
+  through `dispatchRouterDecision`'s synthesised-advance re-prompt path, so an
+  unparseable/garbage reply can never trap the user in a gap-fill loop (the
+  deterministic LLM-less / E2E-mock walk is unchanged).
+- **Double-call guard.** The extraction runs ONLY when `shouldConsultRouter` is
+  false (the router was NOT already consulted upstream in `advance`). When the
+  conversational flag IS on, `consumeChoice` already merged the router's
+  `state_delta` into `phase_state` before this handler ran, so re-calling would
+  double-bill the LLM and break the call-count contract.
+- **`normalizeNonWorkInterestsForExtraction` (NEW module helper).** Maps a
+  router `state_delta.non_work_interests` (a real model emits plain strings OR
+  `{name}` objects) into the `ExtractedFields` `{name, cadence_hint?}[]` shape
+  `mergeGapFillExtractedFields` expects. The merge stays additive + deduped.
+
+**Tests.** `onboarding/interview/__tests__/work-interview-projects-extraction-real-path.test.ts`
+(NEW) reproduces on the REAL prod path — the real `buildLlmRouter` over a
+`FixtureAnthropicClient` returning a realistic raw-model envelope (the router's
+own `parseRouterDecision` runs), `platform: stubPlatform([])` (conversational
+OFF = the fresh-Open-install default), and **no `promptDriver`**. One test
+asserts the freeform answer populates `primary_projects` with all five stated
+projects + the non-work interest and advances; the other walks the full no-import
+flow (signup → … → skip-slug) and asserts it reaches the project-shell collapse
+with `primary_projects_confirmed` = the five projects and that NO emitted prompt
+used the "I didn't pin down concrete projects" copy. RED before the fix (projects
+`[]`), GREEN after. `bunx tsc --noEmit` clean; full `onboarding/interview/__tests__`
+suite green (920 pass); the `open-single-owner-walkthrough` E2E (which a broader
+first cut had regressed into a 120s loop) stays green.
 ## 2026-06-21 — Agent-aware watchdog + double-spawn guard for the dispatch layer (WAVE 2 P1, gap-audit §(b) #8)
 
 **Problem.** The daily-driver gap audit (§(b) #8) flagged two reliability holes

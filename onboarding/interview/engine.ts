@@ -6932,7 +6932,49 @@ export class InterviewEngine implements EngineInternals {
     // `next_phase_on_default` (advance to personality_offered).
     const driver_did_fire = this.driverDidFireForOwner.has(input.project_slug)
     if (!driver_did_fire) {
-      return await this.fallbackGapFillToStaticAdvance(input, observed_at, choice)
+      // ISSUES #323 — the driver-unwired branch is the PRODUCTION path:
+      // production wires `phaseSpecResolver` + `llmRouter`, never
+      // `promptDriver`, so `driverDidFireForOwner` is never set and the
+      // `extracted` drain above is always null. Pre-fix this fell straight to
+      // `fallbackGapFillToStaticAdvance`, which advances with an EMPTY patch and
+      // SILENTLY DISCARDS the user's freeform answer — so an explicit project
+      // list ("Tabs, Pristine and Amascence, Neutron, Robobuddha…") was dropped
+      // and the flow re-asked at `projects_proposed` ("I didn't pin down
+      // concrete projects"). The router is the only production extraction seam
+      // but, in a default Open install, it is gated OFF here by
+      // `NEUTRON_ONBOARDING_CONVERSATIONAL` (unset → off), so it never runs over
+      // the gap-fill answer.
+      //
+      // Consult the router DIRECTLY for best-effort extraction, independent of
+      // that flag — gap-fill is fundamentally an LLM-extraction phase. Crucially
+      // this is best-effort: a missing router, a router error, a parse-fail, or
+      // a no-delta classification yields an empty patch and we STILL advance via
+      // the static fallback. We do NOT route through `dispatchRouterDecision`'s
+      // synthesised-advance re-prompt path, so a garbage/unparseable model reply
+      // can never trap the user in a gap-fill loop (the deterministic
+      // LLM-less / E2E-mock walk is unchanged — it just advances with {}).
+      //
+      // Guard against a double router call: when the conversational flag IS on
+      // for this phase, `advance` already consulted the router upstream and
+      // `consumeChoice` merged its `state_delta` into `phase_state` BEFORE this
+      // handler ran — so the projects are already persisted and re-calling here
+      // would double-bill the LLM. Only extract when the router was NOT consulted
+      // upstream (`shouldConsultRouter` false — the prod-default Open install,
+      // where the drop happened).
+      const active_sub_step = deriveActiveSubStep(state.phase, state.phase_state)
+      const router_extracted = this.shouldConsultRouter(state.phase, active_sub_step)
+        ? null
+        : await this.extractGapFillFieldsViaRouterBestEffort(input, state, reply_text)
+      const fallback_patch = this.mergeGapFillExtractedFields(
+        state.phase_state,
+        router_extracted,
+      )
+      return await this.advanceFromGapFillToPersonality(
+        input,
+        observed_at,
+        fallback_patch,
+        choice,
+      )
     }
 
     // Merge the extracted fields into a working patch + a projected
@@ -7168,6 +7210,88 @@ export class InterviewEngine implements EngineInternals {
     choice: ButtonChoice,
   ): Promise<AdvanceResult> {
     return await this.advanceFromGapFillToPersonality(input, observed_at, {}, choice)
+  }
+
+  /**
+   * ISSUES #323 — best-effort gap-fill extraction via the LLM router.
+   *
+   * `work_interview_gap_fill`'s only PRODUCTION extraction seam is the
+   * `llmRouter` (production wires `phaseSpecResolver` + `llmRouter`, never
+   * `promptDriver`). In `advance`, the router is gated behind
+   * `NEUTRON_ONBOARDING_CONVERSATIONAL` (`shouldConsultRouter`), which defaults
+   * OFF, so a default Open install never routes the gap-fill answer through it
+   * and the freeform reply (e.g. an explicit project list) was being dropped.
+   * This consults the router DIRECTLY to pull `primary_projects` /
+   * `non_work_interests` out of the reply, independent of that flag — gap-fill
+   * is fundamentally an extraction phase.
+   *
+   * Best-effort by contract: returns `null` (→ the caller advances with an
+   * empty patch, the prior behavior) when no router is wired, the router throws,
+   * the model output doesn't parse, or the decision carries no usable
+   * `state_delta`. It does NOT re-prompt or loop on a parse-fail/synthesised
+   * decision (unlike `dispatchRouterDecision`'s input-preserving advance), so an
+   * unparseable model reply can never trap the user in a gap-fill loop — the
+   * deterministic LLM-less / E2E-mock walk just advances with `{}` as before.
+   */
+  private async extractGapFillFieldsViaRouterBestEffort(
+    input: AdvanceInput,
+    state: OnboardingState,
+    user_text: string | null,
+  ): Promise<ExtractedFields | null> {
+    const router = this.deps.llmRouter
+    if (router === undefined) return null
+    if (typeof user_text !== 'string' || user_text.trim().length === 0) return null
+    const knowledge = getKnowledgeForPhase(state.phase)
+    if (knowledge === null) return null
+    const spec = STATIC_PHASE_SPECS[state.phase]
+    if (spec === undefined) return null
+    let decision: RouterDecision
+    try {
+      decision = await router.route({
+        phase: state.phase,
+        active_prompt: {
+          body: spec.body,
+          options: spec.options.map((o) => ({
+            label: o.label,
+            body: o.body,
+            value: o.value,
+          })),
+          allow_freeform: spec.allow_freeform,
+          pick_only: !spec.allow_freeform,
+        },
+        user_text,
+        knowledge,
+        captured: extractCapturedFromState(state.phase_state),
+        recent_turns: recentTurnsForRouter(this.deps.transcript, 6),
+        project_slug: input.project_slug,
+        user_id: input.user_id,
+        // Gap-fill is never the first session turn (signup precedes it), so the
+        // steady-state budget is correct; never widen to the cold-spawn ceiling.
+        first_turn: false,
+      })
+    } catch (err) {
+      console.warn(
+        `[engine] gap-fill best-effort router extraction threw for project=${input.project_slug}:`,
+        err instanceof Error ? err.message : err,
+      )
+      return null
+    }
+    const delta = decision.state_delta
+    if (delta === null || delta === undefined) return null
+    const deltaRec = delta as Record<string, unknown>
+    const extracted: ExtractedFields = {}
+    const raw_projects = deltaRec['primary_projects']
+    const projects = Array.isArray(raw_projects)
+      ? raw_projects.filter(
+          (p): p is string => typeof p === 'string' && p.trim().length > 0,
+        )
+      : []
+    if (projects.length > 0) extracted.primary_projects = projects
+    const interests = normalizeNonWorkInterestsForExtraction(
+      deltaRec['non_work_interests'],
+    )
+    if (interests.length > 0) extracted.non_work_interests = interests
+    return Object.keys(extracted).length > 0 ? extracted : null
   }
 
   /**
@@ -9800,6 +9924,44 @@ function extractCapturedFromState(
   const nwi = phase_state['non_work_interests']
   if (Array.isArray(nwi)) out.non_work_interests = nwi
   return out as Partial<import('./required-fields-audit.ts').RequiredFieldsState>
+}
+
+/**
+ * ISSUES #323 — normalize a router `state_delta.non_work_interests` (which a
+ * real model emits as either plain strings — "meditation" — or `{name}` objects)
+ * into the `ExtractedFields.non_work_interests` `{name, cadence_hint?}[]` shape
+ * `mergeGapFillExtractedFields` expects. Drops empty/blank entries; preserves a
+ * valid `cadence_hint` when present. Returns `[]` on a non-array input.
+ */
+function normalizeNonWorkInterestsForExtraction(
+  raw: unknown,
+): Array<{ name: string; cadence_hint?: 'weekly' | 'monthly' | 'occasional' }> {
+  if (!Array.isArray(raw)) return []
+  const out: Array<{
+    name: string
+    cadence_hint?: 'weekly' | 'monthly' | 'occasional'
+  }> = []
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      const name = entry.trim()
+      if (name.length > 0) out.push({ name })
+      continue
+    }
+    if (entry !== null && typeof entry === 'object') {
+      const rec = entry as Record<string, unknown>
+      const rawName = rec['name']
+      if (typeof rawName !== 'string' || rawName.trim().length === 0) continue
+      const item: { name: string; cadence_hint?: 'weekly' | 'monthly' | 'occasional' } = {
+        name: rawName.trim(),
+      }
+      const cadence = rec['cadence_hint']
+      if (cadence === 'weekly' || cadence === 'monthly' || cadence === 'occasional') {
+        item.cadence_hint = cadence
+      }
+      out.push(item)
+    }
+  }
+  return out
 }
 
 /**
