@@ -81,10 +81,24 @@ describe('Google Workspace Core — production REST client (mocked Google API)',
     expect(call.url).toContain('/drive/v3/files?')
     expect(call.headers['authorization']).toBe('Bearer tok-123')
     const q = new URL(call.url).searchParams
-    expect(q.get('q')).toBe("name contains 'Report' and 'fold1' in parents")
+    expect(q.get('q')).toBe("name contains 'Report' and 'fold1' in parents and trashed = false")
     expect(q.get('orderBy')).toBe('modifiedTime desc')
     expect(q.get('pageSize')).toBe('10')
     expect(q.get('fields')).toContain('files(')
+  })
+
+  test('drive_list with no query still excludes trashed files by default', async () => {
+    const { fetchImpl, calls } = mockFetch(() => ({ json: { files: [] } }))
+    const client = buildGoogleWorkspaceClient({ accessToken: STATIC_TOKEN, fetchImpl })
+    await client.driveList({})
+    expect(new URL(calls[0]!.url).searchParams.get('q')).toBe('trashed = false')
+  })
+
+  test('drive_list does not double-constrain when the caller already filters trashed', async () => {
+    const { fetchImpl, calls } = mockFetch(() => ({ json: { files: [] } }))
+    const client = buildGoogleWorkspaceClient({ accessToken: STATIC_TOKEN, fetchImpl })
+    await client.driveList({ query: 'trashed = true' })
+    expect(new URL(calls[0]!.url).searchParams.get('q')).toBe('trashed = true')
   })
 
   test('drive_read exports Google-native docs as text/plain by default', async () => {

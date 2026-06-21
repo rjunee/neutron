@@ -713,7 +713,13 @@ export function buildGoogleWorkspaceClient(
       const clauses: string[] = []
       if (input.query !== undefined && input.query.length > 0) clauses.push(input.query)
       if (input.folder_id !== undefined) clauses.push(`'${input.folder_id}' in parents`)
-      if (clauses.length > 0) params.set('q', clauses.join(' and '))
+      // Drive `files.list` returns Trash by default. Honor the tool
+      // contract ("omitted query → non-trashed files") by AND-ing
+      // `trashed = false` unless the caller's own query already
+      // constrains the trashed state.
+      const mentionsTrashed = clauses.some((c) => /\btrashed\b/.test(c))
+      if (!mentionsTrashed) clauses.push('trashed = false')
+      params.set('q', clauses.join(' and '))
       params.set('pageSize', String(limit))
       params.set('orderBy', 'modifiedTime desc')
       params.set(

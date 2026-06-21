@@ -64,6 +64,15 @@ is a daily-driver need — so this PR ships it here and FLIPS those guards.
   conversation surfaces in the owner's inbox — the send-path counterpart to the
   draft rule. `DraftLabelingError` carries the sent message id for idempotent
   retry on a partial completion.
+- KNOWN CAVEAT (Codex review P2): adding `gmail.send` to the existing
+  `gmail_compose` grant means any user who connected Gmail BEFORE this change
+  holds a stored token with only the old three scopes — `email_send` will 403
+  until they disconnect/reconnect Gmail in the connectors UI (the
+  `OAuthTokenManager` refreshes by label, not by re-comparing granted scopes).
+  Accepted for this pre-release: the Cores OAuth surface is itself new (no
+  established connected users to migrate) and reconnect is a one-click path;
+  a scope-diff/forced-re-consent migration is deferred to the OAuth layer
+  (out of this cores/tool-layer scope).
 
 **Registration plumbing (the thing the prior attempt broke).** The earlier run
 failed with `tool_registration_failed` for `calendar_core` + `email_managed_core`
