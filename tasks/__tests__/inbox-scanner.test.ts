@@ -75,8 +75,11 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
     const first = await scan()
     expect(first.applied).toBe(1)
 
-    // Inbox emptied (consumed bytes removed).
-    expect(readFileSync(paths.inbox, 'utf8')).toBe('')
+    // Inbox drained: rotated away (no pending rows) and the processing
+    // sidecar cleaned up after commit.
+    const drained = existsSync(paths.inbox) ? readFileSync(paths.inbox, 'utf8') : ''
+    expect(drained).toBe('')
+    expect(existsSync(`${paths.inbox}.processing`)).toBe(false)
 
     const second = await scan()
     expect(second.processed).toBe(0)
@@ -117,6 +120,19 @@ describe('inbox — scanner (end-to-end: append → store → markdown)', () => 
     const second = await scan()
     expect(second.applied).toBe(1) // 'b' now applied
     expect(store.list({ project_slug: 't1', status: 'all' }).length).toBe(2)
+  })
+
+  test('a leftover .processing sidecar from a crashed scan is recovered', async () => {
+    // Simulate a scan that mutated nothing yet crashed after rotate: a
+    // sidecar holds an un-applied row, and the live inbox has a newer one.
+    appendFileSync(`${paths.inbox}.processing`, JSON.stringify({ action: 'add', id: 'crashed', title: 'from crash' }) + '\n')
+    appendInboxRow(paths.inbox, { action: 'add', id: 'fresh', title: 'after restart' })
+
+    const result = await scan()
+    expect(result.applied).toBe(2) // both the recovered + the fresh row
+    expect(store.get('crashed')?.title).toBe('from crash')
+    expect(store.get('fresh')?.title).toBe('after restart')
+    expect(existsSync(`${paths.inbox}.processing`)).toBe(false)
   })
 
   test('complete via inbox flips the task to Done in tasks.md', async () => {

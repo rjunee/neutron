@@ -5,15 +5,21 @@
  * This is the neutron analogue of `~/vajra/scripts/task-scanner.py`, but
  * the store (not the markdown) is the source of truth:
  *
- *   1. Read `task-inbox.jsonl`, parse every line (`parseInbox`).
- *   2. Apply each row to the `TaskStore` (`applyInboxRows`).
- *   3. Archive every processed row + its outcome to
+ *   1. ROTATE the inbox: atomically `rename` `task-inbox.jsonl` to a
+ *      `.processing` sidecar, then read it. A concurrent appender always
+ *      writes to the path `task-inbox.jsonl`, so anything it opened before
+ *      the rename lands in the rotated file we read; anything after lands
+ *      in a freshly-recreated inbox the NEXT scan drains. No append is ever
+ *      lost — there is no read-modify-rewrite window (see `rotateInbox`).
+ *   2. Parse every rotated line (`parseInbox`).
+ *   3. Apply each row to the `TaskStore` (`applyInboxRows`).
+ *   4. Archive every processed row + its outcome to
  *      `task-inbox.archive.jsonl` (append-only audit log).
- *   4. Truncate the inbox — but only the bytes we actually consumed, so
- *      rows appended concurrently during the scan survive to the next
- *      run (byte-prefix check; see `truncateInbox`).
  *   5. Re-render `tasks.md` + `DASHBOARD.md` from the post-mutation
- *      store state (atomic writes).
+ *      store state (atomic writes), then delete the `.processing` sidecar.
+ *      A crash before that delete is recovered on the next scan (the
+ *      sidecar is read back in), and reprocessing is safe because `add`
+ *      is idempotent on a stable id and edit-ops on missing rows skip.
  *
  * Designed to be driven by a cron tick (mirroring the focus-score
  * recompute cron) OR invoked ad-hoc. Path resolution is injected so the
@@ -21,7 +27,14 @@
  * `<NEUTRON_HOME>` project-folder paths.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFile } from '../../runtime/atomic-write.ts'
 import type { TaskStore } from '../store.ts'
@@ -96,24 +109,45 @@ export function appendInboxRow(inboxPath: string, input: InboxAppendInput): void
   appendFileSync(inboxPath, line, { mode: 0o600 })
 }
 
-function readIfExists(path: string): string {
-  if (!existsSync(path)) return ''
-  return readFileSync(path, 'utf8')
+/** The in-flight sidecar an inbox is rotated to while a scan drains it. */
+function processingPathFor(inboxPath: string): string {
+  return `${inboxPath}.processing`
 }
 
 /**
- * Remove the bytes we consumed (`consumedBody`) from the front of the
- * inbox, preserving anything appended during the scan. If the current
- * file no longer starts with what we read (a concurrent rewrite, not a
- * plain append), we leave it untouched — re-processing is safe because
- * `add` is idempotent on a stable id and edit-ops on missing rows skip.
+ * Atomically claim the queue for processing and return its contents.
+ *
+ * The rotate (`rename`) is the crux of the concurrent-append guarantee:
+ * appenders always target `inboxPath`, so the rename moves a CONSISTENT
+ * snapshot out of the way in one atomic step — there is no
+ * read-then-rewrite window where a racing append could be clobbered. A
+ * leftover `.processing` sidecar from a crashed prior scan is read back
+ * FIRST (older rows), then the rename brings the current queue in behind
+ * it. Returns the full body to parse + apply.
  */
-async function truncateInbox(inboxPath: string, consumedBody: string): Promise<void> {
-  if (consumedBody === '') return
-  const current = readIfExists(inboxPath)
-  if (!current.startsWith(consumedBody)) return
-  const remainder = current.slice(consumedBody.length)
-  await atomicWriteFile(inboxPath, remainder, { mode: 0o600 })
+function rotateInbox(inboxPath: string): string {
+  const processingPath = processingPathFor(inboxPath)
+  let body = ''
+  // Recover a leftover sidecar from a crashed scan BEFORE the rename
+  // below would clobber it on disk (we've already captured its bytes).
+  if (existsSync(processingPath)) {
+    body += readFileSync(processingPath, 'utf8')
+  }
+  if (existsSync(inboxPath)) {
+    renameSync(inboxPath, processingPath)
+    body += readFileSync(processingPath, 'utf8')
+  }
+  return body
+}
+
+/** Remove the in-flight sidecar once the scan has fully committed. */
+function clearProcessing(inboxPath: string): void {
+  const processingPath = processingPathFor(inboxPath)
+  try {
+    if (existsSync(processingPath)) unlinkSync(processingPath)
+  } catch {
+    /* best-effort; the next scan recovers + reprocesses idempotently */
+  }
 }
 
 function archiveLine(record: Record<string, unknown>): string {
@@ -161,11 +195,10 @@ function appendArchive(
  * queue.
  */
 export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult> {
-  // 1. Read + parse the queue (snapshot the exact bytes we consume).
-  // Snapshot the bytes FIRST; the clock is sampled after so the
-  // consumed-byte set is fixed before any concurrent appender can grow
-  // the file (the truncate then preserves only those later appends).
-  const consumedBody = readIfExists(deps.paths.inbox)
+  // 1. Rotate the queue out of the way atomically, then parse it. The
+  // rename claims a consistent snapshot — appends racing the scan land in
+  // a freshly-recreated inbox the next scan drains, never lost.
+  const consumedBody = rotateInbox(deps.paths.inbox)
   const now = deps.now?.() ?? new Date()
   const nowIso = now.toISOString()
   const { rows, errors } = parseInbox(consumedBody)
@@ -179,10 +212,7 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   // 3. Archive processed rows + parse errors (audit trail).
   appendArchive(deps.paths.archive, nowIso, outcomes, errors)
 
-  // 4. Drain the consumed bytes from the inbox (keep concurrent appends).
-  await truncateInbox(deps.paths.inbox, consumedBody)
-
-  // 5. Re-render the markdown surface from post-mutation store state.
+  // 4. Re-render the markdown surface from post-mutation store state.
   const allTasks = listAllTasks({ store: deps.store, project_slug: deps.project_slug })
   const tasksMd = renderTasksMarkdown({
     tasks: allTasks,
@@ -200,6 +230,10 @@ export async function runTaskScan(deps: RunTaskScanDeps): Promise<TaskScanResult
   })
   await atomicWriteFile(deps.paths.tasks_md, tasksMd, { mode: 0o600 })
   await atomicWriteFile(deps.paths.dashboard, dashboard, { mode: 0o600 })
+
+  // 5. Commit: drop the in-flight sidecar now the store + markdown are
+  // both durable. A crash before here leaves the sidecar for recovery.
+  clearProcessing(deps.paths.inbox)
 
   const applied = outcomes.filter((o) => o.status === 'applied').length
   const skipped = outcomes.filter((o) => o.status === 'skipped').length

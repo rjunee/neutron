@@ -31,12 +31,19 @@ New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
   ≤2d / ≤7d) matching `focus-score.ts` exactly. Ordering **reuses**
   `computeFocusScore` (recomputed against render-time `now`).
 - **`scanner.ts`** — `appendInboxRow` (atomic per-line `O_APPEND`) +
-  `runTaskScan`: read queue → apply → archive every row+outcome to
-  `task-inbox.archive.jsonl` → truncate ONLY the consumed bytes (byte-prefix
-  check preserves concurrent appends) → re-render `tasks.md` + `DASHBOARD.md`
-  (atomic writes via `runtime/atomic-write.ts`). A re-scan of a drained queue
-  is a no-op. Path resolution is injected so composition wires the real
-  `<NEUTRON_HOME>` project-folder paths and the scanner stays testable.
+  `runTaskScan`: **rotate** the queue (atomic `rename` to a `.processing`
+  sidecar) → apply → archive every row+outcome to `task-inbox.archive.jsonl`
+  → re-render `tasks.md` + `DASHBOARD.md` (atomic writes via
+  `runtime/atomic-write.ts`) → drop the sidecar. Rotate-then-process (not
+  read-modify-rewrite) is what makes concurrent appends loss-proof: a racing
+  append always targets the live `task-inbox.jsonl`, which the rename has
+  already moved aside, so it survives in a freshly-recreated inbox the next
+  scan drains. A crash mid-scan leaves the sidecar for recovery on the next
+  run; reprocessing is safe (idempotent `add`, skipping edit-ops). A re-scan
+  of a drained queue is a no-op. Path resolution is injected so composition
+  wires the real `<NEUTRON_HOME>` project-folder paths and the scanner stays
+  testable. (Codex cross-model review caught a TOCTOU window in the original
+  byte-prefix truncate; this is the fix.)
 
 Refactor: `tasks/projection/format.ts` now exports `renderTaskLine` /
 `renderDoneLine` (was a private `renderActiveLine`) so the STATUS.md
