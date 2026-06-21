@@ -37,8 +37,13 @@ export function buildMorningBriefHandler(deps: MorningBriefDeps): CronHandler {
   return async () => {
     try {
       const r = await runMorningBrief(deps)
+      // A delivery outage returns `deliver_failed` and MUST surface as an
+      // error (not the benign `skipped`) so outages are visible in telemetry
+      // (#320). `posted` → ok; `already_posted`/`too_early` → skipped.
+      const status =
+        r.status === 'posted' ? 'ok' : r.status === 'deliver_failed' ? 'error' : 'skipped'
       return {
-        status: r.status === 'posted' ? 'ok' : 'skipped',
+        status,
         detail: `day=${r.day} status=${r.status} body_len=${r.body_length}`,
       }
     } catch (err) {

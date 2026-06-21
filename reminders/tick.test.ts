@@ -79,6 +79,161 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(store.listPending('t1').map((r) => r.message)).toEqual(['fail'])
   })
 
+  // #319 — crash-window dedup. The row is CLAIMED (status flipped fired /
+  // recurrence advanced) BEFORE the post is attempted, so a process crash
+  // anywhere during the send leaves an already-claimed row that a post-restart
+  // `listDue` will not return — no double-send. The pre-fix loop marked fired
+  // only AFTER the post, leaving a `pending` due row across the crash window.
+  test('#319 one-shot row is claimed (fired) BEFORE the post, so a crash mid-send cannot re-fire', async () => {
+    const store = new ReminderStore(db)
+    const now = 10_000_000
+    const r = await store.create({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: now / 1000 - 100,
+      message: 'claim-first',
+    })
+    let postCount = 0
+    // Recorded via an object so the closure mutation isn't control-flow-narrowed.
+    const probe: { status: string | null } = { status: null }
+    const dispatcher: ReminderDispatcher = {
+      dispatch: async (rem) => {
+        // Observe the persisted row at the instant the post is attempted.
+        probe.status = store.get(rem.id)?.status ?? null
+        postCount++
+      },
+    }
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
+
+    await loop.runOnce()
+    // The claim is committed BEFORE the dispatcher posts: a crash right after a
+    // successful post finds an already-fired row.
+    expect(probe.status).toBe('fired')
+    expect(postCount).toBe(1)
+    expect(store.get(r.id)?.status).toBe('fired')
+
+    // Simulate a restart by ticking again: the claimed row is not re-picked.
+    await loop.runOnce()
+    expect(postCount).toBe(1)
+  })
+
+  test('#319 recurring row is advanced PAST due BEFORE the post, so a crash mid-send cannot re-fire', async () => {
+    const store = new ReminderStore(db)
+    const now_sec = 10_000_000
+    const r = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: now_sec - 10,
+      message: 'weekly-claim-first',
+      recurrence: 'weekly',
+    })
+    let postCount = 0
+    const probe: { fireAt: number | null } = { fireAt: null }
+    const dispatcher: ReminderDispatcher = {
+      dispatch: async (rem) => {
+        probe.fireAt = store.get(rem.id)?.fire_at ?? null
+        postCount++
+      },
+    }
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
+
+    await loop.runOnce()
+    // fire_at was rolled forward to the next occurrence BEFORE the post — so it
+    // is no longer due, and a crash-restart tick won't re-fire it.
+    expect(probe.fireAt).not.toBeNull()
+    expect(probe.fireAt!).toBeGreaterThan(now_sec)
+    expect(postCount).toBe(1)
+    expect(store.get(r.id)?.status).toBe('pending') // recurring stays pending
+
+    await loop.runOnce()
+    expect(postCount).toBe(1) // not due → no double-send
+  })
+
+  test('#319 a caught dispatch throw REVERTS the claim so the row retries (one-shot)', async () => {
+    const store = new ReminderStore(db)
+    const now = 10_000_000
+    const r = await store.create({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: now / 1000 - 100,
+      message: 'rejected-post',
+    })
+    let attempts = 0
+    const dispatcher: ReminderDispatcher = {
+      dispatch: async () => {
+        attempts++
+        if (attempts === 1) throw new Error('outbound post rejected — left pending for retry')
+      },
+    }
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
+
+    await loop.runOnce()
+    // First tick claimed then the post failed → claim reverted to pending.
+    expect(store.get(r.id)?.status).toBe('pending')
+    expect(store.get(r.id)?.fired_at).toBeNull()
+
+    // Second tick re-fires the still-pending row and succeeds.
+    await loop.runOnce()
+    expect(attempts).toBe(2)
+    expect(store.get(r.id)?.status).toBe('fired')
+  })
+
+  test('#319 a caught dispatch throw REVERTS the claim so the recurring row stays due', async () => {
+    const store = new ReminderStore(db)
+    const now_sec = 10_000_000
+    const initial_fire = now_sec - 10
+    const r = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: initial_fire,
+      message: 'weekly-rejected',
+      recurrence: 'weekly',
+    })
+    const dispatcher: ReminderDispatcher = {
+      dispatch: async () => {
+        throw new Error('outbound post rejected — left pending for retry')
+      },
+    }
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
+
+    await loop.runOnce()
+    // The advance was reverted: the row is still due at its original fire_at.
+    const after = store.get(r.id)
+    expect(after?.status).toBe('pending')
+    expect(after?.fire_at).toBe(initial_fire)
+    expect(store.listDue(now_sec).map((x) => x.id)).toContain(r.id)
+  })
+
+  test('#319 a concurrent reschedule during dispatch is NOT clobbered by the claim revert', async () => {
+    const store = new ReminderStore(db)
+    const now_sec = 10_000_000
+    const initial_fire = now_sec - 10
+    const owner_new_fire = now_sec + 99_999 // owner moves it far into the future
+    const r = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: initial_fire,
+      message: 'weekly-raced',
+      recurrence: 'weekly',
+    })
+    const dispatcher: ReminderDispatcher = {
+      dispatch: async (rem) => {
+        // Simulate the owner rescheduling WHILE the (long) dispatch is in
+        // flight — the claim already advanced fire_at; this overrides it.
+        await store.reschedule(rem.id, owner_new_fire)
+        throw new Error('post failed after the owner rescheduled')
+      },
+    }
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_sec * 1000 })
+
+    await loop.runOnce()
+    // The revert is a CAS keyed on the claimed fire_at, so the owner's new time
+    // survives — it is NOT overwritten back to the original due time.
+    const after = store.get(r.id)
+    expect(after?.status).toBe('pending')
+    expect(after?.fire_at).toBe(owner_new_fire)
+  })
+
   test('recurring rows roll forward to the next occurrence instead of marking fired', async () => {
     const store = new ReminderStore(db)
     const now_sec = 10_000_000

@@ -7,6 +7,9 @@ name: ci
 # test run, then the self-contained leak-gate purity subset that fails the build
 # if multi-instance vocabulary or a Managed module ever regresses into the tree.
 
+# `pull_request` (no `branches`/`types` filter) fires the `test` job for EVERY
+# PR — opened, synchronize, reopened — to any base, so a PR to main can never
+# merge without a `test` signal regardless of head-branch name shape (#321).
 on:
   pull_request:
   push:
@@ -18,9 +21,15 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref to save runner minutes.
+# Cancel superseded runs to save runner minutes. Key PR runs on the PR NUMBER
+# (always slash-free) and push runs on the ref, namespaced by workflow. The
+# previous `ci-${{ github.ref }}` group keyed PR runs on a ref that, for some
+# branch-name shapes (e.g. a slashed `feat/...` head), could let the `test` job
+# be superseded/skipped so a PR merged with only CodeQL signal (#321). The
+# `github.event.pull_request.number || github.ref` form is GitHub's documented
+# pattern and guarantees every PR to main gets its own independent `test` run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

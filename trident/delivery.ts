@@ -57,9 +57,10 @@ export interface BuildTridentDeliveryOptions {
   /** The outbound seam — production passes the instance `ChannelRouter`. */
   sink: OutboundSink
   /**
-   * Channel the originating `chat_id`/`thread_id` belong to. `/code` today
-   * is Telegram-shaped (`chat_id[:thread_id]`), which is the default;
-   * exposed so a non-Telegram dispatch surface can override it.
+   * Fallback channel for runs whose row carries no `channel_kind` (defensive
+   * — every row written since migration 0081 carries one, defaulting to
+   * `'telegram'`). The per-run `run.channel_kind` is authoritative (#317);
+   * this is only consulted if that is somehow absent.
    */
   channel_kind?: Topic['channel_kind']
   /**
@@ -167,10 +168,15 @@ export function topicForRun(
 export function buildTridentDelivery(
   opts: BuildTridentDeliveryOptions,
 ): TridentTerminalHook {
-  const channel_kind = opts.channel_kind ?? 'telegram'
+  const fallback_channel_kind = opts.channel_kind ?? 'telegram'
   const compose = opts.compose ?? composeTerminalDelivery
   return {
     async onTerminal(run: TridentRun): Promise<void> {
+      // Derive the delivery channel from the RUN (#317) so a `/code` build
+      // originating on the app-WebSocket surface posts its result back there
+      // instead of misrouting to Telegram. Falls back to the build-time
+      // default only for a row missing the field (pre-0081 / defensive).
+      const channel_kind = run.channel_kind ?? fallback_channel_kind
       const topic = topicForRun(run, channel_kind)
       if (topic === null) return
       const composed = compose(run)

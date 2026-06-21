@@ -433,7 +433,8 @@ CREATE TABLE code_trident_runs (
     failure_reason      TEXT,
     started_at          TEXT NOT NULL,                  -- ISO-8601 UTC
     last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
-) STRICT
+, channel_kind TEXT NOT NULL DEFAULT 'telegram'
+        CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli'))) STRICT
 
 [table] connect_guest_invites (tbl=connect_guest_invites)
 CREATE TABLE connect_guest_invites (

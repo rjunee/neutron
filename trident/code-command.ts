@@ -22,6 +22,7 @@
  * `parseAndExecuteCodeCommand` in a `ChatCommandFilter` at the boot layer.
  */
 
+import type { Topic } from '../channels/types.ts'
 import { detectMergeMode, defaultGitModeProbe, detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 
@@ -121,6 +122,13 @@ export interface TridentCodeContext {
   /** Chat thread context persisted on the run for status posts. */
   chat_id?: string | null
   thread_id?: string | null
+  /**
+   * Channel the `chat_id`/`thread_id` belong to (#317) — persisted on the run
+   * so terminal-result delivery routes back to the originating surface instead
+   * of hard-coding Telegram. Omitted → the store defaults to `'telegram'`
+   * (the Telegram webhook `/code` path; app-WS callers pass `'app_socket'`).
+   */
+  channel_kind?: Topic['channel_kind']
   /** Round caps (else the store defaults: 8 / 20). */
   max_rounds?: number
   max_ralph_rounds?: number
@@ -190,6 +198,7 @@ async function executeDispatch(
       ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
       ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
       ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),
+      ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
     })
     const mode = ralph ? 'governed (Ralph)' : merge_mode === 'pr' ? 'PR' : 'local'
     return {

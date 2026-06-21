@@ -266,9 +266,12 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
         reminder_id: reminder.id,
       })
       // A rejected durable post (e.g. the chat history write failed) MUST NOT
-      // let the tick loop mark the row fired / advance its recurrence — that
-      // would silently consume a reminder that never reached the user. Throw
-      // so the tick's try/catch leaves the row pending to retry next tick.
+      // let the row stay claimed/fired — that would silently consume a reminder
+      // that never reached the user. Throw so the tick loop reverts the
+      // pre-dispatch claim and leaves the row pending to retry next tick. The
+      // tick loop treats EVERY caught dispatch throw as "post did not happen"
+      // (#319), which holds because the dispatcher only ever throws BEFORE a
+      // successful delivery, never after one.
       if (accepted === false) {
         throw new Error(
           `reminder ${reminder.id} outbound post rejected for topic ${topic_id} — left pending for retry`,

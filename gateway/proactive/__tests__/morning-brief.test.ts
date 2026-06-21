@@ -106,6 +106,17 @@ describe('composeMorningBrief (pure)', () => {
     expect(body).not.toContain('📅')
     expect(body).not.toContain('🎯')
   })
+
+  // #320 — the quiet-day copy must not over-claim the calendar is clear when
+  // the calendar source was never checked (unwired or threw).
+  it('#320 only claims "nothing on the calendar" when the calendar was actually checked', () => {
+    const checked = composeMorningBrief({ calendar_checked: true }, '2026-06-20')
+    expect(checked).toContain('Nothing on the calendar')
+
+    const unchecked = composeMorningBrief({}, '2026-06-20')
+    expect(unchecked).not.toContain('Nothing on the calendar')
+    expect(unchecked).toContain("couldn't check your calendar")
+  })
 })
 
 describe('gatherBriefContext (graceful degradation)', () => {
@@ -140,6 +151,27 @@ describe('gatherBriefContext (graceful degradation)', () => {
   it('omits an absent source without error', async () => {
     const ctx = await gatherBriefContext({}, '2026-06-20')
     expect(ctx).toEqual({})
+  })
+
+  // #320 — a calendar source that runs and returns [] is a CONFIRMED-empty
+  // day (calendar_checked = true), distinct from an unwired/throwing source.
+  it('#320 marks the calendar checked when the source returns an empty array', async () => {
+    const confirmedEmpty = await gatherBriefContext({ calendarToday: async () => [] }, '2026-06-20')
+    expect(confirmedEmpty.calendar).toBeUndefined()
+    expect(confirmedEmpty.calendar_checked).toBe(true)
+
+    const unwired = await gatherBriefContext({}, '2026-06-20')
+    expect(unwired.calendar_checked).toBeUndefined()
+
+    const threw = await gatherBriefContext(
+      {
+        calendarToday: async () => {
+          throw new Error('no credential')
+        },
+      },
+      '2026-06-20',
+    )
+    expect(threw.calendar_checked).toBeUndefined()
   })
 })
 
@@ -201,7 +233,10 @@ describe('runMorningBrief (compose + POST)', () => {
       },
     }
     const r1 = await runMorningBrief(deps({ now: () => NOON_LA_MS, sink: failingSink }))
-    expect(r1.status).toBe('too_early') // failure path returns non-posted
+    // #320 — a delivery outage returns the distinct `deliver_failed` (NOT the
+    // benign `too_early`) so the cron handler surfaces it as an error in
+    // telemetry rather than folding it into the `skipped` bucket.
+    expect(r1.status).toBe('deliver_failed')
     expect(h.store.hasBriefForDay('2026-06-20')).toBe(false)
     // Next tick with a working sink posts successfully.
     const r2 = await runMorningBrief(deps({ now: () => NOON_LA_MS + 1000 }))
