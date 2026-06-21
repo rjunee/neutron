@@ -4,7 +4,6 @@
   "main": "./chat.ts",
   "private": true,
   "dependencies": {
-    "@neutron/chat-core": "workspace:*",
     "jose": "^5.9.0"
   }
 }

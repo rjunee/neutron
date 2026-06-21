@@ -228,7 +228,6 @@
     "landing": {
       "name": "@neutronai/landing",
       "dependencies": {
-        "@neutron/chat-core": "workspace:*",
         "jose": "^5.9.0",
       },
     },

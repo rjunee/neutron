@@ -234,9 +234,21 @@ export class AppWsAdapter implements ChannelAdapter {
    * the echo out to every live device. Returns the canonical id + seq so the
    * surface can render the HTTP-fallback echo identically.
    *
+   * `was_new` is the idempotency verdict the surface MUST honour: when the
+   * durable log de-dupes a re-sent `client_msg_id` (offline-queue flush,
+   * double-tap, HTTP-fallback racing the WS echo) it returns the existing row
+   * with `was_new:false`. The surface gates its side-effecting work — the
+   * chat-command filter and the agent `dispatchInbound` — on this flag so a
+   * re-send NEVER fires the agent / a command twice (Argus + Codex P1
+   * double-dispatch blocker, PR #6). The echo is still re-emitted (the client
+   * de-dupes it on `client_msg_id`) so a reconnecting device reconciles.
+   *
    * When NO durable log is wired this delegates to the legacy
    * {@link emitUserMessageEcho} (no seq) so the in-memory-only path is
-   * unchanged.
+   * unchanged; `was_new` is `true` (there's no persistence to de-dupe against,
+   * so every send is dispatched, preserving legacy behaviour). A persist
+   * failure likewise reports `was_new:true` — we couldn't establish that the
+   * message was a duplicate, so we dispatch rather than silently drop it.
    */
   async ingestUserMessage(input: {
     channel_topic_id: string
@@ -245,15 +257,16 @@ export class AppWsAdapter implements ChannelAdapter {
     client_msg_id?: string
     project_id?: string
     attachments?: ReadonlyArray<string>
-  }): Promise<{ message_id: string; seq: number | null }> {
+  }): Promise<{ message_id: string; seq: number | null; was_new: boolean }> {
     if (this.chat_log === undefined) {
       const message_id = this.emitUserMessageEcho(input)
-      return { message_id, seq: null }
+      return { message_id, seq: null, was_new: true }
     }
     const message_id = this.generate_message_id()
     const ts = this.now()
     let seq: number | null = null
     let canonical_id = message_id
+    let was_new = true
     try {
       const result = await this.chat_log.append({
         topic_id: input.channel_topic_id,
@@ -269,6 +282,7 @@ export class AppWsAdapter implements ChannelAdapter {
       // Idempotent re-send: an existing row owns the canonical id, so the
       // echo correlates to the message the client already holds.
       canonical_id = result.row.message_id
+      was_new = result.was_new
     } catch (err) {
       console.warn(
         `[app-ws] topic=${input.channel_topic_id} user-message persist failed — echoing without seq: ${
@@ -291,7 +305,7 @@ export class AppWsAdapter implements ChannelAdapter {
     }
     if (seq !== null) env.seq = seq
     this.registry.send(input.channel_topic_id, env)
-    return { message_id: canonical_id, seq }
+    return { message_id: canonical_id, seq, was_new }
   }
 
   /**
