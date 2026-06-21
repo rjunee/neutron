@@ -116,10 +116,28 @@ function normalizePriority(value: unknown): number | null | undefined {
 }
 
 /**
+ * Is `(y, m, d)` a real calendar date? `Date.UTC` silently rolls
+ * impossible dates over (Feb 31 → Mar 3), so we build the date and check
+ * the components round-trip. Catches typos before `Date.parse` accepts a
+ * shifted day.
+ */
+function calendarDateOk(y: number, m: number, d: number): boolean {
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  return (
+    dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
+  )
+}
+
+/**
  * Normalize a raw inbox `due` value into ISO-8601. Accepts a date-only
  * `YYYY-MM-DD` (anchored to midnight UTC) or a full ISO timestamp.
  * Returns `undefined` when absent, `null` when explicitly cleared, and
  * `undefined` for unparseable input (treated as "no change").
+ *
+ * The leading `YYYY-MM-DD` (present in both forms) is validated as a real
+ * calendar date FIRST — `Date.parse` would otherwise roll an impossible
+ * date over (`2026-02-31` / `2026-02-31T00:00:00Z` → Mar 3) and silently
+ * schedule the wrong day.
  */
 function normalizeDue(value: unknown): string | null | undefined {
   if (value === undefined) return undefined
@@ -127,18 +145,16 @@ function normalizeDue(value: unknown): string | null | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   if (trimmed === '') return null
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(trimmed)
+  if (dateMatch !== null) {
+    const y = Number(dateMatch[1])
+    const m = Number(dateMatch[2])
+    const d = Number(dateMatch[3])
+    if (!calendarDateOk(y, m, d)) return undefined
+  }
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     const ms = Date.parse(`${trimmed}T00:00:00.000Z`)
-    if (!Number.isFinite(ms)) return undefined
-    const d = new Date(ms)
-    // `Date.parse` rolls impossible calendar dates over (2026-02-31 →
-    // 2026-03-03). Reject unless the parsed UTC y-m-d round-trips to the
-    // exact input, so a typo doesn't silently schedule the wrong day.
-    const y = d.getUTCFullYear().toString().padStart(4, '0')
-    const m = (d.getUTCMonth() + 1).toString().padStart(2, '0')
-    const day = d.getUTCDate().toString().padStart(2, '0')
-    if (`${y}-${m}-${day}` !== trimmed) return undefined
-    return d.toISOString()
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
   }
   const ms = Date.parse(trimmed)
   return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined

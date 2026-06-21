@@ -90,6 +90,14 @@ describe('inbox — parse', () => {
     const leap = parseInboxLine('{"action":"add","title":"x","due":"2024-02-29"}') as InboxRow
     expect(leap.due_date).toBe('2024-02-29T00:00:00.000Z')
 
+    // Full-ISO impossible dates are rejected too (not just date-only).
+    const isoRollover = parseInboxLine('{"action":"add","title":"x","due":"2026-02-31T09:00:00.000Z"}')
+    expect(typeof isoRollover).toBe('string')
+    expect(isoRollover as string).toContain('due')
+    // A valid full-ISO due passes through.
+    const isoOk = parseInboxLine('{"action":"add","title":"x","due":"2026-07-01T09:30:00.000Z"}') as InboxRow
+    expect(isoOk.due_date).toBe('2026-07-01T09:30:00.000Z')
+
     // An absent field is fine — no error, field simply unset.
     const ok = parseInboxLine('{"action":"add","title":"x"}') as InboxRow
     expect(ok.priority).toBeUndefined()
