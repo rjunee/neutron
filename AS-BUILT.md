@@ -87,6 +87,148 @@ Full suite green; `tsc --noEmit` clean (root + `trident/tsconfig.json`).
 NOTE: closing the managed-repo `ISSUES.md` entries is out of scope (different
 repo) — the PR notes which issues are fixed.
 
+## 2026-06-21 — React + assistant-ui web chat client, behind a flag (Track B Phase 3)
+
+**Problem.** The parity-research doc (`web-chat-telegram-parity-architecture-
+2026-06-20`) ranks the web chat as "nowhere near Telegram." Phase 1 shipped the
+hard part — `@neutron/chat-core` (WS client + send-queue + append-only sync
+engine + local Store) on the app-ws surface with a monotonic `seq` + resume.
+Phase 3 is the largest/riskiest chunk: replace the 4.5k-line bespoke vanilla-TS
+web client with the locked stack (**React + `@assistant-ui/react`, MIT, bring-
+your-own-transport**) — but ship it BEHIND A FLAG with the vanilla client intact
+as the default fallback, no cutover.
+
+**What shipped.**
+
+- **`chat-core/web-session.ts` — additive `onFrame` observer.** The sync layer
+  persists only final `user_message`/`agent_message`s; the UI also needs the
+  ephemeral `agent_message_partial` token stream + typing hints. `onFrame(frame)`
+  surfaces every raw inbound frame BEFORE the persist decision, as a pure
+  observer (errors swallowed) — so Phase-1 wiring is byte-for-byte unchanged.
+  Covered by a new web-session test.
+
+- **`landing/chat-react/` (NEW) — the React client.** Layered for testability:
+  `config.ts` (pure bootstrap: start-token `sub` → `app:<user_id>` topic +
+  app-ws URL; dev-bypass token default, `window.__neutron_app_ws_token`
+  override), `controller.ts` (`NeutronChatController` — framework-agnostic data
+  layer: streaming-partial accumulation into a live agent bubble the final
+  persisted message supersedes, `isRunning` typing derivation, connection +
+  offline-queue state, synchronous `ChatViewModel`; session injected via a
+  factory so it integration-tests against a real `WebChatSession` + fake socket),
+  `message-adapter.ts` (pure `RenderMessage → ThreadMessageLike`),
+  `useNeutronChat.ts` (thin React seam → assistant-ui `ExternalStoreRuntime`),
+  `ChatApp.tsx` (UI from assistant-ui PRIMITIVES — the styled `Thread` left the
+  core package in 0.14.x — styled to the existing dark theme: topic rail,
+  connection banner, offline-pending badge, streaming dots), `main.tsx` (entry,
+  bundled to `/chat-react.js`).
+
+- **`landing/web-chat-flag.ts` + `landing/server.ts` — the flag.**
+  `resolveWebChatClient({ envDefault, queryClient })`: env
+  `NEUTRON_WEB_CHAT_CLIENT` (deploy default) with a `?client=react|vanilla`
+  per-request override; default/garbage → vanilla. `GET /chat` serves the React
+  shell (`chat-react.html`) only when the flag resolves to `react` AND the assets
+  shipped (`existsSync`-guarded — else vanilla); `/chat-react.js` is lazily
+  bundled from `chat-react/main.tsx` via `Bun.build` (minified, ~0.6 MB),
+  mirroring the existing `chat.ts` → `/chat.js` path. Vanilla is otherwise
+  untouched.
+
+**Tests.** chat-core onFrame test; controller integration over a real
+`WebChatSession`+fake socket (optimistic send, streaming→final supersede,
+offline queue, status transitions, project tagging); pure adapter + config
+tests; happy-dom component smoke (full assistant-ui render: optimistic send +
+streamed-then-finalized agent reply reach the DOM); flag + flag-gated serving
+tests. `bunx tsc -p tsconfig.json` (root gate) + `bunx tsc -p
+landing/chat-react/tsconfig.json` (React leaf, isolated from the gate) both
+clean; `bun test chat-core landing` green (577 pass).
+
+**Parity gaps (documented, vanilla stays default until closed):** attachment
+compose-UI (rendering + data path done; upload affordance pending), "load
+earlier" paging beyond the resume window, and the production app-ws web token
+mint (the deferred identity sub-sprint the app-ws auth resolver itself notes).
+
+## 2026-06-21 — Agent-aware watchdog + double-spawn guard for the dispatch layer (WAVE 2 P1, gap-audit §(b) #8)
+
+**Problem.** The daily-driver gap audit (§(b) #8) flagged two reliability holes
+in the agent-dispatch layer (`runtime/subagent/`):
+
+1. **Double-spawn.** `spawnSubagent` minted a fresh `run_id` on every call, so
+   two dispatches for the SAME logical task each started their own process —
+   the Vajra incident class (registry-only pid never killed → two processes on
+   one session). Nothing keyed spawns to the task.
+2. **No agent-aware liveness surfacing.** The generic `lifecycle.ts` reaper
+   silently `cancel`s stale `running` records and marks pid-gone ones
+   `crashed`, but it never SURFACES the failure. A crashed/stuck dispatched
+   agent just dropped out of `live()`; a caller awaiting it (`waitForCompletion`)
+   hung forever with no signal, no failure reason, no notification.
+
+**What shipped** (scoped to the dispatch layer — `runtime/subagent/` only):
+
+- **Double-spawn GUARD (`spawn.ts` + `registry.ts`).** `SpawnInput` gains an
+  optional logical `spawn_key` (callers namespace it, e.g.
+  `${instance_key}:${task_id}:${agent_kind}`) and `on_duplicate: 'coalesce' |
+  'refuse'` (default `coalesce`). Step **0** of `spawnSubagent` — run BEFORE the
+  concurrency/depth checks — consults the new `registry.liveByKey(spawn_key)`:
+  if a LIVE (`pending`|`running`) record already holds the key it either returns
+  that in-flight record (coalesce — no second process, no wasted `run_id`, no
+  concurrency slot consumed) or throws (refuse). A TERMINAL record with the same
+  key does NOT match, so once the prior run finishes — or the watchdog reaps it
+  — a fresh spawn is allowed through. `spawn_key` persists on the record. With
+  no `spawn_key` the guard is inert (full back-compat).
+
+- **Agent-aware WATCHDOG (`watchdog.ts`, NEW).** `runAgentWatchdog(deps)` walks
+  the dispatched-agent registry and, for each LIVE record, detects + SURFACES
+  one of two terminal conditions:
+  - **`process_dead`** — the record has a `pid` whose OS process is gone yet it
+    never reached terminal. (Takes precedence over `stuck`.)
+  - **`stuck`** — `last_event_at` is older than the per-agent-kind inactivity
+    threshold (`StuckThresholdConfig`: a flat number or a per-`AgentKind` map;
+    default `DEFAULT_STUCK_THRESHOLD_MS` = 5 min). A wedged process may still be
+    alive, so it is killed via the registered canceller before surfacing.
+  Surfacing = mark the run **failed** (new `failRun` control verb → terminal
+  `status='crashed'` + `failure_reason`, distinct from a deliberate
+  `cancelRun`) **AND** emit a structured `AgentWatchdogEvent` (`run_id`,
+  `agent_kind`, `instance_key`, `reason`, `delivery_target`, `age_ms`, `pid`)
+  through an injected `notify` sink (Telegram / the `watchdog/` AlertStore / a
+  log). It does NOT auto-respawn (out of scope) but the event carries enough
+  context for a caller to retry/notify. Pure + injectable (`now` / `pid_alive` /
+  `notify`); idempotent.
+
+- **`lifecycle.ts` now COMPOSES the watchdog** instead of duplicating liveness
+  reaping. It previously reaped stale-`running` records SILENTLY (`cancelRun`)
+  and marked pid-gone ones `crashed` with no notification; running that beside
+  the new surfacing watchdog at the same 5-min threshold raced — if the silent
+  pass won the tick it swallowed the very failure the watchdog was meant to
+  surface (a record gone from `live()` is never seen by the watchdog).
+  `runLifecycleTick` is now one ordered tick: **(1)** when `watchdog` deps are
+  supplied it runs `runAgentWatchdog` first (the SOLE owner of live→terminal
+  transitions — surfaces stale/dead agents), **(2)** then prunes already-terminal
+  records past `cleanup_after`. One reaper, defined order, no race — and the
+  established tick entry point keeps reaping liveness (now via the surfacing
+  path) rather than silently losing it. Omit the `watchdog` deps for a
+  prune-only tick. (`STALE_THRESHOLD_MS` kept as a deprecated alias;
+  `LifecycleDeps` = `{ registry, now?, watchdog? }`.)
+
+  Guard + watchdog are complementary: the watchdog reaps a registry-live-but-
+  process-dead record so a legitimate re-spawn can proceed, while the guard
+  blocks a concurrent duplicate while the first is genuinely in flight.
+
+**Tests** (real, both surfaces): `runtime/subagent/spawn-guard.test.ts` (7) —
+duplicate coalesced/refused, coalesce holds while running, terminal key
+recycles, distinct keys don't collide, back-compat without a key, coalesce
+bypasses the concurrency cap. `runtime/subagent/watchdog.test.ts` (10) — dead
+detected→crashed+notified, `process_dead` precedence, stuck killed+surfaced,
+healthy-not-surfaced, per-kind + flat thresholds, `delivery_target` rides along,
+throwing notifier doesn't abort the tick, idempotent across ticks. Full suite:
+`bun test runtime/ trident/ cores/free/code-gen/` → 1164 pass / 0 fail; `tsc
+--noEmit` clean.
+
+**Not in scope (follow-ups).** No production *caller* sets `spawn_key` or runs
+`runAgentWatchdog` on a tick yet — the gateway wires the registry's `notify`
+sink + a periodic tick when the dispatch layer leaves S3 (in-process only) for
+S4 (SQLite-backed, restart-surviving). Per-agent retry/auto-respawn (audit #8's
+"scribe auto-respawn") is deliberately deferred. This change supplies the guard
++ surfacing capability; the wiring is a one-liner at the dispatch call site.
+
 ## 2026-06-21 — Wire Atlas/Sentinel dispatch + load persona `prompts/*.md` (WAVE 2 P1, gap-audit §(a) #7 / §(b) cat 3)
 
 **Problem.** The daily-driver gap audit flagged that the typed agent dispatch

@@ -1,83 +1,73 @@
 /**
- * @neutronai/runtime — subagent lifecycle watchdog.
+ * @neutronai/runtime — subagent lifecycle tick.
  *
- * Cleanup pass for the subagent registry. Lifted from OpenClaw's
- * `subagent-lifecycle.ts`. Runs on a periodic tick (default 60s), driven by
- * the gateway's main interval. Three responsibilities:
+ * Runs on a periodic tick (default 60s), driven by the gateway's main interval.
+ * One ordered tick with two phases:
  *
- *   1. Stale-`running` reaping: any record `running` with no `last_event_at`
- *      update for `STALE_THRESHOLD_MS` is force-cancelled — likely the
- *      subagent crashed without emitting a terminal event.
+ *   1. **Liveness surfacing** (when `watchdog` deps are supplied): runs the
+ *      agent-aware watchdog (`watchdog.ts`) — detects stale/dead `running`
+ *      records, marks them failed, and NOTIFIES — then …
+ *   2. **Cleanup-after pruning**: deletes terminal records
+ *      (`finished`|`crashed`|`cancelled`) past their `cleanup_after`.
  *
- *   2. PID-gone reaping: any record with a `pid` whose process is no longer
- *      alive AND whose status is still `running` is marked `crashed`.
+ * The watchdog runs BEFORE the prune so the single tick both surfaces a failing
+ * agent and reaps already-terminal ones, in a defined order, with no second
+ * independent reaper to race. Liveness reaping USED to live in this file as a
+ * SILENT pass (it `cancelRun`'d stale records / marked pid-gone ones `crashed`
+ * with no notification); that logic moved into the watchdog so failures are
+ * surfaced, and this tick now COMPOSES the watchdog rather than duplicating it.
  *
- *   3. Cleanup-after pruning: records past `cleanup_after` are deleted.
- *
- * Pure orchestration — actual cancellation goes through `cancelRun` in
- * `control.ts`, which calls the registered canceller.
+ * Omit the `watchdog` deps to run a prune-only tick (e.g. a cleanup-only
+ * scheduler); the watchdog can also be driven standalone via `runAgentWatchdog`.
  */
 
-import { cancelRun, type ControlState } from './control.ts'
 import type { SubagentRegistry } from './registry.ts'
+import { runAgentWatchdog, type AgentWatchdogDeps } from './watchdog.ts'
 
+/**
+ * @deprecated The stale-`running` threshold now lives on the agent-aware
+ * watchdog as `DEFAULT_STUCK_THRESHOLD_MS` (`watchdog.ts`). Retained as a
+ * back-compat alias.
+ */
 export const STALE_THRESHOLD_MS = 5 * 60_000
 
 export interface LifecycleDeps {
-  control: ControlState
   registry: SubagentRegistry
-  /**
-   * Probe whether a pid is still alive. Default: `process.kill(pid, 0)`
-   * (signal 0 throws ESRCH if the process is gone). Tests inject a stub.
-   */
-  pid_alive?: (pid: number) => boolean
   /** Now-injection for tests. */
   now?: () => number
+  /**
+   * Liveness-surfacing deps. When present, the tick runs the agent-aware
+   * watchdog first (surfacing stale/dead live agents) and then prunes. Omit for
+   * a prune-only tick. `registry` + `now` are threaded from above, so this is
+   * the watchdog's deps minus those two (`control`, optional `notify` /
+   * `pid_alive` / `stuck_threshold_ms`).
+   */
+  watchdog?: Omit<AgentWatchdogDeps, 'registry' | 'now'>
 }
 
 /**
- * Run one tick of the watchdog. Returns the number of records affected
- * (cancelled / marked crashed / deleted). Safe to call concurrently — each
- * sub-action is idempotent.
+ * Run one lifecycle tick. Returns the number of records affected (agents
+ * surfaced-as-failed + terminal records pruned). Idempotent.
  */
 export async function runLifecycleTick(deps: LifecycleDeps): Promise<number> {
   const now = (deps.now ?? Date.now)()
-  const isAlive = deps.pid_alive ?? defaultPidAlive
   let affected = 0
 
-  // (1) Stale-`running` reaping.
-  for (const rec of deps.registry.live()) {
-    if (rec.status !== 'running') continue
-    if (now - rec.last_event_at > STALE_THRESHOLD_MS) {
-      await cancelRun(deps.control, rec.run_id, 'lifecycle_cleanup')
-      affected++
-    }
+  // (1) Liveness surfacing — the watchdog owns all live→terminal transitions.
+  if (deps.watchdog) {
+    const { surfaced } = await runAgentWatchdog({
+      ...deps.watchdog,
+      registry: deps.registry,
+      now: () => now,
+    })
+    affected += surfaced.length
   }
 
-  // (2) PID-gone reaping.
-  for (const rec of deps.registry.live()) {
-    if (rec.status !== 'running') continue
-    if (rec.pid !== undefined && !isAlive(rec.pid)) {
-      deps.registry.update(rec.run_id, { status: 'crashed', ended_at: now })
-      affected++
-    }
-  }
-
-  // (3) Cleanup-after pruning.
+  // (2) Cleanup-after pruning of already-terminal records.
   for (const rec of deps.registry.pruneCandidates(now)) {
     deps.registry.delete(rec.run_id)
     affected++
   }
 
   return affected
-}
-
-function defaultPidAlive(pid: number): boolean {
-  try {
-    // Signal 0 is the standard "is this process alive" probe.
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
 }

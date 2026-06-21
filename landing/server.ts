@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 export { MOBILE_APP_URL } from '../onboarding/interview/final-handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
+import { resolveWebChatClient } from './web-chat-flag.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -814,6 +815,18 @@ export interface LandingServerOptions {
   chatAuthGate?: {
     isUnauthenticated: () => boolean
   }
+  /**
+   * Track B Phase 3 (2026-06-21) — default web chat client for `GET /chat`.
+   * The React/assistant-ui client ships BEHIND THIS FLAG with the vanilla-TS
+   * client as the default fallback. `'react'` opts an instance into the new
+   * surface deploy-wide; a per-request `?client=react|vanilla` query always
+   * overrides it (see `resolveWebChatClient`). Production wires this from
+   * `process.env.NEUTRON_WEB_CHAT_CLIENT`; unset → vanilla (no behaviour
+   * change). The React assets are also existsSync-guarded, so even with the
+   * flag on, an instance that didn't ship `chat-react.html` falls back to
+   * vanilla rather than 404ing the chat surface.
+   */
+  webChatClientDefault?: string
 }
 
 interface SocketState {
@@ -1002,6 +1015,25 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     ? readFileSync(chat_js_prebuilt_path, 'utf8')
     : null
   const chat_ts_path = join(static_dir, 'chat.ts')
+  // Track B Phase 3 — React/assistant-ui chat client, served BEHIND THE FLAG.
+  // `chat-react.html` is the shell (loads `/chat-react.js`); the JS is either a
+  // pre-built `chat-react.js` next to it or lazily bundled from
+  // `chat-react/main.tsx` on first request (same shape as `resolveChatJs`,
+  // minified because it carries React + assistant-ui). Each asset is
+  // existsSync-guarded so an instance that didn't ship the React surface
+  // simply falls back to vanilla even with the flag on.
+  const chat_react_html_path = join(static_dir, 'chat-react.html')
+  const chat_react_html: Buffer | null = existsSync(chat_react_html_path)
+    ? readFileSync(chat_react_html_path)
+    : null
+  const chat_react_js_prebuilt_path = join(static_dir, 'chat-react.js')
+  let chat_react_js_cache: string | null = existsSync(chat_react_js_prebuilt_path)
+    ? readFileSync(chat_react_js_prebuilt_path, 'utf8')
+    : null
+  const chat_react_entry_path = join(static_dir, 'chat-react', 'main.tsx')
+  // Deploy-wide default client, resolved once at construction; the per-request
+  // `?client=` query still overrides it inside the `/chat` handler.
+  const web_chat_client_default = options.webChatClientDefault ?? process.env['NEUTRON_WEB_CHAT_CLIENT']
   // P2 S5 — invite landing short-circuit. Optional: callers that haven't
   // wired the invite handler yet skip the route entirely so the existing
   // /chat surface stays untouched. C2 (OSS split): the invite assets are
@@ -1082,6 +1114,28 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       if (out === undefined) return null
       chat_js_cache = await out.text()
       return chat_js_cache
+    } catch {
+      return null
+    }
+  }
+  async function resolveChatReactJs(): Promise<string | null> {
+    if (chat_react_js_cache !== null) return chat_react_js_cache
+    if (!existsSync(chat_react_entry_path)) return null
+    try {
+      const result = await Bun.build({
+        entrypoints: [chat_react_entry_path],
+        target: 'browser',
+        format: 'esm',
+        // Minified: the bundle carries React + ReactDOM + assistant-ui +
+        // chat-core (~0.6 MB minified). Cached after the first build.
+        minify: true,
+        sourcemap: 'none',
+      })
+      if (!result.success || result.outputs.length === 0) return null
+      const out = result.outputs[0]
+      if (out === undefined) return null
+      chat_react_js_cache = await out.text()
+      return chat_react_js_cache
     } catch {
       return null
     }
@@ -1176,8 +1230,30 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
             },
           })
         }
+        // Track B Phase 3 — choose the web chat client. The React surface is
+        // served only when the flag resolves to `react` AND its shell shipped;
+        // otherwise the vanilla client (the default) is served unchanged.
+        const web_chat_client = resolveWebChatClient({
+          envDefault: web_chat_client_default,
+          queryClient: url.searchParams.get('client'),
+        })
+        if (web_chat_client === 'react' && chat_react_html !== null) {
+          return new Response(new Uint8Array(chat_react_html), {
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          })
+        }
         return new Response(chat_html, {
           headers: { 'content-type': 'text/html; charset=utf-8' },
+        })
+      }
+      // Track B Phase 3 — serve the lazily-bundled React client. Gated the same
+      // way as the shell: only reachable when the React assets shipped; returns
+      // 404 otherwise (the vanilla path never references `/chat-react.js`).
+      if (url.pathname === '/chat-react.js' && req.method === 'GET') {
+        const js = await resolveChatReactJs()
+        if (js === null) return new Response('chat-react.js unavailable', { status: 404 })
+        return new Response(js, {
+          headers: { 'content-type': 'application/javascript; charset=utf-8' },
         })
       }
       // ISSUES #208 — mobile install/landing page (see construction note).
