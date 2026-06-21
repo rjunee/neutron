@@ -57,6 +57,19 @@ describe('chunkMarkdown', () => {
     const { chunks } = chunkMarkdown('## Section ##\n\nbody')
     expect(chunks[0]!.heading).toBe('Section')
   })
+
+  test('keeps a trailing # that is not a closing fence (no preceding space)', () => {
+    const { chunks } = chunkMarkdown('## C#\n\nbody')
+    expect(chunks[0]!.heading).toBe('C#')
+  })
+
+  test('a long run of spaces in a heading does not hang (ReDoS-safe)', () => {
+    const heading = '#' + ' '.repeat(50000) + 'x' + ' '.repeat(50000)
+    const start = performance.now()
+    const { chunks } = chunkMarkdown(`${heading}\n\nbody`)
+    expect(performance.now() - start).toBeLessThan(1000)
+    expect(chunks[0]!.heading).toContain('x')
+  })
 })
 
 describe('deriveTitleFromFilename', () => {

@@ -57,8 +57,47 @@ export interface ChunkOptions {
 
 const DEFAULT_MAX_CHARS = 1200
 
-const ATX_HEADING_RE = /^(#{1,6})\s+(.*)$/
 const FENCE_RE = /^(\s{0,3})(`{3,}|~{3,})/
+
+/**
+ * Parse an ATX heading line WITHOUT a backtracking regex (ReDoS-safe).
+ * A regex like `^(#{1,6})\s+(.*)$` pairs adjacent ambiguous whitespace
+ * quantifiers, which static analysis (CodeQL js/polynomial-redos) flags
+ * as worst-case super-linear on long whitespace runs. This linear scan
+ * is unambiguous: 1-6 leading `#`, then at least one space/tab, then the
+ * (whitespace-trimmed) heading text. Returns null when the line is not
+ * an ATX heading.
+ */
+function parseAtxHeading(line: string): { hashes: string; text: string } | null {
+  let i = 0
+  while (i < line.length && i < 6 && line.charCodeAt(i) === 0x23 /* # */) i++
+  if (i === 0) return null
+  if (i >= line.length) return null
+  const after = line.charCodeAt(i)
+  if (after !== 0x20 /* space */ && after !== 0x09 /* tab */) return null
+  let j = i
+  while (j < line.length) {
+    const c = line.charCodeAt(j)
+    if (c !== 0x20 && c !== 0x09) break
+    j++
+  }
+  return { hashes: line.slice(0, i), text: line.slice(j) }
+}
+
+/**
+ * Strip a closing ATX fence (a trailing run of `#` preceded by
+ * whitespace, e.g. `Heading ###` -> `Heading`) from already-trimmed
+ * heading text. Uses a single end-anchored `#+$` match (linear) plus an
+ * O(1) preceding-char check rather than an ambiguous `\s+#+\s*$` regex
+ * — so `C#` (no preceding space) is left intact and there is no ReDoS.
+ */
+function stripClosingFence(text: string): string {
+  const m = /#+$/.exec(text)
+  if (m === null || m.index === 0) return text
+  const before = text.charCodeAt(m.index - 1)
+  if (before !== 0x20 && before !== 0x09) return text
+  return text.slice(0, m.index).trimEnd()
+}
 
 /** A raw section captured during the first pass (heading + its lines). */
 interface RawSection {
@@ -96,10 +135,10 @@ export function chunkMarkdown(content: string, options: ChunkOptions = {}): Chun
     }
 
     if (fence === null) {
-      const headingMatch = ATX_HEADING_RE.exec(line)
-      if (headingMatch !== null) {
-        const hashes = headingMatch[1]!
-        const text = headingMatch[2]!.trim().replace(/\s+#+\s*$/, '') // strip closing ###
+      const heading = parseAtxHeading(line)
+      if (heading !== null) {
+        const hashes = heading.hashes
+        const text = stripClosingFence(heading.text.trim()) // strip closing ###
         if (firstH1 === null && hashes.length === 1 && text.length > 0) {
           firstH1 = text
         }
