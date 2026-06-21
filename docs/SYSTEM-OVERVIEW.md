@@ -540,6 +540,38 @@ the user text). Layer order, top to bottom:
   fake indicator paints. (Field + client mechanism retained for a future
   real last-read seam.)
 
+## Reflection — diary + corrections-log (`reflection/`)
+
+The lightweight **reflection + learning layer**. It complements the memory
+subsystems — scribe (`scribe/`) + GBrain (`gbrain-memory/`) + the entity-writer
+wiki capture durable *entity* knowledge; reflection is the *self-improvement*
+loop (Vajra's diary + `corrections-log.md` mechanism, Neutron-native for a
+self-hoster). Storage is mechanical + deterministic (plain append-only markdown
+under `NEUTRON_HOME`, no DB); the only LLM step is judging "was this a
+correction?".
+
+- **Diary** (`diary-store.ts`) — append-only, per-UTC-day markdown at
+  `<NEUTRON_HOME>/diary/<YYYY-MM-DD>.md`; the agent's own short reflections.
+- **Corrections-log** (`corrections-store.ts`) — one append-only markdown file
+  `<NEUTRON_HOME>/corrections/corrections-log.md`; each correction a `## ` block
+  with `wrong` / `right` / `why` / `scope` / `source`. Human-readable AND
+  round-trip-parseable.
+- **Detector** (`detector.ts`) — `looksLikeCorrection` (deterministic keyword
+  pre-gate; skips the LLM on ordinary turns) → `detectCorrection` (LLM judge over
+  the CC-spawn substrate, final say + distils the learning).
+- **Context** (`context.ts`) — renders recent corrections + diary into a
+  `<learned_corrections>` / `<recent_diary>` block (apply SILENTLY).
+- **Factory** (`index.ts`) — `createReflection({ ownerDataDir, substrate? })`.
+
+**Wiring.** `open/composer.ts` builds a dedicated ephemeral `cc-reflection-*`
+judge substrate and threads the `Reflection` into `buildLiveAgentTurn`. On each
+(instance, topic) the FIRST turn splices `loadContext()` into the system prompt
+(so the warm session adopts past corrections and applies them silently); every
+completed turn fires `onTurnComplete(...)` → pre-gate → judge → log + diary
+breadcrumb. LLM-less self-host: omit the substrate → detection OFF, diary +
+read-back still work. Every hook is best-effort and never throws into the chat
+path.
+
 ## React web chat client (`landing/chat-react/`, Track B Phase 3) — behind a flag
 
 The vanilla-TS client above (`landing/chat.ts`, ~4.5k lines, served on the

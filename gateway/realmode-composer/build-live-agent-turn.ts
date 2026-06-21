@@ -143,6 +143,29 @@ export interface LiveAgentTranscriptSink {
   }): unknown
 }
 
+/**
+ * WAVE 2 P1 (gap-audit §(b) cat 4 / §(c) #10) — the reflection + learning layer
+ * (`reflection/`, diary + corrections-log). Structural slice so this module
+ * stays off a static `reflection/` import edge; the composer threads the real
+ * `createReflection(...)` instance.
+ *
+ *   - `loadContext()` returns the `<learned_corrections>` + `<recent_diary>`
+ *     block to splice into a topic's FIRST-turn system context (the read path),
+ *     or null when there is nothing learned yet.
+ *   - `onTurnComplete(turn)` is the FIRE-AND-FORGET post-turn hook: it detects
+ *     whether the owner just corrected the agent and, if so, logs the learning
+ *     so a future session applies it. Returns void; never throws into the turn.
+ */
+export interface LiveAgentReflectionSeam {
+  loadContext(): string | null
+  onTurnComplete(turn: {
+    user_text: string
+    agent_text: string
+    scope?: string
+    observed_at?: number
+  }): void
+}
+
 export interface BuildLiveAgentTurnInput {
   /**
    * The DEDICATED conversational substrate (warm persistent CC REPL pool).
@@ -171,6 +194,14 @@ export interface BuildLiveAgentTurnInput {
    * projects-table read must never kill the turn.
    */
   projectPersonaResolver?: (project_id: string) => Promise<string | null> | string | null
+  /**
+   * WAVE 2 P1 — the reflection + learning layer. When wired, the FIRST turn on
+   * each (instance, topic) splices `reflection.loadContext()` into its system
+   * context (so the warm session adopts the owner's past corrections + recent
+   * diary), and every completed turn calls `reflection.onTurnComplete(...)` to
+   * detect + log a fresh correction. Omitted on the LLM-less path → no-op.
+   */
+  reflection?: LiveAgentReflectionSeam
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -423,6 +454,27 @@ export function buildLiveAgentTurn(
     console.info(
       `${LOG_TAG} event=replied project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} chars=${text.length} elapsed_ms=${now() - started}`,
     )
+    // WAVE 2 P1 — fire-and-forget correction detection over THIS exchange. The
+    // hook deterministically pre-gates (most turns carry no correction cue and
+    // cost nothing), then LLM-judges the rest and logs any learning so a future
+    // session applies it. Returns void + swallows its own errors; the try/catch
+    // is belt-and-suspenders so a synchronous throw can never break the reply.
+    if (input.reflection !== undefined) {
+      try {
+        input.reflection.onTurnComplete({
+          user_text: turn.user_text,
+          agent_text: text,
+          scope,
+          observed_at,
+        })
+      } catch (err) {
+        console.warn(
+          `${LOG_TAG} event=reflection_on_turn_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
     return { outcome: 'replied', reply_prompt_id }
   }
 }
@@ -561,7 +613,24 @@ async function composeFirstTurnPrompt(
     ].join('\n\n')
   }
   const history = await renderRecentHistoryBlock(input.buttonStore, turn.topic_id, wall_now)
+  // WAVE 2 P1 — splice the reflection layer's learned-corrections + recent-diary
+  // block so this topic's warm session adopts the owner's past corrections on
+  // its first turn and applies them silently. Best-effort: a throwing/absent
+  // seam degrades to no block, never kills the turn.
+  let reflectionBlock: string | null = null
+  if (input.reflection !== undefined) {
+    try {
+      reflectionBlock = input.reflection.loadContext()
+    } catch (err) {
+      console.warn(
+        `${LOG_TAG} event=reflection_context_failed project=${turn.project_slug} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
+  }
   const parts = [system]
+  if (reflectionBlock !== null && reflectionBlock.trim().length > 0) parts.push(reflectionBlock)
   if (history !== null) parts.push(history)
   parts.push(
     `The user's message follows. Reply to it directly.\n\n${turn.user_text}`,

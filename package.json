@@ -6,6 +6,7 @@
     "gateway",
     "runtime",
     "scribe",
+    "reflection",
     "gbrain-memory",
     "reminders",
     "trident",

@@ -293,6 +293,12 @@
     "prompts": {
       "name": "@neutronai/prompts",
     },
+    "reflection": {
+      "name": "@neutronai/reflection",
+      "dependencies": {
+        "@neutronai/runtime": "workspace:*",
+      },
+    },
     "reminders": {
       "name": "@neutronai/reminders",
       "dependencies": {
@@ -808,6 +814,8 @@
     "@neutronai/persistence": ["@neutronai/persistence@workspace:persistence"],
 
     "@neutronai/prompts": ["@neutronai/prompts@workspace:prompts"],
+
+    "@neutronai/reflection": ["@neutronai/reflection@workspace:reflection"],
 
     "@neutronai/reminders": ["@neutronai/reminders@workspace:reminders"],
 
