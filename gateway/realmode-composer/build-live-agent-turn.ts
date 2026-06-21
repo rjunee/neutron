@@ -317,7 +317,15 @@ export function buildLiveAgentTurn(
   ): Promise<LiveAgentTurnResult> {
     const observed_at = turn.observed_at ?? now()
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
-    await resolvePreviousRowWithUserText(input.buttonStore, turn, observed_at, now())
+    // Capture that previous agent reply: the owner's message THIS turn is a
+    // response to the PRIOR reply, so correction detection must judge (prior
+    // reply, user_text) — NOT (this turn's freshly generated reply, user_text).
+    const priorAgentReply = await resolvePreviousRowWithUserText(
+      input.buttonStore,
+      turn,
+      observed_at,
+      now(),
+    )
     try {
       input.transcript?.append({
         role: 'user',
@@ -463,7 +471,11 @@ export function buildLiveAgentTurn(
       try {
         input.reflection.onTurnComplete({
           user_text: turn.user_text,
-          agent_text: text,
+          // The exchange being judged is the PRIOR assistant reply + the owner's
+          // response to it — not this turn's just-generated reply. Empty when
+          // there is no prior reply (first message / a standing preference still
+          // judges fine against an empty prior).
+          agent_text: priorAgentReply ?? '',
           scope,
           observed_at,
         })
@@ -487,13 +499,19 @@ export function buildLiveAgentTurn(
  * agent bubble. `__freeform__` is gateway-synthetic by contract
  * (channels/button-routing.ts) — the wire-level FORBIDDEN_INBOUND_VALUES
  * guard only blocks CLIENTS from forging it.
+ *
+ * Returns the PRIOR agent reply body (the row the user's message is responding
+ * to), or null when there is no prior row — so correction detection can judge
+ * the correct (prior reply, user_text) exchange. The body is returned whether or
+ * not the row was already resolved; resolution is the persistence side-effect,
+ * the body is the last thing the assistant said either way.
  */
 async function resolvePreviousRowWithUserText(
   buttonStore: ButtonStore,
   turn: LiveAgentTurnRequest,
   observed_at: number,
   wall_now: number,
-): Promise<void> {
+): Promise<string | null> {
   try {
     const { turns } = await buttonStore.listHistoryByTopic({
       topic_id: turn.topic_id,
@@ -503,7 +521,9 @@ async function resolvePreviousRowWithUserText(
       now: wall_now,
     })
     const latest = turns[0]
-    if (latest === undefined || latest.resolved) return
+    if (latest === undefined) return null
+    const priorBody = typeof latest.body === 'string' ? latest.body : null
+    if (latest.resolved) return priorBody
     await buttonStore.resolve({
       choice: {
         prompt_id: latest.prompt_id,
@@ -514,12 +534,14 @@ async function resolvePreviousRowWithUserText(
         channel_kind: 'app-socket',
       },
     })
+    return priorBody
   } catch (err) {
     console.warn(
       `${LOG_TAG} event=user_turn_persist_skipped project=${turn.project_slug} topic=${turn.topic_id} err=${
         err instanceof Error ? err.message : String(err)
       }`,
     )
+    return null
   }
 }
 

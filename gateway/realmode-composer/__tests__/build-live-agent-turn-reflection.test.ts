@@ -38,10 +38,12 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-function makeStubSubstrate(specs: AgentSpec[], reply = 'ok reply'): Substrate {
+function makeStubSubstrate(specs: AgentSpec[], replies: string | string[] = 'ok reply'): Substrate {
+  const queue = Array.isArray(replies) ? [...replies] : null
   return {
     start(spec: AgentSpec): SessionHandle {
       specs.push(spec)
+      const reply = queue !== null ? (queue.shift() ?? 'ok reply') : (replies as string)
       const events = (async function* (): AsyncGenerator<Event, void, void> {
         yield { kind: 'token', text: reply }
         yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'stub' }
@@ -70,7 +72,7 @@ function makeTurn(over: Partial<LiveAgentTurnRequest> & { sent: ChatOutbound[] }
 }
 
 describe('build-live-agent-turn — reflection wiring', () => {
-  test('splices loadContext() into the FIRST-turn prompt and fires onTurnComplete', async () => {
+  test('splices loadContext() into the FIRST-turn prompt and judges the PRIOR reply', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const completed: Array<{ user_text: string; agent_text: string; scope?: string }> = []
@@ -80,7 +82,8 @@ describe('build-live-agent-turn — reflection wiring', () => {
       onTurnComplete: (t) => completed.push(t),
     }
     const run = buildLiveAgentTurn({
-      substrate: makeStubSubstrate(specs, 'I deployed to prod.'),
+      // Turn 1 reply is the message the owner corrects on turn 2.
+      substrate: makeStubSubstrate(specs, ['I deployed to prod.', 'Switching to staging.']),
       personaLoader: { async load(): Promise<string> { return 'PERSONA' } },
       reflection,
       buttonStore: store,
@@ -89,17 +92,21 @@ describe('build-live-agent-turn — reflection wiring', () => {
       now: () => now,
     })
 
-    await run(makeTurn({ sent }))
+    // Turn 1 — establishes the prior assistant reply (persisted as a row).
+    await run(makeTurn({ sent, user_text: 'deploy the change' }))
+    // Turn 2 — the owner corrects that prior reply.
+    await run(makeTurn({ sent, user_text: 'no, do not deploy to prod' }))
 
-    // Read path: the learned-corrections block is in the first-turn prompt.
-    expect(specs).toHaveLength(1)
+    // Read path: the learned-corrections block is in the FIRST-turn prompt only.
     expect(specs[0]!.prompt).toContain('always default to staging')
 
-    // Write path: the hook fired with this exchange + the General scope.
-    expect(completed).toHaveLength(1)
-    expect(completed[0]!.user_text).toBe('no, do not deploy to prod')
-    expect(completed[0]!.agent_text).toBe('I deployed to prod.')
-    expect(completed[0]!.scope).toBe('general')
+    // Write path: turn 2's detection judges the PRIOR reply (turn 1's), NOT the
+    // just-generated reply to the correction.
+    expect(completed).toHaveLength(2)
+    expect(completed[0]!.agent_text).toBe('') // turn 1 had no prior reply
+    expect(completed[1]!.user_text).toBe('no, do not deploy to prod')
+    expect(completed[1]!.agent_text).toBe('I deployed to prod.')
+    expect(completed[1]!.scope).toBe('general')
   })
 
   test('passes the project id as scope for a project topic', async () => {
