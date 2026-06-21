@@ -2,6 +2,60 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Markdown task surface: task-inbox append-queue + tasks.md / DASHBOARD.md scanner (gap-audit P1 #11)
+
+Closes gap-audit §(a) #11 / §(b) cat 11: the focus-score formula
+(`tasks/focus-score.ts`) was ported and runs on a 4h cron, but tasks lived
+only in SQLite + the web app — there was **no markdown surface**. Ryan's
+workflow is markdown-first (modelled on Vajra's `tasks.md` /
+`gateway/task-inbox.jsonl` / `scripts/task-scanner.py`). This adds the
+markdown-first surface **on top of** the canonical `TaskStore` — the store
+stays the source of truth and the markdown is a pure projection.
+
+New module `tasks/inbox/` (no changes to `composer.ts`; scoring NOT rebuilt):
+
+- **`types.ts`** — the JSONL append-queue row schema + a total, pure parser.
+  Rows: `add` / `complete` / `update` / `cancel` / `delete`. Human forms
+  (`P0..P3`, `YYYY-MM-DD`) are normalized to the store's scales (priority
+  0..3, ISO due). Malformed lines surface as `ParseError`s (1-based line
+  numbers) instead of throwing — one bad row never blocks the queue.
+- **`apply.ts`** — maps a parsed row to the matching `TaskStore` mutation,
+  returning a structured `ApplyOutcome`. `add` with a stable `id` is
+  idempotent (PK collision → `skipped:'duplicate'`); edit-ops locate by `id`
+  or exact open-title match; missing targets → `skipped:'not_found'`. Inbox
+  writes stamp `source='inbox'`.
+- **`render.ts`** — pure renderers. `tasks.md` = flat focus-ordered active
+  list (cross-project) + recent-Done tail. `DASHBOARD.md` = open tasks grouped
+  into **auto-promoted P0/P1/P2/P3 sections**: `effectiveBucket` is the
+  more-urgent of raw priority and due-date urgency, with bands (overdue /
+  ≤2d / ≤7d) matching `focus-score.ts` exactly. Ordering **reuses**
+  `computeFocusScore` (recomputed against render-time `now`).
+- **`scanner.ts`** — `appendInboxRow` (atomic per-line `O_APPEND`) +
+  `runTaskScan`: read queue → apply → archive every row+outcome to
+  `task-inbox.archive.jsonl` → truncate ONLY the consumed bytes (byte-prefix
+  check preserves concurrent appends) → re-render `tasks.md` + `DASHBOARD.md`
+  (atomic writes via `runtime/atomic-write.ts`). A re-scan of a drained queue
+  is a no-op. Path resolution is injected so composition wires the real
+  `<NEUTRON_HOME>` project-folder paths and the scanner stays testable.
+
+Refactor: `tasks/projection/format.ts` now exports `renderTaskLine` /
+`renderDoneLine` (was a private `renderActiveLine`) so the STATUS.md
+projection and the new tasks.md surface emit byte-identical task lines — the
+locked Nova tag format lives in exactly one place.
+
+**Tests (real, not scaffolding):** `tasks/__tests__/inbox.test.ts` (parse +
+priority/due normalization, focus ordering, section promotion, apply against a
+real migrated store) and `tasks/__tests__/inbox-scanner.test.ts` (end-to-end:
+an inbox append mutates the store AND is reflected in the rendered
+tasks.md/DASHBOARD content; idempotent re-scan; concurrent-append survival;
+parse errors archived + non-blocking; focus ordering in the rendered file).
+23 new tests. `bunx tsc --noEmit` clean; full `bun test` green (7727 pass /
+90 skip / 0 fail).
+
+Deferred: composition wiring of the scanner to a cron tick + real
+`<NEUTRON_HOME>` paths (a small build-core-modules follow-up; the seam is the
+injected `TaskScanPaths`).
+
 ## 2026-06-21 — PR #9 Argus round-2 fixes: working gated recovery command + honest false-negative + tty-binding coverage (ISSUES #318)
 
 Argus round 2 (Codex/GPT-5 cross-model + Claude shell/test cross-check) cleared

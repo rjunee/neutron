@@ -17,6 +17,8 @@ export type {
 export {
   renderStatusBlock,
   renderActionsFile,
+  renderTaskLine,
+  renderDoneLine,
   formatPriorityTag,
   formatDueDateTag,
 } from './format.ts'
@@ -24,6 +26,7 @@ export {
 export type {
   RenderStatusBlockInput,
   RenderActionsFileInput,
+  RenderTaskLineOptions,
 } from './format.ts'
 
 export {

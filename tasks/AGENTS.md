@@ -23,6 +23,15 @@ This module owns the canonical per-project task DB. STATUS.md and ACTIONS.md bec
 - **Source canonicalization** — exports `TASK_SOURCE_APP | TASK_SOURCE_TASKS_CORE | TASK_SOURCE_REMINDER | TASK_SOURCE_OVERNIGHT | TASK_SOURCE_HISTORY_IMPORT | TASK_SOURCE_CHAT`. Every internal write site stamps one of these; the HTTP surface defaults to `'app'`.
 - **Reminders Core convert-to-task tool** — `reminders_convert_to_task` MCP tool registered by `@neutron/reminders-core`. The tool calls `TaskStore.create({...; due_date: reminderToIso(reminder.fire_at)})` which goes through the link-creation path; the original reminder is cancelled so it doesn't fire twice.
 
+## `inbox/` — markdown task surface (tasks.md / task-inbox / DASHBOARD)
+
+The markdown-first surface modelled on Vajra (`~/vajra/tasks.md`, `~/vajra/gateway/task-inbox.jsonl`, `~/vajra/scripts/task-scanner.py`). Unlike Vajra, the SQLite `TaskStore` is the source of truth — the markdown is a pure projection. Files live under `<NEUTRON_HOME>` (project-folder convention) alongside the project, paths injected at the composition layer.
+
+- **`inbox/types.ts`** — the append-queue row schema + total/pure parser. Rows: `add` / `complete` / `update` / `cancel` / `delete`. `parseInbox` converts human forms (`P0..P3`, `YYYY-MM-DD`) into the store's scales (priority 0..3, ISO due) and reports malformed lines as `ParseError`s (1-based line numbers) rather than throwing — one bad row never blocks the queue.
+- **`inbox/apply.ts`** — turns a parsed row into the matching `TaskStore` mutation, returning a structured `ApplyOutcome` (`applied` / `skipped` / `errored`). `add` with a stable `id` is idempotent (PK collision → `skipped:'duplicate'`); edit-ops locate by `id` or by exact open-title match; missing targets → `skipped:'not_found'`. Inbox writes stamp `source='inbox'`.
+- **`inbox/render.ts`** — pure renderers. `tasks.md` is the flat focus-ordered active list (cross-project, `[project:…]` tags) + a recent-Done tail. `DASHBOARD.md` groups open tasks into auto-promoted **P0/P1/P2/P3** sections: `effectiveBucket` = the more-urgent of raw priority and due-date urgency, whose bands (overdue / ≤2d / ≤7d) match `focus-score.ts` exactly so dashboard and score never disagree. Ordering REUSES `computeFocusScore` (recomputed against render-time `now`) — scoring is not re-implemented.
+- **`inbox/scanner.ts`** — `appendInboxRow(path, intent)` (atomic per-line `O_APPEND`) + `runTaskScan(deps)`: read queue → apply → archive every row+outcome to `task-inbox.archive.jsonl` → truncate ONLY the consumed bytes (byte-prefix check preserves concurrent appends) → re-render `tasks.md` + `DASHBOARD.md` (atomic writes). End-to-end idempotent: a re-scan of a drained queue is a no-op. Drive from a cron tick or ad-hoc.
+
 ## Still deferred (P6.x follow-ups, not in this sprint)
 
 - LLM-driven daily nudge engine ("pick one most important thing" daily LLM pass) — needs prompt engineering + Haiku-vs-Sonnet calibration + sycophancy bar. The deterministic `focus_score` this sprint lands gives the nudge engine a starting signal.
