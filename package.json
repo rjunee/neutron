@@ -45,7 +45,8 @@
   "scripts": {
     "start": "bun run open/server.ts",
     "start:gateway": "bun run gateway/index.ts",
-    "test": "bun test",
+    "test": "bash scripts/run-tests.sh",
+    "test:bun": "bun test",
     "migrate": "bun run migrations/runner.ts"
   },
   "devDependencies": {
