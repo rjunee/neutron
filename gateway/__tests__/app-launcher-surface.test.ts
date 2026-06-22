@@ -11,15 +11,32 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 
 import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { composeHttpHandler } from '../http/compose.ts'
+import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import { createAppLauncherSurface } from '../http/app-launcher-surface.ts'
 import {
   InMemoryProjectLauncherStore,
   type LauncherEntry,
 } from '../http/project-launcher-store.ts'
 
+// --- in-process handler shim (no socket) -------------------------------------
+// These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
+// trip via the global `fetch`, holding a live listener + socket buffers in the
+// chunk's RSS until teardown. Instead each harness registers its composed
+// handler under a unique in-process base, and `fetch` is shadowed at module
+// scope so requests to a registered base dispatch straight to
+// `composed.fetch(new Request(...))` — identical assertions, no socket.
+// Unrelated URLs fall through to the real fetch.
+const __composedHandlers = new Map<string, ComposedHttpHandler>()
+let __gatewaySeq = 0
+const __realFetch = globalThis.fetch.bind(globalThis)
+const fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const req = input instanceof Request ? input : new Request(input, init)
+  const composed = __composedHandlers.get(new URL(req.url).host)
+  if (composed !== undefined) return Promise.resolve(composed.fetch(req, undefined as never))
+  return __realFetch(input as Parameters<typeof __realFetch>[0], init)
+}) as typeof globalThis.fetch
+
 interface Harness {
-  server: import('bun').Server<unknown>
   base: string
   store: InMemoryProjectLauncherStore
   close(): Promise<void>
@@ -44,17 +61,13 @@ async function startGateway(): Promise<Harness> {
     appLauncher: { handler: surface.handler },
     defaultHandler: () => new Response('not found', { status: 404 }),
   })
-  const server = Bun.serve({
-    port: 0,
-    fetch: (req, srv) => composed.fetch(req, srv),
-    websocket: composed.websocket,
-  })
+  const host = `gw-${++__gatewaySeq}.test`
+  __composedHandlers.set(host, composed)
   return {
-    server,
-    base: `http://127.0.0.1:${server.port}`,
+    base: `http://${host}`,
     store,
     close: async () => {
-      await server.stop(true)
+      __composedHandlers.delete(host)
     },
   }
 }
