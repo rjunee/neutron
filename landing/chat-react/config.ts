@@ -37,6 +37,15 @@ export interface BootstrapConfig {
   projects: ProjectTab[]
   /** Page origin (`https://host`) — used to absolutize relative attachment URLs. */
   origin: string
+  /**
+   * The app-ws bearer token (the same value carried on the WS URL `&token=`).
+   * Surfaced here so the chat-attachment surface can authenticate: both the
+   * `POST /api/app/upload` compose upload and the bearer-authed
+   * `GET /api/app/upload/<user>/<hash>.<ext>` render-back send it as
+   * `Authorization: Bearer <token>`. Defaults to the dev-bypass `dev:<user_id>`
+   * form (accepted under `NEUTRON_APP_WS_BYPASS=1`); the production EdDSA mint
+   * overrides it via `window.__neutron_app_ws_token`. */
+  token: string
   /** Track B Phase 4 — this client's device id (read-receipt attribution +
    *  read-tick self-exclusion). Carried on the WS URL `&device_id=`. */
   deviceId: string
@@ -137,5 +146,14 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     win.__neutron_app_ws_url ??
     buildWsUrl(win.location.protocol, win.location.host, appWsToken, projectId, deviceId)
   const origin = `${win.location.protocol}//${win.location.host}`
-  return { wsUrl, topicId: appWsTopicId(userId), userId, projectId, projects, origin, deviceId }
+  return {
+    wsUrl,
+    topicId: appWsTopicId(userId),
+    userId,
+    projectId,
+    projects,
+    origin,
+    deviceId,
+    token: appWsToken,
+  }
 }

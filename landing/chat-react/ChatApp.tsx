@@ -12,19 +12,98 @@
  * CSS framework is bundled.
  */
 
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
   ComposerPrimitive,
   MessagePartPrimitive,
   useMessage,
+  useComposer,
+  useComposerRuntime,
 } from '@assistant-ui/react'
 
 import type { ReactionChip } from '@neutron/chat-core'
 import type { ChatViewModel, RenderMessage } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
+import type { AttachmentDraft } from './useAttachmentDraft.ts'
+import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl } from './uploads.ts'
+
+type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
+
+/**
+ * The bearer + fetch the bubble's image renderer needs. The chat-attachment
+ * GET (`/api/app/upload/<user>/<hash>.<ext>`) is bearer-authed, so a plain
+ * `<img src>` would 401 — {@link AttachmentImage} fetches the blob WITH the
+ * token and renders an object URL instead. Null disables authed fetching (the
+ * adapter then renders the raw URL, fine for `data:` / external images).
+ */
+interface UploadsCtx {
+  token: string
+  fetchImpl?: FetchImpl
+}
+const UploadsContext = createContext<UploadsCtx | null>(null)
+
+/**
+ * Render one image attachment. A same-origin `/api/app/upload/…` URL is
+ * bearer-authed, so we fetch it with the token and show the resulting `blob:`
+ * object URL (revoked on unmount / src change). `data:` / `blob:` / external
+ * `https:` URLs render directly — no auth, no fetch.
+ */
+function AttachmentImage({ src }: { src: string }): React.JSX.Element {
+  const uploads = useContext(UploadsContext)
+  const needsAuth = uploads !== null && isAuthedAttachmentUrl(src)
+  const [objUrl, setObjUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!needsAuth || uploads === null) return
+    let active = true
+    let created: string | null = null
+    const ac = new AbortController()
+    const fetchOpts: Parameters<typeof fetchAttachmentObjectUrl>[1] = {
+      token: uploads.token,
+      signal: ac.signal,
+    }
+    if (uploads.fetchImpl !== undefined) fetchOpts.fetchImpl = uploads.fetchImpl
+    fetchAttachmentObjectUrl(src, fetchOpts)
+      .then((url) => {
+        if (active) {
+          created = url
+          setObjUrl(url)
+        } else {
+          revokeObjectUrl(url)
+        }
+      })
+      .catch(() => {
+        if (active) setFailed(true)
+      })
+    return () => {
+      active = false
+      ac.abort()
+      if (created !== null) revokeObjectUrl(created)
+    }
+  }, [src, needsAuth, uploads])
+
+  if (!needsAuth) return <img src={src} alt="attachment" className="car-attach-img" />
+  if (failed) return <span className="car-attach-error">📎 image unavailable</span>
+  if (objUrl === null) return <span className="car-attach-loading">Loading image…</span>
+  return <img src={objUrl} alt="attachment" className="car-attach-img" />
+}
+
+function revokeObjectUrl(url: string): void {
+  ;(globalThis as { URL?: { revokeObjectURL?: (u: string) => void } }).URL?.revokeObjectURL?.(url)
+}
+
+/** Custom assistant-ui Image content part → the authed renderer. */
+function AttachmentImagePart({ image }: { image: string }): React.JSX.Element {
+  return <AttachmentImage src={image} />
+}
+
+/** Part-component map: route image parts through the authed renderer; text
+ *  falls back to assistant-ui's default text part. */
+const PART_COMPONENTS = { Image: AttachmentImagePart } as const
 
 /** Quick-reaction palette the web "add reaction" affordance offers. */
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const
@@ -110,7 +189,7 @@ function UserMessage(): React.JSX.Element {
   return (
     <MessagePrimitive.Root className="car-row car-row-user">
       <div className="car-bubble car-bubble-user">
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={PART_COMPONENTS} />
         <MessageReactions />
       </div>
     </MessagePrimitive.Root>
@@ -124,7 +203,7 @@ function AssistantMessage(): React.JSX.Element {
         N
       </div>
       <div className="car-bubble car-bubble-agent">
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={PART_COMPONENTS} />
         <MessageReactions />
       </div>
     </MessagePrimitive.Root>
@@ -251,26 +330,129 @@ function TopicRail({
   )
 }
 
-function Composer(): React.JSX.Element {
+/** Staged-attachment chips above the input: each uploading image, with a
+ *  remove affordance and an inline upload/error state. */
+function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Element | null {
+  if (draft.items.length === 0) return null
   return (
-    <ComposerPrimitive.Root className="car-composer">
-      <ComposerPrimitive.Input
-        className="car-input"
-        placeholder="Message Neutron…"
-        autoFocus
-        rows={1}
-      />
-      <ThreadPrimitive.If running={false}>
-        <ComposerPrimitive.Send className="car-send" aria-label="Send">
-          Send
-        </ComposerPrimitive.Send>
-      </ThreadPrimitive.If>
-      <ThreadPrimitive.If running>
-        <ComposerPrimitive.Cancel className="car-send car-cancel" aria-label="Stop">
-          Stop
-        </ComposerPrimitive.Cancel>
-      </ThreadPrimitive.If>
-    </ComposerPrimitive.Root>
+    <div className="car-attach-chips">
+      {draft.items.map((it) => (
+        <span key={it.id} className={`car-attach-chip car-attach-chip-${it.status}`}>
+          <span className="car-attach-name">{it.name}</span>
+          {it.status === 'uploading' ? <span className="car-attach-state"> · uploading…</span> : null}
+          {it.status === 'error' ? (
+            <span className="car-attach-state" title={it.error}>
+              {' '}
+              · failed
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="car-attach-remove"
+            aria-label={`Remove ${it.name}`}
+            onClick={() => draft.remove(it.id)}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function Composer({
+  draft,
+  controller,
+}: {
+  draft: AttachmentDraft
+  controller: NeutronChatController
+}): React.JSX.Element {
+  const composer = useComposer()
+  const composerRuntime = useComposerRuntime()
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [dragOver, setDragOver] = useState(false)
+
+  const text = composer.text
+  const canSend = text.trim().length > 0 || draft.hasReady
+
+  const onPick = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const files = e.target.files
+    if (files !== null && files.length > 0) draft.addFiles(files)
+    e.target.value = '' // allow re-picking the same file
+  }
+
+  const onDrop = (e: React.DragEvent): void => {
+    e.preventDefault()
+    setDragOver(false)
+    const files = e.dataTransfer?.files
+    if (files !== undefined && files.length > 0) draft.addFiles(files)
+  }
+
+  const send = (): void => {
+    const body = text.trim()
+    const urls = draft.readUrls()
+    if (body.length === 0 && urls.length === 0) return
+    if (body.length > 0) {
+      // Text (optionally + attachments): route through the runtime so Enter and
+      // the Send button share ONE path — `onNew` merges the staged URLs, clears
+      // the draft, and assistant-ui clears the input.
+      composerRuntime.send()
+    } else {
+      // Attachment-only: assistant-ui won't send an empty composer, so hand the
+      // staged URLs to the controller directly, then clear the draft.
+      void controller.send('', urls)
+      draft.clear()
+    }
+  }
+
+  return (
+    <div
+      className={`car-composer-wrap${dragOver ? ' car-dragover' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault()
+        setDragOver(true)
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
+      <AttachmentChips draft={draft} />
+      <ComposerPrimitive.Root className="car-composer">
+        <button
+          type="button"
+          className="car-attach-btn"
+          aria-label="Attach image"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          📎
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          multiple
+          hidden
+          className="car-file-input"
+          onChange={onPick}
+        />
+        <ComposerPrimitive.Input className="car-input" placeholder="Message Neutron…" autoFocus rows={1} />
+        <ThreadPrimitive.If running={false}>
+          <button
+            type="button"
+            className="car-send"
+            aria-label="Send"
+            disabled={!canSend}
+            onClick={send}
+          >
+            Send
+          </button>
+        </ThreadPrimitive.If>
+        <ThreadPrimitive.If running>
+          <ComposerPrimitive.Cancel className="car-send car-cancel" aria-label="Stop">
+            Stop
+          </ComposerPrimitive.Cancel>
+        </ThreadPrimitive.If>
+      </ComposerPrimitive.Root>
+    </div>
   )
 }
 
@@ -278,17 +460,26 @@ export function ChatApp({
   vm,
   controller,
   config,
+  draft,
+  fetchImpl,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
   config: BootstrapConfig
+  draft: AttachmentDraft
+  /** Injected in tests; the authed image renderer falls back to global fetch. */
+  fetchImpl?: FetchImpl
 }): React.JSX.Element {
   const reactionsCtx: ReactionsCtx = {
     byRenderId: buildReactionIndex(vm.messages),
     onReact: (messageId, emoji, reactedBySelf) =>
       controller.react(messageId, emoji, reactedBySelf ? 'remove' : 'add'),
   }
+  const uploadsCtx: UploadsCtx = fetchImpl !== undefined
+    ? { token: config.token, fetchImpl }
+    : { token: config.token }
   return (
+    <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
     <div className="car-shell">
       {config.projects.length > 0 && (
@@ -318,11 +509,12 @@ export function ChatApp({
           </ThreadPrimitive.ScrollToBottom>
           <PendingBadge pending={vm.pending} />
           <DeliveryStatus delivery={vm.latestUserDelivery} isRunning={vm.isRunning} />
-          <Composer />
+          <Composer draft={draft} controller={controller} />
         </ThreadPrimitive.Root>
       </main>
     </div>
     </ReactionsContext.Provider>
+    </UploadsContext.Provider>
   )
 }
 
