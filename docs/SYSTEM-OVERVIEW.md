@@ -227,16 +227,44 @@ socket-attributed, durable + resume-replayable, sync engine NOT forked).
   Like `receipt_log`, `reaction_log` is an additive adapter option — wired in
   tests + composers, not yet in the live gateway composition.
 
-## `/code` → foundational Trident (DONE — Trident-port PR-5)
+## `/code` → foundational Trident (runtime DONE — prod-boot wiring in progress)
 
-The ~5-PR port folding Vajra's full Trident into Neutron Open as
-foundational runtime is **complete**. `/code <task>` now routes through
-foundational Trident: the production filter `buildTridentCodeChatCommandFilter`
-parses the command and CREATES a `code_trident_runs` row
-(`trident/code-command.ts`), and the tick loop drives it build → review → fix
-loop → merge → done (or the Ralph plan↔task loop for governed repos). State
-in SQLite ⇒ restart-safe + resumable. See "Trident — the foundational
-autonomous-build runtime" above for the boot wiring.
+The ~5-PR port folding Vajra's full Trident into Neutron Open as foundational
+runtime is **runtime-complete**: the state machine, tick loop, real
+Forge→Argus→merge `step`, git-mode auto-detect, Ralph loop, and restart-resume
+all land in `trident/` and pass end-to-end against scripted dispatches. The
+production filter `buildTridentCodeChatCommandFilter` parses `/code <task>` and
+CREATES a `code_trident_runs` row (`trident/code-command.ts`); the tick loop
+drives it build → review → fix loop → merge → done (or the Ralph plan↔task loop
+for governed repos). State in SQLite ⇒ restart-safe + resumable.
+
+**Prod-boot wiring — what's live in the Open self-host gateway:**
+
+- **The production runner (DONE — this PR).** The Open composer
+  (`open/composer.ts`) now builds a dedicated `cc-trident-*` CC-subprocess
+  substrate and threads `composition.trident = { dispatch }` (via
+  `buildSubstrateTridentDispatch`, `trident/substrate-dispatch.ts`). That is
+  what flips the tick loop from its `stubAdvanceDeps` no-op to the real
+  `buildTridentOrchestrator` step in `build-core-modules.ts`. Before this, the
+  Open composer never set `input.trident`, so a `/code` build would have hit the
+  loop's no-op (the `CodegenNotConfiguredError` "production runner not wired"
+  class). `buildSubstrateTridentDispatch` runs ONE Forge/Argus turn on the
+  substrate to terminal text — all prompt rendering + verdict parsing stay above
+  it in the orchestrator + session manager.
+- **The `/code` command surface (NEXT PR).** Routing the literal `/code`
+  keystroke from the Open landing chat into `buildTridentCodeChatCommandFilter`
+  is NOT yet wired — the landing chat path (`landing/server.ts` →
+  `chat-bridge.ts:handleInbound`) has no `ChatCommandFilter` seam (that seam
+  exists only on the `app-ws-surface`, which Open does not mount). Wiring an
+  optional `chatCommandFilter` hook into the chat-bridge (mirroring the existing
+  `liveAgentTurn` / `scribeOnUserTurn` hooks) is the next scoped PR.
+- **Hardening (FOLLOW-UP).** `buildSubstrateTridentDispatch` runs each turn on a
+  warm substrate instance pinned to `owner_home`. Per-build context isolation (a
+  fresh subprocess/session per Forge↔Argus turn) and native per-worktree cwd
+  (`AgentSpec` carries none today) are deliberate follow-ups, not this PR.
+
+See "Trident — the foundational autonomous-build runtime" above for the boot
+wiring.
 
 The Code-Gen Core (`cores/free/code-gen/`) wrapper is **superseded** for
 `/code`: `buildCodegenChatCommandFilter` + `CodegenOrchestrator` no longer
@@ -287,9 +315,11 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   oversized-diff guard, model-routing defaults, and (PR-5) **restart-resume**
   — an orphaned `subagent_run_id` (untracked after a control-plane restart)
   is recovered by a bounded one-per-process re-dispatch
-  (`on_orphaned_session`), never a double-spawn. PR-5 flips production onto
-  the live loop: `build-core-modules.ts` wires the real `step` when the
-  composer threads `input.trident.dispatch` (else `stubAdvanceDeps`).
+  (`on_orphaned_session`), never a double-spawn. `build-core-modules.ts` wires
+  the real `step` when the composer threads `input.trident.dispatch` (else
+  `stubAdvanceDeps`); the Open self-host composer threads it via
+  `buildSubstrateTridentDispatch` over a `cc-trident-*` substrate (this PR — see
+  "`/code` → foundational Trident" below).
 - **Tick driver** — `TridentTickLoop` (`trident/tick.ts`), modelled on
   `reminders/tick.ts`: a single-flight `setInterval` (default 90 s, the
   skill's ScheduleWakeup cadence) that loads non-terminal runs and advances

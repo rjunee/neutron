@@ -1,0 +1,146 @@
+/**
+ * @neutronai/trident — production `Substrate` → `TridentDispatch` adapter.
+ *
+ * This is the FIRST prod-boot wiring of the foundational Trident runner. It
+ * bridges the runtime `Substrate` (in production the CC-subprocess persistent-
+ * REPL adapter the Open composer builds via `buildLlmCallSubstrate` →
+ * `createClaudeCodeSubstrateAuto` — NEVER a direct api.anthropic.com call) onto
+ * the foundational Trident `TridentDispatch` contract: run ONE Forge/Argus turn
+ * to its terminal text.
+ *
+ * Before this adapter the Open composer never set `CompositionInput.trident`,
+ * so the trident tick loop fell back to `stubAdvanceDeps()` (classify always
+ * "running") and `/code <task>` could never dispatch a real build — the
+ * `CodegenNotConfiguredError` class of "the production runner is not wired into
+ * prod boot". Wiring `composition.trident = { dispatch }` with this adapter is
+ * what makes `buildTridentOrchestrator`'s real Forge→Argus→merge step run.
+ *
+ * Division of labour — this closure does the MINIMUM:
+ *   • The orchestrator (`trident/orchestrator.ts`) renders the full execution
+ *     prompt into `user_message` and passes the bare kind label ('forge' /
+ *     'argus') as `system`; the build agents' contract rides the user turn
+ *     (see `trident/prompts.ts`).
+ *   • `TridentSessionManager` (`trident/session.ts`) PARSES the terminal text
+ *     per phase (Forge contract lines → remaining; Argus verdict → approved).
+ *   So the adapter only has to faithfully run `{user_message, model,
+ *   timeout_ms}` on the substrate and return the coalesced terminal text + a
+ *   terminal status. It declares NO tools (the Forge/Argus subprocess drives
+ *   its own built-in tools) and holds NO conversation state of its own.
+ *
+ * Status mapping (consumed by `TridentSessionManager.runDispatch`, which treats
+ * any non-`completed` status as a crashed sub-agent):
+ *   `completion` event     → 'completed'
+ *   `error` event          → 'failed'
+ *   `timeout_ms` elapsed   → 'timed_out'
+ *   thrown / start() throws → 'failed'
+ *
+ * SCOPE NOTE (Trident-port, first prod-boot wiring PR). This runs each turn on
+ * the substrate instance handed in. Two hardening concerns are DELIBERATELY the
+ * next PRs, not this one:
+ *   1. Per-build context ISOLATION — a fresh subprocess/session per Forge↔Argus
+ *      turn so one build never inherits another's working context. The instance
+ *      wired in the Open composer is a sibling of the warm conversational pool.
+ *   2. Per-worktree cwd — `AgentSpec` carries no per-call cwd; the CC adapter's
+ *      working dir is fixed at instance construction (owner_home). Forge's
+ *      contract has it create + operate its own worktree, but native per-run
+ *      cwd is a follow-up. See docs/SYSTEM-OVERVIEW.md § Trident / Code-Gen.
+ */
+
+import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
+import type { SessionHandle } from '../runtime/session-handle.ts'
+import type {
+  TridentDispatch,
+  TridentDispatchInput,
+  TridentDispatchResult,
+} from './session.ts'
+
+export interface BuildSubstrateTridentDispatchOptions {
+  /** Model-execution backend — the CC-subprocess persistent REPL in prod. */
+  substrate: Substrate
+  /**
+   * Upper bound on completion tokens per turn. Omitted by default (the adapter
+   * lets the substrate apply its own ceiling); set to bound long build turns.
+   */
+  max_tokens?: number
+  /**
+   * Timer seam (tests). Defaults to `setTimeout`. Must return a handle the
+   * paired `clear_timer` understands.
+   */
+  set_timer?: (fn: () => void, ms: number) => unknown
+  /** Timer-clear seam (tests). Defaults to `clearTimeout`. */
+  clear_timer?: (handle: unknown) => void
+}
+
+/**
+ * Build a production `TridentDispatch` over a runtime `Substrate`. Each call
+ * starts one substrate turn, coalesces its `token` events into the terminal
+ * text, and resolves with a terminal status (see file header for the mapping).
+ */
+export function buildSubstrateTridentDispatch(
+  opts: BuildSubstrateTridentDispatchOptions,
+): TridentDispatch {
+  const setTimer =
+    opts.set_timer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms))
+  const clearTimer =
+    opts.clear_timer ??
+    ((handle: unknown): void => clearTimeout(handle as ReturnType<typeof setTimeout>))
+
+  return async function dispatch(
+    input: TridentDispatchInput,
+  ): Promise<TridentDispatchResult> {
+    const spec: AgentSpec = {
+      prompt: input.user_message,
+      tools: [],
+      model_preference: [input.model],
+      ...(opts.max_tokens !== undefined ? { max_tokens: opts.max_tokens } : {}),
+    }
+
+    let handle: SessionHandle
+    try {
+      handle = opts.substrate.start(spec)
+    } catch {
+      // A substrate that fails to even start the turn is a crashed sub-agent.
+      return { result: '', status: 'failed' }
+    }
+
+    let text = ''
+    let timedOut = false
+    let timer: unknown = null
+    if (input.timeout_ms > 0) {
+      timer = setTimer(() => {
+        timedOut = true
+        // Propagate cancellation to the substrate; swallow — the loop below
+        // resolves the turn regardless of how cancel settles.
+        void handle.cancel().catch(() => {})
+      }, input.timeout_ms)
+    }
+
+    try {
+      for await (const ev of handle.events) {
+        if (ev.kind === 'token') {
+          // `token` is the only coalesce-OK event (runtime/events.ts § 2.2).
+          text += ev.text
+        } else if (ev.kind === 'completion') {
+          return { result: text, status: 'completed' }
+        } else if (ev.kind === 'error') {
+          void handle.cancel().catch(() => {})
+          return { result: text, status: 'failed' }
+        }
+        // thinking / status / tool_* events carry no terminal text for a
+        // Trident build agent — ignored.
+      }
+    } catch {
+      // Iterator threw (cancellation or transport error). A timeout that
+      // cancelled the stream surfaces as 'timed_out'; anything else as failed.
+      return { result: text, status: timedOut ? 'timed_out' : 'failed' }
+    } finally {
+      if (timer !== null) clearTimer(timer)
+    }
+
+    // Stream ended without an explicit completion event. If we tripped the
+    // timeout, report it; otherwise treat the clean end as a completion (the
+    // session manager fails LOUDLY downstream if a forge-init produced no
+    // contract lines).
+    return { result: text, status: timedOut ? 'timed_out' : 'completed' }
+  }
+}
