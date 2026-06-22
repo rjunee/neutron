@@ -25,6 +25,24 @@ import {
 
 const OWNER = 'demo'
 
+// --- in-process handler shim (no socket) -------------------------------------
+// This surface test used to bind a real `Bun.serve({ port: 0 })` and round-trip
+// via the global `fetch`, holding a live listener in the chunk's RSS until
+// teardown. Instead each harness registers its dispatch fn (the same
+// `surface.handler(req) ?? 404` the socket used) under a unique in-process base,
+// and `fetch` is shadowed at module scope so requests to a registered base
+// dispatch straight to it — identical assertions, no socket. Unrelated URLs fall
+// through to the real fetch.
+const __dispatchers = new Map<string, (req: Request) => Promise<Response>>()
+let __gatewaySeq = 0
+const __realFetch = globalThis.fetch.bind(globalThis)
+const fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const req = input instanceof Request ? input : new Request(input, init)
+  const dispatch = __dispatchers.get(new URL(req.url).host)
+  if (dispatch !== undefined) return dispatch(req)
+  return __realFetch(input as Parameters<typeof __realFetch>[0], init)
+}) as typeof globalThis.fetch
+
 interface Harness {
   db: ProjectDb
   tasks: TaskStore
@@ -46,19 +64,17 @@ async function startGateway(): Promise<Harness> {
     now: () => fixedNow,
     timezone: 'America/Los_Angeles',
   })
-  const server = Bun.serve({
-    port: 0,
-    fetch: async (req) => {
-      const res = await surface.handler(req)
-      return res ?? new Response('not found', { status: 404 })
-    },
+  const host = `gw-${++__gatewaySeq}.test`
+  __dispatchers.set(host, async (req) => {
+    const res = await surface.handler(req)
+    return res ?? new Response('not found', { status: 404 })
   })
   return {
     db,
     tasks,
-    base: `http://127.0.0.1:${server.port}`,
+    base: `http://${host}`,
     close: async () => {
-      server.stop(true)
+      __dispatchers.delete(host)
       db.close()
       rmSync(tmp, { recursive: true, force: true })
     },

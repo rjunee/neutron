@@ -748,3 +748,27 @@ before materialization. Removal verbs include drop / cut / skip / remove /
 **ignore / exclude / leave out / don't set up** (the last four added 2026-06-20
 after "ignore real estate investing" was acknowledged but not honored). Projects
 are also renameable/deletable later from settings — the prompt copy says so.
+
+## Testing & CI — the bounded-memory partitioned runner (`scripts/run-tests.sh`)
+
+CI runs `bash scripts/run-tests.sh` (`.github/workflows/ci.yml`), the one
+documented command for the **whole** suite. `bun test` loads every file into one
+long-lived process whose peak RSS OOMs the contended 30 GB deploy box (ISSUES
+#78); the runner **partitions** the ~775 files into chunks and runs each chunk in
+its own fresh `bun test` process, so peak RSS is bounded to a single chunk and
+freed between chunks. Coverage is **audited** — every discovered file runs once,
+cross-checked against bun's own discovery count; drift is a fatal error, never
+silent truncation. For a single file, bare `bun test <file>` is fine.
+
+- **PGLite-WASM quarantine lane (ISSUES #79 / #327).** The handful of test files
+  that boot a real Postgres-in-WASM (`@electric-sql/pglite`) run in their **own
+  dedicated lane after** the general chunks: serial (`--max-concurrency=1`, so two
+  brains never compile WASM at once — the #79 boot race) with a **bounded retry
+  budget** (a transient WASM-init failure re-runs the whole lane a few times
+  before the run fails). Lane membership is content-derived (any file mentioning
+  `pglite`), so new PGLite tests are quarantined automatically; lane files still
+  count toward the coverage audit.
+- **Tuning.** Peak RSS ≈ `NEUTRON_TEST_JOBS` × `NEUTRON_TEST_CHUNK_SIZE` ×
+  per-file working set. Contended box / CI: `CHUNK_SIZE=60 JOBS=1` (bounded
+  memory). Quiet dev box: `JOBS=4` (faster, more RAM). Full knob matrix +
+  recipes in `docs/testing-runner.md`.

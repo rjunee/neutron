@@ -32,13 +32,30 @@ import { createAppWsAuthResolver } from '../../channels/index.ts'
 import { CommentStore } from '../comments/comment-store.ts'
 import { createAppDocsSurface } from '../http/app-docs-surface.ts'
 import { DocStore } from '../http/doc-store.ts'
-import { composeHttpHandler } from '../http/compose.ts'
+import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
+
+// --- in-process handler shim (no socket) -------------------------------------
+// These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-
+// trip via the global `fetch`, holding a live listener + socket buffers in the
+// chunk's RSS until teardown. Instead each harness registers its composed
+// handler under a unique in-process base, and `fetch` is shadowed at module
+// scope so requests to a registered base dispatch straight to
+// `composed.fetch(new Request(...))` — identical assertions, no socket.
+// Unrelated URLs fall through to the real fetch.
+const __composedHandlers = new Map<string, ComposedHttpHandler>()
+let __gatewaySeq = 0
+const __realFetch = globalThis.fetch.bind(globalThis)
+const fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const req = input instanceof Request ? input : new Request(input, init)
+  const composed = __composedHandlers.get(new URL(req.url).host)
+  if (composed !== undefined) return Promise.resolve(composed.fetch(req, undefined as never))
+  return __realFetch(input as Parameters<typeof __realFetch>[0], init)
+}) as typeof globalThis.fetch
 
 const PROJECT_ID = 'demo-project'
 const PROJECT_SLUG = 'demo'
 
 interface Harness {
-  server: import('bun').Server<unknown>
   base: string
   store: DocStore
   comments: CommentStore
@@ -71,26 +88,22 @@ async function startGateway(
     appDocs: { handler: surface.handler },
     defaultHandler: () => new Response('not found', { status: 404 }),
   })
-  const server = Bun.serve({
-    port: 0,
-    fetch: (req, srv) => composed.fetch(req, srv),
-    websocket: composed.websocket,
-  })
+  const host = `gw-${++__gatewaySeq}.test`
+  __composedHandlers.set(host, composed)
   // ISSUES #13 — record the active owner_home so `postRoot(base, body)`
   // (the helper-without-override form) can locate the on-disk doc when
   // seeding the OCC baseline. Pagination tests that build their own
   // server pass owner_home explicitly into `postRoot`.
   activeOwnerHome = owner_home
   return {
-    server,
-    base: `http://127.0.0.1:${server.port}`,
+    base: `http://${host}`,
     store,
     comments,
     owner_home,
     tmp,
     close: async () => {
       comments.closeAll()
-      await server.stop(true)
+      __composedHandlers.delete(host)
       rmSync(tmp, { recursive: true, force: true })
       activeOwnerHome = null
     },
@@ -224,14 +237,11 @@ describe('app-docs comments — auth + missing-comments', () => {
       appDocs: { handler: surface.handler },
       defaultHandler: () => new Response('not found', { status: 404 }),
     })
-    const server = Bun.serve({
-      port: 0,
-      fetch: (req, srv) => composed.fetch(req, srv),
-      websocket: composed.websocket,
-    })
+    const host = `gw-${++__gatewaySeq}.test`
+    __composedHandlers.set(host, composed)
     try {
       const res = await fetch(
-        `http://127.0.0.1:${server.port}/api/app/projects/${PROJECT_ID}/docs/comments?path=x.md`,
+        `http://${host}/api/app/projects/${PROJECT_ID}/docs/comments?path=x.md`,
         { headers: { authorization: 'Bearer dev:sam' } },
       )
       expect(res.status).toBe(403)
@@ -239,7 +249,7 @@ describe('app-docs comments — auth + missing-comments', () => {
       expect(body.code).toBe('project_mismatch')
     } finally {
       comments.closeAll()
-      await server.stop(true)
+      __composedHandlers.delete(host)
       rmSync(tmp, { recursive: true, force: true })
     }
   })
@@ -847,12 +857,9 @@ describe('app-docs comments — pagination preserves rows on tied last_reply_at'
       appDocs: { handler: surface.handler },
       defaultHandler: () => new Response('not found', { status: 404 }),
     })
-    const server = Bun.serve({
-      port: 0,
-      fetch: (req, srv) => composed.fetch(req, srv),
-      websocket: composed.websocket,
-    })
-    const base = `http://127.0.0.1:${server.port}`
+    const host = `gw-${++__gatewaySeq}.test`
+    __composedHandlers.set(host, composed)
+    const base = `http://${host}`
     try {
       // Three roots — same ms timestamp, distinct event_ids.
       const e1 = await postRoot(base, 'first', owner_home)
@@ -887,7 +894,7 @@ describe('app-docs comments — pagination preserves rows on tied last_reply_at'
       expect(seen).toEqual(all_ids)
     } finally {
       comments.closeAll()
-      await server.stop(true)
+      __composedHandlers.delete(host)
       rmSync(tmp, { recursive: true, force: true })
     }
   })
@@ -913,12 +920,9 @@ describe('app-docs comments — pagination preserves rows on tied last_reply_at'
       appDocs: { handler: surface.handler },
       defaultHandler: () => new Response('not found', { status: 404 }),
     })
-    const server = Bun.serve({
-      port: 0,
-      fetch: (req, srv) => composed.fetch(req, srv),
-      websocket: composed.websocket,
-    })
-    const base = `http://127.0.0.1:${server.port}`
+    const host = `gw-${++__gatewaySeq}.test`
+    __composedHandlers.set(host, composed)
+    const base = `http://${host}`
     try {
       await postRoot(base, 'one', owner_home)
       await postRoot(base, 'two', owner_home)
@@ -932,7 +936,7 @@ describe('app-docs comments — pagination preserves rows on tied last_reply_at'
       expect(json.next_cursor).toMatch(/^[0-9]+_[0-9A-HJKMNP-TV-Z]{26}$/)
     } finally {
       comments.closeAll()
-      await server.stop(true)
+      __composedHandlers.delete(host)
       rmSync(tmp, { recursive: true, force: true })
     }
   })
