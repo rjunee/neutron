@@ -2,6 +2,62 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Dead-code sweep (batch 1): remove 8 orphaned files
+
+Evidence-based leanness pass (Ryan mandate, SPEC Decisions Log): delete only
+provably-unused code, never load-bearing code. Method: `knip --include files`
+to surface orphan candidates, then per-file `grep` across the repo to confirm
+zero real importers before each deletion.
+
+**Removed (539 lines, 8 files, all zero-importer):**
+1. `gateway/instance-context.ts` — orphaned `AsyncLocalStorage` frame. All four
+   exports (`withInstanceContext`, `currentInstanceContext`,
+   `requireInstanceContext`, `InstanceContext`) had zero importers anywhere. Its
+   own doc-comment claimed it was "read by the logger, MCP server tool calls,
+   scribe pipeline" — that wiring never landed; the frame was aspirational.
+2. `app/lib/placeholder-tab.tsx`, `app/lib/ws-connection-provider.tsx` — RN
+   helpers in `app/lib/` with zero symbol references (not route files).
+3. `landing/connect-accept-server.ts` — zero refs. Distinct from the LIVE
+   `landing/connect-accept.ts` (the `-server` suffix file was the orphan;
+   `buildConnectAcceptHandler`/`ConnectAcceptHandler` are imported nowhere).
+4. `gateway/proactive/index.ts`, `gateway/push/index.ts`,
+   `gateway/tasks/p6/index.ts`, `onboarding/overnight/index.ts` — orphaned pure
+   re-export barrels. Every consumer imports the concrete files directly
+   (`../proactive/cron.ts`, `../tasks/p6/nudge-engine.ts`, …); no barrel,
+   package-subpath (`@neutronai/gateway/proactive`), or root-barrel re-export
+   importer exists. The concrete modules they re-exported are untouched.
+
+**Phantom FIRST TARGET (ISSUES #73).** The spec named a "dead
+slugRegistry / slugHistoryStore / reservedSlugs triple branch in `engine.ts`."
+Confirmed it does NOT exist in `onboarding/interview/engine.ts` on `origin/main`
+(0 occurrences; never in that file's git history). The `slugHistoryStore` /
+`reservedSlugs` symbols that DO exist elsewhere (`landing/auth-gate.ts`,
+`runtime/slug-grammar.ts`, `gateway/http/chat-bridge.ts`) are LIVE with real
+callers — left untouched. No action: the target was already gone (likely folded
+into the #27 engine consolidation).
+
+**Deferred to a follow-up PR (NOT deleted — robustness over leanness):**
+- `connect/remote-shared-projects-store.ts` — zero importers, but a coherent
+  connect/PH5 feature surface listed as live in the
+  `ph5-persists-nothing.test.ts` guard; plausibly pending wiring.
+- `runtime/adapters/claude-code/persistent/dev-channel.ts` — guarded by
+  `stateless-correlation.test.ts` and part of the runtime-critical persistent
+  REPL substrate (loads `@modelcontextprotocol/sdk`); not high-confidence dead.
+- The repo-wide unused-EXPORT pass (ts-prune flags ~3,600 candidates) — too
+  noisy (re-exports, dynamic imports, entry points) for a focused PR; needs
+  per-symbol verification in a dedicated follow-up.
+- NOT dead (verified, kept): `landing/chat-react/main.tsx` (lazy `Bun.build`
+  bundler entry at `landing/server.ts:1033`),
+  `runtime/.../hooks/enforce-reply.ts` (Stop hook invoked by path),
+  `migrations/regen-snapshot.ts` + the two fixture `build.ts` files (manual
+  regeneration scripts run via `bun run`).
+
+**Verify.** `bunx tsc --noEmit -p tsconfig.json` → 0 errors (clean before and
+after). Targeted suites for every touched area: `bun test gateway/proactive
+gateway/push gateway/tasks/p6 onboarding/overnight` → 155 pass / 0 fail;
+`bun test landing connect` → 754 pass / 0 fail. Full suite deferred to CI
+(local box is memory-constrained).
+
 ## 2026-06-21 — Track B Phase 4 (slice 3): message reactions over `@neutron/chat-core`
 
 **What shipped.** Per-message emoji reactions across the web + mobile chat stack,
