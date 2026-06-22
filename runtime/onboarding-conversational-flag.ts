@@ -6,7 +6,10 @@
  *
  * Tri-state semantics (mirrors `phase-spec-resolver.ts:resolveEnabledPhases`):
  *
- *   - Unset / `0` / `false` / `off` / `none` / `""`
+ *   - Unset (env var absent)
+ *       → flag ON for every phase (2026-06-21 onboarding-engine
+ *         consolidation default-flip — see `resolveOnboardingConversational`).
+ *   - Explicit opt-out `0` / `false` / `off` / `none` / `""`
  *       → flag off; router never fires.
  *   - `1` / `true` / `yes` / `on` / `enabled` / `all`
  *       → flag on for every phase with a non-null PHASE_KNOWLEDGE pack.
@@ -42,8 +45,15 @@ const ALL_PHASES_SET = new Set<OnboardingPhase>(ALL_PHASES)
 export function resolveOnboardingConversational(
   raw: string | undefined,
 ): ConversationalFlagResolution {
+  // 2026-06-21 (onboarding-engine consolidation) — DEFAULT ON. With the
+  // dead `promptDriver` extraction seam removed, the `llmRouter` is the
+  // single freeform/extraction engine, so a stock local install must get
+  // the same conversational experience as managed prod (where the flag was
+  // already set). An ABSENT env var now resolves to enabled-for-all-phases;
+  // an explicit opt-out token (`0`/`false`/`off`/`none`/`""`) still disables
+  // it, and a typo/unrecognised token still fails closed (off).
   if (typeof raw !== 'string') {
-    return { enabled: false, phases: new Set<OnboardingPhase>() }
+    return { enabled: true, phases: 'all' }
   }
   const trimmed = raw.trim()
   const lowered = trimmed.toLowerCase()

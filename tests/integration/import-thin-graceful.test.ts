@@ -53,7 +53,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
-import type { ButtonChoice, ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import {
   InterviewEngine,
   type ImportJobRunnerHook,
@@ -67,10 +67,8 @@ import {
   parsePass2Result,
 } from '@neutronai/onboarding/history-import/pass2-synthesis.ts'
 import type { Pass1ChunkResult } from '@neutronai/onboarding/history-import/types.ts'
-import type {
-  DrivenPhasePromptSpec,
-  GeneratePromptInput,
-} from '@neutronai/onboarding/interview/llm-prompt-driver.ts'
+import type { RouterDecision } from '@neutronai/onboarding/interview/llm-router.ts'
+import { stubRouter, stubPlatform } from './m2-walkthrough-test-helpers.ts'
 
 const OWNER = 'thin-import-test'
 const TOPIC = 'chat'
@@ -84,20 +82,28 @@ let transcript: TranscriptWriter
 let sentPrompts: Array<{ prompt: ButtonPrompt }>
 let runnerResults: Map<string, ImportJob>
 
-function makeFallbackDriver(): (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec> {
-  // Forces every dynamic-prompt request to land at the deterministic
-  // phase-prompts.ts builder (the body source we're pinning here).
-  return async (input) => ({
-    phase: input.phase,
-    body: 'fallback',
-    options: [],
-    allow_freeform: true,
-    next_phase_on_default: input.phase,
-    is_fallback: true,
-  })
+/** A REVIEW-completing freeform reply decision for
+ *  `import_analysis_presented` (a REVIEW/CORRECTION phase). The router
+ *  classifies a corrections reply as `advance` carrying the verbatim text
+ *  + an optional non-null `state_delta`; the engine records `freeform_text`
+ *  into `user_supplied_corrections[]` and applies the whitelisted delta
+ *  before auditing + routing. */
+function reviewAdvance(
+  freeform_text: string,
+  state_delta: RouterDecision['state_delta'] = null,
+): RouterDecision {
+  return {
+    action: 'advance',
+    confidence: 0.95,
+    choice_value: null,
+    freeform_text,
+    response: null,
+    state_delta,
+    reasoning: 'test: review-completing corrections reply',
+  }
 }
 
-function makeEngine(): InterviewEngine {
+function makeEngine(decisions: ReadonlyArray<RouterDecision> = []): InterviewEngine {
   const runner: ImportJobRunnerHook = {
     start: async () => ({ job_id: 'unused' }),
     status: async (job_id) => runnerResults.get(job_id) ?? null,
@@ -117,7 +123,14 @@ function makeEngine(): InterviewEngine {
     },
     importJobRunner: runner,
     importPayloadResolver: resolver,
-    promptDriver: makeFallbackDriver(),
+    // Freeform extraction at this REVIEW phase flows ONLY through the
+    // llmRouter (the dead promptDriver extraction seam was removed). The
+    // deterministic phase-prompts.ts builder is now the sole body source
+    // (no dynamic driver), which is exactly the body these tests pin.
+    // stubPlatform('all') flips the conversational flag on so the router
+    // is consulted for the freeform reply.
+    llmRouter: stubRouter(decisions).router,
+    platform: stubPlatform('all'),
   })
 }
 
@@ -287,7 +300,13 @@ describe('parsePass2Result — graceful degradation when v2 optional fields are 
 
 describe('import_analysis_presented body — graceful degradation when v2 fields are absent', () => {
   test('no confidence + interests present → body has interests bullets and NO "I\'m less sure about" callout, engine advances to personality_offered (audit clean)', async () => {
-    const engine = makeEngine()
+    const reply = 'Looks right, nothing to add.'
+    const engine = makeEngine([
+      reviewAdvance(reply, {
+        primary_projects: ['Caldera', 'Ledgerline', 'Childcare logistics'],
+        removed_projects: [],
+      }),
+    ])
     await landAtImportRunning({
       import_result: thinResult({
         inferred_interests: [
@@ -330,21 +349,14 @@ describe('import_analysis_presented body — graceful degradation when v2 fields
 
     // Engine advances cleanly on a freeform reply — interests are
     // present so the required-fields audit is clean and we go to
-    // personality_offered per § 2.4.
-    const choice: ButtonChoice = {
-      prompt_id: prompt!.prompt_id,
-      choice_value: '__freeform__',
-      freeform_text: 'Looks right, nothing to add.',
-      chosen_at: 2,
-      speaker_user_id: USER,
-      channel_kind: 'app-socket',
-    }
+    // personality_offered per § 2.4. Drive the REAL freeform router path
+    // (typed reply, no synthetic ButtonChoice).
     await engine.advance({
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app-socket',
-      choice,
+      freeform_text: reply,
       observed_at: 2,
     })
 
@@ -356,7 +368,15 @@ describe('import_analysis_presented body — graceful degradation when v2 fields
   })
 
   test('confidence present + interests missing → body has NO "Outside work" section, engine advances to work_interview_gap_fill (interests audit miss)', async () => {
-    const engine = makeEngine()
+    const reply = 'Pretty close — I do also run trails on weekends.'
+    // Interests are absent → audit still flags non_work_interests as
+    // missing → gap_fill, regardless of the projects restated here.
+    const engine = makeEngine([
+      reviewAdvance(reply, {
+        primary_projects: ['Caldera', 'Ledgerline', 'Childcare logistics'],
+        removed_projects: [],
+      }),
+    ])
     await landAtImportRunning({
       import_result: thinResult({
         // inferred_interests deliberately absent.
@@ -407,20 +427,12 @@ describe('import_analysis_presented body — graceful degradation when v2 fields
 
     // Engine accepts the freeform reply and routes into gap_fill so
     // the missing interest field can be collected via S6's self-loop.
-    const choice: ButtonChoice = {
-      prompt_id: prompt!.prompt_id,
-      choice_value: '__freeform__',
-      freeform_text: 'Pretty close — I do also run trails on weekends.',
-      chosen_at: 2,
-      speaker_user_id: USER,
-      channel_kind: 'app-socket',
-    }
     await engine.advance({
       project_slug: OWNER,
       topic_id: TOPIC,
       user_id: USER,
       channel_kind: 'app-socket',
-      choice,
+      freeform_text: reply,
       observed_at: 2,
     })
 
@@ -434,7 +446,13 @@ describe('import_analysis_presented body — graceful degradation when v2 fields
   })
 
   test('both fields missing → body has NO "Outside work" section AND NO "less sure" callout, engine still advances + accepts user reply (no throw)', async () => {
-    const engine = makeEngine()
+    const reply = 'That all checks out.'
+    const engine = makeEngine([
+      reviewAdvance(reply, {
+        primary_projects: ['Caldera', 'Ledgerline', 'Childcare logistics'],
+        removed_projects: [],
+      }),
+    ])
     await landAtImportRunning({ import_result: thinResult() })
 
     await engine.start({
@@ -477,14 +495,6 @@ describe('import_analysis_presented body — graceful degradation when v2 fields
 
     // Engine still accepts the user's reply and routes to gap_fill
     // (since non_work_interests is missing) — no throw, flow completes.
-    const choice: ButtonChoice = {
-      prompt_id: prompt!.prompt_id,
-      choice_value: '__freeform__',
-      freeform_text: 'That all checks out.',
-      chosen_at: 2,
-      speaker_user_id: USER,
-      channel_kind: 'app-socket',
-    }
     let advanceErr: unknown = null
     try {
       await engine.advance({
@@ -492,7 +502,7 @@ describe('import_analysis_presented body — graceful degradation when v2 fields
         topic_id: TOPIC,
         user_id: USER,
         channel_kind: 'app-socket',
-        choice,
+        freeform_text: reply,
         observed_at: 2,
       })
     } catch (err) {

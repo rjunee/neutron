@@ -28,7 +28,7 @@ import {
 } from './agent-name-suggester.ts'
 import { suggestedSlugFromAgentName, type SlugPickerOutcome } from '../../runtime/slug-picker-types.ts'
 import { extractAgentNameFromFreeform } from './extract-agent-name.ts'
-import { STATIC_PHASE_SPECS } from './llm-prompt-driver.ts'
+import { STATIC_PHASE_SPECS } from './phase-prompts.ts'
 import type { OnboardingState } from './state-store.ts'
 import type { AdvanceInput, AdvanceResult, SlugPickerEngineHookInput } from './engine-internals.ts'
 import {
@@ -74,14 +74,10 @@ export async function consumeAgentNameChosenChoice(
       })
     }
 
-    const extracted_patch = self.consumePendingExtractedFields(input.project_slug)
-    const extracted_name =
-      typeof extracted_patch['agent_name'] === 'string' &&
-      (extracted_patch['agent_name'] as string).trim().length > 0
-        ? (extracted_patch['agent_name'] as string).trim()
-        : null
-    // Try LLM-extracted first; else the freeform reply (verbatim, then
-    // the legacy heuristic for "call me X" patterns).
+    // The freeform reply (verbatim, then the legacy heuristic for
+    // "call me X" patterns). A router-extracted name on the conversational
+    // path is already persisted to `phase_state.agent_name` upstream and
+    // read back via `persisted_*` below.
     const heuristic_name =
       freeform !== null ? extractAgentNameFromFreeform(freeform) : null
     // v0.1.121 (2026-06-04) — agent_name_chosen now renders the suggested
@@ -104,7 +100,7 @@ export async function consumeAgentNameChosenChoice(
     // through to the normal cascade. Sits AFTER the heuristic (so a real
     // "call me 3" never collides) and BEFORE freeform.
     let numbered_name_pick: string | null = null
-    if (extracted_name === null && heuristic_name === null && freeform !== null) {
+    if (heuristic_name === null && freeform !== null) {
       const oneBased = parseBareOptionNumber(freeform)
       if (oneBased !== null) {
         const memoized = readMemoizedAgentNameSuggestions(
@@ -121,7 +117,7 @@ export async function consumeAgentNameChosenChoice(
       }
     }
     const candidate =
-      extracted_name ?? heuristic_name ?? numbered_name_pick ?? freeform ?? button_name
+      heuristic_name ?? numbered_name_pick ?? freeform ?? button_name
 
     const validation = candidate === null ? null : validateAgentName(candidate)
 
@@ -138,7 +134,6 @@ export async function consumeAgentNameChosenChoice(
         active_prompt_id: null,
         last_choice_value: choice_value,
         ...(freeform !== null ? { last_choice_freeform: freeform } : {}),
-        ...extracted_patch,
         agent_name_chosen_rejection: reason,
         agent_name_chosen_attempt_count: next_attempts,
       }
@@ -210,7 +205,6 @@ export async function consumeAgentNameChosenChoice(
         active_prompt_id: null,
         last_choice_value: choice_value,
         ...(freeform !== null ? { last_choice_freeform: freeform } : {}),
-        ...extracted_patch,
         agent_name,
         agent_name_chosen_rejection: null,
         agent_name_chosen_attempt_count: null,
@@ -254,10 +248,7 @@ export async function consumeAgentNameChosenChoice(
       user_first_name: user_first_name_for_slug,
     })
     const suggested_slug =
-      typeof extracted_patch['suggested_slug'] === 'string' &&
-      (extracted_patch['suggested_slug'] as string).length > 0
-        ? (extracted_patch['suggested_slug'] as string)
-        : computed.primary ?? suggestedSlugFromAgentName(agent_name)
+      computed.primary ?? suggestedSlugFromAgentName(agent_name)
 
     if (self.deps.personaSync !== undefined) {
       try {
@@ -285,7 +276,6 @@ export async function consumeAgentNameChosenChoice(
       active_prompt_id: null,
       last_choice_value: choice_value,
       ...(freeform !== null ? { last_choice_freeform: freeform } : {}),
-      ...extracted_patch,
       agent_name,
       suggested_slug,
       agent_name_chosen_rejection: null,

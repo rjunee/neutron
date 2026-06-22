@@ -14,9 +14,17 @@
  * import_analysis_presented) lands a dedicated integration test in S4
  * once the upload endpoint is wired.
  *
- * Static fallback bodies drive the prompts (no LLM substrate). The
- * engine's `promptDriver` stub returns `is_fallback=true` for every
- * free-text phase so the deterministic STATIC_PHASE_SPECS body lands.
+ * The static STATIC_PHASE_SPECS bodies drive the prompts (no LLM
+ * substrate). Button taps + simple freeform advance on the static
+ * fallback path with NO router consulted (`stubPlatform([])` →
+ * `shouldConsultRouter` false on every freeform phase). The ONE step that
+ * needs real extraction — `work_interview_gap_fill`, where the user
+ * volunteers their project list + interests in a single reply — is served
+ * by a scripted `llmRouter` decision: an `advance` carrying the projects +
+ * interests as a `state_delta`, which the gap-fill best-effort extractor
+ * reads to populate `primary_projects` / `non_work_interests` so the audit
+ * gate clears in one turn (the "user volunteers multiple required fields
+ * at once" case from spec § 3.8).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -31,10 +39,8 @@ import { InterviewEngine } from '../engine.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
 import { isLegalTransition, LEGAL_TRANSITIONS } from '../phase.ts'
-import type {
-  DrivenPhasePromptSpec,
-  GeneratePromptInput,
-} from '../llm-prompt-driver.ts'
+import type { RouterDecision } from '../llm-router.ts'
+import { stubRouter, stubPlatform } from './interview-testkit.ts'
 import type { OnboardingPhase } from '../phase.ts'
 
 let tmp: string
@@ -62,43 +68,33 @@ afterEach(() => {
 })
 
 /**
- * Returns a promptDriver stub that always falls back to the static spec.
- * The engine then routes via `STATIC_PHASE_SPECS[phase].next_phase_on_default`
- * (and the dynamic builders for slug_chosen / persona_reviewed) so the
- * walk path is deterministic.
+ * The single scripted `llmRouter` decision the walk needs — the gap-fill
+ * extraction turn. `work_interview_gap_fill` is the one free-text phase
+ * where the user volunteers multiple required fields at once (primary
+ * projects + non-work interests). The engine's gap-fill best-effort
+ * extractor reads `primary_projects` / `non_work_interests` off the
+ * router's `state_delta` (the REVIEW/CORRECTION hybrid-advance shape) so
+ * the required-fields audit clears in one turn and the engine advances to
+ * `personality_offered` — exactly the spec § 3.8 case.
  *
- * S6 (2026-05-16) — work_interview_gap_fill needs real extraction for
- * the no-import walk to terminate. The stub special-cases that phase:
- * it pulls primary_projects + non_work_interests off the most recent
- * user line via deterministic substring matching so the engine's audit
- * gate clears after one turn — exactly the "user volunteers multiple
- * required fields at once" case the spec § 3.8 example calls out.
+ * Every OTHER freeform reply (signup name, personality, agent name) takes
+ * the static `__freeform__` fall-through (the router is NOT consulted for
+ * them: `stubPlatform([])` → `shouldConsultRouter` is false everywhere),
+ * so this is the ONLY router decision the queue must supply.
  */
-function makeFallbackDriver(): (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec> {
-  return async (input) => {
-    const spec: DrivenPhasePromptSpec = {
-      phase: input.phase,
-      body: 'fallback',
-      options: [],
-      allow_freeform: true,
-      next_phase_on_default: input.phase,
-      is_fallback: false,
-    }
-    if (input.phase === 'work_interview_gap_fill') {
-      const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-      const reply = lastUser?.body ?? ''
-      const extracted: NonNullable<DrivenPhasePromptSpec['extracted_fields']> = {}
-      if (/fragrance brand|hotel group/i.test(reply)) {
-        extracted.primary_projects = ['fragrance brand', 'hotel group', 'CC course']
-      }
-      if (/yoga|family time/i.test(reply)) {
-        extracted.non_work_interests = [{ name: 'yoga' }, { name: 'family time' }]
-      }
-      if (Object.keys(extracted).length > 0) spec.extracted_fields = extracted
-    } else {
-      spec.is_fallback = true
-    }
-    return spec
+function gapFillDecision(): RouterDecision {
+  return {
+    action: 'advance',
+    confidence: 0.97,
+    choice_value: null,
+    freeform_text:
+      'Building a fragrance brand and a hotel group. Outside work: yoga and family time.',
+    response: null,
+    state_delta: {
+      primary_projects: ['fragrance brand', 'hotel group', 'CC course'],
+      non_work_interests: [{ name: 'yoga' }, { name: 'family time' }],
+    },
+    reasoning: 'User volunteered project list + interests in one reply.',
   }
 }
 
@@ -111,7 +107,12 @@ function makeEngine(): InterviewEngine {
       sentPrompts.push(input)
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
-    promptDriver: makeFallbackDriver(),
+    // Single extraction seam: the gap-fill turn pulls projects + interests
+    // off this scripted decision. `stubPlatform([])` keeps every other
+    // freeform phase on the static fall-through (router not consulted), so
+    // the queue holds exactly one decision.
+    llmRouter: stubRouter([gapFillDecision()]).router,
+    platform: stubPlatform([]),
   })
 }
 
@@ -305,10 +306,10 @@ describe('P2 v2 — engine.advance walks every spec\'d phase', () => {
     // persona_synthesizing only.
     expect(state!.phase).toBe('signup')
 
-    // signup → free-text reply with the user's first name. The fallback
-    // driver returns is_fallback=true, so consumeChoice routes through
-    // STATIC_PHASE_SPECS['signup'].next_phase_on_default which is
-    // instance_provisioned (auto-skipped) → ai_substrate_offered.
+    // signup → free-text reply with the user's first name. No router is
+    // consulted (signup not in the conversational set), so consumeChoice
+    // routes through STATIC_PHASE_SPECS['signup'].next_phase_on_default
+    // which is instance_provisioned (auto-skipped) → ai_substrate_offered.
     observed_at += 1_000
     await advanceFreeform(engine, project_slug, 'Casey', observed_at)
     state = await stateStore.get(project_slug, 'u-1')

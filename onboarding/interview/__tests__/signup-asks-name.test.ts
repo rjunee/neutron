@@ -40,10 +40,7 @@ import type {
 import { InterviewEngine, type PersonaSyncHook } from '../engine.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
-import type {
-  DrivenPhasePromptSpec,
-  GeneratePromptInput,
-} from '../llm-prompt-driver.ts'
+import { stubRouter, stubPlatform } from './interview-testkit.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -83,21 +80,14 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-/** Fallback driver — every phase resolves to `is_fallback=true`, so the
- *  engine reads `next_phase_on_default` from STATIC_PHASE_SPECS. */
-function makeFallbackDriver(): (
-  input: GeneratePromptInput,
-) => Promise<DrivenPhasePromptSpec> {
-  return async (input) => ({
-    phase: input.phase,
-    body: 'fallback',
-    options: [],
-    allow_freeform: true,
-    next_phase_on_default: input.phase,
-    is_fallback: true,
-  })
-}
-
+// 2026-06-21 (onboarding-engine consolidation) — the `promptDriver`
+// extraction seam was removed; it was never wired in production. With NO
+// `platform` adapter wired, `shouldConsultRouter` short-circuits to false,
+// so the engine runs the STATIC heuristic capture path
+// (`extractAgentNameFromFreeform` → `sanitizeUserFirstName`) — the exact
+// safety-net path these deterministic assertions exercise. A plain-name
+// signup reply ("Casey", "Sam Doe", "I'm Sam", "call me Sam") is captured
+// by the heuristic with no router and no driver.
 function makeEngine(personaSync?: PersonaSyncHook): InterviewEngine {
   return new InterviewEngine({
     buttonStore,
@@ -107,7 +97,6 @@ function makeEngine(personaSync?: PersonaSyncHook): InterviewEngine {
       sentPrompts.push(input)
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
-    promptDriver: makeFallbackDriver(),
     ...(personaSync !== undefined ? { personaSync } : {}),
   })
 }
@@ -408,51 +397,36 @@ describe('P2 v2 § 3.1 (Codex r1 P1) — signup does NOT write user name into ph
 })
 
 describe('P2 v2 § 3.1 (Codex r1 P2) — backfill user_first_name from legacy agent_name signal', () => {
-  test('LLM emits agent_name (v1 shape) → engine backfills user_first_name from it', async () => {
-    // A v1-shaped LLM only emits `extracted_fields.agent_name = 'Sam'`
-    // at signup; the engine must NOT advance with
-    // `phase_state.user_first_name === undefined`. Backfill kicks in
-    // when agent_name is the only signal, sanitizing through the same
-    // pipeline as a fresh user_first_name extraction.
+  test('router advance emits agent_name (v1 shape) → engine backfills user_first_name from it', async () => {
+    // 2026-06-21 (onboarding-engine consolidation) — ported off the removed
+    // `promptDriver` extraction seam onto the surviving `llmRouter` seam.
+    // A v1-shaped classifier emits only `state_delta.agent_name = 'Sam'` on
+    // a signup ADVANCE (no `user_first_name`); the engine must NOT advance
+    // with `phase_state.user_first_name === undefined`. The signup-advance
+    // backfill (engine.ts § "backfill user_first_name from the legacy
+    // agent_name extraction signal") kicks in when agent_name is the only
+    // name signal, sanitizing through the same pipeline as a fresh
+    // user_first_name extraction.
+    //
+    // The user's reply is intentionally NOT name-shaped ("yes that sounds
+    // great") so `extractAgentNameFromFreeform` returns null and the
+    // heuristic capture branch leaves user_first_name unset — isolating the
+    // agent_name → user_first_name backfill as the ONLY path that supplies
+    // the name.
     const project_slug = 'v1-llm-shape'
     const recorder = makeRecorder()
-    const driverWithLegacyShape: (
-      input: GeneratePromptInput,
-    ) => Promise<DrivenPhasePromptSpec> = async (input) => {
-      if (input.phase !== 'signup') {
-        return {
-          phase: input.phase,
-          body: 'fallback',
-          options: [],
-          allow_freeform: true,
-          next_phase_on_default: input.phase,
-          is_fallback: true,
-        }
-      }
-      if (input.transcript_so_far.some((t) => t.role === 'user')) {
-        // After the user replies, the LLM emits only legacy agent_name
-        // (no user_first_name field) — the v1 envelope shape.
-        return {
-          phase: 'signup',
-          body: 'Hey Sam, great. Pulling next step.',
-          options: [],
-          allow_freeform: true,
-          next_phase_on_default: 'instance_provisioned',
-          is_fallback: false,
-          extracted_fields: {
-            agent_name: 'Sam',
-          },
-        }
-      }
-      return {
-        phase: 'signup',
-        body: 'Hey, what should I call you?',
-        options: [],
-        allow_freeform: true,
-        next_phase_on_default: 'signup',
-        is_fallback: false,
-      }
-    }
+    const { router } = stubRouter([
+      {
+        action: 'advance',
+        confidence: 0.95,
+        choice_value: null,
+        freeform_text: 'yes that sounds great',
+        response: null,
+        // v1 envelope shape: only agent_name, no user_first_name.
+        state_delta: { agent_name: 'Sam' } as Record<string, unknown>,
+        reasoning: 'v1-shaped advance — agent_name only',
+      },
+    ])
     const engine = new InterviewEngine({
       buttonStore,
       stateStore,
@@ -461,7 +435,8 @@ describe('P2 v2 § 3.1 (Codex r1 P2) — backfill user_first_name from legacy ag
         sentPrompts.push(input)
         return { message_id: `msg-${sentPrompts.length}`, was_new: true }
       },
-      promptDriver: driverWithLegacyShape,
+      llmRouter: router,
+      platform: stubPlatform('all'),
       personaSync: recorder,
     })
     let observed_at = 1_700_000_000_000
@@ -473,11 +448,21 @@ describe('P2 v2 § 3.1 (Codex r1 P2) — backfill user_first_name from legacy ag
       signup_via: 'web',
     })
     observed_at += 1_000
-    await advanceFreeform(engine, project_slug, 'Sam', observed_at)
+    // The router seam is only consulted on the freeform interaction-mode
+    // branch, which fires on a typed `freeform_text` reply (NOT a synthetic
+    // `__freeform__` ButtonChoice). Drive that path directly.
+    await engine.advance({
+      project_slug,
+      topic_id: 'topic-1',
+      user_id: 'u-1',
+      channel_kind: 'app-socket',
+      freeform_text: 'yes that sounds great',
+      observed_at,
+    })
 
     const state = await stateStore.get(project_slug, 'u-1')
     expect(state?.phase).toBe('ai_substrate_offered')
-    // Backfill landed: user_first_name set even though LLM only
+    // Backfill landed: user_first_name set even though the classifier only
     // emitted agent_name.
     expect(state?.phase_state['user_first_name']).toBe('Sam')
     // Registry side mirrored too.

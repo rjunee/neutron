@@ -62,6 +62,7 @@ import {
   PROJECTS_PROPOSED_SHARE_WORK,
   PROJECTS_PROPOSED_SKIP_AHEAD,
   RESUME_PROMPT_OPTIONS,
+  STATIC_PHASE_SPECS,
   stripPersonaFileH1,
   validateAgentName,
   type AiSubstrateSource,
@@ -117,12 +118,9 @@ import type {
   RouterRecentTurn,
 } from './llm-router.ts'
 import {
-  STATIC_PHASE_SPECS,
   sanitizeUserFirstName,
-  type DrivenPhasePromptSpec,
   type ExtractedFields,
-  type GeneratePromptInput,
-} from './llm-prompt-driver.ts'
+} from './extracted-fields.ts'
 // 2026-05-28 final-handoff sprint — post-`wow_fired → completed` emit
 // in the General topic. Surfaces the 3-button (web) / 2-button
 // (telegram) handoff prompt the user sees as the final agent line of
@@ -151,7 +149,7 @@ import {
   resolveInteractionMode,
   validateMixedTextInput,
 } from './interaction-mode.ts'
-import { auditRequiredFields, type RequiredField } from './required-fields-audit.ts'
+import { auditRequiredFields } from './required-fields-audit.ts'
 import type {
   ApplyEditInput as PersonaApplyEditInput,
   ComposeInput as PersonaComposeInput,
@@ -1316,11 +1314,6 @@ export class InterviewEngine implements EngineInternals {
       signup_via: input.signup_via,
       user_id: input.user_id,
       topic_id: input.topic_id,
-      // Codex r1 P1 (2026-05-10) — fold any extracted_fields the LLM
-      // driver staged on the same `start()` cycle into the initial
-      // state upsert so they land atomically with active_prompt_id +
-      // signup_via.
-      ...this.consumePendingExtractedFields(input.project_slug),
     }
     if (
       typeof input.tg_first_name === 'string' &&
@@ -1834,7 +1827,6 @@ export class InterviewEngine implements EngineInternals {
           ...(input.choice.freeform_text !== undefined
             ? { last_choice_freeform: input.choice.freeform_text }
             : {}),
-          ...this.consumePendingExtractedFields(input.project_slug),
         },
         advanced_at: this.now(),
       })
@@ -1898,7 +1890,6 @@ export class InterviewEngine implements EngineInternals {
         ...(input.choice.freeform_text !== undefined
           ? { chosen_freeform: input.choice.freeform_text }
           : {}),
-        ...this.consumePendingExtractedFields(input.project_slug),
         ...acceptchoice_signup_patch,
       },
       advanced_at: this.now(),
@@ -2628,12 +2619,11 @@ export class InterviewEngine implements EngineInternals {
       // `'buttons-only'` (the deliberate 2026-06-03 "tweak later, defer real
       // edits to the post-onboarding owner tools" decision), so a typed
       // "drop X / add Y" on the populated list hit the canned buttons-only
-      // nudge and was IGNORED. The GAP1 additive union added 2026-06-09
-      // (consumeProjectsProposedChoice) intended that edit to be applied, but
-      // wired it only on the `drainPendingExtractedFieldsRaw` path — populated
-      // ONLY by the `promptDriver` engine dep, which PRODUCTION does not wire
-      // (it wires `phaseSpecResolver` + `llmRouter`), so the union is prod-dead
-      // and the edit fell back to confirming the seeded list verbatim. Treat
+      // nudge and was IGNORED. The GAP1 additive union (added 2026-06-09)
+      // originally landed only on the now-removed `promptDriver` extraction
+      // path, which PRODUCTION never wired — so the edit fell back to
+      // confirming the seeded list verbatim. The `llmRouter` is the single
+      // extraction seam; route the edit to it instead. Treat
       // the populated list-review like its sibling review phase
       // `import_analysis_presented` (itself reclassified buttons-only →
       // 'freeform' for the same strand class, Argus r3 2026-06-03): override to
@@ -3127,7 +3117,7 @@ export class InterviewEngine implements EngineInternals {
   ): Promise<AdvanceResult> {
     // BUG 1 FIX (onboarding-opening-fix, 2026-06-19) — signup auto-advance
     // on a non-`advance` classification. Production wires
-    // `phaseSpecResolver` + `llmRouter` (NOT `promptDriver`), and
+    // `phaseSpecResolver` + `llmRouter`, and
     // `PACK_SIGNUP.advance_examples` was empty, so the router routinely
     // classified a bare typed name ("Ryan") as `amend` (it volunteers a
     // fact) or a low-confidence `answer` rather than `advance`. On signup
@@ -3232,13 +3222,13 @@ export class InterviewEngine implements EngineInternals {
         channel_kind: input.channel_kind,
       }
       // GAP1 LIVE-PATH FIX (onboarding-wow-handoff-fix r3, 2026-06-09 — Argus
-      // r2 BLOCKER). The PROD-wired capture path on a REVIEW/CORRECTION phase
+      // r2 BLOCKER). The capture path on a REVIEW/CORRECTION phase
       // (canonically import_analysis_presented) is THIS router `state_delta`.
-      // The drain-based GAP1 merge in consumeProjectsProposedChoice is
-      // prod-DEAD: production wires `phaseSpecResolver` (which by contract
-      // "cannot produce extracted_fields"), NOT `promptDriver`, so
-      // `pendingExtractedFields` is never populated and the union there never
-      // fires on the live import flow. On a confirm/restate *advance* ("go with
+      // (The older drain-based GAP1 merge in consumeProjectsProposedChoice
+      // ran only on the `promptDriver` extraction seam, which production never
+      // wired and which was removed in the 2026-06-21 consolidation — the
+      // router `state_delta` is now the single capture path.)
+      // On a confirm/restate *advance* ("go with
       // A, B, C, D, E") the router's extracted `primary_projects` routinely
       // ANCHORS to the proposed list and DROPS the user's net-new additions,
       // returning a SHORTER set; consumeChoice → whitelistRouterStateDelta then
@@ -4287,21 +4277,10 @@ export class InterviewEngine implements EngineInternals {
       next_phase !== 'failed' &&
       choice_value === '__freeform__'
     ) {
-      const pending_extracted = this.peekPendingExtractedFields(input.project_slug)
       // P2 v2 S3 (2026-05-16) — `user_first_name` is the v2-canonical
       // signal at signup. `agent_name` is still honoured for backward
       // compat with v1 LLM responses (the v1 envelope used agent_name
       // ambiguously for the user's name at signup).
-      const pending_user_first_name =
-        typeof pending_extracted['user_first_name'] === 'string' &&
-        (pending_extracted['user_first_name'] as string).length > 0
-          ? (pending_extracted['user_first_name'] as string)
-          : null
-      const pending_name =
-        typeof pending_extracted['agent_name'] === 'string' &&
-        (pending_extracted['agent_name'] as string).length > 0
-          ? (pending_extracted['agent_name'] as string)
-          : null
       const persisted_user_first_name = readString(state.phase_state, 'user_first_name')
       const persisted_name = readString(state.phase_state, 'agent_name')
       const freeform =
@@ -4317,8 +4296,6 @@ export class InterviewEngine implements EngineInternals {
       // the clarify-reprompt branch, not advancement.
       const freeform_sanitized = freeform === null ? null : sanitizeUserFirstName(freeform)
       if (
-        pending_user_first_name === null &&
-        pending_name === null &&
         persisted_user_first_name === null &&
         persisted_name === null &&
         freeform_sanitized === null
@@ -4346,7 +4323,6 @@ export class InterviewEngine implements EngineInternals {
         ...(resolved.choice.freeform_text !== undefined
           ? { last_choice_freeform: resolved.choice.freeform_text }
           : {}),
-        ...this.consumePendingExtractedFields(input.project_slug),
         ...(clarify_name_reprompt ? { clarify_name_reprompt: true } : {}),
       }
       const stayed = await this.deps.stateStore.upsert({
@@ -4399,15 +4375,10 @@ export class InterviewEngine implements EngineInternals {
     // freeform_text attached to the choice that resolved the
     // agent-naming prompt; button-only choices leave agent_name=null
     // (the slug picker drops option A and the user types freeform).
-    // Argus r1 (2026-05-10) — drain LLM-extracted fields BEFORE picking
-    // the captured agent_name so the multi-turn signup path uses the
-    // earlier-extracted name (e.g. the user said "I'm Sam" two turns
-    // back, then later said "and a bit of Marcus Aurelius") rather
-    // than the most recent freeform reply (which is archetype talk,
-    // not the name). The static-fallback path leaves
-    // `extracted_patch` empty and falls back to the freeform_text.
-    const extracted_patch = this.consumePendingExtractedFields(input.project_slug)
-    const slug_chosen_patch: Record<string, unknown> = { ...extracted_patch }
+    // Signup name capture falls back to the freeform_text heuristic below
+    // (the router-extracted name, when the conversational path is active,
+    // is already merged into `phase_state` upstream).
+    const slug_chosen_patch: Record<string, unknown> = {}
     // 2026-05-14 — T9: capture agent_name at the signup-advance turn
     // too. Pre-T9 the only place name capture happened was the
     // signup → name_chosen shortcut path; after T9 the spec'd flow is
@@ -4466,9 +4437,8 @@ export class InterviewEngine implements EngineInternals {
     // P2 v2 S3 (Codex r1 P2) — backfill `user_first_name` from the
     // legacy `agent_name` extraction signal when advancing past
     // signup with no user_first_name landed. Covers two cases:
-    //   1. A v1-shaped LLM response that only emits `agent_name`
-    //      (extracted_patch['agent_name'] === 'Sam',
-    //      extracted_patch['user_first_name'] undefined).
+    //   1. A v1-shaped LLM response that only emitted `agent_name`
+    //      (persisted as `phase_state.agent_name`, no user_first_name).
     //   2. A resumed pre-S3 instance whose prior turn wrote
     //      `phase_state.agent_name` but never set
     //      `phase_state.user_first_name`.
@@ -4525,16 +4495,11 @@ export class InterviewEngine implements EngineInternals {
       }
     }
     if (next_phase === 'agent_name_chosen') {
-      const extracted_name =
-        typeof extracted_patch['agent_name'] === 'string' &&
-        (extracted_patch['agent_name'] as string).length > 0
-          ? (extracted_patch['agent_name'] as string)
-          : null
-      // Argus r1 (2026-05-10) — also honour an agent_name that was
-      // extracted on a PRIOR stay-at-signup turn and persisted into
-      // phase_state. Without this, a multi-turn signup that gathers
-      // the name early ("I'm Sam") and advances later (after archetype
-      // talk) would derive the slug from the most recent reply
+      // Argus r1 (2026-05-10) — honour an agent_name that was extracted on
+      // a PRIOR turn (by the router on the conversational path) and
+      // persisted into phase_state. Without this, a multi-turn signup that
+      // gathers the name early ("I'm Sam") and advances later (after
+      // archetype talk) would derive the slug from the most recent reply
       // (archetype text) instead of the name.
       const persisted_name = readString(state.phase_state, 'agent_name')
       // 2026-05-11 — bug fix: the persona-discovery signup fallback body
@@ -4559,14 +4524,12 @@ export class InterviewEngine implements EngineInternals {
         resolved.choice.freeform_text.length > 0
           ? extractAgentNameFromFreeform(resolved.choice.freeform_text)
           : null
-      const agent_name = extracted_name ?? persisted_name ?? freeform_name
+      const agent_name = persisted_name ?? freeform_name
       slug_chosen_patch['agent_name'] = agent_name
-      // Honour the LLM-extracted slug ('nova' in Sam's example) over
+      // Honour a router-extracted slug ('nova' in Sam's example) over
       // the agent-name-derived fallback. Source precedence:
-      //   1. extracted_patch.suggested_slug (just-extracted this turn,
-      //      already in slug_chosen_patch via the spread above)
-      //   2. phase_state.suggested_slug (extracted on a PRIOR stay turn)
-      //   3. derive-from-name fallback
+      //   1. phase_state.suggested_slug (extracted on a PRIOR turn)
+      //   2. derive-from-name fallback
       if (typeof slug_chosen_patch['suggested_slug'] !== 'string') {
         const persisted_slug = readString(state.phase_state, 'suggested_slug')
         slug_chosen_patch['suggested_slug'] =
@@ -6004,10 +5967,11 @@ export class InterviewEngine implements EngineInternals {
 
     // v0.1.80 — share-freeform sub-state. User previously tapped
     // "Share what I'm working on" and is now sending the project list.
-    // Extract via LLM driver; on miss, fall back to a newline/semicolon
-    // split so the user is never stuck. After persisting, re-emit
-    // `projects_proposed` (do NOT advance) so they see the populated
-    // body + standard confirm/review buttons.
+    // Split the freeform reply on newline/semicolon/comma so the user is
+    // never stuck. After persisting, re-emit `projects_proposed` (do NOT
+    // advance) so they see the populated body + standard confirm/review
+    // buttons. (When the conversational router is active it handles the
+    // share-freeform reply upstream; this is the deterministic capture.)
     if (awaiting_share_freeform && choice_value === '__freeform__') {
       this.invalidateResolvedSpec(input.project_slug, 'projects_proposed')
       await this.resolvePhasePromptSpec(
@@ -6015,19 +5979,8 @@ export class InterviewEngine implements EngineInternals {
         input.user_id,
         'projects_proposed',
       )
-      const extracted = this.drainPendingExtractedFieldsRaw(input.project_slug)
-      const llm_projects: ReadonlyArray<string> =
-        extracted?.primary_projects !== undefined &&
-        Array.isArray(extracted.primary_projects)
-          ? extracted.primary_projects.filter(
-              (p): p is string => typeof p === 'string' && p.trim().length > 0,
-            )
-          : []
-      const fallback_projects =
-        llm_projects.length === 0 && freeform !== null
-          ? splitFreeformProjectList(freeform)
-          : []
-      const final_projects = llm_projects.length > 0 ? llm_projects : fallback_projects
+      const final_projects =
+        freeform !== null ? splitFreeformProjectList(freeform) : []
       if (final_projects.length === 0) {
         // Couldn't pick anything out. Re-emit with a rejection that
         // hints at the expected format.
@@ -6225,84 +6178,15 @@ export class InterviewEngine implements EngineInternals {
       return { outcome: 'advanced', state: advanced_final }
     }
 
-    // Pre-resolve the projects_proposed spec so the LLM driver sees the
-    // just-appended user reply and gets a chance to extract edits like
-    // "drop #2, add Studio Sessions" into `primary_projects`. Mirrors
-    // the gap-fill / persona-discovery pattern. When the driver is
-    // unwired OR returns `is_fallback=true`, this is a cheap no-op and
-    // the drain below returns `null`.
-    await this.resolvePhasePromptSpec(input.project_slug, input.user_id, 'projects_proposed')
-
-    // Drain any LLM-extracted updates the driver staged (e.g. the user
-    // asked to drop a project and add another via freeform). P2 v2 / S7
-    // Codex r1 P1 (2026-05-16): the confirmed list MUST reflect the
-    // post-extraction merged view, not the pre-extraction persisted
-    // value — pre-fix a "drop #2, add Studio Sessions" reply silently
-    // discarded the edits because `primary_projects_confirmed` was
-    // copied from `state.phase_state.primary_projects` before the
-    // extracted_patch overrode it. Drain raw + merge then confirm.
-    const extracted_raw = this.drainPendingExtractedFieldsRaw(input.project_slug)
-    const prior_primary_projects =
-      readStringArray(state.phase_state as Record<string, unknown>, 'primary_projects') ?? []
-    const extracted_patch: Record<string, unknown> = {}
-    if (extracted_raw !== null) {
-      if (
-        extracted_raw.primary_projects !== undefined ||
-        extracted_raw.removed_projects !== undefined
-      ) {
-        // GAP1 (onboarding-wow-handoff-fix, 2026-06-09) — ADDITIVE merge
-        // MINUS explicit removals. Pre-fix this OVERWROTE `primary_projects`
-        // with the extracted set: `extracted_patch['primary_projects'] =
-        // [...extracted]`, and `merged_projects` then preferred that
-        // extracted set wholesale. The LLM extraction on a "go with A, B, C,
-        // D, E" reply routinely returns a SHORTER list (it anchors to the
-        // projects it proposed and drops net-new additions the user named) —
-        // so a confirm reply silently SHRANK the seeded list. Sam's
-        // 2026-06-09 signup seeded 7 projects then ended with 3 because the
-        // extraction dropped his two additions (Buddhism, Biohacking).
-        //
-        // Fix (the brief's "union(presented, extracted) minus explicit
-        // removals", Argus r1 BLOCKER #1): UNION the extracted picks with the
-        // prior seeded `primary_projects` so a confirm reply can only ADD,
-        // never silently drop — THEN subtract the LLM's explicit
-        // `removed_projects` (populated only on a clear "drop X / skip X"
-        // request; see ExtractedFields.removed_projects). A reply that names
-        // no removal drops nothing; a reply naming a removal drops exactly
-        // that one. This resolves the self-contradiction Argus flagged: the
-        // extraction contract no longer relies on the LLM OMITTING a project
-        // to remove it (omission is re-added by the union) — removal flows
-        // through the explicit `removed_projects` signal instead.
-        const union = dedupeStringsCaseInsensitive([
-          ...prior_primary_projects,
-          ...(extracted_raw.primary_projects ?? []),
-        ])
-        const removed = new Set(
-          (extracted_raw.removed_projects ?? []).map((p) => p.trim().toLowerCase()),
-        )
-        extracted_patch['primary_projects'] =
-          removed.size > 0
-            ? union.filter((p) => !removed.has(p.trim().toLowerCase()))
-            : union
-      }
-      if (extracted_raw.agent_personality !== undefined) {
-        extracted_patch['agent_personality'] = extracted_raw.agent_personality
-      }
-      if (extracted_raw.user_supplied_corrections !== undefined) {
-        const prior = readStringArray(
-          state.phase_state as Record<string, unknown>,
-          'user_supplied_corrections',
-        ) ?? []
-        extracted_patch['user_supplied_corrections'] = [
-          ...prior,
-          ...extracted_raw.user_supplied_corrections,
-        ]
-      }
-    }
-
+    // The confirmed list is the projects already seeded on `phase_state`.
+    // GAP1 (onboarding-wow-handoff-fix, 2026-06-09) — confirm is ADDITIVE:
+    // freeform edits ("drop #2, add Studio Sessions") on the conversational
+    // path are extracted + unioned-minus-removals upstream by
+    // `dispatchRouterDecision`'s projects_proposed branch before this
+    // handler runs, so the persisted `primary_projects` is already the
+    // post-edit view. Confirm it here; never silently shrink it.
     const merged_projects =
-      Array.isArray(extracted_patch['primary_projects'])
-        ? (extracted_patch['primary_projects'] as ReadonlyArray<string>)
-        : prior_primary_projects
+      readStringArray(state.phase_state as Record<string, unknown>, 'primary_projects') ?? []
     const review_requested = choice_value === PROJECTS_PROPOSED_REVIEW
     // GAP1 — project funnel telemetry: make proposed → confirmed divergence
     // observable instead of silent. `presented` is what the user could see
@@ -6330,7 +6214,6 @@ export class InterviewEngine implements EngineInternals {
       active_prompt_id: null,
       last_choice_value: choice_value,
       ...(freeform !== null ? { last_choice_freeform: freeform } : {}),
-      ...extracted_patch,
       primary_projects_confirmed: [...merged_projects],
       projects_proposed_confirm_kind:
         choice_value === PROJECTS_PROPOSED_CONFIRM
@@ -6843,42 +6726,27 @@ export class InterviewEngine implements EngineInternals {
   }
 
   /**
-   * P2 v2 § 2.4 + § 3.8 / S6 — handle the user's freeform reply to the
-   * LLM-driven gap-fill question. The handler:
+   * P2 v2 § 2.4 / S6 — handle the user's freeform reply to the gap-fill
+   * question. EXTRACT-then-ADVANCE (the shipped ISSUES #323 / PR #20
+   * behavior). The handler:
    *
-   *   1. Appends the user reply to transcript so the LLM driver sees it
-   *      in `recent_turns`.
-   *   2. Pre-resolves the current phase's spec — this triggers a
-   *      BEST_MODEL (Opus 4.7) call that BOTH extracts whatever
-   *      structured fields the user
-   *      volunteered (potentially multiple per turn: "I'm working on
-   *      Northwind and Acme and writing a book; outside work I
-   *      climb" extracts primary_projects + non_work_interests at once)
-   *      AND emits a candidate body the user would see if we re-emit.
-   *   3. Drains the raw `ExtractedFields` and merges into `phase_state`
-   *      using append-not-overwrite semantics for array-shape fields
-   *      (so multi-turn answers accumulate).
-   *   4. Re-runs `auditRequiredFields()` over the merged view.
-   *   5. Decides:
-   *      a. `next_to_collect ∈ {null, agent_personality, agent_name}` —
-   *         audit clean for gap-fill's responsibility (the last two
-   *         fields are collected at the dedicated phases). Advance to
-   *         `personality_offered`.
-   *      b. `gap_fill_iteration_count >= GAP_FILL_ITERATION_CAP` AND
-   *         ≥1 of {user_first_name, primary_projects,
-   *         non_work_interests} still missing — transition to
-   *         `phase='failed'` per spec § 3.8 + § 12. NO synthetic-
-   *         placeholder paths; that's the v1 structural-drift trapdoor
-   *         the spec exists to prevent.
-   *      c. Otherwise — bump iteration counter, stay on the phase,
-   *         invalidate the resolver cache so the next emit gets a
-   *         fresh LLM call seeded with the updated audit snapshot, and
-   *         re-emit.
+   *   1. Appends the user reply to transcript so the router sees it in
+   *      `recent_turns`.
+   *   2. Extracts the volunteered fields (primary_projects /
+   *      non_work_interests) via the `llmRouter` — best-effort: when the
+   *      conversational router was already consulted upstream
+   *      (`shouldConsultRouter` true) the fields were merged into
+   *      `phase_state` before this handler ran, so we skip the re-call;
+   *      otherwise we consult the router directly here.
+   *   3. Merges the extraction into a phase_state patch (array-shape
+   *      fields APPEND, deduped) and advances to `personality_offered`.
    *
-   * Telemetry: every iteration logs a structured `onboarding.gap_fill_*`
-   * line (`iteration`, `audit_clean`, `cap_hit`) so the
-   * `onboarding_metrics` view + the M2-week-4 collector can answer "how
-   * many turns does the median user spend in the gap-fill loop?".
+   * 2026-06-21 consolidation: the old driver-only audit-clean / 5-iteration
+   * cap / stay-and-loop self-loop was removed. It was only ever reachable
+   * when the (never-wired-in-prod) `promptDriver` fired, so the live engine
+   * has always advanced after one extraction turn. Collapsing onto the
+   * single `llmRouter` seam keeps exactly that — the user is never trapped
+   * in a loop or stranded in a `phase='failed'` dead-end.
    */
   private async consumeWorkInterviewGapFillChoice(
     input: AdvanceInput,
@@ -6916,148 +6784,45 @@ export class InterviewEngine implements EngineInternals {
       button_choice: choice.choice_value,
     })
 
-    // Pre-resolve the gap-fill spec to trigger the LLM extraction on
-    // the user's just-appended reply. The resolved spec gets cached for
-    // the lifetime of this public-method call so a follow-up emit
-    // doesn't double-bill. We invalidate the cache below ONLY when the
-    // post-merge audit state changes which field next_to_collect is so
-    // a stay-and-loop turn sees a fresh question.
-    await this.resolvePhasePromptSpec(input.project_slug, input.user_id, 'work_interview_gap_fill')
-    const extracted = this.drainPendingExtractedFieldsRaw(input.project_slug)
-    // P2 v2 S6 (Codex r1 P1) — distinguish "LLM driver fired but
-    // extracted nothing" from "LLM driver is unwired / threw / is_fallback".
-    // The first case is a real user turn and we bump the counter; the
-    // second case strands owners in the loop because no extraction is
-    // possible, so we fall through to the static fallback's
-    // `next_phase_on_default` (advance to personality_offered).
-    const driver_did_fire = this.driverDidFireForOwner.has(input.project_slug)
-    if (!driver_did_fire) {
-      // ISSUES #323 — the driver-unwired branch is the PRODUCTION path:
-      // production wires `phaseSpecResolver` + `llmRouter`, never
-      // `promptDriver`, so `driverDidFireForOwner` is never set and the
-      // `extracted` drain above is always null. Pre-fix this fell straight to
-      // `fallbackGapFillToStaticAdvance`, which advances with an EMPTY patch and
-      // SILENTLY DISCARDS the user's freeform answer — so an explicit project
-      // list ("Tabs, Pristine and Amascence, Neutron, Robobuddha…") was dropped
-      // and the flow re-asked at `projects_proposed` ("I didn't pin down
-      // concrete projects"). The router is the only production extraction seam
-      // but, in a default Open install, it is gated OFF here by
-      // `NEUTRON_ONBOARDING_CONVERSATIONAL` (unset → off), so it never runs over
-      // the gap-fill answer.
-      //
-      // Consult the router DIRECTLY for best-effort extraction, independent of
-      // that flag — gap-fill is fundamentally an LLM-extraction phase. Crucially
-      // this is best-effort: a missing router, a router error, a parse-fail, or
-      // a no-delta classification yields an empty patch and we STILL advance via
-      // the static fallback. We do NOT route through `dispatchRouterDecision`'s
-      // synthesised-advance re-prompt path, so a garbage/unparseable model reply
-      // can never trap the user in a gap-fill loop (the deterministic
-      // LLM-less / E2E-mock walk is unchanged — it just advances with {}).
-      //
-      // Guard against a double router call: when the conversational flag IS on
-      // for this phase, `advance` already consulted the router upstream and
-      // `consumeChoice` merged its `state_delta` into `phase_state` BEFORE this
-      // handler ran — so the projects are already persisted and re-calling here
-      // would double-bill the LLM. Only extract when the router was NOT consulted
-      // upstream (`shouldConsultRouter` false — the prod-default Open install,
-      // where the drop happened).
-      const active_sub_step = deriveActiveSubStep(state.phase, state.phase_state)
-      const router_extracted = this.shouldConsultRouter(state.phase, active_sub_step)
-        ? null
-        : await this.extractGapFillFieldsViaRouterBestEffort(input, state, reply_text)
-      const fallback_patch = this.mergeGapFillExtractedFields(
-        state.phase_state,
-        router_extracted,
-      )
-      return await this.advanceFromGapFillToPersonality(
-        input,
-        observed_at,
-        fallback_patch,
-        choice,
-      )
-    }
+    // Extract gap-fill fields from the just-appended reply via the LLM
+    // router — the SINGLE extraction seam for the onboarding engine. The
+    // older `promptDriver` envelope (which also returned `extracted_fields`)
+    // was removed in the 2026-06-21 consolidation; the router is now the
+    // only path that pulls `primary_projects` / `non_work_interests` out of
+    // a freeform answer.
+    //
+    // The gap-fill turn EXTRACTS-then-ADVANCES to `personality_offered`
+    // (the shipped ISSUES #323 / PR #20 behavior). Production never wired
+    // the old `promptDriver`, so the driver-only "audit-clean / 5-iteration
+    // cap / stay-and-loop" self-loop was dead code on every real install —
+    // gap-fill has always advanced after one extraction turn. Consolidating
+    // onto the single router seam keeps exactly that: never strand the user
+    // in a loop or a `phase='failed'` dead-end.
+    //
+    // ISSUES #323 — best-effort by contract: a missing router, a router
+    // error, a parse-fail, or a no-delta classification yields a `null`
+    // extraction → an empty merge → still advance (the deterministic
+    // LLM-less / E2E-mock walk just advances with `{}`). We do NOT route
+    // through `dispatchRouterDecision`'s synthesised-advance re-prompt path,
+    // so a garbage/unparseable model reply can never trap the user.
+    //
+    // Guard against a double router call: when the conversational router IS
+    // consulted for this phase, `advance` already routed the reply upstream
+    // and `consumeChoice` merged its `state_delta` into `phase_state` BEFORE
+    // this handler ran — so the fields are already persisted and re-calling
+    // here would double-bill the LLM. Only extract directly when the router
+    // was NOT consulted upstream (`shouldConsultRouter` false).
+    const active_sub_step = deriveActiveSubStep(state.phase, state.phase_state)
+    const extracted = this.shouldConsultRouter(state.phase, active_sub_step)
+      ? null
+      : await this.extractGapFillFieldsViaRouterBestEffort(input, state, reply_text)
 
-    // Merge the extracted fields into a working patch + a projected
-    // view of phase_state for the audit. Array-shape fields APPEND
-    // (deduped case-insensitively, preserving first-seen casing) to
-    // whatever was there before; single-value fields overwrite (latest
-    // wins, since the LLM is sanitizing).
+    // Merge the extracted fields into the advance patch. Array-shape fields
+    // APPEND (deduped case-insensitively) to whatever was there before;
+    // single-value fields overwrite (the LLM sanitized them). Returns `{}`
+    // when nothing was extracted, so we always advance with a safe patch.
     const merge_patch = this.mergeGapFillExtractedFields(state.phase_state, extracted)
-    const projected_state: Record<string, unknown> = {
-      ...state.phase_state,
-      ...merge_patch,
-    }
-
-    // Bump the iteration counter. The counter is `prior + 1` whether or
-    // not the LLM extracted anything — a turn the user took counts
-    // toward the cap regardless of what the LLM heard.
-    const prior_iteration = readNumber(state.phase_state, 'gap_fill_iteration_count') ?? 0
-    const next_iteration = prior_iteration + 1
-    merge_patch['gap_fill_iteration_count'] = next_iteration
-
-    const audit = auditRequiredFields(projected_state)
-
-    // "Audit clean for the gap-fill's responsibility" — the three
-    // required fields the gap-fill phase + import are responsible for
-    // (user_first_name, primary_projects, non_work_interests) are all
-    // filled. The remaining two (agent_personality, agent_name) get
-    // collected at their dedicated downstream phases, so a
-    // next_to_collect pointing at them is still "clean for gap-fill".
-    const GAP_FILL_DOWNSTREAM_FIELDS: ReadonlySet<RequiredField> = new Set<RequiredField>([
-      'agent_personality',
-      'agent_name',
-    ])
-    const required_clean =
-      audit.next_to_collect === null ||
-      GAP_FILL_DOWNSTREAM_FIELDS.has(audit.next_to_collect)
-    const fields_filled_this_turn = listFilledThisTurn(state.phase_state, merge_patch)
-
-    // Branch 1 — audit clean. Advance to personality_offered.
-    if (required_clean) {
-      this.logGapFillEvent('audit_clean', {
-        project_slug: input.project_slug,
-        iteration: next_iteration,
-        filled: audit.filled.slice(),
-        fields_filled_this_turn,
-      })
-      return await this.advanceFromGapFillToPersonality(
-        input,
-        observed_at,
-        merge_patch,
-        choice,
-      )
-    }
-
-    // Branch 2 — cap-hit AND required fields still missing → fail.
-    // Per spec § 3.8 trapdoor fix: NO synthetic-placeholder paths. If a
-    // real human needs to move on, that's an ops decision, not an
-    // engine decision.
-    if (next_iteration >= GAP_FILL_ITERATION_CAP) {
-      const remaining_missing = audit.missing.filter(
-        (f) => !GAP_FILL_DOWNSTREAM_FIELDS.has(f),
-      )
-      this.logGapFillEvent('cap_hit', {
-        project_slug: input.project_slug,
-        iteration: next_iteration,
-        remaining_missing,
-      })
-      return await this.failGapFillCapNoRequiredFields(
-        input,
-        observed_at,
-        merge_patch,
-        remaining_missing,
-        choice,
-      )
-    }
-
-    // Branch 3 — stay on gap_fill, re-emit with a fresh LLM call.
-    this.logGapFillEvent('iteration', {
-      project_slug: input.project_slug,
-      iteration: next_iteration,
-      next_to_collect: audit.next_to_collect,
-      fields_filled_this_turn,
-    })
-    return await this.reemitGapFillWithMergedState(
+    return await this.advanceFromGapFillToPersonality(
       input,
       observed_at,
       merge_patch,
@@ -7189,41 +6954,16 @@ export class InterviewEngine implements EngineInternals {
   }
 
   /**
-   * P2 v2 S6 (Codex r1 P1) — fallback path for the LLM-driver-unwired
-   * / throws / is_fallback case. The audit-driven self-loop cannot
-   * function without the LLM (no extraction → audit never clears).
-   * Rather than deterministically stalling the owner into the
-   * 5-iteration cap, advance via the static spec's
-   * `next_phase_on_default` (which is `personality_offered`) so the
-   * onboarding can proceed. This preserves the pre-S6 contract for
-   * any test / composer wiring that intentionally omits the driver.
-   *
-   * The cap-fail path (`gap_fill_failure_reason =
-   * 'gap_fill_cap_no_required_fields'`) remains reachable when the
-   * LLM driver IS wired AND the user gives no usable info across 5
-   * turns — that's the spec's structural-drift trapdoor (§ 3.8 + § 12)
-   * and is preserved.
-   */
-  private async fallbackGapFillToStaticAdvance(
-    input: AdvanceInput,
-    observed_at: number,
-    choice: ButtonChoice,
-  ): Promise<AdvanceResult> {
-    return await this.advanceFromGapFillToPersonality(input, observed_at, {}, choice)
-  }
-
-  /**
    * ISSUES #323 — best-effort gap-fill extraction via the LLM router.
    *
-   * `work_interview_gap_fill`'s only PRODUCTION extraction seam is the
-   * `llmRouter` (production wires `phaseSpecResolver` + `llmRouter`, never
-   * `promptDriver`). In `advance`, the router is gated behind
-   * `NEUTRON_ONBOARDING_CONVERSATIONAL` (`shouldConsultRouter`), which defaults
-   * OFF, so a default Open install never routes the gap-fill answer through it
-   * and the freeform reply (e.g. an explicit project list) was being dropped.
-   * This consults the router DIRECTLY to pull `primary_projects` /
-   * `non_work_interests` out of the reply, independent of that flag — gap-fill
-   * is fundamentally an extraction phase.
+   * The `llmRouter` is the single extraction seam (the `promptDriver` envelope
+   * was removed in the 2026-06-21 consolidation). In `advance`, the router is
+   * gated behind `NEUTRON_ONBOARDING_CONVERSATIONAL` (`shouldConsultRouter`),
+   * which now defaults ON. This helper consults the router DIRECTLY to pull
+   * `primary_projects` / `non_work_interests` out of the reply on the path
+   * where `shouldConsultRouter` is false (the explicit flag-OFF / freeform
+   * sub_step bypass) so the freeform reply (e.g. an explicit project list) is
+   * never dropped — gap-fill is fundamentally an extraction phase.
    *
    * Best-effort by contract: returns `null` (→ the caller advances with an
    * empty patch, the prior behavior) when no router is wired, the router throws,
@@ -7344,120 +7084,6 @@ export class InterviewEngine implements EngineInternals {
     }
 
     return Object.keys(extracted).length > 0 ? extracted : null
-  }
-
-  /**
-   * Stay on `work_interview_gap_fill` and re-emit with a fresh LLM
-   * call. Invalidates the cached spec first so the next emit sees the
-   * MERGED audit snapshot (the spec cached above was based on the
-   * pre-merge phase_state and would re-ask for a field we just filled).
-   */
-  private async reemitGapFillWithMergedState(
-    input: AdvanceInput,
-    observed_at: number,
-    merge_patch: Record<string, unknown>,
-    choice: ButtonChoice,
-  ): Promise<AdvanceResult> {
-    const stayed = await this.deps.stateStore.upsert({
-      project_slug: input.project_slug,
-      user_id: input.user_id,
-      phase: 'work_interview_gap_fill',
-      phase_state_patch: {
-        ...merge_patch,
-        active_prompt_id: null,
-        last_choice_value: choice.choice_value,
-        ...(choice.choice_value === '__freeform__' && typeof choice.freeform_text === 'string'
-          ? { last_choice_freeform: choice.freeform_text }
-          : {}),
-      },
-      advanced_at: observed_at,
-    })
-    this.invalidateResolvedSpec(input.project_slug, 'work_interview_gap_fill')
-    let final_state: OnboardingState | null = null
-    const emit = await this.emitPhasePrompt({
-      project_slug: input.project_slug,
-      user_id: input.user_id,
-      topic_id: input.topic_id,
-      phase: 'work_interview_gap_fill',
-      observed_at,
-      pre_send_state_upsert: async (prompt_id: string) => {
-        final_state = await this.deps.stateStore.upsert({
-          project_slug: input.project_slug,
-          user_id: input.user_id,
-          phase: 'work_interview_gap_fill',
-          phase_state_patch: { active_prompt_id: prompt_id },
-          advanced_at: observed_at,
-        })
-      },
-    })
-    if (final_state === null) {
-      final_state = (await this.deps.stateStore.get(input.project_slug, input.user_id)) ?? stayed
-    }
-    return { outcome: 'reemitted_current', state: final_state, prompt_id: emit.prompt_id }
-  }
-
-  /**
-   * Spec § 3.8 + § 12 trapdoor fix — 5-iteration cap reached AND ≥1
-   * required field still missing. Engine transitions to `phase='failed'`
-   * with `{ reason: 'gap_fill_cap_no_required_fields', missing: [...] }`.
-   * Ops surfaces the stalled instance via the admin observability
-   * dashboard. NO synthetic-placeholder paths.
-   */
-  private async failGapFillCapNoRequiredFields(
-    input: AdvanceInput,
-    observed_at: number,
-    merge_patch: Record<string, unknown>,
-    remaining_missing: ReadonlyArray<RequiredField>,
-    choice: ButtonChoice,
-  ): Promise<AdvanceResult> {
-    if (!isLegalTransition('work_interview_gap_fill', 'failed')) {
-      throw new InterviewError(
-        'work_interview_gap_fill',
-        'illegal_transition',
-        false,
-        'gap_fill cap-hit: illegal transition to failed',
-      )
-    }
-    const failed = await this.deps.stateStore.upsert({
-      project_slug: input.project_slug,
-      user_id: input.user_id,
-      phase: 'failed',
-      phase_state_patch: {
-        ...merge_patch,
-        active_prompt_id: null,
-        last_choice_value: choice.choice_value,
-        ...(choice.choice_value === '__freeform__' && typeof choice.freeform_text === 'string'
-          ? { last_choice_freeform: choice.freeform_text }
-          : {}),
-        gap_fill_failure_reason: 'gap_fill_cap_no_required_fields',
-        gap_fill_failure_missing: remaining_missing.slice(),
-      },
-      advanced_at: observed_at,
-    })
-    return { outcome: 'advanced', state: failed }
-  }
-
-  /**
-   * Structured-log telemetry sink for the gap-fill loop. The engine
-   * doesn't take an `OnboardingTelemetry` dep today (the wiring lives
-   * one layer up at `gateway/realmode-composer/build-landing-stack.ts`,
-   * which routes events into `gateway_events`). The log-line shape
-   * matches the spec § 5 contract (event names land in the M2 metrics
-   * view) — when the engine is later refactored to take a telemetry
-   * dep directly, this helper rewires to `emit(...)` without touching
-   * call sites.
-   */
-  private logGapFillEvent(
-    kind: 'iteration' | 'audit_clean' | 'cap_hit',
-    payload: Record<string, unknown>,
-  ): void {
-    const event_name = `onboarding.gap_fill_${kind}`
-    try {
-      console.info(JSON.stringify({ level: 'info', event: event_name, payload }))
-    } catch {
-      // Defensive — JSON.stringify can throw on circular refs.
-      console.info(`[engine] ${event_name}`)
-    }
   }
 
   /**
@@ -8091,20 +7717,11 @@ export class InterviewEngine implements EngineInternals {
     // confirm/review buttons. Fallback bodies for the empty case live in
     // the builder.
     if (phase === 'projects_proposed') {
-      // Fire the LLM driver as a side-effect so any edits in the user's
-      // most-recent transcript turn (e.g. "drop #2, add Studio Sessions")
-      // land in `pendingExtractedFields`. The driver's body+options are
-      // ignored — we always render via `buildProjectsProposedPromptSpec`
-      // — but the extraction side effect feeds `consumeProjectsProposedChoice`'s
-      // drain so the confirm path honours the edits.
-      await this.resolveLlmSpec({
-        project_slug,
-        topic_id: null,
-        user_id,
-        phase,
-        signup_via: null,
-        state: null,
-      })
+      // Edits in the user's most-recent transcript turn (e.g. "drop #2, add
+      // Studio Sessions") are extracted + merged into `phase_state` upstream
+      // by the `llmRouter` (`dispatchRouterDecision`); this body builder just
+      // renders the persisted `primary_projects` via
+      // `buildProjectsProposedPromptSpec`.
       const state = await this.deps.stateStore.get(project_slug, user_id)
       const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
       const rejection = readString(phase_state, 'projects_proposed_rejection')
@@ -8623,18 +8240,12 @@ export class InterviewEngine implements EngineInternals {
      */
     tg_first_name_override?: string | null
   }): Promise<PhasePromptSpec | null> {
-    // Codex r1 P1 (2026-05-10): the new `promptDriver` takes precedence
-    // over the legacy `phaseSpecResolver` whenever both are wired. The
-    // driver is the only path that produces `extracted_fields` +
-    // `persona_acknowledgment` from the same LLM round-trip, so
-    // instances opted into LLM-driven prompts go through it. Falls back
-    // to the resolver (and then the static spec) on null so existing
-    // tests that only inject `phaseSpecResolver` still exercise the
-    // narrow path.
-    if (
-      this.deps.phaseSpecResolver === undefined &&
-      this.deps.promptDriver === undefined
-    ) {
+    // 2026-06-21 (onboarding-engine consolidation) — the warm conversational
+    // body copy is produced solely by `phaseSpecResolver`. The older
+    // `promptDriver` extraction-envelope seam (which also returned
+    // `extracted_fields`) was never wired in production and has been removed;
+    // freeform-field extraction now flows exclusively through `llmRouter`.
+    if (this.deps.phaseSpecResolver === undefined) {
       return null
     }
     // ISSUES #2 (2026-05-19) — when `input.user_id` is null (legacy
@@ -8660,64 +8271,6 @@ export class InterviewEngine implements EngineInternals {
     const tg_first_name =
       input.tg_first_name_override ?? readString(phase_state, 'tg_first_name')
 
-    // Prefer the new conversational driver when wired.
-    if (this.deps.promptDriver !== undefined) {
-      const driverInput: GeneratePromptInput = {
-        phase: input.phase,
-        signup_via,
-        phase_state,
-        transcript_so_far: this.readRecentTurns(6),
-        topic_id,
-        user_id,
-        tg_first_name_override: tg_first_name,
-      }
-      try {
-        const driven = await this.deps.promptDriver(driverInput)
-        if (driven.is_fallback) {
-          // Fall through to the legacy resolver below.
-        } else {
-          // Stash extracted_fields keyed by project_slug so the caller's
-          // own state upsert (start() / emitPhasePrompt) can merge them
-          // into the same patch. We can't persist eagerly here because
-          // a fresh `signup` start has no onboarding_state row yet —
-          // an upsert from this method would race the caller's own
-          // upsert and either lose its fields or get overwritten by
-          // the caller's patch (which doesn't carry agent_name etc).
-          if (driven.extracted_fields !== undefined) {
-            this.pendingExtractedFields.set(input.project_slug, driven.extracted_fields)
-          }
-          // P2 v2 S6 (Codex r1 P1) — flag that a non-fallback driver
-          // call landed this turn for this instance. The
-          // `consumeWorkInterviewGapFillChoice` handler reads this on
-          // its `extracted === null` path to decide between
-          // "stay + loop" (driver ran but user volunteered nothing)
-          // and "fall through to static-fallback advance" (driver
-          // unwired / threw / returned is_fallback). Without the flag
-          // the unwired-driver case deterministically hits the
-          // 5-iteration cap, stranding any instance with a flaky LLM.
-          this.driverDidFireForOwner.add(input.project_slug)
-          return {
-            phase: driven.phase,
-            body: driven.body,
-            options: driven.options,
-            allow_freeform: driven.allow_freeform,
-            next_phase_on_default: driven.next_phase_on_default,
-            ...(driven.next_phase_overrides !== undefined
-              ? { next_phase_overrides: driven.next_phase_overrides }
-              : {}),
-            ...(driven.kind !== undefined ? { kind: driven.kind } : {}),
-          }
-        }
-      } catch (err) {
-        console.warn(
-          `[engine] promptDriver threw for phase=${input.phase} project=${input.project_slug}:`,
-          err instanceof Error ? err.message : err,
-        )
-        // Fall through to the legacy resolver path below.
-      }
-    }
-
-    if (this.deps.phaseSpecResolver === undefined) return null
     const intent = PHASE_INTENTS[input.phase]
     if (intent === null || intent === undefined) return null
     const attempt_count = readNumber(phase_state, 'attempt_count') ?? 0
@@ -8756,16 +8309,6 @@ export class InterviewEngine implements EngineInternals {
   }
 
   /**
-   * Codex r1 P1 (2026-05-10) — per-instance cache of extracted_fields the
-   * LLM driver returned on the most recent `resolveLlmSpec` call.
-   * Consumed by `consumePendingExtractedFields` at the next state
-   * upsert so the captured values land as part of the caller's own
-   * `phase_state_patch` (avoids racing the caller's upsert with a
-   * separate write).
-   */
-  private readonly pendingExtractedFields: Map<string, ExtractedFields> = new Map()
-
-  /**
    * 2026-06-04 (onboarding-suggester-llm-timeout) — in-flight suggester
    * generations keyed by `${project_slug}::${user_id}`. The suggester LLM
    * call runs on the CC-spawn substrate and takes seconds; these maps let
@@ -8784,23 +8327,6 @@ export class InterviewEngine implements EngineInternals {
     string,
     Promise<AgentNameSuggesterResult>
   > = new Map()
-
-  /**
-   * P2 v2 S6 (Codex r1 P1) — per-instance flag tracking whether a
-   * non-fallback LLM driver call landed during the current public-
-   * method lifetime. Cleared at the top of every public entry point
-   * (alongside the resolved-spec cache) and set inside `resolveLlmSpec`
-   * when `driver.is_fallback === false`.
-   *
-   * Used by `consumeWorkInterviewGapFillChoice` to distinguish two
-   * extraction-empty cases:
-   *   - driver fired but the user replied with non-actionable text
-   *     → bump iteration counter, stay on the gap-fill loop;
-   *   - driver did NOT fire (unwired, threw, or returned is_fallback)
-   *     → advance via the static-fallback `next_phase_on_default`
-   *     so an instance with a flaky LLM is never stranded in the loop.
-   */
-  private readonly driverDidFireForOwner: Set<string> = new Set()
 
   /**
    * Argus r1 (2026-05-10) — per-(instance, phase) cache of the most
@@ -8829,10 +8355,6 @@ export class InterviewEngine implements EngineInternals {
   }
   private clearResolvedSpecCache(): void {
     this.resolvedSpecCache.clear()
-    // Per-public-call lifetime — the gap-fill handler's "did the LLM
-    // actually fire?" signal must reset every entry-point call so a
-    // stale-from-prior-turn flag doesn't gate the new turn's routing.
-    this.driverDidFireForOwner.clear()
   }
   /**
    * Invalidate a single (instance, phase) entry in the resolved-spec
@@ -8842,95 +8364,6 @@ export class InterviewEngine implements EngineInternals {
    */
   invalidateResolvedSpec(project_slug: string, phase: OnboardingPhase): void {
     this.resolvedSpecCache.delete(`${project_slug}:${phase}`)
-  }
-
-  /**
-   * Non-consuming peek at the pending extracted fields. Used by the
-   * 2026-05-12 Bug C guard at signup advance (post-T9: signup →
-   * instance_provisioned) to inspect whether a name has already been
-   * staged by the LLM driver before deciding to re-prompt. The actual
-   * drain still happens via `consumePendingExtractedFields` further
-   * down the same turn.
-   */
-  private peekPendingExtractedFields(project_slug: string): Record<string, unknown> {
-    const fields = this.pendingExtractedFields.get(project_slug)
-    if (fields === undefined) return {}
-    const patch: Record<string, unknown> = {}
-    if (fields.agent_name !== undefined) patch['agent_name'] = fields.agent_name
-    if (fields.slug !== undefined) patch['suggested_slug'] = fields.slug
-    if (fields.archetypes !== undefined) {
-      patch['archetype_hint'] = fields.archetypes.join(', ')
-    }
-    if (fields.goal_one_liner !== undefined) patch['goal_one_liner'] = fields.goal_one_liner
-    if (fields.user_first_name !== undefined) {
-      patch['user_first_name'] = fields.user_first_name
-    }
-    return patch
-  }
-
-  /**
-   * Drain the cached extracted_fields for this instance and return them
-   * shaped as a phase_state_patch. Callers fold these into their own
-   * upsert patch. Idempotent: a second call returns an empty object.
-   */
-  consumePendingExtractedFields(project_slug: string): Record<string, unknown> {
-    const fields = this.pendingExtractedFields.get(project_slug)
-    if (fields === undefined) return {}
-    this.pendingExtractedFields.delete(project_slug)
-    const patch: Record<string, unknown> = {}
-    if (fields.agent_name !== undefined) patch['agent_name'] = fields.agent_name
-    // Argus r1 (2026-05-10): write the LLM-extracted slug to
-    // `suggested_slug`, which is the key the slug picker + rename driver
-    // both read. The previous `extracted_slug` key was dead — the
-    // conversational slug Sam typed ("nova") landed there and got
-    // silently dropped because nothing downstream consumed it.
-    if (fields.slug !== undefined) patch['suggested_slug'] = fields.slug
-    if (fields.archetypes !== undefined) {
-      patch['archetype_hint'] = fields.archetypes.join(', ')
-    }
-    if (fields.goal_one_liner !== undefined) patch['goal_one_liner'] = fields.goal_one_liner
-    // P2 v2 S3 (2026-05-16) — drain the captured `user_first_name` into
-    // `phase_state.user_first_name`. Spec § 3.1 + § 4.1: this is the
-    // canonical phase-state location for the user's first name. The
-    // dual-store mirror to the `user_first_name` registry row lives at the
-    // signup-advance branch in `consumeChoice` (so the registry write
-    // only fires once, when the engine commits to advancing past
-    // signup).
-    if (fields.user_first_name !== undefined) {
-      patch['user_first_name'] = fields.user_first_name
-    }
-    // P2 v2 S6 (2026-05-16) — single-value fields the LLM may extract
-    // at any phase. Array-shape fields (primary_projects,
-    // non_work_interests, rituals, inner_circle, companies,
-    // user_supplied_corrections) are NOT drained here — they go through
-    // `drainPendingExtractedFieldsRaw` so the gap-fill handler (the
-    // only consumer today) can run its own append-not-overwrite merge.
-    if (fields.agent_personality !== undefined) {
-      patch['agent_personality'] = fields.agent_personality
-    }
-    if (fields.time_style !== undefined) patch['time_style'] = fields.time_style
-    if (fields.work_pattern !== undefined) patch['work_pattern'] = fields.work_pattern
-    return patch
-  }
-
-  /**
-   * P2 v2 S6 (2026-05-16) — drain the raw `ExtractedFields` object for
-   * this instance. Used by `consumeWorkInterviewGapFillChoice` so the
-   * gap-fill handler can run its own append-not-overwrite merge on the
-   * array-shape fields (primary_projects, non_work_interests, rituals,
-   * inner_circle, companies, user_supplied_corrections) against the
-   * prior `phase_state` values. Idempotent: a second call returns null.
-   *
-   * NOTE: this call CLEARS the cache. If a caller also needs the
-   * single-value fields (`agent_name`, `user_first_name`, etc.) it must
-   * pull them off the returned object directly — calling
-   * `consumePendingExtractedFields` afterward will return `{}`.
-   */
-  private drainPendingExtractedFieldsRaw(project_slug: string): ExtractedFields | null {
-    const fields = this.pendingExtractedFields.get(project_slug)
-    if (fields === undefined) return null
-    this.pendingExtractedFields.delete(project_slug)
-    return fields
   }
 
   // ----------------------------------------------------------------------
@@ -10182,17 +9615,6 @@ function logProjectFunnel(args: {
   )
 }
 
-/**
- * P2 v2 § 3.8 / § 12 (S6) — hard cap on `work_interview_gap_fill`
- * iterations. When this many user turns pass without the audit clearing
- * the required-3 fields, the engine transitions to `phase='failed'`
- * with `{ reason: 'gap_fill_cap_no_required_fields', missing: [...] }`.
- * The cap is a sanity bound, NOT a force-advance with synthetic data —
- * synthesizing `primary_projects = ["work"]` to satisfy `length >= 3`
- * is the v1 structural-drift trapdoor the spec exists to prevent.
- */
-const GAP_FILL_ITERATION_CAP = 5
-
 /** Read an array of strings off `phase_state`. Returns [] on missing /
  *  non-array / empty. Filters out non-string + empty entries. Note: a
  *  sibling helper `readStringArray` further down the file returns
@@ -10235,48 +9657,6 @@ function mergeNonWorkInterests(
   }
   return Array.from(seen.values())
 }
-
-/** List the field keys whose value in `merge_patch` differs from
- *  `prior_phase_state`. Used in the gap_fill telemetry so observers
- *  can see which fields each turn filled in. */
-function listFilledThisTurn(
-  prior_phase_state: Record<string, unknown>,
-  merge_patch: Record<string, unknown>,
-): ReadonlyArray<string> {
-  const filled: string[] = []
-  // Audit-relevant fields the gap-fill phase can populate.
-  const KEYS = [
-    'user_first_name',
-    'primary_projects',
-    'non_work_interests',
-    'agent_personality',
-    'agent_name',
-    'time_style',
-    'work_pattern',
-    'rituals',
-    'inner_circle',
-    'companies',
-    'user_supplied_corrections',
-  ]
-  for (const k of KEYS) {
-    if (!(k in merge_patch)) continue
-    const before = prior_phase_state[k]
-    const after = merge_patch[k]
-    // Cheap structural compare: arrays change if length differs OR JSON
-    // differs; strings change if value differs. Anything else: present-
-    // in-patch is enough to count as "filled this turn".
-    if (Array.isArray(before) && Array.isArray(after)) {
-      if (before.length !== after.length || JSON.stringify(before) !== JSON.stringify(after)) {
-        filled.push(k)
-      }
-      continue
-    }
-    if (before !== after) filled.push(k)
-  }
-  return filled
-}
-
-
 
 function readPersonaEditTargetSection(
   phase_state: Record<string, unknown>,

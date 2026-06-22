@@ -24,9 +24,13 @@
  *   - Walks via real `engine.advance` calls — no SQL-stubbing past
  *     intermediate phases.
  *
- * The promptDriver stub is deliberately deterministic so the test is
- * insulated from real LLM availability while still exercising the
- * "LLM emits extracted_fields" path on phases that take advantage of it.
+ * The freeform extraction seam is the `llmRouter` (the deleted promptDriver
+ * stub is gone, 2026-06-21 consolidation): a `stubRouter` feeds deterministic
+ * `RouterDecision`s so the test is insulated from real LLM availability while
+ * still exercising the "router extracts fields via state_delta" path on the
+ * freeform phases (signup name + work_interview_gap_fill). The personality /
+ * agent-name / slug phases are `'mixed'` mode — their validated freeform reply
+ * routes straight through `consumeChoice` without the router.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -48,10 +52,10 @@ import type { SlugPickerOutcome } from '@neutronai/runtime/slug-picker-types.ts'
 import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
 import type {
-  DrivenPhasePromptSpec,
-  ExtractedFields,
-  GeneratePromptInput,
-} from '@neutronai/onboarding/interview/llm-prompt-driver.ts'
+  LlmRouter,
+  RouterDecision,
+} from '@neutronai/onboarding/interview/llm-router.ts'
+import { stubRouter, stubPlatform } from './m2-walkthrough-test-helpers.ts'
 import {
   checkSlugAvailability,
   sanitizeToSlug,
@@ -90,43 +94,54 @@ afterEach(() => {
 })
 
 /**
- * Deterministic prompt driver:
- *   - work_interview_gap_fill: extracts primary_projects + non_work_interests
- *     from pattern-matched replies so the engine clears the audit gate
- *     after one turn.
- *   - personality_offered: emits `is_fallback=true` so the engine uses
- *     the static body (capture freeform agent_personality without LLM
- *     extraction help).
- *   - agent_name_chosen: emits `is_fallback=true` for the same reason —
- *     the freeform reply IS the name.
- *   - all other phases: same `is_fallback=true` collapse.
+ * The driver-stub extraction seam was DELETED in the 2026-06-21
+ * consolidation; freeform extraction now flows ONLY through the
+ * `llmRouter`. With `platform: stubPlatform('all')` the router is consulted
+ * on every freeform-mode phase that carries a knowledge pack — here that's
+ * `signup` (the name reply) and `work_interview_gap_fill` (the projects
+ * reply). The personality / agent-name / slug phases are `'mixed'` mode:
+ * their validated freeform reply IS the answer and routes straight through
+ * the existing `consumeChoice` cascade WITHOUT the router. So only two
+ * router decisions are needed per `landAtPersonality` walk.
+ *
+ * An `advance` decision answers the current question via `freeform_text`;
+ * for the gap-fill it ALSO carries the extracted structured fields in
+ * `state_delta` (the engine merges the whitelisted delta into phase_state
+ * before the gap-fill audit runs, then — seeing the router was consulted
+ * upstream — does NOT re-extract). The Mira walk volunteers all three
+ * projects + two interests in one reply, so the single gap-fill advance
+ * clears the audit gate in one turn (the same one-turn-clear the deleted
+ * driver gave).
  */
-function makeDriver(): (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec> {
-  return async (input) => {
-    const spec: DrivenPhasePromptSpec = {
-      phase: input.phase,
-      body: 'fallback',
-      options: [],
-      allow_freeform: true,
-      next_phase_on_default: input.phase,
-      is_fallback: false,
-    }
-    if (input.phase === 'work_interview_gap_fill') {
-      const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-      const reply = (lastUser?.body ?? '').toLowerCase()
-      const extracted: ExtractedFields = {}
-      if (reply.includes('fragrance') || reply.includes('hotel')) {
-        extracted.primary_projects = ['fragrance brand', 'hotel group', 'CC course']
-      }
-      if (reply.includes('yoga') || reply.includes('family')) {
-        extracted.non_work_interests = [{ name: 'yoga' }, { name: 'family time' }]
-      }
-      if (Object.keys(extracted).length > 0) spec.extracted_fields = extracted
-      return spec
-    }
-    spec.is_fallback = true
-    return spec
+function advanceDecision(
+  freeform_text: string,
+  state_delta: RouterDecision['state_delta'] = null,
+): RouterDecision {
+  return {
+    action: 'advance',
+    confidence: 0.97,
+    choice_value: null,
+    freeform_text,
+    response: null,
+    state_delta,
+    reasoning: 'test: scripted advance',
   }
+}
+
+/** The two scripted router decisions the `landAtPersonality` walk needs:
+ *  the signup name reply, then the gap-fill projects+interests reply that
+ *  clears the audit in one turn. */
+function landAtPersonalityDecisions(): RouterDecision[] {
+  return [
+    advanceDecision('Mira'),
+    advanceDecision(
+      'Working on a fragrance brand and a hotel group; outside work yoga + family time.',
+      {
+        primary_projects: ['fragrance brand', 'hotel group', 'CC course'],
+        non_work_interests: [{ name: 'yoga' }, { name: 'family time' }],
+      },
+    ),
+  ]
 }
 
 interface RegistryStub extends SlugRegistryProbe {
@@ -193,6 +208,14 @@ interface MakeEngineOpts {
    * fires when picker is unwired).
    */
   wireSlugPicker?: boolean
+  /**
+   * Scripted `llmRouter` decisions, consumed in order on each freeform-mode
+   * router consultation (signup name reply + gap-fill reply). Defaults to
+   * the two `landAtPersonality` needs. Pass a longer list for tests that
+   * walk extra router-consulted freeform turns (e.g. a projects_proposed
+   * list edit).
+   */
+  routerDecisions?: ReadonlyArray<RouterDecision>
 }
 
 const slugPickerCalls: SlugPickerEngineHookInput[] = []
@@ -240,6 +263,9 @@ function makeEngine(opts: MakeEngineOpts = {}): InterviewEngine {
       }),
     sanitize: sanitizeToSlug,
   }
+  const llmRouter: LlmRouter = stubRouter([
+    ...(opts.routerDecisions ?? landAtPersonalityDecisions()),
+  ]).router
   return new InterviewEngine({
     buttonStore,
     stateStore,
@@ -248,7 +274,8 @@ function makeEngine(opts: MakeEngineOpts = {}): InterviewEngine {
       sentPrompts.push({ prompt: input.prompt })
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
-    promptDriver: makeDriver(),
+    llmRouter,
+    platform: stubPlatform('all'),
     personaSync,
     slugAvailability,
     ...(wirePicker ? { slugPicker: makeStubSlugPicker() } : {}),
@@ -261,26 +288,26 @@ async function lastPromptId(): Promise<string> {
   return sent.prompt.prompt_id
 }
 
+/**
+ * Drive the REAL web freeform path: a typed reply with NO matching
+ * ButtonChoice so `advance` hits the freeform interaction-mode branch. On
+ * router-consulted phases (signup, work_interview_gap_fill) this reaches
+ * the scripted `llmRouter`; on `'mixed'` phases (personality / agent-name /
+ * slug) the validated text routes straight through `consumeChoice` without
+ * the router. (A synthetic `__freeform__` ButtonChoice would BYPASS the
+ * router entirely — not the live web shape.)
+ */
 async function advanceFreeform(
   engine: InterviewEngine,
   text: string,
   observed_at: number,
 ): Promise<void> {
-  const prompt_id = await lastPromptId()
-  const choice: ButtonChoice = {
-    prompt_id,
-    choice_value: '__freeform__',
-    freeform_text: text,
-    chosen_at: observed_at,
-    speaker_user_id: USER,
-    channel_kind: 'app-socket',
-  }
   await engine.advance({
     project_slug: OWNER,
     topic_id: TOPIC,
     user_id: USER,
     channel_kind: 'app-socket',
-    choice,
+    freeform_text: text,
     observed_at,
   })
 }
@@ -438,12 +465,15 @@ describe('P2 v2 § 3.10 — agent_name_chosen', () => {
     const state = await stateStore.get(OWNER, USER)
     expect(state!.phase).toBe('agent_name_chosen')
     expect(state!.phase_state['agent_name']).not.toBe('Claude')
-    expect(
-      typeof state!.phase_state['agent_name_chosen_rejection'],
-    ).toBe('string')
-    expect(
-      (state!.phase_state['agent_name_chosen_rejection'] as string).toLowerCase(),
-    ).toContain('reserved')
+    // Live web shape: `agent_name_chosen` is a `'mixed'`-interaction phase,
+    // so the typed reply is validated by the canonical `validateAgentName`
+    // BEFORE it reaches `consumeChoice`. A reserved name fails that gate and
+    // the engine surfaces the recoverable reason to the USER (the re-emitted
+    // prompt body carries it) rather than persisting an internal
+    // `agent_name_chosen_rejection` bookkeeping field — that field is only
+    // written on the `consumeChoice` path (a valid name / a button tap). The
+    // INTENT — "stay on phase, tell the user it's reserved" — is preserved
+    // through the mixed-mode seam.
     const last = sentPrompts[sentPrompts.length - 1]!.prompt
     expect(last.body.toLowerCase()).toContain('reserved')
   })
@@ -457,9 +487,12 @@ describe('P2 v2 § 3.10 — agent_name_chosen', () => {
     const state = await stateStore.get(OWNER, USER)
     expect(state!.phase).toBe('agent_name_chosen')
     expect(state!.phase_state['agent_name']).not.toBe('Mimir@home')
-    expect(
-      typeof state!.phase_state['agent_name_chosen_rejection'],
-    ).toBe('string')
+    // Mixed-mode validation rejects the punctuation BEFORE consumeChoice (see
+    // the reserved-name test). The recoverable reason is surfaced to the user
+    // via the re-emitted prompt body — assert the user sees the
+    // letters/numbers guidance rather than an internal rejection field.
+    const last = sentPrompts[sentPrompts.length - 1]!.prompt
+    expect(last.body.toLowerCase()).toContain('letters')
   })
 
   test('1-char name → rejected (length floor 2)', async () => {
@@ -681,6 +714,25 @@ describe('P2 v2 § 3.12 / S7 — projects_proposed honours LLM-extracted edits (
         return { kind: 'skipped', reason: 'same_slug' }
       },
     }
+    // Router decisions for this walk: (1) signup name, (2) gap-fill
+    // projects+interests, (3) the projects_proposed list edit. The edit is a
+    // REVIEW-completing advance — it both answers the review AND carries the
+    // corrected facts, so it advances past projects_proposed (the one case
+    // where an advance carries a non-null state_delta, llm-router.ts §
+    // REVIEW/CORRECTION). `removed_projects` is the transient removal signal
+    // the advance-path additive merge (`mergeAdvanceProjectsAdditively`)
+    // honors: (seeded ∪ adds) MINUS removals. Seeded [fragrance, hotel, CC] ∪
+    // adds [fragrance, CC, Sound Ceremony] minus [hotel] = [fragrance, CC,
+    // Sound Ceremony].
+    const editDecisions: RouterDecision[] = [
+      ...landAtPersonalityDecisions(),
+      advanceDecision('drop hotel, add Sound Ceremony', {
+        primary_projects: ['fragrance brand', 'CC course', 'Sound Ceremony'],
+        // `removed_projects` is whitelist-stripped before it reaches
+        // phase_state, but `mergeAdvanceProjectsAdditively` reads it first.
+        removed_projects: ['hotel group'],
+      } as RouterDecision['state_delta']),
+    ]
     const engine = new InterviewEngine({
       buttonStore,
       stateStore,
@@ -689,51 +741,13 @@ describe('P2 v2 § 3.12 / S7 — projects_proposed honours LLM-extracted edits (
         sentPrompts.push({ prompt: input.prompt })
         return { message_id: `msg-${sentPrompts.length}`, was_new: true }
       },
-      // Custom driver: also extracts `primary_projects` on
-      // `projects_proposed` so we can exercise the merge path.
-      promptDriver: async (input) => {
-        const spec: DrivenPhasePromptSpec = {
-          phase: input.phase,
-          body: 'fallback',
-          options: [],
-          allow_freeform: true,
-          next_phase_on_default: input.phase,
-          is_fallback: false,
-        }
-        if (input.phase === 'work_interview_gap_fill') {
-          const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-          const reply = (lastUser?.body ?? '').toLowerCase()
-          const extracted: ExtractedFields = {}
-          if (reply.includes('fragrance') || reply.includes('hotel')) {
-            extracted.primary_projects = ['fragrance brand', 'hotel group', 'CC course']
-          }
-          if (reply.includes('yoga') || reply.includes('family')) {
-            extracted.non_work_interests = [{ name: 'yoga' }, { name: 'family time' }]
-          }
-          if (Object.keys(extracted).length > 0) spec.extracted_fields = extracted
-          return spec
-        }
-        if (input.phase === 'projects_proposed') {
-          const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-          const reply = (lastUser?.body ?? '').toLowerCase()
-          if (reply.includes('drop hotel') || reply.includes('add sound ceremony')) {
-            // GAP1 union-minus-removals (r1, commit 3bc2ed98): the confirm
-            // merge is ADDITIVE — omitting a project from `primary_projects`
-            // no longer removes it (the union re-adds it). An explicit drop
-            // must surface via `removed_projects`, mirroring the production
-            // extraction contract (ExtractedFields.removed_projects). Without
-            // this the union re-adds 'hotel group' and the assertion below
-            // (which expects it dropped) fails.
-            spec.extracted_fields = {
-              primary_projects: ['fragrance brand', 'CC course', 'Sound Ceremony'],
-              removed_projects: ['hotel group'],
-            }
-            return spec
-          }
-        }
-        spec.is_fallback = true
-        return spec
-      },
+      // Freeform extraction flows ONLY through the `llmRouter` now (the
+      // driver seam was deleted). With `stubPlatform('all')` the populated
+      // projects_proposed list-review edit is routed to the router (the
+      // engine's #117 interaction-mode override flips buttons-only →
+      // freeform when the router is wired + consulted).
+      llmRouter: stubRouter(editDecisions).router,
+      platform: stubPlatform('all'),
       personaSync: makePersonaSyncRecorder(),
       // No slug-suggestion wiring needed — this test exercises the
       // projects_proposed merge path; the slug phase auto-advances via

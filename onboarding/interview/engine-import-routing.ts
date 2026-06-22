@@ -40,7 +40,7 @@ import {
   type ImportResult,
   type ImportSource,
 } from '../history-import/types.ts'
-import { STATIC_PHASE_SPECS } from './llm-prompt-driver.ts'
+import { STATIC_PHASE_SPECS } from './phase-prompts.ts'
 import type { OnboardingState } from './state-store.ts'
 import type { AdvanceInput, AdvanceResult } from './engine-internals.ts'
 import {

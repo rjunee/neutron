@@ -15,10 +15,16 @@
  *      removal phrasings that work and that projects are editable later.
  *
  * This test pins the PLUMBING guarantee end-to-end: GIVEN an "ignore X" reply
- * the (corrected) extractor turns into `removed_projects: ['Real Estate
- * Investing']`, the engine's `consumeProjectsProposedChoice` union-minus-
- * removals path drops EXACTLY that project from the confirmed/materialized
- * set and keeps the rest. Mirrors gap1-additive-confirm-merge's harness.
+ * the (corrected) router emits `removed_projects: ['Real Estate Investing']`
+ * in its `state_delta`, the engine's `consumeProjectsProposedChoice` union-
+ * minus-removals path (`mergeAdvanceProjectsAdditively`) drops EXACTLY that
+ * project from the confirmed/materialized set and keeps the rest.
+ *
+ * The promptDriver extraction seam was removed in the 2026-06-21 onboarding
+ * consolidation; the router `state_delta` is now the single capture path, so
+ * this drives the prod-functional router seam (stubRouter + stubPlatform) —
+ * scripting one REVIEW-completing `advance` decision per reply that carries
+ * the `removed_projects` the corrected router now produces.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -28,12 +34,15 @@ import { join } from 'node:path'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
 import { ButtonStore } from '../../../channels/button-store.ts'
-import type { ButtonChoice, ButtonPrompt } from '../../../channels/button-primitive.ts'
+import type { ButtonPrompt } from '../../../channels/button-primitive.ts'
 import { InterviewEngine } from '../engine.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
-import { PROJECTS_PROPOSED_CONFIRM } from '../phase-prompts.ts'
-import type { DrivenPhasePromptSpec, GeneratePromptInput } from '../llm-prompt-driver.ts'
+import type { RouterDecision } from '../llm-router.ts'
+import {
+  stubRouter,
+  stubPlatform,
+} from '@neutronai/onboarding/interview/__tests__/interview-testkit.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -67,45 +76,34 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-/**
- * Driver mimicking the CORRECTED production LLM router: a reply naming a
- * removal verb ("ignore"/"exclude"/"leave out"/"drop"/"skip"/"don't set up")
- * against a proposed project populates `removed_projects`. Matches a single
- * proposed title case-insensitively.
- */
-function makeDriver(): (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec> {
-  const REMOVAL_VERBS = ['ignore', 'exclude', 'leave out', 'drop', 'skip', "don't set up", 'remove']
-  return async (input) => {
-    const spec: DrivenPhasePromptSpec = {
-      phase: input.phase,
-      body: 'fallback',
-      options: [{ label: 'A', body: 'Good to go', value: PROJECTS_PROPOSED_CONFIRM }],
-      allow_freeform: true,
-      next_phase_on_default: input.phase,
-      is_fallback: false,
-    }
-    if (input.phase === 'projects_proposed') {
-      const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-      const reply = (lastUser?.body ?? '').toLowerCase()
-      const removed: string[] = []
-      if (REMOVAL_VERBS.some((v) => reply.includes(v))) {
-        for (const p of PROPOSED) {
-          if (reply.includes(p.toLowerCase())) removed.push(p)
-        }
-      }
-      if (removed.length > 0) {
-        spec.extracted_fields = { removed_projects: removed }
-      } else {
-        spec.is_fallback = true
-      }
-      return spec
-    }
-    spec.is_fallback = true
-    return spec
+/** A REVIEW-completing REMOVAL routed as an ADVANCE — the corrected router
+ *  classifies "ignore X" / "leave out X" as a removal and carries the dropped
+ *  name(s) in `removed_projects` (per llm-router.ts § REVIEW-completing
+ *  REMOVALS). It MAY also restate the kept `primary_projects` (anchored to the
+ *  proposed list) — the engine subtracts removals from the `(prior ∪ adds)`
+ *  union regardless. The engine then confirms via consumeProjectsProposedChoice
+ *  (writing `primary_projects_confirmed`). */
+function removalDecision(
+  freeform_text: string,
+  removed: ReadonlyArray<string>,
+  kept?: ReadonlyArray<string>,
+): RouterDecision {
+  return {
+    action: 'advance',
+    confidence: 0.95,
+    choice_value: null,
+    freeform_text,
+    response: null,
+    state_delta:
+      kept !== undefined
+        ? { primary_projects: [...kept], removed_projects: [...removed] }
+        : { removed_projects: [...removed] },
+    reasoning: 'test: review-completing removal routed as advance',
   }
 }
 
-function makeEngine(): InterviewEngine {
+function makeEngine(decisions: ReadonlyArray<RouterDecision>): InterviewEngine {
+  const { router } = stubRouter(decisions)
   return new InterviewEngine({
     buttonStore,
     stateStore,
@@ -114,7 +112,11 @@ function makeEngine(): InterviewEngine {
       sentPrompts.push(input)
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
-    promptDriver: makeDriver(),
+    // NB no `promptDriver` (removed 2026-06-21) — the router state_delta is
+    // the single capture path. `platform: 'all'` flips the conversational
+    // router ON for projects_proposed so the freeform reply routes through it.
+    llmRouter: router,
+    platform: stubPlatform('all'),
   })
 }
 
@@ -139,23 +141,18 @@ async function seedAtProjectsProposed(engine: InterviewEngine): Promise<string> 
 
 async function confirmFreeform(
   engine: InterviewEngine,
-  prompt_id: string,
   text: string,
 ): Promise<void> {
-  const choice: ButtonChoice = {
-    prompt_id,
-    choice_value: '__freeform__',
-    freeform_text: text,
-    chosen_at: 1_700_000_001_000,
-    speaker_user_id: 'u-1',
-    channel_kind: 'app-socket',
-  }
+  // Drive the REAL freeform path: a typed reply with NO matching ButtonChoice,
+  // so normalAdvance hits the `freeform` interaction-mode branch → consults the
+  // llmRouter → dispatchRouterDecision (advance branch for a review-completing
+  // removal).
   await engine.advance({
     project_slug: 'casey',
     topic_id: 'topic-1',
     user_id: 'u-1',
     channel_kind: 'app-socket',
-    choice,
+    freeform_text: text,
     observed_at: 1_700_000_001_000,
   })
 }
@@ -168,9 +165,13 @@ async function readConfirmed(): Promise<ReadonlyArray<string>> {
 
 describe('GO-LIVE #5 — an ignored project is genuinely NOT materialized', () => {
   test('"ignore real estate investing" removes exactly that project, keeps the rest', async () => {
-    const engine = makeEngine()
-    const prompt_id = await seedAtProjectsProposed(engine)
-    await confirmFreeform(engine, prompt_id, 'these look good but ignore real estate investing')
+    const engine = makeEngine([
+      removalDecision('these look good but ignore real estate investing', [
+        'Real Estate Investing',
+      ]),
+    ])
+    const _prompt_id = await seedAtProjectsProposed(engine)
+    await confirmFreeform(engine, 'these look good but ignore real estate investing')
     const confirmed = await readConfirmed()
     // The acknowledged ignore is HONORED — the project is gone from the
     // materialized set (pre-fix: it was union-re-added and created anyway).
@@ -183,9 +184,11 @@ describe('GO-LIVE #5 — an ignored project is genuinely NOT materialized', () =
   })
 
   test('"leave out biohacking and ship it" is also honored as a removal', async () => {
-    const engine = makeEngine()
-    const prompt_id = await seedAtProjectsProposed(engine)
-    await confirmFreeform(engine, prompt_id, 'leave out biohacking and ship it')
+    const engine = makeEngine([
+      removalDecision('leave out biohacking and ship it', ['Biohacking']),
+    ])
+    const _prompt_id = await seedAtProjectsProposed(engine)
+    await confirmFreeform(engine, 'leave out biohacking and ship it')
     const confirmed = await readConfirmed()
     expect(confirmed).not.toContain('Biohacking')
     expect(confirmed).toContain('Real Estate Investing')
@@ -193,9 +196,20 @@ describe('GO-LIVE #5 — an ignored project is genuinely NOT materialized', () =
   })
 
   test('a plain confirm with no removal verb keeps the full proposed list', async () => {
-    const engine = makeEngine()
-    const prompt_id = await seedAtProjectsProposed(engine)
-    await confirmFreeform(engine, prompt_id, 'these all look great, go ahead')
+    // A plain confirm carries no project delta at all (state_delta: null).
+    const engine = makeEngine([
+      {
+        action: 'advance',
+        confidence: 0.95,
+        choice_value: null,
+        freeform_text: 'these all look great, go ahead',
+        response: null,
+        state_delta: null,
+        reasoning: 'test: plain confirm, no delta',
+      },
+    ])
+    const _prompt_id = await seedAtProjectsProposed(engine)
+    await confirmFreeform(engine, 'these all look great, go ahead')
     const confirmed = await readConfirmed()
     expect(confirmed.length).toBe(PROPOSED.length)
     for (const p of PROPOSED) expect(confirmed).toContain(p)

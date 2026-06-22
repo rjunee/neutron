@@ -57,10 +57,6 @@ import type {
   AgentNameSuggestions,
 } from './agent-name-suggester.ts'
 import { detectImportSourceMention } from './interaction-mode.ts'
-import type {
-  DrivenPhasePromptSpec,
-  GeneratePromptInput,
-} from './llm-prompt-driver.ts'
 import type { LlmRouter } from './llm-router.ts'
 import type {
   CharacterSuggesterResult,
@@ -946,26 +942,6 @@ export interface InterviewEngineDeps {
    * which preserves every existing test assertion).
    */
   phaseSpecResolver?: PhaseSpecResolver
-  /**
-   * Conversational LLM prompt driver (sprint: M2 onboarding —
-   * conversational LLM-driven driver, 2026-05-10). When wired AND the
-   * phase is in the driver's enabled set, the engine routes through
-   * `generatePromptForPhase(...)` which adds two outputs the narrow
-   * `phaseSpecResolver` cannot produce: `extracted_fields` (the
-   * engine writes these to `phase_state` so downstream phases see the
-   * captured values) and `persona_acknowledgment` (baked into the body
-   * for observability). When the driver returns `is_fallback=true`
-   * (LLM unwired / phase not enabled / model error), the engine falls
-   * through to the legacy `phaseSpecResolver` and then to
-   * `STATIC_PHASE_SPECS`.
-   *
-   * Production composer wires this via a closure over
-   * `generatePromptForPhase(input, deps)` with the deps configured per
-   * instance; tests inject a deterministic stub. Tests that only need
-   * the narrow resolver continue to pass via `phaseSpecResolver` —
-   * both deps are optional and the engine falls back cleanly.
-   */
-  promptDriver?: (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec>
   /**
    * 2026-05-13 — T3 max-oauth handoff hook. When wired AND the user taps
    * Attach my Max at `max_oauth_offered`, the engine calls
@@ -2190,7 +2166,6 @@ export interface EngineInternals {
 
   // --- R5 / audit P2-4 — non-extracted methods cross-called by the
   //     extracted persona free functions in `engine-persona.ts` ---
-  consumePendingExtractedFields(project_slug: string): Record<string, unknown>
   getOrStartAgentNameSuggestions(
     project_slug: string,
     user_id: string,
