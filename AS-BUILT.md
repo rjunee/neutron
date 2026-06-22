@@ -57,6 +57,57 @@ after). Targeted suites for every touched area: `bun test gateway/proactive
 gateway/push gateway/tasks/p6 onboarding/overnight` → 155 pass / 0 fail;
 `bun test landing connect` → 754 pass / 0 fail. Full suite deferred to CI
 (local box is memory-constrained).
+## 2026-06-22 — React web chat: attachment compose UI + authed image render (Track B Phase 3 parity)
+
+**Problem.** The flag-gated React/assistant-ui web client (Phase 3, PR #19)
+reached parity with the vanilla client on everything EXCEPT three documented
+gaps: attachment *compose* UI, "load earlier" history paging, and the production
+app-ws web token mint. This sprint closes the attachment gap end-to-end. (The
+render path's prior "done" status was only true for `data:`/external URLs — the
+real `/api/app/upload` GET is bearer-authed, so a plain `<img src>` 401s; this
+sprint makes uploaded attachments actually render too.)
+
+**What shipped (client-only — NO backend changes; the upload surface already
+existed for the Expo client at `gateway/http/app-upload-surface.ts`).**
+
+- **`landing/chat-react/uploads.ts`.** `uploadAttachment(file)` POSTs multipart
+  to the bearer-authed `POST /api/app/upload` and returns the content-addressed
+  URL; `fetchAttachmentObjectUrl(url)` GETs WITH the bearer and yields a `blob:`
+  object URL for rendering (the GET is bearer-authed — a plain `<img src>` would
+  401). `isAuthedAttachmentUrl` gates which URLs need the authed path. Pure given
+  an injected `fetchImpl`.
+- **`landing/chat-react/useAttachmentDraft.ts`.** Stages picked/dropped images,
+  uploads each eagerly (so the network overlaps with the user typing a caption),
+  and exposes `readUrls()` (ready URLs, read through a ref to dodge stale-closure
+  sends) + `clear()`. The ready URLs ride out on the next send via
+  `WebChatSession.send({ attachments })` — the data path that already existed.
+- **`ChatApp.tsx`.** A 📎 file-picker + drag-drop composer, removable staged
+  chips with per-item upload/error state, an attachment-only send path
+  (assistant-ui won't send an empty composer, so the controller is handed the
+  URLs directly), and a custom assistant-ui `Image` content-part that renders
+  uploaded images through the authed fetch→object-URL renderer (external/`data:`
+  URLs still render directly).
+- **`config.ts`.** Surfaces the app-ws bearer token (`BootstrapConfig.token`) for
+  the upload + render auth.
+
+**Scope decision (deliberate).** Of the three Phase-3 parity gaps, ONLY
+attachments was safely closable in one autonomous PR. "Load earlier" is NOT
+client-only: chat-core + the app-ws surface are forward-only (one
+`{type:'resume', after_seq}` replay; `replayAfter` ASC capped at 500), so no
+backfill primitive exists. Closing it is an additive cross-layer change
+(`replayBefore`/`{type:'history', before_seq}` on the app-ws surface + a
+`WebChatSession.loadEarlier()` request/response correlation + a controller cursor
++ a "Load earlier" button) entangled with the Phase-1 forward-only resume
+contract — deferred to its own reviewed sprint rather than risk the foundation.
+The production app-ws web token mint remains the separate identity sub-sprint.
+
+**Tests.** `uploads.test.ts` (upload client: bearer multipart, oversize +
+unsupported pre-flight, server error code+status, abort, malformed body, authed
+GET→object URL); `attachments.test.tsx` (happy-dom stage→upload→send→authed-
+render); `config.test.ts` token assertion. Root deploy-gate `tsc` + the React
+leaf `tsc -p landing/chat-react/tsconfig.json` both clean; `bun test
+landing/chat-react` green (38 pass). The full suite runs in CI. Vanilla stays the
+default behind the flag.
 
 ## 2026-06-21 — Track B Phase 4 (slice 3): message reactions over `@neutron/chat-core`
 

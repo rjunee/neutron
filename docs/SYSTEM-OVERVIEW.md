@@ -626,24 +626,44 @@ existing `chat.ts` → `/chat.js` lazy-bundle path.
   (`ThreadPrimitive`/`MessagePrimitive`/`ComposerPrimitive` — the styled
   `Thread` was removed from the core package in 0.14.x), styled to the existing
   dark theme; topic rail (project tags), connection banner, offline-pending
-  badge, streaming typing dots.
+  badge, streaming typing dots, and the attachment compose affordance
+  (file-picker + drag-drop, removable staged chips, attachment-only send).
+- `chat-react/uploads.ts` + `chat-react/useAttachmentDraft.ts` are the
+  attachment seam. Compose uploads go to the EXISTING bearer-authed
+  `POST /api/app/upload` surface (`gateway/http/app-upload-surface.ts`, shared
+  with the Expo client — no new backend); the returned content-addressed URL is
+  staged in the draft and ridden out on the next send via
+  `WebChatSession.send({ attachments })`. Because the matching
+  `GET /api/app/upload/<user>/<hash>.<ext>` is ALSO bearer-authed (a leaked URL
+  reveals only one user's blobs), a plain `<img src>` would 401 — so a custom
+  assistant-ui `Image` content-part fetches the blob WITH the app-ws token and
+  renders an object URL. The bare token is surfaced on `BootstrapConfig.token`.
 
 **Parity reached:** optimistic send, token streaming, typing indicator,
 reconnect+backoff (all via chat-core), durable cold-open + gap-free reconnect
 (seq/resume), multi-device (falls out of seq/resume + the Phase-1 `Set<sender>`
-registry), project topics, attachment rendering. **Not yet at parity (documented
-gaps):** attachment *compose* UI (upload-and-send affordance — rendering is
-done; the data path through `WebChatSession.send(attachments)` exists); "load
-earlier" history paging beyond the resume replay window; and the production
-app-ws token mint for web (the same deferred identity sub-sprint the app-ws auth
-resolver itself notes). These are incremental follow-ups; the vanilla client
-remains the default until they close.
+registry), project topics, and attachments (compose **and** authed render).
+**Not yet at parity (documented gaps):** "load earlier" history paging beyond the
+resume replay window — this is the one remaining named-scope gap, and it is NOT
+client-only: chat-core + the app-ws surface are forward-only (a single
+`{type:'resume', after_seq}` replay, `replayAfter` ASC capped at 500), so there
+is no backfill primitive to page OLDER messages. Closing it is an additive
+cross-layer change (a `replayBefore`/`{type:'history', before_seq}` request on
+the app-ws surface + persistence + a `WebChatSession.loadEarlier()` correlation
++ a controller cursor + a "Load earlier" button) that must not destabilize the
+Phase-1 forward-only resume contract — deferred to its own reviewed sprint. Also
+deferred: the production app-ws token mint for web (the same identity sub-sprint
+the app-ws auth resolver itself notes). The vanilla client remains the default
+until these close.
 
 **Tests.** `chat-react/__tests__/` — controller integration over a real
 `WebChatSession`+fake socket, pure adapter + bootstrap-config tests, and a
 happy-dom component smoke test that renders the full assistant-ui composition
 and asserts an optimistic send + a streamed-then-finalized agent reply reach the
-DOM. `landing/__tests__/web-chat-flag.test.ts` + `chat-react-serving.test.ts`
+DOM. `chat-react/__tests__/uploads.test.ts` covers the upload client (bearer
+multipart POST, pre-flight size/type rejection, server error codes, abort,
+authed GET→object URL) and `attachments.test.tsx` the full stage→upload→send→
+authed-render flow. `landing/__tests__/web-chat-flag.test.ts` + `chat-react-serving.test.ts`
 cover the flag + flag-gated `/chat` + `/chat-react.js` serving. The React leaf
 typechecks via `landing/chat-react/tsconfig.json` (`bunx tsc -p
 landing/chat-react/tsconfig.json`) — isolated from the root deploy gate, which
