@@ -59,8 +59,10 @@ describe('resolveBootstrapConfig', () => {
     expect(cfg.userId).toBe('sam')
     expect(cfg.topicId).toBe('app:sam')
     expect(cfg.wsUrl).toContain('wss://sam.neutron.test/ws/app/chat')
-    // Default app-ws token is the dev-bypass form.
+    // Default app-ws token is the dev-bypass form — surfaced bare for the
+    // attachment upload/render auth as well as carried on the WS URL.
     expect(cfg.wsUrl).toContain('token=dev%3Asam')
+    expect(cfg.token).toBe('dev:sam')
     expect(cfg.origin).toBe('https://sam.neutron.test')
   })
 

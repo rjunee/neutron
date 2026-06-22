@@ -21,6 +21,7 @@ import { ChatApp } from './ChatApp.tsx'
 import { resolveBootstrapConfig, type BootstrapConfig, type WindowLike } from './config.ts'
 import { NeutronChatController } from './controller.ts'
 import { useNeutronChat } from './useNeutronChat.ts'
+import { useAttachmentDraft } from './useAttachmentDraft.ts'
 
 function Root({
   controller,
@@ -29,10 +30,11 @@ function Root({
   controller: NeutronChatController
   config: BootstrapConfig
 }): React.JSX.Element {
-  const { runtime, vm } = useNeutronChat(controller, config.origin)
+  const draft = useAttachmentDraft({ token: config.token })
+  const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ChatApp vm={vm} controller={controller} config={config} />
+      <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
     </AssistantRuntimeProvider>
   )
 }

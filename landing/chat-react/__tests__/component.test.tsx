@@ -51,6 +51,7 @@ describe('ChatApp render (happy-dom)', () => {
     const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
     const { NeutronChatController } = await import('../controller.ts')
     const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
     const { ChatApp } = await import('../ChatApp.tsx')
     const React = await import('react')
 
@@ -104,13 +105,15 @@ describe('ChatApp render (happy-dom)', () => {
       projects: [],
       origin: 'https://sam.neutron.test',
       deviceId: 'dev-test',
+      token: 'dev:sam',
     }
 
     function Harness(): React.JSX.Element {
-      const { runtime, vm } = useNeutronChat(controller, config.origin)
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
       return (
         <AssistantRuntimeProvider runtime={runtime}>
-          <ChatApp vm={vm} controller={controller} config={config} />
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
         </AssistantRuntimeProvider>
       )
     }

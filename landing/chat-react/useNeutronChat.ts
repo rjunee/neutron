@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useExternalStoreRuntime, type AppendMessage } from '@assistant-ui/react'
 
 import type { ChatViewModel, NeutronChatController, RenderMessage } from './controller.ts'
+import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import { toThreadMessage } from './message-adapter.ts'
 
 /** Pull the plain text out of an assistant-ui AppendMessage's content parts. */
@@ -38,7 +39,11 @@ export interface UseNeutronChat {
   vm: ChatViewModel
 }
 
-export function useNeutronChat(controller: NeutronChatController, origin: string): UseNeutronChat {
+export function useNeutronChat(
+  controller: NeutronChatController,
+  origin: string,
+  draft?: AttachmentDraft,
+): UseNeutronChat {
   const [vm, setVm] = useState<ChatViewModel>(() => controller.getViewModel())
 
   useEffect(() => {
@@ -66,9 +71,15 @@ export function useNeutronChat(controller: NeutronChatController, origin: string
     convertMessage,
     onNew: async (message: AppendMessage) => {
       const text = extractText(message)
-      const attachments = extractAttachments(message)
+      // Wait for any in-flight uploads so a caption sent before a larger image
+      // finishes uploading doesn't drop the attachment, then merge the staged
+      // URLs (+ any assistant-ui content image parts — none today) and clear the
+      // draft once the controller owns the send.
+      const staged = draft !== undefined ? await draft.waitForUploads() : []
+      const attachments = [...extractAttachments(message), ...staged]
       if (text.length === 0 && attachments.length === 0) return
       await controller.send(text, attachments.length > 0 ? attachments : undefined)
+      draft?.clear()
     },
   })
 
