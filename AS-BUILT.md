@@ -2,6 +2,50 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-22 — Test-suite RUN-efficiency: PGLite quarantine lane + handler-direct surface tests
+
+Pure speed/reliability sprint per `docs/research/test-suite-audit-2026-06-22.md`
+(P1 + P2 + P4 of that plan). **Zero tests deleted, zero assertions changed** —
+this only changes *how* tests run, never *what* they assert.
+
+**P1 — PGLite-WASM quarantine lane (`scripts/run-tests.sh`).** The handful of
+test files that boot a real Postgres-in-WASM (`@electric-sql/pglite`) were the
+suite's single most expensive + flakiest step (ISSUES #79 boot race / #327
+WASM-init OOM). They now run in their **own dedicated lane after** the general
+chunks: serial intra-lane (`--max-concurrency=1`, so two brains never compile
+WASM at the same instant) with a **bounded retry budget** (a transient lane
+failure re-runs the whole lane up to `NEUTRON_TEST_PGLITE_RETRIES`=2 extra times
+before the run fails). Membership is **content-derived** (any test file
+mentioning `pglite`), so new PGLite tests are quarantined automatically — no
+allowlist. Coverage is unchanged: lane files still count in the audit
+(`RAN_TOTAL == TOTAL`). New env: `NEUTRON_TEST_PGLITE_{RETRIES,CONCURRENCY,
+TIMEOUT}` + `NEUTRON_TEST_NO_PGLITE_LANE=1` escape hatch. Lane logic validated
+with a stub-bun harness (green / retry-recovery / exhausted-retry-FAIL / disabled
+paths all behave).
+
+**P2 — server-boot → handler-direct (18 gateway `app-*-surface` tests).** These
+bound a real `Bun.serve({port:0})` socket only to `fetch()` one route over
+loopback. They now dispatch through the composed handler **in-process**: a
+module-scoped shim shadows `fetch`, each harness registers its composed handler
+(or surface dispatch fn) under a unique in-process base host, and `fetch()` to a
+registered base calls `composed.fetch(new Request(...))` directly — no listener
+or socket buffers held in the chunk's RSS until teardown. Identical assertions
+(verified: zero net change in `expect`/`describe`/`it` lines). **Kept on a real
+socket** (genuinely need the wire): `app-ws-surface` (real WebSocket client) and
+`app-upload-surface` + `app-docs-surface-binary` (multipart/binary uploads assert
+`content-length` 411/413 + boundary serialization that only exist over the wire).
+
+**P4 — tuning recipes.** Chunk-size / `NEUTRON_TEST_JOBS` recipes (contended/CI
+box vs quiet dev box) in the runner header, a new `docs/testing-runner.md`, and a
+Testing & CI section in `docs/SYSTEM-OVERVIEW.md`.
+
+**Out of scope (needs Ryan sign-off, per the audit):** P0 make-runner-default,
+P3 redundancy/bookkeeping deletion scan.
+
+**Verification.** `bunx tsc --noEmit` clean; all 18 converted surface files green
+(306 pass / 0 fail) in one bun process; PGLite lane logic exercised via stub-bun.
+Full suite NOT run locally (the dev box OOMs on it — CI runs it).
+
 ## 2026-06-22 — Overnight-dispatcher disentangle: remove the orphaned `wow_overnight_handler` stub
 
 Completes the overnight-dispatcher disentangle/registration (the registration
