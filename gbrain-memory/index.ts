@@ -9,6 +9,10 @@ export {
 } from './GBrainSyncHook.ts'
 export { GBrainMemoryStore } from './gbrain-memory-store.ts'
 export {
+  resolveEmbedderConfig,
+  type EmbedderConfig,
+} from './embedder-config.ts'
+export {
   GBrainStdioMcpClient,
   type GBrainStdioMcpClientOptions,
 } from './gbrain-stdio-client.ts'

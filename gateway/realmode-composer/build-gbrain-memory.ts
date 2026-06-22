@@ -39,6 +39,7 @@ import {
   GBrainMemoryStore,
   GBrainSyncHook,
   type MemoryStore,
+  resolveEmbedderConfig,
 } from '../../gbrain-memory/index.ts'
 import type { SyncHook } from '../../runtime/entity-writer.ts'
 
@@ -56,8 +57,16 @@ export interface GBrainMemoryWiring {
 /**
  * Resolve the per-instance `GBrainStdioMcpClient` options from the instance home +
  * env. Pure (no I/O, no spawn) so the scoping logic is unit-testable: the
- * `GBRAIN_HOME` data boundary, the `GBRAIN_SOURCE` default, and the optional
- * operator-provided `GBRAIN_BRAIN_ID` passthrough.
+ * `GBRAIN_HOME` data boundary, the `GBRAIN_SOURCE` default, the optional
+ * operator-provided `GBRAIN_BRAIN_ID` passthrough, and the **conditional**
+ * embedding-store wiring.
+ *
+ * **Conditional embedding store (opt-in).** When — and only when — an embedder
+ * is opted into via `NEUTRON_EMBEDDINGS` (see `resolveEmbedderConfig`), its
+ * `GBRAIN_EMBEDDING_*` + provider-auth env is merged into the child so
+ * `gbrain serve` initializes its embedding/vector store. With no embedder
+ * configured (the default), the child env is byte-for-byte today's
+ * keyword-+-graph wiring — provisioning and search are unaffected.
  */
 export function resolveGbrainClientOptions(input: {
   owner_home: string
@@ -69,6 +78,15 @@ export function resolveGbrainClientOptions(input: {
   // GBRAIN_HOME is the per-instance data boundary. Forward an
   // operator/systemd-provided GBRAIN_SOURCE / GBRAIN_BRAIN_ID when present.
   const childEnv: Record<string, string> = { GBRAIN_HOME: gbrainHome }
+
+  // Conditional embedding-store init: merge the embedder's child env ONLY when
+  // an embedder is opted in. `null` (the default) leaves childEnv untouched, so
+  // gbrain serve starts no embedding store — keyword + graph exactly as today.
+  const embedder = resolveEmbedderConfig(env)
+  if (embedder !== null) {
+    Object.assign(childEnv, embedder.childEnv)
+  }
+
   const source =
     typeof env['GBRAIN_SOURCE'] === 'string' && env['GBRAIN_SOURCE']!.length > 0
       ? env['GBRAIN_SOURCE']!

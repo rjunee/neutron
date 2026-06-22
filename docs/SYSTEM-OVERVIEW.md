@@ -60,6 +60,41 @@ mid-conversation. It is the Neutron equivalent of Vajra's QMD.
   builds the index at `<owner_home>/cache/doc-search/index.db`, threads the
   runtime in, and closes it on shutdown (failure-isolated).
 
+## Entity-page memory + provisioning (GBrain) — `@neutronai/gbrain-memory`
+
+The per-instance long-term memory: entity pages + a typed-edge graph, backed by
+GBrain (`gbrain serve` over stdio MCP). Provisioned at boot by
+`gateway/realmode-composer/build-gbrain-memory.ts#buildGBrainMemory`, which
+returns the live trio the composer threads in — the `client`, the admin
+"Memory" tab `memoryStore`, and the entity-writer `syncHook` (pages + graph
+fan-out). `resolveGbrainClientOptions` is the pure config seam: it scopes the
+`gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`) and forwards the
+optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
+
+- **Default — keyword + graph, NO embeddings.** Memory search runs on GBrain's
+  BM25 keyword index + the typed-edge graph. No embedding/vector store
+  initializes; provisioning and search need no external embedder. This is the
+  shipped default and is unchanged.
+- **Conditional embedding store (OPT-IN) — `gbrain-memory/embedder-config.ts`.**
+  `resolveEmbedderConfig(env)` returns an embedder config **only** when the
+  operator opts in via `NEUTRON_EMBEDDINGS`:
+  - `openai` → cloud `text-embedding-3-large` (3072d); key from
+    `NEUTRON_EMBEDDINGS_OPENAI_API_KEY`, else `OPENAI_API_KEY`.
+  - `ollama` → local/free `nomic-embed-text` (768d) over `OLLAMA_BASE_URL`
+    (default `http://localhost:11434/v1`).
+  - `auto` → OpenAI when a key is present, else Ollama when `OLLAMA_BASE_URL`
+    is set.
+  - `off` / unset → `null` (the default — no store).
+
+  A non-null result is the child env (`GBRAIN_EMBEDDING_MODEL` =
+  `provider:model`, `GBRAIN_EMBEDDING_DIMENSIONS`, provider auth/base-url),
+  which `resolveGbrainClientOptions` merges into the `gbrain serve` child so
+  GBrain initializes its embedding store and hybridSearch goes semantic. A
+  `null` result leaves the child env untouched — keyword + graph exactly as
+  today. A bare `OPENAI_API_KEY` (consumed by the GPT LLM adapter) does **not**
+  enable embeddings; the explicit `NEUTRON_EMBEDDINGS` opt-in keeps cloud
+  embedding cost from ever being a surprise.
+
 ## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
 
 The chat-history twin of doc-search: full-text search over the user's CHAT
