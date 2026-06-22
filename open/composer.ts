@@ -68,6 +68,7 @@ import { DocSearchRuntime } from '../doc-search/runtime.ts'
 import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/message-search-wiring.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
+import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
 import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
@@ -403,6 +404,37 @@ export function buildOpenGraphComposer(
           })()
         : null
 
+    // ── Reflection: diary + corrections-log (P1 daily-driver, gap-audit §(c) #10) ──
+    // The lightweight self-improvement loop COMPLEMENTING scribe/GBrain (which
+    // capture entity knowledge). Two stores under the owner home:
+    //   - diary/        — the agent's own append-only short reflections
+    //   - corrections/  — owner corrections of the agent (what was wrong / right
+    //                     / why), read back into context so future sessions adapt
+    //                     SILENTLY (Vajra's corrections-log mechanism).
+    // The correction JUDGE is an LLM call, so it gets its OWN dedicated ephemeral
+    // `cc-reflection-*` substrate (per-judgement isolation, never pollutes the
+    // chat REPL) — same shape as scribe's `cc-scribe-*`. When LLM-less the
+    // substrate is omitted: detection is OFF but the diary + context read-back
+    // still function, so the layer degrades gracefully.
+    const reflectionSubstrate =
+      llmPool !== null
+        ? buildLlmCallSubstrate({
+            pool: llmPool,
+            substrate_instance_id: `cc-reflection-${internal_handle}`,
+            cwd: owner_home,
+            internal_handle,
+            user_id: OWNER_USER_ID,
+            project_slug,
+            skip_permissions: true,
+            ephemeral: true,
+            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+          })
+        : null
+    const reflection: Reflection = createReflection({
+      ownerDataDir: owner_home,
+      ...(reflectionSubstrate !== null ? { substrate: reflectionSubstrate } : {}),
+    })
+
     // Production-shape hook threaded into `buildLandingStack` → the chat-bridge.
     // `scribe` is `const`, so TS preserves the `!== null` narrowing inside the
     // closure (the extraction is fire-and-forget; `handleUserTurn` returns void
@@ -521,6 +553,7 @@ export function buildOpenGraphComposer(
               substrate: liveAgentSubstrate,
               personaLoader,
               projectPersonaResolver,
+              reflection,
               buttonStore: pieces.buttonStore,
               transcript: pieces.transcript,
               project_slug,
