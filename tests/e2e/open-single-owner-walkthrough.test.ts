@@ -25,11 +25,16 @@
  *      `substrateFactory` is swapped for a deterministic fake `Substrate`
  *      that synthesizes the Claude-Code subprocess output. NO
  *      api.anthropic.com, NO real Max token (synthetic auth, per memory
- *      feedback_e2e_synthetic_auth). The onboarding phase-spec resolver's
- *      LLM rephrasing falls back to the static phase prompts on the fake's
- *      non-JSON output (build-phase-spec-resolver.ts §"static fallback"), so
- *      the walk is deterministic; the post-completion live-agent turn surfaces
- *      the fake's canned reply directly.
+ *      feedback_e2e_synthetic_auth). With NEUTRON_ONBOARDING_CONVERSATIONAL
+ *      defaulting ON (2026-06-21 onboarding-engine consolidation), every
+ *      freeform answer is classified by the `llmRouter` first, so the fake
+ *      returns a prompt-faithful `advance` router envelope (echoing the
+ *      verbatim reply) for router calls and a canned non-JSON reply for
+ *      everything else. The onboarding phase-spec resolver's LLM rephrasing +
+ *      the suggesters fall back to their static / deterministic output on that
+ *      non-JSON (build-phase-spec-resolver.ts §"static fallback"), so the walk
+ *      is deterministic; the post-completion live-agent turn surfaces the
+ *      fake's canned reply directly. See `fakeSubstrateFactory` below.
  *   4. ASSERT the served flow actually ran: onboarding reaches phase=completed,
  *      the PersonaComposer wrote persona/{SOUL,USER,priority-map}.md under
  *      owner_home, the projects list landed in the persisted phase_state, a
@@ -119,22 +124,79 @@ afterEach(async () => {
 /**
  * The MOCKED Claude-Code subprocess. The composer threads this into
  * `buildLlmCallSubstrate({ substrateFactory })` in place of the real
- * `createClaudeCodeSubstrateAuto`, so every LLM call site (onboarding
- * phase-spec rephrasing + the post-completion live agent turn) dispatches
- * through a deterministic in-process fake instead of spawning a real
- * interactive `claude` REPL. It yields one token + the terminal completion —
- * the minimal shape `collectTokensToString` (the substrate's universal
- * consumer) needs. Non-JSON text is intentional: the onboarding phase-spec
- * resolver fails to parse it and falls back to the static phase prompts
- * (deterministic walk), while the live agent turn surfaces the text verbatim
- * as the chat reply body.
+ * `createClaudeCodeSubstrateAuto`, so every LLM call site dispatches through a
+ * deterministic in-process fake instead of spawning a real interactive
+ * `claude` REPL. It yields one token + the terminal completion — the minimal
+ * shape `collectTokensToString` (the substrate's universal consumer) needs.
+ *
+ * Two response shapes, discriminated by the dispatched prompt:
+ *
+ *  1. CONVERSATIONAL ROUTER calls. With `NEUTRON_ONBOARDING_CONVERSATIONAL`
+ *     now defaulting ON (2026-06-21 onboarding-engine consolidation — the dead
+ *     `promptDriver` seam removed, `llmRouter` is the single freeform engine),
+ *     every freeform onboarding answer is classified by the `llmRouter` before
+ *     the engine advances. The router packs the reply into a distinctive
+ *     `inbound_user_text: """…"""` envelope (llm-router.ts:buildUserPrompt), so
+ *     we detect that marker and return the PROMPT-FAITHFUL decision a real
+ *     Haiku classifier emits for a direct freeform answer: an `action:'advance'`
+ *     carrying the user's VERBATIM reply in `freeform_text` (`choice_value:null`,
+ *     `state_delta:null`, high confidence — exactly the state_delta-free
+ *     free-text advance contract `work-interview-projects-extraction-real-path`
+ *     pins). This drives the conversational path to completion — each freeform
+ *     phase advances on the user's actual answer (the engine recovers e.g. the
+ *     project list out of `freeform_text`). Without this the router received
+ *     non-JSON, fell to `synthesiseFallback('unparseable')`, re-prompted "say
+ *     it again", and the walk STALLED to the 120s timeout.
+ *
+ *  2. EVERYTHING ELSE — onboarding phase-spec rephrasing, the suggesters /
+ *     persona summarizer / wow picker, and the post-completion live agent turn.
+ *     Returns one canned non-JSON reply. The phase-spec resolver + suggesters
+ *     fail to parse it and fall back to their static / deterministic output
+ *     (deterministic walk); the live agent turn surfaces the text verbatim as
+ *     the chat reply body.
+ *
+ * Button taps (ai_substrate_offered / projects_proposed / persona_reviewed)
+ * bypass the router entirely (llm-router.ts § 2.1), so they need no mock here.
+ *
+ * NO api.anthropic.com, NO real Max token (synthetic auth, per memory
+ * feedback_e2e_synthetic_auth).
  */
 const MOCK_REPLY = 'E2E_MOCK_AGENT_REPLY — your plate is clear for today.'
+
+/**
+ * Detect a router classification dispatch and extract the verbatim reply the
+ * router packed into its `inbound_user_text: """…"""` envelope
+ * (llm-router.ts:buildUserPrompt — always the LAST line of the user prompt).
+ * Returns null for any non-router prompt (phase-spec / suggester / live-agent
+ * turn), which the factory maps to the canned `MOCK_REPLY`.
+ */
+function extractRouterUserText(prompt: string): string | null {
+  const m = /inbound_user_text: """([\s\S]*)"""/.exec(prompt)
+  return m === null ? null : m[1]!
+}
+
 function fakeSubstrateFactory(opts: ClaudeCodeSubstrateOptions): Substrate {
   return {
-    start(_spec: AgentSpec): SessionHandle {
+    start(spec: AgentSpec): SessionHandle {
+      const routerUserText = extractRouterUserText(spec.prompt)
+      const reply =
+        routerUserText === null
+          ? MOCK_REPLY
+          : JSON.stringify({
+              action: 'advance',
+              confidence: 0.97,
+              choice_value: null,
+              // Echo the user's verbatim reply — the engine's advance branch
+              // records it (`decision.freeform_text ?? input.freeform_text`) and
+              // recovers per-phase fields from it (e.g. primary_projects).
+              freeform_text: routerUserText,
+              response: null,
+              state_delta: null,
+              reasoning:
+                'E2E mock: the freeform reply is a direct answer to this phase — advance with the verbatim text.',
+            })
       const events = (async function* (): AsyncGenerator<Event, void, void> {
-        yield { kind: 'token', text: MOCK_REPLY }
+        yield { kind: 'token', text: reply }
         yield {
           kind: 'completion',
           usage: { input_tokens: 1, output_tokens: 1 },
