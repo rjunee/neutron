@@ -56,15 +56,6 @@ export {
   type WowSelectorResult,
 } from './llm-selector.ts'
 
-export {
-  WOW_OVERNIGHT_HANDLER_NAME,
-  buildWowOvernightHandler,
-  composeMorningCheckin,
-  registerWowOvernightHandler,
-  type BuildWowOvernightHandlerInput,
-  type WowOvernightDeliverInput,
-} from './overnight-cron.ts'
-
 export type {
   BriefSubstrate,
   CapturedProject,

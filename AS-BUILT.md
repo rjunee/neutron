@@ -2,6 +2,45 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-22 — Overnight-dispatcher disentangle: remove the orphaned `wow_overnight_handler` stub
+
+Completes the overnight-dispatcher disentangle/registration (the registration
+half — the real `overnight_handler` engine + `overnight-<slug>` job — already
+landed in the 2026-06-19 overnight-engine work). The leftover entanglement was
+the **preview-only morning check-in stub** `wow_overnight_handler`
+(`onboarding/wow-moment/overnight-cron.ts`): once `build-core-modules.ts`
+registered the real engine unconditionally and action 07 emitted
+`overnight-<slug>` jobs bound to `overnight_handler`, nothing in the production
+boot path ever registered the stub again — it was dead code still exported
+through the wow-moment barrel, with a stale config field pointing at its type.
+
+**What shipped:**
+- **Deleted** `onboarding/wow-moment/overnight-cron.ts` (the stub:
+  `buildWowOvernightHandler`, `registerWowOvernightHandler`,
+  `composeMorningCheckin`, `WOW_OVERNIGHT_HANDLER_NAME`) and its test
+  `onboarding/wow-moment/__tests__/overnight-cron.test.ts`.
+- **Removed** the stub's re-exports from `onboarding/wow-moment/index.ts`.
+- **Renamed** the composition config field `onboarding_wow_overnight_cron` →
+  `onboarding_overnight_cron` and repointed its `deliver` seam from the stub's
+  `WowOvernightDeliverInput` at the real engine's `MorningBriefDeliverInput`
+  (identical `{ topic_id, body }` shape — no behavioral change). Updated the
+  sole consumer (`gateway/composition/build-core-modules.ts`). No caller sets
+  the field today, so the rename is internal-only.
+- **Docs:** refreshed the overnight section of `docs/SYSTEM-OVERVIEW.md`.
+
+**Verification:** `bunx tsc --noEmit` clean; targeted `bun test` of
+`onboarding/overnight/`, action 07, the wow-moment suite, and
+`gateway/composition-onboarding-telemetry.test.ts` (which asserts
+`overnight_handler` is registered) → 171 pass / 0 fail. Full suite deferred to
+CI (memory-constrained box).
+
+**Out of scope / not needed here:** the Vajra-gateway "completed-bullet
+re-validation" + "no auto-archival" defects do **not** exist in this port — the
+neutron-open dispatcher already skips completed/failed bullets before the
+context gate (`onboarding/overnight/dispatcher.ts`). Wiring an actual
+`deliver` surface in production (the field is currently never set, so the
+reporter records `skipped`) is a separate, pre-existing gap.
+
 ## 2026-06-22 — Conditional embedding-store init wired into provisioning (ISSUES #215)
 
 Embeddings become a real, **opt-in** capability of the per-instance GBrain

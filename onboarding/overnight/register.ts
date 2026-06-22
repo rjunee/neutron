@@ -1,9 +1,9 @@
 /**
  * @neutronai/onboarding/overnight — production wiring.
  *
- * Builds the real `overnight_handler` cron handler (replacing the
- * preview-only morning check-in stub `overnight-cron.ts`) and the production
- * seams it runs on:
+ * Builds the real `overnight_handler` cron handler (which superseded the
+ * now-removed preview-only morning check-in stub `wow_overnight_handler`)
+ * and the production seams it runs on:
  *
  *   • `buildOvernightTridentSeam` — each queued item becomes a real
  *     `code_trident_runs` row (via `TridentRunStore`), driven by the Trident
@@ -311,7 +311,7 @@ function resolveGeneralTopic(db: ProjectDb): string | null {
 
 /**
  * Register `overnight_handler` in the production registry. Idempotent across
- * repeat calls (mirrors `registerWowOvernightHandler`). The JOB
+ * repeat calls (mirrors `registerImportRunningCron`'s guard). The JOB
  * (`overnight-<slug>`) is registered dynamically by wow-moment action 07 at
  * dispatch time; only the handler registration lives here.
  */
