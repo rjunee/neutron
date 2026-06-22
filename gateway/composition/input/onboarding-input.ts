@@ -3,7 +3,7 @@ import type {
   EventLogger as OnboardingEventLogger,
   SeanEllisChannel,
 } from '../../../onboarding/telemetry/index.ts'
-import type { WowOvernightDeliverInput } from '../../../onboarding/wow-moment/overnight-cron.ts'
+import type { MorningBriefDeliverInput } from '../../../onboarding/overnight/morning-brief.ts'
 import type { InterviewEngine } from '../../../onboarding/interview/engine.ts'
 
 export interface OnboardingCompositionInput {
@@ -103,23 +103,27 @@ export interface OnboardingCompositionInput {
     interval_ms?: number
   }
   /**
-   * 2026-06-10 (wow-hang-resilience) — `wow_overnight_handler` config.
-   * Action 07 registers the `wow-overnight-<internal_handle>` JOB at
-   * wow-moment dispatch time, but the HANDLER must exist in the
-   * production `CronHandlerRegistry` or every tick logs "skipping job
-   * … handler wow_overnight_handler not registered" (prod incident
-   * t-33333333). The composer registers the handler UNCONDITIONALLY
-   * (it is harmless for instances with no overnight job); this config
-   * only supplies the optional delivery surface. When omitted, the
-   * handler still registers and records 'skipped' ticks instead of
-   * scheduler errors.
+   * Autonomous Overnight-Work engine config (`overnight_handler`). Action
+   * 07 registers the per-project `overnight-<slug>` JOB at wow-moment
+   * dispatch time, but the HANDLER must exist in the production
+   * `CronHandlerRegistry` or every tick logs "skipping job … handler
+   * overnight_handler not registered". The composer registers the handler
+   * UNCONDITIONALLY (it is harmless for instances with no overnight job);
+   * this config only supplies the optional delivery surface for the
+   * morning brief. When omitted, the handler still registers and the
+   * reporter records 'skipped' ticks instead of scheduler errors.
+   *
+   * 2026-06-22 (overnight-dispatcher disentangle) — renamed from
+   * `onboarding_wow_overnight_cron` and repointed at the real engine's
+   * `MorningBriefDeliverInput` when the preview-only `wow_overnight_handler`
+   * check-in stub (`onboarding/wow-moment/overnight-cron.ts`) was removed.
    */
-  onboarding_wow_overnight_cron?: {
+  onboarding_overnight_cron?: {
     /**
-     * Deliver the morning check-in to the user's topic (production:
-     * the shared web sender registry). Returns true when an active
-     * surface accepted the message.
+     * Deliver the morning brief to the user's topic (production: the
+     * shared web sender registry). Returns true when an active surface
+     * accepted the message.
      */
-    deliver?: (input: WowOvernightDeliverInput) => boolean | Promise<boolean>
+    deliver?: (input: MorningBriefDeliverInput) => boolean | Promise<boolean>
   }
 }

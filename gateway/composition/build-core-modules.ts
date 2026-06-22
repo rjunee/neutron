@@ -471,22 +471,22 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       }
 
       // 2026-06-19 (overnight-engine) — register the REAL Autonomous
-      // Overnight-Work engine handler `overnight_handler` UNCONDITIONALLY,
-      // replacing the preview-only morning check-in stub
-      // (`wow_overnight_handler`). The JOB (`overnight-<slug>`) is
-      // registered dynamically by wow-moment action 07 at dispatch time —
-      // the handler just has to exist by the time the scheduler ticks it.
-      // Each ~30-min tick: scan (in 23:00–07:00 window) → advance in-flight
-      // Trident runs → reporter (≥06:50). Each queued item runs AS a Trident
-      // run (`code_trident_runs`); the morning brief reports the REAL result.
-      // The optional `onboarding_wow_overnight_cron.deliver` seam supplies
-      // the delivery surface; absent → the reporter records 'skipped'.
+      // Overnight-Work engine handler `overnight_handler` UNCONDITIONALLY.
+      // (2026-06-22: the preview-only morning check-in stub
+      // `wow_overnight_handler` it superseded was removed.) The JOB
+      // (`overnight-<slug>`) is registered dynamically by wow-moment action
+      // 07 at dispatch time — the handler just has to exist by the time the
+      // scheduler ticks it. Each ~30-min tick: scan (in 23:00–07:00 window)
+      // → advance in-flight Trident runs → reporter (≥06:50). Each queued
+      // item runs AS a Trident run (`code_trident_runs`); the morning brief
+      // reports the REAL result. The optional `onboarding_overnight_cron.deliver`
+      // seam supplies the delivery surface; absent → the reporter records 'skipped'.
       {
         const cron = ctx.graph.get<{
           jobs: CronJobRegistry
           handlers: CronHandlerRegistry
         }>('cron')
-        const overnightCfg = input.onboarding_wow_overnight_cron
+        const overnightCfg = input.onboarding_overnight_cron
         const handler = buildOvernightEngineHandler({
           db: input.db,
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),

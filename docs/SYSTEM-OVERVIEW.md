@@ -412,9 +412,13 @@ This is the Neutron-Open (SQLite-native) port of Vajra's
 `gateway/overnight-dispatcher.ts`, with the Ryan-locked design correction that
 each item is a Trident run rather than a single throwaway substrate turn.
 
-It replaces the old preview-only morning check-in stub
-(`onboarding/wow-moment/overnight-cron.ts`, `wow_overnight_handler`), which
-delivered a "here's what's on deck" message but never actually ran any work.
+It superseded the old preview-only morning check-in stub
+(`wow_overnight_handler`), which delivered a "here's what's on deck" message
+but never ran any work. That stub (`onboarding/wow-moment/overnight-cron.ts`)
+was removed in the 2026-06-22 overnight-dispatcher disentangle once the real
+engine was the only registered `overnight_handler`; the composition's delivery
+seam (`onboarding_overnight_cron.deliver`, renamed from
+`onboarding_wow_overnight_cron`) now feeds the real engine's morning brief.
 
 **Queue model (chat-driven).** `overnight_queue` (migration
 `0078_overnight_queue.sql`) is the runtime source of truth — one row per work
