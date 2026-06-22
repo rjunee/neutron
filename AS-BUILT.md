@@ -2,6 +2,43 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-22 — Conditional embedding-store init wired into provisioning (ISSUES #215)
+
+Embeddings become a real, **opt-in** capability of the per-instance GBrain
+memory without touching the keyword-+-graph default. Closes the #215 gap: the
+provisioning path could not turn on a semantic store even when the operator had
+an embedder available.
+
+**What shipped:**
+- `gbrain-memory/embedder-config.ts` (new) — pure `resolveEmbedderConfig(env)`.
+  Opt-in via `NEUTRON_EMBEDDINGS`: `openai` → cloud `text-embedding-3-large`
+  (3072d, key from `NEUTRON_EMBEDDINGS_OPENAI_API_KEY` ?? `OPENAI_API_KEY`);
+  `ollama` → local/free `nomic-embed-text` (768d) over `OLLAMA_BASE_URL`;
+  `auto` → OpenAI-if-keyed else Ollama-if-`OLLAMA_BASE_URL`; `off`/unset →
+  `null`. Returns the `gbrain serve` child env (`GBRAIN_EMBEDDING_MODEL`
+  `provider:model`, `GBRAIN_EMBEDDING_DIMENSIONS`, provider auth/base-url).
+- `gateway/realmode-composer/build-gbrain-memory.ts` — `resolveGbrainClientOptions`
+  now merges a non-null embedder config into the child env. `null` (the default)
+  leaves the child env byte-for-byte today's keyword-+-graph wiring.
+- Tests: `gbrain-memory/__tests__/embedder-config.test.ts` (resolver, both
+  paths + edge cases) and the conditional-store cases added to
+  `gateway/realmode-composer/__tests__/build-gbrain-memory.test.ts`.
+- Docs: new GBrain memory/provisioning section in `docs/SYSTEM-OVERVIEW.md`;
+  opt-in env vars documented in `.env.example`.
+
+**Spec-conformance (#215):**
+- SPEC says: init an embedding store ONLY when an embedder is configured
+  (OpenAI key → cloud; Ollama → local); neither → no store, search as today.
+- Current wiring (pre-PR): `gbrain serve` was always launched WITHOUT any
+  `GBRAIN_EMBEDDING_*` env, so no store could ever initialize.
+- Gap: no detection of a configured embedder, no conditional child-env wiring.
+- This PR closes it: `resolveEmbedderConfig` detects the opt-in + provider and
+  `resolveGbrainClientOptions` conditionally forwards the embedding env.
+- Judgment call (noted in PR): the trigger is an explicit `NEUTRON_EMBEDDINGS`
+  opt-in, NOT bare `OPENAI_API_KEY` presence — that key already feeds the GPT
+  LLM adapter, so triggering on it would silently bill every GPT-BYO user and
+  change the default, violating the opt-in contract.
+
 ## 2026-06-21 — Dead-code sweep (batch 1): remove 8 orphaned files
 
 Evidence-based leanness pass (Ryan mandate, SPEC Decisions Log): delete only
