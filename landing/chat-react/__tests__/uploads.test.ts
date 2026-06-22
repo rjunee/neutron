@@ -105,12 +105,19 @@ describe('uploadAttachment', () => {
 })
 
 describe('isAuthedAttachmentUrl', () => {
-  it('matches relative + absolutized attachment URLs only', () => {
-    expect(isAuthedAttachmentUrl('/api/app/upload/sam/abc.png')).toBe(true)
-    expect(isAuthedAttachmentUrl('https://sam.neutron.test/api/app/upload/sam/abc.png')).toBe(true)
-    expect(isAuthedAttachmentUrl('data:image/png;base64,AAAA')).toBe(false)
-    expect(isAuthedAttachmentUrl('https://cdn.example.com/x.png')).toBe(false)
-    expect(isAuthedAttachmentUrl('blob:abc')).toBe(false)
+  const ORIGIN = 'https://sam.neutron.test'
+  it('matches relative + SAME-ORIGIN attachment URLs only', () => {
+    expect(isAuthedAttachmentUrl('/api/app/upload/sam/abc.png', ORIGIN)).toBe(true)
+    expect(isAuthedAttachmentUrl(`${ORIGIN}/api/app/upload/sam/abc.png`, ORIGIN)).toBe(true)
+    expect(isAuthedAttachmentUrl('data:image/png;base64,AAAA', ORIGIN)).toBe(false)
+    expect(isAuthedAttachmentUrl('https://cdn.example.com/x.png', ORIGIN)).toBe(false)
+    expect(isAuthedAttachmentUrl('blob:abc', ORIGIN)).toBe(false)
+  })
+  it('NEVER authed-fetches a cross-origin URL even when its path mimics ours (no bearer leak)', () => {
+    // Crafted external attachment whose path starts with /api/app/upload/.
+    expect(isAuthedAttachmentUrl('https://evil.example/api/app/upload/sam/abc.png', ORIGIN)).toBe(false)
+    // Fail closed when the page origin is unknown.
+    expect(isAuthedAttachmentUrl('https://sam.neutron.test/api/app/upload/sam/abc.png')).toBe(false)
   })
 })
 

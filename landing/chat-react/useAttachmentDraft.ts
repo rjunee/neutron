@@ -45,6 +45,13 @@ export interface AttachmentDraft {
   remove: (id: string) => void
   /** The server URLs of all `ready` items, in add order. Read at send time. */
   readUrls: () => string[]
+  /**
+   * Resolve once no item is still `uploading` (success OR failure settles each),
+   * returning the ready URLs. The send path awaits this so a caption sent while
+   * a larger image is still uploading doesn't silently drop the attachment.
+   * Bounded by `timeoutMs` (default 30s) so a stuck upload can't wedge a send.
+   */
+  waitForUploads: (timeoutMs?: number) => Promise<string[]>
   /** Clear the whole draft after a successful send hand-off. */
   clear: () => void
   /** True while any item is still uploading. */
@@ -121,6 +128,19 @@ export function useAttachmentDraft(opts: UseAttachmentDraftOptions): AttachmentD
     return out
   }, [])
 
+  const waitForUploads = useCallback(
+    async (timeoutMs = 30_000): Promise<string[]> => {
+      const stepMs = 30
+      let waited = 0
+      while (itemsRef.current.some((it) => it.status === 'uploading') && waited < timeoutMs) {
+        await new Promise((r) => setTimeout(r, stepMs))
+        waited += stepMs
+      }
+      return readUrls()
+    },
+    [readUrls],
+  )
+
   const clear = useCallback((): void => {
     setItems([])
   }, [])
@@ -130,6 +150,7 @@ export function useAttachmentDraft(opts: UseAttachmentDraftOptions): AttachmentD
     addFiles,
     remove,
     readUrls,
+    waitForUploads,
     clear,
     uploading: items.some((it) => it.status === 'uploading'),
     hasReady: items.some((it) => it.status === 'ready'),

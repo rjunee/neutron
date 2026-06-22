@@ -41,6 +41,9 @@ type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
  */
 interface UploadsCtx {
   token: string
+  /** Page origin — only same-origin attachment URLs take the authed (bearer)
+   *  fetch path, so the token never leaks cross-origin. */
+  origin: string
   fetchImpl?: FetchImpl
 }
 const UploadsContext = createContext<UploadsCtx | null>(null)
@@ -53,7 +56,7 @@ const UploadsContext = createContext<UploadsCtx | null>(null)
  */
 function AttachmentImage({ src }: { src: string }): React.JSX.Element {
   const uploads = useContext(UploadsContext)
-  const needsAuth = uploads !== null && isAuthedAttachmentUrl(src)
+  const needsAuth = uploads !== null && isAuthedAttachmentUrl(src, uploads.origin)
   const [objUrl, setObjUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
 
@@ -394,14 +397,19 @@ function Composer({
     if (body.length === 0 && urls.length === 0) return
     if (body.length > 0) {
       // Text (optionally + attachments): route through the runtime so Enter and
-      // the Send button share ONE path — `onNew` merges the staged URLs, clears
-      // the draft, and assistant-ui clears the input.
+      // the Send button share ONE path — `onNew` waits for in-flight uploads,
+      // merges the staged URLs, clears the draft, and assistant-ui clears input.
       composerRuntime.send()
     } else {
       // Attachment-only: assistant-ui won't send an empty composer, so hand the
-      // staged URLs to the controller directly, then clear the draft.
-      void controller.send('', urls)
-      draft.clear()
+      // staged URLs to the controller directly. Await any still-uploading items
+      // first (don't drop them), then clear the draft.
+      void (async () => {
+        const ready = await draft.waitForUploads()
+        if (ready.length === 0) return
+        await controller.send('', ready)
+        draft.clear()
+      })()
     }
   }
 
@@ -476,8 +484,8 @@ export function ChatApp({
       controller.react(messageId, emoji, reactedBySelf ? 'remove' : 'add'),
   }
   const uploadsCtx: UploadsCtx = fetchImpl !== undefined
-    ? { token: config.token, fetchImpl }
-    : { token: config.token }
+    ? { token: config.token, origin: config.origin, fetchImpl }
+    : { token: config.token, origin: config.origin }
   return (
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>

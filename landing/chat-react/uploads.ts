@@ -148,14 +148,22 @@ export interface FetchObjectUrlOptions {
 }
 
 /**
- * True when a URL points at our bearer-authed attachment surface and therefore
- * must be fetched WITH the token rather than dropped into an `<img src>`. Both
- * the relative path the server returns and an absolutized form match.
+ * True when a URL points at OUR bearer-authed attachment surface and therefore
+ * must be fetched WITH the token rather than dropped into an `<img src>`.
+ *
+ * SECURITY: the app-ws bearer must never leave our origin. A relative
+ * `/api/app/upload/…` path is ours by construction. An ABSOLUTE URL only counts
+ * when its origin equals the page origin — otherwise a crafted message
+ * attachment like `https://evil.example/api/app/upload/x.png` (CORS-permitting)
+ * would trick the renderer into sending the bearer cross-origin. Without a known
+ * page origin we refuse every absolute URL (fail closed).
  */
-export function isAuthedAttachmentUrl(url: string): boolean {
+export function isAuthedAttachmentUrl(url: string, origin?: string): boolean {
   if (url.startsWith(`${UPLOAD_ENDPOINT}/`)) return true
   try {
-    return new URL(url).pathname.startsWith(`${UPLOAD_ENDPOINT}/`)
+    const u = new URL(url)
+    if (!u.pathname.startsWith(`${UPLOAD_ENDPOINT}/`)) return false
+    return origin !== undefined && u.origin === origin
   } catch {
     return false
   }

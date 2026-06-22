@@ -71,10 +71,11 @@ export function useNeutronChat(
     convertMessage,
     onNew: async (message: AppendMessage) => {
       const text = extractText(message)
-      // Merge any assistant-ui content image parts (none today — we stage via
-      // the draft) with the composer's staged-attachment URLs, then clear the
+      // Wait for any in-flight uploads so a caption sent before a larger image
+      // finishes uploading doesn't drop the attachment, then merge the staged
+      // URLs (+ any assistant-ui content image parts — none today) and clear the
       // draft once the controller owns the send.
-      const staged = draft?.readUrls() ?? []
+      const staged = draft !== undefined ? await draft.waitForUploads() : []
       const attachments = [...extractAttachments(message), ...staged]
       if (text.length === 0 && attachments.length === 0) return
       await controller.send(text, attachments.length > 0 ? attachments : undefined)

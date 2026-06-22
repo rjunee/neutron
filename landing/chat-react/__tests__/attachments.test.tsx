@@ -195,4 +195,61 @@ describe('attachment compose + authed render (happy-dom)', () => {
       root.unmount()
     })
   })
+
+  it('waitForUploads blocks until an in-flight upload settles (no silent drop)', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const React = await import('react')
+
+    let resolveUpload: (r: { url: string; contentType: string; sizeBytes: number }) => void = () => {}
+    const uploadImpl = () =>
+      new Promise<{ url: string; contentType: string; sizeBytes: number }>((res) => {
+        resolveUpload = res
+      })
+
+    let draftRef: AttachmentDraft | null = null
+    function H(): React.JSX.Element {
+      draftRef = useAttachmentDraft({ token: 'dev:sam', uploadImpl })
+      return <div>{draftRef.uploading ? 'uploading' : 'idle'}</div>
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<H />)
+    })
+
+    await act(async () => {
+      draftRef!.addFiles([new File([new Uint8Array([1])], 'big.png', { type: 'image/png' })])
+      await tick()
+    })
+    expect(draftRef!.uploading).toBe(true)
+    expect(draftRef!.hasReady).toBe(false)
+
+    let settled = false
+    const waitP = draftRef!.waitForUploads().then((u) => {
+      settled = true
+      return u
+    })
+    await act(async () => {
+      await tick()
+    })
+    // Still uploading → must NOT have resolved (the bug would resolve to []).
+    expect(settled).toBe(false)
+
+    // Settle the upload + flush state inside act, then await the poll OUTSIDE
+    // act (awaiting the polling promise inside act deadlocks — act spins on
+    // microtasks while the 30ms poll needs a macrotask timer to advance).
+    await act(async () => {
+      resolveUpload({ url: '/api/app/upload/sam/zzz.png', contentType: 'image/png', sizeBytes: 1 })
+      await tick()
+    })
+    const urls = await waitP
+    expect(urls).toEqual(['/api/app/upload/sam/zzz.png'])
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
 })
