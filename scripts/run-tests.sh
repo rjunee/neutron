@@ -29,6 +29,26 @@
 # repo root. We mirror those exclusions when building the partition list and the
 # cross-check makes any drift fatal.
 #
+# PGLITE-WASM QUARANTINE LANE (ISSUES #79 / #327)
+# ----------------------------------------------
+# A handful of test files boot a REAL Postgres-in-WASM (`@electric-sql/pglite`)
+# + ~100 migrations. That first big WASM compile is the suite's single most
+# expensive + flakiest step: under a contended box it intermittently fails
+# `PGLite failed to initialize its WASM runtime` (#327) or races the boot probe
+# (#79). Mixed into a general chunk it (a) inflates that chunk's peak RSS by
+# tens of MB of WASM and (b) randomly reds an otherwise-green chunk.
+#
+# So these files run in their OWN dedicated lane, AFTER the general chunks, with:
+#   - serial intra-lane execution (--max-concurrency=1) so two brains never
+#     compile WASM at the same instant (the #79 boot race), and
+#   - a bounded RETRY budget: a transient lane failure re-runs the WHOLE lane a
+#     few times before the run is declared failed (the `withTransientBootRetry`
+#     classifier inside boot-pglite-brain.ts self-heals most boots; this lane
+#     retry is the belt-and-braces for the rest).
+# The lane membership is content-derived (any test file that mentions `pglite`),
+# so a new PGLite test is quarantined automatically — no allowlist to maintain.
+# Coverage is unchanged: lane files are still counted in the audit (RAN_TOTAL).
+#
 # USAGE
 #   scripts/run-tests.sh                 # run the whole suite, bounded memory
 #
@@ -40,6 +60,26 @@
 #                             strictly bounded memory; raise on a quiet dev box
 #                             for speed at the cost of higher peak RSS = JOBS×chunk)
 #   NEUTRON_BUN_BIN           bun binary                  (default: bun)
+#   --- PGLite quarantine lane ---
+#   NEUTRON_TEST_PGLITE_RETRIES      lane re-runs on transient failure (default 2)
+#   NEUTRON_TEST_PGLITE_CONCURRENCY  --max-concurrency for the lane     (default 1)
+#   NEUTRON_TEST_PGLITE_TIMEOUT      per-test timeout ms for the lane   (default 90000,
+#                                    the real-WASM boots use 60s timeouts internally)
+#   NEUTRON_TEST_NO_PGLITE_LANE      set =1 to fold PGLite files back into general
+#                                    chunks (the pre-quarantine behaviour)
+#
+# TUNING RECIPES (peak RSS ≈ JOBS × CHUNK_SIZE × per-file working set)
+#   Contended 30 GB deploy box / CI (bounded memory is the priority):
+#       NEUTRON_TEST_CHUNK_SIZE=60 NEUTRON_TEST_JOBS=1 bash scripts/run-tests.sh
+#     Smaller chunks ⇒ lower per-chunk peak RSS; sequential ⇒ only one chunk's
+#     RSS live at a time. This is the safest profile (and the CI default intent).
+#   Quiet dev box / lots of free RAM (wall-clock is the priority):
+#       NEUTRON_TEST_JOBS=4 NEUTRON_TEST_CHUNK_SIZE=100 bash scripts/run-tests.sh
+#     Runs 4 chunks at once — ~Nx faster, but holds ~4 chunks' RSS concurrently,
+#     so only do this with headroom. Drop JOBS first if the box starts swapping.
+#   Single chunk still spiking? Lower intra-chunk parallelism:
+#       NEUTRON_TEST_CONCURRENCY=2 bash scripts/run-tests.sh
+#   See docs/testing-runner.md for the full matrix + rationale.
 #
 # EXIT
 #   0  every discovered file ran and passed
@@ -60,6 +100,12 @@ CONCURRENCY="${NEUTRON_TEST_CONCURRENCY:-$(sysctl -n hw.physicalcpu 2>/dev/null 
 TIMEOUT="${NEUTRON_TEST_TIMEOUT:-15000}"
 JOBS="${NEUTRON_TEST_JOBS:-1}"
 BUN="${NEUTRON_BUN_BIN:-bun}"
+# PGLite-WASM quarantine lane (see header). Defaults: serial, generous timeout,
+# 2 retries. NEUTRON_TEST_NO_PGLITE_LANE=1 disables the lane entirely.
+PGLITE_RETRIES="${NEUTRON_TEST_PGLITE_RETRIES:-2}"
+PGLITE_CONCURRENCY="${NEUTRON_TEST_PGLITE_CONCURRENCY:-1}"
+PGLITE_TIMEOUT="${NEUTRON_TEST_PGLITE_TIMEOUT:-90000}"
+NO_PGLITE_LANE="${NEUTRON_TEST_NO_PGLITE_LANE:-0}"
 
 # --- 1. Discover the canonical real-source test set --------------------------
 # Shared with the deploy gate so the two can never drift (the dot-dir exclusion
@@ -98,10 +144,35 @@ if [ -n "$BUN_DISC" ] && [ "$BUN_DISC" != "$TOTAL" ]; then
   exit 1
 fi
 
+# --- 2b. Split out the PGLite-WASM quarantine lane ---------------------------
+# Membership is content-derived (any test file that mentions `pglite`), so a new
+# PGLite test is quarantined automatically. The general chunks run everything
+# else; the lane runs last, serially, with its own retry budget (see header).
+PGLITE_FILES=()
+GENERAL_FILES=()
+if [ "$NO_PGLITE_LANE" = "1" ]; then
+  GENERAL_FILES=( "${FILES[@]}" )
+else
+  # One batched grep over the discovered set (well under ARG_MAX for ~800 files).
+  # `|| true` so a zero-match grep (exit 1) doesn't trip `set -o pipefail`/`-e`.
+  PGLITE_MATCH="$(LC_ALL=C grep -lEi 'pglite' "${FILES[@]}" 2>/dev/null || true)"
+  for f in "${FILES[@]}"; do
+    case $'\n'"${PGLITE_MATCH}"$'\n' in
+      *$'\n'"$f"$'\n'*) PGLITE_FILES+=("$f") ;;
+      *)                GENERAL_FILES+=("$f") ;;
+    esac
+  done
+fi
+NPGLITE=${#PGLITE_FILES[@]}
+GEN_TOTAL=${#GENERAL_FILES[@]}
+
 # --- 3. Partition + run -------------------------------------------------------
-NCHUNKS=$(( (TOTAL + CHUNK_SIZE - 1) / CHUNK_SIZE ))
-echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} chunks of <=${CHUNK_SIZE}"
+NCHUNKS=$(( (GEN_TOTAL + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+echo "run-tests: ${TOTAL} test files (bun-discovered: ${BUN_DISC:-n/a}) → ${NCHUNKS} general chunks of <=${CHUNK_SIZE} + ${NPGLITE}-file PGLite lane"
 echo "run-tests: bun=${BUN} max-concurrency=${CONCURRENCY} timeout=${TIMEOUT}ms jobs=${JOBS}"
+if [ "$NPGLITE" -gt 0 ]; then
+  echo "run-tests: PGLite lane → ${NPGLITE} files, serial=${PGLITE_CONCURRENCY}, timeout=${PGLITE_TIMEOUT}ms, retries=${PGLITE_RETRIES}"
+fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/neutron-runtests-XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -109,7 +180,7 @@ trap 'rm -rf "$WORK"' EXIT
 run_chunk() {
   local idx="$1"
   local start=$(( idx * CHUNK_SIZE ))
-  local chunk=( "${FILES[@]:start:CHUNK_SIZE}" )
+  local chunk=( "${GENERAL_FILES[@]:start:CHUNK_SIZE}" )
   local clog; clog="$WORK/chunk-$(printf '%03d' "$idx").log"
   {
     echo "==== chunk $((idx+1))/${NCHUNKS}: ${#chunk[@]} files (index ${start}..$((start+${#chunk[@]}-1))) ===="
@@ -125,6 +196,32 @@ run_chunk() {
   # Sequential mode: stream this chunk's output now (naturally in order) so the
   # run is observable live instead of buffered to the end.
   [ "$JOBS" -le 1 ] && cat "$clog"
+}
+
+# Run the PGLite-WASM files in their own serial lane with a bounded retry budget.
+# A transient lane failure (the #79 boot race / #327 WASM-init flake) re-runs the
+# WHOLE lane up to PGLITE_RETRIES extra times before the run is declared failed.
+# Lane files are still counted in the coverage audit (RAN_TOTAL).
+run_pglite_lane() {
+  local llog="$WORK/lane-pglite.log"
+  local attempt=1 max=$(( PGLITE_RETRIES + 1 )) rc=1 ran=0
+  while [ "$attempt" -le "$max" ]; do
+    {
+      echo "==== PGLite quarantine lane: ${NPGLITE} files (attempt ${attempt}/${max}, max-concurrency=${PGLITE_CONCURRENCY}, timeout=${PGLITE_TIMEOUT}ms) ===="
+      NO_COLOR=1 "$BUN" test "${PGLITE_FILES[@]}" --timeout="$PGLITE_TIMEOUT" --max-concurrency="$PGLITE_CONCURRENCY" 2>&1
+    } >"$llog" 2>&1
+    rc=$?
+    ran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$llog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
+    cat "$llog"
+    [ "$rc" = "0" ] && break
+    if [ "$attempt" -lt "$max" ]; then
+      echo "run-tests: PGLite lane attempt ${attempt}/${max} failed (rc=${rc}) — retrying (transient WASM-init/boot flake, ISSUES #79/#327)…"
+    fi
+    attempt=$(( attempt + 1 ))
+  done
+  # Sentinel idx 'pglite'; ran falls back to NPGLITE so the coverage audit still
+  # accounts for the lane files if bun's count line was eaten by log noise.
+  echo "pglite ${rc} ${NPGLITE} ${ran:-$NPGLITE}" >> "$WORK/results"
 }
 
 idx=0
@@ -151,6 +248,13 @@ if [ "$JOBS" -gt 1 ]; then
   done
 fi
 
+# PGLite lane runs AFTER the general chunks (and after their buffered emit), in
+# its own process with serial intra-lane concurrency + retry — never mixed into a
+# general chunk's RSS or parallelism.
+if [ "$NPGLITE" -gt 0 ]; then
+  run_pglite_lane
+fi
+
 # --- 4. Aggregate + coverage audit -------------------------------------------
 FAILED_CHUNKS=0
 RAN_TOTAL=0
@@ -159,20 +263,31 @@ while read -r r_idx r_rc r_nfiles r_ran; do
   RAN_TOTAL=$(( RAN_TOTAL + r_ran ))
   if [ "$r_rc" != "0" ]; then
     FAILED_CHUNKS=$(( FAILED_CHUNKS + 1 ))
-    FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
+    if [ "$r_idx" = "pglite" ]; then
+      FAIL_LIST="${FAIL_LIST} PGLite-lane"
+    else
+      FAIL_LIST="${FAIL_LIST} $(( r_idx + 1 ))"
+    fi
   fi
 done < "$WORK/results"
 
+LANES=$NCHUNKS
+LANE_DESC="${NCHUNKS} general chunks"
+if [ "$NPGLITE" -gt 0 ]; then
+  LANES=$(( NCHUNKS + 1 ))
+  LANE_DESC="${LANE_DESC} + PGLite lane"
+fi
+
 echo "---- run-tests coverage audit ----"
-echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   files executed across chunks: ${RAN_TOTAL}"
-echo "chunks: ${NCHUNKS}   failed chunks: ${FAILED_CHUNKS}${FAIL_LIST:+ (chunk#${FAIL_LIST# })}"
+echo "declared files: ${TOTAL}   bun-discovered: ${BUN_DISC:-n/a}   files executed: ${RAN_TOTAL} (${GEN_TOTAL} general + ${NPGLITE} PGLite)"
+echo "lanes: ${LANE_DESC}   failed: ${FAILED_CHUNKS}${FAIL_LIST:+ (${FAIL_LIST# })}"
 if [ "$RAN_TOTAL" -lt "$TOTAL" ]; then
   echo "run-tests: FATAL — executed ${RAN_TOTAL} files < ${TOTAL} discovered (coverage hole)." >&2
   exit 1
 fi
 if [ "$FAILED_CHUNKS" -ne 0 ]; then
-  echo "run-tests: FAIL — ${FAILED_CHUNKS}/${NCHUNKS} chunk(s) contained failing tests (see output above)."
+  echo "run-tests: FAIL — ${FAILED_CHUNKS}/${LANES} lane(s) contained failing tests (see output above)."
   exit 1
 fi
-echo "run-tests: PASS — all ${TOTAL} files across ${NCHUNKS} bounded-memory chunks are green."
+echo "run-tests: PASS — all ${TOTAL} files across ${LANES} bounded-memory lane(s) are green."
 exit 0
