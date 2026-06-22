@@ -33,10 +33,8 @@ import { InterviewEngine } from '../engine.ts'
 import type { OnboardingDeploymentMode } from '../phase.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
-import type {
-  DrivenPhasePromptSpec,
-  GeneratePromptInput,
-} from '../llm-prompt-driver.ts'
+import type { RouterDecision } from '../llm-router.ts'
+import { stubRouter, stubPlatform } from './interview-testkit.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -73,36 +71,32 @@ afterEach(() => {
 })
 
 /**
- * Static-fallback prompt driver (same shape as v2-phase-walk.test.ts). The
- * work_interview_gap_fill phase gets deterministic extraction so the audit
- * gate clears in one turn; every other free-text phase falls back to the
- * static spec so routing is driven by `next_phase_on_default`.
+ * The single scripted `llmRouter` decision each walk needs — the gap-fill
+ * extraction turn. `work_interview_gap_fill` is the one free-text phase
+ * where the user volunteers projects + interests at once; the engine's
+ * gap-fill best-effort extractor reads them off the router's `state_delta`
+ * (the REVIEW/CORRECTION hybrid-advance shape) so the required-fields
+ * audit clears in one turn and the walk advances to `personality_offered`.
+ *
+ * Every other freeform reply (name, personality, agent name, the open
+ * setup-token paste) takes the static `__freeform__` fall-through — the
+ * router is NOT consulted (`stubPlatform([])` → `shouldConsultRouter`
+ * false; the setup-token paste is additionally a freeform sub_step that
+ * always bypasses the router) — so the queue holds exactly one decision.
  */
-function makeFallbackDriver(): (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec> {
-  return async (input) => {
-    const spec: DrivenPhasePromptSpec = {
-      phase: input.phase,
-      body: 'fallback',
-      options: [],
-      allow_freeform: true,
-      next_phase_on_default: input.phase,
-      is_fallback: false,
-    }
-    if (input.phase === 'work_interview_gap_fill') {
-      const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-      const reply = lastUser?.body ?? ''
-      const extracted: NonNullable<DrivenPhasePromptSpec['extracted_fields']> = {}
-      if (/fragrance brand|hotel group/i.test(reply)) {
-        extracted.primary_projects = ['fragrance brand', 'hotel group', 'CC course']
-      }
-      if (/yoga|family time/i.test(reply)) {
-        extracted.non_work_interests = [{ name: 'yoga' }, { name: 'family time' }]
-      }
-      if (Object.keys(extracted).length > 0) spec.extracted_fields = extracted
-    } else {
-      spec.is_fallback = true
-    }
-    return spec
+function gapFillDecision(): RouterDecision {
+  return {
+    action: 'advance',
+    confidence: 0.97,
+    choice_value: null,
+    freeform_text:
+      'Building a fragrance brand and a hotel group. Outside work: yoga and family time.',
+    response: null,
+    state_delta: {
+      primary_projects: ['fragrance brand', 'hotel group', 'CC course'],
+      non_work_interests: [{ name: 'yoga' }, { name: 'family time' }],
+    },
+    reasoning: 'User volunteered project list + interests in one reply.',
   }
 }
 
@@ -115,7 +109,10 @@ function makeEngine(deploymentMode: OnboardingDeploymentMode): InterviewEngine {
       sentPrompts.push(input)
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
-    promptDriver: makeFallbackDriver(),
+    // Single extraction seam (gap-fill); `stubPlatform([])` keeps every
+    // other freeform phase on the static fall-through.
+    llmRouter: stubRouter([gapFillDecision()]).router,
+    platform: stubPlatform([]),
     deploymentMode,
     // In-memory SecretsStore so the open setup-token paste persists somewhere
     // observable. `list` starts empty so the phase is not auto-skipped.

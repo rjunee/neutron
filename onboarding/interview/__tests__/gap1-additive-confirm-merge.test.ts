@@ -3,12 +3,15 @@
  * additive-merge confirm path in `consumeProjectsProposedChoice` had NO
  * direct test, which is exactly why the union/removal bug slipped).
  *
- * This drives REAL `engine.advance` through `consumeProjectsProposedChoice`
- * with a mock LLM driver that mimics the production extraction behavior:
- * on a "go with A, B, C, …" confirm reply the driver anchors to the
- * proposed list and returns a SHORTER `primary_projects` (dropping the
- * user's net-new additions) — the exact mechanism that shrank Sam's
- * 7-project seed to 3.
+ * This drives REAL `engine.advance` at `projects_proposed` through the
+ * PROD-wired conversational router: a freeform reply is routed by
+ * `dispatchRouterDecision`'s `advance` branch, which unions the router's
+ * extracted `primary_projects` onto the seeded list (minus explicit
+ * `removed_projects`) via `mergeAdvanceProjectsAdditively`, then confirms
+ * via `consumeProjectsProposedChoice` (writing `primary_projects_confirmed`).
+ * The router on a confirm/restate advance anchors to the proposed list and
+ * returns a SHORTER `primary_projects` (dropping the user's net-new
+ * additions) — the exact mechanism that shrank Sam's 7-project seed to 3.
  *
  * It pins all three branches of the brief's
  * "union(seeded, extracted) minus explicit removals" rule:
@@ -17,6 +20,11 @@
  *   2. A reply that explicitly names a removal (`removed_projects`) drops
  *      exactly that one and keeps the rest.
  *   3. A plain confirm that extracts nothing drops nothing.
+ *
+ * The promptDriver extraction seam was removed in the 2026-06-21 onboarding
+ * consolidation; the router `state_delta` is now the single capture path, so
+ * these tests drive it through the prod-functional router seam (stubRouter +
+ * stubPlatform) instead of the deleted driver.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -26,15 +34,15 @@ import { join } from 'node:path'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
 import { ButtonStore } from '../../../channels/button-store.ts'
-import type { ButtonChoice, ButtonPrompt } from '../../../channels/button-primitive.ts'
+import type { ButtonPrompt } from '../../../channels/button-primitive.ts'
 import { InterviewEngine } from '../engine.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
-import { PROJECTS_PROPOSED_CONFIRM } from '../phase-prompts.ts'
-import type {
-  DrivenPhasePromptSpec,
-  GeneratePromptInput,
-} from '../llm-prompt-driver.ts'
+import type { RouterDecision } from '../llm-router.ts'
+import {
+  stubRouter,
+  stubPlatform,
+} from '@neutronai/onboarding/interview/__tests__/interview-testkit.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -70,48 +78,32 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-/**
- * Driver that, at `projects_proposed`, reads the latest user reply and
- * stages extracted_fields the way the production LLM driver would:
- *   - "go with …"      → a SHORTER primary_projects (anchored to proposals).
- *   - "drop Biohacking" → removed_projects: ['Biohacking'].
- *   - anything else     → is_fallback (nothing extracted; a plain confirm).
- */
-function makeDriver(): (input: GeneratePromptInput) => Promise<DrivenPhasePromptSpec> {
-  return async (input) => {
-    const spec: DrivenPhasePromptSpec = {
-      phase: input.phase,
-      body: 'fallback',
-      options: [{ label: 'A', body: 'Good to go', value: PROJECTS_PROPOSED_CONFIRM }],
-      allow_freeform: true,
-      next_phase_on_default: input.phase,
-      is_fallback: false,
-    }
-    if (input.phase === 'projects_proposed') {
-      const lastUser = [...input.transcript_so_far].reverse().find((t) => t.role === 'user')
-      const reply = (lastUser?.body ?? '').toLowerCase()
-      const extracted: NonNullable<DrivenPhasePromptSpec['extracted_fields']> = {}
-      if (reply.includes('go with')) {
-        // The LLM anchors to the proposed list and returns a SHORTER set,
-        // dropping the user's net-new additions (Buddhism, Biohacking).
-        extracted.primary_projects = ['Topline', 'Northwind', 'Acme']
-      }
-      if (reply.includes('drop biohacking')) {
-        extracted.removed_projects = ['Biohacking']
-      }
-      if (Object.keys(extracted).length > 0) {
-        spec.extracted_fields = extracted
-      } else {
-        spec.is_fallback = true
-      }
-      return spec
-    }
-    spec.is_fallback = true
-    return spec
+/** A REVIEW/CORRECTION confirm advance (the hybrid case where an `advance`
+ *  carries a non-null `state_delta`). The router's extracted
+ *  `primary_projects` ANCHORS to a SHORTER subset (the exact production
+ *  shrink); a named removal arrives in `removed_projects`. The engine unions
+ *  the adds onto the seeded list, subtracts removals, then confirms. */
+function confirmDecision(
+  freeform_text: string,
+  extracted: ReadonlyArray<string>,
+  removed?: ReadonlyArray<string>,
+): RouterDecision {
+  return {
+    action: 'advance',
+    confidence: 0.95,
+    choice_value: null,
+    freeform_text,
+    response: null,
+    state_delta:
+      removed !== undefined
+        ? { primary_projects: [...extracted], removed_projects: [...removed] }
+        : { primary_projects: [...extracted] },
+    reasoning: 'test: projects_proposed confirm advance, anchored extraction',
   }
 }
 
-function makeEngine(): InterviewEngine {
+function makeEngine(decisions: ReadonlyArray<RouterDecision>): InterviewEngine {
+  const { router } = stubRouter(decisions)
   return new InterviewEngine({
     buttonStore,
     stateStore,
@@ -120,12 +112,17 @@ function makeEngine(): InterviewEngine {
       sentPrompts.push(input)
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
-    promptDriver: makeDriver(),
+    // NB no `promptDriver` (removed 2026-06-21) — the router state_delta is
+    // the single capture path. `platform: 'all'` flips the conversational
+    // router ON for projects_proposed so the freeform reply routes through it.
+    llmRouter: router,
+    platform: stubPlatform('all'),
   })
 }
 
 /** Seed state at projects_proposed with the 7-project list + emit the
- *  confirm prompt so a tap resolves against a live button row. */
+ *  confirm prompt so a freeform reply resolves against a live allow_freeform
+ *  button row. */
 async function seedAtProjectsProposed(engine: InterviewEngine): Promise<string> {
   await stateStore.upsert({
     project_slug: 'casey',
@@ -147,24 +144,18 @@ async function seedAtProjectsProposed(engine: InterviewEngine): Promise<string> 
 
 async function confirmFreeform(
   engine: InterviewEngine,
-  prompt_id: string,
   text: string,
   observed_at: number,
 ): Promise<void> {
-  const choice: ButtonChoice = {
-    prompt_id,
-    choice_value: '__freeform__',
-    freeform_text: text,
-    chosen_at: observed_at,
-    speaker_user_id: 'u-1',
-    channel_kind: 'app-socket',
-  }
+  // Drive the REAL freeform path: a typed reply with NO matching ButtonChoice,
+  // so normalAdvance hits the `freeform` interaction-mode branch → consults the
+  // llmRouter → dispatchRouterDecision (advance branch for a confirm/restate).
   await engine.advance({
     project_slug: 'casey',
     topic_id: 'topic-1',
     user_id: 'u-1',
     channel_kind: 'app-socket',
-    choice,
+    freeform_text: text,
     observed_at,
   })
 }
@@ -177,13 +168,17 @@ async function readConfirmed(): Promise<ReadonlyArray<string>> {
 
 describe('GAP1 — consumeProjectsProposedChoice additive merge (union minus removals)', () => {
   test('a confirm whose extraction is SHORTER keeps the full seeded list (no silent shrink)', async () => {
-    const engine = makeEngine()
-    const prompt_id = await seedAtProjectsProposed(engine)
-    // Driver will return only [Topline, Northwind, Acme] for this reply —
+    // Router anchors to only [Topline, Northwind, Acme] for this reply —
     // dropping Buddhism + Biohacking, the exact 7→3 regression.
+    const engine = makeEngine([
+      confirmDecision(
+        'go with Topline, Northwind, Acme, Buddhism and Biohacking',
+        ['Topline', 'Northwind', 'Acme'],
+      ),
+    ])
+    const _prompt_id = await seedAtProjectsProposed(engine)
     await confirmFreeform(
       engine,
-      prompt_id,
       'go with Topline, Northwind, Acme, Buddhism and Biohacking',
       1_700_000_001_000,
     )
@@ -194,14 +189,11 @@ describe('GAP1 — consumeProjectsProposedChoice additive merge (union minus rem
   })
 
   test('an explicit removal drops exactly that one and keeps the rest', async () => {
-    const engine = makeEngine()
-    const prompt_id = await seedAtProjectsProposed(engine)
-    await confirmFreeform(
-      engine,
-      prompt_id,
-      'looks good but drop Biohacking',
-      1_700_000_001_000,
-    )
+    const engine = makeEngine([
+      confirmDecision('looks good but drop Biohacking', [], ['Biohacking']),
+    ])
+    const _prompt_id = await seedAtProjectsProposed(engine)
+    await confirmFreeform(engine, 'looks good but drop Biohacking', 1_700_000_001_000)
     const confirmed = await readConfirmed()
     expect(confirmed).not.toContain('Biohacking')
     // Every OTHER seeded project survives.
@@ -212,9 +204,20 @@ describe('GAP1 — consumeProjectsProposedChoice additive merge (union minus rem
   })
 
   test('a plain confirm that extracts nothing drops nothing', async () => {
-    const engine = makeEngine()
-    const prompt_id = await seedAtProjectsProposed(engine)
-    await confirmFreeform(engine, prompt_id, 'looks good', 1_700_000_001_000)
+    // A plain confirm carries no project delta at all (state_delta: null).
+    const engine = makeEngine([
+      {
+        action: 'advance',
+        confidence: 0.95,
+        choice_value: null,
+        freeform_text: 'looks good',
+        response: null,
+        state_delta: null,
+        reasoning: 'test: plain confirm, no delta',
+      },
+    ])
+    const _prompt_id = await seedAtProjectsProposed(engine)
+    await confirmFreeform(engine, 'looks good', 1_700_000_001_000)
     const confirmed = await readConfirmed()
     expect(confirmed.length).toBe(7)
     for (const p of SEVEN) expect(confirmed).toContain(p)

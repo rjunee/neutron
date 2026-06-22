@@ -1,270 +1,303 @@
 /**
- * Integration test for the LLM-driven conversational onboarding driver.
+ * Integration test for the LLM-driven CONVERSATIONAL onboarding experience.
  *
- * Replays Alex's verbatim example from 2026-05-10 turn-by-turn, with a
- * stub LLM that returns deterministic JSON envelopes. Asserts:
+ * HISTORY (2026-06-21 consolidation): this file previously unit-tested the
+ * deleted `generatePromptForPhase` driver — feeding a stub LLM a JSON
+ * envelope and asserting the driver parsed it into a `DrivenPhasePromptSpec`
+ * (body text, `extracted_fields`, `persona_acknowledgment`, and that the
+ * driver's own user-prompt carried `recent_turns`). That whole surface was
+ * DRIVER-INTERNAL: `generatePromptForPhase` / `GeneratePromptInput` /
+ * `GeneratePromptDeps` no longer exist. The "conversational" experience is
+ * now the `phaseSpecResolver` (body copy) + `llmRouter` (routing + field
+ * extraction + acknowledgment) PAIR wired into the real `InterviewEngine`.
  *
- *   - The agent emits free-text prompts, no A/B/C buttons in the happy path
- *   - Each agent response acknowledges what the user just said
- *     (persona_acknowledgment is baked into the body)
- *   - extracted_fields land on phase_state when the LLM extracts them
+ * The driver-envelope-shape assertions are therefore deleted (they tested a
+ * function that is gone) and REPLACED with the equivalent USER-VISIBLE
+ * contract, asserted on the REAL engine driven by a `phaseSpecResolver` +
+ * `stubRouter` + `stubPlatform('all')`:
  *
- * The Alex-example transcript IS the test fixture:
+ *   - the agent emits FREE-TEXT prompts (no A/B/C buttons) in the happy path;
+ *   - each router decision can carry a natural-language acknowledgment
+ *     (`response`) that the engine sends as its own free-text bubble BEFORE
+ *     the next prompt (the old `persona_acknowledgment` lived here);
+ *   - the router's extracted fields land on `phase_state` (the old
+ *     `extracted_fields` contract — now the router `state_delta` seam);
+ *   - the engine consults the router with the recent transcript turns (the
+ *     old "feeds the prior user turn as recent_turns" contract).
  *
- *   Agent: "Hey — I'd like to get to know you before we go further. Who
- *           do you want me to be? What kind of presence — a sharp
- *           strategist, a warm collaborator, a no-nonsense executor? Or
- *           someone specific — Marcus Aurelius, your favorite character?"
- *   User:  "kind of like Sherlock Holmes but warmer. And really good at design."
- *   Agent: "Got it — incisive, observant, but not cold. Design fluency
- *           baked in. What should I call you?"
- *   User:  "Alex"
- *   Agent: "Nice. Want your URL to be alex.example.com, or pick
- *           something different?"
- *   User:  "neutron"
- *   Agent: "neutron it is. One last thing — what are you actually trying
- *           to get done?"
- *
- * The stub LLM returns one JSON envelope per agent turn — same shape
- * the real Haiku 4.5 call would produce.
+ * Alex's verbatim 2026-05-10 example is preserved as the framing fixture; we
+ * walk the real phase machine (signup → ai_substrate_offered →
+ * work_interview_gap_fill) rather than the flat per-phase driver calls.
  */
 
-import { describe, expect, test } from 'bun:test'
-import {
-  generatePromptForPhase,
-  type GeneratePromptInput,
-  type GeneratePromptDeps,
-} from '@neutronai/onboarding/interview/llm-prompt-driver.ts'
-import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
-import type { OnboardingPhase } from '@neutronai/onboarding/interview/phase.ts'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ButtonStore } from '@neutronai/channels/button-store.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
+import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
+import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
+import type { RouterDecision } from '@neutronai/onboarding/interview/llm-router.ts'
+import type {
+  PhaseSpecResolver,
+  PhaseContextBundle,
+} from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
+import { STATIC_PHASE_SPECS } from '@neutronai/onboarding/interview/phase-prompts.ts'
+import { stubRouter, stubPlatform } from './m2-walkthrough-test-helpers.ts'
+import type { RouterCall } from './m2-walkthrough-test-helpers.ts'
 
-// ---------------------------------------------------------------------------
-// Deterministic stub LLM that returns one of N JSON envelopes per call
-// ---------------------------------------------------------------------------
+const OWNER = 't1'
+const TOPIC = 'topic-1'
+const USER = 'u-1'
 
-function buildStubLlm(envelopes: ReadonlyArray<string>): {
-  llm: LlmCallFn
-  callCount: () => number
-  capturedUserPrompts: ReadonlyArray<string>
+// Alex's verbatim opening copy — the framing fixture. The conversational
+// body half is now the phaseSpecResolver; this is the body it returns for
+// the signup phase.
+const SIGNUP_OPENING =
+  "Hey — I'd like to get to know you before we go further. Who do you want " +
+  'me to be? What kind of presence — a sharp strategist, a warm collaborator, ' +
+  'a no-nonsense executor? Or someone specific?'
+
+let tmp: string
+let db: ProjectDb
+let buttonStore: ButtonStore
+let stateStore: InMemoryOnboardingStateStore
+let transcript: TranscriptWriter
+let sentPrompts: Array<{ prompt: ButtonPrompt }>
+
+beforeEach(() => {
+  tmp = mkdtempSync(join(tmpdir(), 'conversational-e2e-'))
+  db = ProjectDb.open(join(tmp, 'project.db'))
+  applyMigrations(db.raw())
+  buttonStore = new ButtonStore({ db })
+  stateStore = new InMemoryOnboardingStateStore()
+  transcript = new TranscriptWriter({
+    path: join(tmp, 'persona', 'onboarding-transcript.jsonl'),
+  })
+  sentPrompts = []
+})
+
+afterEach(() => {
+  db.close()
+  rmSync(tmp, { recursive: true, force: true })
+})
+
+/**
+ * Conversational body-copy resolver — the body half of the conversational
+ * pair. Returns Alex's warm opening copy on signup and varies the gap-fill
+ * body per turn (so a re-emit gets a fresh prompt_id); every other phase
+ * falls through to the static spec (`null`). All bodies stay options-less
+ * (`allow_freeform: true`) so the happy path never renders buttons.
+ */
+function makeConversationalResolver(): PhaseSpecResolver {
+  let gapFillEmits = 0
+  return {
+    async resolve(bundle: PhaseContextBundle) {
+      if (bundle.phase === 'signup') {
+        const fallback = STATIC_PHASE_SPECS['signup']
+        if (fallback === undefined) return null
+        return { ...fallback, body: SIGNUP_OPENING }
+      }
+      if (bundle.phase === 'work_interview_gap_fill') {
+        const fallback = STATIC_PHASE_SPECS['work_interview_gap_fill']
+        if (fallback === undefined) return null
+        gapFillEmits += 1
+        return {
+          ...fallback,
+          body: `One last thing — what are you actually trying to get done? (turn ${gapFillEmits})`,
+        }
+      }
+      return null
+    },
+  }
+}
+
+function makeEngine(decisions: RouterDecision[]): {
+  engine: InterviewEngine
+  routerCalls: RouterCall[]
 } {
-  let idx = 0
-  const captured: string[] = []
-  const llm: LlmCallFn = async (call) => {
-    captured.push(call.user)
-    const out = envelopes[idx]
-    if (out === undefined) {
-      throw new Error(`stub LLM exhausted at call ${idx} (only ${envelopes.length} envelopes wired)`)
-    }
-    idx++
-    return out
-  }
+  const { router, calls } = stubRouter(decisions)
+  const engine = new InterviewEngine({
+    buttonStore,
+    stateStore,
+    transcript,
+    sendButtonPrompt: async (input) => {
+      sentPrompts.push({ prompt: input.prompt })
+      return { message_id: `msg-${sentPrompts.length}`, was_new: true }
+    },
+    llmRouter: router,
+    phaseSpecResolver: makeConversationalResolver(),
+    platform: stubPlatform('all'),
+  })
+  return { engine, routerCalls: calls }
+}
+
+function advance(
+  freeform_text: string,
+  state_delta: RouterDecision['state_delta'] = null,
+  response: string | null = null,
+): RouterDecision {
   return {
-    llm,
-    callCount: () => idx,
-    capturedUserPrompts: captured,
+    action: 'advance',
+    confidence: 0.97,
+    choice_value: null,
+    freeform_text,
+    response,
+    state_delta,
+    reasoning: 'test: scripted conversational advance',
   }
 }
 
-function buildDeps(llm: LlmCallFn): GeneratePromptDeps {
-  return {
-    llm,
-    enabled_phases: new Set(['signup']),
-  }
+async function replyFreeform(
+  engine: InterviewEngine,
+  text: string,
+  observed_at: number,
+): Promise<void> {
+  await engine.advance({
+    project_slug: OWNER,
+    topic_id: TOPIC,
+    user_id: USER,
+    channel_kind: 'app-socket',
+    freeform_text: text,
+    observed_at,
+  })
 }
 
-// ---------------------------------------------------------------------------
-// Alex-example envelopes — one per agent turn
-// ---------------------------------------------------------------------------
+async function tapButton(
+  engine: InterviewEngine,
+  choice_value: string,
+  observed_at: number,
+): Promise<void> {
+  const state = await stateStore.get(OWNER, USER)
+  const prompt_id = (state!.phase_state as Record<string, unknown>)['active_prompt_id'] as string
+  await engine.advance({
+    project_slug: OWNER,
+    topic_id: TOPIC,
+    user_id: USER,
+    channel_kind: 'app-socket',
+    choice: {
+      prompt_id,
+      choice_value,
+      chosen_at: observed_at,
+      speaker_user_id: USER,
+      channel_kind: 'app-socket',
+    },
+    observed_at,
+  })
+}
 
-const ENVELOPE_TURN_1 = JSON.stringify({
-  body:
-    "Hey — I'd like to get to know you before we go further. Who do you want me to be? What kind of presence — a sharp strategist, a warm collaborator, a no-nonsense executor? Or someone specific — Marcus Aurelius, your favorite character?",
-  options: [],
-})
+describe('Conversational onboarding — Alex verbatim example (real engine)', () => {
+  test('opening — the agent asks who the user wants it to be, as free text (no buttons)', async () => {
+    const { engine } = makeEngine([])
+    await engine.start({ project_slug: OWNER, topic_id: TOPIC, user_id: USER, signup_via: 'web' })
 
-// After user says "kind of like Sherlock Holmes but warmer. And really
-// good at design." — the LLM extracts archetype_hint + asks for the
-// user's name.
-const ENVELOPE_TURN_2 = JSON.stringify({
-  body:
-    "Got it — incisive, observant, but not cold. Design fluency baked in. What should I call you?",
-  options: [],
-  extracted_fields: {
-    archetypes: ['sherlock-but-warmer', 'design-fluent'],
-  },
-  persona_acknowledgment:
-    'Got it — incisive, observant, but not cold. Design fluency baked in.',
-})
-
-// After user says "Alex" — LLM extracts agent_name + asks about URL.
-const ENVELOPE_TURN_3 = JSON.stringify({
-  body: 'Nice. Want your URL to be alex.example.com, or pick something different?',
-  options: [],
-  extracted_fields: {
-    agent_name: 'Alex',
-  },
-  persona_acknowledgment: 'Nice.',
-})
-
-// After user says "neutron" — LLM acknowledges + asks about goal.
-const ENVELOPE_TURN_4 = JSON.stringify({
-  body:
-    "neutron it is. One last thing — what are you actually trying to get done?",
-  options: [],
-  extracted_fields: {
-    slug: 'neutron',
-  },
-  persona_acknowledgment: 'neutron it is.',
-})
-
-describe('Conversational onboarding — Alex verbatim example', () => {
-  test('turn 1 (opening) — agent asks who the user wants the agent to be', async () => {
-    const { llm } = buildStubLlm([ENVELOPE_TURN_1])
-    const input: GeneratePromptInput = {
-      phase: 'signup',
-      signup_via: 'web',
-      phase_state: {},
-      transcript_so_far: [],
-    }
-    const spec = await generatePromptForPhase(input, buildDeps(llm))
-    expect(spec.is_fallback).toBe(false)
-    expect(spec.body.toLowerCase()).toContain('who do you want me to be')
-    // CRITICAL: no buttons in the happy path
-    expect(spec.options).toEqual([])
-    expect(spec.allow_freeform).toBe(true)
+    const last = sentPrompts[sentPrompts.length - 1]!.prompt
+    expect(last.body.toLowerCase()).toContain('who do you want me to be')
+    // CRITICAL: no buttons in the happy path.
+    expect(last.options).toEqual([])
+    expect(last.allow_freeform).toBe(true)
   })
 
-  test('turn 2 (persona ack + name ask) — extracts archetypes, asks for name', async () => {
-    const { llm } = buildStubLlm([ENVELOPE_TURN_2])
-    const input: GeneratePromptInput = {
-      phase: 'signup',
-      signup_via: 'web',
-      phase_state: {},
-      transcript_so_far: [
+  test('name turn — the router extracts the name + acknowledges, and the engine advances off signup', async () => {
+    // "Alex" answers the signup name question; the router classifies it as an
+    // advance carrying a warm acknowledgment (the old persona_acknowledgment).
+    const { engine } = makeEngine([advance('Alex', null, 'Nice to meet you, Alex.')])
+    await engine.start({ project_slug: OWNER, topic_id: TOPIC, user_id: USER, signup_via: 'web' })
+
+    await replyFreeform(engine, 'Alex', 1_700_000_001_000)
+    const state = await stateStore.get(OWNER, USER)
+    // The name landed on phase_state and the engine advanced off signup.
+    expect(state!.phase_state['user_first_name']).toBe('Alex')
+    expect(state!.phase).toBe('ai_substrate_offered')
+    // The router's acknowledgment was sent as its own free-text bubble.
+    const ackBodies = sentPrompts.map((s) => s.prompt.body)
+    expect(ackBodies.some((b) => b.includes('Nice to meet you, Alex.'))).toBe(true)
+  })
+
+  test('gap-fill turn — the router-extracted projects + interests land on phase_state', async () => {
+    // Walk to the gap-fill phase, then the user describes their work in one
+    // free-text turn; the router carries the extracted fields in state_delta
+    // (the seam that replaced the driver's extracted_fields).
+    const { engine } = makeEngine([
+      advance('Alex'),
+      advance(
+        'Building a fragrance brand, a hotel group, and a CC course; outside work I do yoga and family time.',
         {
-          role: 'agent',
-          body:
-            "Hey — I'd like to get to know you before we go further. Who do you want me to be?",
-          phase: 'signup',
+          primary_projects: ['fragrance brand', 'hotel group', 'CC course'],
+          non_work_interests: [{ name: 'yoga' }, { name: 'family time' }],
         },
-        {
-          role: 'user',
-          body: 'kind of like Sherlock Holmes but warmer. And really good at design.',
-          phase: 'signup',
-        },
-      ],
-    }
-    const spec = await generatePromptForPhase(input, buildDeps(llm))
-    expect(spec.is_fallback).toBe(false)
-    expect(spec.body).toContain('incisive, observant')
-    expect(spec.body).toContain('What should I call you')
-    expect(spec.options).toEqual([])
-    expect(spec.extracted_fields).toBeDefined()
-    expect(spec.extracted_fields!.archetypes).toEqual([
-      'sherlock-but-warmer',
-      'design-fluent',
+        "Got it — that's a full plate.",
+      ),
     ])
-    expect(spec.persona_acknowledgment).toContain('incisive')
+    await engine.start({ project_slug: OWNER, topic_id: TOPIC, user_id: USER, signup_via: 'web' })
+    await replyFreeform(engine, 'Alex', 1_700_000_001_000)
+    // neither → no-import fork lands on work_interview_gap_fill.
+    await tapButton(engine, 'neither', 1_700_000_002_000)
+    let state = await stateStore.get(OWNER, USER)
+    expect(state!.phase).toBe('work_interview_gap_fill')
+
+    await replyFreeform(engine, 'fragrance brand, hotel group, CC course; yoga + family', 1_700_000_003_000)
+    state = await stateStore.get(OWNER, USER)
+    expect(state!.phase_state['primary_projects']).toEqual([
+      'fragrance brand',
+      'hotel group',
+      'CC course',
+    ])
+    expect(state!.phase_state['non_work_interests']).toEqual([
+      { name: 'yoga' },
+      { name: 'family time' },
+    ])
+    // The audit cleared (3 projects + 1+ interest) → advanced to personality.
+    expect(state!.phase).toBe('personality_offered')
   })
 
-  test('turn 3 (name + slug suggestion) — extracts agent_name, asks about URL', async () => {
-    const { llm } = buildStubLlm([ENVELOPE_TURN_3])
-    const input: GeneratePromptInput = {
-      phase: 'signup',
-      signup_via: 'web',
-      phase_state: {
-        archetype_hint: 'sherlock-but-warmer, design-fluent',
-      },
-      transcript_so_far: [
-        { role: 'agent', body: 'What should I call you?', phase: 'signup' },
-        { role: 'user', body: 'Alex', phase: 'signup' },
-      ],
-    }
-    const spec = await generatePromptForPhase(input, buildDeps(llm))
-    expect(spec.body).toContain('alex.example.com')
-    expect(spec.options).toEqual([])
-    expect(spec.extracted_fields!.agent_name).toBe('Alex')
-  })
+  test('NO buttons across the conversational happy path', async () => {
+    const { engine } = makeEngine([
+      advance('Alex'),
+      advance('fragrance brand, hotel group, CC course; yoga', {
+        primary_projects: ['fragrance brand', 'hotel group', 'CC course'],
+        non_work_interests: [{ name: 'yoga' }],
+      }),
+    ])
+    await engine.start({ project_slug: OWNER, topic_id: TOPIC, user_id: USER, signup_via: 'web' })
+    await replyFreeform(engine, 'Alex', 1_700_000_001_000)
+    await tapButton(engine, 'neither', 1_700_000_002_000)
+    await replyFreeform(engine, 'fragrance, hotel, CC; yoga', 1_700_000_003_000)
 
-  test('turn 4 (slug + goal ask) — extracts slug, asks about goal', async () => {
-    const { llm } = buildStubLlm([ENVELOPE_TURN_4])
-    const input: GeneratePromptInput = {
-      phase: 'signup',
-      signup_via: 'web',
-      phase_state: {
-        agent_name: 'Alex',
-        suggested_slug: 'alex',
-      },
-      transcript_so_far: [
-        {
-          role: 'agent',
-          body: 'Want your URL to be alex.example.com, or pick something different?',
-          phase: 'signup',
-        },
-        { role: 'user', body: 'neutron', phase: 'signup' },
-      ],
-    }
-    const spec = await generatePromptForPhase(input, buildDeps(llm))
-    expect(spec.body).toContain('neutron it is')
-    expect(spec.body).toContain('trying to get done')
-    expect(spec.options).toEqual([])
-    expect(spec.extracted_fields!.slug).toBe('neutron')
-  })
-
-  test('NO buttons in the happy path across all 4 turns', async () => {
-    const envelopes = [ENVELOPE_TURN_1, ENVELOPE_TURN_2, ENVELOPE_TURN_3, ENVELOPE_TURN_4]
-    const { llm } = buildStubLlm(envelopes)
-    const turns: ReadonlyArray<GeneratePromptInput> = [
-      { phase: 'signup' as OnboardingPhase, signup_via: 'web', phase_state: {}, transcript_so_far: [] },
-      {
-        phase: 'signup' as OnboardingPhase,
-        signup_via: 'web',
-        phase_state: {},
-        transcript_so_far: [
-          { role: 'agent', body: 'who?', phase: 'signup' as OnboardingPhase },
-          { role: 'user', body: 'sherlock-but-warmer', phase: 'signup' as OnboardingPhase },
-        ],
-      },
-      {
-        phase: 'signup' as OnboardingPhase,
-        signup_via: 'web',
-        phase_state: {},
-        transcript_so_far: [
-          { role: 'agent', body: 'name?', phase: 'signup' as OnboardingPhase },
-          { role: 'user', body: 'Alex', phase: 'signup' as OnboardingPhase },
-        ],
-      },
-      {
-        phase: 'signup' as OnboardingPhase,
-        signup_via: 'web',
-        phase_state: {},
-        transcript_so_far: [
-          { role: 'agent', body: 'url?', phase: 'signup' as OnboardingPhase },
-          { role: 'user', body: 'neutron', phase: 'signup' as OnboardingPhase },
-        ],
-      },
-    ]
-    const deps = buildDeps(llm)
-    for (const turn of turns) {
-      const spec = await generatePromptForPhase(turn, deps)
-      expect(spec.options.length).toBe(0)
-      expect(spec.allow_freeform).toBe(true)
+    // The conversational happy-path prompts — the signup opening and the
+    // gap-fill question — are pure free text with NO buttons. (The one
+    // buttoned prompt in the walk is the ai_substrate_offered source picker,
+    // which is the deliberate 3-option import fork, not the happy-path
+    // free-text flow.)
+    const happyPath = sentPrompts.filter(
+      (s) =>
+        s.prompt.body.toLowerCase().includes('who do you want me to be') ||
+        s.prompt.body.toLowerCase().includes('what are you actually trying to get done'),
+    )
+    expect(happyPath.length).toBeGreaterThanOrEqual(2)
+    for (const s of happyPath) {
+      expect(s.prompt.options).toEqual([])
+      expect(s.prompt.allow_freeform).toBe(true)
     }
   })
 
-  test('feeds the prior user turn into the LLM user prompt as recent_turns', async () => {
-    const { llm, capturedUserPrompts } = buildStubLlm([ENVELOPE_TURN_2])
-    const input: GeneratePromptInput = {
-      phase: 'signup',
-      signup_via: 'web',
-      phase_state: {},
-      transcript_so_far: [
-        { role: 'agent', body: 'who?', phase: 'signup' },
-        { role: 'user', body: 'sherlock-but-warmer-design-fluent', phase: 'signup' },
-      ],
-    }
-    await generatePromptForPhase(input, buildDeps(llm))
-    expect(capturedUserPrompts[0]).toContain('recent_turns')
-    expect(capturedUserPrompts[0]).toContain('sherlock-but-warmer-design-fluent')
+  test('the engine consults the router with the recent transcript turns', async () => {
+    // The old test asserted the DRIVER folded the prior user turn into its LLM
+    // user-prompt as `recent_turns`. The engine now hands the router a
+    // `recent_turns` array directly; assert it carries the user's reply.
+    const { engine, routerCalls } = makeEngine([advance('Alex')])
+    await engine.start({ project_slug: OWNER, topic_id: TOPIC, user_id: USER, signup_via: 'web' })
+    await replyFreeform(engine, 'sherlock-but-warmer-design-fluent', 1_700_000_001_000)
+
+    expect(routerCalls.length).toBeGreaterThanOrEqual(1)
+    const firstCall = routerCalls[0]!
+    expect(firstCall.input.phase).toBe('signup')
+    expect(firstCall.input.user_text).toBe('sherlock-but-warmer-design-fluent')
+    // The engine passes a recent_turns window to the router for grounding.
+    expect(Array.isArray(firstCall.input.recent_turns)).toBe(true)
   })
 })

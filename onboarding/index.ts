@@ -33,18 +33,13 @@ export {
   type StartResult,
 } from './interview/engine.ts'
 
-// LLM-driven conversational onboarding driver (2026-05-10 sprint). The
-// single entry point for prompt body generation; supersedes the old
-// PHASE_PROMPTS table.
-export {
-  generatePromptForPhase,
-  STATIC_PHASE_SPECS,
-  PHASE_GOALS,
-  type DrivenPhasePromptSpec,
-  type ExtractedFields,
-  type GeneratePromptDeps,
-  type GeneratePromptInput,
-} from './interview/llm-prompt-driver.ts'
+// Deterministic short-question fallback table (the static phase prompts).
+export { STATIC_PHASE_SPECS } from './interview/phase-prompts.ts'
+// Shared LLM field-extraction primitives. The `promptDriver` seam that
+// once lived alongside these was never wired in production and was removed
+// in the 2026-06-21 onboarding-engine consolidation; the surviving
+// `llmRouter` extraction path consumes `ExtractedFields`.
+export { type ExtractedFields } from './interview/extracted-fields.ts'
 
 export {
   ALL_PHASES,

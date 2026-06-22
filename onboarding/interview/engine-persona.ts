@@ -103,16 +103,6 @@ export async function consumePersonalityOfferedChoice(
       return { outcome: 'no_active_prompt', state }
     }
 
-    // Drain any LLM-extracted fields landed by the prompt driver. The
-    // LLM envelope may carry `agent_personality` directly; otherwise we
-    // fall back to the freeform reply.
-    const extracted_patch = self.consumePendingExtractedFields(input.project_slug)
-    const extracted_personality =
-      typeof extracted_patch['agent_personality'] === 'string' &&
-      (extracted_patch['agent_personality'] as string).trim().length > 0
-        ? (extracted_patch['agent_personality'] as string).trim()
-        : null
-
     // v0.1.80 (2026-05-22) — character-button tap. The 5 character
     // buttons emit `value = "character:<index>"` (index ∈ 0..4 in
     // render order: personalized first, then wild). A button tap
@@ -224,7 +214,6 @@ export async function consumePersonalityOfferedChoice(
       character_button_pick ??
       legacy_suggestion_pick ??
       numbered_pick ??
-      extracted_personality ??
       freeform
 
     if (candidate === null || candidate.length < 4) {
@@ -241,7 +230,6 @@ export async function consumePersonalityOfferedChoice(
         active_prompt_id: null,
         last_choice_value: choice_value,
         ...(freeform !== null ? { last_choice_freeform: freeform } : {}),
-        ...extracted_patch,
         personality_offered_rejection: reason,
         personality_offered_attempt_count: next_attempts,
       }
@@ -311,7 +299,6 @@ export async function consumePersonalityOfferedChoice(
       active_prompt_id: null,
       last_choice_value: choice_value,
       ...(freeform !== null ? { last_choice_freeform: freeform } : {}),
-      ...extracted_patch,
       agent_personality,
       personality_offered_rejection: null,
       personality_offered_attempt_count: null,
