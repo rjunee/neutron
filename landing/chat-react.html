@@ -88,6 +88,18 @@
   /* Track B Phase 4 — delivery/read receipt status line for the latest send. */
   .car-receipt { text-align: right; font-size: 11px; color: var(--muted); padding: 2px 14px; }
   .car-receipt-read { color: var(--accent); }
+  /* Track B Phase 4 — per-message emoji reaction chips. */
+  .car-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; align-items: center; }
+  .car-reaction {
+    font-size: 12px; line-height: 1; padding: 3px 8px; border-radius: 11px;
+    border: 1px solid var(--border); background: var(--surface, rgba(255,255,255,0.04));
+    color: inherit; cursor: pointer;
+  }
+  .car-reaction-self { border-color: var(--accent); color: var(--accent); }
+  .car-reaction-add { opacity: 0.6; padding: 3px 7px; }
+  .car-reaction-add:hover { opacity: 1; }
+  .car-reaction-picker { display: inline-flex; gap: 2px; margin-left: 2px; }
+  .car-reaction-pick { font-size: 15px; background: none; border: none; cursor: pointer; padding: 1px 3px; }
   .car-scroll-bottom {
     position: absolute; right: 16px; bottom: 78px; z-index: 5;
     width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);

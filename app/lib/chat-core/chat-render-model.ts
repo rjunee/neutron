@@ -15,7 +15,10 @@
  *     checkmark ladder (queued → sent → delivered), Telegram-style.
  */
 
+import { groupReactions as groupReactionsCore, type ReactionChip } from '@neutron/chat-core';
 import type { ChatMessage } from '@neutron/chat-core';
+
+export type { ReactionChip };
 
 /** One in-flight agent stream (a sequence of `agent_message_partial`s). */
 export interface StreamingBuffer {
@@ -179,6 +182,19 @@ function isReadByOther(
     if (id.length > 0 && id !== selfDeviceId) return true;
   }
   return false;
+}
+
+/**
+ * Track B Phase 4 (reactions) — group a message's reaction set into the
+ * per-emoji chips the FlashList UI renders. Thin wrapper over chat-core's
+ * framework-free {@link groupReactionsCore} so the RN surface keeps importing
+ * grouping from the render model alongside the delivery helpers.
+ */
+export function groupReactions(
+  message: Pick<ChatMessage, 'reactions'>,
+  selfDeviceId?: string,
+): ReactionChip[] {
+  return groupReactionsCore(message.reactions, selfDeviceId);
 }
 
 /** The glyph the UI renders for a delivery state. `delivered` and `read` share

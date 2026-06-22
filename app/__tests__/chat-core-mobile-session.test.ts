@@ -301,6 +301,48 @@ describe('MobileChatSession — offline send-queue + resume', () => {
     expect(types).toContain('session_ready');
     expect(types).toContain('agent_message_partial'); // partials reach the UI even though they aren't persisted
   });
+
+  it('applies a reaction_update onto a stored message and sends a reaction frame on react() (Track B Phase 4)', async () => {
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a1', seq: 1, body: 'hi', ts: 2 });
+    await tick();
+
+    // A reaction_update lands on the stored message.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'reaction_update',
+      message_id: 'a1',
+      seq: 1,
+      rev: 1,
+      reactions: [{ emoji: '👍', device_id: 'devB' }],
+      ts: 3,
+    });
+    await tick();
+    let msgs = await session.messages();
+    expect(msgs.find((m) => m.message_id === 'a1')?.reactions).toEqual([
+      { emoji: '👍', device_id: 'devB' },
+    ]);
+
+    // react() puts a reaction frame on the wire.
+    session.react('a1', '🎉', 'add');
+    expect(sockets[0]!.sentEnvelopes()).toContainEqual({
+      v: 1,
+      type: 'reaction',
+      message_id: 'a1',
+      emoji: '🎉',
+      action: 'add',
+    });
+
+    // A higher-rev empty update clears the reactions (removal).
+    sockets[0]!.deliver({ v: 1, type: 'reaction_update', message_id: 'a1', seq: 1, rev: 2, reactions: [], ts: 4 });
+    await tick();
+    msgs = await session.messages();
+    expect(msgs.find((m) => m.message_id === 'a1')?.reactions ?? null).toBeNull();
+  });
 });
 
 /** Let the session's async apply/flush microtasks settle. */

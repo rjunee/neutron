@@ -53,6 +53,10 @@ CREATE UNIQUE INDEX idx_app_chat_messages_client_msg
 CREATE UNIQUE INDEX idx_app_chat_messages_message_id
     ON app_chat_messages (message_id)
 
+[index] idx_app_chat_reactions_topic_seq (tbl=app_chat_reactions)
+CREATE INDEX idx_app_chat_reactions_topic_seq
+    ON app_chat_reactions (topic_id, seq)
+
 [index] idx_app_chat_receipts_topic_seq (tbl=app_chat_receipts)
 CREATE INDEX idx_app_chat_receipts_topic_seq
     ON app_chat_receipts (topic_id, seq)
@@ -383,6 +387,19 @@ CREATE TABLE app_chat_messages (
     attachments_json TEXT,
     created_at       INTEGER NOT NULL,
     PRIMARY KEY (topic_id, seq)
+) STRICT
+
+[table] app_chat_reactions (tbl=app_chat_reactions)
+CREATE TABLE app_chat_reactions (
+    topic_id   TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    device_id  TEXT NOT NULL,
+    emoji      TEXT NOT NULL,
+    seq        INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1,
+    rev        INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (topic_id, message_id, device_id, emoji)
 ) STRICT
 
 [table] app_chat_receipts (tbl=app_chat_receipts)

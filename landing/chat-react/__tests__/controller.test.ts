@@ -214,4 +214,41 @@ describe('NeutronChatController — view model over chat-core', () => {
     await tick()
     expect(notifications).toBeGreaterThan(0)
   })
+
+  it('reflects a reaction_update on the message VM and sends a reaction frame on react()', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    // An agent message arrives (the user reacts to agent messages on web).
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'hello', ts: 1 })
+    await tick()
+
+    // A reaction_update from the server lands on the message's VM chips.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'reaction_update',
+      message_id: 'm1',
+      seq: 1,
+      rev: 1,
+      reactions: [{ emoji: '👍', device_id: 'devB' }],
+      ts: 2,
+    })
+    await tick()
+    let agent = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
+    expect(agent?.reactions).toEqual([{ emoji: '👍', count: 1, reactedBySelf: false }])
+
+    // react() puts a reaction frame on the wire.
+    controller.react('m1', '🎉', 'add')
+    const reactionFrames = sockets[0]!.sent
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((e) => e['type'] === 'reaction')
+    expect(reactionFrames).toContainEqual({ v: 1, type: 'reaction', message_id: 'm1', emoji: '🎉', action: 'add' })
+
+    // A higher-rev empty update clears the chips (removal).
+    sockets[0]!.deliver({ v: 1, type: 'reaction_update', message_id: 'm1', seq: 1, rev: 2, reactions: [], ts: 3 })
+    await tick()
+    agent = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
+    expect(agent?.reactions).toEqual([])
+  })
 })

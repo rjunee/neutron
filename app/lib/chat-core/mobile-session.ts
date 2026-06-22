@@ -36,12 +36,15 @@ import {
   ChatWsClient,
   InMemoryStore,
   normalizeInbound,
+  normalizeReactionUpdate,
   normalizeReceiptUpdate,
   SendQueue,
   SyncEngine,
   type ChatMessage,
   type ConnStatus,
+  type OutboundReaction,
   type OutboundReceipt,
+  type ReactionAction,
   type SocketLike,
   type Store,
 } from '@neutron/chat-core';
@@ -198,6 +201,19 @@ export class MobileChatSession {
     }
   }
 
+  /**
+   * Add or remove an emoji reaction on a message (Track B Phase 4). Sends a
+   * `reaction` frame; the server attributes it to THIS device (via the upgrade
+   * URL device id) and fans a `reaction_update` to every device, which {@link
+   * handleInbound} applies. Best-effort over the open socket; returns whether
+   * the frame was handed to the socket.
+   */
+  react(message_id: string, emoji: string, action: ReactionAction): boolean {
+    if (message_id.length === 0 || emoji.length === 0) return false;
+    const env: OutboundReaction = { v: 1, type: 'reaction', message_id, emoji, action };
+    return this.ws.send(env);
+  }
+
   private async handleInbound(data: unknown): Promise<void> {
     // Hand the raw frame to the UI first so streaming partials + typing
     // brackets render even though chat-core only persists final messages.
@@ -215,6 +231,15 @@ export class MobileChatSession {
     const receipt = normalizeReceiptUpdate(data);
     if (receipt !== null) {
       const { applied } = await this.engine.applyReceiptUpdate(this.topic_id, receipt);
+      if (applied) this.emitChange();
+      return;
+    }
+    // Track B Phase 4 (reactions) — a reaction_update carries the full current
+    // reaction set + rev for an already-applied message. Apply (rev-LWW) so the
+    // chips update; no-op if the message isn't local yet or the update is stale.
+    const reaction = normalizeReactionUpdate(data);
+    if (reaction !== null) {
+      const { applied } = await this.engine.applyReactionUpdate(this.topic_id, reaction);
       if (applied) this.emitChange();
       return;
     }

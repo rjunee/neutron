@@ -148,6 +148,50 @@ engine is NOT forked). Scope is receipts only.
   adapter option — wired in tests + composers, not yet in the live gateway
   composition (the app-ws surface itself isn't productionised there yet).
 
+## Message reactions (Track B Phase 4, slice 3) — `@neutron/chat-core` + app-ws
+
+Per-message emoji reactions across the web + mobile chat stack, MIRRORING the
+receipts slice above (per-message metadata, multi-device sync over chat-core,
+socket-attributed, durable + resume-replayable, sync engine NOT forked).
+
+- **Why it isn't just receipts-with-emoji: reactions are REMOVABLE.** Receipts
+  only advance, so the client merges them by monotonic **set-union**. A reaction
+  can be added AND removed, which a union can't express. So the model is
+  **server-authoritative full-aggregate + last-writer-wins by a monotonic
+  per-message `rev`**: each add/remove bumps `rev` and re-fans the WHOLE current
+  reaction set as a `reaction_update`; the client keeps the highest-`rev`
+  aggregate and drops stale ones — idempotent + order-independent, and a
+  higher-`rev` EMPTY set is what clears a reaction. Resume replays one
+  `reaction_update` per message-with-reactions after the cursor.
+- **No forging.** A client sends `{type:'reaction', message_id, emoji,
+  action:'add'|'remove'}`; the gateway attributes it to the SOCKET's `device_id`
+  (never the frame). `sanitizeReactionEmoji` bounds the emoji to one grapheme
+  (no whitespace/control, ≤64 chars; no fixed allowlist so the client owns the
+  palette).
+- **Stored in the Store contract, engine untouched.** `ChatMessage` gains
+  optional `reactions`/`reactions_rev`; `pickReactionState` (rev-LWW, NOT a
+  union) is folded into `mergeMessage`; `SyncEngine.applyReactionUpdate` is an
+  additive method over the existing UPSERT path (no-op if the message isn't
+  local yet or the update is stale). RN op-sqlite persists via a `reactions`
+  (JSON) + `reactions_rev` (INTEGER) column pair + idempotent `ADD COLUMN`
+  migration; web in-mem/OPFS for free.
+- **Server (`channels/adapters/app-ws/`, `gateway/http/app-ws-surface.ts`,
+  `persistence/app-chat-reactions.ts`).** `AppChatReactionStore` (migration
+  `0083_app_chat_reactions.sql`) keeps one row per `(topic, message, device,
+  emoji)`; a remove flips `active = 0` (a TOMBSTONE, not a DELETE) so `MAX(rev)`
+  stays monotonic across removes; seq resolved from the message log for resume.
+  The adapter gains a `reaction_log` option, `recordReaction` (persist + fan),
+  and `replayReactionsAfter`; the surface handles the `reaction` inbound
+  (device from the socket) and replays reactions after a resume.
+- **Clients.** chat-core sessions add `react(id, emoji, action)` +
+  `reaction_update` handling. Mobile (`ChatSyncSurface`) renders per-bubble
+  reaction chips (count + self-highlight, tap to toggle) + a long-press
+  quick-emoji tray; the shared `groupReactions` derivation produces the chips.
+  React/assistant-ui (`landing/chat-react/`) renders per-bubble chips + an
+  add-reaction palette via a `ReactionsContext` + assistant-ui's `useMessage()`.
+  Like `receipt_log`, `reaction_log` is an additive adapter option — wired in
+  tests + composers, not yet in the live gateway composition.
+
 ## `/code` → foundational Trident (DONE — Trident-port PR-5)
 
 The ~5-PR port folding Vajra's full Trident into Neutron Open as

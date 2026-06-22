@@ -72,6 +72,23 @@ export interface AppWsInboundReceipt {
   seq?: number
 }
 
+/**
+ * Track B Phase 4 (message reactions) — a client adds or removes an emoji
+ * reaction on a message. The server attributes it to the SOCKET's device id
+ * (stashed at upgrade) — the client never self-reports a device id here, so it
+ * can't forge another device's reaction (same anti-forge posture as the read
+ * receipt). `seq` is the message's server seq when the client knows it; omitted
+ * otherwise.
+ */
+export interface AppWsInboundReaction {
+  v: 1
+  type: 'reaction'
+  message_id: string
+  emoji: string
+  action: 'add' | 'remove'
+  seq?: number
+}
+
 export type AppWsInbound = AppWsInboundUserMessage
 
 export interface AppWsOutboundSessionReady {
@@ -269,12 +286,37 @@ export interface AppWsOutboundReceiptUpdate {
   project_id?: string
 }
 
+/**
+ * Track B Phase 4 (message reactions) — the FULL current reaction aggregate for
+ * one message. Fanned out to EVERY device on the topic whenever a device
+ * adds/removes a reaction, and replayed (per message with reactions) after a
+ * resume. Unlike the receipt aggregate (a monotonic union the client
+ * accumulates), the client REPLACES its reaction set with whichever
+ * `reaction_update` carries the highest `rev` — that's what lets a removal
+ * actually clear a reaction.
+ */
+export interface AppWsOutboundReactionUpdate {
+  v: 1
+  type: 'reaction_update'
+  message_id: string
+  /** The message's server seq (lets a client scope/ignore stale updates). */
+  seq?: number
+  /** Monotonic per-message reaction revision (last-writer-wins key). */
+  rev: number
+  /** The active `(emoji, device_id)` reactions on the message. */
+  reactions: ReadonlyArray<{ emoji: string; device_id: string }>
+  ts: number
+  /** P5.2 parity — project the underlying message belongs to. */
+  project_id?: string
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
   | AppWsOutboundAgentMessage
   | AppWsOutboundAgentMessagePartial
   | AppWsOutboundReceiptUpdate
+  | AppWsOutboundReactionUpdate
   | AppWsOutboundError
 
 /**
@@ -360,6 +402,61 @@ export function decodeAppWsReceipt(raw: unknown): AppWsInboundReceipt | null {
     out.seq = Math.max(0, Math.trunc(raw_seq))
   }
   return out
+}
+
+/**
+ * Track B Phase 4 — decode a
+ * `{ v:1, type:'reaction', message_id, emoji, action:'add'|'remove' }` frame.
+ * SEPARATE from the message / resume / receipt decoders so each path keeps its
+ * narrow type. Returns `null` for anything malformed. The device id is
+ * intentionally NOT read from the frame — the surface attributes the reaction
+ * to the socket's own device id, so a client can't forge another device's
+ * reaction. The emoji is validated by {@link sanitizeReactionEmoji}.
+ */
+export function decodeAppWsReaction(raw: unknown): AppWsInboundReaction | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'reaction') return null
+  if (e['action'] !== 'add' && e['action'] !== 'remove') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0 || message_id.length > 256) {
+    return null
+  }
+  const emoji = sanitizeReactionEmoji(e['emoji'])
+  if (emoji === null) return null
+  const out: AppWsInboundReaction = { v: 1, type: 'reaction', message_id, emoji, action: e['action'] }
+  const raw_seq = e['seq']
+  if (typeof raw_seq === 'number' && Number.isFinite(raw_seq)) {
+    out.seq = Math.max(0, Math.trunc(raw_seq))
+  }
+  return out
+}
+
+/** Track B Phase 4 — max bytes for a reaction emoji. Generous enough for any
+ *  single grapheme cluster (flags, skin-tone + ZWJ sequences) while bounding a
+ *  malformed client from shipping arbitrary text as a "reaction". */
+export const MAX_REACTION_EMOJI_LEN = 64
+
+/**
+ * Validate a reaction emoji from an untrusted source. Returns the cleaned value
+ * or `null` (absent / malformed). Accepts a non-empty string up to
+ * {@link MAX_REACTION_EMOJI_LEN} chars with NO ASCII control chars or
+ * whitespace — i.e. a single emoji/grapheme, not a sentence. Deliberately does
+ * NOT enforce a fixed allowlist: the client picks the palette, and a future
+ * emoji shouldn't require a server change.
+ */
+export function sanitizeReactionEmoji(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  if (raw.length === 0 || raw.length > MAX_REACTION_EMOJI_LEN) return null
+  // Reject control chars (C0/C1) and any whitespace — a reaction is one glyph,
+  // never multi-token text. Char-code scan avoids fiddly char-class ranges.
+  for (const ch of raw) {
+    const code = ch.codePointAt(0) ?? 0
+    if (code <= 0x20 || (code >= 0x7f && code <= 0xa0)) return null
+    if (/\s/u.test(ch)) return null
+  }
+  return raw
 }
 
 /**

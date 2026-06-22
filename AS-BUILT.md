@@ -2,6 +2,88 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-21 — Track B Phase 4 (slice 3): message reactions over `@neutron/chat-core`
+
+**What shipped.** Per-message emoji reactions across the web + mobile chat stack,
+built ON the existing chat-core engine (NO fork of the sync engine), MIRRORING
+the receipts slice (#24): per-message metadata, synced multi-device over
+chat-core, device-attributed by the socket (no forging), durable + resume-
+replayable. Scope is reactions ONLY (edit/delete is the next slice, out of scope).
+
+**The one structural difference from receipts: reactions are REMOVABLE.** Receipts
+only ever advance, so the client could merge them by monotonic set-union.
+Reactions can be added AND removed, so a union can't model a removal. The model
+is therefore **server-authoritative full-aggregate + last-writer-wins by a
+monotonic per-message `rev`**:
+- A client sends `{type:'reaction', message_id, emoji, action:'add'|'remove'}`.
+  The gateway attributes it to the SOCKET's `device_id` (never the frame — a
+  client can't forge another device's reaction), persists it, bumps the
+  message's `rev`, and fans the FULL current aggregate as a `reaction_update`
+  (`{rev, reactions:[{emoji,device_id}]}`).
+- The client REPLACES its reaction set with whichever `reaction_update` carries
+  the highest `rev` and drops a stale lower one — idempotent + order-independent,
+  and a higher-`rev` EMPTY set is what actually clears a reaction. Resume replays
+  one `reaction_update` per message-with-reactions after the cursor.
+
+**chat-core (engine untouched).**
+- `types.ts`: `ChatMessage` gains optional `reactions`/`reactions_rev`;
+  `MessageReaction`, `ReactionAction`, `InboundReactionUpdate`, `OutboundReaction`,
+  `normalizeReactionUpdate`, `parseReactions`.
+- `store.ts`: `pickReactionState` (rev-LWW, NOT a union) folded into
+  `mergeMessage`; `normalizeReactions`; framework-free `groupReactions` →
+  per-emoji chips shared by both clients.
+- `sync-engine.ts`: additive `applyReactionUpdate(topic, update)` — rev-LWW over
+  the existing UPSERT path; no-op when the message isn't local yet or the update
+  is stale.
+- RN op-sqlite (`app/lib/chat-core/sqlite-store.ts`): `reactions` (JSON TEXT) +
+  `reactions_rev` (INTEGER) columns + idempotent `ADD COLUMN` migration for
+  pre-reactions DBs. Web in-mem/OPFS serialize for free.
+
+**Server (`channels/adapters/app-ws/` + `gateway/http/app-ws-surface.ts`).**
+- Durable reaction log `persistence/app-chat-reactions.ts`
+  (`AppChatReactionStore`) + migration `0083_app_chat_reactions.sql` — one row
+  per `(topic, message, device, emoji)`; a remove flips `active = 0` (a
+  TOMBSTONE, not a DELETE) so `MAX(rev)` stays monotonic across removes; seq
+  resolved from the message log for resume ordering.
+- Envelope: `AppWsInboundReaction` + `decodeAppWsReaction` +
+  `sanitizeReactionEmoji` (one grapheme, no whitespace/control, ≤64 chars, no
+  fixed allowlist); `AppWsOutboundReactionUpdate`.
+- Adapter: `reaction_log` option; `recordReaction` (persist + fan
+  `reaction_update`); `replayReactionsAfter`; `hasReactions`.
+- Surface: a `reaction` inbound branch (device from the socket); reaction replay
+  after a resume (after messages + receipts so the target is already applied).
+
+**Clients.**
+- chat-core sessions (`web-session.ts` / `mobile-session.ts`): `react(id, emoji,
+  action)`, `reaction_update` handling.
+- Mobile (`ChatSyncSurface.tsx`): per-bubble reaction chips (count + self-
+  highlight, tap a self-chip to remove) + a long-press quick-emoji tray;
+  `groupReactions` via `chat-render-model`; `useMobileChat` exposes `react`.
+- React/assistant-ui (`landing/chat-react/`): controller computes per-message
+  `reactions` chips + a `react()` passthrough; `ChatApp` renders chips +
+  an add-reaction palette per bubble via a `ReactionsContext` + assistant-ui's
+  `useMessage()` (CSS `car-reaction*` in `chat-react.html`).
+
+**Wiring posture (honest scope).** Like `chat_log`/`receipt_log`, the
+`reaction_log` is an ADDITIVE adapter option — exercised by the test composers +
+a real-SQLite gateway integration test, NOT yet wired into the live gateway
+composition (the production app-ws surface itself isn't composed in
+`gateway/composition.ts` in neutron-open). When productionised, pass `chat_log`
++ `receipt_log` + `reaction_log` together.
+
+**Tests (real, not mocks).** `chat-core/__tests__/reactions.test.ts` (decode,
+parse, rev-LWW merge incl. removal-clears, engine apply/stale/clear,
+groupReactions), `persistence/app-chat-reactions.test.ts` (add/remove tombstone,
+rev monotonicity, aggregate, resume replay over real SQLite),
+`channels/adapters/app-ws/__tests__/reactions.test.ts` (decode + emoji
+validation, fan-out, removal, multi-device, replay, legacy no-log),
+`gateway/__tests__/app-ws-reactions.test.ts` (end-to-end WS over a live
+Bun.serve: add/remove fan-out, socket-attributed device — forged frame id
+ignored, resume replay), plus render-model, mobile-session, sqlite-store (incl.
+reaction persistence + cold-reopen), and a happy-dom `component.test.tsx` that
+asserts a chip reaches the real assistant-ui DOM. Root + all leaf tsc clean;
+full `bun test` green.
+
 ## 2026-06-21 — Track B Phase 4 (slice 2): delivery + read receipts over `@neutron/chat-core`
 
 **What shipped.** A per-message delivery ladder — `pending → sent → delivered →
