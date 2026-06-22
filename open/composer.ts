@@ -51,6 +51,7 @@ import {
   PREWARM_AWAIT_CAP_MS_DEFAULT,
 } from '../onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
+import { buildSubstrateTridentDispatch } from '../trident/substrate-dispatch.ts'
 import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
@@ -273,6 +274,28 @@ export function buildOpenGraphComposer(
         ? buildLlmCallSubstrate({
             pool: llmPool,
             substrate_instance_id: `cc-agent-${internal_handle}`,
+            cwd: owner_home,
+            internal_handle,
+            user_id: OWNER_USER_ID,
+            project_slug,
+            skip_permissions: true,
+            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+          })
+        : null
+
+    // Dedicated substrate for foundational Trident build agents (Forge / Argus)
+    // — the `/code <task>` autonomous build loop. Trident-port: FIRST prod-boot
+    // wiring of the production runner. A distinct `cc-trident-*` instance id
+    // keeps build turns OFF the conversational (`cc-agent-*`) warm pool so a
+    // build's Forge/Argus context never bleeds into the owner's live chat (or
+    // vice-versa). When no credential resolves (`llmPool === null`) the box has
+    // no runner and `composition.trident` stays unset — the tick loop runs its
+    // restart-safe `stubAdvanceDeps` no-op, the unchanged LLM-less behaviour.
+    const tridentSubstrate =
+      llmPool !== null
+        ? buildLlmCallSubstrate({
+            pool: llmPool,
+            substrate_instance_id: `cc-trident-${internal_handle}`,
             cwd: owner_home,
             internal_handle,
             user_id: OWNER_USER_ID,
@@ -979,6 +1002,20 @@ export function buildOpenGraphComposer(
       // `import_analysis_presented` without a user inbound. Mirrors the managed
       // wiring exactly (gateway/composition/build-core-modules.ts § S12).
       onboarding_import_running_cron: { engine: landing.engine },
+      // Foundational Trident — the `/code <task>` autonomous Forge→Argus→merge
+      // loop. Threading `dispatch` here is what flips the trident tick loop
+      // (built in `build-core-modules.ts`) from its `stubAdvanceDeps` no-op to
+      // the REAL `buildTridentOrchestrator` step, so a `code_trident_runs` row
+      // is driven end-to-end on the CC-subprocess substrate. Omitted when no
+      // credential resolves (`tridentSubstrate === null`) → unchanged LLM-less
+      // behaviour (loop stays live + restart-safe but advances nothing).
+      ...(tridentSubstrate !== null
+        ? {
+            trident: {
+              dispatch: buildSubstrateTridentDispatch({ substrate: tridentSubstrate }),
+            },
+          }
+        : {}),
       // Tear down the upload-session sweeper on shutdown.
       realmode_cleanups: realmodeCleanups,
       landing_server: {

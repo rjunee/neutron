@@ -40,6 +40,51 @@ neutron-open dispatcher already skips completed/failed bullets before the
 context gate (`onboarding/overnight/dispatcher.ts`). Wiring an actual
 `deliver` surface in production (the field is currently never set, so the
 reporter records `skipped`) is a separate, pre-existing gap.
+## 2026-06-22 — Foundational Trident production runner wired into Open prod boot
+
+Makes the `/code <task>` build runner real in the Open self-host gateway. The
+trident runtime (state machine + tick loop + real Forge→Argus→merge `step`) was
+complete and the `input.trident.dispatch` seam existed, but the Open composer
+never set it — so the tick loop fell back to `stubAdvanceDeps()` (advances
+nothing) and a build could never dispatch. This is the `CodegenNotConfiguredError`
+"production runner not wired into prod boot" class.
+
+**What shipped:**
+- `trident/substrate-dispatch.ts` (new) — `buildSubstrateTridentDispatch({ substrate })`:
+  a thin production adapter turning a runtime `Substrate` (the CC-subprocess
+  persistent-REPL adapter, never api.anthropic.com) into a `TridentDispatch`.
+  Runs ONE Forge/Argus turn → coalesced terminal text + terminal status
+  (completion→completed, error→failed, timeout→timed_out, throw→failed). Declares
+  NO tools and holds no conversation state — prompt rendering + verdict parsing
+  stay above it in the orchestrator + `TridentSessionManager`.
+- `open/composer.ts` — builds a dedicated `cc-trident-*` substrate (kept off the
+  conversational `cc-agent-*` warm pool) and threads
+  `composition.trident = { dispatch }`. When no credential resolves, `trident`
+  stays unset → unchanged LLM-less behaviour (loop live + restart-safe, advances
+  nothing).
+- Tests: `trident/substrate-dispatch.test.ts` (adapter mechanics + an end-to-end
+  `/code`→real-run proof through the REAL orchestrator with a mocked substrate);
+  `open/__tests__/open-trident-prod-boot-wiring.test.ts` (boots the REAL Open
+  composer with a synthetic credential + mocked substrate; asserts
+  `composition.trident.dispatch` is a working runner and the no-credential boot
+  degrades cleanly).
+- Docs: `docs/SYSTEM-OVERVIEW.md` Trident/`/code` + boot sections corrected to
+  reflect what's live vs. the next PRs.
+
+**Spec-conformance (Trident-port, FIRST scoped PR of the multi-PR port):**
+- Spec/intent says: wire the production runner into prod boot so `/code` runs on
+  the CC-subprocess substrate instead of throwing `CodegenNotConfiguredError`.
+- Pre-PR wiring: `build-core-modules.ts` reads `input.trident.dispatch` (PR-5),
+  but the Open composer never populated it → `stubAdvanceDeps()` no-op.
+- Gap: no production `TridentDispatch`; no composer wiring.
+- This PR closes it: adapter + composer wiring + a test proving `/code`
+  dispatches a real run on a mocked substrate.
+- OUT OF SCOPE (next PRs, noted in PR body + SYSTEM-OVERVIEW): (a) routing the
+  literal `/code` keystroke from the Open landing chat into
+  `buildTridentCodeChatCommandFilter` (the landing chat path has no
+  `ChatCommandFilter` seam yet); (b) per-build context isolation + per-worktree
+  cwd; (c) physical retirement of the `cores/free/code-gen` wrapper (still
+  referenced by the `codegen_*` MCP tools + Managed composer + ~106 tests).
 
 ## 2026-06-22 — Conditional embedding-store init wired into provisioning (ISSUES #215)
 
