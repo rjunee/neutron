@@ -2,6 +2,69 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-1: tab descriptor + resolver endpoints (engine, builtin-only, flag-gated)
+
+First PR of the WAVE 3 tabbed-project-interface build
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.1 + § 4). Establishes
+the **engine-side tab resolver both clients will consume** so tabs are never
+hardcoded in the mobile/web clients.
+
+**New module `tabs/registry.ts`.** A `TabDescriptor` type
+(`key`, `label`, `scope: 'project'|'global'`, `source: 'builtin'|'core'`,
+optional `core_slug`, `order`, `mount: { kind: 'builtin'|'webview', target }`)
++ `resolveTabs(scope)` / `resolveProjectTabs()` / `resolveGlobalTabs()`. **v1
+emits BUILTIN descriptors only** — Chat/Documents/Tasks per-project (targets
+`chat`/`docs`/`tasks` matching the existing client routes), Admin global. The
+resolver returns fresh clones of a frozen builtin set every call (callers
+can't mutate shared state), and builtin `order` values are spaced by 10 so
+PR-2 can interleave Core-contributed tabs without renumbering. No reading of
+`core_installations` — that union is PR-2.
+
+**New HTTP surface `gateway/http/app-tabs-surface.ts`.** Two read-only routes,
+`GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs`, Bearer-auth via the
+shared `AppWsAuthResolver` (same contract as the sibling app surfaces), per-
+project route validates `project_id`, non-GET → 405, non-owned paths → `null`.
+
+**Flag gate `NEUTRON_TABS_REGISTRY` (default OFF).** Resolved to a boolean at
+composition time and passed to the surface as `enabled`. Flag OFF → the
+surface disclaims its routes (returns `null`) BEFORE auth, so they 404 through
+the default chain exactly as if unmounted and clients keep their hardcoded
+tabs (no regression). Flag ON → serves descriptors.
+
+**Plumbing.** `app_tabs_surface` added to `AppSurfacesCompositionInput`,
+forwarded in `composition.ts` (+ `hasAnyChainedSurface`), and dispatched in
+`gateway/http/compose.ts` as `appTabs` — mounted ahead of `appProjects` so the
+per-project `/tabs` path is unambiguously owned (mirrors the
+launcher/tasks/reminders precedence). Like the other app surfaces this is a
+plumbed seam tested in isolation (no production boot constructs it yet, same
+status as `app_docs_surface`). `tabs/**/*.ts` added to the root tsconfig
+`include`.
+
+**Spec-conformance diff (plan PR-1 / current code / gap / this-PR / out-of-scope):**
+- *plan PR-1:* `tabs/registry.ts` + `GET /api/app/projects/<id>/tabs` +
+  `GET /api/app/tabs`, builtin descriptors only (Chat, Documents, Tasks; global
+  Admin), flag `NEUTRON_TABS_REGISTRY`, pure additive.
+- *current code:* no tab resolver; mobile tabs hardcoded
+  (`app/components/ProjectTabBar.tsx`), web chat-only; `project_tab` core
+  surface declared-but-unrendered.
+- *gap:* no engine source-of-truth for the tab set.
+- *this-PR:* the descriptor type + resolver + both endpoints + flag + tests +
+  composition plumbing. Reconciled two `[estimate]` shape points the plan
+  invited confirming in-PR: `mount.kind` = `'builtin'|'webview'` (an engine
+  descriptor can't know mobile-vs-web; builtin tabs carry a `target` key each
+  client maps to its native view), and `source` is the builtin/core
+  discriminant (v2 adds `'custom'`). Included **Tasks** as a builtin project
+  tab per the plan's PR-1 list (the dispatch brief's shorthand said
+  "Chat + Documents"; the plan § 4 says "Chat, Documents, Tasks").
+- *out-of-scope (NOT built here):* Core-contributed tabs, install-scope union,
+  any client change, the global cross-project roll-up (all PR-2+).
+
+**Tests (19, green).** `tabs/__tests__/registry.test.ts` (shape, scope
+filtering, ordering + PR-2 gaps, immutability, no v2 source leak) +
+`gateway/__tests__/app-tabs-surface.test.ts` (flag-ON project + global 200s,
+auth 401, malformed project_id 400, non-GET 405, **flag-OFF 404 disclaim**
+before auth, non-owned-path disclaim). `bunx tsc --noEmit` clean.
+
 ## 2026-06-22 — Test-suite RUN-efficiency: PGLite quarantine lane + handler-direct surface tests
 
 Pure speed/reliability sprint per `docs/research/test-suite-audit-2026-06-22.md`

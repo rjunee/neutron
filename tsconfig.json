@@ -18,6 +18,7 @@
     "gbrain-memory/**/*.ts",
     "reminders/**/*.ts",
     "tasks/**/*.ts",
+    "tabs/**/*.ts",
     "cron/**/*.ts",
     "doc-search/**/*.ts",
     "message-search/**/*.ts",

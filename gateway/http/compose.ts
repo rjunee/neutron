@@ -186,6 +186,18 @@ export interface AppDocsHandler {
 }
 
 /**
+ * WAVE 3 PR-1 — Expo/web-app tab-resolver surface. Owns
+ * `GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs`. Returns the
+ * engine-resolved tab descriptors both clients consume. Flag-gated by
+ * `NEUTRON_TABS_REGISTRY`; disclaims (returns `null`) when the flag is off.
+ *
+ * Surface factory: `gateway/http/app-tabs-surface.ts:createAppTabsSurface`.
+ */
+export interface AppTabsHandler {
+  handler: (req: Request) => Promise<Response | null>
+}
+
+/**
  * P7.4 restore UI — Expo-app project-backups + restore surface.
  * Owns `/api/app/projects/<id>/backups[...]` + `/api/app/projects/<id>/restore`.
  * Same disclaiming-null contract as the docs surface.
@@ -530,6 +542,21 @@ export interface ComposeHttpHandlerInput {
    */
   appDocs?: AppDocsHandler
   /**
+   * WAVE 3 PR-1 — optional Expo/web-app tab-resolver surface. When
+   * supplied, the composed HTTP chain mounts
+   * `GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs` (engine-
+   * resolved tab descriptors both clients consume). Flag-gated inside the
+   * surface by `NEUTRON_TABS_REGISTRY`; when the flag is off it disclaims
+   * its routes (returns `null`) so they 404 through the default chain and
+   * clients keep their hardcoded tabs. Mounted ahead of `appProjects` so
+   * the per-project `/tabs` path is unambiguously owned, mirroring the
+   * launcher/tasks/reminders precedence.
+   *
+   * Surface factory: `gateway/http/app-tabs-surface.ts:createAppTabsSurface`.
+   * Per docs/plans/wave3-tabbed-interface-build-plan.md § 3.1 + § 4 (PR-1).
+   */
+  appTabs?: AppTabsHandler
+  /**
    * P7.4 restore UI — Expo-app project-backups + restore surface. When
    * supplied, the composed HTTP chain mounts:
    *
@@ -800,6 +827,7 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
     appPersona,
     appDevices,
     appDocs,
+    appTabs,
     appBackups,
     cores,
     coresOAuth,
@@ -1055,6 +1083,17 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       if (appReminders !== undefined) {
         const remRes = await appReminders.handler(req)
         if (remRes !== null) return remRes
+      }
+      // 0h1. Expo/web-app tab-resolver surface — WAVE 3 PR-1. Owns
+      //      `GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs`.
+      //      Mounted BEFORE appProjects so the per-project `/tabs` path is
+      //      unambiguously owned (appProjects disclaims it via null today,
+      //      but this precedence keeps it that way), mirroring the
+      //      launcher/tasks/reminders ordering. Disclaims (null) when the
+      //      `NEUTRON_TABS_REGISTRY` flag is off so the routes 404 through.
+      if (appTabs !== undefined) {
+        const tabsRes = await appTabs.handler(req)
+        if (tabsRes !== null) return tabsRes
       }
       // 0h2. Expo-app project-settings + project-list surface — P5.2
       //      + ISSUES #9. Owns:

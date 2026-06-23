@@ -238,6 +238,27 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * WAVE 3 PR-1 — Expo/web-app tab-resolver surface. When supplied, the
+   * composed HTTP chain mounts `GET /api/app/projects/<id>/tabs` (per-
+   * project tabs) + `GET /api/app/tabs` (global tabs). The endpoints
+   * return engine-resolved `TabDescriptor[]` that both clients (mobile RN
+   * + web React) consume instead of hardcoding their tab set. v1 resolves
+   * BUILTIN descriptors only (Chat/Documents/Tasks per-project; Admin
+   * global); Core-contributed tabs + install-scope land in PR-2.
+   *
+   * Flag-gated by `NEUTRON_TABS_REGISTRY` (default OFF), resolved to a
+   * boolean at composition time and passed to the surface as `enabled`.
+   * When the flag is off the surface disclaims its routes (returns `null`)
+   * so they 404 through the default chain and clients keep their hardcoded
+   * tabs — no regression. When omitted entirely the routes are unmounted.
+   *
+   * Surface factory: `gateway/http/app-tabs-surface.ts:createAppTabsSurface`.
+   * Per docs/plans/wave3-tabbed-interface-build-plan.md § 3.1 + § 4 (PR-1).
+   */
+  app_tabs_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P7.4 restore UI — optional project-backups + restore surface.
    * Owns `/api/app/projects/<id>/backups[...]` +
    * `/api/app/projects/<id>/restore`. Surface factory:
