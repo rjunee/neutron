@@ -175,7 +175,10 @@ describe('ProjectShell render (happy-dom)', () => {
     const chatPanel = container.querySelector('.car-tabpanel') as HTMLElement
     expect(chatPanel.hasAttribute('hidden')).toBe(false)
 
-    // Switch to Documents → placeholder shows, Chat panel hidden (but mounted).
+    // Switch to Documents → the real Documents view mounts (PR-5), Chat panel
+    // hidden (but mounted). The injected fetch only serves /tabs, so the docs
+    // tree 404s and the viewer shows its empty prompt — proving the Documents
+    // tab now renders DocumentsTab instead of the PR-4 placeholder.
     const docsBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
       (b) => b.textContent === 'Documents',
     ) as HTMLButtonElement
@@ -183,7 +186,8 @@ describe('ProjectShell render (happy-dom)', () => {
       docsBtn.click()
       await tick()
     })
-    expect(container.textContent).toContain('Coming soon.')
+    expect(container.querySelector('.cdoc')).not.toBeNull()
+    expect(container.textContent).toContain('Select a document to read.')
     expect((container.querySelector('.car-tabpanel') as HTMLElement).hasAttribute('hidden')).toBe(true)
 
     // Switch to the Core tab → a sandboxed iframe at the resolved URL.

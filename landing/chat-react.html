@@ -56,6 +56,80 @@
   }
   .car-tab-placeholder-title { font-size: 20px; color: var(--fg); margin-bottom: 6px; }
   .car-tab-placeholder-sub { font-size: 14px; }
+  /* WAVE 3 PR-5 — web Documents tab (list · viewer · comments). */
+  .cdoc { display: flex; flex: 1 1 auto; min-height: 0; width: 100%; }
+  .cdoc-list {
+    flex: 0 0 220px; min-width: 0; overflow-y: auto;
+    border-right: 1px solid var(--border); background: var(--surface); padding: 8px 0;
+  }
+  .cdoc-list-ul { list-style: none; margin: 0; padding: 0; }
+  .cdoc-list-item {
+    display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
+    appearance: none; background: transparent; border: 0; color: var(--fg);
+    padding: 7px 12px; font: inherit; cursor: pointer;
+  }
+  .cdoc-list-item:hover { background: rgba(255,255,255,.05); }
+  .cdoc-list-item-active { background: rgba(108,170,255,.16); }
+  .cdoc-list-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cdoc-list-dir { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cdoc-view { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+  .cdoc-view-head {
+    flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border);
+  }
+  .cdoc-view-path { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cdoc-comment-btn {
+    appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+    border-radius: 8px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; flex: 0 0 auto;
+  }
+  .cdoc-comment-btn:disabled { opacity: .45; cursor: default; }
+  .cdoc-content {
+    flex: 1 1 auto; overflow-y: auto; margin: 0; padding: 16px 18px;
+    white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fg); user-select: text;
+  }
+  .cdoc-comments {
+    flex: 0 0 300px; min-width: 0; overflow-y: auto;
+    border-left: 1px solid var(--border); background: var(--surface); padding: 10px;
+  }
+  .cdoc-empty { color: var(--muted); font-size: 13px; padding: 14px; text-align: center; }
+  .cdoc-view-empty { margin: auto; }
+  .cdoc-comments-error { color: #ff8a8a; font-size: 12px; padding: 6px 8px; }
+  .cdoc-composer, .cdoc-reply-box {
+    flex: 0 0 auto; border-top: 1px solid var(--border); padding: 10px 14px; background: var(--surface);
+  }
+  .cdoc-composer-excerpt { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-style: italic; }
+  .cdoc-composer-input {
+    width: 100%; resize: vertical; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px; font: inherit; font-size: 13px;
+  }
+  .cdoc-composer-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .cdoc-btn {
+    appearance: none; border: 1px solid var(--border); background: transparent; color: var(--fg);
+    border-radius: 8px; padding: 5px 11px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .cdoc-btn:disabled { opacity: .45; cursor: default; }
+  .cdoc-btn-primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+  .cdoc-thread { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+  .cdoc-thread-resolved { opacity: .6; }
+  .cdoc-thread-head {
+    display: block; width: 100%; text-align: left; appearance: none; background: transparent;
+    border: 0; color: var(--fg); padding: 9px 11px; font: inherit; cursor: pointer;
+  }
+  .cdoc-thread-head:hover { background: rgba(255,255,255,.04); }
+  .cdoc-thread-anchor { font-size: 11px; color: var(--accent); margin-bottom: 4px; font-style: italic; }
+  .cdoc-thread-root { display: flex; flex-direction: column; gap: 2px; }
+  .cdoc-thread-author { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .cdoc-thread-body { font-size: 13px; color: var(--fg); white-space: pre-wrap; word-break: break-word; }
+  .cdoc-thread-count { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .cdoc-thread-detail { padding: 6px 11px 11px; border-top: 1px solid var(--border); }
+  .cdoc-reply { display: flex; flex-direction: column; gap: 1px; padding: 6px 0; }
+  .cdoc-reply-box { border-top: 0; padding: 6px 0 0; background: transparent; }
+  .cdoc-resolved-head { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 10px 0 6px; padding: 0 4px; }
+  @media (max-width: 720px) {
+    .cdoc-list { flex-basis: 140px; }
+    .cdoc-comments { flex-basis: 200px; }
+  }
   .car-shell { display: flex; height: 100%; width: 100%; }
   .car-rail {
     width: 220px;
