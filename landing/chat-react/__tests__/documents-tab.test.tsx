@@ -7,6 +7,9 @@
  *   - selecting text + posting a COMMENT round-trips through the anchor builder;
  *   - the comments_unavailable 503 gate degrades gracefully (plan §5 VERIFY):
  *     the doc still views and the composer is hidden.
+ *   - EDIT (PR-6): Edit → change the textarea → Save PUTs the new content with
+ *     the OCC baseline and returns to the read view; a 409 doc_changed_underfoot
+ *     keeps edit mode and shows a conflict message.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
@@ -294,6 +297,271 @@ describe('DocumentsTab (happy-dom)', () => {
     expect(container.querySelector('.cdoc-content')?.textContent).toContain('quick brown fox')
     expect(container.textContent).toContain('Comments aren’t available on this server.')
     expect(container.querySelector('.cdoc-comment-btn')).toBeNull()
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('edits a doc and saves it over PUT with the OCC baseline (PR-6)', async () => {
+    let put: { url: string; body: Record<string, unknown> } | null = null
+    let commentReloads = 0
+    const handler: Handler = (url, init) => {
+      if (url.endsWith('/docs/tree')) return jsonRes({ ok: true, tree: TREE, file_count: 2 })
+      if (url.includes('/docs/file?path=')) {
+        return jsonRes({
+          ok: true,
+          file: { path: 'notes/intro.md', content: FILE_CONTENT, size_bytes: 44, modified_at: 5 },
+        })
+      }
+      if (url.endsWith('/docs/file') && (init?.method ?? 'GET') === 'PUT') {
+        put = { url, body: JSON.parse(init!.body as string) as Record<string, unknown> }
+        return jsonRes({ ok: true, file: { path: 'notes/intro.md', size_bytes: 9, modified_at: 99 } })
+      }
+      if (url.includes('/docs/comments?path=')) {
+        commentReloads += 1
+        return jsonRes({ ok: true, threads: [], next_cursor: null })
+      }
+      return null
+    }
+    const { container, root, act } = await mount(handler)
+
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+      (b) => (b.textContent ?? '').includes('intro.md'),
+    ) as HTMLButtonElement
+    await act(async () => {
+      introBtn.click()
+      await tick()
+      await tick()
+    })
+    const reloadsAfterOpen = commentReloads
+
+    // Enter edit mode.
+    const editBtn = container.querySelector('.cdoc-edit-btn') as HTMLButtonElement
+    expect(editBtn).not.toBeNull()
+    await act(async () => {
+      editBtn.click()
+      await tick()
+    })
+
+    // The editor textarea is seeded with the raw file content.
+    const editor = container.querySelector('.cdoc-editor') as HTMLTextAreaElement
+    expect(editor).not.toBeNull()
+    expect(editor.value).toBe(FILE_CONTENT)
+
+    // Save is disabled until the draft actually differs.
+    const saveBtnInitial = Array.from(container.querySelectorAll('.cdoc-btn-primary')).find(
+      (b) => (b.textContent ?? '').includes('Save'),
+    ) as HTMLButtonElement
+    expect(saveBtnInitial.disabled).toBe(true)
+
+    // Edit the draft.
+    const { act: actFn } = await import('react')
+    await actFn(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!
+      setter.call(editor, '# Rewritten')
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+
+    const saveBtn = Array.from(container.querySelectorAll('.cdoc-btn-primary')).find(
+      (b) => (b.textContent ?? '').includes('Save'),
+    ) as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    await act(async () => {
+      saveBtn.click()
+      await tick()
+      await tick()
+    })
+
+    // PUT carried the new content + the OCC baseline (the open file's mtime).
+    expect(put).not.toBeNull()
+    expect(put!.body).toEqual({
+      path: 'notes/intro.md',
+      content: '# Rewritten',
+      expected_modified_at: 5,
+    })
+    // Back to the read view, now showing the saved content; comments reloaded.
+    expect(container.querySelector('.cdoc-editor')).toBeNull()
+    expect(container.querySelector('.cdoc-content')?.textContent).toContain('# Rewritten')
+    expect(commentReloads).toBeGreaterThan(reloadsAfterOpen)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('surfaces a conflict when the doc changed underfoot (409)', async () => {
+    const handler: Handler = (url, init) => {
+      if (url.endsWith('/docs/tree')) return jsonRes({ ok: true, tree: TREE, file_count: 2 })
+      if (url.includes('/docs/file?path=')) {
+        return jsonRes({
+          ok: true,
+          file: { path: 'notes/intro.md', content: FILE_CONTENT, size_bytes: 44, modified_at: 5 },
+        })
+      }
+      if (url.endsWith('/docs/file') && (init?.method ?? 'GET') === 'PUT') {
+        // PUT /docs/file surfaces a stale OCC baseline as doc_modified_conflict
+        // (DocConflictError), the real gateway code for write conflicts.
+        return jsonRes(
+          { ok: false, code: 'doc_modified_conflict', message: 'stale', current_modified_at: 88 },
+          409,
+        )
+      }
+      if (url.includes('/docs/comments?path=')) return jsonRes({ ok: true, threads: [], next_cursor: null })
+      return null
+    }
+    const { container, root, act } = await mount(handler)
+
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+      (b) => (b.textContent ?? '').includes('intro.md'),
+    ) as HTMLButtonElement
+    await act(async () => {
+      introBtn.click()
+      await tick()
+      await tick()
+    })
+    await act(async () => {
+      ;(container.querySelector('.cdoc-edit-btn') as HTMLButtonElement).click()
+      await tick()
+    })
+    const editor = container.querySelector('.cdoc-editor') as HTMLTextAreaElement
+    const { act: actFn } = await import('react')
+    await actFn(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!
+      setter.call(editor, 'conflicting edit')
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+    const saveBtn = Array.from(container.querySelectorAll('.cdoc-btn-primary')).find(
+      (b) => (b.textContent ?? '').includes('Save'),
+    ) as HTMLButtonElement
+    await act(async () => {
+      saveBtn.click()
+      await tick()
+      await tick()
+    })
+
+    // Stays in edit mode, draft preserved, with a conflict message.
+    expect(container.querySelector('.cdoc-editor')).not.toBeNull()
+    expect((container.querySelector('.cdoc-editor') as HTMLTextAreaElement).value).toBe('conflicting edit')
+    expect(container.textContent).toContain('changed since you opened it')
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('does not leave Save stuck-disabled when navigating away mid-save', async () => {
+    // The PUT for doc A is held open; navigating to doc B must reset `saving` so
+    // doc B's edit controls aren't stuck-disabled when the stale PUT settles.
+    let releasePut: (() => void) | null = null
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve
+    })
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { DocumentsTab } = await import('../DocumentsTab.tsx')
+    const React = await import('react')
+
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith('/docs/tree')) return jsonRes({ ok: true, tree: TREE, file_count: 2 })
+      if (url.includes('/docs/file?path=')) {
+        const isReadme = url.includes('readme.md')
+        return jsonRes({
+          ok: true,
+          file: {
+            path: isReadme ? 'readme.md' : 'notes/intro.md',
+            content: isReadme ? 'README body' : FILE_CONTENT,
+            size_bytes: 11,
+            modified_at: isReadme ? 7 : 5,
+          },
+        })
+      }
+      if (url.endsWith('/docs/file') && (init?.method ?? 'GET') === 'PUT') {
+        await putGate // held until the test releases it
+        return jsonRes({ ok: true, file: { path: 'notes/intro.md', size_bytes: 3, modified_at: 50 } })
+      }
+      if (url.includes('/docs/comments?path=')) return jsonRes({ ok: true, threads: [], next_cursor: null })
+      return new Response(JSON.stringify({ ok: false, code: 'request_failed' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <React.StrictMode>
+          <DocumentsTab projectId={PROJECT} config={config} fetchImpl={fetchImpl} />
+        </React.StrictMode>,
+      )
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+
+    const open = async (name: string): Promise<void> => {
+      const btn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+        (b) => (b.textContent ?? '').includes(name),
+      ) as HTMLButtonElement
+      await act(async () => {
+        btn.click()
+        await tick()
+        await tick()
+      })
+    }
+    const setEditorValue = async (v: string): Promise<void> => {
+      const editor = container.querySelector('.cdoc-editor') as HTMLTextAreaElement
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!
+        setter.call(editor, v)
+        editor.dispatchEvent(new Event('input', { bubbles: true }))
+        await tick()
+      })
+    }
+    const clickEdit = async (): Promise<void> => {
+      await act(async () => {
+        ;(container.querySelector('.cdoc-edit-btn') as HTMLButtonElement).click()
+        await tick()
+      })
+    }
+    const saveBtn = (): HTMLButtonElement =>
+      Array.from(container.querySelectorAll('.cdoc-btn-primary')).find((b) =>
+        (b.textContent ?? '').includes('Sav'),
+      ) as HTMLButtonElement
+
+    // Doc A: edit, change, Save → PUT is now in flight (held by putGate).
+    await open('intro.md')
+    await clickEdit()
+    await setEditorValue('A edit')
+    await act(async () => {
+      saveBtn().click()
+      await tick()
+    })
+
+    // Navigate to doc B while the save is still in flight.
+    await open('readme.md')
+
+    // Release the stale PUT; its continuation must bail (seq mismatch).
+    await act(async () => {
+      releasePut!()
+      await tick()
+      await tick()
+    })
+
+    // Doc B can be edited + its Save enables once the draft differs — i.e. the
+    // controls are NOT stuck-disabled from the abandoned save.
+    await clickEdit()
+    await setEditorValue('B edit')
+    expect(saveBtn().disabled).toBe(false)
+    expect(saveBtn().textContent).toContain('Save')
 
     await act(async () => {
       root.unmount()

@@ -7,6 +7,7 @@
  *
  *   GET  /api/app/projects/<id>/docs/tree                       → list docs + folders
  *   GET  /api/app/projects/<id>/docs/file?path=<rel>            → read a markdown file
+ *   PUT  /api/app/projects/<id>/docs/file                       → write a markdown file (PR-6)
  *   GET  /api/app/projects/<id>/docs/comments?path=<rel>        → list threads on a doc
  *   GET  /api/app/projects/<id>/docs/comments/<id>/thread       → one thread tree
  *   POST /api/app/projects/<id>/docs/comments                   → post a root comment
@@ -15,8 +16,8 @@
  *   POST /api/app/projects/<id>/docs/comments/<id>/escalate     → escalate to chat
  *
  * WAVE 3 keeps the FILESYSTEM as the source of truth for doc bodies — there is
- * no new `documents` table; the web Documents tab reads + comments over these
- * EXISTING handlers. Read+comment first; editing lands in PR-6.
+ * no new `documents` table; the web Documents tab reads, edits + comments over
+ * these EXISTING handlers. PR-6 added `writeFile` (edit parity with mobile).
  *
  * ── comments_unavailable gate (plan §5 VERIFY) ──────────────────────────────
  * The comments substrate is OPTIONAL on the gateway: when it isn't wired the
@@ -57,6 +58,14 @@ export interface DocTreeNode {
 export interface DocFile {
   path: string
   content: string
+  size_bytes: number
+  modified_at: number
+}
+
+/** Result of a successful `writeFile` — the server-authoritative post-write
+ *  stat. `modified_at` becomes the next OCC baseline for a follow-up edit. */
+export interface WriteResult {
+  path: string
   size_bytes: number
   modified_at: number
 }
@@ -169,6 +178,10 @@ interface FileResponse {
   ok: boolean
   file: DocFile
 }
+interface WriteResponse {
+  ok: boolean
+  file: WriteResult
+}
 interface CommentsListResponse {
   ok: boolean
   threads: ThreadSummary[]
@@ -233,6 +246,29 @@ export class WebDocsClient {
   async readFile(project_id: string, rel_path: string): Promise<DocFile> {
     const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file?path=${encodeURIComponent(rel_path)}`
     const res = await this.req<FileResponse>(path)
+    return res.file
+  }
+
+  /**
+   * Write a markdown file's full content (create or overwrite). Brings the web
+   * Documents tab to edit parity with the mobile docs tab (WAVE 3 PR-6) over the
+   * EXISTING `PUT .../docs/file` handler — filesystem stays the source of truth.
+   *
+   * Optimistic-concurrency: pass `expected_modified_at` (the open file's mtime)
+   * so a concurrent write loses the race with a `409 doc_changed_underfoot`
+   * instead of silently clobbering. The thrown {@link DocsClientError} carries
+   * `current_modified_at` so the UI can prompt a reload. Omit it to force-write.
+   */
+  async writeFile(
+    project_id: string,
+    input: { path: string; content: string; expected_modified_at?: number },
+  ): Promise<WriteResult> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file`
+    const body: Record<string, unknown> = { path: input.path, content: input.content }
+    if (input.expected_modified_at !== undefined) {
+      body.expected_modified_at = input.expected_modified_at
+    }
+    const res = await this.req<WriteResponse>(path, { method: 'PUT', body })
     return res.file
   }
 

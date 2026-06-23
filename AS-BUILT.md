@@ -2,6 +2,68 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-6: Documents parity (web edit) + Obsidian retire close-out
+
+Closes the WAVE 3 **Documents** track
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.3 / § 4 PR-6, conformance
+rows C5 + C6). PR-5 shipped the web Documents tab as **read + comment**; mobile
+already had **edit + comment**. This PR brings the web tab to full **web↔mobile
+parity** (browse · open · read · **edit** · comment) and closes out the Obsidian
+retirement. Per the standing rule: **no feature flags** — edit renders directly.
+
+**Spec-conformance diff (5 lines):**
+- C5 (Documents list/view/**comment**, every project): web had read+comment
+  (PR-5), mobile had edit+comment → web now **edits** too ⇒ parity reached.
+- C5 **§5 "does MOBILE docs already render comments?" → VERIFIED YES.** The
+  mobile docs tab (`app/app/projects/[id]/docs.tsx`) already mounts a full
+  comment UI: `CommentsSidePane` + `CommentsProvider` with reply / **Resolve** /
+  **Escalate to chat** and an editor/preview/comments tri-pane. **No mobile
+  comment-parity work was needed** — the plan's "needs-verification" item is
+  resolved in code, not built.
+- C5 gap was therefore **web edit only** (the one capability mobile had and web
+  lacked) — shipped here.
+- C6 (Obsidian RETIRED): **VERIFIED no daily-driver doc flow depends on
+  Obsidian.** Doc bodies are filesystem-backed; the agent reads via
+  `doc_search`/`doc_read`; the app reads/edits/comments over
+  `gateway/http/app-docs-surface.ts`. The Documents tab is now the primary +
+  only per-project doc surface on web AND mobile.
+- Residual `obsidian` mentions are accurate "Obsidian-replacement" labels on this
+  surface or the operator platform's *separate* `vault.example.test` deeplink
+  convention for the owner's own vault (legacy Nova prompts, not load-bearing) —
+  neither is a project document flow, so nothing to repoint.
+
+**What changed (web client only — no gateway/backend changes; the
+`PUT /docs/file` handler with OCC already existed and is what mobile uses).**
+- **`chat-react/docs-client.ts`** — added `WriteResult` type, `WriteResponse`,
+  and `WebDocsClient.writeFile(project_id, { path, content, expected_modified_at })`
+  → `PUT /docs/file`. `expected_modified_at` is the OCC baseline; a stale write
+  gets a `409 doc_modified_conflict` (`DocConflictError`) rethrown as a typed
+  `DocsClientError` carrying `current_modified_at`. Mirrors `app/lib/docs-client.ts`.
+- **`chat-react/DocumentsTab.tsx`** — added **edit mode**: an **Edit** button in
+  the viewer header swaps the read-only `<pre>` for a raw-markdown `<textarea>`
+  seeded from the open file; **Save** (disabled until the draft differs) writes
+  via `writeFile` with `expected_modified_at = file.modified_at`. On success it
+  adopts the server's post-write `modified_at` as the next baseline, exits edit
+  mode, and reloads comments (anchors re-anchor server-side). On a `409`
+  (`doc_modified_conflict`) it stays in edit mode with the draft preserved and a
+  "changed since you opened it" prompt; `doc_too_large` (5 MB) is surfaced too. A
+  `saveSeq` guard drops a stale save continuation if the user opens another doc /
+  switches project before the PUT resolves (same pattern as the read/comment
+  paths); those navigations also clear `saving` so the bailed continuation can't
+  leave the controls stuck-disabled. Edit state resets on doc open and project
+  switch.
+- **`chat-react.html`** — `cdoc-editor` / `cdoc-edit-btn` / `cdoc-edit-actions`
+  CSS for the editor + header buttons.
+
+**Tests.** `docs-client.test.ts` +3 (writeFile PUT body + OCC, force-write omits
+the baseline, 409 → typed error with `current_modified_at`).
+`documents-tab.test.tsx` +3 happy-dom (Edit→change→Save PUTs the new content with
+the OCC baseline and returns to the read view with comments reloaded; a 409
+`doc_modified_conflict` keeps edit mode with the draft + conflict message;
+navigating away mid-save doesn't leave Save stuck-disabled). Full
+`landing/chat-react/` suite green (**77 pass**, was 71), `tsc -p
+chat-react/tsconfig.json` clean, browser bundle builds.
+
 ## 2026-06-23 — WAVE 3 PR-5: web Documents tab (list · view · comment)
 
 First PR of the WAVE 3 **Documents** track

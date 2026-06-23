@@ -83,10 +83,20 @@
     border-radius: 8px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; flex: 0 0 auto;
   }
   .cdoc-comment-btn:disabled { opacity: .45; cursor: default; }
+  .cdoc-edit-actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
+  .cdoc-edit-btn {
+    appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+    border-radius: 8px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; flex: 0 0 auto;
+  }
   .cdoc-content {
     flex: 1 1 auto; overflow-y: auto; margin: 0; padding: 16px 18px;
     white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--fg); user-select: text;
+  }
+  .cdoc-editor {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 16px 18px; resize: none;
+    white-space: pre; word-break: normal; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--fg); background: var(--bg); border: 0; border-bottom: 1px solid var(--border); outline: none;
   }
   .cdoc-comments {
     flex: 0 0 300px; min-width: 0; overflow-y: auto;
