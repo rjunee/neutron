@@ -454,4 +454,117 @@ describe('DocumentsTab (happy-dom)', () => {
       root.unmount()
     })
   })
+
+  it('does not leave Save stuck-disabled when navigating away mid-save', async () => {
+    // The PUT for doc A is held open; navigating to doc B must reset `saving` so
+    // doc B's edit controls aren't stuck-disabled when the stale PUT settles.
+    let releasePut: (() => void) | null = null
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve
+    })
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { DocumentsTab } = await import('../DocumentsTab.tsx')
+    const React = await import('react')
+
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith('/docs/tree')) return jsonRes({ ok: true, tree: TREE, file_count: 2 })
+      if (url.includes('/docs/file?path=')) {
+        const isReadme = url.includes('readme.md')
+        return jsonRes({
+          ok: true,
+          file: {
+            path: isReadme ? 'readme.md' : 'notes/intro.md',
+            content: isReadme ? 'README body' : FILE_CONTENT,
+            size_bytes: 11,
+            modified_at: isReadme ? 7 : 5,
+          },
+        })
+      }
+      if (url.endsWith('/docs/file') && (init?.method ?? 'GET') === 'PUT') {
+        await putGate // held until the test releases it
+        return jsonRes({ ok: true, file: { path: 'notes/intro.md', size_bytes: 3, modified_at: 50 } })
+      }
+      if (url.includes('/docs/comments?path=')) return jsonRes({ ok: true, threads: [], next_cursor: null })
+      return new Response(JSON.stringify({ ok: false, code: 'request_failed' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <React.StrictMode>
+          <DocumentsTab projectId={PROJECT} config={config} fetchImpl={fetchImpl} />
+        </React.StrictMode>,
+      )
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+
+    const open = async (name: string): Promise<void> => {
+      const btn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+        (b) => (b.textContent ?? '').includes(name),
+      ) as HTMLButtonElement
+      await act(async () => {
+        btn.click()
+        await tick()
+        await tick()
+      })
+    }
+    const setEditorValue = async (v: string): Promise<void> => {
+      const editor = container.querySelector('.cdoc-editor') as HTMLTextAreaElement
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!
+        setter.call(editor, v)
+        editor.dispatchEvent(new Event('input', { bubbles: true }))
+        await tick()
+      })
+    }
+    const clickEdit = async (): Promise<void> => {
+      await act(async () => {
+        ;(container.querySelector('.cdoc-edit-btn') as HTMLButtonElement).click()
+        await tick()
+      })
+    }
+    const saveBtn = (): HTMLButtonElement =>
+      Array.from(container.querySelectorAll('.cdoc-btn-primary')).find((b) =>
+        (b.textContent ?? '').includes('Sav'),
+      ) as HTMLButtonElement
+
+    // Doc A: edit, change, Save → PUT is now in flight (held by putGate).
+    await open('intro.md')
+    await clickEdit()
+    await setEditorValue('A edit')
+    await act(async () => {
+      saveBtn().click()
+      await tick()
+    })
+
+    // Navigate to doc B while the save is still in flight.
+    await open('readme.md')
+
+    // Release the stale PUT; its continuation must bail (seq mismatch).
+    await act(async () => {
+      releasePut!()
+      await tick()
+      await tick()
+    })
+
+    // Doc B can be edited + its Save enables once the draft differs — i.e. the
+    // controls are NOT stuck-disabled from the abandoned save.
+    await clickEdit()
+    await setEditorValue('B edit')
+    expect(saveBtn().disabled).toBe(false)
+    expect(saveBtn().textContent).toContain('Save')
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
 })

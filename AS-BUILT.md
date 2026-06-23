@@ -49,17 +49,20 @@ retirement. Per the standing rule: **no feature flags** — edit renders directl
   "changed since you opened it" prompt; `doc_too_large` (5 MB) is surfaced too. A
   `saveSeq` guard drops a stale save continuation if the user opens another doc /
   switches project before the PUT resolves (same pattern as the read/comment
-  paths). Edit state resets on doc open and project switch.
+  paths); those navigations also clear `saving` so the bailed continuation can't
+  leave the controls stuck-disabled. Edit state resets on doc open and project
+  switch.
 - **`chat-react.html`** — `cdoc-editor` / `cdoc-edit-btn` / `cdoc-edit-actions`
   CSS for the editor + header buttons.
 
 **Tests.** `docs-client.test.ts` +3 (writeFile PUT body + OCC, force-write omits
 the baseline, 409 → typed error with `current_modified_at`).
-`documents-tab.test.tsx` +2 happy-dom (Edit→change→Save PUTs the new content with
-the OCC baseline and returns to the read view with comments reloaded; a 409 keeps
-edit mode with the draft + conflict message). Full `landing/chat-react/` suite
-green (**76 pass**, was 71), `tsc -p chat-react/tsconfig.json` clean, browser
-bundle builds.
+`documents-tab.test.tsx` +3 happy-dom (Edit→change→Save PUTs the new content with
+the OCC baseline and returns to the read view with comments reloaded; a 409
+`doc_modified_conflict` keeps edit mode with the draft + conflict message;
+navigating away mid-save doesn't leave Save stuck-disabled). Full
+`landing/chat-react/` suite green (**77 pass**, was 71), `tsc -p
+chat-react/tsconfig.json` clean, browser bundle builds.
 
 ## 2026-06-23 — WAVE 3 PR-5: web Documents tab (list · view · comment)
 

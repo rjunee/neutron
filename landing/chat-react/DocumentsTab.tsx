@@ -156,8 +156,10 @@ export function DocumentsTab({
     setDraft('')
     setSaveError(null)
     // Invalidate any in-flight save so its continuation can't land under the
-    // newly selected project.
+    // newly selected project; clear `saving` too since that continuation now
+    // bails before its own setSaving(false) and would otherwise stick.
     saveSeq.current += 1
+    setSaving(false)
     let cancelled = false
     void client
       .tree(projectId)
@@ -204,8 +206,10 @@ export function DocumentsTab({
       setEditing(false)
       setDraft('')
       setSaveError(null)
-      // A new doc invalidates any in-flight save's continuation.
+      // A new doc invalidates any in-flight save's continuation; clear `saving`
+      // so the bailed continuation can't leave the controls stuck-disabled.
       saveSeq.current += 1
+      setSaving(false)
       setLoadingFile(true)
       setFileError(null)
       const seq = (fileSeq.current += 1)
