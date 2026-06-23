@@ -2,6 +2,54 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-4: web project tab SHELL (registry-driven)
+
+Fourth and final foundation PR of the WAVE 3 tabbed-project-interface build
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.1, PR-4). Brings the
+**web** React client (`landing/chat-react/`) to tabs — it was chat-only. Per the
+SPEC Decisions Log (2026-06-23) **no feature flags** — the plan's
+`NEUTRON_WEB_TABS` gate is disregarded; the shell renders the resolved tabs
+directly, with no dual chat-only path.
+
+**What changed.** A new `ProjectShell` wraps the existing `ChatApp` as the Chat
+tab and renders the project's tab bar from the engine resolver, so the web
+project view shows tabs (Chat ∪ Documents ∪ Tasks ∪ installed Core tabs) instead
+of chat-only. Mirrors the mobile shell from PR-3.
+
+- **`chat-react/tabs-client.ts`** (new) — `WebTabsClient`, the web twin of
+  `app/lib/tabs-client.ts`: a bearer-auth (`config.token`) fetch wrapper for
+  `listProjectTabs(id)` against `GET /api/app/projects/<id>/tabs`, base URL
+  `config.origin`. `TabDescriptor` wire shapes mirror `tabs/registry.ts`
+  (re-declared client-side, same convention as mobile — keeps the browser bundle
+  free of a gateway dep). Throws `TabsClientError` on 4xx/5xx/network. Exports
+  `CHAT_TAB` (the pre-fetch / fallback builtin Chat descriptor) +
+  `sanitizeCoreTabUrl` (http(s)-only scheme guard, ported from mobile).
+- **`chat-react/ProjectShell.tsx`** (new) — the tab shell. Fetches the active
+  project's tabs (none for the General/no-project view → chat-only). Chat tab =
+  the existing `ChatApp`, kept MOUNTED (hidden via `hidden`) across switches so
+  the chat-core session/stream/scroll survive; Documents/Tasks builtins = a
+  "coming soon" placeholder (real views land in PR-5..9 — unbuilt content, NOT a
+  flag); Core (`mount.kind:'webview'`) tabs = a sandboxed `<iframe>` at the
+  scheme-validated URL. Switching projects re-fetches + resets to Chat; a
+  vanished active tab falls back to Chat.
+- **`chat-react/main.tsx`** — mounts `ProjectShell` (was `ChatApp`) inside the
+  `AssistantRuntimeProvider`, so the runtime/session lives above the tabs and
+  survives switching. `ChatApp` itself is unchanged.
+- **`chat-react.html`** — `car-projectshell` / `car-tabs` / `car-tab` /
+  `car-tab-frame` / `car-tab-placeholder` CSS; `.car-shell` height changed
+  `100dvh → 100%` so the chat fills its tab panel rather than the viewport.
+- **Tests** — `__tests__/tabs-client.test.ts` (pure: URL build/encode, bearer
+  header, error mapping, `sanitizeCoreTabUrl`) + `__tests__/project-shell.test.tsx`
+  (happy-dom over a real `WebChatSession` + injected resolver fetch: the bar
+  renders the resolved set Chat/Documents/Tasks/Core — not a hardcoded list — the
+  Chat tab shows `ChatApp`, switching to Documents reveals the placeholder + hides
+  Chat, switching to the Core tab renders the iframe at the resolved URL).
+
+**Verify.** `bunx tsc -p landing/chat-react/tsconfig.json` clean;
+`bun test landing/chat-react/__tests__/` → 48 pass. The Documents/Tasks tab
+CONTENT is intentionally placeholder; PR-5..9 fill it. The General view stays
+chat-only by design (no project ⇒ no project tabs).
+
 ## 2026-06-23 — WAVE 3 PR-3: mobile project tab bar is REGISTRY-DRIVEN
 
 Third PR of the WAVE 3 tabbed-project-interface build

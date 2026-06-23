@@ -34,7 +34,29 @@
     -webkit-font-smoothing: antialiased;
   }
   #root { height: 100dvh; }
-  .car-shell { display: flex; height: 100dvh; }
+  /* WAVE 3 PR-4 — web project tab shell wrapping the chat client. */
+  .car-projectshell { display: flex; flex-direction: column; height: 100dvh; min-height: 0; }
+  .car-tabs {
+    display: flex; gap: 2px; flex: 0 0 auto; overflow-x: auto;
+    padding: 0 8px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .car-tab {
+    appearance: none; background: transparent; color: var(--muted); border: 0;
+    border-bottom: 2px solid transparent; padding: 11px 14px; margin: 0;
+    font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .car-tab:hover { color: var(--fg); }
+  .car-tab-active { color: var(--fg); border-bottom-color: var(--accent); }
+  .car-tabpanels { flex: 1 1 auto; position: relative; min-height: 0; display: flex; }
+  .car-tabpanel { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; }
+  .car-tabpanel[hidden] { display: none; }
+  .car-tab-frame { flex: 1 1 auto; width: 100%; height: 100%; border: 0; background: var(--bg); }
+  .car-tab-placeholder {
+    margin: auto; text-align: center; color: var(--muted); padding: 40px 20px;
+  }
+  .car-tab-placeholder-title { font-size: 20px; color: var(--fg); margin-bottom: 6px; }
+  .car-tab-placeholder-sub { font-size: 14px; }
+  .car-shell { display: flex; height: 100%; width: 100%; }
   .car-rail {
     width: 220px;
     flex: 0 0 220px;

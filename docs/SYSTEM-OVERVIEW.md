@@ -74,6 +74,30 @@ registry's project builtins are Chat/Documents/Tasks, so the old **Apps
 fetch resolves (their routes remain, reachable by deep-link); re-adding them is
 a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4.
 
+### Web client consumption (WAVE 3 PR-4)
+
+The React web client (`landing/chat-react/`) is now **registry-driven** too.
+`chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
+and renders the project's tab bar from the same resolver: on the active project
+(`vm.projectId`) it fetches `GET /api/app/projects/<id>/tabs` via
+`chat-react/tabs-client.ts` (`WebTabsClient` — the web twin of `app/lib/`'s
+client, bearer-authed off `config.token`, base URL `config.origin`). `main.tsx`
+mounts `ProjectShell` inside the `AssistantRuntimeProvider` (so the chat session
+survives tab switches) instead of `ChatApp` directly. Tab content: **Chat** =
+the existing `ChatApp`, kept MOUNTED (hidden via `hidden`) across switches;
+**Documents/Tasks** (builtin) = a "coming soon" placeholder until PR-5..9 land
+their real views (unbuilt content, NOT a flag); **Core** (`mount.kind:'webview'`)
+= the Core's `project_tab` surface in a sandboxed `<iframe>`, URL scheme-validated
+(`sanitizeCoreTabUrl`, http(s) only) before it reaches `src`. The General
+(no-project) view has no project tabs, so it stays chat-only. No feature flag —
+the resolved tabs render directly; an unreachable resolver degrades to the
+guaranteed Chat tab (graceful fallback, not a toggle). CSS lives in
+`chat-react.html` (`car-projectshell` / `car-tab*` / `car-tab-frame`). Tests:
+`chat-react/__tests__/tabs-client.test.ts` (pure client + URL sanitize) +
+`project-shell.test.tsx` (happy-dom: bar renders the resolved set, Chat shows
+`ChatApp`, switching to a builtin shows the placeholder, switching to a Core tab
+renders the iframe at the resolved URL).
+
 ### Cores install-SCOPE (WAVE 3 PR-2)
 
 A Core installs **per-project** (`core_installations`, keyed
@@ -756,6 +780,10 @@ existing `chat.ts` → `/chat.js` lazy-bundle path.
   dark theme; topic rail (project tags), connection banner, offline-pending
   badge, streaming typing dots, and the attachment compose affordance
   (file-picker + drag-drop, removable staged chips, attachment-only send).
+- `chat-react/ProjectShell.tsx` (WAVE 3 PR-4) is now the component `main.tsx`
+  mounts inside the runtime provider — it wraps `ChatApp` as the Chat tab and
+  renders the registry-resolved tab bar (see "Web client consumption" above).
+  `ChatApp` itself is unchanged.
 - `chat-react/uploads.ts` + `chat-react/useAttachmentDraft.ts` are the
   attachment seam. Compose uploads go to the EXISTING bearer-authed
   `POST /api/app/upload` surface (`gateway/http/app-upload-surface.ts`, shared
