@@ -212,7 +212,11 @@ The `tasks` table (migration `0032`) is the single source of truth for tasks
 across every surface — agents (via the `@neutronai/tasks-core` Core), the app's
 `/api/app/projects/<id>/tasks` HTTP surface, the chat commands, reminders, and
 the overnight-work auto-tasker all write through one `TaskStore` (`tasks/store.ts`).
-STATUS.md / ACTIONS.md are read-only projections (`tasks/projection/`).
+STATUS.md / ACTIONS.md are read-only projections (`tasks/projection/`). The
+interim WAVE-2 markdown task port (a `task-inbox.jsonl` append-queue scanned
+into `tasks.md` / `DASHBOARD.md`) was **retired** in WAVE 3 PR-9 — the SQLite
+store plus the web Tasks tab are the surface; the only markdown projection that
+remains is STATUS.md / ACTIONS.md.
 
 **Prioritization is LLM-primary, deterministic-fallback** (WAVE 3 PR-7). Two
 ranking signals coexist:

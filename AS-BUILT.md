@@ -2,6 +2,61 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-9: retire the legacy markdown task port (`tasks/inbox/`)
+
+Closes the WAVE 3 **Tasks** track
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.4 #3 / § 4 PR-9,
+conformance row C7). The Tasks Core is fully realized: the canonical SQLite
+`tasks` table is the source of truth (migration `0032`), prioritization is
+LLM-primary with deterministic fallback (PR-7), and the web Tasks tab gives
+agent+user-parity CRUD (PR-8). The interim WAVE-2 PR #15 **markdown task port**
+— a `task-inbox.jsonl` append-queue scanned (CLAIM→PARSE→APPLY→ARCHIVE→RENDER)
+into read-only `tasks.md` / `DASHBOARD.md` projections — is therefore retired.
+Per the standing rule: **no feature flags** — the dead port is removed outright,
+not gated.
+
+**§5 scanner-wiring verification (the load-bearing finding).** The plan flagged
+"[needs verification]: is the task-inbox scanner boot-wired or cron/CLI-only?".
+Verified: **neither.** `runTaskScan()` and `appendInboxRow()` have **zero
+production callers** — the only references repo-wide were the `tasks/index.ts`
+barrel re-export, the module's own internals, and its two test files. No cron
+registers it (`build-core-modules.ts` wires focus-score / nudge / proactive
+crons, never a task-scan), no boot shell calls it, no CLI/agent path appends to
+`task-inbox.jsonl`. The AS-BUILT entry for PR #15 itself recorded the wiring as
+"Deferred". So the **whole port is dead**, not "scanner-with-a-real-job" — it is
+removed cleanly rather than stripped-to-ingestion.
+
+**Removed** (all self-contained, no external importers):
+- `tasks/inbox/` directory entirely — `types.ts` (JSONL row schema + parser),
+  `apply.ts` (row→`TaskStore` mutation), `render.ts` (`tasks.md` /
+  `DASHBOARD.md` renderers), `scanner.ts` (`appendInboxRow` + `runTaskScan`
+  claim/drain loop), `index.ts` (barrel).
+- `tasks/__tests__/inbox.test.ts` + `tasks/__tests__/inbox-scanner.test.ts`.
+- The inbox value + type re-export blocks from `tasks/index.ts`
+  (`parseInbox`, `applyInboxRows`, `renderTasksMarkdown`,
+  `renderDashboardMarkdown`, `appendInboxRow`, `runTaskScan`, `TASK_SOURCE_INBOX`,
+  the `Inbox*` / `TaskScan*` types, …).
+
+**Kept untouched** (NOT the markdown port — independent, production-wired):
+- The canonical `TaskStore` (`tasks/store.ts`, migration `0032`), the Tasks Core
+  substrate adapter (`buildSubstrateTaskStoreBackend`), the
+  `/api/app/projects/<id>/tasks` HTTP surface, focus-score + LLM prioritization,
+  and all task crons.
+- The **`tasks/projection/`** writer (STATUS.md / ACTIONS.md). This is a separate
+  surface that subscribes to `TaskStore` mutations and is wired live in
+  `build-core-modules.ts`; it does not depend on `tasks/inbox/` and is not part
+  of the retired port. Its `projection.test.ts` and the gateway
+  `*-tasks-projection-wiring.test.ts` regression guards stay green.
+
+**Touch-ups:** a stale "task-scan" example in a `build-core-modules.ts` cron
+comment and a `tasks/projection/format.ts` doc-comment that named the removed
+`tasks.md` / `DASHBOARD.md` surface were corrected.
+
+**Verification:** `bunx tsc --noEmit` clean; `bun test tasks/__tests__/` (165
+pass / 0 fail) + the three gateway tasks/projection wiring suites (21 pass / 0
+fail) green. Repo-wide grep for every inbox symbol confirms no lingering
+reference outside the removed files.
+
 ## 2026-06-23 — WAVE 3 PR-6: Documents parity (web edit) + Obsidian retire close-out
 
 Closes the WAVE 3 **Documents** track
