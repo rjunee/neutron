@@ -56,6 +56,10 @@ import {
   registerFocusScoreRecomputeCron,
 } from '../../tasks/focus-score-cron.ts'
 import {
+  buildTaskPrioritizeHandler,
+  registerTaskPrioritizeCron,
+} from '../../tasks/prioritize-llm.ts'
+import {
   buildNudgeEngineHandler,
   registerNudgeEngineCron,
 } from '../tasks/p6/nudge-engine.ts'
@@ -643,6 +647,39 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           registerInput.interval_ms = tasksCfg.focus_score_interval_ms
         }
         registerFocusScoreRecomputeCron(registerInput)
+      }
+
+      // WAVE 3 PR-7 — LLM-primary prioritization cron. Each tick ranks
+      // the open backlog via the LLM (deterministic focus-score order is
+      // the fallback when no credential is wired / the call errors) and
+      // stamps `llm_rank` / `llm_reason` / `prioritized_by`; the
+      // `focus_score` order then renders LLM-rank-first across every
+      // surface. Safe to register with a null llm — the handler runs the
+      // deterministic fallback until a credential becomes available.
+      if (tasksCfg.enable_task_prioritize_cron === true) {
+        const prioritizer = tasksCfg.task_prioritizer ?? { llm: null }
+        const prioritizeHandlerDeps: Parameters<typeof buildTaskPrioritizeHandler>[0] =
+          { db: input.db, llm: prioritizer.llm }
+        if (prioritizer.model !== undefined) {
+          prioritizeHandlerDeps.model = prioritizer.model
+        }
+        if (prioritizer.timeout_ms !== undefined) {
+          prioritizeHandlerDeps.timeout_ms = prioritizer.timeout_ms
+        }
+        if (prioritizer.limit !== undefined) {
+          prioritizeHandlerDeps.limit = prioritizer.limit
+        }
+        const prioritizeHandler = buildTaskPrioritizeHandler(prioritizeHandlerDeps)
+        const prioritizeRegisterInput: Parameters<typeof registerTaskPrioritizeCron>[0] = {
+          project_slug: input.project_slug,
+          jobs: cronDeps.jobs,
+          handlers: cronDeps.handlers,
+          handler: prioritizeHandler,
+        }
+        if (tasksCfg.task_prioritize_interval_ms !== undefined) {
+          prioritizeRegisterInput.interval_ms = tasksCfg.task_prioritize_interval_ms
+        }
+        registerTaskPrioritizeCron(prioritizeRegisterInput)
       }
 
       // P6.1 — daily nudge engine cron. Runs the staleness pass + LLM

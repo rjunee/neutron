@@ -359,4 +359,36 @@ describe('composition wiring — guardrail for subscriber-feature + missing cano
       await graph.shutdown()
     }
   })
+
+  test('registers the LLM-primary prioritize cron when enabled (WAVE 3 PR-7)', async () => {
+    const canonicalStore = new TaskStore(db)
+    const graph = await composeProductionGraph({
+      db,
+      project_slug: OWNER,
+      topic_handler: async () => {},
+      approval_notifier: { notify: async () => undefined },
+      watchdog_notifier: { notify: async () => undefined },
+      reminder_dispatcher: { dispatch: async () => undefined },
+      heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+      platform: STUB_PLATFORM,
+      tasks: {
+        store: canonicalStore,
+        enable_task_prioritize_cron: true,
+        // Tight interval to keep the test cheap if it ever ticks; a null
+        // llm means the handler runs the deterministic fallback.
+        task_prioritize_interval_ms: 1_000_000,
+        task_prioritizer: { llm: null },
+      },
+    })
+    try {
+      const cron = graph.get<{
+        jobs: { get(name: string): unknown }
+        handlers: { get(name: string): unknown }
+      }>('cron')
+      expect(cron.jobs.get(`tasks-prioritize-${OWNER}`)).toBeDefined()
+      expect(cron.handlers.get('tasks.prioritize_llm')).toBeDefined()
+    } finally {
+      await graph.shutdown()
+    }
+  })
 })

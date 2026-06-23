@@ -65,6 +65,79 @@ round-trip, the unavailable gate). Updated `project-shell.test.tsx` (Documents
 switch now asserts the real `DocumentsTab` mounts, not the placeholder). Full
 `landing/chat-react/` suite green (71 pass) + `tsc -p
 landing/chat-react/tsconfig.json` clean + browser bundle builds.
+## 2026-06-23 — WAVE 3 PR-7: LLM-primary task prioritization
+
+Tasks-track PR of the WAVE 3 build (`docs/plans/wave3-tabbed-interface-build-plan.md`
+§ 3.4, PR-7). Flips task **prioritization** from deterministic-only to
+**LLM-primary, deterministic-fallback**. The canonical `tasks` store already
+carried a deterministic `focus_score` (`tasks/focus-score.ts`, formula = priority
++ due-date + staleness). That formula has no notion of *what the work is*, so
+equally-urgent tasks tie and sort by recency. WAVE 3 hands the open backlog to an
+LLM that returns an explicit ordering + a one-line rationale per task. Per the
+SPEC Decisions Log **no feature flags** — the plan's `NEUTRON_TASKS_LLM_PRIORITY`
+gate is disregarded; LLM-primary is the default and deterministic is a genuine
+fallback path (no LLM credential / call errors / times out / returns garbage),
+not a dual flag-path.
+
+**What changed.**
+- **Migration `0085_tasks_llm_priority.sql`** — 4 columns on `tasks`: `llm_rank
+  INTEGER` (1-based rank from the last pass; 1 = do first), `llm_reason TEXT`
+  (LLM rationale; NULL in the deterministic fallback), `prioritized_by TEXT
+  CHECK(prioritized_by IN ('llm','deterministic'))` (which mechanism produced the
+  rank), `prioritized_at TEXT` (ISO-8601). Plus a partial index
+  `idx_tasks_project_llm_rank ON tasks(project_slug, llm_rank) WHERE
+  status='open'` mirroring the focus-score index. `focus_score` is RETAINED — it
+  is the fallback ranking AND a prior shown to the LLM. Forward-only ADD COLUMN,
+  defaults NULL. `migrations/expected-schema.txt` regenerated; runner snapshot
+  test green.
+- **`tasks/prioritize-llm.ts`** (new) — the prioritizer. `prioritizeTasksForProject`
+  ranks the FULL open set each pass (clearing every open row's rank first, so a
+  row outside the prompt cap can't keep a stale rank); only the top-N by
+  `focus_score` (cap 50) go to the LLM, the tail is ranked deterministically. If
+  no `llm` / the call throws / times out / returns an unparseable / empty /
+  out-of-domain ranking → ranks by recomputed `focus_score DESC` and stamps
+  `prioritized_by='deterministic'` (reason NULL); on a valid LLM ranking → stamps
+  `llm_rank` from the LLM order + `llm_reason` per task + `prioritized_by='llm'`.
+  Ids the LLM omits (and the beyond-cap tail) are appended in deterministic order
+  so EVERY open row gets a fresh rank (no NULL gaps, no stale ranks). All writes
+  land in one `db.transaction`. Ships a cron
+  (`buildTaskPrioritizeHandler` / `buildTaskPrioritizeJob` /
+  `registerTaskPrioritizeCron`, handler name `tasks.prioritize_llm`, 6h default
+  cadence) mirroring `tasks/focus-score-cron.ts`, plus `parseRanking` (tolerates
+  ```json fences + trailing prose, drops invalid/dupe ids) and a locked v1
+  prompt. Uses the same `LlmCallFn` shape + `callWithTimeout` pattern as the nudge
+  engine.
+- **`tasks/store.ts`** — `Task` / `TaskDbRow` / `COLS` / `rowToTask` gain the 4
+  columns (create() stamps them NULL). The **`'focus_score'` order is now the
+  prioritized order**: a row's sort position is its *effective rank* — a ranked
+  row uses its `llm_rank`; a row created since the last pass (`llm_rank` NULL) is
+  **interleaved by `focus_score`** (a correlated subquery slots it right after the
+  ranked rows it outranks on `focus_score`), so a freshly-captured urgent task
+  competes with the ranked set instead of being buried until the next pass. Ties
+  fall to `focus_score DESC, due_date ASC NULLS LAST, created_at DESC`. Because
+  every existing surface (HTTP, pick-next, projection, Tasks Core) already
+  requests `order:'focus_score'`, the ranking flows everywhere with **no
+  per-caller change**; with no rows ranked yet it degrades to pure focus-score
+  ordering, so the change is back-compatible (all existing focus-score tests stay
+  green). That is the "wire into the Tasks Core" seam.
+- **`gateway/composition/`** — `tasks-input.ts` gains `enable_task_prioritize_cron`
+  / `task_prioritize_interval_ms` / `task_prioritizer:{llm,model,timeout_ms,limit}`;
+  `build-core-modules.ts` registers the prioritize cron (mirrors the focus-score /
+  nudge-engine gates). Safe to register with a null llm — the handler runs the
+  deterministic fallback until a credential is wired. "Cron switches to LLM-primary."
+- **`gateway/http/app-focus-current-surface.ts`** — its hand-built `Task` literal
+  + `SELECT` extended with the 4 columns so the focus-pick hero card carries its
+  real ranking.
+
+**Verify.** `bunx tsc --noEmit` clean (0 errors). `bun test tasks/__tests__/
+cores/free/tasks/__tests__/ migrations/snapshot.test.ts` → 206 pass; gateway
+surface/composer tests (`app-focus-current-surface`, `app-tasks-surface`,
+`composition-tasks-projection-wiring`, `tasks-production-composer`) → 55 pass. New
+`tasks/__tests__/prioritize-llm.test.ts` covers the LLM-ranks path, the rendered
+order following the LLM ranking, omitted-id backfill, and all four fallback
+triggers (no-llm / throw / timeout / unparseable / out-of-domain) plus
+`parseRanking` + the cron wiring. Composition test asserts the prioritize job +
+handler register when enabled.
 
 ## 2026-06-23 — WAVE 3 PR-4: web project tab SHELL (registry-driven)
 

@@ -148,6 +148,45 @@ lives on `CoreInstallationsStore` (`recordGlobal` / `getGlobal` / `listGlobal`
 project data namespace or secrets prompt — those still flow through the
 per-project `installCore`).
 
+## Tasks — canonical store + LLM-primary prioritization (`tasks/`)
+
+The `tasks` table (migration `0032`) is the single source of truth for tasks
+across every surface — agents (via the `@neutronai/tasks-core` Core), the app's
+`/api/app/projects/<id>/tasks` HTTP surface, the chat commands, reminders, and
+the overnight-work auto-tasker all write through one `TaskStore` (`tasks/store.ts`).
+STATUS.md / ACTIONS.md are read-only projections (`tasks/projection/`).
+
+**Prioritization is LLM-primary, deterministic-fallback** (WAVE 3 PR-7). Two
+ranking signals coexist:
+
+- **Deterministic `focus_score`** (`tasks/focus-score.ts`, migration `0037`) — a
+  pure function of `(priority, due_date, staleness)`, stamped synchronously on
+  every score-affecting write and re-converged by the 4-hourly
+  `tasks.focus_score_recompute` cron. It is the **fallback** ranking and the
+  prior shown to the LLM.
+- **LLM ranking** (`tasks/prioritize-llm.ts`, migration `0085`) — the
+  `tasks.prioritize_llm` cron (6h default) hands the open backlog to an LLM that
+  returns an explicit ordering + a one-line rationale, stamped onto `llm_rank` /
+  `llm_reason` / `prioritized_by` / `prioritized_at`. This is the **primary**
+  mechanism. There is no flag: the deterministic path runs ONLY when no LLM
+  credential is wired, or the call throws / times out / returns an
+  unparseable·empty·out-of-domain ranking — in which case the same pass ranks by
+  `focus_score DESC` and stamps `prioritized_by='deterministic'`.
+
+The two meet at the store's **`'focus_score'` sort order**, which now ranks each
+row by its *effective rank*: a ranked row uses its `llm_rank`; a row created
+since the last pass (`llm_rank` NULL) is interleaved by `focus_score` (slotted
+right after the ranked rows it outranks on `focus_score`) so a freshly-captured
+urgent task competes with the ranked set instead of being buried until the next
+pass. Each pass clears + re-ranks the full open set, so no row keeps a stale rank.
+Every surface already requests this order, so the LLM ranking flows to every
+rendered list with no per-caller change; with no rows ranked yet it degrades to
+pure focus-score ordering. The
+prioritize cron is wired in `gateway/composition/build-core-modules.ts` behind
+`tasks.enable_task_prioritize_cron` + `tasks.task_prioritizer.llm` (mirrors the
+focus-score / nudge-engine gates); registering it with a null llm is safe — the
+handler runs the deterministic fallback until a credential exists.
+
 ## Doc search (QMD-equivalent) — `@neutronai/doc-search`
 
 The agent-native corpus search over the owner's project docs, so the live

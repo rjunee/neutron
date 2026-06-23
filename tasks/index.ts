@@ -50,6 +50,27 @@ export type {
 } from './focus-score-cron.ts'
 
 export {
+  TASK_PRIORITIZE_HANDLER_NAME,
+  DEFAULT_TASK_PRIORITIZE_INTERVAL_MS,
+  DEFAULT_TASK_PRIORITIZE_MODEL,
+  DEFAULT_TASK_PRIORITIZE_TIMEOUT_MS,
+  DEFAULT_TASK_PRIORITIZE_LIMIT,
+  PRIORITIZE_SYSTEM_PROMPT,
+  prioritizeTasksForProject,
+  buildPrioritizeUserPrompt,
+  parseRanking,
+  buildTaskPrioritizeHandler,
+  buildTaskPrioritizeJob,
+  registerTaskPrioritizeCron,
+} from './prioritize-llm.ts'
+
+export type {
+  PrioritizedBy,
+  TaskPrioritizeResult,
+  PrioritizeTasksForProjectInput,
+} from './prioritize-llm.ts'
+
+export {
   TASK_REMINDER_SOURCE,
   createLinkedReminder,
   cancelLinkedReminders,
