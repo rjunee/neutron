@@ -1,14 +1,16 @@
 /**
  * landing/chat-react — web DOCUMENTS tab content (WAVE 3 PR-5).
  *
- * The Obsidian-replacement reading surface for the web project shell: a doc
- * list → open a doc → view its markdown → comment on a selection. Renders as
- * the builtin `documents` tab inside `ProjectShell` (PR-4).
+ * The Obsidian-replacement surface for the web project shell: a doc list →
+ * open a doc → read / edit its markdown → comment on a selection. Renders as
+ * the builtin `documents` tab inside `ProjectShell` (PR-4). At web↔mobile
+ * parity (browse · open · read · edit · comment) as of WAVE 3 PR-6.
  *
  * ── Source of truth = the FILESYSTEM ───────────────────────────────────────
- * WAVE 3 adds NO `documents` table. This tab reads + comments over the existing
- * gateway handlers (`/docs/tree`, `/docs/file`, `/docs/comments*`) via
- * `WebDocsClient`. Editing is deferred to PR-6 — this is read + comment first.
+ * WAVE 3 adds NO `documents` table. This tab reads, edits + comments over the
+ * existing gateway handlers (`/docs/tree`, `/docs/file` [GET+PUT],
+ * `/docs/comments*`) via `WebDocsClient`. Edit (PR-6) writes the whole file
+ * over `PUT /docs/file` with OCC against the open file's mtime.
  *
  * ── Anchored comments over RAW markdown ─────────────────────────────────────
  * Comment anchors are character offsets into the file's RAW content (the same
@@ -109,6 +111,14 @@ export function DocumentsTab({
   const [commentsUnavailable, setCommentsUnavailable] = useState(false)
   const [commentsError, setCommentsError] = useState<string | null>(null)
 
+  // Edit mode (PR-6) — swaps the read-only viewer for a textarea bound to a
+  // draft of the raw markdown. Saving writes the whole file over the existing
+  // `PUT /docs/file` handler with OCC against the open file's mtime.
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
   // Active text selection over the viewer (raw-content offsets) + composer.
   const [selection, setSelection] = useState<{ start: number; end: number; excerpt: string } | null>(null)
   const [composerOpen, setComposerOpen] = useState(false)
@@ -140,6 +150,9 @@ export function DocumentsTab({
     setComposerOpen(false)
     setOpenThread(null)
     setOpenThreadId(null)
+    setEditing(false)
+    setDraft('')
+    setSaveError(null)
     let cancelled = false
     void client
       .tree(projectId)
@@ -183,6 +196,9 @@ export function DocumentsTab({
       setComposerOpen(false)
       setOpenThread(null)
       setOpenThreadId(null)
+      setEditing(false)
+      setDraft('')
+      setSaveError(null)
       setLoadingFile(true)
       setFileError(null)
       const seq = (fileSeq.current += 1)
@@ -246,6 +262,57 @@ export function DocumentsTab({
         setCommentsError(msg)
       })
   }, [client, projectId, file, selection, composerBody, loadComments])
+
+  // ── edit mode (PR-6) ──
+  const startEdit = useCallback((): void => {
+    if (file === null) return
+    setDraft(file.content)
+    setSaveError(null)
+    setSelection(null)
+    setComposerOpen(false)
+    setEditing(true)
+  }, [file])
+
+  const cancelEdit = useCallback((): void => {
+    setEditing(false)
+    setDraft('')
+    setSaveError(null)
+  }, [])
+
+  const saveEdit = useCallback((): void => {
+    if (file === null || saving) return
+    const next = draft
+    setSaving(true)
+    setSaveError(null)
+    void client
+      .writeFile(projectId, {
+        path: file.path,
+        content: next,
+        expected_modified_at: file.modified_at,
+      })
+      .then((res) => {
+        setSaving(false)
+        setEditing(false)
+        // Adopt the server-authoritative stat as the next OCC baseline so an
+        // immediate follow-up edit doesn't false-conflict against the old mtime.
+        setFile({ path: res.path, content: next, size_bytes: res.size_bytes, modified_at: res.modified_at })
+        setDraft('')
+        // Anchors re-anchor server-side against the new bytes — refresh threads.
+        loadComments(file.path)
+      })
+      .catch((err: unknown) => {
+        setSaving(false)
+        const msg =
+          err instanceof DocsClientError && err.code === 'doc_changed_underfoot'
+            ? 'This document changed since you opened it — Cancel, reopen it, and reapply your edit.'
+            : err instanceof DocsClientError && err.code === 'doc_too_large'
+              ? 'This document is too large to save (5 MB limit).'
+              : err instanceof Error
+                ? err.message
+                : 'failed to save document'
+        setSaveError(msg)
+      })
+  }, [client, projectId, file, draft, saving, loadComments])
 
   const expandThread = useCallback(
     (threadRootId: string): void => {
@@ -357,31 +424,65 @@ export function DocumentsTab({
           <>
             <header className="cdoc-view-head">
               <span className="cdoc-view-path">{file.path}</span>
-              {!commentsUnavailable ? (
-                <button
-                  type="button"
-                  className="cdoc-comment-btn"
-                  disabled={selection === null}
-                  onClick={() => {
-                    if (selection !== null) {
-                      setComposerOpen(true)
-                      setComposerBody('')
-                    }
-                  }}
-                  title={selection === null ? 'Select text to comment on it' : 'Comment on selection'}
-                >
-                  Comment
-                </button>
-              ) : null}
+              {editing ? (
+                <div className="cdoc-edit-actions">
+                  <button
+                    type="button"
+                    className="cdoc-btn cdoc-btn-primary"
+                    disabled={saving || draft === file.content}
+                    onClick={saveEdit}
+                  >
+                    {saving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button type="button" className="cdoc-btn" disabled={saving} onClick={cancelEdit}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div className="cdoc-edit-actions">
+                  <button type="button" className="cdoc-edit-btn" onClick={startEdit}>
+                    Edit
+                  </button>
+                  {!commentsUnavailable ? (
+                    <button
+                      type="button"
+                      className="cdoc-comment-btn"
+                      disabled={selection === null}
+                      onClick={() => {
+                        if (selection !== null) {
+                          setComposerOpen(true)
+                          setComposerBody('')
+                        }
+                      }}
+                      title={selection === null ? 'Select text to comment on it' : 'Comment on selection'}
+                    >
+                      Comment
+                    </button>
+                  ) : null}
+                </div>
+              )}
             </header>
-            <pre
-              ref={contentRef}
-              className="cdoc-content"
-              onMouseUp={onSelect}
-              onKeyUp={onSelect}
-            >
-              {file.content}
-            </pre>
+            {editing ? (
+              <>
+                <textarea
+                  className="cdoc-editor"
+                  aria-label="Edit document"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  spellCheck={false}
+                />
+                {saveError !== null ? <div className="cdoc-comments-error">{saveError}</div> : null}
+              </>
+            ) : (
+              <pre
+                ref={contentRef}
+                className="cdoc-content"
+                onMouseUp={onSelect}
+                onKeyUp={onSelect}
+              >
+                {file.content}
+              </pre>
+            )}
             {composerOpen && selection !== null ? (
               <div className="cdoc-composer" role="form" aria-label="New comment">
                 <div className="cdoc-composer-excerpt">“{selection.excerpt.slice(0, 140)}”</div>

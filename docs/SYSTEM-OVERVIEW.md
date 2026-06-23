@@ -98,14 +98,15 @@ guaranteed Chat tab (graceful fallback, not a toggle). CSS lives in
 `ChatApp`, switching to **Documents** mounts the real `DocumentsTab` (PR-5),
 switching to a Core tab renders the iframe at the resolved URL).
 
-### Web Documents tab (WAVE 3 PR-5)
+### Web Documents tab (WAVE 3 PR-5 + PR-6)
 
 The builtin **Documents** tab (`mount.target === 'docs'`) renders
-`chat-react/DocumentsTab.tsx` — the web Obsidian-replacement read+comment surface
-inside `ProjectShell`. It is **read + comment first** (editing is PR-6) and adds
-**no `documents` table**: bodies stay filesystem-backed, served by the existing
-gateway docs surface (`gateway/http/app-docs-surface.ts`). The tab is a
-three-pane layout — doc **list** (left) · markdown **viewer** (centre) ·
+`chat-react/DocumentsTab.tsx` — the web Obsidian-replacement surface inside
+`ProjectShell`. As of **PR-6** it is at **web↔mobile parity**: browse · open ·
+read · **edit** · comment (PR-5 shipped read+comment; PR-6 added editing). It
+adds **no `documents` table**: bodies stay filesystem-backed, served by the
+existing gateway docs surface (`gateway/http/app-docs-surface.ts`). The tab is a
+three-pane layout — doc **list** (left) · markdown **viewer/editor** (centre) ·
 **comments** side-pane (right) — over `chat-react/docs-client.ts` (`WebDocsClient`,
 the web twin of `app/lib/docs-client.ts`: bearer-authed off `config.token`, base
 URL `config.origin`, wire types re-declared client-side so the bundle stays
@@ -119,6 +120,15 @@ gateway-free):
   selection back to raw offsets (`selectionOffsets`) — pretty-rendering would
   desync offsets from the file, so v1 shows raw text. `buildAnchor` builds the
   excerpt + ±256-byte context, clamped to the gateway's byte caps.
+- **Editor** (PR-6) = **Edit** swaps the viewer for a raw-markdown textarea
+  seeded from the open file; **Save** = `WebDocsClient.writeFile` →
+  `PUT /docs/file` carrying `expected_modified_at` (the open file's mtime) as the
+  **optimistic-concurrency baseline**. A concurrent write loses the race with a
+  `409 doc_changed_underfoot` (Save stays in edit mode, draft preserved, prompts
+  a reload) rather than silently clobbering. On success the tab adopts the
+  server's post-write `modified_at` as the next baseline and reloads comments
+  (anchors re-anchor server-side against the new bytes). Mirrors the mobile docs
+  tab's editor (`app/app/projects/[id]/docs.tsx`) over the same handler.
 - **Comments** = `GET /docs/comments?path=` (active ∪ a muted Resolved group);
   select text → **Comment** → `POST /docs/comments` (root, anchored); expand a
   thread → reply (`/reply`), **Resolve** (`/resolve`), **Escalate to chat**
@@ -131,9 +141,21 @@ has no comment substrate the comments routes return `503 comments_unavailable`;
 Documents tab **still lists + views docs** and simply hides the comment composer,
 showing a one-line note instead of an error. CSS (`cdoc-*`) lives in
 `chat-react.html`. Tests: `chat-react/__tests__/docs-client.test.ts` (pure:
-routes, the 503 gate, `buildAnchor`/`clampUtf8`/`flattenDocFiles`) +
-`documents-tab.test.tsx` (happy-dom: list renders, doc opens, selection→comment
-post round-trip, the unavailable gate).
+routes incl. `writeFile` PUT + the 409 conflict, the 503 gate,
+`buildAnchor`/`clampUtf8`/`flattenDocFiles`) + `documents-tab.test.tsx`
+(happy-dom: list renders, doc opens, selection→comment post round-trip, the
+unavailable gate, and the PR-6 edit→save→PUT + 409-conflict flows).
+
+**Obsidian retired (WAVE 3 close-out, PR-6).** With web edit parity shipped, the
+per-project **Documents tab is the primary and only daily doc surface** on both
+web and mobile. No daily-driver doc flow depends on Obsidian: doc bodies are
+filesystem-backed (`<owner_home>/Projects/<id>/docs/`), the agent reads them via
+`doc_search`/`doc_read` over the FTS index, and the app reads/edits/comments over
+`gateway/http/app-docs-surface.ts`. The remaining `obsidian` mentions in the tree
+are either accurate "Obsidian-replacement" labels on this surface or the operator
+platform's *separate* vault-deeplink convention (the `vault.example.test`
+redirector for the owner's own notes) — neither is part of a project's document
+flow.
 
 ### Cores install-SCOPE (WAVE 3 PR-2)
 

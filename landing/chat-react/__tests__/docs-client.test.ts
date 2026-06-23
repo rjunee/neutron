@@ -93,6 +93,69 @@ describe('WebDocsClient.readFile', () => {
   })
 })
 
+describe('WebDocsClient.writeFile (PR-6 edit parity)', () => {
+  it('PUTs docs/file with the body + OCC baseline and returns the new stat', async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = []
+    const client = new WebDocsClient({
+      base_url: 'https://h',
+      token: 't',
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init })
+        return json({ ok: true, file: { path: 'notes/a.md', size_bytes: 12, modified_at: 42 } })
+      },
+    })
+    const res = await client.writeFile('acme', {
+      path: 'notes/a.md',
+      content: '# edited',
+      expected_modified_at: 9,
+    })
+    expect(calls[0]!.url).toBe('https://h/api/app/projects/acme/docs/file')
+    expect(calls[0]!.init?.method).toBe('PUT')
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({
+      path: 'notes/a.md',
+      content: '# edited',
+      expected_modified_at: 9,
+    })
+    expect(res.modified_at).toBe(42)
+    expect(res.size_bytes).toBe(12)
+  })
+
+  it('omits expected_modified_at when not provided (force write)', async () => {
+    let bodySeen = ''
+    const client = new WebDocsClient({
+      base_url: 'https://h',
+      token: 't',
+      fetchImpl: async (_url, init) => {
+        bodySeen = init?.body as string
+        return json({ ok: true, file: { path: 'a.md', size_bytes: 1, modified_at: 2 } })
+      },
+    })
+    await client.writeFile('acme', { path: 'a.md', content: 'x' })
+    expect(JSON.parse(bodySeen)).toEqual({ path: 'a.md', content: 'x' })
+  })
+
+  it('throws a typed DocsClientError carrying current_modified_at on a 409 conflict', async () => {
+    const client = new WebDocsClient({
+      base_url: 'https://h',
+      token: 't',
+      fetchImpl: async () =>
+        json(
+          { ok: false, code: 'doc_changed_underfoot', message: 'stale', current_modified_at: 77 },
+          409,
+        ),
+    })
+    try {
+      await client.writeFile('acme', { path: 'a.md', content: 'x', expected_modified_at: 1 })
+      throw new Error('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(DocsClientError)
+      expect((err as DocsClientError).code).toBe('doc_changed_underfoot')
+      expect((err as DocsClientError).status).toBe(409)
+      expect((err as DocsClientError).current_modified_at).toBe(77)
+    }
+  })
+})
+
 describe('WebDocsClient.listComments — comments_unavailable gate', () => {
   it('returns threads on a 200', async () => {
     const client = new WebDocsClient({
