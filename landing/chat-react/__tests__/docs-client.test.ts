@@ -138,9 +138,10 @@ describe('WebDocsClient.writeFile (PR-6 edit parity)', () => {
     const client = new WebDocsClient({
       base_url: 'https://h',
       token: 't',
+      // The gateway's PUT /docs/file conflict code is doc_modified_conflict.
       fetchImpl: async () =>
         json(
-          { ok: false, code: 'doc_changed_underfoot', message: 'stale', current_modified_at: 77 },
+          { ok: false, code: 'doc_modified_conflict', message: 'stale', current_modified_at: 77 },
           409,
         ),
     })
@@ -149,7 +150,7 @@ describe('WebDocsClient.writeFile (PR-6 edit parity)', () => {
       throw new Error('should have thrown')
     } catch (err) {
       expect(err).toBeInstanceOf(DocsClientError)
-      expect((err as DocsClientError).code).toBe('doc_changed_underfoot')
+      expect((err as DocsClientError).code).toBe('doc_modified_conflict')
       expect((err as DocsClientError).status).toBe(409)
       expect((err as DocsClientError).current_modified_at).toBe(77)
     }

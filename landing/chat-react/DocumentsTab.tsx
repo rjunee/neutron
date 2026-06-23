@@ -131,9 +131,11 @@ export function DocumentsTab({
   const [replyBody, setReplyBody] = useState('')
 
   const contentRef = useRef<HTMLPreElement>(null)
-  // Monotonic guards so a slow file/comments fetch can't land after a newer one.
+  // Monotonic guards so a slow file/comments/save response can't land after a
+  // newer one (e.g. a Save that resolves after the user opened another doc).
   const fileSeq = useRef(0)
   const commentsSeq = useRef(0)
+  const saveSeq = useRef(0)
 
   // Reset everything when the project changes — a stale open doc from project A
   // must never linger under project B's id.
@@ -153,6 +155,9 @@ export function DocumentsTab({
     setEditing(false)
     setDraft('')
     setSaveError(null)
+    // Invalidate any in-flight save so its continuation can't land under the
+    // newly selected project.
+    saveSeq.current += 1
     let cancelled = false
     void client
       .tree(projectId)
@@ -199,6 +204,8 @@ export function DocumentsTab({
       setEditing(false)
       setDraft('')
       setSaveError(null)
+      // A new doc invalidates any in-flight save's continuation.
+      saveSeq.current += 1
       setLoadingFile(true)
       setFileError(null)
       const seq = (fileSeq.current += 1)
@@ -282,15 +289,20 @@ export function DocumentsTab({
   const saveEdit = useCallback((): void => {
     if (file === null || saving) return
     const next = draft
+    const docPath = file.path
+    // Capture the save token; a doc-open / project-switch bumps `saveSeq` and
+    // invalidates this continuation so a slow PUT can't clobber the new view.
+    const seq = saveSeq.current
     setSaving(true)
     setSaveError(null)
     void client
       .writeFile(projectId, {
-        path: file.path,
+        path: docPath,
         content: next,
         expected_modified_at: file.modified_at,
       })
       .then((res) => {
+        if (seq !== saveSeq.current) return
         setSaving(false)
         setEditing(false)
         // Adopt the server-authoritative stat as the next OCC baseline so an
@@ -298,12 +310,17 @@ export function DocumentsTab({
         setFile({ path: res.path, content: next, size_bytes: res.size_bytes, modified_at: res.modified_at })
         setDraft('')
         // Anchors re-anchor server-side against the new bytes — refresh threads.
-        loadComments(file.path)
+        loadComments(docPath)
       })
       .catch((err: unknown) => {
+        if (seq !== saveSeq.current) return
         setSaving(false)
+        // PUT /docs/file surfaces a stale `expected_modified_at` as a 409
+        // `doc_modified_conflict` (DocConflictError); accept the comment-flow's
+        // `doc_changed_underfoot` too so either OCC shape maps to the prompt.
         const msg =
-          err instanceof DocsClientError && err.code === 'doc_changed_underfoot'
+          err instanceof DocsClientError &&
+          (err.code === 'doc_modified_conflict' || err.code === 'doc_changed_underfoot')
             ? 'This document changed since you opened it — Cancel, reopen it, and reapply your edit.'
             : err instanceof DocsClientError && err.code === 'doc_too_large'
               ? 'This document is too large to save (5 MB limit).'

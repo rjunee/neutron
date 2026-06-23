@@ -37,17 +37,19 @@ retirement. Per the standing rule: **no feature flags** — edit renders directl
 - **`chat-react/docs-client.ts`** — added `WriteResult` type, `WriteResponse`,
   and `WebDocsClient.writeFile(project_id, { path, content, expected_modified_at })`
   → `PUT /docs/file`. `expected_modified_at` is the OCC baseline; a stale write
-  gets a `409 doc_changed_underfoot` rethrown as a typed `DocsClientError`
-  carrying `current_modified_at`. Mirrors `app/lib/docs-client.ts`.
+  gets a `409 doc_modified_conflict` (`DocConflictError`) rethrown as a typed
+  `DocsClientError` carrying `current_modified_at`. Mirrors `app/lib/docs-client.ts`.
 - **`chat-react/DocumentsTab.tsx`** — added **edit mode**: an **Edit** button in
   the viewer header swaps the read-only `<pre>` for a raw-markdown `<textarea>`
   seeded from the open file; **Save** (disabled until the draft differs) writes
   via `writeFile` with `expected_modified_at = file.modified_at`. On success it
   adopts the server's post-write `modified_at` as the next baseline, exits edit
-  mode, and reloads comments (anchors re-anchor server-side). On `409` it stays
-  in edit mode with the draft preserved and a "changed since you opened it"
-  prompt; `doc_too_large` (5 MB) is surfaced too. Edit state resets on doc open
-  and project switch.
+  mode, and reloads comments (anchors re-anchor server-side). On a `409`
+  (`doc_modified_conflict`) it stays in edit mode with the draft preserved and a
+  "changed since you opened it" prompt; `doc_too_large` (5 MB) is surfaced too. A
+  `saveSeq` guard drops a stale save continuation if the user opens another doc /
+  switches project before the PUT resolves (same pattern as the read/comment
+  paths). Edit state resets on doc open and project switch.
 - **`chat-react.html`** — `cdoc-editor` / `cdoc-edit-btn` / `cdoc-edit-actions`
   CSS for the editor + header buttons.
 

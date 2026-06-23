@@ -404,8 +404,10 @@ describe('DocumentsTab (happy-dom)', () => {
         })
       }
       if (url.endsWith('/docs/file') && (init?.method ?? 'GET') === 'PUT') {
+        // PUT /docs/file surfaces a stale OCC baseline as doc_modified_conflict
+        // (DocConflictError), the real gateway code for write conflicts.
         return jsonRes(
-          { ok: false, code: 'doc_changed_underfoot', message: 'stale', current_modified_at: 88 },
+          { ok: false, code: 'doc_modified_conflict', message: 'stale', current_modified_at: 88 },
           409,
         )
       }

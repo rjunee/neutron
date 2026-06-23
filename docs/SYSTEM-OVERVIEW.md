@@ -124,8 +124,9 @@ gateway-free):
   seeded from the open file; **Save** = `WebDocsClient.writeFile` →
   `PUT /docs/file` carrying `expected_modified_at` (the open file's mtime) as the
   **optimistic-concurrency baseline**. A concurrent write loses the race with a
-  `409 doc_changed_underfoot` (Save stays in edit mode, draft preserved, prompts
-  a reload) rather than silently clobbering. On success the tab adopts the
+  `409 doc_modified_conflict` (`DocConflictError`; Save stays in edit mode, draft
+  preserved, prompts a reload) rather than silently clobbering. On success the tab
+  adopts the
   server's post-write `modified_at` as the next baseline and reloads comments
   (anchors re-anchor server-side against the new bytes). Mirrors the mobile docs
   tab's editor (`app/app/projects/[id]/docs.tsx`) over the same handler.
