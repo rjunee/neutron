@@ -20,7 +20,7 @@
  * All visual styling sources from `lib/theme.ts` tokens.
  */
 
-import { Slot, useLocalSearchParams, useRouter, useSegments } from 'expo-router';
+import { Slot, useLocalSearchParams, usePathname, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
@@ -88,7 +88,15 @@ export default function ProjectLayout() {
 
 function ProjectShell({ project_id }: { project_id: string }) {
   const router = useRouter();
-  const segments = useSegments() as readonly string[];
+  // CONCRETE path segments (`usePathname()` carries the real `<id>`/`<slug>`).
+  // `useSegments()` would return the file-route TOKENS (`[id]`, `[slug]`) for
+  // dynamic routes, which never match a Core tab's resolved route — see
+  // `activeTabKeyFromSegments`.
+  const pathname = usePathname();
+  const segments = useMemo<readonly string[]>(
+    () => (pathname.split('?')[0] ?? '').split('/').filter((p) => p.length > 0),
+    [pathname],
+  );
   const { user } = useAuthSession();
   const { project, loading, error, generateInvite } = useProjectState();
   const config = useMemo(() => loadAppConfig(), []);
@@ -103,6 +111,11 @@ function ProjectShell({ project_id }: { project_id: string }) {
   useEffect(() => {
     if (user === null) return;
     let cancelled = false;
+    // Drop the previous project's tabs immediately on a project switch — this
+    // layout instance is reused across `project_id` changes, so without the
+    // reset `displayTabs` would briefly hold the OLD project's routes (whose
+    // `<id>` is baked in) and a tab tap would navigate back to it.
+    setFetchedTabs(null);
     const client = new TabsClient({ base_url: config.base_url, token: user.token });
     client
       .listProjectTabs(project_id)
@@ -123,9 +136,10 @@ function ProjectShell({ project_id }: { project_id: string }) {
     [fetchedTabs, project_id],
   );
 
-  // `null` on a non-tab sub-route (chat-sync/notes/backups/bare cores): no tab
-  // is highlighted there and `handleTabSelect` then lets every tab tap
-  // navigate. Route-driven against the live `displayTabs`.
+  // `null` on a non-tab sub-route (chat-sync/notes/backups/bare cores) AND on a
+  // legacy leaf no longer in the registry set: no tab is highlighted there and
+  // `handleTabSelect` then lets every tab tap navigate. Route-driven against
+  // the live `displayTabs`.
   const activeTab = activeTabKeyFromSegments(segments, displayTabs);
   // The slot fade keys off the actual route leaf (not the highlighted tab) so
   // it animates across non-tab routes too, and never receives a null key.

@@ -75,6 +75,9 @@ const NON_TAB_SUBROUTES: ReadonlySet<string> = new Set([
 /** The route segment the generic Core webview tab lives under. */
 const CORE_ROUTE_SEGMENT = 'cores';
 
+/** The top-level segment the project routes hang off (`/projects/<id>/…`). */
+const PROJECTS_ROOT_SEGMENT = 'projects';
+
 /** Strip a leading `core:` prefix off a descriptor/tab key, if present. */
 function coreSlugOf(descriptor: TabDescriptor): string {
   return descriptor.core_slug ?? descriptor.key.replace(/^core:/, '');
@@ -147,7 +150,19 @@ function isCoreRoute(route: string): boolean {
  *  - a `cores/<slug>` leaf → the Core tab whose slug matches (else null);
  *  - a builtin leaf matching a rendered tab's route leaf → that tab;
  *  - a known non-tab leaf (chat-sync / notes / backups / bare cores) → null;
- *  - the bare project route or an unknown leaf → the Chat tab if present.
+ *  - the bare project route (`/projects/<id>`) → the Chat tab if present;
+ *  - ANY OTHER unmatched leaf → null (NOT Chat).
+ *
+ * IMPORTANT — `segments` must be the CONCRETE path segments (e.g. from
+ * `usePathname()` split on `/`), NOT expo-router's `useSegments()`, which
+ * returns the file-route TOKENS (`['projects','[id]','cores','[slug]']`) for
+ * dynamic routes — those never carry the real `<id>`/`<slug>` so Core tabs
+ * would never match.
+ *
+ * The last bullet is load-bearing: a legacy `launcher`/`reminders` route that
+ * is no longer in the registry set must highlight NOTHING — default-
+ * highlighting Chat there would make the bar suppress the very tap that lets
+ * the user escape the obsolete route (the PR #11 shadow-and-lock class).
  */
 export function activeTabKeyFromSegments(
   segments: readonly string[],
@@ -156,7 +171,7 @@ export function activeTabKeyFromSegments(
   const leaf = segments[segments.length - 1] ?? '';
   const parent = segments[segments.length - 2];
 
-  // Concrete Core webview route: /projects/[id]/cores/[slug].
+  // Concrete Core webview route: /projects/<id>/cores/<slug>.
   if (parent === CORE_ROUTE_SEGMENT && leaf.length > 0) {
     const match = tabs.find((t) => isCoreRoute(t.route) && routeLeaf(t.route) === leaf);
     return match?.key ?? null;
@@ -168,9 +183,13 @@ export function activeTabKeyFromSegments(
 
   if (NON_TAB_SUBROUTES.has(leaf)) return null;
 
-  // Bare project route or unknown leaf → default to the Chat tab if present.
-  const chat = tabs.find((t) => !isCoreRoute(t.route) && routeLeaf(t.route) === 'chat');
-  return chat?.key ?? null;
+  // Bare project route (`/projects/<id>` — the leaf IS the id, its parent is
+  // `projects`): default to the Chat tab. Every other unmatched leaf → null.
+  if (parent === PROJECTS_ROOT_SEGMENT) {
+    const chat = tabs.find((t) => !isCoreRoute(t.route) && routeLeaf(t.route) === 'chat');
+    return chat?.key ?? null;
+  }
+  return null;
 }
 
 /**

@@ -132,6 +132,23 @@ describe('activeTabKeyFromSegments — registry set', () => {
   it('defaults the bare project route to the chat tab', () => {
     expect(activeTabKeyFromSegments([...base], tabs)).toBe('chat');
   });
+
+  it('highlights NOTHING on a legacy leaf no longer in the registry set', () => {
+    // `launcher` / `reminders` dropped out of the registry builtins. Default-
+    // highlighting Chat here would lock the user out of the obsolete route
+    // (the bar suppresses taps on the active tab) — PR #11 shadow-and-lock.
+    expect(activeTabKeyFromSegments([...base, 'launcher'], tabs)).toBeNull();
+    expect(activeTabKeyFromSegments([...base, 'reminders'], tabs)).toBeNull();
+    expect(activeTabKeyFromSegments([...base, 'totally-unknown'], tabs)).toBeNull();
+  });
+
+  it('matches the Core tab by its CONCRETE slug, not the [slug] token', () => {
+    // Drives home the usePathname (concrete) vs useSegments ([slug]) contract.
+    expect(activeTabKeyFromSegments(['projects', 'p_real', 'cores', 'research'], tabs)).toBe(
+      'core:research',
+    );
+    expect(activeTabKeyFromSegments(['projects', 'p_real', 'cores', '[slug]'], tabs)).toBeNull();
+  });
 });
 
 describe('activeTabKeyFromSegments — loading default set', () => {
