@@ -97,6 +97,68 @@ describe('prioritizeTasksForProject — LLM-primary path', () => {
     expect(after.map((r) => r.id)).toEqual([b.id, a.id])
   })
 
+  test('ranks the FULL open set even when it exceeds the prompt cap (no stale tail)', async () => {
+    const store = new TaskStore(db)
+    // 4 open tasks but only the top-2 by focus go to the LLM (limit=2).
+    const p3 = await store.create({ project_slug: 't1', title: 'p3', priority: 3 })
+    const p2 = await store.create({ project_slug: 't1', title: 'p2', priority: 2 })
+    const p1 = await store.create({ project_slug: 't1', title: 'p1', priority: 1 })
+    const p0 = await store.create({ project_slug: 't1', title: 'p0', priority: 0 })
+
+    const result = await prioritizeTasksForProject({
+      db,
+      project_slug: 't1',
+      llm: llmRankingIds([p2.id, p3.id]), // LLM reorders the top-2
+      limit: 2,
+    })
+    // Every open row is ranked this pass — no NULL llm_rank survives.
+    expect(result.scanned).toBe(4)
+    expect(result.ranked).toBe(4)
+    for (const id of [p3.id, p2.id, p1.id, p0.id]) {
+      expect(store.get(id)?.llm_rank).not.toBeNull()
+    }
+    // Head = LLM order; tail = deterministic focus order (p1 > p0).
+    expect(store.get(p2.id)?.llm_rank).toBe(1)
+    expect(store.get(p3.id)?.llm_rank).toBe(2)
+    expect(store.get(p1.id)?.llm_rank).toBe(3)
+    expect(store.get(p0.id)?.llm_rank).toBe(4)
+  })
+
+  test('a second pass clears prior ranks (no stale rank pins a dropped task)', async () => {
+    const store = new TaskStore(db)
+    const a = await store.create({ project_slug: 't1', title: 'A', priority: 3 })
+    const b = await store.create({ project_slug: 't1', title: 'B', priority: 0 })
+    // Pass 1: LLM pins B first.
+    await prioritizeTasksForProject({ db, project_slug: 't1', llm: llmRankingIds([b.id, a.id]) })
+    expect(store.get(b.id)?.llm_rank).toBe(1)
+    // Pass 2 with no LLM → deterministic: A (P3) must reclaim rank 1, B drops to 2.
+    await prioritizeTasksForProject({ db, project_slug: 't1', llm: null })
+    expect(store.get(a.id)?.llm_rank).toBe(1)
+    expect(store.get(b.id)?.llm_rank).toBe(2)
+    expect(store.get(a.id)?.prioritized_by).toBe('deterministic')
+  })
+
+  test('a task created AFTER a pass interleaves by focus_score (not buried)', async () => {
+    const store = new TaskStore(db)
+    const a = await store.create({ project_slug: 't1', title: 'A', priority: 2 })
+    const b = await store.create({ project_slug: 't1', title: 'B', priority: 1 })
+    const c = await store.create({ project_slug: 't1', title: 'C', priority: 0 })
+    // Rank the existing three (deterministic: A>B>C).
+    await prioritizeTasksForProject({ db, project_slug: 't1', llm: null })
+
+    // A new URGENT task arrives after the pass — llm_rank stays NULL.
+    const urgent = await store.create({ project_slug: 't1', title: 'urgent', priority: 3 })
+    expect(store.get(urgent.id)?.llm_rank).toBeNull()
+
+    // It must NOT sort dead-last; with P3 (highest focus) it interleaves
+    // near the top, ahead of the lower-focus ranked rows.
+    const order = store.list({ project_slug: 't1', order: 'focus_score' }).map((r) => r.id)
+    // urgent (fresh, P3) is not last; it sits ahead of B and C at minimum.
+    expect(order.indexOf(urgent.id)).toBeLessThan(order.indexOf(b.id))
+    expect(order.indexOf(urgent.id)).toBeLessThan(order.indexOf(c.id))
+    expect(order[order.length - 1]).toBe(c.id) // lowest focus stays last
+  })
+
   test('ids the LLM omits are appended in deterministic order (no NULL gaps)', async () => {
     const store = new TaskStore(db)
     const a = await store.create({ project_slug: 't1', title: 'A', priority: 3 })

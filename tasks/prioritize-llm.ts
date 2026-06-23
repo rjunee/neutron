@@ -136,29 +136,30 @@ export async function prioritizeTasksForProject(
   const model = input.model ?? DEFAULT_TASK_PRIORITIZE_MODEL
   const timeout_ms = input.timeout_ms ?? DEFAULT_TASK_PRIORITIZE_TIMEOUT_MS
 
-  // Pull the open backlog, capped to the top-N by stored focus_score so
-  // a pathological backlog never blows the prompt budget. NULLS LAST so
-  // a freshly-created row (focus_score stamped synchronously, so rarely
-  // null) still appears.
+  // Pull the FULL open backlog. We rank EVERY open row (not just the
+  // top-N) so no row keeps a stale `llm_rank` from a previous pass once
+  // it falls outside the prompt cap — `writeRanking` also clears the
+  // whole open set first, so a pass is the single source of truth for
+  // the project's ranking. The prompt cap (`limit`) only bounds how many
+  // rows we hand the LLM; the tail beyond the cap is ranked
+  // deterministically by focus_score.
   const rows = input.db
-    .prepare<OpenTaskRow, [string, number]>(
+    .prepare<OpenTaskRow, [string]>(
       `SELECT id, title, description, priority, due_date, focus_score, created_at, updated_at
          FROM tasks
-        WHERE project_slug = ? AND status = 'open'
-        ORDER BY CASE WHEN focus_score IS NULL THEN 1 ELSE 0 END ASC,
-                 focus_score DESC,
-                 created_at DESC
-        LIMIT ?`,
+        WHERE project_slug = ? AND status = 'open'`,
     )
-    .all(input.project_slug, limit)
+    .all(input.project_slug)
 
   if (rows.length === 0) {
     return { scanned: 0, ranked: 0, prioritized_by: 'deterministic', model_id: null }
   }
 
-  // The deterministic fallback order — recomputed here (not read from
-  // the stored column) so the fallback is correct even if the
-  // focus-score cron hasn't ticked since the last mutation.
+  // The deterministic order over ALL open rows — recomputed here (not
+  // read from the stored column) so the fallback is correct even if the
+  // focus-score cron hasn't ticked since the last mutation. This is both
+  // the full fallback order AND the order of the tail appended after the
+  // LLM-ranked head.
   const deterministicOrder = [...rows].sort(
     (a, b) => focusScoreFor(b, nowDate) - focusScoreFor(a, nowDate),
   )
@@ -167,12 +168,17 @@ export async function prioritizeTasksForProject(
   if (input.llm === null || input.llm === undefined) {
     const ranked = await writeRanking({
       db: input.db,
+      project_slug: input.project_slug,
       order: deterministicOrder.map((r) => ({ id: r.id, reason: null })),
       prioritized_by: 'deterministic',
       prioritized_at: nowIso,
     })
     return { scanned: rows.length, ranked, prioritized_by: 'deterministic', model_id: null }
   }
+
+  // Only the top-N by focus_score go to the LLM (prompt-budget cap); the
+  // rest are ranked deterministically in the tail.
+  const candidates = deterministicOrder.slice(0, limit)
 
   // LLM-primary path. Any failure (throw / timeout / unparseable /
   // empty / out-of-domain) drops to the deterministic fallback.
@@ -181,17 +187,18 @@ export async function prioritizeTasksForProject(
       input.llm,
       {
         system: PRIORITIZE_SYSTEM_PROMPT,
-        user: buildPrioritizeUserPrompt(rows),
+        user: buildPrioritizeUserPrompt(candidates),
         max_tokens: PRIORITIZE_MAX_TOKENS,
       },
       timeout_ms,
     )
-    const parsed = parseRanking(raw, new Set(rows.map((r) => r.id)))
+    const parsed = parseRanking(raw, new Set(candidates.map((r) => r.id)))
     if (parsed.length === 0) {
       throw new Error('llm returned no valid ranking')
     }
-    // Append any ids the LLM omitted, in deterministic order, so EVERY
-    // open row gets a rank (no NULL gaps that would silently sort last).
+    // Append every open row the LLM didn't rank (candidates it omitted +
+    // the entire beyond-cap tail), in deterministic order, so EVERY open
+    // row gets a fresh rank this pass — no NULL gaps, no stale ranks.
     const seen = new Set(parsed.map((p) => p.id))
     const merged = [
       ...parsed,
@@ -201,6 +208,7 @@ export async function prioritizeTasksForProject(
     ]
     const ranked = await writeRanking({
       db: input.db,
+      project_slug: input.project_slug,
       order: merged,
       prioritized_by: 'llm',
       prioritized_at: nowIso,
@@ -214,6 +222,7 @@ export async function prioritizeTasksForProject(
     )
     const ranked = await writeRanking({
       db: input.db,
+      project_slug: input.project_slug,
       order: deterministicOrder.map((r) => ({ id: r.id, reason: null })),
       prioritized_by: 'deterministic',
       prioritized_at: nowIso,
@@ -234,17 +243,27 @@ function focusScoreFor(row: OpenTaskRow, now: Date): number {
 
 /**
  * Stamp `llm_rank` (1-based, in `order`), `llm_reason`, `prioritized_by`,
- * and `prioritized_at` for each row in one transaction. Returns the
- * count written.
+ * and `prioritized_at` for each row in one transaction. Clears the
+ * ranking columns for EVERY open row of the project first, so a row that
+ * dropped out of this pass (e.g. completed, or no longer ranked) can
+ * never keep a stale rank. Returns the count written.
  */
 async function writeRanking(input: {
   db: ProjectDb
+  project_slug: string
   order: Array<{ id: string; reason: string | null }>
   prioritized_by: PrioritizedBy
   prioritized_at: string
 }): Promise<number> {
   let written = 0
   await input.db.transaction(async (tx) => {
+    // Reset the open set so no row carries a rank this pass didn't write.
+    await tx.run(
+      `UPDATE tasks
+          SET llm_rank = NULL, llm_reason = NULL, prioritized_by = NULL, prioritized_at = NULL
+        WHERE project_slug = ? AND status = 'open'`,
+      [input.project_slug],
+    )
     for (let i = 0; i < input.order.length; i++) {
       const entry = input.order[i]
       if (entry === undefined) continue

@@ -72,17 +72,20 @@ export const NO_PROJECT: '' = ''
  *     ASC, then dateless newest-first; non-open by completed_at/
  *     updated_at DESC). The Expo client and the Tasks Core's launcher
  *     surface bind to this ordering today.
- *   - `'focus_score'` is the **prioritized** ordering. It sorts open
- *     rows by the LLM-primary rank first (`llm_rank ASC NULLS LAST`,
- *     stamped by `tasks/prioritize-llm.ts`), falling back to the
- *     deterministic `focus_score DESC NULLS LAST, due_date ASC NULLS
- *     LAST, created_at DESC` for rows the last prioritize pass hasn't
- *     reached (and for instances with no LLM credential, where the
- *     prioritize pass writes `llm_rank` from the focus order anyway).
- *     The HTTP surfaces, the Tasks Core, and the projection layer all
- *     request this order, so the LLM-primary ranking flows to every
- *     rendered task list without each caller opting in separately
- *     (WAVE 3 PR-7). The name stays `'focus_score'` for back-compat.
+ *   - `'focus_score'` is the **prioritized** ordering (WAVE 3 PR-7). A
+ *     row's sort position is its effective rank: a row the last
+ *     prioritize pass ranked uses its `llm_rank` (`tasks/prioritize-llm.ts`);
+ *     a row created SINCE that pass (`llm_rank` NULL) is interleaved by
+ *     `focus_score` — slotted right after the ranked rows it outranks on
+ *     `focus_score` — so a freshly-captured urgent task competes with the
+ *     ranked set instead of being buried until the next 6-hour pass.
+ *     Ties fall to `focus_score DESC, due_date ASC NULLS LAST,
+ *     created_at DESC`. When no LLM credential is wired the prioritize
+ *     pass still writes `llm_rank` from the deterministic focus order,
+ *     so this degrades to pure focus-score ordering. The HTTP surfaces,
+ *     the Tasks Core, and the projection layer all request this order,
+ *     so the ranking flows to every rendered list without each caller
+ *     opting in. The name stays `'focus_score'` for back-compat.
  */
 export type TaskOrder = 'default' | 'focus_score'
 
@@ -436,8 +439,15 @@ export class TaskStore {
 
     const orderBy = order === 'focus_score'
       ? `
+        COALESCE(
+          llm_rank,
+          (SELECT COUNT(*) FROM tasks AS ranked_peer
+            WHERE ranked_peer.project_slug = tasks.project_slug
+              AND ranked_peer.status = 'open'
+              AND ranked_peer.llm_rank IS NOT NULL
+              AND ranked_peer.focus_score > COALESCE(tasks.focus_score, -1)) + 1
+        ) ASC,
         CASE WHEN llm_rank IS NULL THEN 1 ELSE 0 END ASC,
-        llm_rank ASC,
         CASE WHEN focus_score IS NULL THEN 1 ELSE 0 END ASC,
         focus_score DESC,
         CASE WHEN due_date IS NULL THEN 1 ELSE 0 END ASC,

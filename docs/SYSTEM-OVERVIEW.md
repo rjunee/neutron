@@ -173,11 +173,15 @@ ranking signals coexist:
   unparseable·empty·out-of-domain ranking — in which case the same pass ranks by
   `focus_score DESC` and stamps `prioritized_by='deterministic'`.
 
-The two meet at the store's **`'focus_score'` sort order**, which is now
-`llm_rank ASC NULLS LAST, focus_score DESC NULLS LAST, due_date ASC NULLS LAST,
-created_at DESC`. Every surface already requests this order, so the LLM ranking
-flows to every rendered list with no per-caller change; a row the last pass
-hasn't reached (`llm_rank` NULL) falls back to `focus_score` automatically. The
+The two meet at the store's **`'focus_score'` sort order**, which now ranks each
+row by its *effective rank*: a ranked row uses its `llm_rank`; a row created
+since the last pass (`llm_rank` NULL) is interleaved by `focus_score` (slotted
+right after the ranked rows it outranks on `focus_score`) so a freshly-captured
+urgent task competes with the ranked set instead of being buried until the next
+pass. Each pass clears + re-ranks the full open set, so no row keeps a stale rank.
+Every surface already requests this order, so the LLM ranking flows to every
+rendered list with no per-caller change; with no rows ranked yet it degrades to
+pure focus-score ordering. The
 prioritize cron is wired in `gateway/composition/build-core-modules.ts` behind
 `tasks.enable_task_prioritize_cron` + `tasks.task_prioritizer.llm` (mirrors the
 focus-score / nudge-engine gates); registering it with a null llm is safe — the

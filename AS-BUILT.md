@@ -91,13 +91,16 @@ not a dual flag-path.
   defaults NULL. `migrations/expected-schema.txt` regenerated; runner snapshot
   test green.
 - **`tasks/prioritize-llm.ts`** (new) — the prioritizer. `prioritizeTasksForProject`
-  fetches the open backlog (top-N by `focus_score`, cap 50), and: if no `llm` /
-  the call throws / times out / returns an unparseable / empty / out-of-domain
-  ranking → ranks by recomputed `focus_score DESC` and stamps
+  ranks the FULL open set each pass (clearing every open row's rank first, so a
+  row outside the prompt cap can't keep a stale rank); only the top-N by
+  `focus_score` (cap 50) go to the LLM, the tail is ranked deterministically. If
+  no `llm` / the call throws / times out / returns an unparseable / empty /
+  out-of-domain ranking → ranks by recomputed `focus_score DESC` and stamps
   `prioritized_by='deterministic'` (reason NULL); on a valid LLM ranking → stamps
   `llm_rank` from the LLM order + `llm_reason` per task + `prioritized_by='llm'`.
-  Ids the LLM omits are appended in deterministic order so EVERY open row gets a
-  rank (no NULL gaps). All writes land in one `db.transaction`. Ships a cron
+  Ids the LLM omits (and the beyond-cap tail) are appended in deterministic order
+  so EVERY open row gets a fresh rank (no NULL gaps, no stale ranks). All writes
+  land in one `db.transaction`. Ships a cron
   (`buildTaskPrioritizeHandler` / `buildTaskPrioritizeJob` /
   `registerTaskPrioritizeCron`, handler name `tasks.prioritize_llm`, 6h default
   cadence) mirroring `tasks/focus-score-cron.ts`, plus `parseRanking` (tolerates
@@ -106,13 +109,17 @@ not a dual flag-path.
   engine.
 - **`tasks/store.ts`** — `Task` / `TaskDbRow` / `COLS` / `rowToTask` gain the 4
   columns (create() stamps them NULL). The **`'focus_score'` order is now the
-  prioritized order**: `llm_rank ASC NULLS LAST, focus_score DESC NULLS LAST,
-  due_date ASC NULLS LAST, created_at DESC`. Because every existing surface
-  (HTTP, pick-next, projection, Tasks Core) already requests `order:'focus_score'`,
-  the LLM-primary ranking flows to every rendered task list with **no per-caller
-  change** — and rows the last pass hasn't reached (llm_rank NULL) sort by
-  `focus_score` exactly as before, so the change is back-compatible (all existing
-  focus-score tests stay green). That is the "wire into the Tasks Core" seam.
+  prioritized order**: a row's sort position is its *effective rank* — a ranked
+  row uses its `llm_rank`; a row created since the last pass (`llm_rank` NULL) is
+  **interleaved by `focus_score`** (a correlated subquery slots it right after the
+  ranked rows it outranks on `focus_score`), so a freshly-captured urgent task
+  competes with the ranked set instead of being buried until the next pass. Ties
+  fall to `focus_score DESC, due_date ASC NULLS LAST, created_at DESC`. Because
+  every existing surface (HTTP, pick-next, projection, Tasks Core) already
+  requests `order:'focus_score'`, the ranking flows everywhere with **no
+  per-caller change**; with no rows ranked yet it degrades to pure focus-score
+  ordering, so the change is back-compatible (all existing focus-score tests stay
+  green). That is the "wire into the Tasks Core" seam.
 - **`gateway/composition/`** — `tasks-input.ts` gains `enable_task_prioritize_cron`
   / `task_prioritize_interval_ms` / `task_prioritizer:{llm,model,timeout_ms,limit}`;
   `build-core-modules.ts` registers the prioritize cron (mirrors the focus-score /
