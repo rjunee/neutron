@@ -109,9 +109,8 @@ export interface RenderTaskLineOptions {
 
 /**
  * Render a single open-task checkbox line in the locked Nova tag format.
- * Exported so every markdown surface (STATUS.md projection, the
- * instance-wide tasks.md / DASHBOARD.md surface) emits byte-identical
- * lines — the tag format lives in exactly one place.
+ * Exported so every markdown surface (the STATUS.md / ACTIONS.md projection)
+ * emits byte-identical lines — the tag format lives in exactly one place.
  */
 export function renderTaskLine(
   task: Task,

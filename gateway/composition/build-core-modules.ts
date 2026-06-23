@@ -301,7 +301,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         project_slug: input.project_slug,
       })
       // P1 S4 doesn't auto-start jobs — handlers are wired by the modules
-      // that own each job (vault-backup, task-scan, …) BEFORE scheduler.start.
+      // that own each job (vault-backup, focus_score_recompute, …) BEFORE scheduler.start.
       // The boot shell triggers start() after all modules register handlers.
       return { jobs, handlers, state, scheduler }
     },
