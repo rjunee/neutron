@@ -158,7 +158,11 @@ export function ProjectShell({
       return
     }
     let cancelled = false
+    // Reset to the Chat fallback IMMEDIATELY on a project switch so the previous
+    // project's resolved tabs (incl. its Core iframe URLs) can't linger — and be
+    // clicked under the new project's chat — while the new fetch is in flight.
     setActiveKey(CHAT_KEY)
+    setTabs([CHAT_TAB])
     void client
       .listProjectTabs(projectId)
       .then((resolved) => {
@@ -186,18 +190,22 @@ export function ProjectShell({
   // view on mount; keep the panels container as the scroll parent.
   const panelsRef = useRef<HTMLDivElement>(null)
 
+  // The General (no-project) view has no project tabs, so it stays the existing
+  // CHAT-ONLY experience — no tab strip, full chat area. The tab bar only
+  // appears once a project is active. `ChatApp` keeps the SAME tree position
+  // either way, so crossing the General↔project boundary doesn't remount it.
+  const isGeneral = projectId === null || projectId.length === 0
+  const chatHidden = !isGeneral && resolvedActiveKey !== CHAT_KEY
+
   return (
     <div className="car-projectshell">
-      <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+      {!isGeneral ? (
+        <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+      ) : null}
       <div className="car-tabpanels" ref={panelsRef}>
         {/* Chat stays mounted across tab switches so the live session, stream,
             and scroll state survive — only its visibility toggles. */}
-        <div
-          className="car-tabpanel"
-          role="tabpanel"
-          hidden={resolvedActiveKey !== CHAT_KEY}
-          aria-hidden={resolvedActiveKey !== CHAT_KEY}
-        >
+        <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
           <ChatApp
             vm={vm}
             controller={controller}
@@ -206,7 +214,7 @@ export function ProjectShell({
             {...(fetchImpl !== undefined ? { fetchImpl } : {})}
           />
         </div>
-        {resolvedActiveKey !== CHAT_KEY ? (
+        {!isGeneral && resolvedActiveKey !== CHAT_KEY ? (
           <div className="car-tabpanel" role="tabpanel">
             <TabContent tab={activeTab} />
           </div>
