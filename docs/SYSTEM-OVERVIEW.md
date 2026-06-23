@@ -85,8 +85,9 @@ client, bearer-authed off `config.token`, base URL `config.origin`). `main.tsx`
 mounts `ProjectShell` inside the `AssistantRuntimeProvider` (so the chat session
 survives tab switches) instead of `ChatApp` directly. Tab content: **Chat** =
 the existing `ChatApp`, kept MOUNTED (hidden via `hidden`) across switches;
-**Documents/Tasks** (builtin) = a "coming soon" placeholder until PR-5..9 land
-their real views (unbuilt content, NOT a flag); **Core** (`mount.kind:'webview'`)
+**Documents** (PR-5) + **Tasks** (PR-8) (builtin) = their real views; any
+not-yet-built builtin tab = a "coming soon" placeholder (unbuilt content, NOT a
+flag); **Core** (`mount.kind:'webview'`)
 = the Core's `project_tab` surface in a sandboxed `<iframe>`, URL scheme-validated
 (`sanitizeCoreTabUrl`, http(s) only) before it reaches `src`. The General
 (no-project) view has no project tabs, so it stays chat-only. No feature flag —
@@ -157,6 +158,40 @@ are either accurate "Obsidian-replacement" labels on this surface or the operato
 platform's *separate* vault-deeplink convention (the `vault.example.test`
 redirector for the owner's own notes) — neither is part of a project's document
 flow.
+
+### Web Tasks tab (WAVE 3 PR-8)
+
+The builtin **Tasks** tab (`mount.target === 'tasks'`) renders
+`chat-react/TasksTab.tsx` — a dynamic React/AJAX list of the project's tasks
+inside `ProjectShell`, with agent+user-parity CRUD (add / complete / reprioritize
+/ cancel / delete). It adds **no gateway/backend changes**: it reads + writes over
+the existing project tasks surface (`gateway/http/app-tasks-surface.ts`) through
+`chat-react/tasks-client.ts` (`WebTasksClient`, the web twin of
+`app/lib/tasks-client.ts`: bearer-authed off `config.token`, base URL
+`config.origin`, wire types re-declared client-side so the bundle stays
+gateway-free).
+
+- **Order is the engine's.** The list fetches with `order=focus_score`, the PR-7
+  LLM-primary prioritized ordering (`tasks/prioritize-llm.ts`): ranked rows first
+  by `llm_rank`, fresh rows interleaved by `focus_score`. The tab NEVER re-sorts —
+  `tasks/store.ts` is the single source of truth — so what the agent ranked is
+  what the user sees. Each row surfaces its `llm_rank` (`#N`) and the LLM's
+  one-line `llm_reason`.
+- **Agent + user parity.** Every action hits the same canonical `TaskStore` the
+  agent's `cores/free/tasks` backend writes; the server returns the canonical row
+  and the list re-fetches after every mutation. **Reprioritize** is a PATCH of the
+  0-3 `priority` field (the column the focus-score reads), so a user nudge feeds
+  the next prioritize pass. Open tasks **Cancel** (soft); already-closed rows
+  **Delete** (hard). A status filter toggles Open ⇄ All.
+- **Robustness.** A monotonic `listSeq` guard drops a slow fetch that lands after
+  a newer one; a per-row `busyId` guard blocks double-fires; a project-change
+  reset clears a stale list so project A's tasks never linger under project B.
+
+No feature flag — the tab renders directly. CSS (`ctask-*`) lives in
+`chat-react.html`. Tests: `chat-react/__tests__/tasks-client.test.ts` (pure:
+routes incl. the `order=focus_score` default, `priorityLabel`/`clampPriority`/
+`formatDue`) + `tasks-tab.test.tsx` (happy-dom: prioritized server order with
+rank+reason, complete, reprioritize PATCH, add).
 
 ### Cores install-SCOPE (WAVE 3 PR-2)
 

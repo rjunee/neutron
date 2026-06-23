@@ -140,6 +140,51 @@
     .cdoc-list { flex-basis: 140px; }
     .cdoc-comments { flex-basis: 200px; }
   }
+  /* ── Tasks tab (WAVE 3 PR-8) ── */
+  .ctask { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; width: 100%; }
+  .ctask-head {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .ctask-filters { display: flex; gap: 4px; }
+  .ctask-filter {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+  }
+  .ctask-filter:hover { color: var(--fg); }
+  .ctask-filter-active { color: var(--fg); border-color: var(--accent); background: rgba(108,170,255,.12); }
+  .ctask-add { display: flex; gap: 6px; flex: 1 1 240px; min-width: 200px; }
+  .ctask-add-input {
+    flex: 1 1 auto; min-width: 0; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 14px;
+  }
+  .ctask-error { color: #ff8a8a; font-size: 12px; padding: 6px 14px; }
+  .ctask-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 14px; }
+  .ctask-empty { color: var(--muted); font-size: 13px; padding: 24px 14px; text-align: center; }
+  .ctask-ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .ctask-row {
+    display: flex; align-items: flex-start; gap: 10px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--surface);
+  }
+  .ctask-row-done { opacity: .55; }
+  .ctask-rank { flex: 0 0 34px; font-size: 13px; font-weight: 600; color: var(--accent); padding-top: 2px; text-align: right; }
+  .ctask-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .ctask-title-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .ctask-title { font-size: 14px; color: var(--fg); word-break: break-word; }
+  .ctask-row-done .ctask-title { text-decoration: line-through; }
+  .ctask-chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .ctask-chip-prio { color: #ffd27d; border-color: rgba(255,210,125,.4); }
+  .ctask-chip-due { color: var(--accent); border-color: rgba(108,170,255,.4); }
+  .ctask-reason { font-size: 12px; color: var(--muted); font-style: italic; }
+  .ctask-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; flex-wrap: wrap; }
+  .ctask-btn {
+    background: transparent; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  .ctask-btn:hover { border-color: var(--accent); }
+  .ctask-btn:disabled { opacity: .4; cursor: default; }
+  .ctask-btn-icon { padding: 4px 7px; line-height: 1; font-size: 10px; }
+  .ctask-btn-primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
   .car-shell { display: flex; height: 100%; width: 100%; }
   .car-rail {
     width: 220px;

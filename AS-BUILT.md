@@ -63,6 +63,58 @@ the OCC baseline and returns to the read view with comments reloaded; a 409
 navigating away mid-save doesn't leave Save stuck-disabled). Full
 `landing/chat-react/` suite green (**77 pass**, was 71), `tsc -p
 chat-react/tsconfig.json` clean, browser bundle builds.
+## 2026-06-23 — WAVE 3 PR-8: web Tasks tab (LLM-prioritized, agent+user-parity CRUD)
+
+Tasks-track PR of the WAVE 3 build
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.4 item 2, PR-8). Fills the
+builtin **Tasks** tab in the web `ProjectShell` (PR-4) with its real view: a
+dynamic React/AJAX list of the project's tasks rendered in the **LLM-primary
+prioritized order** shipped in PR-7 (`tasks/prioritize-llm.ts`), with
+agent+user-parity CRUD (add / complete / reprioritize / cancel / delete). Per the
+SPEC Decisions Log (2026-06-23) **no feature flags** — the tab renders directly.
+This is the per-project Tasks tab; the global cross-project roll-up stays
+v2-deferred (plan C11).
+
+**Order is the engine's, not the client's.** The list fetches with
+`order=focus_score`, the PR-7 prioritized ordering: ranked rows first by
+`llm_rank`, fresh rows interleaved by `focus_score`. The tab NEVER re-sorts — the
+store (`tasks/store.ts`) is the single source of truth — so what the agent ranked
+is what the user sees. Each row surfaces its `llm_rank` (`#N`) and the LLM's
+one-line `llm_reason`.
+
+**Agent + user parity.** Every action hits the SAME canonical `TaskStore` the
+agent's `cores/free/tasks` backend writes (`buildSubstrateTaskStoreBackend`), over
+the existing `gateway/http/app-tasks-surface.ts` surface — **no gateway/backend
+changes**. Reprioritize is a PATCH of the 0-3 `priority` field (the column the
+focus-score reads), so a user nudge feeds the next prioritize pass. The server
+returns the canonical row and the list re-fetches after every mutation, so the
+order reflects the store immediately.
+
+**What changed (web client only).**
+- **`chat-react/tasks-client.ts`** (new) — `WebTasksClient`, the web twin of
+  `app/lib/tasks-client.ts`: bearer-auth (`config.token`) fetch wrapper, base URL
+  `config.origin`, wire types re-declared client-side (bundle stays gateway-free,
+  same convention as `docs-client.ts` / `tabs-client.ts`). Methods: `list`
+  (defaults to `order=focus_score`), `create`, `update`, `complete`, `cancel`,
+  `delete`. Pure helpers: `priorityLabel` (0-3 → P0..P3), `clampPriority`,
+  `formatDue`. Typed `TasksClientError`.
+- **`chat-react/TasksTab.tsx`** (new) — the tab view: a status filter
+  (Open / All), an add-task composer, and a prioritized task list. Each row shows
+  rank + reason + priority/due chips and Raise/Lower/Done/Cancel(or Delete)
+  actions. Monotonic `listSeq` guard (slow fetch can't land after a newer one),
+  per-row `busyId` in-flight guard, and a project-change reset effect so a stale
+  list from project A never lingers under project B.
+- **`chat-react/ProjectShell.tsx`** — `TabContent` now renders `<TasksTab>` for
+  the builtin `tasks` mount target (was the PR-4 "coming soon" placeholder); the
+  placeholder remains the fallback for any not-yet-built builtin tab.
+- **`chat-react.html`** — `.ctask-*` styles mirroring the `.cdoc-*` block.
+
+**Tests.** `chat-react/__tests__/tasks-client.test.ts` (client + helpers, pure
+injected fetch) and `chat-react/__tests__/tasks-tab.test.tsx` (happy-dom: list
+renders prioritized server order with rank+reason; complete → POST /complete +
+re-fetch; reprioritize → PATCH priority; add → POST title + re-fetch).
+`bun test landing/chat-react/__tests__/` → 86 pass. Leaf tsc clean
+(`bunx tsc -p landing/chat-react/tsconfig.json`).
 
 ## 2026-06-23 — WAVE 3 PR-5: web Documents tab (list · view · comment)
 

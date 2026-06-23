@@ -36,6 +36,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { ChatApp } from './ChatApp.tsx'
 import { DocumentsTab } from './DocumentsTab.tsx'
+import { TasksTab } from './TasksTab.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -137,7 +138,17 @@ function TabContent({
       />
     )
   }
-  // Other builtin tabs (Tasks) — real views land in PR-8.
+  // Builtin Tasks — the LLM-prioritized, agent+user-parity tasks view (PR-8).
+  if (tab.mount.target === 'tasks') {
+    return (
+      <TasksTab
+        projectId={projectId}
+        config={config}
+        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+      />
+    )
+  }
+  // Any other builtin tab whose real view hasn't landed yet.
   return <TabPlaceholder label={tab.label} />
 }
 
