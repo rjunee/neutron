@@ -16,6 +16,10 @@ CREATE INDEX button_prompts_topic_active
 CREATE INDEX button_prompts_topic_created
     ON button_prompts (topic_id, created_at DESC)
 
+[index] core_global_installations_install_state (tbl=core_global_installations)
+CREATE INDEX core_global_installations_install_state
+    ON core_global_installations (install_state)
+
 [index] core_installations_install_state (tbl=core_installations)
 CREATE INDEX core_installations_install_state
     ON core_installations(project_slug, install_state)
@@ -495,6 +499,18 @@ CREATE TABLE "connected_members" (
     approved_at        TEXT,
     status             TEXT NOT NULL
                            CHECK (status IN ('pending', 'active', 'revoked'))
+) STRICT
+
+[table] core_global_installations (tbl=core_global_installations)
+CREATE TABLE core_global_installations (
+    core_slug                   TEXT NOT NULL,
+    package_name                TEXT NOT NULL,
+    package_version             TEXT NOT NULL,
+    manifest_capabilities_json  TEXT NOT NULL,
+    install_state               TEXT NOT NULL DEFAULT 'install_ok',
+    installed_at                INTEGER NOT NULL,
+    uninstalled_at              INTEGER,
+    PRIMARY KEY (core_slug)
 ) STRICT
 
 [table] core_installations (tbl=core_installations)

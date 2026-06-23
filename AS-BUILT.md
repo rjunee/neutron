@@ -2,6 +2,73 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-2: strip the tabs flag + Cores install-SCOPE (global) + Core-tab union
+
+Second PR of the WAVE 3 tabbed-project-interface build
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.1-3.2). Two things, and
+per Ryan's SPEC Decisions Log (2026-06-23) **no feature flags** — the plan's
+flag-gating is disregarded.
+
+**(A) Strip `NEUTRON_TABS_REGISTRY`.** PR-1 gated the tab-resolver surface on an
+`enabled` boolean (the `NEUTRON_TABS_REGISTRY` flag) and disclaimed its routes
+when off. That gate is **removed**: `createAppTabsSurface` no longer takes
+`enabled`, the flag-off `return null` path is gone, and the routes
+(`GET /api/app/projects/<id>/tabs`, `GET /api/app/tabs`) are **always on**. The
+surface still returns `null` for non-owned paths (compose-chain dispatch, not a
+flag). The flag was never wired into production boot (PR-1 left
+`app_tabs_surface` as an unpopulated composition slot), so there is no boot path
+to change — only the surface, its doc comments (`compose.ts`,
+`app-surfaces-input.ts`), and the test. The flag-OFF test branch is deleted.
+
+**(B) Cores install-SCOPE — the GLOBAL scope (no flag).** A Core can now install
+**per-project** (the existing `core_installations`, keyed `(project_slug,
+core_slug)`) OR **globally** (its tabs surface in the global shell + every
+project):
+- **Migration `0084_core_global_installations.sql`** — a sibling table keyed on
+  `core_slug` (PK), with `package_name/version`, `manifest_capabilities_json`,
+  `install_state` (mirrors 0036), and install/uninstall timestamps. A dedicated
+  table (not a `scope` column + sentinel `project_slug='*'`) keeps every
+  per-project read path byte-identical and makes "installed globally" a clean
+  UNION in the resolver. `expected-schema.txt` regenerated;
+  `migrations/runner.test.ts` applied-list extended to `84`.
+- **Global CRUD on `CoreInstallationsStore`** — `recordGlobal` / `getGlobal` /
+  `listGlobal` / `listGlobalLive` / `markGlobalUninstalled`, mirroring the
+  per-project methods (uninstall is a tombstone; re-install revives via UPSERT).
+- **Manifest `install_scopes: ('project'|'global')[]`** — OPTIONAL (omitted ⇒
+  project-only, so every pre-WAVE-3 Core is unchanged). Added to the runtime Zod
+  schema (`cores/sdk/manifest.ts`, the loader's source of truth) and, for
+  parity, the hand-written `core-sdk` (type + permissive validator +
+  `manifest.schema.json`).
+- **Global lifecycle** — `installCoreGlobally` / `uninstallCoreGlobally` +
+  `manifestSupportsScope` (`cores/runtime/lifecycle.ts`). A global install loads
+  + validates the manifest, **gates on `install_scopes` including `'global'`**
+  (new `CoreInstallError` code `scope_not_supported`), refuses a duplicate live
+  global install, and records the global row. Deliberately project-agnostic — no
+  per-project data namespace or secrets prompt (those still flow through the
+  unchanged per-project `installCore`), so the heavily-tested per-project path is
+  byte-identical.
+- **Resolver union** — `resolveTabs(scope, cores)` now unions builtin tabs with a
+  `CoreTabContribution[]` (Core tabs sort after builtins at `order ≥ 100`,
+  `source:'core'`, `key:'core:<slug>'`, `mount:{kind:'webview'}`). The registry
+  stays **pure**; the HTTP surface gathers contributions — per-project from
+  `installations.listLive(project_slug)` (with `<project_id>` substituted into
+  the Core's `project_tab` entry), global from `installations.listGlobalLive()`
+  (placeholder kept) — reading each Core's manifest from `CoresModuleState.registry`.
+  Core union is opt-in: `createAppTabsSurface({ auth, cores?, installations? })`
+  serves builtins-only when those are omitted.
+
+**Tests (tsc clean; targeted suites green):** registry union (project/global
+scope stamping, order, webview mount); store global CRUD (round-trip,
+project/global separation, tombstone + revive); lifecycle global install/uninstall
++ scope gate (`scope_not_supported`, duplicate refusal, default project-only);
+surface end-to-end (always-on builtins, per-project Core fold-in with substitution,
+global Core fold-in, no per-project leak into global, tombstoned skip). 57
+focused tests across the four touched suites + 256 across `core-sdk`/`cores/sdk`/
+`cores/runtime`.
+
+**Out of scope (later PRs):** mobile/web tab UI (PR-3/PR-4); Documents/Tasks
+tabs; wiring `app_tabs_surface` into production boot.
+
 ## 2026-06-23 — WAVE 3 PR-1: tab descriptor + resolver endpoints (engine, builtin-only, flag-gated)
 
 First PR of the WAVE 3 tabbed-project-interface build

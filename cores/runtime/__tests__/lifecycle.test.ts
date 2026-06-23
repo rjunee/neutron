@@ -13,7 +13,10 @@ import {
   CoreInstallationsStore,
   SecretAuditLog,
   installCore,
+  installCoreGlobally,
+  manifestSupportsScope,
   uninstallCore,
+  uninstallCoreGlobally,
   upgradeCore,
   type SecretsPrompter,
 } from '../index.ts'
@@ -31,10 +34,12 @@ function manifestFor(opts: {
   capabilities?: string[]
   secrets?: Array<{ kind: string; label: string; required: boolean; install_prompt?: string }>
   tools?: Array<{ name: string; capability_required: string }>
+  install_scopes?: string[]
 } = {}): unknown {
   return {
     capabilities: opts.capabilities ?? ['read:project.db'],
     tier_support: ['regular'],
+    ...(opts.install_scopes !== undefined ? { install_scopes: opts.install_scopes } : {}),
     tools: (opts.tools ?? []).map((t) => ({
       name: t.name,
       description: 'desc',
@@ -373,4 +378,60 @@ test('upgradeCore: layout change tables→sidecar rejected', async () => {
       consent_acknowledged: true,
     }),
   ).rejects.toThrow(expect.objectContaining({ code: 'data_layout_change_not_supported' }))
+})
+
+// ── GLOBAL install scope (WAVE 3 PR-2) ─────────────────────────────────────
+
+test('manifestSupportsScope: omitted install_scopes ⇒ project-only', () => {
+  const manifest = { install_scopes: undefined, capabilities: [] } as never
+  expect(manifestSupportsScope(manifest, 'project')).toBe(true)
+  expect(manifestSupportsScope(manifest, 'global')).toBe(false)
+})
+
+test('installCoreGlobally: records a global install when manifest allows global', async () => {
+  const dir = writeCorePackage(
+    'admin',
+    manifestFor({ install_scopes: ['project', 'global'] }),
+  )
+  const rec = await installCoreGlobally({ coreDir: dir, installations: installs })
+  expect(rec.core_slug).toBe('admin')
+  expect(rec.uninstalled_at).toBeNull()
+  expect((await installs.listGlobalLive()).map((r) => r.core_slug)).toEqual(['admin'])
+  // It does NOT create a per-project row.
+  expect(await installs.get(OWNER, 'admin')).toBeNull()
+})
+
+test('installCoreGlobally: rejects a Core that does not declare global scope', async () => {
+  const dir = writeCorePackage('notes', manifestFor({ install_scopes: ['project'] }))
+  await expect(
+    installCoreGlobally({ coreDir: dir, installations: installs }),
+  ).rejects.toThrow(expect.objectContaining({ code: 'scope_not_supported' }))
+  // Default (no install_scopes) is also project-only → rejected.
+  const dir2 = writeCorePackage('calendar', manifestFor({}))
+  await expect(
+    installCoreGlobally({ coreDir: dir2, installations: installs }),
+  ).rejects.toThrow(expect.objectContaining({ code: 'scope_not_supported' }))
+})
+
+test('installCoreGlobally: refuses a duplicate live global install', async () => {
+  const dir = writeCorePackage('admin', manifestFor({ install_scopes: ['global'] }))
+  await installCoreGlobally({ coreDir: dir, installations: installs })
+  await expect(
+    installCoreGlobally({ coreDir: dir, installations: installs }),
+  ).rejects.toThrow(expect.objectContaining({ code: 'duplicate_install' }))
+})
+
+test('uninstallCoreGlobally: tombstones the install; re-install allowed after', async () => {
+  const dir = writeCorePackage('admin', manifestFor({ install_scopes: ['global'] }))
+  await installCoreGlobally({ coreDir: dir, installations: installs })
+  await uninstallCoreGlobally({ core_slug: 'admin', installations: installs })
+  expect(await installs.listGlobalLive()).toHaveLength(0)
+  // Re-install works after uninstall.
+  await installCoreGlobally({ coreDir: dir, installations: installs })
+  expect((await installs.listGlobalLive()).map((r) => r.core_slug)).toEqual(['admin'])
+})
+
+test('uninstallCoreGlobally: idempotent no-op for an unknown core', async () => {
+  await uninstallCoreGlobally({ core_slug: 'nope', installations: installs })
+  expect(await installs.listGlobal()).toHaveLength(0)
 })

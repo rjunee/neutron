@@ -80,6 +80,20 @@ export const TierSupportSchema = z.enum(['regular', 'private', 'both'])
 export type TierSupport = z.infer<typeof TierSupportSchema>
 
 /**
+ * WAVE 3 PR-2 — which install SCOPES a Core supports. `project` = installs
+ * into one project (the `core_installations` path, the historical default).
+ * `global` = installs into the global app shell + every project (the new
+ * `core_global_installations` path). A manifest may declare both. The field
+ * is OPTIONAL on the manifest; an omitted value means project-only
+ * (`['project']`), so every pre-WAVE-3 Core keeps installing exactly as
+ * before. The install lifecycle gates global installs on this list.
+ *
+ * Mirrors `core-sdk/types.ts:InstallScope`.
+ */
+export const InstallScopeSchema = z.enum(['project', 'global'])
+export type InstallScope = z.infer<typeof InstallScopeSchema>
+
+/**
  * A JSON Schema document. Loose at the SDK layer; downstream tooling
  * validates the body when the Core actually registers tools at runtime.
  */
@@ -294,6 +308,14 @@ export const NeutronManifestSchema = z
     tier_support: z.array(TierSupportSchema).min(1, {
       message: 'tier_support must declare at least one tier',
     }),
+    /**
+     * WAVE 3 PR-2 — install scopes the Core supports. Optional; omitted ⇒
+     * project-only. A non-empty list when present (an empty array would
+     * mean "installable nowhere", which is a packaging mistake).
+     */
+    install_scopes: z.array(InstallScopeSchema).min(1, {
+      message: 'install_scopes, when present, must declare at least one scope',
+    }).optional(),
     tools: z.array(ToolDefSchema),
     ui_components: z.array(UiComponentDefSchema),
     billing_hooks: z.array(BillingMeterSchema),

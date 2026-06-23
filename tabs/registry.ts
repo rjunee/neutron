@@ -7,14 +7,18 @@
  * engine-side resolver that BOTH clients (mobile RN + web React) consume
  * over HTTP — tabs are NOT hardcoded in either client.
  *
- * ── PR-1 scope (this file) ──────────────────────────────────────────────
- * v1 resolves BUILTIN tabs ONLY:
+ * ── Scope (PR-1 + PR-2) ─────────────────────────────────────────────────
+ * BUILTIN tabs:
  *   - per-project (scope='project'): Chat, Documents, Tasks
  *   - global      (scope='global'):  Admin
- * Core-contributed tabs (`source='core'`) and the install-scope union come
- * in PR-2 — the descriptor + resolver are deliberately shaped to slot them
- * in without a breaking change (see the `source`/`order` notes below). This
- * file does NOT read `core_installations`; it emits a static builtin list.
+ * PR-2 adds the CORE union: installed Cores' `project_tab` surfaces are
+ * folded in as `source='core'` descriptors. This file STAYS PURE — it does
+ * NOT read the DB or load packages. The HTTP layer resolves which Cores are
+ * installed (per-project via `core_installations`, global via
+ * `core_global_installations`), reads each Core's manifest, and passes the
+ * resulting `CoreTabContribution[]` into `resolveTabs`. The registry just
+ * prepends the builtins and orders the union — which keeps it trivially
+ * unit-testable and identical across both clients.
  *
  * ── Descriptor shape (reconciliation note) ──────────────────────────────
  * The plan tagged the descriptor shape `[estimate] — confirm in-PR`. Two
@@ -116,6 +120,49 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
   },
 ])
 
+/**
+ * A Core-contributed tab, gathered by the HTTP layer from an installed Core's
+ * manifest `project_tab` ui_component. The registry stays pure — callers
+ * resolve installs + manifests and pass the contributions in.
+ *
+ * For the per-project endpoint, `target` has `<project_id>` already
+ * substituted to the concrete project; for the global endpoint it keeps the
+ * `<project_id>` placeholder (the client substitutes per project at nav time,
+ * mirroring `open_app_tab`).
+ */
+export interface CoreTabContribution {
+  /** Slug of the contributing Core (→ descriptor `core_slug`). */
+  core_slug: string
+  /** Tab label; the HTTP layer falls back to the slug when unnamed. */
+  label: string
+  /** Webview URL/entry the client renders for this Core's tab. */
+  target: string
+}
+
+/**
+ * Base `order` for Core-contributed tabs. Builtins occupy 0/10/20 (project)
+ * and 0 (global); Cores slot AFTER them. Install order is preserved by adding
+ * the contribution index, so two Cores keep a stable relative order.
+ */
+const CORE_TAB_ORDER_BASE = 100
+
+/** Build a Core-contributed descriptor for a given scope + contribution. */
+function coreDescriptor(
+  scope: TabScope,
+  c: CoreTabContribution,
+  index: number,
+): TabDescriptor {
+  return {
+    key: `core:${c.core_slug}`,
+    label: c.label,
+    scope,
+    source: 'core',
+    core_slug: c.core_slug,
+    order: CORE_TAB_ORDER_BASE + index,
+    mount: { kind: 'webview', target: c.target },
+  }
+}
+
 /** Deep-freeze a descriptor so callers can't mutate the shared builtin set. */
 function cloneDescriptor(d: TabDescriptor): TabDescriptor {
   return {
@@ -130,28 +177,35 @@ function cloneDescriptor(d: TabDescriptor): TabDescriptor {
 }
 
 /**
- * Resolve the ordered tab descriptors for a scope.
+ * Resolve the ordered tab descriptors for a scope: the builtin tabs for that
+ * scope, UNIONed with the supplied Core contributions, sorted ascending by
+ * `order` (builtins first, Cores after). The return is a fresh array of fresh
+ * objects every call, so callers (and the HTTP surface that JSON-encodes them)
+ * can never mutate the shared builtin set.
  *
- * PR-1: builtin descriptors only, sorted ascending by `order`. The return is
- * a fresh array of fresh objects every call, so callers (and the HTTP
- * surface that JSON-encodes them) can never mutate the shared builtin set.
- *
- * PR-2 will extend this to UNION the `project_tab` surfaces of Cores
- * installed in the relevant scope — the signature will grow a cores arg;
- * the builtin prefix stays.
+ * `cores` defaults to empty — passing no contributions yields the builtin-only
+ * result (the pre-PR-2 behaviour), so callers that don't resolve installs are
+ * unaffected.
  */
-export function resolveTabs(scope: TabScope): TabDescriptor[] {
-  return BUILTIN_TABS.filter((t) => t.scope === scope)
-    .map(cloneDescriptor)
-    .sort((a, b) => a.order - b.order)
+export function resolveTabs(
+  scope: TabScope,
+  cores: readonly CoreTabContribution[] = [],
+): TabDescriptor[] {
+  const builtins = BUILTIN_TABS.filter((t) => t.scope === scope).map(cloneDescriptor)
+  const coreTabs = cores.map((c, i) => coreDescriptor(scope, c, i))
+  return [...builtins, ...coreTabs].sort((a, b) => a.order - b.order)
 }
 
-/** Per-project tab descriptors (Chat, Documents, Tasks in v1). */
-export function resolveProjectTabs(): TabDescriptor[] {
-  return resolveTabs('project')
+/** Per-project tab descriptors: Chat/Documents/Tasks + per-project Core tabs. */
+export function resolveProjectTabs(
+  cores: readonly CoreTabContribution[] = [],
+): TabDescriptor[] {
+  return resolveTabs('project', cores)
 }
 
-/** Global tab descriptors (Admin in v1). */
-export function resolveGlobalTabs(): TabDescriptor[] {
-  return resolveTabs('global')
+/** Global tab descriptors: builtin Admin + globally-installed Core tabs. */
+export function resolveGlobalTabs(
+  cores: readonly CoreTabContribution[] = [],
+): TabDescriptor[] {
+  return resolveTabs('global', cores)
 }

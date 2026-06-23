@@ -37,8 +37,10 @@ export {
   mintInstallEventId,
   type CoreDataLayout,
   type CoreInstallationRecord,
+  type CoreGlobalInstallationRecord,
   type InstallationsStoreOptions,
   type RecordInstallInput,
+  type RecordGlobalInstallInput,
   type UpdateVersionInput,
 } from './installations-store.ts'
 
@@ -77,15 +79,20 @@ export {
 export {
   configureCore,
   installCore,
+  installCoreGlobally,
+  manifestSupportsScope,
   startCore,
   stopCore,
   uninstallCore,
+  uninstallCoreGlobally,
   upgradeCore,
   type ConfigureCoreInput,
   type InstallCoreInput,
   type InstallCoreResult,
+  type InstallCoreGloballyInput,
   type SecretsPrompter,
   type UninstallCoreInput,
+  type UninstallCoreGloballyInput,
   type UpgradeCoreInput,
   type UpgradeCoreResult,
 } from './lifecycle.ts'

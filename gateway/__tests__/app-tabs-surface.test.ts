@@ -1,23 +1,35 @@
 /**
- * WAVE 3 PR-1 — gateway app-tabs (tab-resolver) surface tests.
+ * WAVE 3 — gateway app-tabs (tab-resolver) surface tests.
  *
  * Verifies the two read-only routes (`GET /api/app/projects/<id>/tabs` +
  * `GET /api/app/tabs`) round-trip through `composeHttpHandler` with the
- * dev-bypass auth resolver, covering BOTH flag states:
- *   - flag ON  (`enabled:true`)  → 200 + builtin descriptors
- *   - flag OFF (`enabled:false`) → routes disclaim → default 404 chain
- * plus auth, method, and project_id validation contracts.
+ * dev-bypass auth resolver. WAVE 3 ships WITHOUT a feature flag (SPEC
+ * Decisions Log, 2026-06-23) — the surface is ALWAYS on; there is no
+ * `enabled`/`NEUTRON_TABS_REGISTRY` gate. Covers:
+ *   - builtin-only surface (no Cores wired) → 200 + builtin descriptors
+ *   - Core union (PR-2): per-project + global installed Cores fold their
+ *     `project_tab` surfaces into the resolved set
+ *   - auth, method, and project_id validation contracts
  *
  * Mirrors the in-process handler shim from app-launcher-surface.test.ts
  * (no real socket — composed.fetch is dispatched directly).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { Database } from 'bun:sqlite'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '../../channels/index.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import { createAppTabsSurface } from '../http/app-tabs-surface.ts'
 import type { TabDescriptor } from '../../tabs/registry.ts'
+import { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
+import { applyMigrations } from '../../migrations/runner.ts'
+import { ProjectDb } from '../../persistence/index.ts'
+import type { CoresModuleState } from '../cores/composer-state.ts'
+import type { BundledCore } from '../../cores/runtime/bundled-registry.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 const __composedHandlers = new Map<string, ComposedHttpHandler>()
@@ -36,10 +48,16 @@ interface Harness {
 }
 
 const PROJECT_ID = 'demo-project'
+const PROJECT_SLUG = 'demo'
 
-function startGateway(enabled: boolean): Harness {
-  const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
-  const surface = createAppTabsSurface({ auth, enabled })
+interface StartOptions {
+  cores?: CoresModuleState
+  installations?: CoreInstallationsStore
+}
+
+function startGateway(opts: StartOptions = {}): Harness {
+  const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
+  const surface = createAppTabsSurface({ auth, ...opts })
   const composed = composeHttpHandler({
     appTabs: { handler: surface.handler },
     defaultHandler: () => new Response('not found', { status: 404 }),
@@ -67,10 +85,64 @@ interface TabsPayload {
   tabs: TabDescriptor[]
 }
 
-describe('app-tabs surface — flag ON, project tabs', () => {
+// --- helpers to build an in-memory installations store + fake cores state ----
+
+function openStore(): { store: CoreInstallationsStore; db: ProjectDb } {
+  const tmp = mkdtempSync(join(tmpdir(), 'app-tabs-surface-'))
+  const dbPath = join(tmp, 'project.db')
+  const raw = new Database(dbPath, { create: true })
+  applyMigrations(raw)
+  raw.close()
+  const db = ProjectDb.open(dbPath)
+  return { store: new CoreInstallationsStore({ db, now: () => 1_000_000 }), db }
+}
+
+/** A minimal fake CoresModuleState whose registry returns a single Core that
+ *  declares a `project_tab` surface. Only the fields the surface reads are
+ *  populated (`registry.get`, `launcherIcons`). */
+function fakeCoresState(core: {
+  slug: string
+  entry_point: string
+  label?: string
+}): CoresModuleState {
+  const bundled = {
+    slug: core.slug,
+    package_name: `@neutronai/${core.slug}`,
+    package_version: '1.0.0',
+    coreDir: `/fake/${core.slug}`,
+    source: 'bundled',
+    rootDir: '/fake',
+    manifest: {
+      capabilities: [],
+      tier_support: ['regular'],
+      tools: [],
+      ui_components: [
+        { name: `${core.slug}-tab`, entry_point: core.entry_point, surface: 'project_tab' },
+      ],
+      billing_hooks: [],
+      linked_sources: [],
+      secrets: [],
+      compat: { coreApi: '1.0' },
+      build: { neutronVersion: '1.0' },
+    },
+  } as unknown as BundledCore
+  const launcherIcons = new Map<string, { label: string }>()
+  if (core.label !== undefined) launcherIcons.set(core.slug, { label: core.label })
+  return {
+    registry: {
+      get: (slug: string) => (slug === core.slug ? bundled : null),
+      list: () => [bundled],
+    },
+    installed: new Map(),
+    failures: [],
+    launcherIcons,
+  } as unknown as CoresModuleState
+}
+
+describe('app-tabs surface — builtin-only (no Cores wired)', () => {
   let harness: Harness
   beforeEach(() => {
-    harness = startGateway(true)
+    harness = startGateway()
   })
   afterEach(async () => {
     await harness.close()
@@ -94,6 +166,14 @@ describe('app-tabs surface — flag ON, project tabs', () => {
     expect(json.tabs.every((t) => t.source === 'builtin' && t.scope === 'project')).toBe(true)
   })
 
+  it('returns only the builtin Admin global tab', async () => {
+    const res = await authedFetch(harness.base, `/api/app/tabs`)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as TabsPayload
+    expect(json.scope).toBe('global')
+    expect(json.tabs.map((t) => t.key)).toEqual(['admin'])
+  })
+
   it('rejects a malformed project_id', async () => {
     const res = await authedFetch(harness.base, `/api/app/projects/has%20space/tabs`)
     expect(res.status).toBe(400)
@@ -110,27 +190,6 @@ describe('app-tabs surface — flag ON, project tabs', () => {
     const json = (await res.json()) as { code: string }
     expect(json.code).toBe('method_not_allowed')
   })
-})
-
-describe('app-tabs surface — flag ON, global tabs', () => {
-  let harness: Harness
-  beforeEach(() => {
-    harness = startGateway(true)
-  })
-  afterEach(async () => {
-    await harness.close()
-  })
-
-  it('returns only the builtin Admin global tab', async () => {
-    const res = await authedFetch(harness.base, `/api/app/tabs`)
-    expect(res.status).toBe(200)
-    const json = (await res.json()) as TabsPayload
-    expect(json.ok).toBe(true)
-    expect(json.scope).toBe('global')
-    expect(json.project_id).toBeUndefined()
-    expect(json.tabs.map((t) => t.key)).toEqual(['admin'])
-    expect(json.tabs[0]!.scope).toBe('global')
-  })
 
   it('still enforces Bearer auth on the global route', async () => {
     const res = await fetch(`${harness.base}/api/app/tabs`)
@@ -138,36 +197,109 @@ describe('app-tabs surface — flag ON, global tabs', () => {
   })
 })
 
-describe('app-tabs surface — flag OFF (disclaim → 404)', () => {
-  let harness: Harness
-  beforeEach(() => {
-    harness = startGateway(false)
-  })
-  afterEach(async () => {
-    await harness.close()
+describe('app-tabs surface — Core union (PR-2)', () => {
+  it('folds a PER-PROJECT-installed Core tab into the project set, with <project_id> substituted', async () => {
+    const { store } = openStore()
+    await store.record({
+      project_slug: PROJECT_SLUG,
+      core_slug: 'notes',
+      package_name: '@neutronai/notes',
+      package_version: '1.0.0',
+      capabilities: [],
+      data_layout: 'tables',
+    })
+    const cores = fakeCoresState({
+      slug: 'notes',
+      entry_point: '/projects/<project_id>/notes',
+      label: 'Notes',
+    })
+    const harness = startGateway({ cores, installations: store })
+    try {
+      const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/tabs`)
+      expect(res.status).toBe(200)
+      const json = (await res.json()) as TabsPayload
+      expect(json.tabs.map((t) => t.key)).toEqual(['chat', 'documents', 'tasks', 'core:notes'])
+      const notes = json.tabs.find((t) => t.key === 'core:notes')!
+      expect(notes.source).toBe('core')
+      expect(notes.core_slug).toBe('notes')
+      expect(notes.label).toBe('Notes')
+      expect(notes.mount).toEqual({ kind: 'webview', target: `/projects/${PROJECT_ID}/notes` })
+    } finally {
+      await harness.close()
+    }
   })
 
-  it('404s the per-project route (falls through to the default chain)', async () => {
-    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/tabs`)
-    expect(res.status).toBe(404)
-    expect(await res.text()).toBe('not found')
+  it('does NOT leak a per-project Core into the GLOBAL set', async () => {
+    const { store } = openStore()
+    await store.record({
+      project_slug: PROJECT_SLUG,
+      core_slug: 'notes',
+      package_name: '@neutronai/notes',
+      package_version: '1.0.0',
+      capabilities: [],
+      data_layout: 'tables',
+    })
+    const cores = fakeCoresState({ slug: 'notes', entry_point: '/projects/<project_id>/notes' })
+    const harness = startGateway({ cores, installations: store })
+    try {
+      const res = await authedFetch(harness.base, `/api/app/tabs`)
+      const json = (await res.json()) as TabsPayload
+      expect(json.tabs.map((t) => t.key)).toEqual(['admin'])
+    } finally {
+      await harness.close()
+    }
   })
 
-  it('404s the global route', async () => {
-    const res = await authedFetch(harness.base, `/api/app/tabs`)
-    expect(res.status).toBe(404)
+  it('folds a GLOBALLY-installed Core tab into the global set (placeholder kept)', async () => {
+    const { store } = openStore()
+    await store.recordGlobal({
+      core_slug: 'admin-core',
+      package_name: '@neutronai/admin-core',
+      package_version: '1.0.0',
+      capabilities: [],
+    })
+    const cores = fakeCoresState({
+      slug: 'admin-core',
+      entry_point: '/projects/<project_id>/admin-core',
+      label: 'Admin Core',
+    })
+    const harness = startGateway({ cores, installations: store })
+    try {
+      const res = await authedFetch(harness.base, `/api/app/tabs`)
+      const json = (await res.json()) as TabsPayload
+      expect(json.tabs.map((t) => t.key)).toEqual(['admin', 'core:admin-core'])
+      const tab = json.tabs.find((t) => t.key === 'core:admin-core')!
+      // Global scope keeps the <project_id> placeholder for the client.
+      expect(tab.mount.target).toBe('/projects/<project_id>/admin-core')
+    } finally {
+      await harness.close()
+    }
   })
 
-  it('disclaims BEFORE auth — no 401 leaks the surface existence', async () => {
-    // No bearer token, flag off: still a plain 404, not a 401.
-    const res = await fetch(`${harness.base}/api/app/tabs`)
-    expect(res.status).toBe(404)
+  it('skips an uninstalled (tombstoned) global Core', async () => {
+    const { store } = openStore()
+    await store.recordGlobal({
+      core_slug: 'admin-core',
+      package_name: '@neutronai/admin-core',
+      package_version: '1.0.0',
+      capabilities: [],
+    })
+    await store.markGlobalUninstalled('admin-core')
+    const cores = fakeCoresState({ slug: 'admin-core', entry_point: '/x/<project_id>' })
+    const harness = startGateway({ cores, installations: store })
+    try {
+      const res = await authedFetch(harness.base, `/api/app/tabs`)
+      const json = (await res.json()) as TabsPayload
+      expect(json.tabs.map((t) => t.key)).toEqual(['admin'])
+    } finally {
+      await harness.close()
+    }
   })
 })
 
 describe('app-tabs surface — non-owned paths', () => {
   it('disclaims unrelated /api/app/* paths so the chain keeps walking', async () => {
-    const harness = startGateway(true)
+    const harness = startGateway()
     try {
       const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/launcher`)
       expect(res.status).toBe(404)

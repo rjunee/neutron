@@ -28,6 +28,9 @@ export type CoreInstallErrorCode =
   | 'capability_escalation_requires_consent'
   | 'unknown_core'
   | 'sql_namespace_violation'
+  // WAVE 3 PR-2 — a global install was attempted for a Core whose manifest
+  // `install_scopes` does not include 'global'.
+  | 'scope_not_supported'
 
 export class CoreInstallError extends Error {
   override readonly name = 'CoreInstallError'

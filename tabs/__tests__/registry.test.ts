@@ -13,6 +13,7 @@ import {
   resolveGlobalTabs,
   resolveProjectTabs,
   resolveTabs,
+  type CoreTabContribution,
   type TabDescriptor,
 } from '../registry.ts'
 
@@ -97,8 +98,54 @@ describe('tab registry — resolveTabs(scope) parity + immutability', () => {
     expect(second[0]!.mount.target).toBe('chat')
   })
 
-  it('emits no v2 source values (core/custom) anywhere in v1', () => {
+  it('emits no v2 source values (core/custom) when no contributions are passed', () => {
     const all = [...resolveProjectTabs(), ...resolveGlobalTabs()]
     expect(all.every((t) => t.source === 'builtin')).toBe(true)
+  })
+})
+
+describe('tab registry — Core union (PR-2)', () => {
+  const notes: CoreTabContribution = {
+    core_slug: 'notes',
+    label: 'Notes',
+    target: '/projects/p1/notes',
+  }
+  const calendar: CoreTabContribution = {
+    core_slug: 'calendar',
+    label: 'Calendar',
+    target: '/projects/p1/calendar',
+  }
+
+  it('appends Core tabs AFTER the builtins, preserving install order', () => {
+    const tabs = resolveProjectTabs([notes, calendar])
+    expect(tabs.map((t) => t.key)).toEqual([
+      'chat',
+      'documents',
+      'tasks',
+      'core:notes',
+      'core:calendar',
+    ])
+  })
+
+  it('shapes a Core descriptor: source=core, core_slug set, webview mount', () => {
+    const tab = resolveProjectTabs([notes]).find((t) => t.key === 'core:notes')!
+    expect(tab.source).toBe('core')
+    expect(tab.core_slug).toBe('notes')
+    expect(tab.label).toBe('Notes')
+    expect(tab.scope).toBe('project')
+    expect(tab.mount).toEqual({ kind: 'webview', target: '/projects/p1/notes' })
+    // Core tabs sort after the order=20 Tasks builtin.
+    expect(tab.order).toBeGreaterThan(20)
+  })
+
+  it('unions Core tabs into the GLOBAL scope too (scope stamped global)', () => {
+    const tabs = resolveGlobalTabs([{ ...notes, target: '/projects/<project_id>/notes' }])
+    expect(tabs.map((t) => t.key)).toEqual(['admin', 'core:notes'])
+    expect(tabs.find((t) => t.key === 'core:notes')!.scope).toBe('global')
+  })
+
+  it('passing the same contribution to project vs global stamps the right scope', () => {
+    expect(resolveProjectTabs([notes]).find((t) => t.source === 'core')!.scope).toBe('project')
+    expect(resolveGlobalTabs([notes]).find((t) => t.source === 'core')!.scope).toBe('global')
   })
 })

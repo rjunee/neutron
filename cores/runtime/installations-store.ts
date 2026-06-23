@@ -48,6 +48,39 @@ export interface UpdateVersionInput {
   capabilities: string[]
 }
 
+/**
+ * WAVE 3 PR-2 — a GLOBAL Core installation (scope='global'). Project-agnostic:
+ * no `data_layout`/`sidecar_db_path` (those describe a Core's per-project data
+ * namespace). Schema in `migrations/0084_core_global_installations.sql`.
+ */
+export interface CoreGlobalInstallationRecord {
+  core_slug: string
+  package_name: string
+  package_version: string
+  /** JSON-decoded array of capability strings. */
+  capabilities: string[]
+  install_state: string
+  installed_at: number
+  uninstalled_at: number | null
+}
+
+export interface RecordGlobalInstallInput {
+  core_slug: string
+  package_name: string
+  package_version: string
+  capabilities: string[]
+}
+
+interface CoreGlobalInstallationRow {
+  core_slug: string
+  package_name: string
+  package_version: string
+  manifest_capabilities_json: string
+  install_state: string
+  installed_at: number
+  uninstalled_at: number | null
+}
+
 interface CoreInstallationRow {
   project_slug: string
   core_slug: string
@@ -208,6 +241,98 @@ export class CoreInstallationsStore {
         input.core_slug,
       ],
     )
+  }
+
+  // ── GLOBAL scope (WAVE 3 PR-2) ─────────────────────────────────────────
+  // A Core installed GLOBALLY surfaces in the global app shell + every
+  // project. Stored in the sibling `core_global_installations` table, keyed
+  // on `core_slug` alone (no project_slug). Methods mirror the per-project
+  // CRUD above; uninstall is a tombstone so re-install reuses the PK.
+
+  async recordGlobal(input: RecordGlobalInstallInput): Promise<CoreGlobalInstallationRecord> {
+    const ts = this.now()
+    const capabilities_json = JSON.stringify(input.capabilities)
+    await this.db.run(
+      `INSERT INTO core_global_installations
+         (core_slug, package_name, package_version,
+          manifest_capabilities_json, install_state, installed_at, uninstalled_at)
+       VALUES (?, ?, ?, ?, 'install_ok', ?, NULL)
+       ON CONFLICT(core_slug) DO UPDATE SET
+         package_name = excluded.package_name,
+         package_version = excluded.package_version,
+         manifest_capabilities_json = excluded.manifest_capabilities_json,
+         install_state = 'install_ok',
+         installed_at = excluded.installed_at,
+         uninstalled_at = NULL`,
+      [input.core_slug, input.package_name, input.package_version, capabilities_json, ts],
+    )
+    const got = await this.getGlobal(input.core_slug)
+    if (got === null) {
+      throw new Error(
+        `core_global_installations.recordGlobal: post-insert read returned null for core=${input.core_slug}`,
+      )
+    }
+    return got
+  }
+
+  async getGlobal(core_slug: string): Promise<CoreGlobalInstallationRecord | null> {
+    const row = this.db
+      .raw()
+      .query<CoreGlobalInstallationRow, [string]>(
+        `SELECT core_slug, package_name, package_version,
+                manifest_capabilities_json, install_state, installed_at, uninstalled_at
+           FROM core_global_installations
+          WHERE core_slug = ?`,
+      )
+      .get(core_slug)
+    return row === null ? null : globalRowToRecord(row)
+  }
+
+  async listGlobal(): Promise<CoreGlobalInstallationRecord[]> {
+    const rows = this.db
+      .raw()
+      .query<CoreGlobalInstallationRow, []>(
+        `SELECT core_slug, package_name, package_version,
+                manifest_capabilities_json, install_state, installed_at, uninstalled_at
+           FROM core_global_installations
+          ORDER BY installed_at`,
+      )
+      .all()
+    return rows.map(globalRowToRecord)
+  }
+
+  async listGlobalLive(): Promise<CoreGlobalInstallationRecord[]> {
+    const all = await this.listGlobal()
+    return all.filter((r) => r.uninstalled_at === null)
+  }
+
+  async markGlobalUninstalled(core_slug: string): Promise<void> {
+    await this.db.run(
+      `UPDATE core_global_installations SET uninstalled_at = ?
+        WHERE core_slug = ?`,
+      [this.now(), core_slug],
+    )
+  }
+}
+
+function globalRowToRecord(row: CoreGlobalInstallationRow): CoreGlobalInstallationRecord {
+  let capabilities: string[]
+  try {
+    const parsed: unknown = JSON.parse(row.manifest_capabilities_json)
+    capabilities = Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === 'string')
+      : []
+  } catch {
+    capabilities = []
+  }
+  return {
+    core_slug: row.core_slug,
+    package_name: row.package_name,
+    package_version: row.package_version,
+    capabilities,
+    install_state: row.install_state,
+    installed_at: row.installed_at,
+    uninstalled_at: row.uninstalled_at,
   }
 }
 
