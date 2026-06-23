@@ -72,10 +72,17 @@ export const NO_PROJECT: '' = ''
  *     ASC, then dateless newest-first; non-open by completed_at/
  *     updated_at DESC). The Expo client and the Tasks Core's launcher
  *     surface bind to this ordering today.
- *   - `'focus_score'` opt-in sorts open rows by `focus_score DESC NULLS
- *     LAST, due_date ASC NULLS LAST, created_at DESC`. The HTTP
- *     surfaces and projection layer use this to drive the Focus view
- *     and the marked-block "Active" list in STATUS.md.
+ *   - `'focus_score'` is the **prioritized** ordering. It sorts open
+ *     rows by the LLM-primary rank first (`llm_rank ASC NULLS LAST`,
+ *     stamped by `tasks/prioritize-llm.ts`), falling back to the
+ *     deterministic `focus_score DESC NULLS LAST, due_date ASC NULLS
+ *     LAST, created_at DESC` for rows the last prioritize pass hasn't
+ *     reached (and for instances with no LLM credential, where the
+ *     prioritize pass writes `llm_rank` from the focus order anyway).
+ *     The HTTP surfaces, the Tasks Core, and the projection layer all
+ *     request this order, so the LLM-primary ranking flows to every
+ *     rendered task list without each caller opting in separately
+ *     (WAVE 3 PR-7). The name stays `'focus_score'` for back-compat.
  */
 export type TaskOrder = 'default' | 'focus_score'
 
@@ -120,6 +127,19 @@ export interface Task {
   focus_score: number | null
   /** ISO-8601 UTC; null until first score-affecting mutation or cron. */
   focus_score_updated_at: string | null
+  /**
+   * 1-based rank from the most recent LLM-primary prioritize pass
+   * (`tasks/prioritize-llm.ts`; 1 = do first). Null on a row created
+   * since the last pass — the `focus_score` order treats null as
+   * "rank last, fall back to focus_score". Migration 0085.
+   */
+  llm_rank: number | null
+  /** LLM's one-line rationale for the rank. Null in the deterministic fallback. */
+  llm_reason: string | null
+  /** Which mechanism produced the current rank. Null until first pass. */
+  prioritized_by: 'llm' | 'deterministic' | null
+  /** ISO-8601 UTC of the prioritize pass that stamped this row. */
+  prioritized_at: string | null
   /** ISO-8601 UTC, stamped at insert. */
   created_at: string
   /** ISO-8601 UTC, stamped on every mutation. */
@@ -190,13 +210,17 @@ interface TaskDbRow {
   source: string | null
   focus_score: number | null
   focus_score_updated_at: string | null
+  llm_rank: number | null
+  llm_reason: string | null
+  prioritized_by: 'llm' | 'deterministic' | null
+  prioritized_at: string | null
   created_at: string
   updated_at: string
   completed_at: string | null
 }
 
 const COLS =
-  'id, project_slug, project_id, title, description, status, priority, due_date, owner_persona, source, focus_score, focus_score_updated_at, created_at, updated_at, completed_at'
+  'id, project_slug, project_id, title, description, status, priority, due_date, owner_persona, source, focus_score, focus_score_updated_at, llm_rank, llm_reason, prioritized_by, prioritized_at, created_at, updated_at, completed_at'
 
 const DEFAULT_LIST_LIMIT = 100
 
@@ -350,6 +374,13 @@ export class TaskStore {
       source,
       focus_score,
       focus_score_updated_at,
+      // A freshly-created task has no LLM ranking yet — the next
+      // prioritize pass (`tasks/prioritize-llm.ts`) stamps these; until
+      // then the `focus_score` order sorts it via the focus_score fallback.
+      llm_rank: null,
+      llm_reason: null,
+      prioritized_by: null,
+      prioritized_at: null,
       created_at: ts,
       updated_at: ts,
       completed_at: null,
@@ -405,6 +436,8 @@ export class TaskStore {
 
     const orderBy = order === 'focus_score'
       ? `
+        CASE WHEN llm_rank IS NULL THEN 1 ELSE 0 END ASC,
+        llm_rank ASC,
         CASE WHEN focus_score IS NULL THEN 1 ELSE 0 END ASC,
         focus_score DESC,
         CASE WHEN due_date IS NULL THEN 1 ELSE 0 END ASC,
@@ -615,6 +648,10 @@ function rowToTask(row: TaskDbRow): Task {
     source: row.source,
     focus_score: row.focus_score,
     focus_score_updated_at: row.focus_score_updated_at,
+    llm_rank: row.llm_rank,
+    llm_reason: row.llm_reason,
+    prioritized_by: row.prioritized_by,
+    prioritized_at: row.prioritized_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at,

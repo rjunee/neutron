@@ -49,6 +49,30 @@ export interface TasksCompositionInput {
     /** Override the 4h tick (testing seam). */
     focus_score_interval_ms?: number
     /**
+     * WAVE 3 PR-7 — register the LLM-primary prioritization cron. Each
+     * tick hands the open backlog to `task_prioritizer.llm` and stamps
+     * `llm_rank` / `llm_reason` / `prioritized_by` on the rows; the
+     * `focus_score` order then renders LLM-rank-first. When
+     * `task_prioritizer.llm` is null (no credential) the pass runs the
+     * deterministic focus-score fallback every tick — registering the
+     * cron before a credential exists is harmless.
+     */
+    enable_task_prioritize_cron?: boolean
+    /** Override the 6h tick (testing seam). */
+    task_prioritize_interval_ms?: number
+    /**
+     * WAVE 3 PR-7 — the LLM call + knobs for the prioritization cron.
+     * Production passes the same Anthropic-Messages `LlmCallFn` that
+     * powers the nudge engine / phase-spec resolver; tests inject a
+     * deterministic stub (or `null` to exercise the fallback).
+     */
+    task_prioritizer?: {
+      llm: LlmCallFn | null
+      model?: string
+      timeout_ms?: number
+      limit?: number
+    }
+    /**
      * P6.1 — register the daily nudge engine cron (LLM "do this next"
      * pick + staleness pass). Requires `nudge_engine.llm` set;
      * without an LLM credential the handler no-ops every tick.

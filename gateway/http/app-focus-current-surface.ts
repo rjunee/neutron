@@ -76,6 +76,10 @@ interface TaskRowFull {
   source: string | null
   focus_score: number | null
   focus_score_updated_at: string | null
+  llm_rank: number | null
+  llm_reason: string | null
+  prioritized_by: 'llm' | 'deterministic' | null
+  prioritized_at: string | null
   created_at: string
   updated_at: string
   completed_at: string | null
@@ -141,7 +145,8 @@ export function createAppFocusCurrentSurface(
         .prepare<TaskRowFull, [string, string]>(
           `SELECT id, project_slug, project_id, title, description, status,
                   priority, due_date, owner_persona, source, focus_score,
-                  focus_score_updated_at, created_at, updated_at, completed_at
+                  focus_score_updated_at, llm_rank, llm_reason, prioritized_by,
+                  prioritized_at, created_at, updated_at, completed_at
              FROM tasks
             WHERE project_slug = ? AND id = ?
             LIMIT 1`,
@@ -172,6 +177,10 @@ export function createAppFocusCurrentSurface(
         source: taskRow.source,
         focus_score: taskRow.focus_score,
         focus_score_updated_at: taskRow.focus_score_updated_at,
+        llm_rank: taskRow.llm_rank,
+        llm_reason: taskRow.llm_reason,
+        prioritized_by: taskRow.prioritized_by,
+        prioritized_at: taskRow.prioritized_at,
         created_at: taskRow.created_at,
         updated_at: taskRow.updated_at,
         completed_at: taskRow.completed_at,
