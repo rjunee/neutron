@@ -1,8 +1,11 @@
 /**
- * @neutronai/app — project tab bar (P5.2).
+ * @neutronai/app — project tab bar (P5.2; registry-driven WAVE 3 PR-3).
  *
- * Renders the locked 5-tab set (chat / launcher / tasks / reminders /
- * docs). Two layouts:
+ * Renders whatever ordered tab set the layout hands it. The set is
+ * REGISTRY-DRIVEN: the layout fetches `GET /api/app/projects/<id>/tabs`
+ * (engine resolver — `tabs/registry.ts`) and feeds the resolved descriptors
+ * in via the `tabs` prop. {@link PROJECT_TABS} (the legacy hardcoded 5-tab
+ * set) survives ONLY as the pre-fetch loading default. Two layouts:
  *
  *   - Narrow (`<800` CSS px) OR any native target: horizontal
  *     scrollable strip below the project header. Each tab is a pill.
@@ -19,31 +22,28 @@
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
-
-export type ProjectTabKey = 'chat' | 'launcher' | 'tasks' | 'reminders' | 'docs';
-
-export interface ProjectTabSpec {
-  key: ProjectTabKey;
-  label: string;
-}
+import { PROJECT_TABS, type ProjectTabSpec } from '../lib/project-tabs';
 
 /**
- * The LOCKED tab set per § B.P5 of engineering-plan.md + § 4.1 of the
- * P5.2 brief. Notes is intentionally NOT here — it's a Core that the
- * launcher icons point at, not a top-level lens.
+ * The builtin native-tab keys the loading default ({@link PROJECT_TABS})
+ * still uses. Post-WAVE-3 the rendered tab set is registry-driven, so a tab
+ * `key` is no longer restricted to this union: builtin descriptors use
+ * `'chat' | 'documents' | 'tasks'` and Core descriptors use `'core:<slug>'`.
+ * The bar is therefore generic over `string` keys; this alias is retained for
+ * back-compat callers that still talk about the locked native set.
  */
-export const PROJECT_TABS: readonly ProjectTabSpec[] = [
-  { key: 'chat', label: 'Chat' },
-  { key: 'launcher', label: 'Apps' },
-  { key: 'tasks', label: 'Tasks' },
-  { key: 'reminders', label: 'Reminders' },
-  { key: 'docs', label: 'Docs' },
-];
+export type ProjectTabKey = 'chat' | 'launcher' | 'tasks' | 'reminders' | 'docs';
+
+// `ProjectTabSpec` + `PROJECT_TABS` now live in the RN-free `lib/project-tabs`
+// (so the tab-mapping logic stays unit-testable). Re-exported here so existing
+// importers (`_layout.tsx`, tests) keep their `components/ProjectTabBar` path.
+export { PROJECT_TABS };
+export type { ProjectTabSpec };
 
 export interface ProjectTabBarProps {
-  /** The highlighted tab, or `null` on a non-tab sub-route (no tab active). */
-  active: ProjectTabKey | null;
-  onSelect: (key: ProjectTabKey) => void;
+  /** The highlighted tab key, or `null` on a non-tab sub-route (no tab active). */
+  active: string | null;
+  onSelect: (key: string) => void;
   tabs?: readonly ProjectTabSpec[];
 }
 
@@ -63,8 +63,8 @@ function NarrowTabBar({
   onSelect,
 }: {
   tabs: readonly ProjectTabSpec[];
-  active: ProjectTabKey | null;
-  onSelect: (key: ProjectTabKey) => void;
+  active: string | null;
+  onSelect: (key: string) => void;
 }) {
   return (
     <ScrollView
@@ -106,8 +106,8 @@ function WideTabBar({
   onSelect,
 }: {
   tabs: readonly ProjectTabSpec[];
-  active: ProjectTabKey | null;
-  onSelect: (key: ProjectTabKey) => void;
+  active: string | null;
+  onSelect: (key: string) => void;
 }) {
   return (
     <View style={styles.wideBar} testID="project-tab-bar-wide">

@@ -2,6 +2,65 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-3: mobile project tab bar is REGISTRY-DRIVEN
+
+Third PR of the WAVE 3 tabbed-project-interface build
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.1, PR-3). Wires the
+**mobile** (`app/`) project shell to the tab-resolver endpoints PR-1/PR-2
+shipped. Per the SPEC Decisions Log (2026-06-23) **no feature flags** — the
+plan's flag-gating is disregarded; the bar renders the resolved set directly.
+
+**What changed.** The project shell (`app/app/projects/[id]/_layout.tsx`) no
+longer renders the hardcoded `PROJECT_TABS`. On mount it fetches
+`GET /api/app/projects/<id>/tabs` (the always-on engine resolver) and feeds the
+resolved descriptors into `ProjectTabBar`'s existing `tabs` prop, so the bar
+shows exactly what the engine resolves: builtin **Chat / Documents / Tasks** ∪
+the `project_tab` surfaces of Cores installed in that project. No flag, no dual
+path.
+
+- **`lib/tabs-client.ts`** (new) — thin bearer-auth fetch wrapper for
+  `listProjectTabs(id)`; wire shapes mirror `tabs/registry.ts` `TabDescriptor`
+  (re-declared app-side, the same convention every other `app/lib/*-client.ts`
+  follows — keeps the Expo app free of a gateway dep). Throws `TabsClientError`
+  on 4xx/5xx/network so the shell can fall back.
+- **`lib/project-tabs.ts`** (new, RN-free) — descriptor→route + active-tab
+  resolution, unit-testable under `bun test`. Builtin descriptors route to the
+  client's native expo-router leaf (`mount.target` = `chat`/`docs`/`tasks`);
+  Core descriptors (`mount.kind:'webview'`) route to the generic
+  `cores/[slug]` webview with the URL + label as query params.
+  `activeTabKeyFromSegments` is route-driven so it tracks whatever set is live
+  (loading default or fetched registry). Now ALSO the home of `PROJECT_TABS` +
+  `ProjectTabSpec` (moved off the RN component so the logic stays pure;
+  `ProjectTabBar` re-exports both for back-compat).
+- **`app/projects/[id]/cores/[slug].tsx`** (new) — generic Core webview tab.
+  WEB renders an inline `<iframe>`; NATIVE opens the Core URL in the system
+  browser via `expo-web-browser` (the app has no `react-native-webview`
+  dependency — an inline-native webview is a documented follow-up). URLs are
+  scheme-validated (`sanitizeCoreTabUrl`, http(s) only) before any load.
+- **`components/ProjectTabBar.tsx`** — `key`/`active`/`onSelect` widened from
+  the locked 5-tab union to `string` so the bar renders registry + Core keys.
+  Pure presentation, unchanged otherwise.
+- **Pre-fetch default.** `PROJECT_TABS` (the legacy chat/Apps/tasks/reminders/
+  docs set) survives ONLY as the loading default shown before the fetch returns
+  (or if it errors — a graceful fallback, not a flag-gated alt path).
+- **Removed** `lib/active-tab.ts` + its test — superseded by the route-driven
+  resolver in `lib/project-tabs.ts` (the PR #11 chat-sync no-shadow regression
+  is ported into `__tests__/project-tabs.test.ts`).
+
+**Spec-conformance note (5-line).** SPEC/plan §3.1 builtins are Chat/Documents/
+Tasks; the pre-WAVE-3 mobile bar also had **Apps (launcher)** + **Reminders**.
+Rendering the registry faithfully (the SSOT) means those two are no longer
+top-level tabs once the fetch resolves — their routes still exist and are
+reachable by deep-link. Re-adding them, if desired, is a one-line
+`BUILTIN_TABS` change in `tabs/registry.ts` (engine), out of scope for this
+mobile-wiring PR.
+
+**Tests.** `__tests__/project-tabs.test.ts` (descriptor→route incl. Core
+webview; pre-fetch default; active-tab incl. Core route + non-tab regression;
+URL guard) + `__tests__/tabs-client.test.ts` (GET/bearer/unwrap/error
+mapping). `app/` `tsc --noEmit` clean; 30 targeted tests pass. Full suite NOT
+run (memory-constrained box, per the run brief).
+
 ## 2026-06-23 — WAVE 3 PR-2: strip the tabs flag + Cores install-SCOPE (global) + Core-tab union
 
 Second PR of the WAVE 3 tabbed-project-interface build

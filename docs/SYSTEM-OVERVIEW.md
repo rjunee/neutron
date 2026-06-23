@@ -56,6 +56,24 @@ is opt-in — omit `cores`/`installations` for a builtin-only surface), plumbed
 via `app_tabs_surface` in `AppSurfacesCompositionInput` → `composition.ts` →
 `compose.ts` (`appTabs`, mounted ahead of `appProjects`).
 
+### Mobile client consumption (WAVE 3 PR-3)
+
+The Expo project shell (`app/app/projects/[id]/_layout.tsx`) is **registry-driven**:
+on mount it fetches `GET /api/app/projects/<id>/tabs` via `app/lib/tabs-client.ts`
+and feeds the resolved descriptors into `ProjectTabBar`'s `tabs` prop — no
+hardcoded set. `app/lib/project-tabs.ts` (RN-free, unit-tested) maps each
+descriptor to a route + active-highlight key: **builtin** descriptors render the
+native expo-router leaf (`mount.target` = `chat`/`docs`/`tasks`); **Core**
+(`mount.kind:'webview'`) descriptors route to the generic
+`app/app/projects/[id]/cores/[slug].tsx` webview (inline `<iframe>` on web,
+system browser via `expo-web-browser` on native — no `react-native-webview`
+dep). The legacy `PROJECT_TABS` const survives ONLY as the pre-fetch loading
+default (and the on-error fallback) — not a flag-gated path. Consequence: the
+registry's project builtins are Chat/Documents/Tasks, so the old **Apps
+(launcher)** + **Reminders** tabs are no longer top-level mobile tabs once the
+fetch resolves (their routes remain, reachable by deep-link); re-adding them is
+a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4.
+
 ### Cores install-SCOPE (WAVE 3 PR-2)
 
 A Core installs **per-project** (`core_installations`, keyed

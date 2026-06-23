@@ -5,8 +5,11 @@
  *   - Mounting `<ProjectStateProvider>` per `project_id` so the
  *     gateway-backed settings doc loads exactly once + propagates to
  *     `<ProjectHeader>` / `<ProjectSettingsDrawer>` / future tab bodies.
- *   - Rendering the locked 5-tab set (chat / launcher / tasks /
- *     reminders / docs) via `<ProjectTabBar>` — Notes is NOT a tab.
+ *   - Fetching the REGISTRY-DRIVEN tab set (`GET /api/app/projects/<id>/tabs`,
+ *     WAVE 3 PR-3) and rendering it via `<ProjectTabBar>` — builtin
+ *     Chat/Documents/Tasks ∪ installed Cores' `project_tab` surfaces. The
+ *     legacy `PROJECT_TABS` const survives ONLY as the pre-fetch loading
+ *     default. Core tabs route to the generic `cores/[slug]` webview.
  *   - The per-project last-tab persistence write path (the read path
  *     lives in `index.tsx`).
  *   - Swapping `<Slot />` children behind a 150ms opacity fade so tab
@@ -18,7 +21,7 @@
  */
 
 import { Slot, useLocalSearchParams, useRouter, useSegments } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -37,16 +40,20 @@ import { ProjectSettingsDrawer } from '../../../components/ProjectSettingsDrawer
 import { InviteModal, type InviteModalResult } from '../../../components/InviteModal';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { canInviteToProject } from '../../../lib/invite-helpers';
-import {
-  PROJECT_TABS,
-  ProjectTabBar,
-  type ProjectTabKey,
-} from '../../../components/ProjectTabBar';
+import { PROJECT_TABS, ProjectTabBar } from '../../../components/ProjectTabBar';
 import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
-import { activeTabFromSegments } from '../../../lib/active-tab';
+import { loadAppConfig } from '../../../lib/config';
 import { lastTabStorage } from '../../../lib/last-tab-storage';
+import {
+  activeTabKeyFromSegments,
+  descriptorsToResolvedTabs,
+  lastTabValueForLeaf,
+  loadingTabsForProject,
+  type ResolvedTab,
+} from '../../../lib/project-tabs';
 import { ProjectStateProvider, useProjectState } from '../../../lib/project-state';
 import { useAuthSession } from '../../../lib/session';
+import { TabsClient } from '../../../lib/tabs-client';
 
 export default function ProjectLayout() {
   const router = useRouter();
@@ -84,9 +91,42 @@ function ProjectShell({ project_id }: { project_id: string }) {
   const segments = useSegments() as readonly string[];
   const { user } = useAuthSession();
   const { project, loading, error, generateInvite } = useProjectState();
-  // `null` on a non-tab sub-route (chat-sync/notes/cores/backups): no tab is
-  // highlighted there and `handleTabSelect` then lets every tab tap navigate.
-  const activeTab = activeTabFromSegments(segments);
+  const config = useMemo(() => loadAppConfig(), []);
+
+  // WAVE 3 PR-3 — the tab set is REGISTRY-DRIVEN. Fetch the engine-resolved
+  // descriptors (`GET /api/app/projects/<id>/tabs`) and render whatever the
+  // engine returns: builtin Chat/Documents/Tasks ∪ installed Cores'
+  // `project_tab` surfaces. `null` until the fetch resolves; on error it stays
+  // null and the loading default (the legacy `PROJECT_TABS`, resolved to native
+  // routes) keeps showing — a graceful fallback, NOT a feature-flag alt path.
+  const [fetchedTabs, setFetchedTabs] = useState<ResolvedTab[] | null>(null);
+  useEffect(() => {
+    if (user === null) return;
+    let cancelled = false;
+    const client = new TabsClient({ base_url: config.base_url, token: user.token });
+    client
+      .listProjectTabs(project_id)
+      .then((descriptors) => {
+        if (!cancelled) setFetchedTabs(descriptorsToResolvedTabs(descriptors, project_id));
+      })
+      .catch(() => {
+        // Endpoint absent / offline / auth — keep the loading default visible.
+        if (!cancelled) setFetchedTabs(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, config.base_url, project_id]);
+
+  const displayTabs = useMemo<ResolvedTab[]>(
+    () => fetchedTabs ?? loadingTabsForProject(project_id),
+    [fetchedTabs, project_id],
+  );
+
+  // `null` on a non-tab sub-route (chat-sync/notes/backups/bare cores): no tab
+  // is highlighted there and `handleTabSelect` then lets every tab tap
+  // navigate. Route-driven against the live `displayTabs`.
+  const activeTab = activeTabKeyFromSegments(segments, displayTabs);
   // The slot fade keys off the actual route leaf (not the highlighted tab) so
   // it animates across non-tab routes too, and never receives a null key.
   const slotKey = segments[segments.length - 1] ?? 'chat';
@@ -125,10 +165,13 @@ function ProjectShell({ project_id }: { project_id: string }) {
   };
 
   useEffect(() => {
-    // Only persist a real tab — a non-tab sub-route (activeTab === null) leaves
-    // the last-tab preference untouched.
-    if (activeTab !== null) void lastTabStorage().set(project_id, activeTab);
-  }, [project_id, activeTab]);
+    // Persist only a real, persistable native tab. The route leaf is the
+    // canonical last-tab value (`docs`, not the `documents` descriptor key);
+    // Core webview tabs + non-tab sub-routes resolve to null and leave the
+    // preference untouched. `index.tsx` redirects to this on a bare open.
+    const persistable = lastTabValueForLeaf(slotKey);
+    if (persistable !== null) void lastTabStorage().set(project_id, persistable);
+  }, [project_id, slotKey]);
 
   if (loading && project === null) {
     return (
@@ -154,9 +197,11 @@ function ProjectShell({ project_id }: { project_id: string }) {
     );
   }
 
-  const handleTabSelect = (key: ProjectTabKey): void => {
+  const handleTabSelect = (key: string): void => {
     if (key === activeTab) return;
-    router.replace(`/projects/${project_id}/${key}`);
+    const target = displayTabs.find((t) => t.key === key);
+    if (target === undefined) return;
+    router.replace(target.route);
   };
 
   // Show the Invite pill only when the gateway can actually mint a link:
@@ -178,7 +223,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
       />
       {wide ? (
         <View style={styles.wideBody}>
-          <ProjectTabBar active={activeTab} onSelect={handleTabSelect} />
+          <ProjectTabBar active={activeTab} onSelect={handleTabSelect} tabs={displayTabs} />
           <View style={styles.wideContent}>
             <SlotFader keyId={slotKey}>
               <Slot />
@@ -187,7 +232,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
         </View>
       ) : (
         <>
-          <ProjectTabBar active={activeTab} onSelect={handleTabSelect} />
+          <ProjectTabBar active={activeTab} onSelect={handleTabSelect} tabs={displayTabs} />
           <View style={styles.narrowContent}>
             <SlotFader keyId={slotKey}>
               <Slot />
