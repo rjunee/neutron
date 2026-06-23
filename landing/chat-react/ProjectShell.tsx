@@ -1,0 +1,217 @@
+/**
+ * landing/chat-react — web project TAB SHELL (WAVE 3 PR-4).
+ *
+ * Wraps the existing `ChatApp` as the **Chat** tab and renders the project's
+ * tab bar from the engine resolver (`GET /api/app/projects/<id>/tabs`), so the
+ * web project view shows tabs (Chat + Documents + Tasks + any installed Core
+ * tabs) instead of chat-only. This is the web twin of the mobile registry-driven
+ * tab bar shipped in PR-3 (`app/components/ProjectTabBar.tsx`).
+ *
+ * ── No feature flag ─────────────────────────────────────────────────────────
+ * Per the SPEC Decisions Log (Ryan, 2026-06-23) WAVE 3 ships WITHOUT feature
+ * flags. The shell renders the resolved tabs directly — there is no toggle and
+ * no dual chat-only path. When the resolver can't be reached the bar degrades to
+ * the guaranteed Chat tab (the existing chat experience), which is graceful
+ * fallback, not a flag.
+ *
+ * ── Tab content ─────────────────────────────────────────────────────────────
+ *   - Chat (builtin)         → the existing `ChatApp`, kept MOUNTED across tab
+ *     switches (hidden via `hidden`) so the chat-core session, streaming state,
+ *     and scroll position survive a round-trip to another tab.
+ *   - Documents/Tasks (builtin) → a "coming soon" placeholder until PR-5..9 land
+ *     their real views. This is unbuilt content, NOT a flag.
+ *   - Core (webview)         → the Core's `project_tab` surface in a sandboxed
+ *     `<iframe>`, mirroring the mobile `cores/[slug]` webview from PR-3. The URL
+ *     is scheme-validated (`sanitizeCoreTabUrl`) before it ever reaches the
+ *     iframe `src`.
+ *
+ * ── Project scope ───────────────────────────────────────────────────────────
+ * Tabs are resolved per project. When a project is active (`vm.projectId`) the
+ * shell fetches that project's tab set; the General (no-project) view has no
+ * project tabs, so it stays chat-only. Switching projects re-fetches and resets
+ * the active tab to Chat.
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react'
+
+import { ChatApp } from './ChatApp.tsx'
+import type { ChatViewModel } from './controller.ts'
+import type { NeutronChatController } from './controller.ts'
+import type { BootstrapConfig } from './config.ts'
+import type { AttachmentDraft } from './useAttachmentDraft.ts'
+import {
+  CHAT_TAB,
+  WebTabsClient,
+  sanitizeCoreTabUrl,
+  type TabDescriptor,
+} from './tabs-client.ts'
+
+type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
+
+/** The Chat tab key — kept mounted and the default active tab. */
+const CHAT_KEY = CHAT_TAB.key
+
+/** The horizontal tab bar. Pure presentation over the resolved descriptors. */
+function TabBar({
+  tabs,
+  activeKey,
+  onSelect,
+}: {
+  tabs: readonly TabDescriptor[]
+  activeKey: string
+  onSelect: (key: string) => void
+}): React.JSX.Element {
+  return (
+    <nav className="car-tabs" role="tablist" aria-label="Project sections">
+      {tabs.map((t) => {
+        const active = t.key === activeKey
+        return (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            className={`car-tab${active ? ' car-tab-active' : ''}`}
+            onClick={() => onSelect(t.key)}
+          >
+            {t.label}
+          </button>
+        )
+      })}
+    </nav>
+  )
+}
+
+/** Placeholder for a builtin tab whose real view ships in a later PR. */
+function TabPlaceholder({ label }: { label: string }): React.JSX.Element {
+  return (
+    <div className="car-tab-placeholder" role="status">
+      <div className="car-tab-placeholder-title">{label}</div>
+      <div className="car-tab-placeholder-sub">Coming soon.</div>
+    </div>
+  )
+}
+
+/** Render one non-Chat tab's body: a Core webview, or a builtin placeholder. */
+function TabContent({ tab }: { tab: TabDescriptor }): React.JSX.Element {
+  if (tab.mount.kind === 'webview') {
+    const safeUrl = sanitizeCoreTabUrl(tab.mount.target)
+    if (safeUrl === null) {
+      return (
+        <div className="car-tab-placeholder" role="alert">
+          <div className="car-tab-placeholder-title">Can’t open {tab.label}</div>
+          <div className="car-tab-placeholder-sub">
+            This Core tab didn’t provide a valid web address.
+          </div>
+        </div>
+      )
+    }
+    return (
+      <iframe
+        className="car-tab-frame"
+        src={safeUrl}
+        title={`${tab.label} Core tab`}
+        sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+      />
+    )
+  }
+  // Builtin Documents/Tasks — real views land in PR-5..9.
+  return <TabPlaceholder label={tab.label} />
+}
+
+export function ProjectShell({
+  vm,
+  controller,
+  config,
+  draft,
+  fetchImpl,
+}: {
+  vm: ChatViewModel
+  controller: NeutronChatController
+  config: BootstrapConfig
+  draft: AttachmentDraft
+  /** Injected in tests; also forwarded to `ChatApp` for authed image fetches. */
+  fetchImpl?: FetchImpl
+}): React.JSX.Element {
+  const client = useMemo(
+    () =>
+      new WebTabsClient(
+        fetchImpl !== undefined
+          ? { base_url: config.origin, token: config.token, fetchImpl }
+          : { base_url: config.origin, token: config.token },
+      ),
+    [config.origin, config.token, fetchImpl],
+  )
+
+  const [tabs, setTabs] = useState<TabDescriptor[]>([CHAT_TAB])
+  const [activeKey, setActiveKey] = useState<string>(CHAT_KEY)
+  const projectId = vm.projectId
+
+  // Resolve the tab set for the active project. The General (no-project) view
+  // has no project tabs, so it falls back to the guaranteed Chat tab. A stale
+  // in-flight fetch (rapid project switches, StrictMode double-invoke) is
+  // ignored via the `cancelled` latch.
+  useEffect(() => {
+    if (projectId === null || projectId.length === 0) {
+      setTabs([CHAT_TAB])
+      setActiveKey(CHAT_KEY)
+      return
+    }
+    let cancelled = false
+    setActiveKey(CHAT_KEY)
+    void client
+      .listProjectTabs(projectId)
+      .then((resolved) => {
+        if (cancelled) return
+        // The resolver always includes Chat; guard against an empty/degenerate
+        // payload so the bar never renders without a Chat tab.
+        setTabs(resolved.length > 0 ? resolved : [CHAT_TAB])
+      })
+      .catch(() => {
+        if (cancelled) return
+        setTabs([CHAT_TAB])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [client, projectId])
+
+  // The previous active tab can vanish when the set changes (project switch /
+  // Core uninstall). Fall back to Chat so we never highlight a missing tab.
+  const hasActive = tabs.some((t) => t.key === activeKey)
+  const resolvedActiveKey = hasActive ? activeKey : CHAT_KEY
+  const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
+
+  // assistant-ui's composer autofocus tries to scroll the focused input into
+  // view on mount; keep the panels container as the scroll parent.
+  const panelsRef = useRef<HTMLDivElement>(null)
+
+  return (
+    <div className="car-projectshell">
+      <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+      <div className="car-tabpanels" ref={panelsRef}>
+        {/* Chat stays mounted across tab switches so the live session, stream,
+            and scroll state survive — only its visibility toggles. */}
+        <div
+          className="car-tabpanel"
+          role="tabpanel"
+          hidden={resolvedActiveKey !== CHAT_KEY}
+          aria-hidden={resolvedActiveKey !== CHAT_KEY}
+        >
+          <ChatApp
+            vm={vm}
+            controller={controller}
+            config={config}
+            draft={draft}
+            {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+          />
+        </div>
+        {resolvedActiveKey !== CHAT_KEY ? (
+          <div className="car-tabpanel" role="tabpanel">
+            <TabContent tab={activeTab} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}

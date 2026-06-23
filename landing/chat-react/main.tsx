@@ -17,7 +17,7 @@ import { createRoot } from 'react-dom/client'
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import { WebChatSession, createWebStore } from '@neutron/chat-core'
 
-import { ChatApp } from './ChatApp.tsx'
+import { ProjectShell } from './ProjectShell.tsx'
 import { resolveBootstrapConfig, type BootstrapConfig, type WindowLike } from './config.ts'
 import { NeutronChatController } from './controller.ts'
 import { useNeutronChat } from './useNeutronChat.ts'
@@ -32,9 +32,12 @@ function Root({
 }): React.JSX.Element {
   const draft = useAttachmentDraft({ token: config.token })
   const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+  // ProjectShell wraps ChatApp as the Chat tab and renders the project's
+  // registry-resolved tab bar (WAVE 3 PR-4). The runtime provider stays at the
+  // root so the chat session survives switching tabs.
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+      <ProjectShell vm={vm} controller={controller} config={config} draft={draft} />
     </AssistantRuntimeProvider>
   )
 }
