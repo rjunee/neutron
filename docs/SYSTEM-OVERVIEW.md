@@ -28,6 +28,28 @@ share one backend instance. Examples:
   (`gateway/cores/build-production-codegen-wiring.ts`, gateway-side
   because its Anthropic credential factory is gateway-side).
 
+## Tab resolver (WAVE 3 tabbed shell) — `tabs/` + `gateway/http/app-tabs-surface.ts`
+
+The project (and global) tab set is resolved **engine-side** so both clients
+(mobile RN + web React) consume one source of truth instead of hardcoding
+their tabs. `tabs/registry.ts` exposes a `TabDescriptor` (`key`, `label`,
+`scope: 'project'|'global'`, `source: 'builtin'|'core'`, `order`,
+`mount: { kind: 'builtin'|'webview', target }`) and a `resolveTabs(scope)`
+resolver. **v1 (PR-1) emits BUILTIN descriptors only** — Chat / Documents /
+Tasks per-project, Admin global; Core-contributed tabs + install-scope union
+arrive in PR-2 (the descriptor + `order` gaps are shaped to slot them in).
+
+Two read-only HTTP routes (Bearer-auth, shared `AppWsAuthResolver` contract):
+- `GET /api/app/projects/<project_id>/tabs` → ordered project-scope descriptors
+- `GET /api/app/tabs`                        → ordered global-scope descriptors
+
+Both are gated by **`NEUTRON_TABS_REGISTRY`** (default **OFF**). When the flag
+is off the surface disclaims its routes (returns `null` → 404 through the
+default chain) so clients keep their pre-WAVE-3 hardcoded tabs (no
+regression). Surface factory: `createAppTabsSurface({ auth, enabled })`,
+plumbed via `app_tabs_surface` in `AppSurfacesCompositionInput` →
+`composition.ts` → `compose.ts` (`appTabs`, mounted ahead of `appProjects`).
+
 ## Doc search (QMD-equivalent) — `@neutronai/doc-search`
 
 The agent-native corpus search over the owner's project docs, so the live
