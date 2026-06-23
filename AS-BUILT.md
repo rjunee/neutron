@@ -2,6 +2,70 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-23 — WAVE 3 PR-5: web Documents tab (list · view · comment)
+
+First PR of the WAVE 3 **Documents** track
+(`docs/plans/wave3-tabbed-interface-build-plan.md` § 3.3, PR-5). Fills the
+builtin **Documents** tab in the web `ProjectShell` (PR-4) with its real view —
+the Obsidian-replacement read+comment surface. Per the SPEC Decisions Log
+(2026-06-23) **no feature flags**: the tab renders directly, no toggle.
+
+**Source of truth stays the FILESYSTEM.** No `documents` table is added; the tab
+reads + comments over the EXISTING gateway handlers
+(`gateway/http/app-docs-surface.ts`: `/docs/tree`, `/docs/file`,
+`/docs/comments*`). Read + comment first — editing is deferred to PR-6.
+
+**What changed (web client only — no gateway/backend changes).**
+- **`chat-react/docs-client.ts`** (new) — `WebDocsClient`, the web twin of
+  `app/lib/docs-client.ts`: bearer-auth (`config.token`) fetch wrapper, base URL
+  `config.origin`, wire types re-declared client-side (bundle stays gateway-free,
+  same convention as `tabs-client.ts`). Methods: `tree`, `readFile`,
+  `listComments`, `getThread`, `postComment`, `replyToComment`, `resolveComment`,
+  `escalateToChat`. Pure helpers: `flattenDocFiles` (tree → markdown leaves),
+  `buildAnchor` (raw-offset selection → clamped anchor), `clampUtf8` /
+  `byteLength` (respect the gateway's 1024-byte excerpt / 256-byte context caps).
+- **`chat-react/DocumentsTab.tsx`** (new) — three-pane view: doc **list** (left,
+  `flattenDocFiles` over `/docs/tree`) · markdown **viewer** (centre, RAW
+  selectable markdown so comment anchors map 1:1 to file offsets) · **comments**
+  side-pane (right). Select text → **Comment** (root, anchored via `buildAnchor`);
+  expand a thread → reply / **Resolve** / **Escalate to chat**. Active threads vs
+  a muted **Resolved** group. Per-fetch monotonic seq guards so a slow file /
+  comments response can't land after a newer one; full reset on project switch.
+- **`chat-react/ProjectShell.tsx`** — the `docs` builtin tab now renders
+  `<DocumentsTab>` (was the "coming soon" placeholder); Tasks keeps the
+  placeholder until PR-8. `TabContent` now receives `projectId` + `config`
+  (+ test `fetchImpl`).
+- **`chat-react.html`** — `cdoc-*` CSS for the three-pane Documents layout.
+
+**`comments_unavailable` gate (plan §5 VERIFY — handled).** The comments
+substrate is optional on the gateway; when absent the four `/docs/comments…`
+routes return `503 comments_unavailable` (`app-docs-surface.ts:193`).
+`WebDocsClient.listComments` treats that ONE code as a first-class non-error —
+resolves to `{ unavailable: true, threads: [] }` — while every other non-2xx
+still throws. The Documents tab then **still lists + views docs**, hides the
+comment composer, and shows a one-line "comments aren't available" note instead
+of an error toast. Verified by a unit test (503 → degrade, 400 → still throws)
+and a happy-dom component test.
+
+**Spec-conformance diff (plan §5, ≤5 lines).**
+1. SPEC C5 "Documents tab — list/view/**comment**, web none" → web Documents tab
+   now lists (`/docs/tree`), views (`/docs/file`), comments (`/docs/comments*`).
+2. Plan §3.3 "keep filesystem as source of truth, no `documents` table" → honoured
+   (zero gateway/schema changes; reuses existing handlers).
+3. Plan §3.3 "Editing can ship read+comment first" → this PR is read+comment; edit
+   is PR-6.
+4. Plan §5 VERIFY "`comments_unavailable` gate — degrade gracefully" → handled +
+   tested (list/view survive; composer hidden).
+5. No feature flag (SPEC Decisions Log 2026-06-23) → tab renders directly.
+
+**Tests** — `chat-react/__tests__/docs-client.test.ts` (19 pure: routes, the 503
+gate, `buildAnchor`/`clampUtf8`/`flattenDocFiles`) + `documents-tab.test.tsx`
+(3 happy-dom: list renders, doc opens + comments list, selection→comment post
+round-trip, the unavailable gate). Updated `project-shell.test.tsx` (Documents
+switch now asserts the real `DocumentsTab` mounts, not the placeholder). Full
+`landing/chat-react/` suite green (71 pass) + `tsc -p
+landing/chat-react/tsconfig.json` clean + browser bundle builds.
+
 ## 2026-06-23 — WAVE 3 PR-4: web project tab SHELL (registry-driven)
 
 Fourth and final foundation PR of the WAVE 3 tabbed-project-interface build

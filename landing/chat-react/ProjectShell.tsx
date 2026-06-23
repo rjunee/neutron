@@ -35,6 +35,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { ChatApp } from './ChatApp.tsx'
+import { DocumentsTab } from './DocumentsTab.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -92,8 +93,19 @@ function TabPlaceholder({ label }: { label: string }): React.JSX.Element {
   )
 }
 
-/** Render one non-Chat tab's body: a Core webview, or a builtin placeholder. */
-function TabContent({ tab }: { tab: TabDescriptor }): React.JSX.Element {
+/** Render one non-Chat tab's body: the Documents view, a Core webview, or a
+ *  builtin placeholder for tabs whose real view ships in a later PR. */
+function TabContent({
+  tab,
+  projectId,
+  config,
+  fetchImpl,
+}: {
+  tab: TabDescriptor
+  projectId: string
+  config: BootstrapConfig
+  fetchImpl?: FetchImpl
+}): React.JSX.Element {
   if (tab.mount.kind === 'webview') {
     const safeUrl = sanitizeCoreTabUrl(tab.mount.target)
     if (safeUrl === null) {
@@ -115,7 +127,17 @@ function TabContent({ tab }: { tab: TabDescriptor }): React.JSX.Element {
       />
     )
   }
-  // Builtin Documents/Tasks — real views land in PR-5..9.
+  // Builtin Documents — the Obsidian-replacement read+comment surface (PR-5).
+  if (tab.mount.target === 'docs') {
+    return (
+      <DocumentsTab
+        projectId={projectId}
+        config={config}
+        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+      />
+    )
+  }
+  // Other builtin tabs (Tasks) — real views land in PR-8.
   return <TabPlaceholder label={tab.label} />
 }
 
@@ -214,9 +236,14 @@ export function ProjectShell({
             {...(fetchImpl !== undefined ? { fetchImpl } : {})}
           />
         </div>
-        {!isGeneral && resolvedActiveKey !== CHAT_KEY ? (
+        {!isGeneral && resolvedActiveKey !== CHAT_KEY && projectId !== null ? (
           <div className="car-tabpanel" role="tabpanel">
-            <TabContent tab={activeTab} />
+            <TabContent
+              tab={activeTab}
+              projectId={projectId}
+              config={config}
+              {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+            />
           </div>
         ) : null}
       </div>

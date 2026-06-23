@@ -95,8 +95,45 @@ guaranteed Chat tab (graceful fallback, not a toggle). CSS lives in
 `chat-react.html` (`car-projectshell` / `car-tab*` / `car-tab-frame`). Tests:
 `chat-react/__tests__/tabs-client.test.ts` (pure client + URL sanitize) +
 `project-shell.test.tsx` (happy-dom: bar renders the resolved set, Chat shows
-`ChatApp`, switching to a builtin shows the placeholder, switching to a Core tab
-renders the iframe at the resolved URL).
+`ChatApp`, switching to **Documents** mounts the real `DocumentsTab` (PR-5),
+switching to a Core tab renders the iframe at the resolved URL).
+
+### Web Documents tab (WAVE 3 PR-5)
+
+The builtin **Documents** tab (`mount.target === 'docs'`) renders
+`chat-react/DocumentsTab.tsx` — the web Obsidian-replacement read+comment surface
+inside `ProjectShell`. It is **read + comment first** (editing is PR-6) and adds
+**no `documents` table**: bodies stay filesystem-backed, served by the existing
+gateway docs surface (`gateway/http/app-docs-surface.ts`). The tab is a
+three-pane layout — doc **list** (left) · markdown **viewer** (centre) ·
+**comments** side-pane (right) — over `chat-react/docs-client.ts` (`WebDocsClient`,
+the web twin of `app/lib/docs-client.ts`: bearer-authed off `config.token`, base
+URL `config.origin`, wire types re-declared client-side so the bundle stays
+gateway-free):
+
+- **List** = `GET /docs/tree` flattened to its markdown leaves (`flattenDocFiles`;
+  folders + binaries dropped).
+- **Viewer** = `GET /docs/file?path=` rendered as **selectable RAW markdown** in
+  a single text node. Anchors are character offsets into the raw content (the
+  same bytes the gateway re-anchors against), so the viewer maps the DOM
+  selection back to raw offsets (`selectionOffsets`) — pretty-rendering would
+  desync offsets from the file, so v1 shows raw text. `buildAnchor` builds the
+  excerpt + ±256-byte context, clamped to the gateway's byte caps.
+- **Comments** = `GET /docs/comments?path=` (active ∪ a muted Resolved group);
+  select text → **Comment** → `POST /docs/comments` (root, anchored); expand a
+  thread → reply (`/reply`), **Resolve** (`/resolve`), **Escalate to chat**
+  (`/escalate`).
+
+**`comments_unavailable` degrades gracefully** (plan §5 VERIFY): when the gateway
+has no comment substrate the comments routes return `503 comments_unavailable`;
+`WebDocsClient.listComments` catches that one code and resolves to
+`{ unavailable: true, threads: [] }` (every other non-2xx still throws), so the
+Documents tab **still lists + views docs** and simply hides the comment composer,
+showing a one-line note instead of an error. CSS (`cdoc-*`) lives in
+`chat-react.html`. Tests: `chat-react/__tests__/docs-client.test.ts` (pure:
+routes, the 503 gate, `buildAnchor`/`clampUtf8`/`flattenDocFiles`) +
+`documents-tab.test.tsx` (happy-dom: list renders, doc opens, selection→comment
+post round-trip, the unavailable gate).
 
 ### Cores install-SCOPE (WAVE 3 PR-2)
 
