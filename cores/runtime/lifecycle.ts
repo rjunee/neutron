@@ -52,6 +52,7 @@ import { CoreInstallError } from './errors.ts'
 import {
   CoreInstallationsStore,
   type CoreInstallationRecord,
+  type CoreGlobalInstallationRecord,
 } from './installations-store.ts'
 import { loadCoreFromDir, type LoadedCore } from './loader.ts'
 import {
@@ -226,6 +227,88 @@ export async function installCore(
     installation,
     secrets_accessor: accessor,
   }
+}
+
+// ── GLOBAL install scope (WAVE 3 PR-2) ─────────────────────────────────────
+//
+// A GLOBAL install registers a Core into the global app shell + every project
+// (its `project_tab` surfaces show up in `GET /api/app/tabs`). Unlike the
+// per-project `installCore`, a global install is project-agnostic: it has no
+// per-project data namespace and no per-project secrets prompt — it records
+// that the Core is globally available in `core_global_installations`. The
+// per-project data/secrets handling for a globally-installed Core, when it is
+// actually exercised inside a project, is a per-project concern that still
+// flows through `installCore`. Keeping the two paths separate leaves the
+// heavily-tested per-project lifecycle byte-identical.
+
+export interface InstallCoreGloballyInput {
+  /** Absolute path to the Core's directory on disk. */
+  coreDir: string
+  installations: CoreInstallationsStore
+}
+
+export interface UninstallCoreGloballyInput {
+  core_slug: string
+  installations: CoreInstallationsStore
+}
+
+/** True iff the manifest permits installation in `scope`. An omitted
+ *  `install_scopes` means project-only (the pre-WAVE-3 default). */
+export function manifestSupportsScope(
+  manifest: NeutronManifest,
+  scope: 'project' | 'global',
+): boolean {
+  const scopes = manifest.install_scopes ?? ['project']
+  return scopes.includes(scope)
+}
+
+/**
+ * Install a Core GLOBALLY. Loads + validates the manifest, gates on the
+ * manifest's `install_scopes` (must include `'global'`), refuses a duplicate
+ * live global install, and records the global installation row.
+ */
+export async function installCoreGlobally(
+  input: InstallCoreGloballyInput,
+): Promise<CoreGlobalInstallationRecord> {
+  const core = loadCoreFromDir(input.coreDir)
+
+  if (!manifestSupportsScope(core.manifest, 'global')) {
+    throw new CoreInstallError(
+      'scope_not_supported',
+      `core=${core.slug} does not declare 'global' in its manifest install_scopes; cannot install globally`,
+      {
+        core_slug: core.slug,
+        declared_scopes: core.manifest.install_scopes ?? ['project'],
+      },
+    )
+  }
+
+  const existing = await input.installations.getGlobal(core.slug)
+  if (existing !== null && existing.uninstalled_at === null) {
+    throw new CoreInstallError(
+      'duplicate_install',
+      `core=${core.slug} is already installed globally at version=${existing.package_version}`,
+      { core_slug: core.slug, existing_version: existing.package_version },
+    )
+  }
+
+  return input.installations.recordGlobal({
+    core_slug: core.slug,
+    package_name: core.package_name,
+    package_version: core.package_version,
+    capabilities: [...core.manifest.capabilities],
+  })
+}
+
+/** Uninstall a globally-installed Core (tombstone `uninstalled_at`).
+ *  Idempotent: a no-op when the Core was never globally installed or is
+ *  already uninstalled. */
+export async function uninstallCoreGlobally(
+  input: UninstallCoreGloballyInput,
+): Promise<void> {
+  const existing = await input.installations.getGlobal(input.core_slug)
+  if (existing === null || existing.uninstalled_at !== null) return
+  await input.installations.markGlobalUninstalled(input.core_slug)
 }
 
 async function driveSecretsInstall(input: {

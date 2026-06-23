@@ -153,3 +153,78 @@ test('record after markUninstalled re-installs with cleared lifecycle markers', 
 test('get returns null for unknown core', async () => {
   expect(await store.get('t1', 'nope')).toBeNull()
 })
+
+// ── GLOBAL scope CRUD (WAVE 3 PR-2) ────────────────────────────────────────
+
+test('recordGlobal + getGlobal round-trip', async () => {
+  const rec = await store.recordGlobal({
+    core_slug: 'admin',
+    package_name: '@neutronai/admin',
+    package_version: '2.0.0',
+    capabilities: ['read:project.db'],
+  })
+  expect(rec.core_slug).toBe('admin')
+  expect(rec.installed_at).toBe(1_000_000)
+  expect(rec.uninstalled_at).toBeNull()
+  expect(rec.install_state).toBe('install_ok')
+  expect(rec.capabilities).toEqual(['read:project.db'])
+
+  const got = await store.getGlobal('admin')
+  expect(got?.package_version).toBe('2.0.0')
+})
+
+test('global installs are SEPARATE from per-project installs (no key collision)', async () => {
+  await store.record({
+    project_slug: 't1',
+    core_slug: 'notes',
+    package_name: '@neutronai/notes',
+    package_version: '1.0.0',
+    capabilities: [],
+    data_layout: 'tables',
+  })
+  await store.recordGlobal({
+    core_slug: 'notes',
+    package_name: '@neutronai/notes',
+    package_version: '1.0.0',
+    capabilities: [],
+  })
+  // Per-project read sees its row; global read sees its own; neither pollutes
+  // the other.
+  expect((await store.listLive('t1')).map((r) => r.core_slug)).toEqual(['notes'])
+  expect((await store.listGlobalLive()).map((r) => r.core_slug)).toEqual(['notes'])
+})
+
+test('listGlobalLive excludes tombstoned installs; re-install via UPSERT revives', async () => {
+  await store.recordGlobal({
+    core_slug: 'admin',
+    package_name: '@neutronai/admin',
+    package_version: '1.0.0',
+    capabilities: [],
+  })
+  await store.markGlobalUninstalled('admin')
+  expect(await store.listGlobalLive()).toHaveLength(0)
+  // getGlobal still returns the tombstone row.
+  expect((await store.getGlobal('admin'))?.uninstalled_at).toBe(1_000_000)
+
+  // Re-install reuses the PK and clears the tombstone.
+  now = 2_000_000
+  const revived = await store.recordGlobal({
+    core_slug: 'admin',
+    package_name: '@neutronai/admin',
+    package_version: '1.1.0',
+    capabilities: [],
+  })
+  expect(revived.uninstalled_at).toBeNull()
+  expect(revived.installed_at).toBe(2_000_000)
+  expect(revived.package_version).toBe('1.1.0')
+  expect((await store.listGlobalLive()).map((r) => r.core_slug)).toEqual(['admin'])
+})
+
+test('getGlobal returns null for an unknown global core', async () => {
+  expect(await store.getGlobal('nope')).toBeNull()
+})
+
+test('markGlobalUninstalled is a no-op for an unknown core', async () => {
+  await store.markGlobalUninstalled('nope')
+  expect(await store.listGlobal()).toHaveLength(0)
+})

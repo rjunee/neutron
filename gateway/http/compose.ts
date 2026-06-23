@@ -186,10 +186,11 @@ export interface AppDocsHandler {
 }
 
 /**
- * WAVE 3 PR-1 — Expo/web-app tab-resolver surface. Owns
+ * WAVE 3 — Expo/web-app tab-resolver surface. Owns
  * `GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs`. Returns the
- * engine-resolved tab descriptors both clients consume. Flag-gated by
- * `NEUTRON_TABS_REGISTRY`; disclaims (returns `null`) when the flag is off.
+ * engine-resolved tab descriptors both clients consume (builtins ∪ installed
+ * Cores' `project_tab` surfaces). Always on — no feature flag (SPEC Decisions
+ * Log, 2026-06-23). Disclaims (returns `null`) only for non-owned paths.
  *
  * Surface factory: `gateway/http/app-tabs-surface.ts:createAppTabsSurface`.
  */
@@ -542,18 +543,17 @@ export interface ComposeHttpHandlerInput {
    */
   appDocs?: AppDocsHandler
   /**
-   * WAVE 3 PR-1 — optional Expo/web-app tab-resolver surface. When
-   * supplied, the composed HTTP chain mounts
-   * `GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs` (engine-
-   * resolved tab descriptors both clients consume). Flag-gated inside the
-   * surface by `NEUTRON_TABS_REGISTRY`; when the flag is off it disclaims
-   * its routes (returns `null`) so they 404 through the default chain and
-   * clients keep their hardcoded tabs. Mounted ahead of `appProjects` so
-   * the per-project `/tabs` path is unambiguously owned, mirroring the
+   * WAVE 3 — optional Expo/web-app tab-resolver surface. When supplied, the
+   * composed HTTP chain mounts `GET /api/app/projects/<id>/tabs` +
+   * `GET /api/app/tabs` (engine-resolved tab descriptors both clients consume:
+   * builtins ∪ installed Cores' `project_tab` surfaces). Always on — no
+   * feature flag (SPEC Decisions Log, 2026-06-23); disclaims its routes
+   * (returns `null`) only for non-owned paths. Mounted ahead of `appProjects`
+   * so the per-project `/tabs` path is unambiguously owned, mirroring the
    * launcher/tasks/reminders precedence.
    *
    * Surface factory: `gateway/http/app-tabs-surface.ts:createAppTabsSurface`.
-   * Per docs/plans/wave3-tabbed-interface-build-plan.md § 3.1 + § 4 (PR-1).
+   * Per docs/plans/wave3-tabbed-interface-build-plan.md § 3.1-3.2 (PR-1+PR-2).
    */
   appTabs?: AppTabsHandler
   /**
@@ -1084,13 +1084,13 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
         const remRes = await appReminders.handler(req)
         if (remRes !== null) return remRes
       }
-      // 0h1. Expo/web-app tab-resolver surface — WAVE 3 PR-1. Owns
+      // 0h1. Expo/web-app tab-resolver surface — WAVE 3. Owns
       //      `GET /api/app/projects/<id>/tabs` + `GET /api/app/tabs`.
       //      Mounted BEFORE appProjects so the per-project `/tabs` path is
       //      unambiguously owned (appProjects disclaims it via null today,
       //      but this precedence keeps it that way), mirroring the
-      //      launcher/tasks/reminders ordering. Disclaims (null) when the
-      //      `NEUTRON_TABS_REGISTRY` flag is off so the routes 404 through.
+      //      launcher/tasks/reminders ordering. Always on — no flag; the
+      //      surface disclaims (null) only for non-owned paths.
       if (appTabs !== undefined) {
         const tabsRes = await appTabs.handler(req)
         if (tabsRes !== null) return tabsRes

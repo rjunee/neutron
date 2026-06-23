@@ -34,21 +34,40 @@ The project (and global) tab set is resolved **engine-side** so both clients
 (mobile RN + web React) consume one source of truth instead of hardcoding
 their tabs. `tabs/registry.ts` exposes a `TabDescriptor` (`key`, `label`,
 `scope: 'project'|'global'`, `source: 'builtin'|'core'`, `order`,
-`mount: { kind: 'builtin'|'webview', target }`) and a `resolveTabs(scope)`
-resolver. **v1 (PR-1) emits BUILTIN descriptors only** — Chat / Documents /
-Tasks per-project, Admin global; Core-contributed tabs + install-scope union
-arrive in PR-2 (the descriptor + `order` gaps are shaped to slot them in).
+`mount: { kind: 'builtin'|'webview', target }`) and a
+`resolveTabs(scope, cores)` resolver. **BUILTIN descriptors** — Chat /
+Documents / Tasks per-project, Admin global — are unioned with
+**CORE-contributed tabs** (PR-2): the `project_tab` surfaces of installed
+Cores, shaped as `source:'core'`, `key:'core:<slug>'`,
+`mount:{kind:'webview', target}` and sorted AFTER the builtins. The registry
+stays **pure** (no DB / no package loading) — the HTTP layer resolves which
+Cores are installed and passes a `CoreTabContribution[]` in.
 
 Two read-only HTTP routes (Bearer-auth, shared `AppWsAuthResolver` contract):
-- `GET /api/app/projects/<project_id>/tabs` → ordered project-scope descriptors
-- `GET /api/app/tabs`                        → ordered global-scope descriptors
+- `GET /api/app/projects/<project_id>/tabs` → builtins ∪ per-project Cores
+  (from `core_installations`); `<project_id>` substituted into Core targets
+- `GET /api/app/tabs`                        → builtin Admin ∪ globally-installed
+  Cores (from `core_global_installations`)
 
-Both are gated by **`NEUTRON_TABS_REGISTRY`** (default **OFF**). When the flag
-is off the surface disclaims its routes (returns `null` → 404 through the
-default chain) so clients keep their pre-WAVE-3 hardcoded tabs (no
-regression). Surface factory: `createAppTabsSurface({ auth, enabled })`,
-plumbed via `app_tabs_surface` in `AppSurfacesCompositionInput` →
-`composition.ts` → `compose.ts` (`appTabs`, mounted ahead of `appProjects`).
+**Always on — no feature flag** (SPEC Decisions Log, 2026-06-23). The surface
+disclaims its routes (returns `null` → 404) only for non-owned paths. Surface
+factory: `createAppTabsSurface({ auth, cores?, installations? })` (Core union
+is opt-in — omit `cores`/`installations` for a builtin-only surface), plumbed
+via `app_tabs_surface` in `AppSurfacesCompositionInput` → `composition.ts` →
+`compose.ts` (`appTabs`, mounted ahead of `appProjects`).
+
+### Cores install-SCOPE (WAVE 3 PR-2)
+
+A Core installs **per-project** (`core_installations`, keyed
+`(project_slug, core_slug)`) OR **globally** (`core_global_installations`,
+keyed `core_slug` — added in migration `0084`). The manifest's optional
+`install_scopes: ('project'|'global')[]` (omitted ⇒ project-only) declares
+which scopes a Core permits; the global lifecycle gates on it. Global CRUD
+lives on `CoreInstallationsStore` (`recordGlobal` / `getGlobal` / `listGlobal`
+/ `listGlobalLive` / `markGlobalUninstalled`) and the lifecycle exposes
+`installCoreGlobally` / `uninstallCoreGlobally` (project-agnostic: no per-
+project data namespace or secrets prompt — those still flow through the
+per-project `installCore`).
 
 ## Doc search (QMD-equivalent) — `@neutronai/doc-search`
 

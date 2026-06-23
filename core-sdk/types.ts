@@ -26,6 +26,14 @@
 export type TierSupport = 'regular' | 'private' | 'both'
 
 /**
+ * WAVE 3 PR-2 — install SCOPE a Core supports. `project` installs into one
+ * project; `global` installs into the global app shell + every project. A
+ * manifest's `install_scopes` field (optional; defaults to project-only)
+ * lists the scopes it permits. Mirrors `cores/sdk/manifest.ts:InstallScope`.
+ */
+export type InstallScope = 'project' | 'global'
+
+/**
  * Cross-project linked-source kind. Per § A.3.5, a Core can opt-in to
  * read/write data from a workspace instance other than the owner's own
  * instance — gated by the linked-source consent record on both sides.
@@ -197,6 +205,12 @@ export interface ManifestSecret {
 export interface NeutronManifest {
   capabilities: NeutronCapability[]
   tier_support: TierSupport[]
+  /**
+   * WAVE 3 PR-2 — install scopes the Core supports. Optional; when omitted
+   * the Core is project-only (`['project']`). Present values must be a
+   * non-empty subset of {`project`, `global`}.
+   */
+  install_scopes?: InstallScope[]
   tools: ToolDef[]
   ui_components: UiComponentDef[]
   billing_hooks: BillingHookDef[]

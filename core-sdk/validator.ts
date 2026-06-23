@@ -53,6 +53,9 @@ export const KNOWN_TIER_SUPPORTS: ReadonlyArray<TierSupport> = [
   'both',
 ] as const
 
+/** WAVE 3 PR-2 — install scopes a Core may declare in `install_scopes`. */
+export const KNOWN_INSTALL_SCOPES = ['project', 'global'] as const
+
 export const KNOWN_LINKED_SOURCE_KINDS = [
   'gmail',
   'calendar',
@@ -169,6 +172,7 @@ export function validateNeutronManifest(input: unknown): ValidationResult {
 
   validateCapabilities(input['capabilities'], errors)
   validateTierSupport(input['tier_support'], errors)
+  validateInstallScopes(input['install_scopes'], errors)
   validateTools(input['tools'], errors)
   validateUiComponents(input['ui_components'], errors)
   validateBillingHooks(input['billing_hooks'], errors)
@@ -230,6 +234,34 @@ function validateTierSupport(value: unknown, errors: ValidationError[]): void {
           ERROR_CODES.INVALID_TIER_SUPPORT,
           path,
           `must be one of: ${KNOWN_TIER_SUPPORTS.join(', ')}`,
+        ),
+      )
+    }
+  }
+}
+
+function validateInstallScopes(value: unknown, errors: ValidationError[]): void {
+  // OPTIONAL field (WAVE 3 PR-2). Omitted ⇒ project-only; nothing to check.
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.length === 0) {
+    errors.push(
+      err(
+        ERROR_CODES.TYPE_MISMATCH,
+        '/install_scopes',
+        'must be a non-empty array of install scopes when present',
+      ),
+    )
+    return
+  }
+  const known = new Set<string>(KNOWN_INSTALL_SCOPES)
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i]
+    if (typeof item !== 'string' || !known.has(item)) {
+      errors.push(
+        err(
+          ERROR_CODES.TYPE_MISMATCH,
+          `/install_scopes/${i}`,
+          `must be one of: ${KNOWN_INSTALL_SCOPES.join(', ')}`,
         ),
       )
     }
