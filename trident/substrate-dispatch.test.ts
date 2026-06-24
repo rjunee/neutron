@@ -140,6 +140,40 @@ describe('buildSubstrateTridentDispatch — adapter mechanics', () => {
     expect(out.result).toBe('')
   })
 
+  test('build_substrate is invoked PER dispatch with the run worktree as cwd', async () => {
+    const cwds: string[] = []
+    const rec = recordingSubstrate(() => [{ kind: 'token', text: 'ok' }, completion()])
+    const dispatch = buildSubstrateTridentDispatch({
+      build_substrate: (cwd: string) => {
+        cwds.push(cwd)
+        return rec.substrate
+      },
+    })
+
+    await dispatch(forgeInput({ repo_path: '/worktrees/run-a' }))
+    await dispatch(forgeInput({ repo_path: '/worktrees/run-b' }))
+
+    // A FRESH substrate is requested per turn, each rooted at THAT run's
+    // worktree — never a single fixed (owner_home) cwd.
+    expect(cwds).toEqual(['/worktrees/run-a', '/worktrees/run-b'])
+  })
+
+  test('a build_substrate that throws maps to failed (a crashed sub-agent)', async () => {
+    const dispatch = buildSubstrateTridentDispatch({
+      build_substrate: () => {
+        throw new Error('empty credential pool')
+      },
+    })
+    const out = await dispatch(forgeInput())
+
+    expect(out.status).toBe('failed')
+    expect(out.result).toBe('')
+  })
+
+  test('throws at construction when neither substrate nor build_substrate is supplied', () => {
+    expect(() => buildSubstrateTridentDispatch({})).toThrow(/exactly one of/)
+  })
+
   test('a turn that never completes is cancelled at timeout_ms → timed_out', async () => {
     const rec = recordingSubstrate(() => [{ kind: 'token', text: 'thinking…' }], { hang: true })
     // Inject a synchronous timer so the timeout fires deterministically.

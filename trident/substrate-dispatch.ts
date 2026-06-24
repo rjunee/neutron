@@ -34,16 +34,22 @@
  *   `timeout_ms` elapsed   → 'timed_out'
  *   thrown / start() throws → 'failed'
  *
- * SCOPE NOTE (Trident-port, first prod-boot wiring PR). This runs each turn on
- * the substrate instance handed in. Two hardening concerns are DELIBERATELY the
- * next PRs, not this one:
- *   1. Per-build context ISOLATION — a fresh subprocess/session per Forge↔Argus
- *      turn so one build never inherits another's working context. The instance
- *      wired in the Open composer is a sibling of the warm conversational pool.
- *   2. Per-worktree cwd — `AgentSpec` carries no per-call cwd; the CC adapter's
- *      working dir is fixed at instance construction (owner_home). Forge's
- *      contract has it create + operate its own worktree, but native per-run
- *      cwd is a follow-up. See docs/SYSTEM-OVERVIEW.md § Trident / Code-Gen.
+ * SUBSTRATE RESOLUTION — two shapes, exactly one required:
+ *   • `build_substrate(cwd)` — PRODUCTION. A factory called ONCE PER DISPATCH
+ *     with the run's worktree (`input.repo_path`) as the cwd. This closes the
+ *     two hardening items the first prod-boot wiring PR (#33) deferred:
+ *       1. Per-worktree cwd — `AgentSpec` carries no per-call cwd, so the CC
+ *          adapter's working dir is fixed at substrate construction. Building a
+ *          FRESH substrate per turn with `cwd = input.repo_path` lands each
+ *          Forge/Argus turn IN the run's own worktree instead of `owner_home`.
+ *       2. Per-build context ISOLATION — a fresh (ephemeral) substrate per turn
+ *          means one build never inherits another's working context, and build
+ *          turns never bleed into the owner's warm conversational pool.
+ *   • `substrate` — a single pre-built instance reused for every dispatch (its
+ *     cwd is whatever it was constructed with). Back-compat / test shape; do NOT
+ *     use in production for multi-worktree builds (every turn would run in the
+ *     one fixed cwd). Retained so the adapter mechanics tests can drive a single
+ *     recording substrate.
  */
 
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
@@ -55,8 +61,20 @@ import type {
 } from './session.ts'
 
 export interface BuildSubstrateTridentDispatchOptions {
-  /** Model-execution backend — the CC-subprocess persistent REPL in prod. */
-  substrate: Substrate
+  /**
+   * PRODUCTION substrate factory — built ONCE PER DISPATCH with the run's
+   * worktree (`input.repo_path`) as the cwd, so each Forge/Argus turn runs IN
+   * the run's own worktree on a fresh (ephemeral) CC-subprocess REPL. Exactly
+   * one of `build_substrate` / `substrate` must be supplied; `build_substrate`
+   * wins when both are present.
+   */
+  build_substrate?: (cwd: string) => Substrate
+  /**
+   * Single pre-built backend reused for every dispatch (back-compat / tests).
+   * Its cwd is fixed at construction, so it is NOT suitable for production
+   * multi-worktree builds — prefer `build_substrate`.
+   */
+  substrate?: Substrate
   /**
    * Upper bound on completion tokens per turn. Omitted by default (the adapter
    * lets the substrate apply its own ceiling); set to bound long build turns.
@@ -79,6 +97,11 @@ export interface BuildSubstrateTridentDispatchOptions {
 export function buildSubstrateTridentDispatch(
   opts: BuildSubstrateTridentDispatchOptions,
 ): TridentDispatch {
+  if (opts.build_substrate === undefined && opts.substrate === undefined) {
+    throw new Error(
+      'buildSubstrateTridentDispatch: exactly one of `build_substrate` (per-worktree, production) or `substrate` (single instance, tests) must be supplied',
+    )
+  }
   const setTimer =
     opts.set_timer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms))
   const clearTimer =
@@ -97,7 +120,15 @@ export function buildSubstrateTridentDispatch(
 
     let handle: SessionHandle
     try {
-      handle = opts.substrate.start(spec)
+      // PRODUCTION: build a fresh substrate rooted at THIS run's worktree so the
+      // turn runs in `input.repo_path`, not the construction-time cwd. Tests may
+      // pass a single `substrate` instead. The factory itself throwing (e.g. an
+      // empty credential pool) is a crashed sub-agent, same as a start() throw.
+      const substrate =
+        opts.build_substrate !== undefined
+          ? opts.build_substrate(input.repo_path)
+          : opts.substrate!
+      handle = substrate.start(spec)
     } catch {
       // A substrate that fails to even start the turn is a crashed sub-agent.
       return { result: '', status: 'failed' }
