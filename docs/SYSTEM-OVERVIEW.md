@@ -402,6 +402,19 @@ ADDITIVELY activates a capability.
   with what actually gets stored. The phase enum + `LEGAL_TRANSITIONS` are
   unchanged — the optional keys are additive to the substrate choice, never a
   new gate, so skipping them is the zero-friction default.
+- **Activation sink differs by deployment tier.** `storeOptionalKey` →
+  `ApiKeyStore` is the **managed** activation path (the per-instance resolver
+  `resolveLlmCredentials` reads `ApiKeyStore`), and is what the integration
+  test exercises end-to-end. **Open self-host** resolves LLM credentials from
+  **env** instead (`open/composer.ts:resolveOpenLlmPool` →
+  `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`; embeddings + the GPT adapter
+  read `OPENAI_API_KEY` / `NEUTRON_EMBEDDINGS_*` from the owner env file), so
+  the open-mode activating sink is the owner's `.env` (read on next boot), not
+  `ApiKeyStore`. This slice ships the offer registry + the storage primitive +
+  the conversational surfacing; the **interactive collector** (a paste
+  affordance on the credential step) and the per-tier intake closure (managed:
+  an `ApiKeyStore`-backed hook; open: an env-file writer) are the explicit
+  next slice — the primitive is deliberately landed and proven first.
 
 ## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
 

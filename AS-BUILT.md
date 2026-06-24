@@ -76,6 +76,20 @@ substrate choice, not a new gate, so the phase-walk matrix is untouched).
 FAQs + answer-tangents derived from the canonical offer registry, so the
 onboarding agent answers in lockstep with what `storeOptionalKey` persists.
 
+**Scope boundary (Codex review P2).** This slice ships the offer registry, the
+storage primitive, and the conversational surfacing — NOT yet an interactive
+paste collector that fires in every run. Deliberate, because the *activating
+sink* differs by deployment tier and a complete wire is a larger,
+security-sensitive change: managed reads `ApiKeyStore` (what the integration
+test proves), but **open self-host** resolves credentials from **env**
+(`open/composer.ts:resolveOpenLlmPool` is Anthropic-env-only; the GPT adapter +
+gbrain embedder read `OPENAI_API_KEY` / `NEUTRON_EMBEDDINGS_*` from the owner
+`.env`), so open-mode activation means writing the owner env file + restart,
+not an `ApiKeyStore` row. The primitive is landed + proven first; the
+interactive collector + the per-tier intake closure (managed: `ApiKeyStore`
+hook; open: env-file writer) are the explicit next slice. The byte-pinned
+onboarding engine credential branch is intentionally left untouched here.
+
 **Tests.** `onboarding/__tests__/optional-keys.test.ts` (pure unit, in-memory
 fake store: offers exposed + optional; valid key stored; invalid rejected
 without write; idempotent re-paste; codex guidance-only; skip = no write) and
