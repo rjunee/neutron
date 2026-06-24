@@ -93,6 +93,9 @@ describe('Sam 4-point draft policy (load-bearing)', () => {
       async getMessage() {
         throw new Error('unused')
       },
+      async getThread() {
+        throw new Error('unused')
+      },
       async search() {
         return { results: [] }
       },
@@ -146,6 +149,9 @@ describe('Sam 4-point draft policy (load-bearing)', () => {
         return { results: [] }
       },
       async getMessage() {
+        throw new Error('unused')
+      },
+      async getThread() {
         throw new Error('unused')
       },
       async search() {

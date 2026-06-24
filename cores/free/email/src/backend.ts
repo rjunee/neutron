@@ -115,6 +115,41 @@ export interface GmailGetInput {
   message_id: string
 }
 
+export interface GmailThreadGetInput {
+  thread_id: string
+}
+
+/**
+ * Full Gmail thread — the conversation-level read surface (Gmail's
+ * `users.threads.get`). Carries every message in the thread plus
+ * derived thread metadata.
+ *
+ * Ordering: `messages` is OLDEST-FIRST (ascending by `internalDate`)
+ * — the natural conversation reading order, top-to-bottom. This is
+ * the INVERSE of `listMessages` / `search`, which are newest-first
+ * (inboxes face backward; a thread you're reading faces forward).
+ */
+export interface GmailThreadFull {
+  thread_id: string
+  /** Subject of the thread — taken from the FIRST (oldest) message. */
+  subject: string
+  /** Number of messages in the thread. */
+  message_count: number
+  /** ISO-8601 datetime of the most recent message in the thread. */
+  last_message_date: string
+  /**
+   * Distinct From / To / Cc participants across every message in the
+   * thread, in first-seen order. Raw RFC 5322 mailbox specs (e.g.
+   * `"Alice" <alice@x.com>`) — downstream consumers extract the bare
+   * address themselves when they want one.
+   */
+  participants: string[]
+  /** Union of label ids across all messages in the thread. */
+  label_ids: string[]
+  /** Full messages, OLDEST-FIRST (ascending by internalDate). */
+  messages: GmailMessageFull[]
+}
+
 export interface GmailDraftInput {
   to: string[]
   subject: string
@@ -221,6 +256,14 @@ export interface GmailClient {
   listMessages(input: GmailListInput): Promise<GmailListResult>
   /** Throws `MessageNotFoundError` on unknown id. */
   getMessage(input: GmailGetInput): Promise<GmailMessageFull>
+  /**
+   * Fetch a whole Gmail conversation by thread id (`users.threads.get`)
+   * — every message in the thread plus derived thread metadata
+   * (subject, participants, message_count, last_message_date). Messages
+   * come back OLDEST-FIRST (conversation reading order). Throws
+   * `ThreadNotFoundError` on an unknown / empty thread.
+   */
+  getThread(input: GmailThreadGetInput): Promise<GmailThreadFull>
   search(input: GmailSearchInput): Promise<GmailListResult>
   /**
    * Atomic two-call sequence: drafts.create → threads.modify
@@ -309,6 +352,67 @@ export class MessageNotFoundError extends Error {
     super(`gmail message not found: ${message_id}`)
     this.name = 'MessageNotFoundError'
     this.message_id = message_id
+  }
+}
+
+/**
+ * Thrown when `getThread` references a thread id that doesn't exist (or
+ * a thread with no messages). Mirrors `MessageNotFoundError` so the
+ * tool layer surfaces it as an `unknown_id` outcome consistently across
+ * the in-memory and Google backends.
+ */
+export class ThreadNotFoundError extends Error {
+  readonly code = 'thread_not_found' as const
+  readonly thread_id: string
+
+  constructor(thread_id: string) {
+    super(`gmail thread not found: ${thread_id}`)
+    this.name = 'ThreadNotFoundError'
+    this.thread_id = thread_id
+  }
+}
+
+/**
+ * Assemble a `GmailThreadFull` from the messages of a single thread.
+ * Pure — shared by the in-memory fakes and the Google wrapper so the
+ * thread-metadata derivation (ordering, participant union, label
+ * union, subject/last-date) is identical across backends.
+ *
+ * Messages are returned OLDEST-FIRST (ascending by internalDate) — the
+ * natural conversation reading order. Subject is taken from the oldest
+ * message; participants are the first-seen union of From/To/Cc across
+ * the whole thread.
+ */
+function assembleThread(
+  thread_id: string,
+  msgs: GmailMessageFull[],
+): GmailThreadFull {
+  const ordered = [...msgs].sort(
+    (a, b) => Date.parse(a.internal_date) - Date.parse(b.internal_date),
+  )
+  const participants: string[] = []
+  const seen = new Set<string>()
+  const labels = new Set<string>()
+  for (const m of ordered) {
+    for (const addr of [m.from, ...m.to, ...m.cc]) {
+      const v = addr.trim()
+      if (v.length > 0 && !seen.has(v)) {
+        seen.add(v)
+        participants.push(v)
+      }
+    }
+    for (const l of m.label_ids) labels.add(l)
+  }
+  const first = ordered[0]
+  const last = ordered[ordered.length - 1]
+  return {
+    thread_id,
+    subject: first?.subject ?? '',
+    message_count: ordered.length,
+    last_message_date: last?.internal_date ?? '',
+    participants,
+    label_ids: Array.from(labels),
+    messages: ordered,
   }
 }
 
@@ -478,6 +582,15 @@ export function buildInMemoryGmailClient(
       const row = messages.get(input.message_id)
       if (row === undefined) throw new MessageNotFoundError(input.message_id)
       return { ...row }
+    },
+
+    async getThread(input: GmailThreadGetInput): Promise<GmailThreadFull> {
+      const msgs: GmailMessageFull[] = []
+      for (const row of messages.values()) {
+        if (row.thread_id === input.thread_id) msgs.push({ ...row })
+      }
+      if (msgs.length === 0) throw new ThreadNotFoundError(input.thread_id)
+      return assembleThread(input.thread_id, msgs)
     },
 
     async search(input: GmailSearchInput): Promise<GmailListResult> {
@@ -800,6 +913,15 @@ export function buildSeededInMemoryGmailClient(
       const row = messages.get(input.message_id)
       if (row === undefined) throw new MessageNotFoundError(input.message_id)
       return { ...row }
+    },
+
+    async getThread(input: GmailThreadGetInput): Promise<GmailThreadFull> {
+      const msgs: GmailMessageFull[] = []
+      for (const row of messages.values()) {
+        if (row.thread_id === input.thread_id) msgs.push({ ...row })
+      }
+      if (msgs.length === 0) throw new ThreadNotFoundError(input.thread_id)
+      return assembleThread(input.thread_id, msgs)
     },
 
     async search(input: GmailSearchInput): Promise<GmailListResult> {
@@ -1406,7 +1528,10 @@ export function buildGoogleGmailClient(
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
-    options: { message_id_for_not_found?: string } = {},
+    options: {
+      message_id_for_not_found?: string
+      thread_id_for_not_found?: string
+    } = {},
   ): Promise<unknown> {
     const headers: Record<string, string> = await authHeaders()
     if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -1425,6 +1550,9 @@ export function buildGoogleGmailClient(
       // API error.
       if (res.status === 404 && options.message_id_for_not_found !== undefined) {
         throw new MessageNotFoundError(options.message_id_for_not_found)
+      }
+      if (res.status === 404 && options.thread_id_for_not_found !== undefined) {
+        throw new ThreadNotFoundError(options.thread_id_for_not_found)
       }
       const text = await res.text().catch(() => '')
       throw new GoogleGmailApiError(res.status, text)
@@ -1501,6 +1629,23 @@ export function buildGoogleGmailClient(
 
     async getMessage(input: GmailGetInput): Promise<GmailMessageFull> {
       return fetchFull(input.message_id)
+    },
+
+    async getThread(input: GmailThreadGetInput): Promise<GmailThreadFull> {
+      // `users.threads.get?format=full` returns the thread resource
+      // with every message's full payload inline — one round-trip for
+      // the whole conversation (NO N+1, unlike list/search which only
+      // get message refs). 404 maps to ThreadNotFoundError so callers
+      // branch on the typed error consistently across backends.
+      const raw = (await call(
+        'GET',
+        `/threads/${encodeURIComponent(input.thread_id)}?format=full`,
+        undefined,
+        { thread_id_for_not_found: input.thread_id },
+      )) as { id?: string; messages?: GmailMessageResource[] }
+      const msgs = (raw.messages ?? []).map((m) => fullFromResource(m))
+      if (msgs.length === 0) throw new ThreadNotFoundError(input.thread_id)
+      return assembleThread(raw.id ?? input.thread_id, msgs)
     },
 
     async search(input: GmailSearchInput): Promise<GmailListResult> {

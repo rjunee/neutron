@@ -259,6 +259,7 @@ describe('bundled registry — Email-Managed Core discovery', () => {
       'email_search',
       'email_send',
       'email_summarize',
+      'email_thread',
       'email_triage',
     ])
     // Exactly one required OAuth secret carrying the 4-scope grant

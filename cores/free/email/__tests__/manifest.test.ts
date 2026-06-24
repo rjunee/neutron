@@ -64,12 +64,13 @@ describe('Email-Managed Core — manifest', () => {
     expect(ls?.target_kinds).toContain('user')
   })
 
-  test('seven tools declared with locked capability_required values — drafts vs send write capabilities, five read', () => {
+  test('eight tools declared with locked capability_required values — drafts vs send write capabilities, six read', () => {
     const m = loadManifest()
     const byName = new Map(m.tools.map((t) => [t.name, t]))
-    expect(byName.size).toBe(7)
+    expect(byName.size).toBe(8)
     expect(byName.get('email_list')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_read')?.capability_required).toBe(READ_CAPABILITY)
+    expect(byName.get('email_thread')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_search')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_summarize')?.capability_required).toBe(READ_CAPABILITY)
     expect(byName.get('email_triage')?.capability_required).toBe(READ_CAPABILITY)
@@ -134,6 +135,26 @@ describe('Email-Managed Core — manifest', () => {
     expect(appTab).toBeDefined()
     expect(appTab?.name).toBe('EmailManagedAppTab')
     expect(appTab?.entry_point).toBe('./src/ui/app-tab-surface.ts')
+  })
+
+  test('email_thread MCP tool is present + read-capability gated, with a thread output schema', () => {
+    const m = loadManifest()
+    const thread = m.tools.find((t) => t.name === 'email_thread')
+    expect(thread).toBeDefined()
+    expect(thread?.capability_required).toBe(READ_CAPABILITY)
+    const input = thread?.input_schema as {
+      properties?: Record<string, unknown>
+      required?: string[]
+    }
+    expect(input.properties?.['thread_id']).toBeDefined()
+    expect(input.required).toContain('thread_id')
+    const out = thread?.output_schema as { properties?: Record<string, unknown> }
+    const threadProp = out.properties?.['thread'] as {
+      properties?: Record<string, unknown>
+    }
+    expect(threadProp.properties?.['messages']).toBeDefined()
+    expect(threadProp.properties?.['participants']).toBeDefined()
+    expect(threadProp.properties?.['message_count']).toBeDefined()
   })
 
   test('email_triage MCP tool is present (S1 manifest extension)', () => {
