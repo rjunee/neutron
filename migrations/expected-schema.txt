@@ -48,6 +48,10 @@ CREATE INDEX gateway_events_project_event
 CREATE INDEX gateway_events_ts
     ON gateway_events (ts)
 
+[index] idx_app_chat_edits_topic_seq (tbl=app_chat_edits)
+CREATE INDEX idx_app_chat_edits_topic_seq
+    ON app_chat_edits (topic_id, seq)
+
 [index] idx_app_chat_messages_client_msg (tbl=app_chat_messages)
 CREATE UNIQUE INDEX idx_app_chat_messages_client_msg
     ON app_chat_messages (topic_id, client_msg_id)
@@ -390,6 +394,19 @@ CREATE TABLE api_keys (
     added_at INTEGER NOT NULL,
     last_used_at INTEGER,
     UNIQUE (project_slug, provider, label)
+) STRICT
+
+[table] app_chat_edits (tbl=app_chat_edits)
+CREATE TABLE app_chat_edits (
+    topic_id         TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    seq              INTEGER NOT NULL DEFAULT 0,
+    rev              INTEGER NOT NULL DEFAULT 0,
+    body             TEXT NOT NULL DEFAULT '',
+    deleted          INTEGER NOT NULL DEFAULT 0,
+    edited_at        INTEGER NOT NULL DEFAULT 0,
+    editor_device_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (topic_id, message_id)
 ) STRICT
 
 [table] app_chat_messages (tbl=app_chat_messages)
