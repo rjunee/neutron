@@ -2,6 +2,46 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-24 — WAVE 3 Cores: Calendar Core `/cal` composer-reachability parity
+
+Close-out of the WAVE 3 **Calendar Core** acceptance (installs + reads/writes
+the owner's primary calendar via per-Core Google OAuth; agent-native CRUD
+parity; graceful degradation when not connected).
+
+**Audit finding — the Core was already substantially complete.** On `origin/main`
+the Calendar Core ships at **v0.2.0**: the production `buildGoogleCalendarClient`
+(Calendar v3 REST, no SDK dep) is wired in `gateway/boot-helpers.ts` through the
+shared `OAuthTokenManager` (label `google_calendar`, the SAME per-Core OAuth
+plumbing Email + Google Workspace use — NOT a global token), with an
+in-memory fallback (`buildInMemoryCalendarClient`) when the Cores-OAuth surface
+is unmounted. Nine MCP tools (`calendar_list/create/update/cancel/brief/…`)
+give the agent CRUD; the `/cal` chat commands give the user the same. tsc
+clean; 131 Core tests + the gateway production-composer test (12) pass. The
+manifest already declares the `oauth_token` secret the shared integrations
+connect/disconnect surface (`gateway/cores/integrations.ts`) derives from.
+
+**The one genuine gap — and the fix.** The `/cal` `ChatCommandFilter`
+(`buildCalendarChatCommandDispatcher`, `gateway/cores/calendar-wiring.ts`) was
+reachable ONLY from `calendar-wiring.ts`, while its sibling Cores'
+filters (`buildRemindersChatCommandFilter`, `buildTridentCodeChatCommandFilter`,
+`buildCodegenChatCommandFilter`) live in `gateway/boot-helpers.ts` and are
+re-exported from the `gateway` entry barrel — the import site the production
+composer assembles `buildChainedChatCommandFilter([...])` from. So `/cal` could
+not be chained uniformly with `/remind` and `/code`, despite the dispatcher's
+own doc comment saying it "composes ... via `buildChainedChatCommandFilter`".
+
+**Added** `buildCalendarChatCommandFilter` to `gateway/boot-helpers.ts` (memoized
+lazy delegation to the canonical `buildCalendarChatCommandDispatcher` — single
+source of truth, no duplicated dispatch logic, no eager `scribe`/calendar-wiring
+module-load, no entry-module import cycle) and re-exported it from
+`gateway/index.ts` alongside the sibling builders. New regression test
+`gateway/__tests__/calendar-command-wiring.test.ts` (6 tests) locks: barrel
+reachability (parity with `/remind`,`/code`), `/cal show` + `/cal create`
+claim-and-dispatch against the `CalendarClient`, non-`/cal` + unrecognized
+`/cal` fall through to the LLM, and composition inside
+`buildChainedChatCommandFilter`. Gateway tsc clean; 157 calendar+sibling tests
+pass. No feature flag (standing rule) — additive wiring only.
+
 ## 2026-06-23 — WAVE 3 PR-9: retire the legacy markdown task port (`tasks/inbox/`)
 
 Closes the WAVE 3 **Tasks** track

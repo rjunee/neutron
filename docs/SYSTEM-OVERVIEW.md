@@ -27,6 +27,19 @@ share one backend instance. Examples:
 - Code-Gen: `buildProductionCodegenCoreWiring`
   (`gateway/cores/build-production-codegen-wiring.ts`, gateway-side
   because its Anthropic credential factory is gateway-side).
+- Calendar (`cores/free/calendar`, `@neutronai/calendar-core`): per-Core
+  Google OAuth (manifest `oauth_token` slot, label `google_calendar`, scope
+  `…/auth/calendar`) shared with Email + Google Workspace via the
+  `OAuthTokenManager` — NOT a global token. `buildGoogleCalendarClient`
+  (Calendar v3 REST, no SDK dep) is wired in `gateway/boot-helpers.ts`
+  through that accessor; when the Cores-OAuth surface is unmounted it falls
+  back to `buildInMemoryCalendarClient` so install still succeeds (graceful
+  degradation). CRUD lives behind nine MCP tools (`calendar_list/create/
+  update/cancel/…`) AND the `/cal` chat commands — agent-native parity. The
+  `/cal` filter is surfaced via `buildCalendarChatCommandFilter`
+  (`gateway/boot-helpers.ts`, re-exported from the `gateway` barrel) so the
+  composer chains it into `buildChainedChatCommandFilter([...])` alongside
+  `/remind` and `/code`.
 
 ## Tab resolver (WAVE 3 tabbed shell) — `tabs/` + `gateway/http/app-tabs-surface.ts`
 

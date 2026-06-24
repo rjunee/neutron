@@ -40,6 +40,7 @@ export {
   buildRemindersChatCommandFilter,
   buildTridentCodeChatCommandFilter,
   buildCodegenChatCommandFilter,
+  buildCalendarChatCommandFilter,
   readPatternFromPrompts,
   buildCoresBackendFactories,
   wrapResearchBackendWithDefaultProjectId,
