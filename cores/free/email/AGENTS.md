@@ -1,38 +1,40 @@
 # AGENTS.md — cores/free/email-managed
 
 This directory is the Tier 1 free Email-Managed Core
-(`@neutron/email-managed-core`). It surfaces a launcher icon + six
-MCP tools (`email_list`, `email_read`, `email_search`,
-`email_summarize`, `email_draft_prepare`, `email_triage`) wrapping
-Gmail v1, per the locked 2-tier Cores model
+(`@neutron/email-managed-core`). It surfaces a launcher icon + eight
+MCP tools (`email_list`, `email_read`, `email_thread`, `email_search`,
+`email_summarize`, `email_draft_prepare`, `email_triage`, `email_send`)
+wrapping Gmail v1, per the locked 2-tier Cores model
 (`docs/research/neutron-cores-marketplace-split-2026-05-17.md`).
 
-**Read + draft-prepare only. The Core never invokes send.**
+**Read + draft + send.** Send was added per the 2026-06-20 daily-driver
+gap-audit (P0) — earlier revisions of this Core were drafts-only, and
+older copies of this file documented a "never sends" guarantee that no
+longer holds. `email_send` calls `messages.send` and applies the owner
+visibility labels (INBOX + IMPORTANT + UNREAD) to the sent thread, the
+send-path counterpart to the 4-point draft policy.
 
-The "never sends" guarantee is enforced at THREE layers:
+Capability attribution (enforced by `CapabilityGuard.wrapToolHandler`,
+which writes a `secret_audit_log` row per dispatch):
 
-- PRODUCT — no send tool, no send method on `GmailClient`, no
-  `messages.send` / `drafts.send` call anywhere in the wrapper.
-- OAUTH GRANT — `gmail.send` is NOT in the requested scope set
-  (the Core requests `gmail.readonly` + `gmail.modify` +
-  `gmail.compose`). The persisted token cannot send mail.
-- AUDIT — every dispatch goes through `CapabilityGuard.
-  wrapToolHandler` and writes a row to `secret_audit_log`; the
-  six wrapped tools never reach send.
+- READS (`email_list` / `email_read` / `email_thread` / `email_search` /
+  `email_summarize` / `email_triage`) → `read:email_managed_core.messages`.
+- DRAFTS (`email_draft_prepare`) → `write:email_managed_core.drafts`.
+- SEND (`email_send`) → `write:email_managed_core.send` — a DISTINCT
+  capability so every outbound send is independently attributable.
 
-See README's "OAuth scopes — the 3-scope split" section for the
-full rationale (incl. why these THREE scopes are the narrowest
-tuple that satisfies the Tier 1 surface).
+OAuth grant: four scopes — `gmail.readonly` (reads incl. `threads.get`),
+`gmail.modify` (`threads.modify` for the visibility labels), `gmail.compose`
+(`drafts.create`), `gmail.send` (`messages.send`). See README's
+"OAuth scopes — the 4-scope grant" section.
 
 It must NOT:
 
-- Add a `send` tool, a `send` method on `GmailClient`, or any path
-  that calls `messages.send` / `drafts.send`. Send is intentionally
-  Tier 2 (paid Email-Private Core). The Tier 1 free Core ships
-  drafts-only forever.
-- Add `gmail.send` to the OAuth scope grant. Tier 2 Email-Private
-  Core requests gmail.send under a distinct secret label so audit
-  attribution stays clean.
+- Change `email_send`'s capability to reuse the drafts write capability.
+  Send keeps its own `write:email_managed_core.send` so audit attribution
+  stays clean.
+- Drop `gmail.send` from the OAuth scope grant or remove the `email_send`
+  tool — both are load-bearing for the shipped send surface.
 - Re-implement OAuth consent / token exchange. The Core declares
   the `gmail_readonly` `oauth_token` secret in its manifest; the
   runtime composer drives the prompt at install time and resolves a

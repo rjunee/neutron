@@ -28,6 +28,37 @@ share one backend instance. Examples:
   (`gateway/cores/build-production-codegen-wiring.ts`, gateway-side
   because its Anthropic credential factory is gateway-side).
 
+### Email-Managed Core (`cores/free/email/`)
+
+Tier 1 Gmail Core. Installs against the owner's Google account via a
+per-Core OAuth grant (the same per-Core OAuth pattern the Calendar and
+Google-Workspace Cores use; tokens live under the distinct `gmail_compose`
+secret label so the three Google Cores connect/disconnect independently).
+The production backend factory (`gateway/boot-helpers.ts`,
+`email_managed_core`) wires `buildGoogleGmailClient` — a hand-rolled Gmail
+v1 REST wrapper with a lazy access-token accessor — and falls back to an
+in-memory client when the Cores OAuth surface is absent so install still
+succeeds.
+
+Eight MCP tools (all capability-guarded + audited):
+- **Read:** `email_list` (label, newest-first), `email_read` (one message),
+  `email_thread` (a whole conversation via `users.threads.get` — every
+  message + derived thread metadata, oldest-first, one round-trip),
+  `email_search` (Gmail query syntax), `email_summarize` (Haiku-fast
+  structured summary + optional prose brief), `email_triage` (top-5
+  ranked inbox triage).
+- **Write:** `email_draft_prepare` (drafts.create + the owner 4-point
+  INBOX+IMPORTANT+UNREAD label policy) and `email_send` (messages.send +
+  the same visibility-label apply). Send carries its own
+  `write:email_managed_core.send` capability, distinct from the drafts
+  write capability, for clean audit attribution (shipped per the
+  2026-06-20 daily-driver gap-audit P0). Reads degrade gracefully when
+  unconnected (the in-memory fallback returns an empty mailbox).
+
+Agent-native parity: every read/search/draft/send is also reachable from
+chat via `/email` commands (`/email thread <id>`, `/email search <q>`,
+`/email summarize <id>`, `/email triage`, `/email draft …`).
+
 ## Tab resolver (WAVE 3 tabbed shell) — `tabs/` + `gateway/http/app-tabs-surface.ts`
 
 The project (and global) tab set is resolved **engine-side** so both clients

@@ -1,97 +1,78 @@
 # @neutron/email-managed-core
 
 Tier 1 free Email-Managed Core for Neutron. Wraps Gmail v1 and
-surfaces five MCP tools:
+surfaces **eight** MCP tools:
 
 - `email_list` — list message metadata for a label, newest-first
   (the natural inbox semantic)
 - `email_read` — fetch the full body + headers of a single message
+- `email_thread` — fetch a whole conversation by thread id
+  (`users.threads.get`): every message in the thread plus derived
+  thread metadata (subject, participants, message_count,
+  last_message_date, label union). Messages come back **oldest-first**
+  — the natural conversation reading order, the inverse of the
+  newest-first list/search ordering. One round-trip, no N+1.
 - `email_search` — run a Gmail-style query
   (`from:alice@x.com is:unread`)
 - `email_summarize` — structured summary (from, subject,
   key_points, sentiment, ask_or_response). Calls an LLM
   (`EmailSummarizer`) — Haiku 4.5 in production, deterministic
   stub in tests.
-- `email_draft_prepare` — create a Gmail DRAFT. **Never sends.**
-  Drafts land in the user's Drafts label for review.
+- `email_draft_prepare` — create a Gmail DRAFT. Drafts land in the
+  user's Drafts label with the owner 4-point labels (INBOX +
+  IMPORTANT + UNREAD) applied atomically.
+- `email_triage` — Haiku-fast triage agent over the recent inbox,
+  returning a top-5 ranked list with one-line reasons.
+- `email_send` — send mail via `messages.send` (see below).
 
-Bundled into the public OSS repo at `cores/free/email-managed/` per
+Bundled into the public OSS repo at `cores/free/email/` per
 the locked 2-tier Cores model
 (`docs/research/neutron-cores-marketplace-split-2026-05-17.md`).
 
-## Send is NOT invoked — Tier 1 product-level guarantee
+## Send IS supported (gap-audit P0 reversal)
 
-The Tier 1 free Email-Managed Core is **read + draft-prepare only**.
+> **History.** Send was originally carved OUT of this Tier 1 Core
+> (drafts-only, with send reserved for a Tier 2 paid Core). The
+> gap-audit
+> (`docs/research/vajra-neutron-daily-driver-gap-audit-2026-06-20.md`,
+> P0) **reversed that product decision** — Gmail-send is a daily-driver
+> need — so `gmail.send` + the `email_send` tool now ship here. Earlier
+> revisions of this README documented a "no-send Tier 1 guarantee";
+> that guarantee no longer holds and this section supersedes it.
 
-- The tool surface declares NO `email_send` / `email_reply` /
-  `email_forward` tool. Regression-guarded in
-  `__tests__/manifest.test.ts`.
-- The `GmailClient` interface declares NO `send` method anywhere.
-  The in-memory fake AND the production wrapper both omit it.
-- The production wrapper hand-rolled against Gmail v1 REST never
-  reaches the `messages.send` / `drafts.send` endpoints.
+`email_send` calls `messages.send`, then applies the owner visibility
+labels (INBOX + IMPORTANT + UNREAD, + `Neutron/<project_id>` when
+supplied) to the sent thread — the send-path counterpart to the
+4-point draft policy. Send gets its **own** distinct capability
+(`write:email_managed_core.send`), separate from the drafts write
+capability, so every outbound send is independently attributable in
+the audit log. Header values containing CR/LF/NUL are rejected at the
+shared `buildRawMessage` MIME layer (header-injection guard).
 
-A Tier 2 paid Email-Private Core will ship send capability with a
-distinct `write:email_private_core.send` capability and a distinct
-secret label (`gmail_send` or similar), so audit attribution stays
-clean.
+The 4-point DRAFT rule (DRAFT + INBOX + IMPORTANT + UNREAD) is
+unchanged: drafts still land in the Drafts label for the user to
+review and send manually whenever they prefer that flow.
 
-When a drafted message is ready, the user opens Gmail and clicks
-Send themselves. This is the deliberate Tier 1 guarantee.
+### OAuth scopes — the 4-scope grant
 
-### OAuth scopes — the 3-scope split, and why `gmail.send` is excluded
-
-The Core requests **three** Google OAuth scopes — every one is
+The Core requests **four** Google OAuth scopes — every one is
 load-bearing for a specific production code path:
 
 - **`gmail.readonly`** — `messages.list` / `messages.get` /
-  metadata reads. The triage agent, the summarizer, `email_list`,
-  `email_read`, and `email_search` all need this scope. Without it
-  every read path returns 403 against real Gmail.
-- **`gmail.modify`** — `threads.modify`. The mandatory owner 4-point
-  draft policy (every drafted thread MUST land with INBOX +
-  IMPORTANT + UNREAD on it before `createDraft` returns success)
-  needs this scope. Without it the post-`drafts.create`
-  threads.modify call 403s and the draft sits invisibly in the
-  Drafts label.
+  `threads.get` / metadata reads. The triage agent, the summarizer,
+  `email_list`, `email_read`, `email_thread`, and `email_search` all
+  need this scope. Without it every read path returns 403 against real
+  Gmail.
+- **`gmail.modify`** — `threads.modify`. The mandatory owner
+  visibility-label policy (every drafted/sent thread MUST land with
+  INBOX + IMPORTANT + UNREAD on it) needs this scope.
 - **`gmail.compose`** — `drafts.create`. Without it the Core can't
-  prepare drafts at all.
+  prepare drafts.
+- **`gmail.send`** — `messages.send`. Backs the `email_send` tool.
 
-`gmail.send` is **deliberately and permanently excluded**. The Core
-has no send tool, no send method anywhere on the `GmailClient`
-surface, and the OAuth grant doesn't authorise sending mail either.
-The Tier 2 paid Email-Private Core will request `gmail.send`
-separately, store its token under a distinct secret label, and own
-a distinct `write:email_private_core.send` capability so audit
-attribution stays clean across the two Cores.
-
-This is the deliberate owner rule: the user clicks Send themselves
-in Gmail when a drafted message is ready. The Tier 1 "no auto-send"
-guarantee is enforced at THREE layers:
-
-1. **Product surface.** No send tool. No send method on
-   `GmailClient`. Regression-guarded in `__tests__/manifest.test.ts`.
-2. **OAuth grant.** `gmail.send` is not in the requested scope set.
-   Even a misuse of the persisted token OUTSIDE this Core can't
-   send mail with these credentials.
-3. **Audit log.** Every dispatch goes through
-   `CapabilityGuard.wrapToolHandler` and writes a row to
-   `secret_audit_log`; the six wrapped tools never touch send.
-
-Previous versions of this README documented `gmail.compose` as the
-sole scope, with a "honest trust boundary" caveat that the persisted
-token was technically powerful enough to send. That caveat is gone:
-the OAuth grant no longer includes `gmail.send`, so the token is
-NOT powerful enough to send. The 3-scope split closes the gap.
-
-### Why these three scopes, and not (`gmail.metadata` + `gmail.compose`)
-
-Gmail does not ship a "drafts only" scope that allows
-`threads.modify` without a broader grant. The narrowest tuple that
-satisfies the Tier 1 surface (read + label-management for drafts +
-draft creation, NO send) is `(gmail.readonly, gmail.modify,
-gmail.compose)`. If Google ships a narrower set in the future, the
-Core will migrate to it.
+Every dispatch goes through `CapabilityGuard.wrapToolHandler` and
+writes a row to `secret_audit_log`, so reads, drafts, and sends are
+each attributable to their declared capability.
 
 ## Install
 
@@ -110,7 +91,7 @@ the lifecycle:
    platform `SecretsStore`.
 4. Allocates a `tables`-layout namespace (the Core has no sidecar —
    persistence delegates to Gmail; no `.db`-suffixed capability).
-5. Registers the five MCP tools, each capability-guarded by
+5. Registers the eight MCP tools, each capability-guarded by
    Sprint 31's `CapabilityGuard.wrapToolHandler`.
 
 The launcher icon surface (`ui_components[0]`) is manifest metadata
@@ -206,9 +187,15 @@ row pre-pass before the prose-brief composer runs):
 
 - **Ordering.** `email_list` and `email_search` return messages
   newest-first by Gmail `internalDate` (the natural inbox semantic
-  — "most recent at the top"). Distinct from the Calendar Core's
-  chronological-ascending ordering (meetings face forward; inboxes
-  face backward).
+  — "most recent at the top"). `email_thread` is the **inverse** —
+  messages come back oldest-first, the natural top-to-bottom
+  conversation reading order. Both are distinct from the Calendar
+  Core's chronological-ascending ordering (meetings face forward;
+  inboxes face backward).
+- **Thread reads are one round-trip.** Unlike list/search (N+1 —
+  one `messages.get` per ref), `email_thread` uses
+  `users.threads.get?format=full`, which inlines every message's
+  full payload in a single response.
 - **Default label.** `'INBOX'` — Gmail's main-inbox id. Pass a
   custom label id (e.g. `'IMPORTANT'`, `'UNREAD'`, a user label
   like `'Label_42'`) to scope the query.
@@ -219,7 +206,8 @@ row pre-pass before the prose-brief composer runs):
   rows). A batch endpoint lands when the surface needs it.
 - **No attachments.** Bodies are extracted; attachments are
   ignored. Attachment surfacing is a follow-up sprint.
-- **No batch send / no send at all.** Tier 1 guarantee.
+- **No batch send.** `email_send` sends one message per call; there
+  is no bulk-send endpoint.
 
 ## Testing
 
