@@ -31,6 +31,17 @@ export const AGENT_DEVICE_ID = 'agent'
 export type ReactionAction = 'add' | 'remove'
 
 /**
+ * Track B Phase 4 (edit/delete) — the two mutations a message's AUTHOR can
+ * apply to a message it sent: rewrite the body (`edit`) or tombstone it
+ * (`delete`). Unlike reactions (which any device may add to any message), an
+ * edit/delete is author-only: the server enforces that the mutating party is
+ * the message's author (a human device may mutate `user` messages; the agent
+ * may mutate `agent` messages). Agent-native parity falls out — the same
+ * mechanism an agent uses to edit/delete its own message.
+ */
+export type EditAction = 'edit' | 'delete'
+
+/**
  * Track B Phase 4 — one active emoji reaction on a message, attributed to the
  * device that added it. The canonical per-message reaction state is a set of
  * these `(emoji, device_id)` pairs; the render layer groups them by emoji into
@@ -109,6 +120,29 @@ export interface ChatMessage {
    * a reaction.
    */
   reactions_rev?: number | null
+  /**
+   * Track B Phase 4 (edit/delete) — unix-ms time this message was last edited
+   * (or deleted), null when it has never been mutated. The render layer shows an
+   * "edited" marker when this is set on a non-deleted message. Governed by
+   * {@link edit_rev} (last-writer-wins), NOT a union — mirrors reactions.
+   */
+  edited_at?: number | null
+  /**
+   * Track B Phase 4 (edit/delete) — true once the author tombstones the message.
+   * The body is cleared to `''` and the UI renders a "message deleted"
+   * placeholder. Tombstone, not a row removal, so the message keeps its `seq`
+   * slot and every device converges. Governed by {@link edit_rev}.
+   */
+  deleted?: boolean | null
+  /**
+   * Track B Phase 4 (edit/delete) — monotonic per-message edit revision. The
+   * server bumps it on every edit/delete; the client keeps whichever edit
+   * aggregate (body + edited_at + deleted) carries the highest `rev` and ignores
+   * a stale lower one, so applying edit updates is idempotent + order-independent.
+   * Null when the message has never been edited or deleted. See
+   * {@link pickEditState}.
+   */
+  edit_rev?: number | null
 }
 
 /**
@@ -164,6 +198,26 @@ export interface InboundReactionUpdate {
   reactions: readonly MessageReaction[]
 }
 
+/**
+ * An edit-state update for a single message (Track B Phase 4 — edit/delete).
+ * Carries the message's current body + tombstone flag + the monotonic `rev`, so
+ * applying it is idempotent + order-independent: the client keeps whichever
+ * aggregate has the highest `rev`. Produced by {@link normalizeEditUpdate} from
+ * an `edit_update` wire frame. A `deleted` update carries an empty `body`.
+ */
+export interface InboundEditUpdate {
+  message_id: string
+  seq: number | null
+  /** Monotonic per-message edit revision (last-writer-wins key). */
+  rev: number
+  /** The message's current body after the edit (`''` for a delete tombstone). */
+  body: string
+  /** True when the message has been tombstoned (deleted). */
+  deleted: boolean
+  /** unix-ms time the edit/delete happened, null when unknown. */
+  edited_at: number | null
+}
+
 /** Wire envelope a client sends to deliver a user message. */
 export interface OutboundUserMessage {
   v: 1
@@ -209,6 +263,23 @@ export interface OutboundReaction {
   message_id: string
   emoji: string
   action: ReactionAction
+  seq?: number
+}
+
+/**
+ * Wire envelope a client sends to edit or delete a message it authored (Track B
+ * Phase 4). The server authorizes it against the message's author (a human
+ * device may mutate `user` messages; the agent may mutate `agent` messages) and
+ * fans an `edit_update` back to every device. `body` is the new text on an
+ * `edit` and is omitted/ignored on a `delete`. `seq` is the message's server
+ * seq when the client knows it; omitted otherwise.
+ */
+export interface OutboundEdit {
+  v: 1
+  type: 'edit'
+  message_id: string
+  action: EditAction
+  body?: string
   seq?: number
 }
 
@@ -323,6 +394,37 @@ export function normalizeReactionUpdate(raw: unknown): InboundReactionUpdate | n
   if (typeof rawRev === 'number' && Number.isFinite(rawRev)) rev = Math.max(0, Math.trunc(rawRev))
 
   return { message_id, seq, rev, reactions: parseReactions(e['reactions']) }
+}
+
+/**
+ * Normalize a parsed `edit_update` wire frame into an {@link InboundEditUpdate},
+ * or `null` when malformed. Defensive (drop, never throw), matching {@link
+ * normalizeReactionUpdate}. A `deleted` update normalizes `body` to `''`; `rev`
+ * defaults to 0 and `edited_at` to null when absent.
+ */
+export function normalizeEditUpdate(raw: unknown): InboundEditUpdate | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'edit_update') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0) return null
+
+  let seq: number | null = null
+  const rawSeq = e['seq']
+  if (typeof rawSeq === 'number' && Number.isFinite(rawSeq)) seq = Math.trunc(rawSeq)
+
+  let rev = 0
+  const rawRev = e['rev']
+  if (typeof rawRev === 'number' && Number.isFinite(rawRev)) rev = Math.max(0, Math.trunc(rawRev))
+
+  const deleted = e['deleted'] === true
+  const body = !deleted && typeof e['body'] === 'string' ? (e['body'] as string) : ''
+
+  let edited_at: number | null = null
+  const rawAt = e['edited_at']
+  if (typeof rawAt === 'number' && Number.isFinite(rawAt)) edited_at = Math.trunc(rawAt)
+
+  return { message_id, seq, rev, body, deleted, edited_at }
 }
 
 /** Parse an untrusted value into a clean `MessageReaction[]` (drops malformed

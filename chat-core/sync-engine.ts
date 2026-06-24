@@ -20,6 +20,7 @@ import { InMemoryStore, type Store } from './store.ts'
 import type {
   ChatMessage,
   InboundChatMessage,
+  InboundEditUpdate,
   InboundReactionUpdate,
   InboundReceiptUpdate,
   OutboundResume,
@@ -125,6 +126,39 @@ export class SyncEngine {
       ...existing,
       reactions: update.reactions.length > 0 ? update.reactions : null,
       reactions_rev: update.rev,
+    }
+    await this.store.upsert(patch)
+    return { applied: true }
+  }
+
+  /**
+   * Apply an edit/delete update for an already-delivered message (Track B
+   * Phase 4). Looks the message up by `message_id` and writes the new body +
+   * tombstone via the same idempotent UPSERT path messages use (NOT a fork):
+   * the Store's {@link pickEditState} keeps whichever aggregate has the higher
+   * `rev`, so a stale (lower-rev) update is a no-op. Returns `{ applied:false }`
+   * when the message isn't local yet (an edit can't precede its message on the
+   * wire) or the update is stale.
+   */
+  async applyEditUpdate(
+    topic_id: string,
+    update: InboundEditUpdate,
+  ): Promise<{ applied: boolean }> {
+    if (update.message_id.length === 0) return { applied: false }
+    const existing = await this.store.getByMessageId(topic_id, update.message_id)
+    if (existing === null) return { applied: false }
+    // Stale-update short-circuit: skip the store churn / re-render for an update
+    // we'd discard anyway (mergeMessage would keep existing, but this keeps the
+    // applied verdict honest — same posture as applyReactionUpdate).
+    if (existing.edit_rev !== null && existing.edit_rev !== undefined) {
+      if (update.rev < existing.edit_rev) return { applied: false }
+    }
+    const patch: ChatMessage = {
+      ...existing,
+      body: update.deleted ? '' : update.body,
+      edited_at: update.edited_at,
+      deleted: update.deleted,
+      edit_rev: update.rev,
     }
     await this.store.upsert(patch)
     return { applied: true }
