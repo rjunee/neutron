@@ -2,6 +2,68 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-24 — Skill Forge runtime: auto-skillify completed workflows (WAVE 4)
+
+**What shipped.** A new `@neutronai/skill-forge` package (top-level `skill-forge/`)
+that audits a *completed multi-step workflow* and, gated by an explicit
+propose-then-approve step, distills it into a saved, re-invokable skill — so a
+workflow Ryan develops once becomes a registered, agent-discoverable skill
+without hand-authoring. It NEVER auto-creates a skill silently: a skill file
+only ever lands on disk via an explicit `approve`.
+
+**Why the conventions dir is the registration target.** The realmode composer's
+skills-loader (`gateway/realmode-composer/skills-loader.ts`, wired in
+`build-phase-spec-resolver.ts:resolveSkillsDir`) already reads
+`<owner_data_dir>/skills/conventions/*.md` on every LLM turn and splices them
+into the system prompt. So "register a skill" = write that markdown file: it is
+immediately agent-discoverable AND — being on disk — survives a fresh session
+with ZERO new wiring. (The alternative `<available_skills>` SkillRef list in
+`runtime/system-prompt.ts` is fed `active_skills: []` by the live composer, so
+the conventions loader is the real, working skill surface — that is what Skill
+Forge plugs into.)
+
+**The pieces (`skill-forge/`).**
+- `detector.ts` — `auditWorkflow()`, the first gate: a workflow is skill-worthy
+  only if it succeeded and is a genuine multi-step procedure (≥2 *distinct*
+  normalized actions — a single tool run N times is not a procedure).
+- `signature.ts` — `workflowSignature()`, a stable hash of the workflow's
+  normalized step *shape* (not its per-run args). The dedupe key.
+- `distiller.ts` — deterministic distillation (no LLM/network) of a workflow
+  (+ optional user edits) into a `SkillDraft` and the convention markdown
+  (`renderSkillMarkdown`): title, an "ALWAYS use when…" trigger block, a
+  what-it-does paragraph, the numbered procedure, and the artifacts.
+- `proposals-store.ts` — `SkillForgeProposalsStore` over `skill_forge_proposals`
+  (migration `0086`): pending → approved | declined, with dedupe by signature
+  and the registered `skill_path` recorded on approve.
+- `registrar.ts` — writes the skill into `skills/conventions/<name>.md`, never
+  clobbering an existing convention (collision-suffixes `-2`, `-3`, …).
+- `forge.ts` — the `SkillForge` orchestrator: `onWorkflowCompleted()` audits →
+  dedupes → persists a PENDING proposal → notifies via an injected
+  `ProposalNotifier` (no skill written); `approve(id, edits?)` distills +
+  registers + marks approved; `decline(id)` marks declined and creates nothing.
+- `proposal-message.ts` — the user-facing proposal text (name + triggers +
+  what it does + artifacts + the approve/decline affordance).
+- `trident-adapter.ts` — `completedWorkflowFromTridentRun()` maps a terminal
+  (`done`) Trident run — the runtime's canonical multi-step workflow — into the
+  generic `CompletedWorkflow`.
+
+**Wiring posture.** The runtime + the Trident adapter ship fully tested. The
+live trigger seam is the Trident tick loop's `onTerminal(run)` hook
+(`trident/tick.ts`): composing Skill Forge there is one call —
+`if (run.phase === 'done') await skillForge.onWorkflowCompleted(completedWorkflowFromTridentRun(run))`.
+That composition (resolving the owner's `skillsDir`, bridging the notifier to
+the live channel) is intentionally left as the documented next step rather than
+folded into this PR, to keep the change focused and reviewable.
+
+**Tests (`skill-forge/__tests__/`).** Acceptance is proven end-to-end against the
+REAL skills-loader: a completed workflow fires a proposal carrying
+name/triggers/what/artifacts while writing nothing; approve distills + registers
+a skill that `loadSkills()` then discovers and that survives a loader cache reset
+(fresh session); decline creates nothing; proposals persist across a DB reopen;
+dedupe suppresses re-nags while pending. The migration snapshot
+(`migrations/expected-schema.txt`) and runner number-list were refreshed for
+`0086`.
+
 ## 2026-06-24 — WAVE 3 Cores: Calendar Core `/cal` composer-reachability parity
 
 Close-out of the WAVE 3 **Calendar Core** acceptance (installs + reads/writes

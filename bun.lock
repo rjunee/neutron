@@ -317,6 +317,12 @@
         "gbrain": "github:garrytan/gbrain#8058144",
       },
     },
+    "skill-forge": {
+      "name": "@neutronai/skill-forge",
+      "dependencies": {
+        "@neutronai/persistence": "workspace:*",
+      },
+    },
     "tasks": {
       "name": "@neutronai/tasks",
       "dependencies": {
@@ -826,6 +832,8 @@
     "@neutronai/runtime": ["@neutronai/runtime@workspace:runtime"],
 
     "@neutronai/scribe": ["@neutronai/scribe@workspace:scribe"],
+
+    "@neutronai/skill-forge": ["@neutronai/skill-forge@workspace:skill-forge"],
 
     "@neutronai/tasks": ["@neutronai/tasks@workspace:tasks"],
 
