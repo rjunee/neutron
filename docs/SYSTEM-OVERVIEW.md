@@ -362,6 +362,47 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   enable embeddings; the explicit `NEUTRON_EMBEDDINGS` opt-in keeps cloud
   embedding cost from ever being a surprise.
 
+## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
+
+The admin add/rotate path (`app/app/admin.tsx` → the gateway admin surface)
+and the per-instance key store (`auth/api-key-store.ts:ApiKeyStore`) already
+exist. WAVE 1 adds the missing front-door: onboarding offers the common
+OPTIONAL keys UP FRONT as optional questions. The system runs fully on
+Claude Max OAuth (or a BYO Anthropic key) alone — **every** offer is
+skippable and skipping leaves the system fully working; a provided key only
+ADDITIVELY activates a capability.
+
+- **Single source of truth (`onboarding/optional-keys.ts`).**
+  `OPTIONAL_KEY_OFFERS` declares each offer (id, the question, the capability
+  it unlocks, the activation requirement, and the skip note).
+  `storeOptionalKey(apiKeys, …)` validates + persists a provided key through
+  the **existing** `ApiKeyStore` — the same store the admin UI and the runtime
+  credential resolver read, so there is one key path, not two. To keep
+  `@neutronai/onboarding` decoupled from `@neutronai/auth`, the module depends
+  on a narrow `OptionalKeyApiKeyStore` interface (the real `ApiKeyStore`
+  satisfies it structurally; this mirrors the engine's `MaxOauthSecretsStore`
+  pattern).
+- **`openai_api_key`** → stored via `ApiKeyStore(provider='openai')`. It
+  becomes resolvable by `gateway/realmode-composer/resolve-llm-credentials.ts`
+  (→ `auth/byo-api-key-fallback.ts:buildBYOApiKeyPool`), which **activates**
+  the OpenAI / GPT-5 API adapter used for cross-model trident reviews. The
+  SAME key backs cloud embeddings (`gbrain-memory/embedder-config.ts`), which
+  additionally require the explicit `NEUTRON_EMBEDDINGS=openai|auto` opt-in —
+  the deliberate cost guard above, so a stored key never silently bills
+  embeddings.
+- **`codex_auth`** → the Codex CLI subscription OAuth (`codex login`), a
+  HOST-level credential under `CODEX_HOME`, not a per-instance paste secret
+  (the `ApiKeyProvider` enum has no `codex`). The offer surfaces it as
+  guidance; operators who prefer a platform key use the `openai_api_key`
+  offer, which the GPT-5 API adapter consumes for the same cross-model reviews.
+- **Phase wiring.** The offers surface during the existing credential step
+  (`max_oauth_offered`): its knowledge pack (`phase-spec-resolver.ts`) carries
+  `optional_openai_key` / `optional_codex_auth` FAQs + tangents derived from
+  the canonical offer registry, so the onboarding agent answers in lockstep
+  with what actually gets stored. The phase enum + `LEGAL_TRANSITIONS` are
+  unchanged — the optional keys are additive to the substrate choice, never a
+  new gate, so skipping them is the zero-friction default.
+
 ## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
 
 The chat-history twin of doc-search: full-text search over the user's CHAT
