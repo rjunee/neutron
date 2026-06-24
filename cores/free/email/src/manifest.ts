@@ -63,6 +63,7 @@ export const OAUTH_SECRET_LABEL = 'gmail_compose' as const
 export const TOOL_NAMES = [
   'email_list',
   'email_read',
+  'email_thread',
   'email_search',
   'email_summarize',
   'email_draft_prepare',

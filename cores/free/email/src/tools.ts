@@ -38,6 +38,7 @@ import {
   type GmailSearchInput,
   type GmailSendInput,
   type GmailSendResult,
+  type GmailThreadFull,
 } from './backend.ts'
 import {
   briefTemplateHash,
@@ -59,6 +60,13 @@ export interface EmailReadToolInput {
 }
 export interface EmailReadToolOutput {
   message: GmailMessageFull
+}
+
+export interface EmailThreadToolInput {
+  thread_id: string
+}
+export interface EmailThreadToolOutput {
+  thread: GmailThreadFull
 }
 
 export interface EmailSearchToolInput extends GmailSearchInput {}
@@ -132,6 +140,7 @@ export interface ToolDeps {
 export interface BuiltTools {
   email_list: (input: EmailListToolInput) => Promise<EmailListToolOutput>
   email_read: (input: EmailReadToolInput) => Promise<EmailReadToolOutput>
+  email_thread: (input: EmailThreadToolInput) => Promise<EmailThreadToolOutput>
   email_search: (input: EmailSearchToolInput) => Promise<EmailSearchToolOutput>
   email_summarize: (
     input: EmailSummarizeToolInput,
@@ -171,6 +180,15 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     fn: async (input: EmailReadToolInput): Promise<EmailReadToolOutput> => {
       const message = await deps.client.getMessage({ message_id: input.message_id })
       return { message }
+    },
+  })
+
+  const email_thread = guard.wrapToolHandler<EmailThreadToolInput, EmailThreadToolOutput>({
+    tool_name: 'email_thread',
+    capability_required: READ_CAPABILITY,
+    fn: async (input: EmailThreadToolInput): Promise<EmailThreadToolOutput> => {
+      const thread = await deps.client.getThread({ thread_id: input.thread_id })
+      return { thread }
     },
   })
 
@@ -347,6 +365,7 @@ export function buildTools(deps: ToolDeps): BuiltTools {
   return {
     email_list,
     email_read,
+    email_thread,
     email_search,
     email_summarize,
     email_draft_prepare,

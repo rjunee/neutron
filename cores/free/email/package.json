@@ -8,7 +8,6 @@
     "./manifest": "./src/manifest.ts",
     "./backend": "./src/backend.ts",
     "./tools": "./src/tools.ts",
-    "./mcp-tools-extra": "./src/mcp-tools-extra.ts",
     "./chat-commands": "./src/chat-commands.ts",
     "./chat-bridge": "./src/chat-bridge.ts",
     "./draft-policy": "./src/draft-policy.ts",
@@ -104,6 +103,57 @@
             }
           },
           "required": ["message"]
+        },
+        "capability_required": "read:email_managed_core.messages"
+      },
+      {
+        "name": "email_thread",
+        "description": "Fetch a whole Gmail conversation by thread id (users.threads.get) — every message in the thread plus derived thread metadata. Returns the thread's subject, message_count, last_message_date, the distinct participants (From/To/Cc union), the union of label_ids, and the full messages array OLDEST-FIRST (conversation reading order, the inverse of email_list/email_search which are newest-first). One round-trip for the entire conversation — no N+1. Use this to read a whole back-and-forth; use email_read for a single message.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "thread_id": { "type": "string", "description": "Gmail thread id (the thread_id field on any message row from email_list / email_search / email_read)." }
+          },
+          "required": ["thread_id"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "thread": {
+              "type": "object",
+              "properties": {
+                "thread_id":         { "type": "string" },
+                "subject":           { "type": "string", "description": "Subject of the oldest message in the thread." },
+                "message_count":     { "type": "integer" },
+                "last_message_date": { "type": "string", "description": "ISO-8601 datetime of the most recent message in the thread." },
+                "participants":      { "type": "array", "items": { "type": "string" }, "description": "Distinct From/To/Cc participants across the thread, first-seen order." },
+                "label_ids":         { "type": "array", "items": { "type": "string" } },
+                "messages": {
+                  "type": "array",
+                  "description": "Full messages, oldest-first.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id":            { "type": "string" },
+                      "thread_id":     { "type": "string" },
+                      "subject":       { "type": "string" },
+                      "from":          { "type": "string" },
+                      "to":            { "type": "array", "items": { "type": "string" } },
+                      "cc":            { "type": "array", "items": { "type": "string" } },
+                      "snippet":       { "type": "string" },
+                      "internal_date": { "type": "string" },
+                      "label_ids":     { "type": "array", "items": { "type": "string" } },
+                      "body_text":     { "type": "string" },
+                      "body_html":     { "type": "string" }
+                    },
+                    "required": ["id", "thread_id", "subject", "from", "snippet", "internal_date", "label_ids", "body_text"]
+                  }
+                }
+              },
+              "required": ["thread_id", "subject", "message_count", "last_message_date", "participants", "label_ids", "messages"]
+            }
+          },
+          "required": ["thread"]
         },
         "capability_required": "read:email_managed_core.messages"
       },

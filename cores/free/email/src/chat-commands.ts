@@ -7,6 +7,7 @@
  * Commands:
  *   /email triage                          — daily-top-5 with one-line reasons
  *   /email summarize <thread_or_msg_id>    — 2-3 sentence prose brief
+ *   /email thread <thread_id>              — read a whole conversation
  *   /email search <query>                  — Gmail-style search, top 10
  *   /email draft <to> <subject> <body>     — 4-point-enforced draft creation
  *   /email help | (bare /email)            — cheatsheet
@@ -25,6 +26,7 @@ import { buildStubEmailSummarizer, type EmailSummarizer } from './backend.ts'
 export type EmailCommand =
   | { kind: 'triage' }
   | { kind: 'summarize'; id: string }
+  | { kind: 'thread'; id: string }
   | { kind: 'search'; query: string }
   | { kind: 'draft'; to: string; subject: string; body: string }
   | { kind: 'help' }
@@ -71,6 +73,16 @@ export function parseEmailCommand(raw: string): EmailCommand {
       return { kind: 'unrecognized', reason: 'usage: /email summarize <thread_id_or_message_id>' }
     }
     return { kind: 'summarize', id }
+  }
+  if (head === 'thread') {
+    if (tail.length === 0) {
+      return { kind: 'unrecognized', reason: 'usage: /email thread <thread_id>' }
+    }
+    const id = tail.split(/\s+/, 1)[0] ?? ''
+    if (id.length === 0) {
+      return { kind: 'unrecognized', reason: 'usage: /email thread <thread_id>' }
+    }
+    return { kind: 'thread', id }
   }
   if (head === 'search') {
     if (tail.length === 0) {
@@ -189,6 +201,8 @@ export async function executeEmailCommand(
         return await runTriage(ctx)
       case 'summarize':
         return await runSummarize(cmd.id, ctx)
+      case 'thread':
+        return await runThread(cmd.id, ctx)
       case 'search':
         return await runSearch(cmd.query, ctx)
       case 'draft':
@@ -205,6 +219,7 @@ function helpResponse(): EmailCommandResponse {
       'Email Core commands: ' +
       '`/email triage` daily-top-5 · ' +
       '`/email summarize <thread_or_msg>` brief · ' +
+      '`/email thread <thread_id>` read a conversation · ' +
       '`/email search <query>` Gmail-style · ' +
       '`/email draft <to> <subject> <body>` (drafts.create + INBOX+IMPORTANT+UNREAD).',
   }
@@ -248,6 +263,12 @@ function classifyError(err: unknown): EmailCommandResponse {
     return {
       text: 'Email Core: message id not found.',
       error: { code: 'unknown_id', message: e.message ?? 'message_not_found' },
+    }
+  }
+  if (code === 'thread_not_found') {
+    return {
+      text: 'Email Core: thread id not found.',
+      error: { code: 'unknown_id', message: e.message ?? 'thread_not_found' },
     }
   }
   if (code === 'capability_denied') {
@@ -342,6 +363,25 @@ async function runSummarize(
   return {
     text: brief.text,
     data: { summary: structuredRow, brief },
+  }
+}
+
+async function runThread(
+  id: string,
+  ctx: EmailCommandContext,
+): Promise<EmailCommandResponse> {
+  // Read the whole conversation by thread id. Surfaces a compact
+  // one-line-per-message list in chat; the full thread (bodies +
+  // participants + metadata) rides in `data.thread` for the agent /
+  // UI to consume. Read-only — no cache write.
+  const thread = await ctx.client.getThread({ thread_id: id })
+  const lines = thread.messages
+    .map((m, i) => `${i + 1}. ${m.from} — ${m.subject}`)
+    .join('\n')
+  const plural = thread.message_count === 1 ? '' : 's'
+  return {
+    text: `Thread ${thread.thread_id} (${thread.message_count} message${plural}):\n${lines}`,
+    data: { thread },
   }
 }
 
