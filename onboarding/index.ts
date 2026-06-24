@@ -49,6 +49,27 @@ export {
   type OnboardingPhase,
 } from './interview/phase.ts'
 
+// WAVE 1 credential-management — up-front OPTIONAL key offers (Codex auth /
+// OpenAI key), validated + persisted via the existing ApiKeyStore.
+export {
+  OPTIONAL_KEY_OFFERS,
+  ONBOARDING_OPENAI_LABEL,
+  detectOptionalKey,
+  getOptionalKeyOffer,
+  listOptionalKeyOffers,
+  looksLikeOpenAiKey,
+  storeOptionalKey,
+  type OptionalKeyApiKeyStore,
+  type OptionalKeyId,
+  type OptionalKeyOffer,
+  type OptionalKeyProvider,
+  type OptionalKeyStorage,
+  type OptionalKeyValidation,
+  type StoreOptionalKeyInput,
+  type StoreOptionalKeyOutcome,
+  type StoreOptionalKeyResult,
+} from './optional-keys.ts'
+
 export {
   RESUME_PROMPT_OPTIONS,
   RESUME_PROMPT_BODY_PREFIX,

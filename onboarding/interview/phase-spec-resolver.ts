@@ -35,6 +35,7 @@
 
 import type { OnboardingPhase } from './phase.ts'
 import type { PhasePromptSpec } from './phase-prompts.ts'
+import { getOptionalKeyOffer } from '../optional-keys.ts'
 // Static fallback table for routing fields. Imported directly from its
 // canonical home `phase-prompts.ts` (the LLM driver only re-exports it).
 // Importing from the leaf here breaks the `phase-spec-resolver` ↔
@@ -1035,6 +1036,14 @@ const PACK_MAX_OAUTH_OFFERED: PhaseKnowledgePack = {
       "Right now Claude Max is required to keep going - we use premium models for persona synthesis, brief generation, and deep reasoning. A future admin interface will let you switch substrates (BYO Anthropic key or free tier) but that's not in the onboarding flow yet. If you don't have Max, the simplest path is to subscribe and re-open this chat - your progress so far is preserved.",
     can_change_later:
       "The substrate choice is reversible from settings (admin interface lands in a future sprint). Switching credentials doesn't lose state - the agent transparently reconnects.",
+    // WAVE 1 credential-management — up-front OPTIONAL keys. The system runs
+    // fully on Claude Max alone; these only ADD capabilities. Copy is derived
+    // from the canonical `onboarding/optional-keys.ts` offer registry so the
+    // onboarding answer and the stored activation stay in lockstep.
+    optional_openai_key:
+      `${getOptionalKeyOffer('openai_api_key')!.question} ${getOptionalKeyOffer('openai_api_key')!.activation} Skipping is fine — ${getOptionalKeyOffer('openai_api_key')!.skip_note}`,
+    optional_codex_auth:
+      `${getOptionalKeyOffer('codex_auth')!.question} ${getOptionalKeyOffer('codex_auth')!.activation} Skipping is fine — ${getOptionalKeyOffer('codex_auth')!.skip_note}`,
   },
   expected_tangents: [
     {
@@ -1061,6 +1070,16 @@ const PACK_MAX_OAUTH_OFFERED: PhaseKnowledgePack = {
       user_text_example: 'can I change this later?',
       expected_action: 'answer',
       summary: 'asks about reversibility - route to can_change_later FAQ',
+    },
+    {
+      user_text_example: 'can I add an OpenAI key for embeddings?',
+      expected_action: 'answer',
+      summary: 'asks about the optional OpenAI key - route to optional_openai_key FAQ',
+    },
+    {
+      user_text_example: 'do you support codex / cross-model reviews?',
+      expected_action: 'answer',
+      summary: 'asks about the optional Codex auth - route to optional_codex_auth FAQ',
     },
   ],
   advance_examples: [

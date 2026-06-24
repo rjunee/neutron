@@ -34,6 +34,70 @@ audit: `docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md`.
 → failed); `trident/vajra-fixes.test.ts` +1 `FIX 9` block (3 cases: PR-first
 ordering, best-effort marking, ban on yielding the turn). 63 pass / 0 fail across
 the three touched trident suites; `tsc -p trident/tsconfig.json` clean.
+## 2026-06-24 — Credential management: onboarding OPTIONAL-key offers (WAVE 1)
+
+**What shipped.** `onboarding/optional-keys.ts` — the single source of truth
+for the up-front OPTIONAL credential questions onboarding asks: an OpenAI key
+(`openai_api_key`) and Codex auth (`codex_auth`). Each is strictly optional;
+the system runs fully on Claude Max OAuth (or a BYO Anthropic key) alone, and
+skipping any offer leaves the system fully working. A provided key is
+validated and persisted through the **existing** `auth/api-key-store.ts:
+ApiKeyStore` (the same store the admin add/rotate UI and the runtime
+credential resolver already use — one key path, not two), and each stored key
+ADDITIVELY activates its capability.
+
+**Why reuse, not rebuild.** The admin add/rotate path (`app/app/admin.tsx`)
+and `ApiKeyStore` already existed; the missing piece was the front-door offer
+during onboarding. `storeOptionalKey()` is the shared seam both onboarding and
+a future admin endpoint call.
+
+**Activation.**
+- `openai_api_key` → `ApiKeyStore(provider='openai')` → resolvable by
+  `gateway/realmode-composer/resolve-llm-credentials.ts` (→
+  `auth/byo-api-key-fallback.ts:buildBYOApiKeyPool`), activating the OpenAI /
+  GPT-5 API adapter (cross-model trident reviews). The same key backs cloud
+  embeddings (`gbrain-memory/embedder-config.ts`), which still require the
+  explicit `NEUTRON_EMBEDDINGS=openai|auto` opt-in — the deliberate cost guard,
+  unchanged. (Ties to the WAVE-2 conditional embedding-store, PR #31.)
+- `codex_auth` → the Codex CLI subscription OAuth (`codex login`) is a
+  HOST-level credential under `CODEX_HOME`, not a per-instance paste secret
+  (the `ApiKeyProvider` enum has no `codex`), so the offer surfaces it as
+  guidance; a platform key via the OpenAI offer drives the same reviews.
+
+**Boundary + decoupling.** `@neutronai/onboarding` stays decoupled from
+`@neutronai/auth`: the module depends on a narrow `OptionalKeyApiKeyStore`
+interface (the real `ApiKeyStore` satisfies it structurally), mirroring the
+engine's `MaxOauthSecretsStore` pattern. No new package dependency, no phase
+enum / `LEGAL_TRANSITIONS` change (the optional keys are additive to the
+substrate choice, not a new gate, so the phase-walk matrix is untouched).
+
+**Phase wiring.** The credential step (`max_oauth_offered`) knowledge pack in
+`phase-spec-resolver.ts` gains `optional_openai_key` / `optional_codex_auth`
+FAQs + answer-tangents derived from the canonical offer registry, so the
+onboarding agent answers in lockstep with what `storeOptionalKey` persists.
+
+**Scope boundary (Codex review P2).** This slice ships the offer registry, the
+storage primitive, and the conversational surfacing — NOT yet an interactive
+paste collector that fires in every run. Deliberate, because the *activating
+sink* differs by deployment tier and a complete wire is a larger,
+security-sensitive change: managed reads `ApiKeyStore` (what the integration
+test proves), but **open self-host** resolves credentials from **env**
+(`open/composer.ts:resolveOpenLlmPool` is Anthropic-env-only; the GPT adapter +
+gbrain embedder read `OPENAI_API_KEY` / `NEUTRON_EMBEDDINGS_*` from the owner
+`.env`), so open-mode activation means writing the owner env file + restart,
+not an `ApiKeyStore` row. The primitive is landed + proven first; the
+interactive collector + the per-tier intake closure (managed: `ApiKeyStore`
+hook; open: env-file writer) are the explicit next slice. The byte-pinned
+onboarding engine credential branch is intentionally left untouched here.
+
+**Tests.** `onboarding/__tests__/optional-keys.test.ts` (pure unit, in-memory
+fake store: offers exposed + optional; valid key stored; invalid rejected
+without write; idempotent re-paste; codex guidance-only; skip = no write) and
+`tests/integration/onboarding-optional-keys-activate.open.test.ts` (real
+`ApiKeyStore` + `SecretsStore` + `resolveLlmCredentials`: provided OpenAI key
+→ stored → resolver returns a BYO pool [ACTIVATED]; skipped → no OpenAI surface
+while Claude/Anthropic still resolves). tsc clean; phase-knowledge invariants
+green.
 
 ## 2026-06-24 — Skill Forge runtime: auto-skillify completed workflows (WAVE 4)
 
