@@ -24,9 +24,11 @@ MCP-tool backend is threaded through `buildCoresBackendFactories`
 (`gateway/boot-helpers.ts`) so the chat-command filter and the MCP tools
 share one backend instance. Examples:
 - Research: `buildProductionResearchCoreWiring` (in-Core).
-- Code-Gen: `buildProductionCodegenCoreWiring`
-  (`gateway/cores/build-production-codegen-wiring.ts`, gateway-side
-  because its Anthropic credential factory is gateway-side).
+- Code-Gen: NO gateway wrapper — `/code` is foundational Trident over the
+  CC-subprocess substrate (see "`/code` → foundational Trident" below). The old
+  gateway wrapper (`buildProductionCodegenCoreWiring` + the direct-SDK
+  `code-gen-factory.ts`) was retired 2026-06-24. The `cores/free/code-gen/` Core
+  engine survives only as the four legacy `codegen_*` MCP tools.
 - Calendar (`cores/free/calendar`, `@neutronai/calendar-core`): per-Core
   Google OAuth (manifest `oauth_token` slot, label `google_calendar`, scope
   `…/auth/calendar`) shared with Email + Google Workspace via the
@@ -492,7 +494,7 @@ socket-attributed, durable + resume-replayable, sync engine NOT forked).
   Like `receipt_log`, `reaction_log` is an additive adapter option — wired in
   tests + composers, not yet in the live gateway composition.
 
-## `/code` → foundational Trident (runtime DONE — prod-boot wiring in progress)
+## `/code` → foundational Trident (runtime DONE — runner live + hardened)
 
 The ~5-PR port folding Vajra's full Trident into Neutron Open as foundational
 runtime is **runtime-complete**: the state machine, tick loop, real
@@ -505,17 +507,26 @@ for governed repos). State in SQLite ⇒ restart-safe + resumable.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
-- **The production runner (DONE — this PR).** The Open composer
-  (`open/composer.ts`) now builds a dedicated `cc-trident-*` CC-subprocess
-  substrate and threads `composition.trident = { dispatch }` (via
-  `buildSubstrateTridentDispatch`, `trident/substrate-dispatch.ts`). That is
-  what flips the tick loop from its `stubAdvanceDeps` no-op to the real
+- **The production runner (LIVE + hardened).** The Open composer
+  (`open/composer.ts`) threads `composition.trident = { dispatch }` (via
+  `buildSubstrateTridentDispatch`, `trident/substrate-dispatch.ts`), which flips
+  the tick loop from its `stubAdvanceDeps` no-op to the real
   `buildTridentOrchestrator` step in `build-core-modules.ts`. Before this, the
   Open composer never set `input.trident`, so a `/code` build would have hit the
   loop's no-op (the `CodegenNotConfiguredError` "production runner not wired"
-  class). `buildSubstrateTridentDispatch` runs ONE Forge/Argus turn on the
-  substrate to terminal text — all prompt rendering + verdict parsing stay above
-  it in the orchestrator + session manager.
+  class). Each dispatch runs ONE Forge/Argus turn on the CC-subprocess substrate
+  to terminal text — all prompt rendering + verdict parsing stay above it in the
+  orchestrator + session manager.
+- **Per-worktree cwd + per-build isolation (DONE).** The composer no longer pins
+  ONE warm `cc-trident-*` substrate to `owner_home`. Instead it threads a
+  `build_substrate(cwd)` FACTORY: `buildSubstrateTridentDispatch` builds a FRESH
+  ephemeral CC-subprocess REPL PER DISPATCH, rooted at the run's worktree
+  (`input.repo_path`). So each Forge/Argus turn runs IN its own worktree on a
+  disposable session — one build never inherits another's working context, and
+  build turns never bleed into the owner's warm conversational (`cc-agent-*`)
+  pool. (`AgentSpec` carries no per-call cwd, so per-worktree dispatch re-roots
+  the substrate per turn.) This closes the two hardening items the first
+  prod-boot wiring PR deferred.
 - **The `/code` command surface (NEXT PR).** Routing the literal `/code`
   keystroke from the Open landing chat into `buildTridentCodeChatCommandFilter`
   is NOT yet wired — the landing chat path (`landing/server.ts` →
@@ -523,22 +534,24 @@ for governed repos). State in SQLite ⇒ restart-safe + resumable.
   exists only on the `app-ws-surface`, which Open does not mount). Wiring an
   optional `chatCommandFilter` hook into the chat-bridge (mirroring the existing
   `liveAgentTurn` / `scribeOnUserTurn` hooks) is the next scoped PR.
-- **Hardening (FOLLOW-UP).** `buildSubstrateTridentDispatch` runs each turn on a
-  warm substrate instance pinned to `owner_home`. Per-build context isolation (a
-  fresh subprocess/session per Forge↔Argus turn) and native per-worktree cwd
-  (`AgentSpec` carries none today) are deliberate follow-ups, not this PR.
 
 See "Trident — the foundational autonomous-build runtime" above for the boot
 wiring.
 
-The Code-Gen Core (`cores/free/code-gen/`) wrapper is **superseded** for
-`/code`: `buildCodegenChatCommandFilter` + `CodegenOrchestrator` no longer
-back the `/code` path. The Core's four `codegen_*` MCP tools remain a Tier-2
-surface, and the physical deletion of the now-redundant Core orchestration
-(+ relocating the shared substrate machinery) is the one documented remaining
-cleanup — deferred because the orchestration is still referenced by those MCP
-tools, the install lifecycle/manifest, the Managed graph composer, and ~106
-self-contained passing tests. See `AS-BUILT.md` PR-5 Decisions Log.
+**The Code-Gen Core gateway wrapper is RETIRED (2026-06-24).** `/code` is now
+EXCLUSIVELY foundational Trident over the CC-subprocess substrate; there is no
+direct-`@anthropic-ai/sdk` code path. The retired wrapper:
+`gateway/cores/code-gen-factory.ts` (the `CodegenLlmCall` over a direct Messages
+API call), `gateway/cores/build-production-codegen-wiring.ts` (the
+credential→orchestrator→filter assembly), and `buildCodegenChatCommandFilter`
+(the superseded legacy `/code` Core filter) are deleted. The Core's useful parts
+— the multi-turn dispatch loop, Forge/Argus prompts, and output parsers — were
+already folded into the foundational Trident runtime across PR-1..PR-5. The
+`cores/free/code-gen/` Core ENGINE + its four `codegen_*` MCP tools + manifest /
+install-lifecycle / sidecar remain a self-contained Tier-2 MCP surface (121
+passing tests); their physical deletion is the one documented remaining cleanup,
+left out because it is referenced by those MCP tools, the install
+lifecycle/manifest, and the Managed graph composer. See `AS-BUILT.md`.
 
 ## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
 
