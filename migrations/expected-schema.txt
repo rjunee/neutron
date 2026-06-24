@@ -349,6 +349,14 @@ CREATE INDEX signin_events_by_user ON signin_events (user_id, occurred_at)
 CREATE INDEX signup_consumed_start_tokens_expires
     ON signup_consumed_start_tokens (expires_at_ms)
 
+[index] skill_forge_proposals_signature (tbl=skill_forge_proposals)
+CREATE INDEX skill_forge_proposals_signature
+    ON skill_forge_proposals (workflow_signature)
+
+[index] skill_forge_proposals_status (tbl=skill_forge_proposals)
+CREATE INDEX skill_forge_proposals_status
+    ON skill_forge_proposals (status)
+
 [index] telegram_bind_tokens_expires (tbl=telegram_bind_tokens)
 CREATE INDEX telegram_bind_tokens_expires
     ON telegram_bind_tokens (expires_at_ms)
@@ -1163,6 +1171,37 @@ CREATE TABLE signup_consumed_start_tokens (
     jti TEXT PRIMARY KEY NOT NULL,
     expires_at_ms INTEGER NOT NULL,
     claimed_at_ms INTEGER NOT NULL
+) STRICT
+
+[table] skill_forge_proposals (tbl=skill_forge_proposals)
+CREATE TABLE skill_forge_proposals (
+    -- Opaque proposal id (uuid v4).
+    id                 TEXT PRIMARY KEY NOT NULL,
+    -- Stable hash of the source workflow's normalized steps (dedupe key).
+    workflow_signature TEXT NOT NULL,
+    -- The project the workflow ran in (audit + scoping).
+    project_slug       TEXT NOT NULL,
+    -- The topic the proposal message was surfaced in (audit).
+    topic_id           TEXT,
+    -- Distilled skill identity. `proposed_name` is the kebab-case slug used
+    -- for both the skill name and the `conventions/<slug>.md` filename.
+    proposed_name      TEXT NOT NULL,
+    -- JSON string[] of trigger phrases ("ALWAYS use when…").
+    triggers_json      TEXT NOT NULL,
+    -- One-paragraph summary of what the skill does.
+    what_it_does       TEXT NOT NULL,
+    -- JSON string[] describing the artifacts the workflow produced/touched.
+    artifacts_json     TEXT NOT NULL,
+    -- Snapshot of the full CompletedWorkflow record (JSON) for re-distillation.
+    workflow_json      TEXT NOT NULL,
+    -- pending | approved | declined.
+    status             TEXT NOT NULL DEFAULT 'pending',
+    -- Absolute path of the registered skill markdown once approved; NULL else.
+    skill_path         TEXT,
+    -- Epoch ms.
+    created_at         INTEGER NOT NULL,
+    -- Epoch ms the proposal was approved/declined; NULL while pending.
+    decided_at         INTEGER
 ) STRICT
 
 [table] task_reminder_links (tbl=task_reminder_links)

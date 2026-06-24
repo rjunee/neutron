@@ -1018,6 +1018,33 @@ before materialization. Removal verbs include drop / cut / skip / remove /
 after "ignore real estate investing" was acknowledged but not honored). Projects
 are also renameable/deletable later from settings — the prompt copy says so.
 
+## Skill Forge — auto-skillify completed workflows (`skill-forge/`)
+
+Skill Forge turns a workflow the agent ran *once* into a saved, re-invokable
+skill, so repeated multi-step work compounds instead of being re-derived each
+time. It is **gated by propose-then-approve** — it never creates a skill
+silently.
+
+- **Audit (`detector.ts`).** When a multi-step workflow completes, `auditWorkflow`
+  decides if it is skill-worthy: it must have succeeded and be a real procedure
+  (≥2 *distinct* normalized actions, not one tool run repeatedly).
+- **Propose (`forge.ts` + `proposal-message.ts`).** `SkillForge.onWorkflowCompleted`
+  persists a **pending** row in `skill_forge_proposals` (migration `0086`) and
+  surfaces a proposal — name + triggers + what-it-does + artifacts — via an
+  injected `ProposalNotifier`. Nothing is written to disk yet. A stable
+  `workflowSignature` dedupes, so a workflow run repeatedly does not re-nag.
+- **Approve → register (`distiller.ts` + `registrar.ts`).** On approve (optionally
+  with edits), the workflow is **distilled** deterministically into a convention
+  markdown and written to `<owner_data_dir>/skills/conventions/<name>.md` — the
+  exact directory the realmode skills-loader (see the system-prompt assembly)
+  splices into **every** LLM turn. So the new skill is immediately
+  agent-discoverable and, being on disk, **survives a fresh session**. Decline
+  marks the row declined and creates nothing.
+- **Trigger source (`trident-adapter.ts`).** `completedWorkflowFromTridentRun`
+  maps a terminal `done` Trident run into the generic `CompletedWorkflow`. The
+  live wiring seam is the Trident tick loop's `onTerminal(run)` hook
+  (`trident/tick.ts`); see `AS-BUILT.md` for the one-line composition.
+
 ## Testing & CI — the bounded-memory partitioned runner (`scripts/run-tests.sh`)
 
 CI runs `bash scripts/run-tests.sh` (`.github/workflows/ci.yml`), the one

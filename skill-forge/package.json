@@ -1,0 +1,9 @@
+{
+  "name": "@neutronai/skill-forge",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/persistence": "workspace:*"
+  }
+}
