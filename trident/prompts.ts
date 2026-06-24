@@ -62,7 +62,12 @@ RULES
 - NEVER commit to {{base_branch}}. Always {{branch}}.
 - NEVER block on human input. If ambiguous, make the best judgment call + note it in the PR body.
 - If a test failure is genuinely unrelated to your change, skip it with a one-line reason + flag it in the PR body.
-- Keep the diff minimal. Three similar lines beats a premature abstraction.`
+- Keep the diff minimal. Three similar lines beats a premature abstraction.
+
+CROSS-MODEL REVIEW (best-effort — NEVER a hang point)
+- Order is FIXED: OPEN THE PR FIRST (steps 6-8 above), THEN run any cross-model / second-model / Codex review. The PR must already exist so a stalled or timed-out review never costs the deliverable.
+- A cross-model review is BEST-EFFORT. It must NEVER gate the PR, block your turn, or be a reason to withhold the contract lines. A failed, empty, or timed-out review is fine — note it and move on.
+- NEVER end your turn to "wait for", "be notified by", or "resume when" an async / background review (or a scheduled wakeup that awaits one). Nothing resumes a yielded headless turn, so it idles until reaped with the PR unshipped. If you run a review at all, run it SYNCHRONOUSLY inline in this turn (a blocking foreground call) and read its result here, or skip it entirely.`
 
 /**
  * The Ralph BOOTSTRAP note, appended to the initial Forge prompt when a

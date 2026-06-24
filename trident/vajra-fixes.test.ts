@@ -20,6 +20,7 @@ import {
   parseArgusVerdict,
   parseForgeOutput,
   parseRalphPlan,
+  renderForgePrompt,
 } from './prompts.ts'
 import { buildTridentOrchestrator, computeDiffLineCount } from './orchestrator.ts'
 import { TridentSessionManager, type TridentDispatch } from './session.ts'
@@ -393,5 +394,42 @@ describe('FIX 8 — model routing defaults', () => {
     expect(models['argus']).toBe('claude-haiku-4-5')
     // Export-control: nothing routes to the disabled Fable id by default.
     expect(models['forge']).not.toContain('fable')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 9 — Fleet PREMATURE-COMPLETION reconciliation (Vajra PR #164 + #160).
+// Vajra incident (fleet-wide, 2026-06-23): a Forge pushed its branch then
+// HUNG at the cross-model (Codex) review before opening the PR — it self-ran
+// an ASYNC review and yielded its turn to await a result nothing feeds back to
+// a headless agent, so it idled until reaped, PR unshipped. Two Open analogs:
+//   (a) PROMPT: the rendered Forge prompt must encode OPEN-PR-FIRST +
+//       review-is-best-effort + NEVER-yield-the-turn-to-await-a-review (the
+//       Open analog of Vajra's prompts/forge.md cross-model rewrite). Open has
+//       no openai-codex stop-review-gate plugin in its repo surface, so the
+//       durable defense here is the prompt, not a per-worktree gate pin.
+//   (b) FALSE-COMPLETION race: a substrate turn whose stream ends WITHOUT a
+//       terminal completion/error event (paused, not finished) must NOT be
+//       classified as completed — asserted in substrate-dispatch.test.ts.
+// See docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md.
+// ---------------------------------------------------------------------------
+describe('FIX 9 — fleet premature-completion / cross-model-review wedge', () => {
+  const prompt = renderForgePrompt(makeRun({ merge_mode: 'pr' as MergeMode }), 'main')
+
+  test('the Forge prompt orders PR-FIRST then review (a stalled review never costs the PR)', () => {
+    expect(prompt).toContain('OPEN THE PR FIRST')
+    // The review ACTION is explicitly sequenced AFTER opening the PR.
+    expect(prompt).toMatch(/OPEN THE PR FIRST[\s\S]*THEN run any cross-model/i)
+  })
+
+  test('the Forge prompt marks cross-model review BEST-EFFORT (never gates the PR)', () => {
+    expect(prompt).toMatch(/BEST-EFFORT/)
+    expect(prompt.toLowerCase()).toContain('never gate the pr')
+  })
+
+  test('the Forge prompt BANS yielding the turn to await an async/background review', () => {
+    // The live wedge: ending the turn "to wait for"/"resume when" a review.
+    expect(prompt).toMatch(/NEVER end your turn/i)
+    expect(prompt.toLowerCase()).toContain('synchronously')
   })
 })
