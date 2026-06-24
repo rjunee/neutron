@@ -527,6 +527,17 @@ for governed repos). State in SQLite ⇒ restart-safe + resumable.
   pool. (`AgentSpec` carries no per-call cwd, so per-worktree dispatch re-roots
   the substrate per turn.) This closes the two hardening items the first
   prod-boot wiring PR deferred.
+  class). `buildSubstrateTridentDispatch` runs ONE Forge/Argus turn on the
+  substrate to terminal text — all prompt rendering + verdict parsing stay above
+  it in the orchestrator + session manager. **Paused ≠ finished
+  (false-completion guard):** a turn whose event stream ends WITHOUT a terminal
+  `completion`/`error` event maps to `failed`, never `completed` — a
+  paused/abnormally-closed turn is not a confirmed finish, so the session manager
+  recovers/fails it loudly instead of silently advancing the build. This is the
+  Open analog of Vajra's fleet "paused vs finished" reap fix (#160). Relatedly,
+  `FORGE_SYSTEM_PROMPT` now hard-rules cross-model review as **best-effort, after
+  the PR is open, never a turn-yielding hang point** (Open analog of Vajra PR
+  #164). See `docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md`.
 - **The `/code` command surface (NEXT PR).** Routing the literal `/code`
   keystroke from the Open landing chat into `buildTridentCodeChatCommandFilter`
   is NOT yet wired — the landing chat path (`landing/server.ts` →

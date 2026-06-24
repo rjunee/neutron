@@ -2,6 +2,39 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-24 — Trident: fleet premature-completion / cross-model-review wedge reconciliation
+
+**What shipped.** The first high-value Vajra→Neutron fix-reconciliation pass
+(SPEC.md WAVE 2 step 22 checkpoint), porting Vajra's fleet premature-completion /
+cross-model-review-wedge fixes (Vajra PR #164 + #160) onto Neutron's in-process
+Trident substrate. Two changes:
+- **`trident/substrate-dispatch.ts` — false-completion race.** A Forge/Argus turn
+  whose substrate event stream ends WITHOUT a terminal `completion`/`error` event
+  now maps to `failed` (was `completed`). The persistent-REPL substrate always
+  settles a real turn with a terminal event before closing its channel, so a
+  terminal-less close is a paused/abnormally-closed turn — NOT a confirmed finish.
+  Classifying it `completed` silently advanced the build as if it succeeded (the
+  subagent-wait → Stop-hook false-completion race). The session manager treats any
+  non-`completed` status as a crashed sub-agent, so the run is now recovered/failed
+  loudly. Open analog of Vajra #160 "paused ≠ finished".
+- **`trident/prompts.ts` — `FORGE_SYSTEM_PROMPT` cross-model-review hard rule.**
+  OPEN THE PR FIRST then review; review is BEST-EFFORT and never gates the PR or
+  blocks the turn; NEVER end the turn to await an async/background review (run it
+  synchronously inline or skip — nothing resumes a yielded headless turn). Open
+  analog of Vajra #164's `prompts/forge.md` rewrite.
+
+**Why no codex stop-gate pin.** Vajra #164 also pinned the openai-codex plugin's
+`stopReviewGate:false` at spawn. That plugin is **not part of Neutron-open's repo
+surface** (the only in-repo "codex" is the unrelated GPT-5.5 Codex CLI *model
+adapter*), so the durable Open defense is the prompt + the dispatch-level
+false-completion guard, not a per-worktree gate pin. Full per-change port/skip
+audit: `docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md`.
+
+**Tests.** `trident/substrate-dispatch.test.ts` +1 (stream-ends-without-terminal
+→ failed); `trident/vajra-fixes.test.ts` +1 `FIX 9` block (3 cases: PR-first
+ordering, best-effort marking, ban on yielding the turn). 63 pass / 0 fail across
+the three touched trident suites; `tsc -p trident/tsconfig.json` clean.
+
 ## 2026-06-24 — Skill Forge runtime: auto-skillify completed workflows (WAVE 4)
 
 **What shipped.** A new `@neutronai/skill-forge` package (top-level `skill-forge/`)

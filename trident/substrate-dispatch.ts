@@ -29,10 +29,14 @@
  *
  * Status mapping (consumed by `TridentSessionManager.runDispatch`, which treats
  * any non-`completed` status as a crashed sub-agent):
- *   `completion` event     → 'completed'
- *   `error` event          → 'failed'
- *   `timeout_ms` elapsed   → 'timed_out'
- *   thrown / start() throws → 'failed'
+ *   `completion` event       → 'completed'
+ *   `error` event            → 'failed'
+ *   `timeout_ms` elapsed     → 'timed_out'
+ *   thrown / start() throws  → 'failed'
+ *   stream ends, NO terminal → 'failed' (paused ≠ finished — a turn that closed
+ *     `completion`/`error`     its channel WITHOUT a terminal event is NOT a
+ *      event was seen          confirmed finish; never a silent success. See the
+ *                              FALSE-COMPLETION race note at the return below.)
  *
  * SUBSTRATE RESOLUTION — two shapes, exactly one required:
  *   • `build_substrate(cwd)` — PRODUCTION. A factory called ONCE PER DISPATCH
@@ -168,10 +172,26 @@ export function buildSubstrateTridentDispatch(
       if (timer !== null) clearTimer(timer)
     }
 
-    // Stream ended without an explicit completion event. If we tripped the
-    // timeout, report it; otherwise treat the clean end as a completion (the
-    // session manager fails LOUDLY downstream if a forge-init produced no
-    // contract lines).
-    return { result: text, status: timedOut ? 'timed_out' : 'completed' }
+    // Stream ended WITHOUT a terminal `completion` event. The persistent-REPL
+    // substrate ALWAYS settles a real turn with a `completion` (success) or an
+    // `error` (death) event before closing its channel — see
+    // persistent-repl-substrate `onReply` (token + completion + close) and
+    // `onDeath` (error + close). So reaching here means the channel closed with
+    // NO terminal signal: a paused / abnormally-closed turn, NOT a confirmed
+    // finish.
+    //
+    // FALSE-COMPLETION race (Vajra fleet-premature-completion reconciliation,
+    // incidents 2026-06-23 "paused ≠ finished" #160 + cross-model-review wedge
+    // #164): classifying this clean-but-terminal-less end as `completed` would
+    // silently advance the build as if it succeeded — the exact failure mode
+    // where a forge-fix/ralph-task turn that yielded mid-work (e.g. a Stop hook
+    // held the turn, or it ended a turn to await an out-of-band review that
+    // never resumes it) is mistaken for a finished one. Report `timed_out` if
+    // the timeout tripped, else `failed`. The session manager treats any
+    // non-`completed` status as a crashed sub-agent, so the run is recovered or
+    // failed LOUDLY rather than falsely reported done. (forge-init was already
+    // caught downstream by the no-contract-lines check; this closes the
+    // forge-fix / ralph-task gap too.)
+    return { result: text, status: timedOut ? 'timed_out' : 'failed' }
   }
 }

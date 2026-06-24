@@ -131,6 +131,25 @@ describe('buildSubstrateTridentDispatch — adapter mechanics', () => {
     expect(rec.cancelled()).toBe(true)
   })
 
+  test('a stream that ENDS WITHOUT a terminal completion event maps to failed, NOT a silent completion (paused ≠ finished)', async () => {
+    // The persistent-REPL substrate always settles a real turn with a
+    // `completion` or `error` event before closing its channel. A stream that
+    // ends with neither — a paused / abnormally-closed turn (e.g. a Stop hook
+    // held the turn, or it yielded to await an out-of-band review that never
+    // resumes it) — must NOT be classified as `completed`, or the build would
+    // be silently advanced as if it succeeded (the FALSE-COMPLETION race;
+    // Vajra fleet-premature-completion reconciliation #160/#164).
+    const rec = recordingSubstrate(() => [
+      { kind: 'token', text: 'did some work…' },
+      // No completion(), no error — the generator just returns (channel close).
+    ])
+    const dispatch = buildSubstrateTridentDispatch({ substrate: rec.substrate })
+    const out = await dispatch(forgeInput())
+
+    expect(out.status).toBe('failed')
+    expect(out.result).toBe('did some work…')
+  })
+
   test('a start() throw maps to failed without surfacing the raw error', async () => {
     const rec = recordingSubstrate(() => [], { throwOnStart: true })
     const dispatch = buildSubstrateTridentDispatch({ substrate: rec.substrate })
