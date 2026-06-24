@@ -718,6 +718,51 @@ export function buildCodegenChatCommandFilter(deps: {
   }
 }
 
+/**
+ * WAVE 3 (Calendar Core completion) — surface the `/cal` chat-command
+ * filter through the SAME boot-helpers + barrel path as its sibling
+ * Cores (`buildRemindersChatCommandFilter`,
+ * `buildTridentCodeChatCommandFilter`, `buildCodegenChatCommandFilter`),
+ * so the production composer chains `/cal` into
+ * `buildChainedChatCommandFilter([...])` alongside `/remind` and `/code`
+ * from ONE import site. Before this, the canonical `/cal` filter was only
+ * reachable from `./cores/calendar-wiring.ts` — a parity asymmetry the
+ * dispatcher's own doc comment ("composes ... via
+ * `buildChainedChatCommandFilter`") implied was unintended.
+ *
+ * The canonical `/cal` dispatcher stays in `./cores/calendar-wiring.ts`
+ * (co-located with the pre-meeting-brief scheduler it shares a
+ * `CalendarClient` + sidecar cache with) — this thin wrapper is the
+ * composer-facing entry. It lazily imports the dispatcher INSIDE
+ * `match()` (mirroring how the sibling filters lazy-import their Core)
+ * so boot-helpers stays free of an eager `scribe` / calendar-wiring
+ * module-load: single source of truth, no duplicated dispatch logic, no
+ * entry-module import cycle.
+ */
+export function buildCalendarChatCommandFilter(deps: {
+  client: import('@neutronai/calendar-core').CalendarClient
+  cacheFor: (
+    project_id: string,
+  ) => Promise<import('@neutronai/calendar-core').CalendarProjectCache | null>
+  /** Clock override (tests). */
+  now?: () => Date
+  /** User timezone for the executor's date formatter. */
+  userTz?: string
+}): import('./http/app-ws-surface.ts').ChatCommandFilter {
+  let inner: import('./http/app-ws-surface.ts').ChatCommandFilter | null = null
+  return {
+    async match(input) {
+      if (inner === null) {
+        const { buildCalendarChatCommandDispatcher } = await import(
+          './cores/calendar-wiring.ts'
+        )
+        inner = buildCalendarChatCommandDispatcher(deps)
+      }
+      return inner.match(input)
+    },
+  }
+}
+
 export function readPatternFromPrompts(name: string): string {
   // We deliberately read the RAW file (no substituteTemplate call)
   // so `{{OWNER_HOME}}` tokens survive into the persisted message
