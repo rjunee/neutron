@@ -668,61 +668,21 @@ export function buildTridentCodeChatCommandFilter(deps: {
   }
 }
 
-/**
- * S2 (Code-Gen Core, 2026-05-22) — `/code` chat-command filter.
- *
- * SUPERSEDED by `buildTridentCodeChatCommandFilter` (Trident-port PR-5):
- * `/code` is now a thin entry into foundational Trident, not the Code-Gen
- * Core wrapper's separate orchestration path. Retained only for the
- * Core's legacy MCP-tool path + its existing tests; new production `/code`
- * wiring routes through the Trident filter above.
- *
- * The production composer assembles the orchestrator + sidecar + chat
- * notifier via `buildCodegenWiring(...)` (in
- * `cores/free/code-gen/src/wiring-production.ts`) and threads the
- * resulting `build_chat_command_context` factory through here. The
- * filter peeks at the inbound body, mints a per-request context via
- * the factory, and dispatches through `parseAndExecuteCodeCommand`.
- *
- * The pre-S2 deps surface (reviewer / merger / llm / gh_runner /
- * orchestrator-passed-directly) was removed when the wiring layer
- * landed — the factory owns all of those now.
- */
-export function buildCodegenChatCommandFilter(deps: {
-  build_chat_command_context: (input: {
-    project_id: string
-    user_id: string
-  }) => import('@neutronai/codegen-core').CodeCommandContext
-  default_project_id?: string
-}): import('./http/app-ws-surface.ts').ChatCommandFilter {
-  const default_pid = deps.default_project_id ?? 'default'
-  return {
-    async match(input) {
-      const trimmed = input.body.trimStart()
-      if (!trimmed.startsWith('/code')) return null
-      const { parseAndExecuteCodeCommand } = await import('@neutronai/codegen-core')
-      const ctx = deps.build_chat_command_context({
-        project_id: input.project_id ?? default_pid,
-        user_id: input.user_id,
-      })
-      const response = await parseAndExecuteCodeCommand(input.body, ctx)
-      if (response === null) return null
-      const out: import('./http/app-ws-surface.ts').ChatCommandFilterResult = {
-        text: response.text,
-      }
-      if (response.data !== undefined) out.data = response.data
-      if (response.deep_link !== undefined) out.deep_link = response.deep_link
-      if (response.error !== undefined) out.error = response.error
-      return out
-    },
-  }
-}
+// RETIRED (Trident-port close-out, 2026-06-24) — the Code-Gen Core's `/code`
+// chat-command filter (`buildCodegenChatCommandFilter`) is gone. `/code` is now
+// EXCLUSIVELY a thin entry into foundational Trident via
+// `buildTridentCodeChatCommandFilter` (above): it creates a `code_trident_runs`
+// row that the tick loop drives on the CC-subprocess substrate. The legacy
+// filter dispatched through the Code-Gen Core wrapper's separate orchestration
+// path (`CodegenOrchestrator` + the direct-`@anthropic-ai/sdk` runner the
+// retired `gateway/cores/code-gen-factory.ts` built) — exactly the wrapper this
+// close-out removes so there is ONE `/code` engine and NO direct-SDK code path.
 
 /**
  * WAVE 3 (Calendar Core completion) — surface the `/cal` chat-command
  * filter through the SAME boot-helpers + barrel path as its sibling
  * Cores (`buildRemindersChatCommandFilter`,
- * `buildTridentCodeChatCommandFilter`, `buildCodegenChatCommandFilter`),
+ * `buildTridentCodeChatCommandFilter`),
  * so the production composer chains `/cal` into
  * `buildChainedChatCommandFilter([...])` alongside `/remind` and `/code`
  * from ONE import site. Before this, the canonical `/cal` filter was only
@@ -1151,29 +1111,26 @@ export async function buildCoresBackendFactories(
       if (codegenOrchestratorFromOpts !== undefined) {
         return { orchestrator: codegenOrchestratorFromOpts }
       }
-      // Trident-port PR-1 (2026-06-19) — OBSERVABILITY GUARDRAIL.
-      // Reaching here in PRODUCTION means the composer never threaded a
-      // real `codegenOrchestrator`, so BOTH the four `codegen_*` MCP
-      // tools AND `/code <task>` dispatch into `buildSkeletonCodegenRunner`,
-      // whose `run(...)` throws `CodegenNotConfiguredError` ("install the
-      // Tier 2 Coding Core") — even on a credentialed instance where the
-      // real Forge → Argus → merge loop COULD run. That silent drift is
-      // exactly the failure the Trident-port diagnostic flagged. Mirror
-      // the Tasks-composer guardrail (Argus r2 BLOCKING #2, PR #221):
-      // warn LOUDLY so a future composer regression surfaces at boot
-      // instead of as a quiet user-visible "/code says install Tier 2".
-      // The skeleton STAYS — it is the legitimate Tier-1 safe-install
-      // shape for Open self-hosts that never wire Code-Gen (install_ok
-      // must stay TRUE); we only make the fall-through observable.
+      // Trident-port close-out (2026-06-24) — the codegen_core module now ONLY
+      // backs the four legacy `codegen_*` MCP tools; `/code <task>` no longer
+      // touches it (it dispatches through foundational Trident on the
+      // CC-subprocess substrate — see `buildTridentCodeChatCommandFilter` +
+      // `trident/substrate-dispatch.ts`). The Code-Gen Core's production
+      // WRAPPER (`gateway/cores/code-gen-factory.ts` +
+      // `build-production-codegen-wiring.ts` + `buildCodegenChatCommandFilter`)
+      // was RETIRED in that close-out, so no composer threads a real
+      // `codegenOrchestrator` here anymore: the codegen_* MCP tools dispatch
+      // into `buildSkeletonCodegenRunner`, whose `run(...)` throws
+      // `CodegenNotConfiguredError`. The skeleton STAYS — it is the legitimate
+      // Tier-1 safe-install shape (install_ok must stay TRUE); we keep the
+      // fall-through observable so it never silently masquerades as a real
+      // runner.
       console.warn(
-        '[codegen_core] WARNING: no `codegenOrchestrator` threaded into ' +
-          'buildCoresBackendFactories — `/code` + the codegen_* MCP tools ' +
-          'will dispatch into the SKELETON runner (every task fails with ' +
-          'CodegenNotConfiguredError). Production composers MUST build the ' +
-          'real orchestrator via `buildProductionCodegenCoreWiring(...)` ' +
-          '(gateway/cores/build-production-codegen-wiring.ts) and thread ' +
-          'its `codegen_orchestrator` here + its `chat_command_filter` into ' +
-          'the app-WS surface. See Trident-port PR-1 (AS-BUILT 2026-06-19).',
+        '[codegen_core] note: no real `codegenOrchestrator` is wired — the ' +
+          'legacy codegen_* MCP tools dispatch into the SKELETON runner ' +
+          '(CodegenNotConfiguredError). This is EXPECTED post Trident-port ' +
+          'close-out: `/code <task>` runs on foundational Trident (the ' +
+          'CC-subprocess substrate), not the retired Code-Gen Core wrapper.',
       )
       const mod = await import('@neutronai/codegen-core')
       const runner = mod.buildSkeletonCodegenRunner()

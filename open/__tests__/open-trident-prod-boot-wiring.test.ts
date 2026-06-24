@@ -112,10 +112,17 @@ describe('Open foundational-Trident prod-boot wiring', () => {
   test('a credentialed boot wires composition.trident.dispatch to a REAL substrate runner', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
     const prompts: string[] = []
+    // Capture the cwd the composer threads into each substrate build — the
+    // `ClaudeCodeSubstrateOptions.cwd` `buildLlmCallSubstrate` composes from the
+    // per-dispatch `build_substrate(cwd)` factory.
+    const builtCwds: string[] = []
     const composer = buildOpenGraphComposer({
       env: process.env,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      substrateFactory: (() => recordingSubstrate(prompts)) as any,
+      substrateFactory: ((opts: { cwd?: string }) => {
+        builtCwds.push(opts.cwd ?? '<none>')
+        return recordingSubstrate(prompts)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any,
     })
     const composition = await composer({ db, project_slug: 'owner' })
 
@@ -124,13 +131,16 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(typeof composition.trident!.dispatch).toBe('function')
 
     // 2) Invoking it dispatches a REAL turn on the substrate (NOT a
-    //    CodegenNotConfiguredError) and returns the terminal text.
+    //    CodegenNotConfiguredError) and returns the terminal text — AND the
+    //    substrate for the turn was rooted at the run's worktree, not owner_home.
+    const builtBefore = builtCwds.length
+    const worktreeA = join(tmpDir, 'worktrees', 'run-a')
     const out = await composition.trident!.dispatch({
       kind: 'forge',
       phase: 'forge-init',
       system: 'forge',
       user_message: 'BUILD: add a feature flag',
-      repo_path: tmpDir,
+      repo_path: worktreeA,
       trident_run_id: 'run-1',
       model: 'claude-sonnet-4-6',
       timeout_ms: 30_000,
@@ -138,6 +148,27 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(out.status).toBe('completed')
     expect(out.result).toContain('PR_NUMBER=11')
     expect(prompts.some((p) => p.includes('BUILD: add a feature flag'))).toBe(true)
+    // A FRESH substrate was built for the dispatch, rooted at the run's worktree
+    // (`repo_path`) — the per-worktree cwd fix. Earlier substrate builds (the
+    // conversational / scribe / synthesis boxes) used owner_home (tmpDir), so we
+    // only assert on the build triggered by THIS dispatch.
+    expect(builtCwds.length).toBeGreaterThan(builtBefore)
+    expect(builtCwds.slice(builtBefore)).toContain(worktreeA)
+
+    // A second dispatch in a DIFFERENT worktree re-roots again (per-build
+    // isolation) — never collapses onto one fixed cwd.
+    const worktreeB = join(tmpDir, 'worktrees', 'run-b')
+    await composition.trident!.dispatch({
+      kind: 'argus',
+      phase: 'argus',
+      system: 'argus',
+      user_message: 'REVIEW: the diff',
+      repo_path: worktreeB,
+      trident_run_id: 'run-2',
+      model: 'claude-sonnet-4-6',
+      timeout_ms: 30_000,
+    })
+    expect(builtCwds).toContain(worktreeB)
 
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {

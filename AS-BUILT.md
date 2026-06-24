@@ -63,6 +63,72 @@ a skill that `loadSkills()` then discovers and that survives a loader cache rese
 dedupe suppresses re-nags while pending. The migration snapshot
 (`migrations/expected-schema.txt`) and runner number-list were refreshed for
 `0086`.
+## 2026-06-24 — `/code` foundational runner: per-worktree cwd + isolation; Code-Gen Core gateway wrapper retired
+
+Close-out of the WAVE 2 Code-Gen acceptance: `/code <task>` runs on the
+**foundational Trident runtime over the CC-subprocess substrate** (NOT direct
+`@anthropic-ai/sdk`), behind NO Core gate, and the Code-Gen Core gateway wrapper
+is retired.
+
+**Audit finding (diagnostic-before-delete).** On `origin/main` PR #33 already
+flipped the Open tick loop from `stubAdvanceDeps` to the real
+`buildTridentOrchestrator` by threading `composition.trident.dispatch`
+(`buildSubstrateTridentDispatch`) — so `/code` was already off the
+`CodegenNotConfiguredError` no-op. Two gaps remained: (a)
+`trident/substrate-dispatch.ts` EXPLICITLY deferred per-worktree cwd + per-build
+isolation (its SCOPE NOTE), so every Forge/Argus turn ran in `owner_home`, not
+the run's worktree; (b) the Code-Gen Core gateway WRAPPER — including a
+direct-`@anthropic-ai/sdk` runner — was still present (dead in Open prod: nothing
+under `open/` calls it).
+
+**1. Per-worktree cwd + per-build isolation (the substantive correctness fix).**
+`buildSubstrateTridentDispatch` gains `build_substrate(cwd)` — a factory invoked
+ONCE PER DISPATCH with the run's worktree (`input.repo_path`) as cwd, building a
+FRESH ephemeral CC-subprocess REPL per turn. So each Forge/Argus turn runs IN its
+own worktree on a disposable session: one build never inherits another's working
+context, and build turns never bleed into the owner's warm conversational
+(`cc-agent-*`) pool. `AgentSpec` carries no per-call cwd, so per-worktree
+dispatch HAS to re-root the substrate per turn. The legacy single-`substrate`
+shape is retained for the adapter-mechanics tests; exactly one of the two is
+required (throws otherwise). `open/composer.ts` threads the per-worktree
+ephemeral factory (was one `owner_home`-pinned `cc-trident-*` substrate). No
+credential → dispatch null → `composition.trident` unset (unchanged restart-safe
+stub no-op). The boot-wiring test now asserts the substrate is re-rooted at each
+dispatch's `repo_path`.
+
+**2. Code-Gen Core gateway wrapper RETIRED.** Deleted
+`gateway/cores/code-gen-factory.ts` (the `CodegenLlmCall` built over a DIRECT
+`@anthropic-ai/sdk` Messages-API call — the exact transport the CC-subprocess
+substrate rule forbids), `gateway/cores/build-production-codegen-wiring.ts` (the
+credential→orchestrator→`/code`-filter assembly), and `buildCodegenChatCommandFilter`
+(the SUPERSEDED legacy `/code` Core filter) + its `gateway/index.ts` re-export +
+the 3 wrapper-only gateway tests. `/code` is now EXCLUSIVELY foundational Trident.
+The Core's useful parts (multi-turn dispatch loop, Forge/Argus prompts, output
+parsers) were already folded into `trident/` across PR-1..PR-5.
+
+**KEPT (out of scope — separate Core-removal).** The `cores/free/code-gen/` Core
+ENGINE + its four `codegen_*` MCP tools + manifest / install-lifecycle / sidecar
+(121 self-contained tests, all green) remain a Tier-2 MCP surface. Physical
+deletion of the Core is the one documented remaining cleanup — it is still
+referenced by those MCP tools, the install lifecycle/manifest, and the Managed
+graph composer, so deleting it inline would red those suites and is a dedicated
+change (consistent with the PR-5 Decisions Log boundary).
+
+**Verify.** `bunx tsc --noEmit` clean (root + `trident/tsconfig.json`).
+`bun test trident/` → 217 pass. `bun test gateway/__tests__/` → 921 pass.
+`bun test cores/free/code-gen/` → 121 pass. Architectural fence
+(`tests/integration/no-direct-anthropic-api.test.ts`) → pass (one fewer
+direct-SDK file). Zero regressions.
+
+### Spec-conformance diff (5 lines)
+- WAVE 2 Code-Gen: `/code` produces a real artifact on the CC-subprocess
+  substrate via foundational Trident — MET (runner live + now per-worktree).
+- "production runner on the CC-subprocess substrate (NOT direct
+  `@anthropic-ai/sdk`)" — MET (substrate-dispatch over `buildLlmCallSubstrate`).
+- "no capability gate" — MET (no Core gate in the Open `/code` path).
+- "retire the code-gen Core wrapper" — MET for the gateway wrapper; Core engine
+  retirement documented as the remaining step.
+- "fold useful parts into foundational Trident" — already done PR-1..PR-5.
 
 ## 2026-06-24 — WAVE 3 Cores: Calendar Core `/cal` composer-reachability parity
 

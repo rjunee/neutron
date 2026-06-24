@@ -283,25 +283,45 @@ export function buildOpenGraphComposer(
           })
         : null
 
-    // Dedicated substrate for foundational Trident build agents (Forge / Argus)
-    // — the `/code <task>` autonomous build loop. Trident-port: FIRST prod-boot
-    // wiring of the production runner. A distinct `cc-trident-*` instance id
-    // keeps build turns OFF the conversational (`cc-agent-*`) warm pool so a
-    // build's Forge/Argus context never bleeds into the owner's live chat (or
-    // vice-versa). When no credential resolves (`llmPool === null`) the box has
-    // no runner and `composition.trident` stays unset — the tick loop runs its
+    // Foundational Trident build-agent runner (Forge / Argus) — the `/code
+    // <task>` autonomous build loop, on the CC-subprocess substrate.
+    //
+    // Per-WORKTREE + per-build isolation: rather than ONE substrate fixed at
+    // `owner_home`, this is a FACTORY that builds a FRESH ephemeral substrate
+    // per dispatch, rooted at the run's worktree (`input.repo_path`). So each
+    // Forge/Argus turn runs IN its own worktree on a disposable `cc-trident-*`
+    // REPL — never `owner_home`, never the owner's warm conversational
+    // (`cc-agent-*`) pool — so one build's context can never bleed into another
+    // build or into the owner's live chat. (`AgentSpec` carries no per-call cwd,
+    // so per-worktree dispatch HAS to re-root the substrate per turn; this
+    // closes the two hardening items the first prod-boot wiring PR deferred.)
+    //
+    // When no credential resolves (`llmPool === null`) the dispatch stays null
+    // and `composition.trident` is left unset — the tick loop runs its
     // restart-safe `stubAdvanceDeps` no-op, the unchanged LLM-less behaviour.
-    const tridentSubstrate =
+    const tridentDispatch =
       llmPool !== null
-        ? buildLlmCallSubstrate({
-            pool: llmPool,
-            substrate_instance_id: `cc-trident-${internal_handle}`,
-            cwd: owner_home,
-            internal_handle,
-            user_id: OWNER_USER_ID,
-            project_slug,
-            skip_permissions: true,
-            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+        ? buildSubstrateTridentDispatch({
+            build_substrate: (cwd: string): Substrate => {
+              const s = buildLlmCallSubstrate({
+                pool: llmPool,
+                substrate_instance_id: `cc-trident-${internal_handle}`,
+                cwd,
+                internal_handle,
+                user_id: OWNER_USER_ID,
+                project_slug,
+                skip_permissions: true,
+                ephemeral: true,
+                ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+              })
+              if (s === null) {
+                // Eager pool drained to empty between boot and dispatch — surface
+                // as a crashed build turn (TridentSessionManager treats a thrown
+                // dispatch as `crashed`) rather than a silent no-op.
+                throw new Error('trident: empty Anthropic credential pool')
+              }
+              return s
+            },
           })
         : null
 
@@ -1006,15 +1026,13 @@ export function buildOpenGraphComposer(
       // loop. Threading `dispatch` here is what flips the trident tick loop
       // (built in `build-core-modules.ts`) from its `stubAdvanceDeps` no-op to
       // the REAL `buildTridentOrchestrator` step, so a `code_trident_runs` row
-      // is driven end-to-end on the CC-subprocess substrate. Omitted when no
-      // credential resolves (`tridentSubstrate === null`) → unchanged LLM-less
-      // behaviour (loop stays live + restart-safe but advances nothing).
-      ...(tridentSubstrate !== null
-        ? {
-            trident: {
-              dispatch: buildSubstrateTridentDispatch({ substrate: tridentSubstrate }),
-            },
-          }
+      // is driven end-to-end on the CC-subprocess substrate (a fresh ephemeral
+      // REPL rooted at each run's worktree — see `tridentDispatch` above).
+      // Omitted when no credential resolves (`tridentDispatch === null`) →
+      // unchanged LLM-less behaviour (loop stays live + restart-safe but
+      // advances nothing).
+      ...(tridentDispatch !== null
+        ? { trident: { dispatch: tridentDispatch } }
         : {}),
       // Tear down the upload-session sweeper on shutdown.
       realmode_cleanups: realmodeCleanups,
