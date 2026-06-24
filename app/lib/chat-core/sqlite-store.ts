@@ -80,6 +80,9 @@ const SCHEMA = [
      read_by       TEXT,
      reactions     TEXT,
      reactions_rev INTEGER,
+     edited_at     INTEGER,
+     deleted       INTEGER,
+     edit_rev      INTEGER,
      PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
@@ -154,6 +157,12 @@ export class SqliteChatStore implements Store {
     // `MessageReaction[]`; `reactions_rev` the monotonic LWW revision.
     await ensureColumn(db, TABLE, 'reactions');
     await ensureColumn(db, TABLE, 'reactions_rev', 'INTEGER');
+    // Track B Phase 4 (edit/delete) — additive columns, same idempotent ADD
+    // COLUMN migration. `edited_at` is the unix-ms of the last edit, `deleted`
+    // the tombstone flag (0/1), `edit_rev` the monotonic LWW revision.
+    await ensureColumn(db, TABLE, 'edited_at', 'INTEGER');
+    await ensureColumn(db, TABLE, 'deleted', 'INTEGER');
+    await ensureColumn(db, TABLE, 'edit_rev', 'INTEGER');
     if (!ftsPreexisted) {
       await backfillFts(db);
     }
@@ -323,8 +332,8 @@ export class SqliteChatStore implements Store {
   private async write(identity: string, msg: ChatMessage): Promise<void> {
     await this.db.execute(
       `INSERT OR REPLACE INTO ${TABLE}
-         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         identity,
         msg.topic_id,
@@ -341,6 +350,9 @@ export class SqliteChatStore implements Store {
         encodeDeviceIds(msg.read_by),
         encodeReactions(msg.reactions),
         msg.reactions_rev ?? null,
+        msg.edited_at ?? null,
+        msg.deleted === true ? 1 : msg.deleted === false ? 0 : null,
+        msg.edit_rev ?? null,
       ],
     );
   }
@@ -367,6 +379,9 @@ function rowToMessage(row: SqlRow): ChatMessage {
     read_by: parseDeviceIds(row['read_by']),
     reactions: parseReactionsCol(row['reactions']),
     reactions_rev: typeof row['reactions_rev'] === 'number' ? row['reactions_rev'] : null,
+    edited_at: typeof row['edited_at'] === 'number' ? row['edited_at'] : null,
+    deleted: row['deleted'] === 1 ? true : row['deleted'] === 0 ? false : null,
+    edit_rev: typeof row['edit_rev'] === 'number' ? row['edit_rev'] : null,
   };
 }
 

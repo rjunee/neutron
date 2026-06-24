@@ -60,6 +60,10 @@ export interface UseMobileChatResult {
   markRead: (messageIds: readonly string[]) => void;
   /** Add or remove an emoji reaction on a message (Track B Phase 4). */
   react: (messageId: string, emoji: string, action: ReactionAction) => void;
+  /** Edit a message's body (Track B Phase 4 — author-only). */
+  editMessage: (messageId: string, body: string) => void;
+  /** Delete (tombstone) a message (Track B Phase 4 — author-only). */
+  deleteMessage: (messageId: string) => void;
   /** This device's id — passed to `deliveryState` so a message's read tick
    *  excludes the sender's own device. Empty until the session constructs. */
   selfDeviceId: string;
@@ -226,6 +230,16 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     [],
   );
 
+  const editMessage = useCallback((messageId: string, body: string): void => {
+    if (messageId.length === 0 || body.trim().length === 0) return;
+    sessionRef.current?.editMessage(messageId, body.trim());
+  }, []);
+
+  const deleteMessage = useCallback((messageId: string): void => {
+    if (messageId.length === 0) return;
+    sessionRef.current?.deleteMessage(messageId);
+  }, []);
+
   const rows = useMemo(() => buildRenderRows(messages, stream), [messages, stream]);
 
   return {
@@ -237,6 +251,8 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     send,
     markRead,
     react,
+    editMessage,
+    deleteMessage,
     selfDeviceId,
   };
 }

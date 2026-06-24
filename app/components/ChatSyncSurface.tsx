@@ -61,8 +61,19 @@ interface ViewableItemsChange {
 }
 
 export function ChatSyncSurface({ projectId }: ChatSyncSurfaceProps): React.JSX.Element {
-  const { rows, status, typing, pendingCount, ready, send, markRead, react, selfDeviceId } =
-    useMobileChat(projectId);
+  const {
+    rows,
+    status,
+    typing,
+    pendingCount,
+    ready,
+    send,
+    markRead,
+    react,
+    editMessage,
+    deleteMessage,
+    selfDeviceId,
+  } = useMobileChat(projectId);
 
   // Track B Phase 4 — toggle a reaction: tap an existing self-chip to remove,
   // else add. The picker tray (long-press) always adds.
@@ -75,9 +86,15 @@ export function ChatSyncSurface({ projectId }: ChatSyncSurfaceProps): React.JSX.
 
   const renderItem = useCallback(
     ({ item }: { item: RenderRow }) => (
-      <ChatRow row={item} selfDeviceId={selfDeviceId} onToggleReaction={onToggleReaction} />
+      <ChatRow
+        row={item}
+        selfDeviceId={selfDeviceId}
+        onToggleReaction={onToggleReaction}
+        onEdit={editMessage}
+        onDelete={deleteMessage}
+      />
     ),
-    [selfDeviceId, onToggleReaction],
+    [selfDeviceId, onToggleReaction, editMessage, deleteMessage],
   );
 
   // Track B Phase 4 — when agent messages scroll into view, report them read.
@@ -144,12 +161,18 @@ function ChatRow({
   row,
   selfDeviceId,
   onToggleReaction,
+  onEdit,
+  onDelete,
 }: {
   row: RenderRow;
   selfDeviceId: string;
   onToggleReaction: (messageId: string, emoji: string, reactedBySelf: boolean) => void;
+  onEdit: (messageId: string, body: string) => void;
+  onDelete: (messageId: string) => void;
 }): React.JSX.Element {
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Track B Phase 4 (edit/delete) — inline edit draft; non-null while editing.
+  const [draft, setDraft] = useState<string | null>(null);
 
   if (row.kind === 'streaming') {
     return (
@@ -168,6 +191,13 @@ function ChatRow({
   // Only a server-acked message (with a real message_id) can carry reactions —
   // you can't react to an optimistic bubble the server hasn't seen yet.
   const canReact = message.message_id !== null;
+  // Track B Phase 4 (edit/delete) — author-only. On mobile the local human owns
+  // the `user` messages, so edit/delete is offered only on the user's own,
+  // server-acked, non-deleted bubbles (the agent's messages are immutable here;
+  // the server would reject a cross-author mutation anyway).
+  const canMutate = isUser && canReact && message.deleted !== true;
+  const isDeleted = message.deleted === true;
+  const wasEdited = !isDeleted && message.edited_at !== null && message.edited_at !== undefined;
 
   const react = (emoji: string, reactedBySelf: boolean): void => {
     if (message.message_id === null) return;
@@ -175,24 +205,90 @@ function ChatRow({
     setPickerOpen(false);
   };
 
+  const beginEdit = (): void => {
+    setPickerOpen(false);
+    setDraft(message.body);
+  };
+  const submitEdit = (): void => {
+    if (message.message_id === null || draft === null) return;
+    const next = draft.trim();
+    if (next.length > 0 && next !== message.body) onEdit(message.message_id, next);
+    setDraft(null);
+  };
+  const remove = (): void => {
+    setPickerOpen(false);
+    if (message.message_id !== null) onDelete(message.message_id);
+  };
+
+  // Deleted → render a tombstone placeholder; no actions, reactions, or ticks.
+  if (isDeleted) {
+    return (
+      <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
+        <View style={styles.bubbleColumn}>
+          <View style={[styles.bubble, styles.tombstoneBubble]}>
+            <Text style={styles.tombstoneText}>🚫 This message was deleted</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  // Editing → render an inline composer in place of the bubble.
+  if (draft !== null) {
+    return (
+      <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
+        <View style={styles.bubbleColumn}>
+          <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
+            <TextInput
+              style={[styles.editInput, isUser ? styles.userText : styles.agentText]}
+              value={draft}
+              onChangeText={setDraft}
+              multiline
+              autoFocus
+              accessibilityLabel="Edit message"
+            />
+          </View>
+          <View style={[styles.reactionRow, isUser ? styles.trayUser : styles.trayAgent]}>
+            <Pressable onPress={() => setDraft(null)} accessibilityRole="button" accessibilityLabel="Cancel edit" style={styles.chip}>
+              <Text style={styles.chipText}>Cancel</Text>
+            </Pressable>
+            <Pressable onPress={submitEdit} accessibilityRole="button" accessibilityLabel="Save edit" style={[styles.chip, styles.chipSelf]}>
+              <Text style={styles.chipText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={[styles.bubbleWrap, isUser ? styles.userWrap : styles.agentWrap]}>
       <View style={styles.bubbleColumn}>
         <Pressable
           onLongPress={canReact ? () => setPickerOpen((v) => !v) : undefined}
           delayLongPress={250}
-          accessibilityLabel={canReact ? 'Long-press to react' : undefined}
+          accessibilityLabel={canReact ? 'Long-press for actions' : undefined}
         >
           <View style={[styles.bubble, isUser ? styles.userBubble : styles.agentBubble]}>
             <Text style={isUser ? styles.userText : styles.agentText}>{message.body}</Text>
-            {delivery !== null ? (
-              <Text
-                style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
-                accessibilityLabel={`delivery: ${delivery}`}
-              >
-                {deliveryGlyph(delivery)}
-              </Text>
-            ) : null}
+            <View style={styles.metaRow}>
+              {wasEdited ? (
+                <Text
+                  style={[styles.editedLabel, isUser ? styles.editedLabelUser : null]}
+                  accessibilityLabel="edited"
+                >
+                  edited
+                </Text>
+              ) : null}
+              {delivery !== null ? (
+                <Text
+                  style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
+                  accessibilityLabel={`delivery: ${delivery}`}
+                >
+                  {deliveryGlyph(delivery)}
+                </Text>
+              ) : null}
+            </View>
           </View>
         </Pressable>
         {pickerOpen ? (
@@ -211,6 +307,16 @@ function ChatRow({
                 <Text style={styles.trayEmoji}>{emoji}</Text>
               </Pressable>
             ))}
+            {canMutate ? (
+              <>
+                <Pressable onPress={beginEdit} accessibilityRole="button" accessibilityLabel="Edit message" style={styles.trayEmojiBtn}>
+                  <Text style={styles.trayAction}>Edit</Text>
+                </Pressable>
+                <Pressable onPress={remove} accessibilityRole="button" accessibilityLabel="Delete message" style={styles.trayEmojiBtn}>
+                  <Text style={[styles.trayAction, styles.trayActionDanger]}>Delete</Text>
+                </Pressable>
+              </>
+            ) : null}
           </View>
         ) : null}
         {chips.length > 0 ? (
@@ -357,6 +463,20 @@ const styles = StyleSheet.create({
     color: THEME.accent,
     opacity: 1,
   },
+  // Track B Phase 4 (edit/delete) — "edited" marker, tombstone + inline editor.
+  metaRow: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-end', gap: SPACING.xs },
+  editedLabel: { ...TYPOGRAPHY.caption, color: THEME.text_muted, opacity: 0.7, marginTop: 2 },
+  editedLabelUser: { color: THEME.background, opacity: 0.6 },
+  tombstoneBubble: {
+    backgroundColor: THEME.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: THEME.hairline,
+    borderBottomLeftRadius: 4,
+  },
+  tombstoneText: { ...TYPOGRAPHY.body, color: THEME.text_muted, fontStyle: 'italic' },
+  editInput: { padding: 0, margin: 0, minWidth: 160 },
+  trayAction: { ...TYPOGRAPHY.caption, color: THEME.text_primary, fontWeight: '600' },
+  trayActionDanger: { color: THEME.warning },
   // Track B Phase 4 (reactions) — chip row + long-press picker tray.
   bubbleColumn: { maxWidth: '82%' },
   reactionRow: {

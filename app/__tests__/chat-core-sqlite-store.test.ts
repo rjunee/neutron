@@ -290,4 +290,46 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect((await store.list('app:a')).map((m) => m.body)).toEqual(['a-body']);
     expect((await store.list('app:b')).map((m) => m.body)).toEqual(['b-updated']);
   });
+
+  // ── Track B Phase 4 (edit/delete) ────────────────────────────────────────
+  it('round-trips edited_at + deleted + edit_rev', async () => {
+    const store = await SqliteChatStore.open(bunExecutor(freshDb()));
+    await store.upsert(
+      msg({
+        client_msg_id: 'c1',
+        message_id: 'm1',
+        seq: 1,
+        status: 'acked',
+        body: 'edited body',
+        edited_at: 1234,
+        edit_rev: 1,
+      }),
+    );
+    let [row] = await store.list(TOPIC);
+    expect(row?.body).toBe('edited body');
+    expect(row?.edited_at).toBe(1234);
+    expect(row?.edit_rev).toBe(1);
+    expect(row?.deleted ?? false).toBe(false);
+    // A higher-rev delete tombstones it (empty body, deleted true).
+    await store.upsert(
+      msg({ client_msg_id: 'c1', message_id: 'm1', seq: 1, status: 'acked', body: '', deleted: true, edit_rev: 2 }),
+    );
+    [row] = await store.list(TOPIC);
+    expect(row?.deleted).toBe(true);
+    expect(row?.body).toBe('');
+    expect(row?.edit_rev).toBe(2);
+  });
+
+  it('persists edit state across a cold reopen (migrated columns)', async () => {
+    const db = freshDb();
+    const first = await SqliteChatStore.open(bunExecutor(db));
+    await first.upsert(
+      msg({ client_msg_id: 'c1', message_id: 'm1', seq: 1, status: 'acked', body: 'fixed', edited_at: 9, edit_rev: 3 }),
+    );
+    const reopened = await SqliteChatStore.open(bunExecutor(db));
+    const [row] = await reopened.list(TOPIC);
+    expect(row?.body).toBe('fixed');
+    expect(row?.edited_at).toBe(9);
+    expect(row?.edit_rev).toBe(3);
+  });
 });
