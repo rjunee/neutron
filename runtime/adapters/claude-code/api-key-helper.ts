@@ -8,16 +8,16 @@
  * `~/.claude/.credentials.json` itself — so the script-spawn helper
  * machinery is no longer wired through the adapter.
  *
- * What survives in this file is `makeMaxOAuthSubscriptionLoader`: an
- * external Core (`gateway/cores/code-gen-factory.ts`) still uses it
- * directly to surface a `{access_token, expires_at}` shape from the
- * owner's secrets store, independently of the CC substrate. The
- * function name is preserved here to avoid a downstream caller import
- * rename in a sprint whose scope is the substrate, not the cores.
+ * What survives in this file is `makeMaxOAuthSubscriptionLoader`: it surfaces a
+ * `{access_token, expires_at}` shape from the owner's secrets store,
+ * independently of the CC substrate. Its sole consumer was the Code-Gen Core's
+ * gateway wrapper (`gateway/cores/code-gen-factory.ts`), RETIRED in the
+ * Trident-port close-out (2026-06-24) — `/code` now runs on foundational
+ * Trident over the CC-subprocess substrate. The export (and its test) are kept
+ * so a future OAuth-loader need has a ready helper rather than a re-impl.
  *
- * If the Code-Gen Core grows its own home (or moves to a top-level
- * `runtime/auth/` module), this file can be deleted entirely. Until
- * then, keep this slim — it is NOT the credential resolver for the CC
+ * With the wrapper gone this file can be deleted once nothing else needs the
+ * loader. Until then, keep this slim — it is NOT the credential resolver for the CC
  * adapter anymore.
  */
 

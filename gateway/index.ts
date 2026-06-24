@@ -39,7 +39,6 @@ export {
   buildChainedChatCommandFilter,
   buildRemindersChatCommandFilter,
   buildTridentCodeChatCommandFilter,
-  buildCodegenChatCommandFilter,
   buildCalendarChatCommandFilter,
   readPatternFromPrompts,
   buildCoresBackendFactories,
