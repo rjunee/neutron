@@ -126,6 +126,15 @@ const USER_FIRST_NAME_STOP_WORDS: ReadonlySet<string> = new Set([
   'nah',
 ])
 
+const NAME_TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?'])
+
+/** Linear-time equivalent of `.replace(/[.,;:!?]+$/u, '')`. */
+function stripTrailingNamePunctuation(s: string): string {
+  let end = s.length
+  while (end > 0 && NAME_TRAILING_PUNCTUATION.has(s[end - 1]!)) end--
+  return s.slice(0, end)
+}
+
 /**
  * Normalize a candidate user first name: first whitespace-separated token,
  * trailing punctuation stripped, stop-words + over-long + non-letter inputs
@@ -135,8 +144,11 @@ export function sanitizeUserFirstName(raw: string): string | null {
   const trimmed = raw.trim()
   if (trimmed.length === 0) return null
   const firstToken = trimmed.split(/\s+/)[0] ?? ''
-  // Strip trailing punctuation: "Sam." → "Sam", "Sam," → "Sam".
-  const stripped = firstToken.replace(/[.,;:!?]+$/u, '')
+  // Strip trailing punctuation: "Sam." → "Sam", "Sam," → "Sam". A backward
+  // scan instead of `/[.,;:!?]+$/` — the unanchored `+` restarts at every
+  // offset when `$` fails (e.g. "!!!!a"), which is quadratic (CodeQL
+  // js/polynomial-redos). One linear pass strips the same trailing run.
+  const stripped = stripTrailingNamePunctuation(firstToken)
   if (stripped.length === 0) return null
   if (stripped.length > 32) return null
   if (USER_FIRST_NAME_STOP_WORDS.has(stripped.toLowerCase())) return null

@@ -4734,3 +4734,64 @@ artifact; the one added line in the new test is the identical `stubPlatform`
 PlatformAdapter aliasing the two sibling router-test files already exhibit).
 `bun test onboarding/interview/` → 981 pass / 35 skip / 0 fail. Full `bun test`
 → 7187 pass / 90 skip / 0 fail.
+
+## Hardening pass — 4 CodeQL polynomial-ReDoS HIGHs + 2 flaky tests
+
+Bugfix + test-hardening only; no surface change (SYSTEM-OVERVIEW.md unchanged).
+
+### CodeQL `js/polynomial-redos` (alerts #60–#63)
+
+Four regexes carried super-linear backtracking on adversarial input. Each was
+replaced with a linear scan (or a non-overlapping regex) that preserves the
+EXACT matching behaviour — nothing the regex accepted was loosened. Each fix is
+pinned by a behaviour-parity test plus a pathological-input test that completes
+in <50ms (the old regex would backtrack for seconds / hang):
+
+- **`skill-forge/signature.ts`** (#63) — `normalizeAction`'s trailing
+  `\s*\(.*\)\s*$` arg-tail strip. The unanchored leading `\s*` + greedy `.*`
+  restarted the match at every offset on input like `'('.repeat(n)`. Now a
+  linear `dropTrailingParenTail()` helper: it reproduces the regex's
+  "first `(` through the last `)` that is the last non-whitespace char, plus
+  the whitespace before that `(`" semantics (including the greedy nested-paren
+  case). New `skill-forge/__tests__/signature.test.ts`.
+- **`skill-forge/distiller.ts`** (#62) — `deriveTriggers`'s `/\.+$/` trailing-
+  dot strip. Unanchored `\.+` is quadratic on `'.'.repeat(n)+'x'` (the `$`
+  fails, the engine restarts at every offset). Now a linear `stripTrailingDots()`
+  backward scan. New parity + pathological tests in `distiller.test.ts`.
+- **`onboarding/interview/extracted-fields.ts`** (#61) — `sanitizeUserFirstName`'s
+  `/[.,;:!?]+$/u` trailing-punctuation strip (same `+$` quadratic shape). Now a
+  linear `stripTrailingNamePunctuation()` over a punctuation `Set`. New
+  `onboarding/interview/__tests__/extracted-fields-sanitize.test.ts`.
+- **`reflection/detector.ts`** (#60) — `extractJsonObject`'s fence regex
+  `/```(?:json)?\s*([\s\S]+?)```/`. The leading `\s*` overlapped `[\s\S]+?`, so
+  a fence opener followed by a whitespace flood with no closing fence backtracked
+  O(n²). The capture is `.trim()`-ed anyway, so the `\s*` was simply dropped:
+  `/```(?:json)?([\s\S]+?)```/` matches the identical region. New
+  `extractJsonObject` describe block in `reflection/__tests__/detector.test.ts`.
+
+### Flaky tests — removed wall-clock / fixed-sleep dependencies
+
+- **`gateway/__tests__/composition-tasks-projection-wiring.test.ts`** — three
+  `await setTimeout(N)` waits before reading STATUS.md/ACTIONS.md raced the
+  30ms projection debounce under CI load (file present, timer not yet flushed →
+  empty read). Replaced with a `waitForFileContaining()` poll-until-condition
+  (10ms ticks, 5s ceiling); the NO_PROJECT case's dead sleep was dropped. 20×
+  loop → 20/20.
+- **`gateway/comments/__tests__/anchor-walker.test.ts`** — "concurrent
+  write+delete keeps anchor live" fired `deleteDoc` and `writeDoc`
+  simultaneously, so the writer's temp-file write (whose mtime the writer later
+  fstat's — rename preserves it) could land BEFORE the deleter's `unlink`. That
+  put `writer_mtime < delete_time` on a fast host, the materialiser dropped the
+  writer's `anchor_relocated` as stale, and the anchor flaked DEAD despite the
+  file existing. The writer is now gated on the observed unlink (`existsSync`
+  poll, 2s ceiling) so its mtime is sampled strictly after `delete_time`. The
+  concurrency under test is preserved — the deleter is still mid-flight in its
+  slow 50ms `recordCommit()` window when the writer lands its rename + hook.
+  30× under 6-core CPU load → 30/30. (The underlying production note: the
+  writer's stamp reflects temp-write time, not rename time — a latent sharp
+  edge in `DocStore.writeDoc`'s mtime sampling that this test happens to probe.)
+
+**Verify.** `tsc -p` clean for skill-forge / reflection / onboarding / gateway.
+`bun test` green for skill-forge (31), reflection (36), gateway/comments (115),
+onboarding/interview (965 pass / 35 skip), composition-projection (9). Race +
+flaky tests looped 20–30× (incl. under CPU contention) → 0 failures.

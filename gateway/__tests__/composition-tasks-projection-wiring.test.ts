@@ -148,6 +148,39 @@ async function authedFetch(
   return fetch(`${base}${path}`, { ...init, headers })
 }
 
+/**
+ * Poll a file until it contains every `needle`, returning its contents.
+ *
+ * The projection writer flushes on a 30ms debounce timer, so a fixed
+ * `setTimeout(120)` raced the flush under CI load (the file existed but the
+ * timer hadn't fired yet → an empty read). Polling-until-condition is the
+ * load-independent contract: we wait only as long as needed, up to a generous
+ * ceiling, instead of betting a single fixed sleep beats the debounce.
+ */
+async function waitForFileContaining(
+  filePath: string,
+  needles: readonly string[],
+  timeoutMs = 5000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  for (;;) {
+    try {
+      last = readFileSync(filePath, 'utf8')
+    } catch {
+      last = ''
+    }
+    if (needles.every((n) => last.includes(n))) return last
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `timed out after ${timeoutMs}ms waiting for ${filePath} to contain ` +
+          `${JSON.stringify(needles)} — last read:\n${last}`,
+      )
+    }
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
 describe('composition wiring — projection writer attaches to canonical store', () => {
   let harness: Harness
   beforeEach(async () => {
@@ -175,16 +208,15 @@ describe('composition wiring — projection writer attaches to canonical store',
     const body = (await res.json()) as { ok: boolean; task: { id: string } }
     expect(body.ok).toBe(true)
 
-    // Debounce is 30ms; wait long enough for the timer to flush.
-    await new Promise((r) => setTimeout(r, 120))
-
+    // Debounce is 30ms; poll until the flush lands rather than betting a
+    // fixed sleep beats it (the prior `setTimeout(120)` flaked under load).
     const statusPath = join(harness.owner_home, 'Projects', PROJECT, 'STATUS.md')
     const actionsPath = join(harness.owner_home, 'Projects', PROJECT, 'ACTIONS.md')
 
-    const status = readFileSync(statusPath, 'utf8')
+    const status = await waitForFileContaining(statusPath, ['- [ ] wiring smoke [P1]'])
     expect(status).toContain('- [ ] wiring smoke [P1]')
 
-    const actions = readFileSync(actionsPath, 'utf8')
+    const actions = await waitForFileContaining(actionsPath, ['- [ ] wiring smoke [P1]'])
     expect(actions).toContain('- [ ] wiring smoke [P1]')
   })
 
@@ -197,8 +229,10 @@ describe('composition wiring — projection writer attaches to canonical store',
       project_slug: OWNER,
       title: 'unscoped',
     })
-    await new Promise((r) => setTimeout(r, 80))
-    // No throw + no STATUS.md created for the empty project_id.
+    // No throw + no STATUS.md created for the empty project_id. The create()
+    // is awaited; the projection module never writes for the NO_PROJECT
+    // bucket, so there's nothing to wait on — a fixed sleep here only added
+    // dead wall-clock.
     const tasksModule = harness.graph.get<{ store: TaskStore }>('tasks')
     expect(tasksModule.store).toBe(harness.canonicalStore)
   })
@@ -213,10 +247,15 @@ describe('composition wiring — projection writer attaches to canonical store',
       method: 'POST',
       body: JSON.stringify({ title: 'second', priority: 1 }),
     })
-    await new Promise((r) => setTimeout(r, 120))
 
+    // Poll until both writes have flushed (coalesced or not) instead of a
+    // fixed sleep; the coalescing guarantee is about the OUTPUT, not the
+    // exact flush latency.
     const statusPath = join(harness.owner_home, 'Projects', PROJECT, 'STATUS.md')
-    const status = readFileSync(statusPath, 'utf8')
+    const status = await waitForFileContaining(statusPath, [
+      '- [ ] first [P1]',
+      '- [ ] second [P2]',
+    ])
     expect(status).toContain('- [ ] first [P1]')
     expect(status).toContain('- [ ] second [P2]')
     // Sanity guard: the file mtime is recent (the debounce fired).

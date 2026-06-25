@@ -24,6 +24,26 @@ test('deriveTriggers includes the intent verbatim (lower-cased)', () => {
   expect(t).toContain('scrape a tweet')
 })
 
+test('deriveTriggers strips a run of trailing dots (regex parity)', () => {
+  // Reimplemented from `/\.+$/` to a linear scan; result is unchanged.
+  expect(deriveTriggers('Scrape a tweet...')).toContain('scrape a tweet')
+  expect(deriveTriggers('do it.')).toContain('do it')
+  // Interior dots are preserved — only a trailing run is stripped.
+  expect(deriveTriggers('ship v1.2')).toContain('ship v1.2')
+})
+
+test('deriveTriggers completes in <50ms on adversarial dot input', () => {
+  // `'.'.repeat(n) + 'x'` is the pathological case for the old `/\.+$/`:
+  // `\.+` matches every dot, `$` fails on the trailing `x`, and the engine
+  // restarts at every offset — O(n²). The linear scan finds no trailing run.
+  const evil = '.'.repeat(500_000) + 'x'
+  const t0 = performance.now()
+  const triggers = deriveTriggers(evil)
+  const elapsed = performance.now() - t0
+  expect(triggers[0]).toBe(evil.toLowerCase())
+  expect(elapsed).toBeLessThan(50)
+})
+
 test('distill derives name/triggers/artifacts/steps from the workflow', () => {
   const draft = distillSkill(workflow)
   expect(draft.name).toBe('scrape-a-tweet-and-file-it-to-the-brief')

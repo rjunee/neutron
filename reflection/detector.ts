@@ -215,7 +215,13 @@ export function extractJsonObject(text: string): unknown {
   } catch {
     /* fall through */
   }
-  const fence = trimmed.match(/```(?:json)?\s*([\s\S]+?)```/)
+  // The capture is `.trim()`-ed below, so we don't need a leading `\s*` to eat
+  // the whitespace after the fence opener — and dropping it removes the
+  // `\s*` / `[\s\S]+?` overlap that gave this regex super-linear backtracking
+  // on input like "```" + many spaces with no closing fence (CodeQL
+  // js/polynomial-redos). The matched region (and therefore the parsed JSON)
+  // is unchanged: lazy `[\s\S]+?` still stops at the first closing fence.
+  const fence = trimmed.match(/```(?:json)?([\s\S]+?)```/)
   if (fence !== null && typeof fence[1] === 'string') {
     try {
       return JSON.parse(fence[1].trim())
