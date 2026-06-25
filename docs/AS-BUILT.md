@@ -55,26 +55,30 @@ the JSONL-first resume path; auto-picking any picker option.
   modified transcript with ≥1 non-empty line (**JSONL-is-truth, invariant §5**;
   mirrors `validateAndPersistSessionId`'s ghost guard). The stale id this REPL was
   spawned under is excluded so it can't "recover" itself.
-- **Surface + retry (actually moves the REPL onto the recovered session — Codex P1).**
-  A hit records the recovered id on `session.pendingResumeSessionId` and **poisons**
-  the warm child that just escaped the picker (it is contextless). `getOrSpawnSession`
-  does NOT re-read `resolveResumeDirective` while an unpoisoned warm child is alive,
-  so merely patching the registry would leave subsequent turns on the fresh REPL
-  despite the notice; the poison makes the next turn evict + respawn, and
-  `pendingResumeSessionId` is carried as the `forceResume` directive (a new
-  `evictedResume` capture in `getOrSpawnSession`, hoisted ABOVE the alive/exited
-  branch split so it also covers a poisoned child that exited before the next
-  dispatch — Codex P2) so that respawn `--resume`s the recovered transcript —
-  bypassing the stale-id registry and sidestepping a race with this spawn's own
-  registry write. The current in-flight turn finishes on the fresh
-  child; the notice tells the user the recovered context is **active from their next
-  message**. A **miss** (nothing on disk) surfaces a "session lost — starting fresh"
-  notice + one operator alert AND fires `onNoRecovery`, which sets
-  `session.forceFreshRespawn` + poisons: the stale `--resume` id `spawnSession` wrote
-  as `has_session: true` would otherwise reopen the picker on a later crash/watchdog
-  respawn, so the next turn evicts + respawns with resume FORCED OFF (a new
-  `evictedForceFresh` branch), and that fresh spawn rewrites the registry
-  `has_session: false` — breaking the stale-resume loop (Codex P2). Spawn-time
+- **Surface + retry (actually moves the REPL onto the recovered session, durably — Codex P1/P2).**
+  A hit uses TWO mechanisms. **(in-memory)** records the recovered id on
+  `session.pendingResumeSessionId` and **poisons** the warm child that just escaped
+  the picker (it is contextless); `getOrSpawnSession` does NOT re-read
+  `resolveResumeDirective` while an unpoisoned warm child is alive, so the poison
+  makes the next turn evict + respawn with `pendingResumeSessionId` carried as the
+  `forceResume` directive (a new `evictedResume` capture, hoisted ABOVE the
+  alive/exited branch split so it also covers a poisoned child that exited before the
+  next dispatch). **(durable)** also `patchRecord`s the registry to the recovered id
+  — the in-memory flags are LOST if this child exits before the next dispatch (the
+  pool drops the session on `child.exited`), so the crash/watchdog respawn, which
+  reads the registry not the session, must see the recovered id or it re-`--resume`s
+  the stale id and reopens the picker (Codex P2). `spawnSession`'s own flag-aware
+  registry write covers the reverse ordering (recovery finishing before that write);
+  together every ordering converges on the recovered id. The current in-flight turn
+  finishes on the fresh child; the notice tells the user the recovered context is
+  **active from their next message**. A **miss** (nothing on disk) surfaces a
+  "session lost — starting fresh" notice + one operator alert AND fires
+  `onNoRecovery`, which (in-memory) sets `session.forceFreshRespawn` + poisons so the
+  next turn evicts + respawns with resume FORCED OFF (a new `evictedForceFresh`
+  branch) AND (durable) `patchRecord`s the registry `has_session: false` now — the
+  stale `--resume` id `spawnSession` persisted would otherwise reopen the picker on a
+  later crash/watchdog respawn even if this child exited first. Breaking the
+  stale-resume loop both live and across a crash (Codex P2). Spawn-time
   notices route through `ReplSession.pushNotice` (buffered until the
   first live turn, since the picker fires before `start()` assigns `activeTurn`) and
   drained by `flushPendingNotices` — Codex P2: a direct `activeTurn?.channel.push`
