@@ -32,7 +32,7 @@
  */
 
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
-import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -146,6 +146,20 @@ import {
   buildCrashLoopWarningText,
   recordAndEvaluateRestart,
 } from './restart-rate.ts'
+import {
+  loadModelUpdateState,
+  realProbeModel,
+  runGracefulUpgrade,
+  saveModelUpdateState,
+  startModelUpdateWatchdog,
+  type ModelUpdateWatchdog,
+  type SessionIdleSignals,
+} from './model-update-watchdog.ts'
+import {
+  getBestModel,
+  getKnownFallbackModels,
+  setBestModelOverride,
+} from '../../../models.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** Separator between the warm-pool key components (S3: `substrate_instance_id`,
@@ -753,6 +767,28 @@ export interface PersistentReplSubstrateOptions {
    *  true (consumes `captureSession`'s result). Tests inject `() => true`;
    *  production uses `makeJsonlExistsProbe(projectsDir)`. */
   jsonlExistsProbe?: (sessionId: string, cwd: string) => boolean
+  /** Path to the model-update watchdog's persisted state JSON (Vajra port row
+   *  #16). When set, the 6h model-version probe + idle-gated graceful upgrade run
+   *  for this instance. Defaults to `<dir(replRegistryPath)>/.model-update-state.json`.
+   *  Unset (and no registry path) → the watchdog does not start. */
+  modelUpdateStatePath?: string
+  /** Vajra port row #16: notified once (edge) when a genuinely-new top-tier
+   *  Claude model is detected and the graceful upgrade begins. A gateway wires
+   *  this to a dev-channel notice; unset → the notice surfaces via an operator
+   *  stderr log. */
+  onModelUpdate?: (notice: { newModel: string; oldModel: string; text: string }) => void
+  /** Override the model-update probe (tests inject a fake; production uses the
+   *  real `claude -p --model opus` probe with NO `--fallback-model`). */
+  modelProbe?: () => Promise<import('./model-update-watchdog.ts').ProbeResult>
+  /** Override the model-update watchdog cadence + probe-gate (tests). */
+  modelCheckTickMs?: number
+  modelCheckIntervalMs?: number
+  /** Override the graceful-upgrade idle gate + cadence (tests drive a fast,
+   *  deterministic upgrade; production uses the 30s/5s/5s/30min defaults). */
+  modelUpgradeIdleQuiesceMs?: number
+  modelUpgradeJsonlFreshMs?: number
+  modelUpgradePollMs?: number
+  modelUpgradePerSessionTimeoutMs?: number
 }
 
 /** Why a child-kill was requested — threads through the respawn trigger. */
@@ -2088,7 +2124,10 @@ async function replayPendingInbound(
   const replaySpec: AgentSpec = {
     prompt: entry.droppedInbound,
     tools: [],
-    model_preference: [record?.model ?? 'claude-opus-4-7'],
+    // The live runtime best model (the watchdog override when one was adopted,
+    // else the env/default) — never a hardcoded id, so a model upgrade reaches
+    // the replay path too.
+    model_preference: [record?.model ?? getBestModel()],
   }
   const handle = createPersistentReplSubstrate(ownerOptions).start(replaySpec)
   let recoveredText = ''
@@ -2686,11 +2725,18 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  *  alive after the gateway/test stops). Populated + cleaned by `startReplWatchdog`. */
 const activeWatchdogs = new Map<string, ReplWatchdog>()
 
+/** Live per-instance model-update watchdog handles (Vajra port row #16), keyed by
+ *  the model-update state path. Tracked so shutdown stops the 6h-gated cadence
+ *  tick. Populated + cleaned by `startModelUpdateWatchdogForInstance`. */
+const activeModelWatchdogs = new Map<string, ModelUpdateWatchdog>()
+
 /** Test/operator helper: SIGTERM every warm REPL and clear the pool. */
 export async function shutdownAllPersistentRepls(): Promise<void> {
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
   for (const w of activeWatchdogs.values()) w.stop()
   activeWatchdogs.clear()
+  for (const w of activeModelWatchdogs.values()) w.stop()
+  activeModelWatchdogs.clear()
   for (const [key, p] of pool.entries()) {
     pool.delete(key)
     try {
@@ -2816,7 +2862,10 @@ function clearRespawnInFlight(registryPath: string, sessionKey: string): void {
  *  from the registry record, empty prompt (the inject happens in `start()`'s
  *  driver / pending-replay, not the spawn). */
 function resumeSpecFor(record: ReplRegistryRecord): AgentSpec {
-  return { prompt: '', tools: [], model_preference: [record.model ?? 'claude-opus-4-7'] }
+  // `record.model` is the model the session spawned with; a graceful model
+  // upgrade rewrites it BEFORE respawning so the resume re-attaches on the new
+  // model. Absent (legacy record) → the live runtime best model.
+  return { prompt: '', tools: [], model_preference: [record.model ?? getBestModel()] }
 }
 
 /** Build the `executeRespawn` dependency surface wired to the real module pool +
@@ -3422,6 +3471,163 @@ export function startReplWatchdog(
   }
   activeWatchdogs.set(registryPath, watchdog)
   return watchdog
+}
+
+// ---------------------------------------------------------------------------
+// Model-update watchdog wiring (Vajra port row #16).
+// ---------------------------------------------------------------------------
+
+/** Snapshot a pooled warm session's idle signals for the graceful-upgrade gate,
+ *  or `null` if the session is gone / its child exited. Reads the four Vajra idle
+ *  signals off the live `ReplSession`:
+ *    - isTyping            → a turn is actively in flight (`activeTurn` set)
+ *    - hasToolPromptPending→ a wedge/tool-prompt recovery ladder is running
+ *    - lastDataAt          → last PTY byte (assistant-write proxy)
+ *    - jsonlMtimeMs        → session transcript mtime (cold ⇒ idle) */
+async function modelUpgradeIdleSignals(
+  sessionKey: string,
+  projectsDir: string,
+  cwd: string | undefined,
+): Promise<SessionIdleSignals | null> {
+  const p = pool.get(sessionKey)
+  if (p === undefined) return null
+  let session: ReplSession
+  try {
+    session = await p
+  } catch {
+    return null
+  }
+  if (session.hasChildExited()) return null
+  let jsonlMtimeMs: number | null = null
+  try {
+    // The session transcript lives at `<projectsDir>/<cwd-dashed>/<id>.jsonl`; a
+    // missing cwd (legacy record) means we can't address it → treat mtime as
+    // unknown (the mid-turn / tool-prompt gates still guard the upgrade).
+    if (cwd !== undefined) {
+      const jsonlPath = sessionJsonlPath(session.sessionId, cwd, projectsDir)
+      jsonlMtimeMs = existsSync(jsonlPath) ? statSync(jsonlPath).mtimeMs : null
+    }
+  } catch {
+    jsonlMtimeMs = null
+  }
+  return {
+    isTyping: session.activeTurn !== undefined,
+    hasToolPromptPending: session.wedgeRecovering,
+    lastDataAt: session.lastDataAt,
+    jsonlMtimeMs,
+  }
+}
+
+/**
+ * Start the model-update watchdog for THIS instance (Vajra port row #16). A
+ * 6h-gated tick probes the CLI's live model id (NO `--fallback-model`); on a
+ * genuinely-new top-tier id it posts the upgrade notice, adopts the model as the
+ * runtime default ({@link setBestModelOverride} — so fresh spawns use it), and
+ * idle-gated graceful-respawns each warm session onto it (rewriting each
+ * record's `model` BEFORE the `--resume`). Idempotent per model-update state
+ * path; a no-op (inert handle) when no state path is configured.
+ */
+export function startModelUpdateWatchdogForInstance(
+  options: PersistentReplSubstrateOptions,
+  wopts: ReplWatchdogOptions = {},
+): ModelUpdateWatchdog {
+  const statePath = options.modelUpdateStatePath
+  if (statePath === undefined) {
+    return { stop: () => {}, tick: async () => {} }
+  }
+  // Idempotent per state path (mirrors startReplWatchdog): one cadence tick per
+  // instance, re-armable after shutdown.
+  const live = activeModelWatchdogs.get(statePath)
+  if (live !== undefined) return live
+
+  const projectsDir = resolveTranscriptProjectsDir(options)
+  const registryPath = options.replRegistryPath
+
+  // The probe inherits the instance's scrubbed env + isolated config dir so it
+  // authenticates exactly as the warm REPLs do.
+  const probeEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...((options.env ?? {}) as NodeJS.ProcessEnv),
+    ...(options.claudeConfigDir !== undefined ? { CLAUDE_CONFIG_DIR: options.claudeConfigDir } : {}),
+  }
+
+  const deps: Parameters<typeof startModelUpdateWatchdog>[0] = {
+    probeModel:
+      options.modelProbe ??
+      (() =>
+        realProbeModel({
+          ...(options.claude_bin !== undefined ? { claudeBin: options.claude_bin } : {}),
+          env: probeEnv,
+        })),
+    loadState: () => loadModelUpdateState(statePath),
+    saveState: (s) => saveModelUpdateState(statePath, s),
+    getConfiguredModel: getBestModel,
+    adoptModel: (m) => setBestModelOverride(m),
+    knownFallbacks: getKnownFallbackModels,
+    postNotice: (notice) => {
+      if (options.onModelUpdate !== undefined) {
+        options.onModelUpdate(notice)
+      } else if (wopts.postAlert !== undefined) {
+        wopts.postAlert(notice.text)
+      } else {
+        process.stderr.write(`[model-update] ${notice.text}\n`)
+      }
+    },
+    runUpgrade: async (newModel: string) => {
+      if (registryPath === undefined) return
+      // Target only the warm sessions this instance owns (pool keys whose owning
+      // substrate points at this registry) — never another instance's sessions.
+      const ownedKeys = [...pool.keys()].filter(
+        (k) => supervisedBySessionKey.get(k)?.replRegistryPath === registryPath,
+      )
+      await runGracefulUpgrade({
+        listSessionKeys: () => ownedKeys,
+        idleSignals: (key) =>
+          modelUpgradeIdleSignals(key, projectsDir, getRecord(registryPath, key)?.cwd),
+        upgradeSession: (key) => {
+          // Rewrite the registry record's model BEFORE the respawn so the
+          // `--resume` re-attaches on the NEW model (resumeSpecFor reads it).
+          patchRecord(registryPath, key, { model: newModel })
+          const owner = supervisedBySessionKey.get(key) ?? options
+          const outcome = respawnReplSession(
+            owner,
+            key,
+            'model-update-watchdog',
+            `model upgrade → ${newModel}`,
+          )
+          return outcome.ok
+        },
+        log: (msg) => console.log(msg),
+        ...(options.modelUpgradeIdleQuiesceMs !== undefined ? { idleQuiesceMs: options.modelUpgradeIdleQuiesceMs } : {}),
+        ...(options.modelUpgradeJsonlFreshMs !== undefined ? { jsonlFreshMs: options.modelUpgradeJsonlFreshMs } : {}),
+        ...(options.modelUpgradePollMs !== undefined ? { pollMs: options.modelUpgradePollMs } : {}),
+        ...(options.modelUpgradePerSessionTimeoutMs !== undefined
+          ? { perSessionTimeoutMs: options.modelUpgradePerSessionTimeoutMs }
+          : {}),
+      })
+    },
+    ...(options.modelCheckTickMs !== undefined ? { intervalMs: options.modelCheckTickMs } : {}),
+    ...(options.modelCheckIntervalMs !== undefined ? { checkIntervalMs: options.modelCheckIntervalMs } : {}),
+  }
+
+  const watchdog = startModelUpdateWatchdog(deps)
+  const wrapped: ModelUpdateWatchdog = {
+    stop: () => {
+      watchdog.stop()
+      if (activeModelWatchdogs.get(statePath) === wrapped) activeModelWatchdogs.delete(statePath)
+    },
+    tick: () => watchdog.tick(),
+  }
+  activeModelWatchdogs.set(statePath, wrapped)
+  return wrapped
+}
+
+/** Test/introspection: the live model-update watchdog for a state path, or
+ *  undefined. Lets the wiring test drive a synchronous `tick()`. */
+export function peekModelUpdateWatchdogForTest(
+  statePath: string,
+): ModelUpdateWatchdog | undefined {
+  return activeModelWatchdogs.get(statePath)
 }
 
 // ---------------------------------------------------------------------------

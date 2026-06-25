@@ -2,6 +2,39 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-25 — model-update watchdog + graceful upgrade (P3, Vajra port row #16)
+
+**What shipped.** `runtime/adapters/claude-code/persistent/model-update-watchdog.ts`
++ live wiring — auto-detects a newer top-tier Claude model and gracefully moves
+every warm session onto it, so the box never drifts on a stale model (Vajra
+2026-04-16: Opus 4.7 shipped overnight, the gateway sat on 4.6 for hours). Built
+ON as the default; no flag. Closes the last MISSING master-table watchdog (#16).
+
+- **Probe (6h-gated, NO `--fallback-model`).** 15-min cadence tick, gated by a
+  persisted 6h cache, runs `claude -p --model opus "Reply ONLY with: MODEL_ID=<id>"`
+  async (`child_process.spawn`, never `spawnSync`). `buildProbeArgs` **never**
+  passes `--fallback-model` (pinned by test) — the load-bearing lesson: a fallback
+  makes the CLI return the HAIKU id during an Opus outage, which a naive
+  "new id → respawn" would adopt and SILENTLY DOWNGRADE every session. No fallback ⇒
+  the CLI errors during an outage ⇒ "probe failed, retry" (6h gate NOT advanced).
+- **Detect.** `isFallbackModel` rejects a known fallback id as an outage
+  (defense-in-depth); `decideModelUpdate` compares the snapshot-normalized probed
+  id against the box's CONFIGURED model (`getBestModel()`) on the first probe (so
+  4.6-while-4.7-shipped is caught immediately), edge-triggered (notify once per id).
+- **Adopt + graceful upgrade.** `setBestModelOverride(newModel)` in
+  `runtime/models.ts` (fresh spawns resolve `--model` via `getBestModel()`), then a
+  round-robin idle-gated `runGracefulUpgrade` respawns each EXISTING session only
+  when idle (not mid-turn, no tool-prompt, assistant quiet ≥30s, JSONL cold ≥5s),
+  rewriting `record.model` BEFORE the `--resume`. Bounded: one attempt per id; a
+  never-idle session is left on the old model, never hard-bounced.
+- **Wiring.** `startModelUpdateWatchdogForInstance` started in
+  `createClaudeCodeSubstrateAuto` (new `.model-update-state.json` supervision
+  path; `onModelUpdate` notice seam; `'model-update-watchdog'` respawn trigger);
+  the two hardcoded `'claude-opus-4-7'` spawn fallbacks now read `getBestModel()`.
+- **Tests.** `model-update-watchdog.test.ts` (40) + `model-update-watchdog-wiring.test.ts`
+  (2 end-to-end). Full runtime suite green (1169 pass); `tsc -p runtime` clean.
+- **Docs.** `docs/SYSTEM-OVERVIEW.md` + `docs/AS-BUILT.md` updated; row #16 → DONE.
+
 ## 2026-06-25 — cwd-drift watchdog (P3, Vajra port row #12)
 
 **What shipped.** `runtime/adapters/claude-code/persistent/cwd-drift-watchdog.ts`

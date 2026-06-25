@@ -72,3 +72,64 @@ export const FAST_MODEL: string =
  * subscription always exposes; Haiku is the safest choice.
  */
 export const PROBE_MODEL: string = FAST_MODEL
+
+// ---------------------------------------------------------------------------
+// Runtime BEST_MODEL override — the model-update watchdog's "real config path"
+// (Vajra port row #16, docs/research/vajra-terminal-detection-keystroke-port-
+// 2026-06-25.md).
+// ---------------------------------------------------------------------------
+
+/**
+ * Process-local override for {@link BEST_MODEL}, flipped by the model-update
+ * watchdog's graceful upgrade when Anthropic ships a newer top-tier model.
+ * `undefined` until an upgrade adopts a new id.
+ */
+let runtimeBestModel: string | undefined
+
+/**
+ * The effective best model id: the watchdog override when one has been adopted,
+ * else the env/default {@link BEST_MODEL}. This is the ONE accessor fresh
+ * persistent-REPL spawns resolve their `--model` through, so once the watchdog
+ * flips the override (via {@link setBestModelOverride}) every NEW session comes
+ * up on the new model with no redeploy and no env change — the "auto-upgrade
+ * like Claude Code, applied to the model" capability. Existing warm sessions are
+ * moved separately by the idle-gated graceful respawn (which rewrites each
+ * registry record's `model`), so a brand-new session and a just-respawned one
+ * agree on the model.
+ *
+ * Why an accessor and not a re-export of `BEST_MODEL`: `BEST_MODEL` is bound
+ * ONCE at module load from `process.env`; a runtime upgrade cannot mutate a
+ * `const`. Code that wants the live value must call `getBestModel()`.
+ */
+export function getBestModel(): string {
+  return runtimeBestModel ?? BEST_MODEL
+}
+
+/**
+ * Adopt (or clear, with `undefined`/empty) the runtime BEST_MODEL override.
+ * Idempotent. Called by the model-update watchdog after it detects a genuine new
+ * top-tier model and posts the upgrade notice.
+ */
+export function setBestModelOverride(model: string | undefined): void {
+  runtimeBestModel = model !== undefined && model.trim() !== '' ? model : undefined
+}
+
+/**
+ * Models the model-update probe must NEVER treat as a "new default" — the
+ * `--fallback-model` trap (Vajra 2026-04-16): during an Opus outage a CLI
+ * configured with `--fallback-model` returns the HAIKU/SONNET id, and a naive
+ * "new id → upgrade" would then SILENTLY DOWNGRADE every session to the fallback
+ * tier. Our probe passes NO `--fallback-model` (so the CLI errors during an
+ * outage instead of lying), and this set is defense-in-depth: if a lower-tier id
+ * ever reaches the parser it is rejected as an outage, not adopted. Sourced from
+ * the lower-tier aliases (+ their base, snapshot-stripped forms) so a future
+ * FAST/SONNET model change keeps the guard correct for free.
+ */
+export function getKnownFallbackModels(): ReadonlySet<string> {
+  return new Set<string>([
+    FAST_MODEL,
+    SONNET_MODEL,
+    'claude-haiku-4-5',
+    'claude-sonnet-4-6',
+  ])
+}
