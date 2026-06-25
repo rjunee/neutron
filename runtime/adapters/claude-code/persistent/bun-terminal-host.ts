@@ -16,6 +16,7 @@
  */
 
 import { stripPtyNoise, newDcsStripState, type DcsStripState } from './pty-noise.ts'
+import { encodeKey, encodeKeys, type Key } from './keystrokes.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from './pty-host.ts'
 
 /** Minimal shape of `Bun.Terminal` we consume (kept narrow so the file type-
@@ -103,6 +104,15 @@ export class BunTerminalHost implements PtyHost {
       write(data) {
         if (exited) return
         terminal.write(data)
+      },
+      writeKey(key: Key) {
+        if (exited) return
+        terminal.write(encodeKey(key))
+      },
+      writeKeys(keys: readonly Key[]) {
+        if (exited) return
+        if (keys.length === 0) return
+        terminal.write(encodeKeys(keys))
       },
       resize(cols, rows) {
         if (exited) return

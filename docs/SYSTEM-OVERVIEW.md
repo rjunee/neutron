@@ -825,6 +825,46 @@ the `watchdog/` AlertStore) when the registry moves to SQLite-backed
 persistence in S4. (Distinct from the OS-process-level `watchdog/` module, which
 runs the same liveness idea over `tools/process-registry.ts` for crons/tools.)
 
+## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
+
+The persistent-REPL substrate drives the interactive `claude` TUI over a single
+PTY read seam (a rolling ring fed by `onData`) and one write seam
+(`child.write`). Vajra's tmux era accreted ~21 detectors that watched the pane
+for a state signature and reacted with a keystroke; porting those to Neutron
+needs three reusable primitives first. This PR ships the substrate (detectors
+themselves land in follow-on P0/P1 PRs). See
+`docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md`.
+
+- **F1 — public ring-read accessor (`pty-ring.ts`).** `PtyRing` replaces the
+  old debug-gated 16 KB closure (`debugRing()`, `NEUTRON_REPL_DEBUG`-only) with
+  a widened 64 KB rolling buffer + `getRecentOutput({ bottomN?, normalize? })`:
+  line-addressable (bottom-N newline-delimited lines, à la `capture-pane -S`) and
+  optionally `normalizePtyText`-collapsed so Ink per-word-cursor ANSI doesn't
+  break contiguous-signature matching. Exposed on `ReplSession.getRecentOutput`.
+  The 64 KB widening (from 16 KB) is so bottom-N guards can see content rendered
+  *below* the footer (the 2026-06-16 Robobuddha status-panel miss).
+- **F2 — structured keystroke API (`keystrokes.ts` + `PtyChild.writeKey`/
+  `writeKeys`).** Named keys (`enter`/`escape`/`ctrl-c`/`tab`/arrows/digit) encode
+  the exact terminal bytes a real keypress emits (Enter=`\r`, Esc=`0x1b`,
+  Ctrl-C=`0x03`, Up=`ESC[A`, Down=`ESC[B`, digit=literal char). Multi-key
+  sequences (`['down','enter']`, `['3','enter']`) navigate Ink arrow-pickers /
+  numbered menus that raw `write('\r')` cannot. The encoding is pure; the Bun
+  backend wires the methods, and the substrate degrades to `write(encodeKeys(…))`
+  for fakes that predate the optional extension (`sendKeys`).
+- **F3 — output-scan tick (`output-scan.ts`).** `OutputScanner` runs registered
+  `{ id, present, keys }` detectors against the ring from the existing `onData`
+  hook (GENERALIZED — not a competing scan loop). Four Vajra invariants are baked
+  in, each encoding a paid-for incident: **edge-triggered latched** firing
+  (rising edge only — a pure time-dedupe re-fired hourly on a stale banner);
+  **doc-quote guards** (`stripDocQuotes` rejects fenced / diff / bullet /
+  inline-backtick matches so quoted menu text can't false-fire); **bottom-N
+  positional guards** (default bottom-24); and **per-detector debounce stamped
+  BEFORE the await** (the latch + last-fire are committed inside `scan()`, so a
+  transport-failed keystroke write can never retry and double-send onto an
+  approval prompt). The dev-channel first-run disclaimer auto-dismiss is now the
+  first registered detector; P0 wedge-prompt recovery + P1 auto-approve /
+  compact-resume / rate-limit-stop register the same way next.
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority

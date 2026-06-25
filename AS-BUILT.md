@@ -52,6 +52,71 @@ and exhaustively unit-tested with injected doubles —
 doctor detection + short-circuit, idempotent upgrade decision, install-failure
 preserves the old ref, broken-upgrade rollback, first-install-broken-no-rollback.
 `tsc` clean (root + `gbrain-memory`); full `gbrain-memory` suite green (88).
+## 2026-06-25 — PTY terminal-detection FOUNDATIONS (F1+F2+F3)
+
+**What shipped.** The substrate the entire Vajra→Neutron terminal-detection +
+keystroke port depends on, as ONE coherent layer in
+`runtime/adapters/claude-code/persistent/`. Detectors themselves (P0 prompt-wedge,
+P1 auto-approve / compact-resume / rate-limit-stop) are explicitly OUT of scope —
+they register on this substrate in follow-on PRs. Source of truth:
+`docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md`.
+
+- **F1 — public ring-read accessor (`pty-ring.ts`, NEW).** `PtyRing` +
+  `bottomNLines`. Promotes the debug-gated 16 KB closure ring (`debugRing()`,
+  `NEUTRON_REPL_DEBUG`-only) to a real, always-on `getRecentOutput({ bottomN?,
+  normalize? })` on `ReplSession`. Widened 16 KB → 64 KB so bottom-N positional
+  guards can see content rendered below the footer (Robobuddha 2026-06-16).
+  Line-addressable bottom-N slice + optional `normalizePtyText` collapse.
+- **F2 — structured keystroke API (`keystrokes.ts`, NEW + `PtyChild`).**
+  `encodeKey`/`encodeKeys` map named keys (enter/escape/ctrl-c/tab/up/down/left/
+  right/digit) to exact terminal bytes; `PtyChild.writeKey`/`writeKeys` (optional,
+  backward-compatible extension) wired in `bun-terminal-host.ts`. Lets recovery
+  detectors navigate Ink arrow-pickers + send Escape/Ctrl-C, which raw
+  `write('\r')` couldn't. Substrate `sendKeys` degrades to `write(encodeKeys(…))`
+  for fakes lacking the methods.
+- **F3 — output-scan tick (`output-scan.ts`, NEW).** `OutputScanner` +
+  `stripDocQuotes`. Generalizes the inline `onData` disclaimer check into a
+  detector-registration framework (`{ id, present, keys, bottomN?, debounceMs? }`)
+  — NOT a competing scan loop; it runs from the same `onData` hook. The four
+  Vajra invariants are baked in: edge-triggered LATCHED firing, doc-quote guards
+  (fenced/diff/bullet/inline-backtick), bottom-N positional guards (default 24),
+  and per-detector debounce STAMPED BEFORE the caller's keystroke write
+  (fire-once on transport failure — no double-Enter on an approval prompt).
+- **Wiring (`persistent-repl-substrate.ts`).** `normalizePtyText` extracted to a
+  shared `pty-text.ts` (single source of truth, imported by substrate + ring +
+  scanner). The ring closure + inline disclaimer check are replaced by
+  `session.ring` + `session.scanner` with the disclaimer registered as detector
+  `dev-channel-disclaimer` (bottom-200, `keys:['enter']`). The timeout-tail debug
+  log now reads `session.getRecentOutput()` (always available, no longer
+  `NEUTRON_REPL_DEBUG`-gated). Behavior of the disclaimer dismiss is preserved.
+
+**Spec conformance (5-line diff).** F1 = `getRecentOutput` on `ReplSession`,
+`{bottomN}` ✓ widened to 64 KB ✓ reuses `normalizePtyText` ✓. F2 =
+`writeKey('enter'|'escape'|'ctrl-c'|'up'|'down'|<digit>)` + multi-key ✓ correct
+escape bytes ✓. F3 = onData-extended scan ✓ edge-latch ✓ doc-quote ✓ bottom-24 ✓
+debounce-before-await ✓ clean detector-registration API ✓.
+
+**Audit flag (live Ink-prompt signatures).** A real `claude` PTY spawn was not
+available in this build env, so NO new signature strings were invented. The ONE
+signature carried (`DEV_CHANNEL_DISCLAIMER_RE`) is the already-production-proven
+disclaimer matcher, unchanged. F3 is structured so each detector's `present`
+predicate + signature is a one-line edit — the P0/P1 PRs MUST validate their
+ported signature strings against a live Neutron PTY frame before wiring (Vajra's
+tmux-capture bytes may differ from Neutron's Bun-PTY render).
+
+**Tests.** NEW `__tests__/pty-ring.test.ts` (bottom-N read, normalize, widened
+bound, trailing-newline), `__tests__/keystrokes.test.ts` (every byte encoding +
+multi-key + unknown-throws), `__tests__/output-scan.test.ts` (edge-latch,
+fire-once-on-retry, debounce floor, doc-quote inline/fenced/diff, bottom-N,
+disclaimer-style detector, duplicate-id throw). 38 new tests pass. The full
+persistent `__tests__/` dir = 287 pass / 0 fail on the real source (the lone
+`dev-channel-exit-on-close` red is a nested-`.worktrees/` `@modelcontextprotocol/
+sdk` resolution artifact — passes on the main checkout, `dev-channel.ts`
+untouched).
+
+**Verify.** `bunx tsc --noEmit` — no new errors in any touched file (the
+dev-channel MCP-SDK + `@neutronai/*` dual-worktree resolution noise is the same
+pre-existing aliasing artifact prior entries document).
 
 ## 2026-06-25 — Installer self-installs the GBrain memory binary (parity gap #1, P0)
 

@@ -18,13 +18,29 @@
  * terminal app), so a PTY is required; tmux is not.
  */
 
+import type { Key } from './keystrokes.ts'
+
 /** A spawned child attached to a PTY. The lifecycle/supervision logic
  *  consumes exactly this shape regardless of the underlying PTY backend. */
 export interface PtyChild {
   /** OS process id of the spawned child. */
   readonly pid: number
-  /** Write bytes to the PTY master → the child's stdin. */
+  /** Write bytes to the PTY master → the child's stdin. The fundamental write
+   *  seam; every backend implements it, and `writeKey`/`writeKeys` are sugar
+   *  over it (the substrate degrades to `write(encodeKeys(...))` when a backend
+   *  predates them — see `sendKeys` in `persistent-repl-substrate.ts`). */
   write(data: string | Uint8Array): void
+  /** Send one structured key (F2): encodes the correct terminal bytes for
+   *  enter/escape/ctrl-c/up/down/left/right/digit. Lets recovery detectors
+   *  navigate Ink arrow-pickers + send Escape/Ctrl-C, which raw `write('\r')`
+   *  cannot. No-op-safe after exit. OPTIONAL: a backward-compatible extension —
+   *  every real PTY backend (`bun-terminal-host.ts`) provides it; lightweight
+   *  test fakes that never receive keystrokes may omit it. */
+  writeKey?(key: Key): void
+  /** Send a multi-key sequence as one write (e.g. `['down','enter']` to pick the
+   *  second option of an arrow-driven picker). No-op-safe after exit. OPTIONAL
+   *  (see `writeKey`). */
+  writeKeys?(keys: readonly Key[]): void
   /** Resize the PTY (cols × rows). No-op-safe after exit. */
   resize(cols: number, rows: number): void
   /** Send a signal to the child (default SIGTERM). Idempotent after exit. */
