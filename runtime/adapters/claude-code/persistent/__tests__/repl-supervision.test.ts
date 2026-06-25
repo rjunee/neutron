@@ -36,6 +36,7 @@ import {
   registerSupervisedSubstrate,
   respawnReplSession,
   respawnSupervisedSession,
+  runCwdDriftWatchdogTick,
   runReplWatchdogTick,
   shutdownAllPersistentRepls,
   startReplWatchdog,
@@ -370,6 +371,104 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     expect(live.length).toBe(1)
     expect(live[0]).toBe(children[1] as PtyChild)
     expect(children[1]?.pid).not.toBe(oldChild?.pid)
+  })
+})
+
+describe('S2 supervision — #12 cwd-drift watchdog respawns a child pinned to canonical', () => {
+  it('a child whose live cwd drifted off canonical is respawned with --resume', async () => {
+    const { host, spawns } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const opts = baseOptions(host, registryPath)
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    expect(await waitForHasSession(registryPath, key)).toBe(true)
+    const originalSessionId = spawns[0]?.sessionId
+
+    const alerts: string[] = []
+    // lsof reports the child rooted in an unrelated dir (e.g. a since-merged
+    // worktree); the canonical record.cwd still exists → respawn pinned back.
+    const results = await runCwdDriftWatchdogTick(opts, {
+      cwdDriftProbeCwd: async () => '/private/tmp/since-merged-worktree',
+      cwdDriftCanonicalExists: () => true,
+      postAlert: (t) => alerts.push(t),
+    })
+    const r = results.find((x) => x.sessionKey === key)
+    expect(r?.action).toBe('respawn')
+    expect(r?.respawned).toBe(true)
+    expect(alerts).toEqual([]) // a respawn (not the missing-canonical alert)
+
+    // The respawn re-attached the SAME captured session, spawned from canonical.
+    expect(await waitForSpawnCount(spawns, 2)).toBe(true)
+    expect(spawns.length).toBe(2)
+    expect(spawns[1]?.isResume).toBe(true)
+    expect(spawns[1]?.sessionId).toBe(originalSessionId as string)
+  })
+
+  it('a child whose live cwd matches canonical (descendant) is left alone', async () => {
+    const { host, spawns } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const opts = baseOptions(host, registryPath)
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    expect(await waitForHasSession(registryPath, key)).toBe(true)
+    const canonicalCwd = getReplRegistrySnapshot(registryPath)[key]?.cwd as string
+
+    const results = await runCwdDriftWatchdogTick(opts, {
+      cwdDriftProbeCwd: async () => `${canonicalCwd}/src`, // descendant — tolerated
+    })
+    expect(results.find((x) => x.sessionKey === key)?.action).toBe('not-drifted')
+    expect(spawns.length).toBe(1) // untouched
+  })
+
+  it('drift BUT canonical missing on disk → NO respawn, alert fired', async () => {
+    const { host, spawns } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const opts = baseOptions(host, registryPath)
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    expect(await waitForHasSession(registryPath, key)).toBe(true)
+
+    const alerts: string[] = []
+    const results = await runCwdDriftWatchdogTick(opts, {
+      cwdDriftProbeCwd: async () => '/private/tmp/since-merged-worktree',
+      cwdDriftCanonicalExists: () => false, // canonical gone → respawn into nothing
+      postAlert: (t) => alerts.push(t),
+    })
+    expect(results.find((x) => x.sessionKey === key)?.action).toBe('alert-missing-canonical')
+    expect(alerts.length).toBe(1)
+    expect(spawns.length).toBe(1) // NEVER respawned
+  })
+
+  it('a second drift within the 1h throttle does not re-respawn', async () => {
+    const { host, spawns } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const opts = baseOptions(host, registryPath)
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    expect(await waitForHasSession(registryPath, key)).toBe(true)
+
+    const probe = { cwdDriftProbeCwd: async () => '/private/tmp/drifted', cwdDriftCanonicalExists: () => true }
+    const first = await runCwdDriftWatchdogTick(opts, probe)
+    expect(first.find((x) => x.sessionKey === key)?.action).toBe('respawn')
+    expect(await waitForSpawnCount(spawns, 2)).toBe(true)
+
+    // Second tick, still drifted, inside the 1h throttle → throttled, no 3rd spawn.
+    const second = await runCwdDriftWatchdogTick(opts, probe)
+    expect(second.find((x) => x.sessionKey === key)?.action).toBe('throttled')
+    await Bun.sleep(50)
+    expect(spawns.length).toBe(2)
   })
 })
 
@@ -792,17 +891,18 @@ describe('S2 supervision — watchdog timers are stopped on shutdown + start is 
       clearIntervalFn: () => { cleared += 1 },
     }
     const wd = startReplWatchdog(opts, di)
-    expect(armed).toBe(1)
-    // Idempotent per registry: returns the live handle, no second interval.
+    // Two timers per start: the wedge/crash tick + the cwd-drift tick.
+    expect(armed).toBe(2)
+    // Idempotent per registry: returns the live handle, no second pair of intervals.
     const wd2 = startReplWatchdog(opts, di)
     expect(wd2).toBe(wd)
-    expect(armed).toBe(1)
-    // Shutdown stops the timer exactly once (no leak).
+    expect(armed).toBe(2)
+    // Shutdown stops BOTH timers exactly once (no leak).
     await shutdownAllPersistentRepls()
-    expect(cleared).toBe(1)
+    expect(cleared).toBe(2)
     // After shutdown the registry is free to re-arm (post-restart cleanliness).
     startReplWatchdog(opts, di)
-    expect(armed).toBe(2)
+    expect(armed).toBe(4)
   })
 })
 

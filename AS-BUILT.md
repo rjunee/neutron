@@ -2,6 +2,50 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-25 — cwd-drift watchdog (P3, Vajra port row #12)
+
+**What shipped.** `runtime/adapters/claude-code/persistent/cwd-drift-watchdog.ts`
+(NEW) — a NON-substrate watchdog over the PTY child **pid** (not an output-scan
+ring detector; it never touches the `OutputScanner` register-block). A child's
+live cwd can drift off the session's canonical cwd — a Bash `cd` into a worktree
+that later gets merged/removed leaves the child pinned to a dead dir while the
+session's canonical project dir is still valid. The wedge watchdog keys off
+liveness + `/health` and is blind to this. Ports Vajra's `cwd-drift-watchdog.ts`.
+
+- **Detect — ask the OS directly, async + batched.** A separate tick (default
+  60s, its own in-flight gate) probes each LIVE pooled child's cwd via **async**
+  `lsof -p <pid> -d cwd -Fn`, batched at **cap ~5** concurrent
+  (`mapWithConcurrency`) — the deliberate replacement for the sync `lsof×20` that
+  stalled the loop ≤40s (2026-04-23). Compared to canonical `record.cwd` via pure
+  `isCwdDrifted`: **trailing-slash normalized** + **descendant tolerance** (a `cd`
+  into a project subdir is NOT drift; only a cwd outside the subtree counts).
+- **Recover — respawn pinned to canonical.** On drift, `respawnReplSession` fires
+  with the new `cwd-drift-watchdog` trigger; the respawn spawns from `record.cwd`
+  so the child is automatically pinned back to canonical (the
+  `cd '<cwd>' && claude --resume` analog), context preserved via
+  resume-is-always-resume.
+- **Existence guard.** Checked BEFORE the drift comparison → canonical missing on
+  disk → **NEVER respawn** (you'd respawn into nothing) → **edge-latched** operator
+  alert (`buildCwdDriftMissingCanonicalAlert`, once per rising edge). Also catches
+  the child still rooted in a canonical dir that was **deleted** (lsof's
+  `<path> (deleted)`, which `normalizeCwd` strips, would otherwise read as
+  not-drifted and slip past the guard — Codex review).
+- **Throttle.** Per-session **1h** respawn throttle (`cwdDriftRespawnState`,
+  separate clock from the wedge cooldown), stamped BEFORE the respawn await
+  (fire-once per detection — a failed respawn still holds the window).
+- **Wiring.** `runCwdDriftWatchdogTick` (scoped to its instance registry like the
+  wedge tick) added to `persistent-repl-substrate.ts`; `startReplWatchdog` arms a
+  second interval (cleared on shutdown). New `RespawnTrigger` member
+  `cwd-drift-watchdog` + notice copy in `session-respawn.ts`.
+- **Tests.** `__tests__/cwd-drift-watchdog.test.ts` (25): normalize / drift /
+  decision branches / concurrency-cap (≤5, proven batched) / the 4 §TESTS
+  scenarios + stamp-before-await. `__tests__/repl-supervision.test.ts` (+4):
+  end-to-end against the real substrate — drift→`--resume` pinned to canonical,
+  descendant left alone, missing-canonical alert+no-respawn, 1h throttle.
+  Closes master-table **port row #12** (last MISSING P3 watchdog). `tsc` clean on
+  the changed files; full persistent `__tests__` green (1 pre-existing
+  worktree-only `@modelcontextprotocol` resolution failure, unrelated).
+
 ## 2026-06-25 — Wedged-interactive-prompt detect + recover (P0 flagship)
 
 **What shipped.** `runtime/adapters/claude-code/persistent/wedged-prompt-detector.ts`

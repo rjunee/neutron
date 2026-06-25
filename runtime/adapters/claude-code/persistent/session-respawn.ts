@@ -54,6 +54,7 @@ export type RespawnTrigger =
   | 'wedge-watchdog'
   | 'crash-watchdog'
   | 'stuck-turn-watchdog'
+  | 'cwd-drift-watchdog'
 
 /** Outcome of the injected spawn-with-resume. Returns a typed refusal so a
  *  ghost-cwd / bind failure propagates instead of lying "context preserved". */
@@ -271,7 +272,9 @@ export function buildRespawnNoticeText(args: RespawnNoticeArgs): string {
         ? 'wedge watchdog'
         : args.trigger === 'crash-watchdog'
           ? 'crash watchdog'
-          : 'stuck-turn watchdog'
+          : args.trigger === 'cwd-drift-watchdog'
+            ? 'cwd-drift watchdog'
+            : 'stuck-turn watchdog'
   const symptom =
     args.trigger === 'admin-endpoint'
       ? 'operator-triggered respawn'
@@ -279,7 +282,9 @@ export function buildRespawnNoticeText(args: RespawnNoticeArgs): string {
         ? 'process exited'
         : args.trigger === 'wedge-watchdog'
           ? 'was unresponsive'
-          : 'turn stalled'
+          : args.trigger === 'cwd-drift-watchdog'
+            ? 'working dir drifted'
+            : 'turn stalled'
   return (
     `\u{1F527} Auto-respawn: REPL \`${args.sessionKey}\` ${symptom} ` +
     `(${triggerLabel}) — resuming session \`${args.sessionId.slice(0, 8)}\`. ` +
