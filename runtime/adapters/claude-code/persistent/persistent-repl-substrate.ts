@@ -33,7 +33,7 @@
 
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -50,6 +50,12 @@ import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import type { PtyChild, PtyHost } from './pty-host.ts'
 import { PtyRing, type RecentOutputOpts } from './pty-ring.ts'
 import { OutputScanner } from './output-scan.ts'
+import { dashifyCwd } from './session-validation.ts'
+import {
+  startApi5xxDeadTurnWatcher,
+  type DeadTurnNotice,
+  type Api5xxWatcherHandle,
+} from './api5xx-dead-turn-watcher.ts'
 import { normalizePtyText } from './pty-text.ts'
 import {
   createWedgedPromptDetector,
@@ -347,6 +353,15 @@ export interface PersistentReplSubstrateOptions {
    *  question is also surfaced to the active turn's chat channel). Default: write
    *  the alert to stderr. Mirrors `ReplWatchdogOptions.postAlert`. */
   postWedgeAlert?: (text: string) => void
+  /** Per-turn API-5xx dead-turn notice sink (master-table row #11). Fired on the
+   *  rising edge when the JSONL watcher sees a mid-turn 5xx
+   *  (`Overloaded`/`overloaded_error`/`rate_limit_error`/`internal_server_error`)
+   *  on a `result`/`system`/`error` record — the turn died before `reply()`, so
+   *  the user saw nothing (Ryan 2026-06-16). The gateway wires this to the
+   *  user-facing "resend your last message" retry affordance; runtime-layer DI
+   *  seam (mirrors `onRecoveredReply`/`postWedgeAlert`). Default: a structured
+   *  stderr notice. */
+  onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
   /**
    * STATELESS-ONE-SHOT mode (Argus r4 BLOCKER, 2026-06-08). When `true`, a
    * `start(spec)` dispatch that carries NO `spec.session` gets its OWN fresh,
@@ -636,6 +651,11 @@ class ReplSession {
    *  registered here (generalized from the old inline `onData` check); the
    *  P0/P1 recovery detectors register signature+action in follow-on PRs. */
   readonly scanner = new OutputScanner()
+  /** Master-table row #11: the per-turn API-5xx dead-turn JSONL watcher for THIS
+   *  child's transcript. Started right after spawn (sessionId + cwd are known →
+   *  the JSONL path is resolvable) and stopped on child death. Distinct from the
+   *  PTY-ring `scanner` above — this watches disk, not the terminal. */
+  deadTurnWatcher: Api5xxWatcherHandle | undefined
   /** True while the wedged-interactive-prompt escape/ctrl-c recovery ladder is
    *  in flight, so a second scan tick can't launch a concurrent ladder on the
    *  same still-present menu (the scanner latch already guards the rising edge;
@@ -1200,6 +1220,31 @@ async function spawnSession(
   // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
   childByKey.set(sessionKey, child)
 
+  // Master-table row #11: start the per-turn API-5xx dead-turn JSONL watcher for
+  // THIS child's transcript. A mid-turn 5xx (`Overloaded`/`internal_server_error`
+  // /`rate_limit_error`) aborts the turn before `reply()`, so the substrate's
+  // `completion` never resolves and the user sees NOTHING (Ryan 2026-06-16). The
+  // watcher tails the transcript JSONL and edge-fires a "resend your last message"
+  // notice through `onDeadTurnNotice` (default: a structured stderr notice — no
+  // feature flag, ON by default). sessionId + cwd are both known here, so the
+  // `<projectsDir>/<dashifyCwd(cwd)>/<sessionId>.jsonl` path resolves immediately
+  // (session-validation.ts layout). projectsDir honours `CLAUDE_CONFIG_DIR`.
+  const projectsDir =
+    options.claudeConfigDir !== undefined
+      ? join(options.claudeConfigDir, 'projects')
+      : join(homedir(), '.claude', 'projects')
+  const deadTurnNotify =
+    options.onDeadTurnNotice ??
+    ((notice: DeadTurnNotice): void => {
+      process.stderr.write(
+        `[repl-api5xx] dead turn on session=${sessionId.slice(0, 8)} matched=${notice.matched} — user should resend last message\n`,
+      )
+    })
+  session.deadTurnWatcher = startApi5xxDeadTurnWatcher({
+    jsonlPath: join(projectsDir, dashifyCwd(cwd), `${sessionId}.jsonl`),
+    notify: deadTurnNotify,
+  })
+
   // Wire process death → fail in-flight turn + evict from pool so the next
   // start() respawns. Leaves cleanup to GC; the dev-channel SIGTERMs itself.
   // IDENTITY-GUARDED: a respawn re-attaches the SAME sessionId/sessionKey, so a
@@ -1207,6 +1252,10 @@ async function spawnSession(
   // installed (the resume race the P2-3 regression caught).
   void child.exited.then(async () => {
     session.onDeath()
+    // Detach the row-#11 dead-turn JSONL watcher — this child's transcript is now
+    // terminal; a respawn starts a fresh watcher for the new child.
+    session.deadTurnWatcher?.stop()
+    session.deadTurnWatcher = undefined
     sink.unregisterIf(sessionId, session)
     // Reclaim the temp config files now the child is gone (covers pool eviction,
     // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).

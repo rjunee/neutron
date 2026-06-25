@@ -2,6 +2,58 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Per-turn API-5xx dead-turn notifier (JSONL watcher, port row #11)
+
+**What shipped.** A new JSONL watcher,
+`runtime/adapters/claude-code/persistent/api5xx-dead-turn-watcher.ts`, that
+detects a mid-turn API 5xx aborting the agent's turn before it ever calls
+`reply()` and edge-fires a "resend your last message" retry notice. Closes
+master-table **row #11** (Vajra `session-error-watcher.ts` +
+`pane-scan-watchdog.ts ADDENDUM`). Builds on F1/F2/F3 (#54) and reuses the #57
+JSONL byte-range read pattern + the `<projectsDir>/<dashifyCwd(cwd)>/<sessionId>.jsonl`
+layout (`session-validation.ts`) rather than duplicating that machinery.
+
+**Why.** A mid-turn `Overloaded` / `internal_server_error` / `rate_limit_error`
+aborts the turn BEFORE `reply()`, so the substrate's `completion` never resolves
+and the user sees nothing — the turn dies silently (Ryan 2026-06-16). The
+PTY-ring detectors key off live TUI signatures, the #57 stuck-turn watcher keys
+off an unanswered real-user turn going stale, and the wedge-detector keys off
+process liveness / HTTP — none catch a turn the model started but a 5xx killed.
+
+**How (a JSONL watcher, NOT a ring scan — the brief's mandate; disk is the source
+of truth, invariant §5):**
+- `startApi5xxDeadTurnWatcher` `fs.watch`es the JSONL's **parent directory**
+  (survives the file not existing yet / a resume re-creating it); each change
+  pumps the bytes appended since the last read into `Api5xxDeadTurnCore`.
+- `classifyApi5xxRecord` (pure) tests the verbatim regex
+  `/Overloaded|overloaded_error|rate_limit_error|internal_server_error/` ONLY
+  against `result` / `system` / `error` records (allowlist, invariant §3) —
+  `type:"user"` and `tool_result` records are ignored entirely so a tool echoing
+  "overloaded" never trips it.
+- `Api5xxDeadTurnCore.feed` buffers a trailing partial line until its newline
+  lands, so a record split across two `fs.watch` callbacks is reassembled
+  (invariant §4).
+- Edge-latch (invariant §1): fires ONCE on the rising edge, does NOT re-fire
+  while latched, clears on a later healthy considered-record; the latch is
+  stamped before the notify side-effect so notify is fire-once even if it throws.
+- **Surface / wiring (ON by default, NO feature flag):** the rising edge calls the
+  injected `onDeadTurnNotice` sink (runtime→gateway DI seam mirroring
+  `onRecoveredReply` / `postWedgeAlert`), defaulting to a structured stderr notice.
+  The watcher is started per session right after the child spawns
+  (`persistent-repl-substrate.ts` — sessionId + cwd known → path resolves) and
+  stopped on child death. **Out of scope:** auto-resend of the stored message.
+
+**Tests.** `__tests__/api5xx-dead-turn-watcher.test.ts` (26 tests): the five
+brief-mandated assertions (result+overloaded_error FIRES; `type:"user"`+overloaded
+does NOT; tool_result echo does NOT; record split across two callbacks
+reassembled+matched; edge-latch fires-once / no-re-fire-while-present / clears on
+absent) plus classify, the `fs.watch` driver (injected fs), rotation/truncation,
+a throwing-sink case, `realReadFrom` offset reads, and a real-fs end-to-end. New
+file suite green; full `persistent/` suite 335 pass (the one
+`dev-channel-exit-on-close` failure is a pre-existing, change-independent
+subprocess-exit timing flake on origin/main — confirmed failing with this PR's
+changes stashed). `tsc --noEmit` clean for the changed files.
+
 ## PTY terminal-detection P1 — /rate-limit-options org-cap auto-stop (port row #4)
 
 **What shipped.** On the merged F1/F2/F3 substrate (PR #54), a third output-scan

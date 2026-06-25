@@ -962,6 +962,49 @@ not kill.
   Neutron's in-memory ring read IS the cheap viewport check — no scrollback
   recapture to gate.
 
+## Per-turn API-5xx dead-turn notifier (JSONL watcher, port row #11) — `api5xx-dead-turn-watcher.ts`
+
+A mid-turn API 5xx — `Overloaded` / `internal_server_error` / `rate_limit_error`
+— aborts the agent's turn BEFORE it ever calls `reply()`. The substrate's turn
+`completion` never resolves, so the user sees **nothing**: the turn dies silently
+(Ryan 2026-06-16). None of the other detectors catch this — the PTY-ring
+detectors (above) key off live TUI signatures, the stuck-turn watchdog (below)
+keys off an *unanswered real-user turn* going stale, and the wedge-detector keys
+off process liveness / HTTP. A turn the model *started* but a 5xx killed before
+any reply is a distinct gap. This closes master-table **row #11**.
+
+Unlike the PTY-ring detectors this is a **JSONL watcher**, not a ring scan
+(cross-cutting invariant §5 — disk is the source of truth; the typed JSONL
+records mean we never have to disambiguate a real CLI error line from prose that
+quotes "API Error: 500"). It does NOT touch the `OutputScanner` / ring.
+
+- **Watch.** `startApi5xxDeadTurnWatcher` `fs.watch`es the turn's transcript JSONL
+  (`<projectsDir>/<dashifyCwd(cwd)>/<sessionId>.jsonl`) — actually the parent
+  directory, so it survives the file not existing yet / a resume re-creating it.
+  Each change pumps the bytes appended since the last read into an
+  `Api5xxDeadTurnCore`.
+- **Match (allowlist + pattern, invariant §3).** The 5xx regex
+  (`/Overloaded|overloaded_error|rate_limit_error|internal_server_error/`,
+  carried verbatim) is tested ONLY against `result` / `system` / `error` records.
+  `type:"user"` and `tool_result` records are ignored entirely — tool output
+  legitimately echoes the word "overloaded" and must never trip the detector.
+- **Reassemble (invariant §4).** `Api5xxDeadTurnCore.feed` buffers a trailing
+  partial line until its newline lands, so a record split across two `fs.watch`
+  callbacks is reassembled, never misparsed.
+- **Edge-latch (invariant §1).** A matching error record fires ONCE on the rising
+  edge and latches; a further 5xx record while latched does NOT re-fire (no
+  hourly-re-fire-on-stale-line bug); a later *healthy* considered-record clears
+  the latch so a fresh error can fire again. The latch is stamped inside `feed`
+  BEFORE the notify side-effect runs, so the notify is fire-once even if it throws.
+- **Surface.** On the rising edge the watcher calls the injected `onDeadTurnNotice`
+  sink (a runtime→gateway DI seam mirroring `onRecoveredReply` / `postWedgeAlert`)
+  with a "resend your last message" retry affordance. **ON by default, no feature
+  flag**: when the gateway doesn't inject a sink it falls back to a structured
+  stderr notice. The watcher is started per session right after the child spawns
+  (sessionId + cwd are known → the path resolves immediately) and stopped on child
+  death. **Out of scope this pass:** auto-resend of the stored message (notify +
+  affordance only).
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority
