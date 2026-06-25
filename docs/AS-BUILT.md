@@ -195,6 +195,53 @@ F1/F2/F3 substrate (PR #54) + post-spawn-assertion path. ON by default — no fl
   (ordering); null re-capture + transient-clears-within-grace → ok; respawn capped
   at 2 then alert-only; non-wedged failure propagates with no retry/alert. Full
   persistent suite green (327 pass).
+## PTY #20 — disk-JSONL recovery classifier + restart-rate crash-loop guard
+
+**What shipped.** The two remaining pieces of Vajra master-table row #20
+(`disk-recovery.ts` + `restart-rate.ts`). The pending-respawns queue
+(`pending-respawns-queue.ts`), `registry-lock.ts`, and the `drainPendingRespawns`
+boot-drain were already merged (rows #11/#12); this build adds ONLY the two
+missing pieces and a focused test pinning the behaviour. Encodes the 2026-05-21
+"pristine" incident lesson: **disk JSONL is the source of truth; never rely on a
+surviving in-memory timer for recovery.**
+
+- **Verify-first gap analysis.** SPEC row #20 wants (a) classify a failed-probe /
+  pending entry resumable from JSONL, and (b) a restart-rate <5min crash-loop
+  guard. Read confirmed the queue + boot-drain + flock-lock are PRESENT (the
+  boot-drain already recovers a disk-persisted entry with no surviving timer);
+  `validateAndPersistSessionId` was only a **binary JSONL-existence gate**, not an
+  mtime/last-real-turn classifier; and there was **no** restart-rate guard (the
+  per-`sessionKey` `RESPAWN_CAP_MAX` 3/hr cap is a different mechanism). Built the
+  two missing pieces; did not rebuild the queue/lock/drain.
+- **`disk-recovery.ts` (NEW).** Pure `classifyResumable` over disk metadata →
+  `no-jsonl` / `empty` / `no-real-turn` (true ghost) vs `live` (RESUMABLE) vs
+  opt-in `stale`; `readSessionJsonlMeta` (fs-injectable) scans the transcript for
+  *real* conversational turns (user/assistant `message` lines; summary/system
+  meta don't count) + last-turn timestamp + mtime. Wired into
+  `drainPendingRespawns`: an unregistered pending entry is now classified from
+  disk and the result carries `resumable`, so a recoverable topic is observably
+  retained, not silently dropped. No `maxAgeMs` cutoff by default (disk is truth).
+- **`restart-rate.ts` (NEW).** Each watchdog boot appends a marker to
+  `<home>/.neutron/.restart-markers.json`; two markers <5min apart
+  (`CRASH_LOOP_WINDOW_MS`) = crash loop. Pure `evaluateRestartRate` applies an
+  **edge latch** (`inCrashLoop`) so the warning fires EXACTLY ONCE on the
+  absent→present edge (via `postAlert` or stderr) and re-arms only after a
+  normally-spaced restart clears it. Wired into `startReplWatchdog`'s boot path
+  next to the boot-drain; best-effort (never blocks startup).
+- **Wiring.** `restartMarkersPath` added to `PersistentReplSubstrateOptions` +
+  `ReplSupervisionPaths` (`deriveReplSupervisionPaths` →
+  `.restart-markers.json`) + threaded in `createClaudeCodeSubstrateAuto`.
+- **Tests.** `restart-rate.test.ts` (16) + `disk-recovery.test.ts` (12): the
+  three acceptance cases — a disk-persisted entry recovered on a simulated boot
+  with NO surviving timer; a failed-probe entry with a live JSONL classified
+  resumable; restart markers <5min apart warn exactly once (edge-latched) + the
+  latch clears + re-arms. Existing `repl-supervision.test.ts` ghost-skip
+  assertion updated for the additive `resumable` field (a no-JSONL ghost →
+  `resumable: false`). 336 in-process persistent tests pass; the lone failure
+  (`dev-channel-exit-on-close`) is a bare-worktree node_modules-resolution
+  artifact that fails identically on unmodified `main` in a worktree and passes
+  from the repo root where CI runs.
+- **No flags.** Built ON as the default — no toggle, no dual path.
 
 ## PTY terminal-detection P1 — auto-approve tool-use prompt (port row #2)
 

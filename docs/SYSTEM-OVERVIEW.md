@@ -1057,6 +1057,53 @@ a longer wait (the root cause is pressure, not timeout tuning).
   first attempt; this wrapper owns only the channel-wedged class. The cap'd
   failure flows through the existing `getOrSpawnSession` pool-cleanup path.
 
+## Disk-JSONL recovery + restart-rate crash-loop guard (#20) — `disk-recovery.ts` + `restart-rate.ts`
+
+The cross-restart recovery substrate (master-table row #20). It encodes one
+hard-won lesson: **disk JSONL is the source of truth; the in-memory
+registry/timer is just an index.** Incident (Nova/Vajra "pristine" 2026-05-21):
+the gateway restarted, scheduled a `setTimeout`-based zombie respawn, then
+restarted AGAIN 118s later — wiping the in-memory timer — so the topic vanished
+silently even though its JSONL was fully intact. Recovery must reconstruct from
+disk on boot, never rely on a surviving timer.
+
+Three layers, two new this build, all wired through `startReplWatchdog`'s boot
+path:
+
+- **Pending-respawns queue + boot-drain (pre-existing).** `pending-respawns-
+  queue.ts` snapshots each deferred respawn to `<home>/.neutron/.pending-
+  respawns.json` BEFORE the drain `setTimeout`s fire; `drainPendingRespawns`
+  reads that file at boot (and on every watchdog tick) and replays the dropped
+  inbound via the dev-channel `/message` sink — no surviving timer required.
+- **Disk-JSONL resumability classifier (NEW, `disk-recovery.ts`).** When the
+  boot-drain meets a pending entry whose owning substrate has not re-registered
+  yet (the cross-restart-before-first-turn case), it no longer just skips
+  blindly: it reads the topic's transcript JSONL and classifies it. The pure
+  `classifyResumable` reasons over disk metadata — `no-jsonl` / `empty` /
+  `no-real-turn` (a true ghost → not resumable) vs `live` (a real conversational
+  turn on disk → RESUMABLE, retained for recovery) vs opt-in `stale`. A real
+  turn is a user/assistant `message` line (summary/system meta lines don't
+  count). This makes "scheduled-but-lost across a restart, recovered from disk,
+  NOT silently dropped" an observable property of the drain result
+  (`resumable: true`). Honours invariant #5 (disk is truth) — with no `maxAgeMs`
+  cutoff, age alone never disqualifies an intact transcript.
+- **Restart-rate crash-loop guard (NEW, `restart-rate.ts`).** Each watchdog boot
+  appends a restart marker (epoch ms) to `<home>/.neutron/.restart-markers.json`.
+  Two markers <5min apart (`CRASH_LOOP_WINDOW_MS`) is the crash-loop signature
+  (the pristine 118s double-restart). The warning is **edge-triggered + latched**
+  (invariant #1): it fires ONCE on the absent→present edge via `postAlert` (or
+  stderr) — a sustained loop does not re-warn every boot — and the latch clears
+  when a normally-spaced restart returns, re-arming for the next loop. Auto-
+  restart makes a crash loop worse (it wipes in-flight timers), so the guard
+  surfaces it to an operator instead of absorbing it.
+
+Both new modules are pure-by-default (the classification + the edge-latch
+transition are pure functions over already-read state; the disk read/write is a
+thin fs-injectable wrapper) and best-effort at the boot seam — a classification
+or marker-write failure can never block watchdog startup. Per-thread respawn
+caps (`RESPAWN_CAP_MAX` 3/hr → `capped_at` hard-stop, invariant #6) are
+unchanged and still apply; this recovery path never bypasses them.
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority
