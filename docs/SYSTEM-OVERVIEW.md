@@ -902,6 +902,19 @@ not kill.
   path from chat (2026-06-06 Neutron incident); bottom-N widened 8→24 after the
   2026-06-16 Robobuddha status-panel-below-footer miss; the `^❯` anchor rejects
   quoted / diff menu lines; a failed re-capture is NOT a clear.
+- **P1 — auto-approve tool-use prompt (port row #2).** A second detector
+  (`id: 'tool-use-approve'`) registered on every session's `OutputScanner`
+  clears CC's tool-use permission prompt. It fires only when **BOTH** cues are
+  present in the normalized bottom-N view — the question
+  (`/doyouwantto(makethisedit|proceed|runthiscommand|create)/i`) **AND** the
+  `❯ 1. Yes` selector (`/❯1\.yes/i`) — because a single cue false-fires on
+  lingering scrollback (a prior approval's selector with no live question). On
+  the rising edge it sends `1`+`enter`. A 5s `debounceMs` floor is set, and the
+  framework stamps the latch + last-fire BEFORE returning the fired detection,
+  so a transport-failed write can NOT retry and DOUBLE-Enter onto the approval.
+  These prompts render even under `--dangerously-skip-permissions` for
+  key-to-kingdom paths (`.git/hooks/*`, writes outside the project root), so the
+  substrate must clear them itself.
 
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 

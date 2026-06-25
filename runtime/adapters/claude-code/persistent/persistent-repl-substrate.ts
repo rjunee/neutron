@@ -127,6 +127,19 @@ const DEV_CHANNEL_DISCLAIMER_RE = /forlocalchanneldevelopment|usingthisforlocald
  *  preserves the old whole-ring match behavior while still excluding unbounded
  *  scrollback. */
 const DISCLAIMER_BOTTOM_N = 200
+/** P1 auto-approve tool-use prompt (port row #2). BOTH cues are required: the
+ *  question line AND the `❯ 1. Yes` selector — matching just one false-fires on
+ *  scrollback (a previous approval's `❯ 1. Yes` lingers without the live
+ *  question). Matched against the whitespace-stripped `normalized` view because
+ *  Ink shreds each word across cursor-move escapes (same reason as the
+ *  disclaimer; see pty-text.ts), so the spec regex
+ *  `/Do you want to (make this edit|proceed|run this command|create)/i` is
+ *  carried here in its space-free normalized form. These prompts render even
+ *  under `--dangerously-skip-permissions` for key-to-kingdom paths
+ *  (`.git/hooks/*`, writes outside the project root), so the substrate must
+ *  clear them itself. */
+const TOOL_USE_QUESTION_RE = /doyouwantto(makethisedit|proceed|runthiscommand|create)/i
+const TOOL_USE_SELECTOR_RE = /❯1\.yes/i
 const REPL_DEBUG = process.env['NEUTRON_REPL_DEBUG'] === '1'
 /** After a turn's reply settles, hold the turn lock until the REPL's PTY has
  *  been quiet for this long (claude returned to idle) before allowing the next
@@ -1082,6 +1095,19 @@ async function spawnSession(
   // ladder in `runOutputScan` (it carries no `keys` — recovery is a verify
   // ladder, never an auto-pick).
   session.scanner.register(createWedgedPromptDetector())
+  // P1: auto-approve CC's tool-use permission prompt. BOTH cues required
+  // (question + `❯ 1. Yes` selector) — single-cue matching false-fires on
+  // scrollback. `1`+`enter` selects "Yes". The framework stamps the latch +
+  // 5s debounce BEFORE returning the fired detection, so this keystroke is
+  // fire-once per rising edge — a transport failure can NOT retry and risk a
+  // DOUBLE-Enter onto the approval (output-scan.ts invariant §4).
+  session.scanner.register({
+    id: 'tool-use-approve',
+    debounceMs: 5000,
+    present: (ctx) =>
+      TOOL_USE_QUESTION_RE.test(ctx.normalized) && TOOL_USE_SELECTOR_RE.test(ctx.normalized),
+    keys: ['1', 'enter'],
+  })
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).
