@@ -940,10 +940,14 @@ and answering, just rooted in the wrong place.
   `record.cwd`, so the child is **automatically pinned back to canonical** (the
   `cd '<cwd>' && claude --resume` analog) — context preserved via the
   resume-is-always-resume invariant.
-- **Existence guard — missing canonical → NEVER respawn.** If the canonical dir
-  itself is gone on disk, a respawn would just respawn into nothing: the watchdog
-  refuses to respawn and fires an operator alert instead
-  (`buildCwdDriftMissingCanonicalAlert`).
+- **Existence guard — missing canonical → NEVER respawn.** Checked BEFORE the
+  drift comparison: a respawn spawns from `record.cwd`, so a missing canonical can
+  never be respawned (into nothing). This also catches the child still rooted IN a
+  canonical dir that has since been **deleted** — lsof reports `<path> (deleted)`,
+  which `normalizeCwd` strips, so it would otherwise read as "not drifted" and slip
+  past the guard. Either way the watchdog refuses to respawn and fires an
+  **edge-latched** operator alert (`buildCwdDriftMissingCanonicalAlert`) — once on
+  the rising edge, never re-firing every tick on a persistently-missing canonical.
 - **Per-session 1h respawn throttle.** A `cwdDriftRespawnState` map (separate
   clock from the wedge cooldown) gates a re-respawn within an hour, so a
   persistently-drifting child can't churn. The throttle is stamped BEFORE the

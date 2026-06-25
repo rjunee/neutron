@@ -2083,6 +2083,7 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   supervisedBySessionKey.clear()
   wedgeAlertState.clear()
   cwdDriftRespawnState.clear()
+  cwdDriftAlertState.clear()
 }
 
 // ---------------------------------------------------------------------------
@@ -2140,6 +2141,9 @@ const wedgeAlertState = new Map<string, number>()
  *  the cwd-drift watchdog (separate from the wedge cooldown so a wedge respawn and
  *  a cwd-drift respawn don't share a clock). */
 const cwdDriftRespawnState = new Map<string, number>()
+/** Edge-latch for the cwd-drift missing-canonical alert: session keys currently
+ *  alerting, so a persistently-missing canonical alerts ONCE (not every tick). */
+const cwdDriftAlertState = new Set<string>()
 
 function gateFor(sessionKey: string): InFlightGate {
   let g = respawnGates.get(sessionKey)
@@ -2668,6 +2672,7 @@ export async function runCwdDriftWatchdogTick(
       return outcome.ok
     },
     ...(wopts.postAlert ? { postAlert: wopts.postAlert } : {}),
+    alertLatch: cwdDriftAlertState,
     ...(wopts.now ? { now: wopts.now } : {}),
     ...(wopts.cwdDriftThrottleMs !== undefined ? { throttleMs: wopts.cwdDriftThrottleMs } : {}),
   })

@@ -109,9 +109,14 @@ export interface CwdDriftActionContext {
 /**
  * Decide what to do about a session's cwd. Pure, total function. Gate order:
  *   1. no live cwd (probe failed) → ignore (`no-live-cwd`) — never act on unknown.
- *   2. not drifted (== canonical or a descendant) → ignore (`not-drifted`).
- *   3. drifted BUT canonical missing on disk → `alert-missing-canonical` (NEVER
- *      respawn — you'd respawn into nothing; the 2026-04-23 existence guard).
+ *   2. canonical MISSING on disk → `alert-missing-canonical` (NEVER respawn — a
+ *      respawn spawns from `record.cwd`, so you'd respawn into nothing; the
+ *      2026-04-23 existence guard). Checked BEFORE the drift comparison because
+ *      the child may still be rooted IN the canonical dir that has since been
+ *      DELETED — lsof reports `<path> (deleted)`, which `normalizeCwd` strips, so
+ *      that dead-cwd case reads as "not drifted" and would otherwise slip past
+ *      the guard with no alert (Codex review).
+ *   3. not drifted (== canonical or a descendant) → ignore (`not-drifted`).
  *   4. drifted, canonical valid, within the 1h throttle → `throttled`.
  *   5. otherwise → `respawn` (pinned to canonical).
  */
@@ -121,14 +126,15 @@ export function decideCwdDriftAction(ctx: CwdDriftActionContext): CwdDriftAction
     return { kind: 'ignore', reason: 'no-live-cwd' }
   }
   const canonical = normalizeCwd(ctx.canonicalCwd)
-  if (!isCwdDrifted(live, canonical)) {
-    return { kind: 'ignore', reason: 'not-drifted' }
-  }
-  // Drift confirmed. Existence-guard the CANONICAL dir BEFORE any respawn: a
-  // respawn spawns from `record.cwd`, so a missing canonical would just respawn
-  // into nothing. Alert instead, never respawn.
+  // Existence-guard the CANONICAL dir FIRST. A respawn spawns from `record.cwd`,
+  // so a missing canonical can NEVER be respawned (into nothing) — whether the
+  // child drifted to an unrelated dir OR is still pinned to the canonical dir
+  // that has since been deleted. Either way: alert, never respawn.
   if (!ctx.canonicalExists) {
     return { kind: 'alert-missing-canonical', live, canonical }
+  }
+  if (!isCwdDrifted(live, canonical)) {
+    return { kind: 'ignore', reason: 'not-drifted' }
   }
   const throttleMs = ctx.throttleMs ?? DEFAULT_CWD_DRIFT_THROTTLE_MS
   if (ctx.lastDriftRespawnAt !== undefined && ctx.now - ctx.lastDriftRespawnAt < throttleMs) {
@@ -235,6 +241,12 @@ export interface CwdDriftTickDeps {
   respawn: (entry: CwdDriftSupervisedEntry) => boolean | Promise<boolean>
   /** Operator alert sink (missing-canonical case). */
   postAlert?: (text: string) => void
+  /** Edge-latch for the missing-canonical alert: session keys currently in the
+   *  alerted state. When provided, the alert fires ONCE on the rising edge
+   *  (absent→present) and clears when the condition resolves — never re-firing
+   *  every tick on a persistently-missing canonical (cross-cutting invariant #1,
+   *  the hourly-re-fire-on-stale-banner bug). Omit to alert every tick. */
+  alertLatch?: Set<string>
   now?: () => number
   throttleMs?: number
   /** Max concurrent lsof probes (cap ~5). */
@@ -292,13 +304,17 @@ export async function runCwdDriftTick(deps: CwdDriftTickDeps): Promise<CwdDriftT
 
     let respawned = false
     if (action.kind === 'alert-missing-canonical') {
-      deps.postAlert?.(
-        buildCwdDriftMissingCanonicalAlert({
-          sessionKey: entry.sessionKey,
-          live: action.live,
-          canonical: action.canonical,
-        }),
-      )
+      // Edge-triggered: alert once on the rising edge, never every tick.
+      if (!deps.alertLatch || !deps.alertLatch.has(entry.sessionKey)) {
+        deps.postAlert?.(
+          buildCwdDriftMissingCanonicalAlert({
+            sessionKey: entry.sessionKey,
+            live: action.live,
+            canonical: action.canonical,
+          }),
+        )
+        deps.alertLatch?.add(entry.sessionKey)
+      }
     } else if (action.kind === 'respawn') {
       // Stamp the throttle BEFORE the await — a respawn is a mutating action that
       // must be fire-once per detection (cross-cutting invariant #4 analog). A
@@ -311,6 +327,9 @@ export async function runCwdDriftTick(deps: CwdDriftTickDeps): Promise<CwdDriftT
         respawned = false
       }
     }
+    // Falling edge: a session no longer in the missing-canonical state can alert
+    // again if it re-enters it later.
+    if (action.kind !== 'alert-missing-canonical') deps.alertLatch?.delete(entry.sessionKey)
     // Surface the ignore *reason* (no-live-cwd / not-drifted) so the wiring is
     // observable, not just "ignore" (mirrors the wedge tick's label).
     const label = action.kind === 'ignore' ? action.reason : action.kind

@@ -24,9 +24,12 @@ liveness + `/health` and is blind to this. Ports Vajra's `cwd-drift-watchdog.ts`
   so the child is automatically pinned back to canonical (the
   `cd '<cwd>' && claude --resume` analog), context preserved via
   resume-is-always-resume.
-- **Existence guard.** Canonical dir missing on disk → **NEVER respawn** (you'd
-  respawn into nothing) → operator alert instead
-  (`buildCwdDriftMissingCanonicalAlert`).
+- **Existence guard.** Checked BEFORE the drift comparison → canonical missing on
+  disk → **NEVER respawn** (you'd respawn into nothing) → **edge-latched** operator
+  alert (`buildCwdDriftMissingCanonicalAlert`, once per rising edge). Also catches
+  the child still rooted in a canonical dir that was **deleted** (lsof's
+  `<path> (deleted)`, which `normalizeCwd` strips, would otherwise read as
+  not-drifted and slip past the guard — Codex review).
 - **Throttle.** Per-session **1h** respawn throttle (`cwdDriftRespawnState`,
   separate clock from the wedge cooldown), stamped BEFORE the respawn await
   (fire-once per detection — a failed respawn still holds the window).

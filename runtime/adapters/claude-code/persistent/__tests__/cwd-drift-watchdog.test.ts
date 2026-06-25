@@ -91,6 +91,17 @@ describe('decideCwdDriftAction', () => {
     const a = decideCwdDriftAction({ ...base, liveCwd: '/p/dead-worktree', canonicalExists: false })
     expect(a.kind).toBe('alert-missing-canonical')
   })
+  it('child still IN a now-DELETED canonical dir → alert-missing-canonical (Codex)', () => {
+    // lsof reports `/p/proj (deleted)`; normalizeCwd strips the marker so it reads
+    // as == canonical (not drifted), but the canonical is gone → still alert,
+    // because the existence guard runs BEFORE the drift comparison.
+    const a = decideCwdDriftAction({
+      ...base,
+      liveCwd: '/p/proj (deleted)',
+      canonicalExists: false,
+    })
+    expect(a.kind).toBe('alert-missing-canonical')
+  })
   it('drift + canonical present + no prior respawn → respawn', () => {
     const a = decideCwdDriftAction({ ...base, liveCwd: '/p/dead-worktree' })
     expect(a).toMatchObject({ kind: 'respawn', live: '/p/dead-worktree', canonical: '/p/proj' })
@@ -239,6 +250,43 @@ describe('runCwdDriftTick — §TESTS scenarios', () => {
     })
     expect(res[0]).toMatchObject({ action: 'respawn', respawned: false })
     expect(throttle.get('k1')).toBe(5_000) // stamped despite the throw → no churn
+  })
+
+  it('edge-latches the missing-canonical alert — fires once across repeated ticks', async () => {
+    const alerts: string[] = []
+    const latch = new Set<string>()
+    const deps = {
+      entries: [ENTRY],
+      probeCwd: async () => '/p/proj (deleted)', // still "in" the deleted canonical
+      canonicalExists: () => false,
+      lastDriftRespawnAt: () => undefined,
+      markDriftRespawn: () => {},
+      respawn: () => true,
+      postAlert: (t: string) => alerts.push(t),
+      alertLatch: latch,
+      now: () => 1,
+    }
+    const r1 = await runCwdDriftTick(deps)
+    const r2 = await runCwdDriftTick(deps) // condition persists
+    expect(r1[0]?.action).toBe('alert-missing-canonical')
+    expect(r2[0]?.action).toBe('alert-missing-canonical')
+    expect(alerts.length).toBe(1) // edge-triggered: alerted ONCE, not twice
+    expect(latch.has('k1')).toBe(true)
+  })
+
+  it('clears the latch when the missing-canonical condition resolves', async () => {
+    const latch = new Set<string>(['k1']) // previously alerting
+    await runCwdDriftTick({
+      entries: [ENTRY],
+      probeCwd: async () => '/p/proj/src', // back in a descendant of (now-present) canonical
+      canonicalExists: () => true,
+      lastDriftRespawnAt: () => undefined,
+      markDriftRespawn: () => {},
+      respawn: () => true,
+      alertLatch: latch,
+      now: () => 1,
+    })
+    expect(latch.has('k1')).toBe(false) // falling edge cleared the latch
   })
 
   it('a failed probe (null) for one entry does not block the others', async () => {
