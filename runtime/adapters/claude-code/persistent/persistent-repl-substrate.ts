@@ -1228,11 +1228,16 @@ async function spawnSession(
   // notice through `onDeadTurnNotice` (default: a structured stderr notice — no
   // feature flag, ON by default). sessionId + cwd are both known here, so the
   // `<projectsDir>/<dashifyCwd(cwd)>/<sessionId>.jsonl` path resolves immediately
-  // (session-validation.ts layout). projectsDir honours `CLAUDE_CONFIG_DIR`.
+  // (session-validation.ts layout). Resolve the transcript root the SAME way the
+  // JSONL ghost gate does (`makeJsonlExistsProbe(options.projectsDir)` below): an
+  // explicit `options.projectsDir` wins (custom / per-instance transcript root —
+  // Codex P2), then `CLAUDE_CONFIG_DIR`'s `projects` (CC writes transcripts there
+  // when `claudeConfigDir` is set), then the default `~/.claude/projects`.
   const projectsDir =
-    options.claudeConfigDir !== undefined
+    options.projectsDir ??
+    (options.claudeConfigDir !== undefined
       ? join(options.claudeConfigDir, 'projects')
-      : join(homedir(), '.claude', 'projects')
+      : join(homedir(), '.claude', 'projects'))
   const deadTurnNotify =
     options.onDeadTurnNotice ??
     ((notice: DeadTurnNotice): void => {

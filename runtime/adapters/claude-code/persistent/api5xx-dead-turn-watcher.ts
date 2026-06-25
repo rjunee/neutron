@@ -320,6 +320,19 @@ export function startApi5xxDeadTurnWatcher(deps: Api5xxWatcherDeps): Api5xxWatch
     }
   }
 
+  // SEEK TO EOF ON ATTACH (Codex P2). On a RESUME the transcript already holds
+  // the whole prior conversation — including any historical 5xx from a turn that
+  // already died and was abandoned. Starting `offset` at 0 and replaying that
+  // history would emit a STALE "resend your last message" notice on every resume
+  // (and our own edge-latch wouldn't save us: the historical error fires during
+  // the catch-up feed BEFORE a later healthy record clears the latch). Seeking to
+  // the current EOF means we only ever consider records appended DURING this
+  // watcher's lifetime — i.e. a 5xx that kills the CURRENT live turn, which is
+  // exactly the per-turn semantics we want. A fresh spawn (file absent → seed
+  // null) keeps offset 0, so nothing the new turn writes is missed.
+  const seed = readFrom(deps.jsonlPath, 0)
+  if (seed !== null) offset = seed.size
+
   let handle: DirWatchHandle | undefined
   try {
     ensureDir(dir)
@@ -331,8 +344,9 @@ export function startApi5xxDeadTurnWatcher(deps: Api5xxWatcherDeps): Api5xxWatch
     handle = undefined
   }
 
-  // Initial read — the JSONL may already carry records (a resume) before the
-  // first change event fires.
+  // Initial read — catches anything appended between the EOF seed above and the
+  // watcher attaching (and, on a fresh spawn where seed was null, the very first
+  // records the new turn writes).
   pump()
 
   return {

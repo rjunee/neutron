@@ -257,11 +257,18 @@ describe('startApi5xxDeadTurnWatcher (fs.watch driver, injected fs)', () => {
     expect(h.notices).toHaveLength(2)
   })
 
-  test('initial read processes records already present before any change event', () => {
+  test('records already on disk at attach are IGNORED (resume seek-to-EOF); only new appends fire', () => {
     const h = harness()
-    h.write(line(resultOverloaded)) // present BEFORE start()
+    // A historical 5xx from a prior (already-abandoned) turn, present BEFORE start():
+    // the watcher seeks to EOF on attach, so it must NOT emit a stale notice (Codex P2).
+    h.write(line(resultOverloaded))
     startApi5xxDeadTurnWatcher(h.deps)
+    expect(h.notices).toHaveLength(0)
+    // A NEW 5xx appended after attach DOES fire.
+    h.write(line(systemRateLimit))
+    h.fire()
     expect(h.notices).toHaveLength(1)
+    expect(h.notices[0]?.matched).toBe('rate_limit_error')
   })
 
   test('file rotation/truncation resets the reassembly buffer (no fused record)', () => {
