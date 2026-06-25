@@ -892,7 +892,8 @@ themselves land in follow-on P0/P1 PRs). See
   transport-failed keystroke write can never retry and double-send onto an
   approval prompt). The dev-channel first-run disclaimer auto-dismiss is now the
   first registered detector; P0 wedge-prompt recovery (below) + P1 auto-approve /
-  compact-resume / rate-limit-stop register the same way next.
+  compact-resume / rate-limit-stop + the P2 rate-limit/overload **banner** alert
+  (notify-only, row #10) all register the same way.
 
 ## Wedged-interactive-prompt detect + recover (P0) — `wedged-prompt-detector.ts`
 
@@ -1066,6 +1067,48 @@ quotes "API Error: 500"). It does NOT touch the `OutputScanner` / ring.
   (sessionId + cwd are known → the path resolves immediately) and stopped on child
   death. **Out of scope this pass:** auto-resend of the stored message (notify +
   affordance only).
+
+## Rate-limit / overload banner alert (notify-only, port row #10) — `rate-limit-banner.ts`
+
+The **passive** rate-limit surface (master-table row #10). When CC prints a
+rate-limit / overload BANNER — a transient Anthropic-side 429/529/overload/502, or
+the subscription window cap — nothing previously told the user; the picker
+auto-stop (row #4) only handles the *interactive* `/rate-limit-options` org-cap
+menu, not the passive banner. This closes that gap with an **edge-triggered,
+NOTIFY-ONLY** alert. It is the passive sibling of row #4: row #4 PRESSES `3`; this
+one never sends a keystroke and never auto-retries — it only informs.
+
+- **Two severities, two detectors** (`createRateLimitBannerDetector` ×
+  `temporary` | `usage-cap`), registered on every session's `OutputScanner`.
+  `temporary` = Anthropic-side transient (`Server is temporarily limiting requests`
+  + `API Error`, `Overloaded` + `API Error`, `502 Bad Gateway` +
+  `api.anthropic.com`) — CC retries on its own; `usage-cap` = the subscription
+  window cap (`Claude usage limit reached`, `5-hour rate limit reached`, `usage
+  limit. Please try again at`) — no auto-recovery. Each cue set requires ALL of its
+  substrings on one line, so bare "Rate limited"/"Overloaded" log noise can't fire.
+- **Edge-latch per `threadId::severity` (invariant §1) — the load-bearing fix.** A
+  pure *time*-dedupe re-fired the alert HOURLY FOREVER on a stale banner sitting in
+  an idle pane. The framework's per-detector edge-latch IS that latch, expressed
+  structurally: one detector per severity → the latch key is `(session.scanner ≡
+  threadId) × (detector id ≡ severity)`. Fires on absent→present, clears ONLY on
+  present→absent.
+- **Guards (the exact three the spec enumerates).** doc-quote (the F3
+  `stripDocQuotes` removes fenced/diff/bullet/blockquote lines + blanks
+  inline-backtick spans before `present` runs); **bottom-30** positional window
+  (`RATE_LIMIT_BANNER_BOTTOM_N` — a banner above it is stale scrollback CC retried
+  past); and **not-at-idle-prompt** — when the bottom-most live line is an idle
+  prompt the banner has by definition cleared. The idle-prompt walk **SKIPS chrome**
+  — bypass-permissions banner / "new task?" hint / `ctrl+…` affordances /
+  box-drawing borders — or a retired 429 above the chrome false-fires (book topic,
+  4 hourly alerts on a long-retired 429, 2026-05-15).
+- **Surface.** NOTIFY-ONLY — the `DetectorSpec` carries NO `keys`. On the rising
+  edge `runOutputScan` routes the fire to `dispatchRateLimitBannerNotice`, which
+  re-derives the verbatim banner line and surfaces it three ways (mirroring the
+  size-alert surface): the active turn's channel if one is in flight, an operator
+  stderr log (always), and the injected `onRateLimitBanner` DI seam (a
+  runtime→gateway seam — the gateway wires the richer chat-surface alert).
+  **ON by default, no feature flag.** **Out of scope:** any keystroke / auto-action
+  (row #4 owns that) and auto-retry.
 
 ## Post-spawn liveness assertion — channel-MCP-unwired fast-fail (port row #6) — `post-spawn-assertion.ts`
 
