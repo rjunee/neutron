@@ -158,6 +158,17 @@ const RATE_LIMIT_OPTIONS_BOTTOM_N = 30
  *  RATE_LIMIT_OPTIONS_DEDUPE_MS) — suppresses a re-press if the picker
  *  re-renders briefly while the prior `3`+enter is still settling. */
 const RATE_LIMIT_OPTIONS_DEBOUNCE_MS = 60_000
+/** P1 compact-resume picker (port row #3). CC renders this summary-vs-full menu
+ *  when resuming an auto-compacted session. EXACT-STRING ONLY — match one of the
+ *  two literal option labels and NOTHING broader. LESSON: a prior broad
+ *  `summary+full+numbered` match fired on NORMAL conversation and injected
+ *  `2<Enter>` into live panes. The picker is ARROW-driven, NOT number-key, so
+ *  the action is `down`+`enter` (the spawn-loop path), never a digit. Matched on
+ *  the whitespace-stripped `normalized` view because Ink shreds each word across
+ *  cursor-move escapes (see pty-text.ts), so the exact labels are carried here
+ *  in their space-free form. */
+const COMPACT_RESUME_SUMMARY_RE = /resumefromsummary\(recommended\)/i
+const COMPACT_RESUME_FULL_RE = /resumefullsessionas-is/i
 const REPL_DEBUG = process.env['NEUTRON_REPL_DEBUG'] === '1'
 /** After a turn's reply settles, hold the turn lock until the REPL's PTY has
  *  been quiet for this long (claude returned to idle) before allowing the next
@@ -1171,6 +1182,23 @@ async function spawnSession(
     present: (ctx) =>
       RATE_LIMIT_OPTIONS_RE.test(ctx.normalized) && RATE_LIMIT_STOP_RE.test(ctx.normalized),
     keys: ['3', 'enter'],
+  })
+  // P1: clear CC's compact-resume picker (the summary-vs-full menu shown when
+  // resuming an auto-compacted session). EXACT-STRING match on one of the two
+  // literal option labels — NOTHING broader. A prior broad
+  // `summary+full+numbered` match fired on NORMAL conversation and injected
+  // `2<Enter>` into live panes; the picker is ARROW-driven, not number-key, so
+  // the action is `down`+`enter` (select "Resume full session as-is"), never a
+  // digit. The framework stamps the latch + 5s debounce BEFORE returning the
+  // fired detection, so this is fire-once per rising edge (invariant §4). The
+  // append-only-ring back-to-back limitation noted on `tool-use-approve` applies
+  // here too; the P0 wedge-recovery detector is the backstop.
+  session.scanner.register({
+    id: 'compact-resume-picker',
+    debounceMs: 5000,
+    present: (ctx) =>
+      COMPACT_RESUME_SUMMARY_RE.test(ctx.normalized) || COMPACT_RESUME_FULL_RE.test(ctx.normalized),
+    keys: ['down', 'enter'],
   })
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after

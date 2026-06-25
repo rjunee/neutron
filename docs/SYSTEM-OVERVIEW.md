@@ -932,6 +932,19 @@ not kill.
   Vajra's viewport-pre-check-gates-recapture lesson (Argus #132 r3) is obviated:
   Neutron's in-memory ring read IS the cheap viewport check — no scrollback
   recapture to gate.
+- **P1 — compact-resume picker (port row #3).** A third detector
+  (`id: 'compact-resume-picker'`) registered on every session's `OutputScanner`
+  clears CC's summary-vs-full picker shown when resuming an auto-compacted
+  session. It fires on an **EXACT-STRING** match of either literal label in the
+  normalized bottom-N view — `Resume from summary (recommended)`
+  (`/resumefromsummary\(recommended\)/i`) **OR** `Resume full session as-is`
+  (`/resumefullsessionas-is/i`) — and **nothing broader**: a prior broad
+  `summary+full+numbered` fallback fired on normal conversation and injected
+  `2<Enter>` into live panes. The picker is **arrow-driven, not number-key**, so
+  on the rising edge it sends `down`+`enter` (never a digit). A 5s `debounceMs`
+  floor is set and the latch is stamped before return (fire-once, same as
+  `tool-use-approve`); the append-only-ring back-to-back limitation and the P0
+  wedge-recovery backstop apply identically.
 
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 

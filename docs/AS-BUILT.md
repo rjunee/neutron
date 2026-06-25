@@ -69,6 +69,38 @@ stop and wait for limit to reset."
   same call: 2 cues + doc-quote + bottom-N, no option-number cue. Honoring the
   spec + Vajra precedent; tracked as a known residual if a live spawn ever
   confirms the picker reliably renders `3.` adjacent to the stop text.
+## PTY terminal-detection P1 — compact-resume picker (port row #3)
+
+**What shipped.** On the merged F1/F2/F3 substrate (PR #54), a third output-scan
+detector (`id: 'compact-resume-picker'`) registered on every session's
+`OutputScanner` in `persistent-repl-substrate.ts` clears CC's compact-resume
+picker — the summary-vs-full menu shown when resuming an auto-compacted session.
+Port of Vajra's `gateway-core.ts isCompactResumePicker` (research row #3).
+
+- **Detect — EXACT STRING ONLY.** Fires when the normalized bottom-N view
+  contains either literal option label: `Resume from summary (recommended)`
+  (`/resumefromsummary\(recommended\)/i`) **OR** `Resume full session as-is`
+  (`/resumefullsessionas-is/i`), carried in whitespace-free form because Ink
+  shreds each word across cursor-move escapes. **No broader match.** The hard-won
+  lesson: a prior broad `summary+full+numbered` fallback fired on NORMAL
+  conversation and injected `2<Enter>` into live panes. Exact-string only.
+- **Action — arrow-driven, NOT number-key.** `writeKey('down')` then
+  `writeKey('enter')` (`keys: ['down','enter']`) on the rising edge — the picker
+  is arrow-driven, so the spawn-loop path is `Down`+`Enter`, never a digit.
+- **Fire-once / no double-keystroke.** `debounceMs: 5000` floor; the F3
+  framework stamps the latch + last-fire BEFORE returning the fired detection, so
+  a transport-failed write can NOT retry next tick and double-send `down`+`enter`
+  (cross-cutting invariant §4).
+- **Tests.** `output-scan.test.ts` (+1, now 17): exact-label frame → `down`+`enter`;
+  the full-session label alone also fires; NORMAL conversation prose mentioning
+  "resume"/"summary"/"full session"/numbered options does NOT fire; debounce
+  stamped before await (same-frame retry does not re-fire; re-arm within 5s
+  suppressed, past 5s fires). `tsc` clean (no new errors in touched files vs
+  baseline).
+- **Known limitation (shared substrate).** The append-only-ring back-to-back
+  limitation documented on `tool-use-approve` applies here too; the P0
+  wedge-recovery detector (#1) is the designed backstop for a genuinely-stuck
+  picker.
 
 ## PTY terminal-detection P1 — auto-approve tool-use prompt (port row #2)
 

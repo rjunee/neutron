@@ -258,4 +258,55 @@ describe('OutputScanner — registration', () => {
     // Already dismissed → no second Enter.
     expect(s.scan(frame, 1).length).toBe(0)
   })
+
+  test('P1 compact-resume-picker: exact label fires down+enter; normal conversation does NOT', () => {
+    // Mirrors the substrate registration (port row #3): EXACT-STRING match on
+    // one of the two literal picker labels, action `down`+`enter` (arrow-driven,
+    // never a digit). Matched on the normalized (whitespace-stripped) view.
+    const SUMMARY = /resumefromsummary\(recommended\)/i
+    const FULL = /resumefullsessionas-is/i
+    const register = (sc: OutputScanner) =>
+      sc.register({
+        id: 'compact-resume-picker',
+        debounceMs: 5000,
+        present: (ctx: { normalized: string }) =>
+          SUMMARY.test(ctx.normalized) || FULL.test(ctx.normalized),
+        keys: ['down', 'enter'] as const,
+      })
+
+    // The picker frame (Ink shreds each word across cursor moves) → fires
+    // `down`+`enter`, NOT a number-key.
+    const s = new OutputScanner()
+    register(s)
+    const picker =
+      'Resume\x1b[8G from\x1b[16G summary\x1b[24G (recommended)\n  Resume full session as-is'
+    const fired = s.scan(picker, 0)
+    expect(fired.map((f) => f.id)).toEqual(['compact-resume-picker'])
+    expect(fired[0]?.keys).toEqual(['down', 'enter'])
+
+    // The full-session label alone also fires (either exact label is sufficient).
+    const s2 = new OutputScanner()
+    register(s2)
+    expect(s2.scan('Resume full session as-is', 0).map((f) => f.id)).toEqual([
+      'compact-resume-picker',
+    ])
+
+    // NORMAL CONVERSATION must NOT fire — the lesson that motivates the
+    // exact-string match. Prose merely mentioning "resume", "summary", "full
+    // session", or numbered options does not trip the detector.
+    const s3 = new OutputScanner()
+    register(s3)
+    expect(s3.scan('Let me resume the session and write a summary of the full plan.', 0).length).toBe(
+      0,
+    )
+    expect(s3.scan('1. summary  2. full session  3. resume', 1).length).toBe(0)
+
+    // Debounce stamped BEFORE return → a same-frame retry does NOT re-fire (no
+    // double down+enter), a re-arm within 5s is suppressed, past the floor fires.
+    expect(s.scan(picker, 1).length).toBe(0) // latched, identical frame
+    expect(s.scan('idle prompt', 2).length).toBe(0) // falling edge clears latch
+    expect(s.scan(picker, 2000).length).toBe(0) // rising edge but within 5s floor
+    expect(s.scan('idle prompt', 6000).length).toBe(0) // falling edge again
+    expect(s.scan(picker, 6001).map((f) => f.id)).toEqual(['compact-resume-picker']) // past floor
+  })
 })
