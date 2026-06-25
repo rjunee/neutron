@@ -504,6 +504,30 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
     deps.clearIntervalFn ??
     ((h: unknown) => globalThis.clearInterval(h as Parameters<typeof globalThis.clearInterval>[0]))
 
+  // Re-hydrate a previously-adopted model on (re)start (Codex P1). The runtime
+  // override (`setBestModelOverride`) is PROCESS-LOCAL and resets to undefined on
+  // every restart, but `last_known_model` is PERSISTED. Without this, after a
+  // gateway restart the next probe returns the SAME already-adopted model, takes
+  // the `no-change` path, and NEVER re-applies the override — so fresh sessions
+  // silently revert to the stale env/default `BEST_MODEL` until an even-newer
+  // model ships (the auto-upgrade quietly un-does itself across restarts).
+  // Restore it here, but ONLY when the persisted model genuinely differs from the
+  // configured base (so a plain seed is a no-op) and is not a fallback id.
+  try {
+    const persisted = deps.loadState()
+    const adopted = persisted.last_known_model
+    if (
+      adopted !== undefined &&
+      !isFallbackModel(adopted, deps.knownFallbacks()) &&
+      normalizeModelId(adopted) !== normalizeModelId(deps.getConfiguredModel())
+    ) {
+      deps.adoptModel(adopted)
+      log(`model-update: re-applied persisted model ${adopted} on start`)
+    }
+  } catch (e) {
+    onError(e)
+  }
+
   // One probe / upgrade at a time — a probe can take seconds and the upgrade
   // minutes; overlapping ticks would double-probe + race the adopt.
   let inFlight = false

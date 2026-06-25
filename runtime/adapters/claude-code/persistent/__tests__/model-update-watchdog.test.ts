@@ -430,6 +430,36 @@ describe('startModelUpdateWatchdog — the cadence + adopt path', () => {
     h.wd.stop()
   })
 
+  it('RESTART: re-applies a persisted adopted model on start (Codex P1)', async () => {
+    // Simulate a restart after a prior adoption: state has last_known_model set to
+    // the newer model, but the process-local override is back to undefined.
+    const h = harness(
+      { ok: true, model: 'claude-opus-4-8' },
+      { last_known_model: 'claude-opus-4-8', last_checked_at: new Date(1_700_000_000_000).toISOString() },
+    )
+    // The override was re-applied at startup (before any tick fired).
+    expect(h.adopted).toEqual(['claude-opus-4-8'])
+    h.wd.stop()
+  })
+
+  it('RESTART: a plain seed (persisted == configured) does NOT pin an override', async () => {
+    const h = harness(
+      { ok: true, model: 'claude-opus-4-7' },
+      { last_known_model: 'claude-opus-4-7' },
+    )
+    expect(h.adopted).toEqual([]) // last_known == configured → no-op
+    h.wd.stop()
+  })
+
+  it('RESTART: never re-applies a persisted FALLBACK id', async () => {
+    const h = harness(
+      { ok: true, model: 'claude-opus-4-7' },
+      { last_known_model: 'claude-haiku-4-5-20251001' },
+    )
+    expect(h.adopted).toEqual([])
+    h.wd.stop()
+  })
+
   it('no-change advances the gate + seeds last_known', async () => {
     const h = harness({ ok: true, model: 'claude-opus-4-7' })
     await h.wd.tick()
