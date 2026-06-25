@@ -1188,6 +1188,23 @@ if [ "$DO_BACKUP" = 1 ]; then
   fi
 fi
 
+# ── gbrain memory auto-upgrade + doctor (the cc-update-doctor analogue) ───────
+# Schedule a launchd StartInterval / systemd timer that runs `neutron doctor
+# --upgrade` daily: re-install gbrain when upstream advances (idempotent + safe,
+# pinned to the resolved commit) AND VERIFY it still works (binary on PATH,
+# responds, real memory round-trip — not just "binary exists"). Out-of-process
+# by design: Neutron NEVER auto-upgrades GBrain inside a running instance
+# (gbrain-memory/version-notice.ts). Only when gbrain actually installed; the
+# --no-gbrain opt-out skips it. Best-effort + non-fatal — a scheduling failure
+# never aborts the install (the doctor stays runnable via `neutron doctor`).
+if [ "$DO_GBRAIN" = 1 ] && [ "$GBRAIN_INSTALLED" = 1 ]; then
+  if [ -f "$SRC_DIR/neutron-service.sh" ]; then
+    NEUTRON_SERVICE_CODE_DIR="$SRC_DIR" NEUTRON_HOME="$NEUTRON_HOME_RESOLVED" \
+      sh "$SRC_DIR/neutron-service.sh" install-doctor \
+      || warn "gbrain doctor schedule failed — run '$SRC_DIR/bin/neutron doctor --upgrade' on a cron instead"
+  fi
+fi
+
 # ── neutron CLI on PATH ──────────────────────────────────────────────────────
 install_neutron_cli
 

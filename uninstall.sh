@@ -418,7 +418,7 @@ stop_gateway() {
 teardown_services() {
   _src=$1
   _home=$2
-  for _pair in neutron-service.sh:uninstall neutron-backup.sh:uninstall-timer; do
+  for _pair in neutron-service.sh:uninstall neutron-service.sh:uninstall-doctor neutron-backup.sh:uninstall-timer; do
     _f=${_pair%%:*}
     _sub=${_pair#*:}
     if [ -f "$_src/$_f" ]; then
