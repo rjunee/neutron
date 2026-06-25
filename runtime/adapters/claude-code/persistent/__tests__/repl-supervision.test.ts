@@ -640,7 +640,11 @@ describe('S2 supervision — pending-respawns: an unregistered owner is skipped 
     })
     const results = await drainPendingRespawns(opts, { baseDelayMs: 0, sleep: async () => {} })
     // Skipped (never respawned with the drain's own env), and retained on disk.
-    expect(results).toEqual([{ sessionKey: ghostKey, replayed: false, skipped: 'unregistered' }])
+    // `resumable: false` — this ghost has no JSONL on disk (a true ghost, not a
+    // recoverable topic); the disk-recovery classifier (#20) correctly declines it.
+    expect(results).toEqual([
+      { sessionKey: ghostKey, replayed: false, skipped: 'unregistered', resumable: false },
+    ])
     const after = loadPendingRespawns(pendingRespawnsPath)
     expect(after.kind).toBe('loaded')
     if (after.kind === 'loaded') {

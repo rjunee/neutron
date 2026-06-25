@@ -114,6 +114,11 @@ import {
   savePendingRespawns,
   type PendingRespawnEntry,
 } from './pending-respawns-queue.ts'
+import { classifyEntryResumable } from './disk-recovery.ts'
+import {
+  buildCrashLoopWarningText,
+  recordAndEvaluateRestart,
+} from './restart-rate.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** Separator between the warm-pool key components (S3: `substrate_instance_id`,
@@ -485,6 +490,12 @@ export interface PersistentReplSubstrateOptions {
    *  row #11). Defaults to `<dir(replRegistryPath)>/.pending-respawns.json`
    *  when a registry path is set. */
   pendingRespawnsPath?: string
+  /** Path to the restart-rate crash-loop guard's marker file (Vajra mechanism
+   *  #20). When set, each watchdog boot records a restart marker and, if two
+   *  restarts land <5min apart, posts a crash-loop warning once (edge-latched)
+   *  via `postAlert` (else stderr). Defaults to
+   *  `<dir(replRegistryPath)>/.restart-markers.json`. */
+  restartMarkersPath?: string
   /** Override the JSONL-existence probe that flips a record's `has_session`
    *  true (consumes `captureSession`'s result). Tests inject `() => true`;
    *  production uses `makeJsonlExistsProbe(projectsDir)`. */
@@ -1757,7 +1768,7 @@ export interface DrainPendingRespawnsOptions {
 export async function drainPendingRespawns(
   options: PersistentReplSubstrateOptions,
   dopts: DrainPendingRespawnsOptions = {},
-): Promise<Array<{ sessionKey: string; replayed: boolean; skipped?: string }>> {
+): Promise<Array<{ sessionKey: string; replayed: boolean; skipped?: string; resumable?: boolean }>> {
   const path = options.pendingRespawnsPath
   if (path === undefined) return []
   const loaded = loadPendingRespawns(path)
@@ -1768,13 +1779,41 @@ export async function drainPendingRespawns(
   if (loaded.kind === 'absent' || loaded.entries.length === 0) return []
   const sleep = dopts.sleep ?? ((ms: number) => Bun.sleep(ms))
   const plan = planZombieRespawns(loaded.entries, dopts.baseDelayMs ?? 500)
-  const results: Array<{ sessionKey: string; replayed: boolean; skipped?: string }> = []
+  const results: Array<{
+    sessionKey: string
+    replayed: boolean
+    skipped?: string
+    resumable?: boolean
+  }> = []
   for (const { entry, delayMs } of plan) {
     // Resolve the OWNING substrate's options by the entry's pool key. Unregistered
     // → retain on disk (don't replay with the wrong env) and report the skip.
     const owner = supervisedBySessionKey.get(entry.sessionKey)
     if (owner === undefined) {
-      results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'unregistered' })
+      // Disk-JSONL recovery classification (Vajra mechanism #20). The entry was
+      // scheduled-but-lost across a restart; its owner hasn't re-registered yet.
+      // "Disk JSONL is the source of truth" — read the transcript and classify
+      // whether this is a RESUMABLE conversation (live JSONL) vs a true ghost.
+      // Retain either way (a later drain replays once the owner registers), but
+      // surface resumability so a recoverable topic is observably NOT dropped
+      // (the 2026-05-21 pristine lesson).
+      let resumable = false
+      try {
+        resumable = classifyEntryResumable(
+          { sessionId: entry.sessionId, cwd: entry.cwd },
+          Date.now(),
+          {},
+          options.projectsDir,
+        ).resumable
+      } catch {
+        /* classification is best-effort; default not-resumable */
+      }
+      results.push({
+        sessionKey: entry.sessionKey,
+        replayed: false,
+        skipped: 'unregistered',
+        resumable,
+      })
       continue
     }
     if (delayMs > 0) await sleep(delayMs)
@@ -2809,6 +2848,25 @@ export function startReplWatchdog(
   let heartbeat: HeartbeatWatchdog | undefined
   if (wopts.heartbeatFile !== undefined) {
     heartbeat = startHeartbeatWatchdog({ heartbeatFile: wopts.heartbeatFile })
+  }
+
+  // Restart-rate crash-loop guard (Vajra mechanism #20). Each boot records a
+  // restart marker; two restarts <5min apart == a crash loop (the 2026-05-21
+  // pristine signature: restart, then restart again 118s later). Edge-latched →
+  // warns ONCE per loop, not every boot. Surfaced via `postAlert` (operator
+  // chat) or stderr — auto-restart is making it worse, so a human must look.
+  if (options.restartMarkersPath !== undefined) {
+    try {
+      const verdict = recordAndEvaluateRestart(options.restartMarkersPath, Date.now())
+      if (verdict.warn) {
+        const text = buildCrashLoopWarningText(verdict.detection)
+        if (wopts.postAlert !== undefined) wopts.postAlert(text)
+        else console.error(text)
+      }
+    } catch (e) {
+      // Best-effort: the guard must never block watchdog startup.
+      console.error(`repl-watchdog: restart-rate guard error: ${e}`)
+    }
   }
 
   // Boot-drain (brief § 6 acceptance #1): replay anything a prior gateway crash

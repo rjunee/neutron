@@ -147,6 +147,7 @@ export interface ReplSupervisionPaths {
   stateDir: string
   replRegistryPath: string
   pendingRespawnsPath: string
+  restartMarkersPath: string
   heartbeatFile: string
 }
 
@@ -156,6 +157,7 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
     stateDir,
     replRegistryPath: join(stateDir, 'repl-registry.json'),
     pendingRespawnsPath: join(stateDir, '.pending-respawns.json'),
+    restartMarkersPath: join(stateDir, '.restart-markers.json'),
     heartbeatFile: join(stateDir, '.heartbeat'),
   }
 }
@@ -214,6 +216,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     }
     p.replRegistryPath = paths.replRegistryPath
     p.pendingRespawnsPath = paths.pendingRespawnsPath
+    p.restartMarkersPath = paths.restartMarkersPath
     // Register the live options so the watchdog tick + the operator admin-respawn
     // endpoint actuate each session with its OWNING substrate's options (keyed by
     // pool key).
