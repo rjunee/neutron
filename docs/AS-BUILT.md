@@ -29,6 +29,19 @@ permission prompt. Port of Vajra's `gateway-core.ts isToolUsePrompt` +
   selector-only and question-only do NOT fire; debounce stamped before await
   (same-frame retry does not re-fire; re-arm within 5s suppressed, past 5s
   fires). `tsc` clean (no new errors in touched files vs baseline).
+- **Known limitation (Codex cross-model review, tracked).** The F1 ring is an
+  append-only byte log, so a just-approved prompt's text lingers in the bottom-N
+  window until new output scrolls it out. If a second prompt renders with
+  < bottomN lines of intervening output, the latch can stay up and the second
+  prompt won't auto-approve until the prior signature clears. This is inherent to
+  the F1 raw-ring + F3 edge-latch substrate (#54) — every content detector shares
+  it; the disclaimer escapes only by firing once at spawn. Not mitigated
+  in-detector on purpose: a tighter positional window would MISS live prompts
+  (the `❯ 1. Yes` selector sits above its 2./3. option lines), and a timed
+  re-fire would inject a stray `1`+enter into a live session. Proper fix is
+  substrate-level (rendered-screen ring or latch-clear-on-fresh-data); the P0
+  wedge-recovery detector (#1) is the designed backstop for a genuinely-stuck
+  prompt.
 
 ## GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
 

@@ -1101,6 +1101,19 @@ async function spawnSession(
   // 5s debounce BEFORE returning the fired detection, so this keystroke is
   // fire-once per rising edge — a transport failure can NOT retry and risk a
   // DOUBLE-Enter onto the approval (output-scan.ts invariant §4).
+  //
+  // KNOWN LIMITATION (substrate-level, not specific to this detector): the F1
+  // ring is an append-only byte log, so a just-approved prompt's text lingers
+  // in the bottom-N window until enough new output scrolls it out. If a second
+  // prompt renders with < bottomN lines of intervening output the latch may
+  // still be up, so it won't see a fresh rising edge until the prior signature
+  // clears. We deliberately do NOT mitigate in-detector: a tighter positional
+  // window would MISS live prompts (the `❯ 1. Yes` selector sits ABOVE its
+  // 2./3. option lines — the widened-window Robobuddha lesson), and a timed
+  // re-fire would inject a stray `1`+enter into a live session. The proper fix
+  // is substrate-level (a rendered-screen ring or latch-clear-on-fresh-data);
+  // the P0 wedge-recovery detector (#1) is the backstop for a genuinely-stuck
+  // prompt. Flagged by Codex cross-model review; tracked for the broader port.
   session.scanner.register({
     id: 'tool-use-approve',
     debounceMs: 5000,
