@@ -24,14 +24,15 @@
  * `Resume Session` || `Enter to select` || `Esc to clear`. A bare OR over those
  * single phrases would false-fire (`Enter to select` is shared with the ordinary
  * AskUserQuestion footer that detector #1 handles). We therefore anchor on the
- * DISTINCTIVE `Resume Session` title AND require one of the picker's footer cues
- * (`Esc to clear` / `Enter to select`). The `Esc to clear` footer is what
- * distinguishes this picker from the AskUserQuestion menu (whose footer is
- * `Esc to cancel`), so the two detectors never collide.
+ * DISTINCTIVE `Resume Session` title AND require the DISTINCTIVE `Esc to clear`
+ * footer — NOT the shared `Enter to select`. The AskUserQuestion menu's footer is
+ * `Esc to cancel`, so requiring `Esc to clear` keeps the two detectors strictly
+ * disjoint even for a live question whose text happens to contain "Resume
+ * Session" (Codex P2).
  *
  * DETECT (gates):
  *   • the `Resume Session` title (the distinctive picker header), AND
- *   • a picker footer cue (`Esc to clear` and/or `Enter to select`).
+ *   • the distinctive `Esc to clear` footer cue.
  *   + doc-quote guard: the `output-scan` framework strips fenced / diff / bullet /
  *     inline-backtick lines, so prose quoting "Resume Session" can't fire.
  *   + edge-latch (framework): fire on absent→present, clear on present→absent.
@@ -61,11 +62,11 @@ export const RESUME_PICKER_BOTTOM_N = 40
 // with its spaces intact — match the normalized form).
 /** The distinctive picker title — the strong anchor. */
 const RESUME_TITLE = /resumesession/i
-/** The picker footer's clear cue — distinguishes this picker from the
- *  AskUserQuestion menu (which uses `esc to cancel`, handled by detector #1). */
+/** The picker footer's clear cue — the DISTINCTIVE footer that distinguishes this
+ *  picker from the AskUserQuestion menu (which uses `esc to cancel`, handled by
+ *  detector #1). REQUIRED by the predicate; the loose-spec `Enter to select` cue
+ *  is deliberately NOT gated on because it is shared with that menu (Codex P2). */
 const FOOTER_CLEAR = /esctoclear/i
-/** The picker footer's select cue (corroborating). */
-const FOOTER_SELECT = /entertoselect/i
 
 /**
  * The pure resume-session-picker predicate. Operates on a {@link DetectorContext}
@@ -75,12 +76,15 @@ const FOOTER_SELECT = /entertoselect/i
 export function isResumeSessionPicker(ctx: DetectorContext): boolean {
   if (ctx.lines.length === 0) return false
   const norm = ctx.normalized
-  // The distinctive title is REQUIRED — it is what makes this the resume picker
-  // and not some other prompt; anchoring on it (vs a bare footer-phrase OR) is
-  // what prevents false-firing on the shared `enter to select` chrome.
-  if (!RESUME_TITLE.test(norm)) return false
-  // Plus a picker footer cue (clear and/or select).
-  return FOOTER_CLEAR.test(norm) || FOOTER_SELECT.test(norm)
+  // BOTH cues are REQUIRED, and the footer cue is the DISTINCTIVE `Esc to clear`
+  // — NOT the shared `Enter to select`. A live AskUserQuestion menu whose text
+  // happens to contain "Resume Session" renders with the footer `Enter to select
+  // · Esc to cancel`; gating on `Enter to select` would let that menu satisfy
+  // this predicate and send Escape into a normal user-choice prompt that detector
+  // #1 should handle (Codex P2). `Esc to clear` is unique to the resume picker
+  // (the AskUserQuestion footer is `esc to cancel`), so requiring it keeps the two
+  // detectors strictly disjoint.
+  return RESUME_TITLE.test(norm) && FOOTER_CLEAR.test(norm)
 }
 
 /**
@@ -163,11 +167,12 @@ export async function runResumePickerRecovery(
   // JSONL/disk is the source of truth for recovery (invariant §5).
   const recoveredId = deps.findLatestSession()
   if (recoveredId !== null && recoveredId.length > 0) {
+    deps.requestResume?.(recoveredId)
     deps.surface(
       `🔁 Resume picker appeared (cached session was stale). Escaped out and recovered ` +
-        `your most recent session \`${recoveredId.slice(0, 8)}\` from disk — context preserved.`,
+        `your most recent session \`${recoveredId.slice(0, 8)}\` from disk — it will be ` +
+        `active from your next message.`,
     )
-    deps.requestResume?.(recoveredId)
     return { recovered: true, sessionId: recoveredId, keysSent }
   }
 

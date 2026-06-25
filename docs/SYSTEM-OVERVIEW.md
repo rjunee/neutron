@@ -993,16 +993,28 @@ not kill.
   edge the substrate runs `runResumePickerRecovery` (`dispatchResumePickerRecovery`,
   guarded by `session.resumePickerRecovering` against a concurrent ladder): it
   sends a **single `Escape`** (never a digit / Enter), then calls
-  `findLatestResumableSession(cwd, projectsDir, { excludeSessionId })` —
-  the Neutron analog of Vajra's `findLatestSessionForTopic` — which scans
+  `findLatestResumableSession(cwd, resolveTranscriptProjectsDir(options), { excludeSessionId })`
+  — the Neutron analog of Vajra's `findLatestSessionForTopic` — which scans
   `<projectsDir>/<dashifyCwd(cwd)>/*.jsonl` for the most-recently-modified
   transcript with ≥1 non-empty line (**JSONL-is-truth, invariant §5**; the stale id
-  that just failed is excluded so it can't "recover" itself). A hit surfaces a
-  "session recovered" notice to the chat surface and (via `requestResume`)
-  `patchRecord`s the registry so the **existing** registry/respawn path
-  (`resolveResumeDirective`) resumes the recovered session next spawn; a miss
-  surfaces a "session lost — starting fresh" notice + one operator alert. This
-  closes master-table **row #7**. It is **largely obviated** by Neutron's
+  that just failed is excluded so it can't "recover" itself). The transcript root is
+  resolved via the **shared** `resolveTranscriptProjectsDir` (explicit
+  `projectsDir` → `CLAUDE_CONFIG_DIR/projects` → `~/.claude/projects`) so the scan
+  finds an isolated-config session's JSONL exactly where the API-5xx watcher looks.
+  On a hit the recovery **moves the live REPL onto the recovered session**: it
+  records the id on `session.pendingResumeSessionId` and **poisons** the warm child
+  (which just escaped the picker and is contextless). `getOrSpawnSession` does NOT
+  re-read `resolveResumeDirective` while an unpoisoned warm child is alive, so the
+  poison is what makes the **next** turn evict + respawn, and
+  `pendingResumeSessionId` is carried as the `forceResume` directive so that respawn
+  `--resume`s the recovered transcript (bypassing the stale-id registry — and the
+  race against this spawn's own registry write). The current in-flight turn finishes
+  on the fresh child; the notice tells the user the recovered context is **active
+  from their next message**. A miss surfaces a "session lost — starting fresh" notice
+  + one operator alert. Spawn-time notices route through `ReplSession.pushNotice`
+  (buffered until the first live turn, since the picker fires before `start()`
+  assigns `activeTurn`) and are drained by `flushPendingNotices`. This closes
+  master-table **row #7**. It is **largely obviated** by Neutron's
   JSONL-first resume (`session-respawn.ts` / `session-validation.ts` /
   `session-capture.ts`), which avoids the picker in the normal path — this is a
   pure safety net for if it ever appears. **Out of scope (by design):** changing

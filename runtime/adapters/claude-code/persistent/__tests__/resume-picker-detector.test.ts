@@ -67,7 +67,28 @@ describe('isResumeSessionPicker — gates', () => {
     ).toBe(false)
   })
 
-  test('the AskUserQuestion menu (esc to cancel) does NOT fire this detector', () => {
+  test('title + only `Enter to select` (no `Esc to clear`) → NOT the picker (Codex P2)', () => {
+    // `Enter to select` is shared with the AskUserQuestion footer, so the
+    // distinctive `Esc to clear` is REQUIRED — `Enter to select` alone must not fire.
+    expect(
+      isResumeSessionPicker(ctxOf(resumePickerFrame({ footer: '↑/↓ to navigate · Enter to select' }))),
+    ).toBe(false)
+  })
+
+  test('a live AskUserQuestion whose TITLE contains "Resume Session" but footer is `esc to cancel` does NOT fire (Codex P2 collision)', () => {
+    // The exact collision Codex flagged: a normal user-choice prompt about resuming
+    // a session, with the AskUserQuestion `Enter to select · Esc to cancel` footer.
+    // Requiring `Esc to clear` keeps detector #1 the sole handler here.
+    const askMenu = [
+      'Resume Session — which one do you want?',
+      '❯ 1. yesterday’s migration session',
+      '  2. start fresh',
+      '↑/↓ to navigate · Enter to select · Esc to cancel',
+    ].join('\n')
+    expect(isResumeSessionPicker(ctxOf(askMenu))).toBe(false)
+  })
+
+  test('the AskUserQuestion menu (esc to cancel, no title) does NOT fire this detector', () => {
     // Detector #1's footer is `esc to cancel`, not `esc to clear`, and it has no
     // "Resume Session" title — so the resume-picker detector ignores it entirely.
     const askMenu = [

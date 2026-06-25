@@ -373,20 +373,20 @@ function dispatchResumePickerRecovery(
     // required recovered/lost notice (Codex P2). Route through `pushNotice`, which
     // buffers until the first live turn flushes it.
     surface: (text) => session.pushNotice(text),
-    // Mark the recovered session resumable so the EXISTING registry/respawn path
-    // (`resolveResumeDirective`) picks it up on the next (re)spawn — we do NOT
-    // touch the JSONL-first resume path itself (explicitly out of scope). No-op
-    // when supervision is off (no registry path).
+    // Actually move the live REPL onto the recovered session (Codex P1). Record
+    // the recovered id on the session and POISON it: the warm child that just
+    // escaped the picker is contextless, and `getOrSpawnSession` does not re-read
+    // `resolveResumeDirective` while an unpoisoned warm child is alive — so merely
+    // patching the registry would leave subsequent turns on the fresh REPL despite
+    // the "recovered" notice. Poisoning makes the NEXT turn evict + respawn, and
+    // `pendingResumeSessionId` is carried as the `forceResume` directive so that
+    // respawn `--resume`s the recovered transcript (bypassing the stale-id
+    // registry, and sidestepping a race with this spawn's own registry write). The
+    // current in-flight turn finishes on the fresh child; the notice tells the user
+    // the recovered context is active from their next message.
     requestResume: (recoveredSessionId) => {
-      if (options.replRegistryPath === undefined) return
-      try {
-        patchRecord(options.replRegistryPath, session.sessionKey, {
-          sessionId: recoveredSessionId,
-          has_session: true,
-        })
-      } catch {
-        /* best-effort — a registry write failure must never brick a live REPL */
-      }
+      session.pendingResumeSessionId = recoveredSessionId
+      session.poisoned = true
     },
     alert: (text) => process.stderr.write(`[resume-picker] ${text}\n`),
     delay: (ms) => new Promise((res) => setTimeout(res, ms)),
@@ -766,6 +766,15 @@ class ReplSession {
    *  the same still-present picker (the scanner latch guards the rising edge; this
    *  guards the async window the ladder runs in). */
   resumePickerRecovering = false
+  /** Set by the resume-session-picker recovery (row #7) to the session id it
+   *  recovered from disk. When this session is later evicted (it is also marked
+   *  `poisoned`), `getOrSpawnSession` carries this as a `forceResume` directive so
+   *  the clean respawn `--resume`s the RECOVERED transcript instead of re-reading
+   *  the stale-id registry (which would drop straight back into the picker). This
+   *  is what makes the recovery actually move the live REPL onto the recovered
+   *  context, not merely patch a registry the warm child never re-reads (Codex P1);
+   *  it also sidesteps racing `spawnSession`'s own registry write. */
+  pendingResumeSessionId: string | undefined
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -1613,6 +1622,11 @@ async function getOrSpawnSession(
   forceResume?: ResumeDirective,
 ): Promise<ReplSession> {
   const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
+  // Carried out of the eviction branch: a resume-session-picker recovery (row #7)
+  // poisons the warm session AND records the disk-recovered session id here, so
+  // the clean respawn below resumes THAT transcript (Codex P1) rather than the
+  // stale-id registry that would re-trip the picker.
+  let evictedResume: ResumeDirective | undefined
   const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
@@ -1674,6 +1688,11 @@ async function getOrSpawnSession(
         process.stderr.write(
           `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,
         )
+        // Resume-picker recovery (row #7): respawn onto the disk-recovered session
+        // it found, bypassing the stale-id registry that would re-open the picker.
+        if (session.pendingResumeSessionId !== undefined) {
+          evictedResume = { sessionId: session.pendingResumeSessionId }
+        }
       }
       // Evict, then AWAIT the old child's exit before falling through to spawn so a
       // supervised `--resume` replacement (same sessionId) never co-owns the session
@@ -1687,7 +1706,7 @@ async function getOrSpawnSession(
       pool.delete(sessionKey)
     }
   }
-  const resume = forceResume ?? resolveResumeDirective(sessionKey, options)
+  const resume = forceResume ?? evictedResume ?? resolveResumeDirective(sessionKey, options)
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
   spawning.catch(() => {
