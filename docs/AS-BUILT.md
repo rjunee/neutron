@@ -50,6 +50,25 @@ stop and wait for limit to reset."
   reports inflated counts because workspace `@neutronai/*` packages aren't linked).
 - **Additive edit.** The output-scan registration is purely additive (new
   constants + one `register` block) to limit conflict with sibling detector PRs.
+- **Codex cross-model review (P2, deliberate tradeoff — NOT mitigated).** Codex
+  flagged that the 2-cue predicate could fire on live, non-doc-quoted terminal
+  prose that happens to contain BOTH `/rate-limit-options` and the verbatim
+  `Stop and wait for limit to reset` within the bottom-30, and suggested
+  requiring a menu-selector cue (e.g. `❯ 3.`) like the tool-use detector's
+  `❯ 1. Yes`. We deliberately do NOT add that anchor: the tool-use detector can
+  require `❯ 1. Yes` because option 1 is ALWAYS the default-highlighted row, but
+  the cursor does NOT default to option 3 here (that is exactly why `'3'` is
+  pressed position-independently), so an `❯ 3.`-anchored cue would FALSE-NEGATIVE
+  whenever the cursor rests on another option — leaving the REPL wedged at the
+  org cap, the precise failure this detector exists to prevent. The exact Ink
+  picker bytes are also unverified end-to-end in the PTY substrate (research-doc
+  caveat), so tightening on an unobserved adjacency trades a vanishingly-rare
+  false-positive (verbatim CC option-3 copy in live unquoted prose, debounced
+  60s, at worst one stray `3`+enter) for a much costlier false-negative. The
+  production-hardened Vajra reference (`decideRateLimitOptionsAction`) made the
+  same call: 2 cues + doc-quote + bottom-N, no option-number cue. Honoring the
+  spec + Vajra precedent; tracked as a known residual if a live spawn ever
+  confirms the picker reliably renders `3.` adjacent to the stop text.
 
 ## PTY terminal-detection P1 — auto-approve tool-use prompt (port row #2)
 
