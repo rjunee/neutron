@@ -44,6 +44,12 @@ import { EventChannel } from './event-channel.ts'
 import { buildReplArgv } from './build-repl-argv.ts'
 import { buildSettings } from './build-settings.ts'
 import { assertReplAlive, type SpawnAssertionConfig } from './post-spawn-assertion.ts'
+import {
+  buildChannelWedgeCapAlertText,
+  ChannelWedgedSpawnError,
+  MAX_FLEET_RESPAWNS,
+  runBoundedChannelWedgeRespawn,
+} from './channel-wedge-respawn.ts'
 import { captureSession, makeJsonlExistsProbe, type CaptureSessionConfig } from './session-capture.ts'
 import { bunTerminalHost } from './bun-terminal-host.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
@@ -1313,6 +1319,10 @@ async function spawnSession(
       isChildAlive: () => !child.hasExited(),
       getChannelPort: () => session.channelPort,
       hasHttpHealth: (port) => httpHealth(port),
+      // Stage 4 (channel-MCP-unwired, port row #6): re-read the ring FRESH —
+      // the assertion only calls this AFTER /health is up (invariant §7), so a
+      // stale pre-health snapshot can never gate the unwired check.
+      readRingFresh: () => session.ring.raw(),
       sleep: (ms) => Bun.sleep(ms),
       now: () => Date.now(),
     },
@@ -1322,6 +1332,15 @@ async function spawnSession(
     child.kill()
     if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
     sink.unregister(sessionId)
+    // channel-wedged is owned by the bounded-respawn wrapper (port row #6): throw
+    // the TYPED error and DON'T pool.delete here — the wrapper holds the pool
+    // entry and either retries on the same key or propagates the cap, so deleting
+    // it mid-loop would orphan a successful retry's warm session. Every OTHER
+    // reason keeps the original delete-and-throw (the wrapper passes it straight
+    // through as a non-wedged failure).
+    if (assertion.reason === 'channel-wedged') {
+      throw new ChannelWedgedSpawnError(sessionKey, assertion.detail)
+    }
     pool.delete(sessionKey)
     throw new Error(`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})`)
   }
@@ -1383,6 +1402,49 @@ async function spawnSession(
     .catch(() => undefined)
 
   return session
+}
+
+/**
+ * Wrap {@link spawnSession} with the channel-MCP-unwired bounded respawn (port
+ * row #6). When a spawn fast-fails `channel-wedged` (dev-channel `/health` 200
+ * but the MCP never bound — the agent can never `reply()`), the root cause is
+ * transient spawn-time memory/CPU pressure, so a respawn usually clears it. We
+ * retry up to {@link MAX_FLEET_RESPAWNS} times; if the wedge persists past the
+ * cap we fire exactly ONE operator alert and give up (no infinite loop). Any
+ * NON-wedged spawn failure (dead-child / no-health / …) is propagated on the
+ * first attempt — this wrapper owns only the channel-wedged class.
+ */
+async function spawnWithChannelWedgeRespawn(
+  sessionKey: string,
+  options: PersistentReplSubstrateOptions,
+  spec: AgentSpec,
+  resume?: ResumeDirective,
+): Promise<ReplSession> {
+  const alert =
+    options.postWedgeAlert ??
+    ((text: string) => process.stderr.write(`[channel-wedged] ${text}\n`))
+  const result = await runBoundedChannelWedgeRespawn<ReplSession>({
+    attempt: async (n) => {
+      try {
+        return { ok: true, value: await spawnSession(sessionKey, options, spec, resume) }
+      } catch (e) {
+        const wedged = e instanceof ChannelWedgedSpawnError
+        if (wedged && n < MAX_FLEET_RESPAWNS) {
+          process.stderr.write(
+            `[channel-wedged] ${sessionKey}: channel MCP never bound (/health 200 but unwired); ` +
+              `bounded respawn ${n + 1}/${MAX_FLEET_RESPAWNS}\n`,
+          )
+        }
+        return { ok: false, wedged, error: e }
+      }
+    },
+    alert: () => alert(buildChannelWedgeCapAlertText({ sessionKey })),
+  })
+  if (result.kind === 'ok') return result.value
+  // capped (still wedged after the cap) or a non-wedged failure → propagate the
+  // underlying error so getOrSpawnSession's `spawning.catch` runs the existing
+  // pool-delete + in-flight-clear cleanup.
+  throw result.error
 }
 
 /**
@@ -1493,7 +1555,7 @@ async function getOrSpawnSession(
     }
   }
   const resume = forceResume ?? resolveResumeDirective(sessionKey, options)
-  const spawning = spawnSession(sessionKey, options, spec, resume)
+  const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
   spawning.catch(() => {
     pool.delete(sessionKey)

@@ -1018,6 +1018,45 @@ quotes "API Error: 500"). It does NOT touch the `OutputScanner` / ring.
   death. **Out of scope this pass:** auto-resend of the stored message (notify +
   affordance only).
 
+## Post-spawn liveness assertion — channel-MCP-unwired fast-fail (port row #6) — `post-spawn-assertion.ts`
+
+`assertReplAlive` gates every fresh spawn before the first inject, in ordered
+stages, the first to fail returning its specific reason: **(1)** child alive
+(`!hasExited`) → `dead-child`; **(2)** dev-channel handshake seen
+(`/channel-ready`) → `no-channel-ready`; **(3)** dev-channel HTTP `/health`
+responds → `no-http-health`. Port row #6 adds a **fourth** stage, the
+**channel-MCP-unwired wedge**: after the dev-channel confirm is answered and the
+TUI is up, the REPL sometimes *never binds the channel MCP* under spawn-time
+memory/CPU pressure — `/health` still returns 200, so the spawn LOOKS alive, but
+every `reply()` prints **"no MCP server configured with that name"** and the turn
+never delivers (2026-06-20: 17/23 wedged forge/argus spawns showed exactly that
+line as their last frame). The fix is an explicit signature + **fast-fail**, NOT
+a longer wait (the root cause is pressure, not timeout tuning).
+
+- **Detect (`channel-unwired-detector.ts`).** The Vajra `isChannelMcpUnwired`
+  signature (`/noMCPserverconfiguredwiththatname/i`, matched on the normalized
+  bottom-24 view so Ink per-word-cursor ANSI doesn't break it), run through the
+  F3 `buildDetectorContext` so the **doc-quote guard** holds — a fenced /
+  backtick-wrapped / diff-quoted *quotation* of the phrase can NOT trip the wedge.
+  **NO keystroke** — this is detect → fast-fail → bounded respawn only.
+- **Re-read AFTER health-up (cross-cutting invariant §7, LOAD-BEARING).** Stage 4
+  re-captures the ring **FRESH** — strictly *after* Stage 3's `/health` gate
+  flips. A stale pre-health snapshot could read `!unwired` and let a same-tick-
+  unwired channel through, so the unwired re-read must never run before health.
+  The signature must **persist** across a short confirm grace (default 2s — a
+  spawn-path window, NOT the 60s topic-readiness grace) before fast-failing: a
+  transient mid-render frame mustn't fail a spawn that's about to bind. A
+  `null`/failed re-capture counts as NOT-unwired so a capture glitch can't fail a
+  healthy spawn. On persistence → reason `channel-wedged`.
+- **Bounded respawn (`channel-wedge-respawn.ts`, cross-cutting invariant §6).**
+  A `channel-wedged` assertion throws a typed `ChannelWedgedSpawnError`; the spawn
+  path retries up to **`MAX_FLEET_RESPAWNS = 2`** times (a respawn usually clears
+  the transient pressure). If the wedge persists past the cap, it fires **exactly
+  one** operator alert (`postWedgeAlert`) and gives up — **no infinite loop**. Any
+  OTHER spawn failure (`dead-child` / `no-http-health` / …) is propagated on the
+  first attempt; this wrapper owns only the channel-wedged class. The cap'd
+  failure flows through the existing `getOrSpawnSession` pool-cleanup path.
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority

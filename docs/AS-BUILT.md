@@ -153,6 +153,48 @@ Port of Vajra's `gateway-core.ts isCompactResumePicker` (research row #3).
   limitation documented on `tool-use-approve` applies here too; the P0
   wedge-recovery detector (#1) is the designed backstop for a genuinely-stuck
   picker.
+## PTY terminal-detection P1 — channel-MCP-unwired fast-fail (port row #6)
+
+**What shipped.** A fourth post-spawn-assertion stage that fast-fails a spawn
+which came up `/health`-200 but never bound its dev-channel MCP — the
+**channel-MCP-unwired wedge**. Port of Vajra's `fleet-spawn-core.ts
+isChannelMcpUnwired` onto the F1/F3 substrate (research row #6). On the merged
+F1/F2/F3 substrate (PR #54) + post-spawn-assertion path. ON by default — no flag.
+
+- **The wedge.** After the dev-channel confirm is answered and the TUI is up, the
+  REPL sometimes never binds the channel MCP under spawn-time memory/CPU pressure;
+  `/health` still returns 200 (spawn LOOKS alive) but every `reply()` prints
+  **"no MCP server configured with that name"** and the turn never delivers
+  (2026-06-20: 17/23 wedged forge/argus spawns showed exactly that as their last
+  frame). Root cause = pressure, not timeout tuning → the fix is an explicit
+  signature + **fast-fail**, not a longer wait.
+- **Detect (`channel-unwired-detector.ts`).** Pure signature
+  (`/noMCPserverconfiguredwiththatname/i`, normalized bottom-24) run through the
+  F3 `buildDetectorContext`, so the **doc-quote guard** keeps a fenced /
+  backtick-wrapped / diff-quoted quotation of the phrase from false-firing. NO
+  keystroke — detect → fast-fail → bounded respawn only.
+- **Re-read AFTER health-up (invariant §7, load-bearing).** `post-spawn-
+  assertion.ts` Stage 4 re-captures the ring **FRESH** strictly after the
+  `/health` gate flips (a stale pre-health snapshot could read `!unwired` and let
+  a same-tick-unwired channel through). The signature must **persist** across a
+  short confirm grace (default 2s — a spawn-path window, not the 60s topic
+  readiness grace) before fast-failing `channel-wedged`; a `null`/failed
+  re-capture counts as NOT-unwired so a glitch can't fail a healthy spawn. Stage 4
+  is skipped when no ring reader is wired (back-compat for the existing tests).
+- **Bounded respawn (`channel-wedge-respawn.ts`, invariant §6).** A
+  `channel-wedged` assertion throws a typed `ChannelWedgedSpawnError`;
+  `getOrSpawnSession` wraps the spawn in `runBoundedChannelWedgeRespawn` — retry up
+  to **`MAX_FLEET_RESPAWNS = 2`**, then **one** operator alert (`postWedgeAlert`)
+  and give up (no infinite loop). Any OTHER spawn failure propagates on the first
+  attempt; the channel-wedged path doesn't `pool.delete` (the wrapper owns the
+  pool entry across retries), so a successful retry keeps its warm session.
+- **Tests** (`channel-unwired-detector.test.ts` +7, `channel-wedge-respawn.test.ts`
+  +5, `post-spawn-assertion.test.ts` +8): unwired signature after health-up →
+  `channel-wedged`; same phrase doc-quoted (backtick/fence/diff) → does NOT fire;
+  healthy bound channel → does NOT fire; re-read happens only AFTER health
+  (ordering); null re-capture + transient-clears-within-grace → ok; respawn capped
+  at 2 then alert-only; non-wedged failure propagates with no retry/alert. Full
+  persistent suite green (327 pass).
 
 ## PTY terminal-detection P1 — auto-approve tool-use prompt (port row #2)
 

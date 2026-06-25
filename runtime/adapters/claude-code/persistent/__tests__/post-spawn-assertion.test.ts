@@ -89,4 +89,136 @@ describe('assertReplAlive', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('no-http-health')
   })
+
+  // ── Stage 4: channel-MCP-unwired wedge (port row #6) ──────────────────────
+
+  it('channel-wedged when the unwired signature persists past the confirm grace after health-up', async () => {
+    const clock = fakeClock()
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 40000,
+      hasHttpHealth: async () => true,
+      // The MCP never bound — every reply attempt prints the unwired error.
+      readRingFresh: () => '⎿ Error: no MCP server configured with that name',
+      sleep: async () => clock.advance(300),
+      now: clock.now,
+    }
+    const r = await assertReplAlive({ pid: 7 }, deps, {
+      channelWedgeGraceMs: 1000,
+      channelWedgeIntervalMs: 250,
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('channel-wedged')
+  })
+
+  it('re-reads the ring ONLY AFTER /health is up (invariant §7 ordering)', async () => {
+    const clock = fakeClock()
+    let healthOk = false
+    let ringReadBeforeHealth = false
+    let ringReads = 0
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 40000,
+      hasHttpHealth: async () => {
+        // Health flips true on the 2nd poll; the ring must NOT have been read yet.
+        const wasOk = healthOk
+        healthOk = true
+        return wasOk
+      },
+      readRingFresh: () => {
+        ringReads += 1
+        if (!healthOk) ringReadBeforeHealth = true
+        return '⎿ Error: no MCP server configured with that name'
+      },
+      sleep: async () => clock.advance(300),
+      now: clock.now,
+    }
+    const r = await assertReplAlive({ pid: 7 }, deps, {
+      healthBudgetMs: 5000,
+      healthIntervalMs: 300,
+      channelWedgeGraceMs: 1000,
+      channelWedgeIntervalMs: 250,
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('channel-wedged')
+    expect(ringReadBeforeHealth).toBe(false) // NEVER read the ring pre-health
+    expect(ringReads).toBeGreaterThan(0) // but it DID read after health-up
+  })
+
+  it('does NOT fire on a healthy bound channel (clean ring after health-up)', async () => {
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 51234,
+      hasHttpHealth: async () => true,
+      readRingFresh: () => '⏺ reply("done")\n⎿ ok\n',
+      sleep: async () => {},
+      now: () => 1000,
+    }
+    const r = await assertReplAlive({ pid: 42 }, deps)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.channelPort).toBe(51234)
+  })
+
+  it('does NOT fire when the phrase only appears doc-quoted (backticks) in the ring', async () => {
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 51234,
+      hasHttpHealth: async () => true,
+      // A quotation of the phrase — not a live error frame — must not fast-fail.
+      readRingFresh: () =>
+        'note: the wedge prints `no MCP server configured with that name`',
+      sleep: async () => {},
+      now: () => 1000,
+    }
+    const r = await assertReplAlive({ pid: 42 }, deps)
+    expect(r.ok).toBe(true)
+  })
+
+  it('treats a null/failed ring re-capture as NOT-unwired (glitch must not fast-fail)', async () => {
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 51234,
+      hasHttpHealth: async () => true,
+      readRingFresh: () => null,
+      sleep: async () => {},
+      now: () => 1000,
+    }
+    const r = await assertReplAlive({ pid: 42 }, deps)
+    expect(r.ok).toBe(true)
+  })
+
+  it('skips Stage 4 entirely when no ring reader is wired (back-compat)', async () => {
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 51234,
+      hasHttpHealth: async () => true,
+      // readRingFresh omitted
+      sleep: async () => {},
+      now: () => 1000,
+    }
+    const r = await assertReplAlive({ pid: 42 }, deps)
+    expect(r.ok).toBe(true)
+  })
+
+  it('a transient unwired frame that clears within grace still succeeds', async () => {
+    const clock = fakeClock()
+    let reads = 0
+    const deps: SpawnAssertionDeps = {
+      isChildAlive: () => true,
+      getChannelPort: () => 40000,
+      hasHttpHealth: async () => true,
+      readRingFresh: () => {
+        reads += 1
+        // First read: a mid-render unwired frame; then it binds and clears.
+        return reads <= 1 ? 'no MCP server configured with that name' : '⎿ ok'
+      },
+      sleep: async () => clock.advance(250),
+      now: clock.now,
+    }
+    const r = await assertReplAlive({ pid: 7 }, deps, {
+      channelWedgeGraceMs: 2000,
+      channelWedgeIntervalMs: 250,
+    })
+    expect(r.ok).toBe(true)
+  })
 })
