@@ -152,7 +152,34 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     switch (req.params.name) {
       case 'reply': {
-        const text = typeof args['text'] === 'string' ? (args['text'] as string) : ''
+        // Coalesce the reply body across the param names agents actually use.
+        // The tool def is `reply(text:…)`, but an agent that calls
+        // `reply(message:…)` / `reply(content:…)` / `reply(body:…)` would
+        // otherwise read undefined → post an EMPTY turn silently (ported Vajra
+        // fix #153 / f99bfd9 — verified still present here). Accept the common
+        // aliases; reject an all-empty call with `isError` so the agent sees the
+        // failure instead of the user getting a blank message.
+        const pickStr = (v: unknown): string | undefined =>
+          typeof v === 'string' && v.trim() !== '' ? v : undefined
+        const text =
+          pickStr(args['text']) ??
+          pickStr(args['message']) ??
+          pickStr(args['content']) ??
+          pickStr(args['body'])
+        if (text === undefined) {
+          process.stderr.write(
+            'neutron-channel: reply called with no non-empty body (text/message/content/body all missing or blank)\n',
+          )
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'error: reply requires a non-empty `text` (also accepts message/content/body)',
+              },
+            ],
+            isError: true,
+          }
+        }
         // S3 #107 — stateless turn-id-echo (see header). Primary: the originating
         // message's `meta.turn_id` echoed on the reply tool-call context. Fallback:
         // the reset-per-turn `currentTurnId` scalar (read-and-clear so a second
