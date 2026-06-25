@@ -916,6 +916,48 @@ not kill.
   key-to-kingdom paths (`.git/hooks/*`, writes outside the project root), so the
   substrate must clear them itself.
 
+## cwd-drift watchdog (P3, port row #12) — `cwd-drift-watchdog.ts`
+
+A **NON-substrate** watchdog over the PTY child **pid** — NOT an output-scan ring
+detector, and it never touches the `OutputScanner` register-block. A PTY child's
+live working directory can drift off the session's canonical cwd (a Bash `cd`
+into a worktree that later gets merged/removed leaves the child pinned to a dead
+dir, while the session's canonical project dir is still valid). The wedge
+watchdog keys off liveness + `/health` and is blind to this — the child is alive
+and answering, just rooted in the wrong place.
+
+- **Detect (ASK THE OS DIRECTLY, async + batched).** A separate tick (default
+  60s, its own in-flight gate — lsof is heavier than the wedge tick's `/health`
+  fetch) asks the OS for each LIVE pooled child's cwd via **async**
+  `lsof -p <pid> -d cwd -Fn`, batched through `mapWithConcurrency` at **cap ~5**
+  concurrent. This is the deliberate replacement for the sync `lsof×20` that
+  stalled the event loop ≤40s (2026-04-23). The live cwd is compared to the
+  session's canonical `record.cwd` via the pure `isCwdDrifted` — **trailing-slash
+  normalized** with **descendant tolerance** (a `cd` into a project subdirectory
+  is NOT drift; only a cwd outside the canonical subtree counts).
+- **Recover (respawn pinned to canonical).** On drift, `respawnReplSession` fires
+  with the new `cwd-drift-watchdog` trigger. The respawn already spawns from
+  `record.cwd`, so the child is **automatically pinned back to canonical** (the
+  `cd '<cwd>' && claude --resume` analog) — context preserved via the
+  resume-is-always-resume invariant.
+- **Existence guard — missing canonical → NEVER respawn.** If the canonical dir
+  itself is gone on disk, a respawn would just respawn into nothing: the watchdog
+  refuses to respawn and fires an operator alert instead
+  (`buildCwdDriftMissingCanonicalAlert`).
+- **Per-session 1h respawn throttle.** A `cwdDriftRespawnState` map (separate
+  clock from the wedge cooldown) gates a re-respawn within an hour, so a
+  persistently-drifting child can't churn. The throttle is stamped BEFORE the
+  respawn await (fire-once per detection — a failed respawn still holds the
+  window).
+- **Pure + injectable.** The cores (`normalizeCwd` / `isCwdDrifted` /
+  `decideCwdDriftAction`) + `runCwdDriftTick` are hermetically unit-tested; the
+  live wiring (`runCwdDriftWatchdogTick`, scoped to its instance registry like
+  the wedge tick) is exercised end-to-end against the real substrate
+  (`repl-supervision.test.ts`).
+
+This closes master-table **port row #12** (previously the last MISSING P3 watchdog
+in `docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md`).
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority

@@ -86,6 +86,12 @@ import {
 } from './wedge-detector.ts'
 import { dispatchWedgeRespawn } from './wedge-respawn-dispatch.ts'
 import {
+  runCwdDriftTick,
+  type CwdDriftSupervisedEntry,
+  type CwdDriftTickResult,
+  type CwdProbe,
+} from './cwd-drift-watchdog.ts'
+import {
   basenameOf,
   cmdlineMatchesSession,
   defaultReadCmdline,
@@ -168,6 +174,10 @@ const REPL_LIVENESS_KEEPALIVE_MS = ((): number => {
 })()
 /** Default watchdog tick cadence (ms). */
 const DEFAULT_WATCHDOG_INTERVAL_MS = 15_000
+/** Default cwd-drift watchdog tick cadence (ms). Slower than the wedge tick —
+ *  lsof is heavier than a `/health` fetch and a drifted-but-alive child is far
+ *  less urgent than a dead one. */
+const DEFAULT_CWD_DRIFT_INTERVAL_MS = 60_000
 /** The TUI slash command that wipes the conversation transcript while keeping
  *  the `claude` process (and its MCP servers / dev-channel / system prompt)
  *  alive. Used by the `reset_context_per_turn` warm-import mode to isolate each
@@ -2071,6 +2081,8 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   childByKey.clear()
   pendingChildKills.clear()
   supervisedBySessionKey.clear()
+  wedgeAlertState.clear()
+  cwdDriftRespawnState.clear()
 }
 
 // ---------------------------------------------------------------------------
@@ -2124,6 +2136,10 @@ export function respawnSupervisedSession(
 const respawnGates = new Map<string, InFlightGate>()
 /** Per-key last-alert timestamp for the wedge-alert dedupe window. */
 const wedgeAlertState = new Map<string, number>()
+/** Per-`sessionKey` last cwd-drift respawn timestamp — the 1h throttle anchor for
+ *  the cwd-drift watchdog (separate from the wedge cooldown so a wedge respawn and
+ *  a cwd-drift respawn don't share a clock). */
+const cwdDriftRespawnState = new Map<string, number>()
 
 function gateFor(sessionKey: string): InFlightGate {
   let g = respawnGates.get(sessionKey)
@@ -2427,6 +2443,15 @@ export interface ReplWatchdogOptions {
   isPidAlive?: (pid: number) => boolean
   /** DI clock. */
   now?: () => number
+  /** cwd-drift tick cadence (ms). Default 60s. */
+  cwdDriftIntervalMs?: number
+  /** DI: live-cwd probe for the cwd-drift tick (tests). Default async `lsof`. */
+  cwdDriftProbeCwd?: CwdProbe
+  /** DI: canonical-dir existence check for the cwd-drift tick (tests). Default
+   *  `existsSync`. */
+  cwdDriftCanonicalExists?: (cwd: string) => boolean
+  /** Override the cwd-drift 1h respawn throttle (tests). */
+  cwdDriftThrottleMs?: number
 }
 
 export interface ReplWatchdog {
@@ -2573,6 +2598,82 @@ export async function runReplWatchdogTick(
 }
 
 /**
+ * Run ONE cwd-drift watchdog tick against this instance's live pool: for each
+ * supervised, LIVE pooled child, ask the OS (async/batched `lsof`) for its live
+ * cwd and compare to the session's canonical `record.cwd`. On drift, respawn the
+ * session — the respawn spawns from `record.cwd`, so it is automatically PINNED
+ * back to canonical (the `cd '<cwd>' && claude --resume` analog). NON-substrate:
+ * a watchdog over the child pid, NOT an output-scan ring detector.
+ *
+ * Scoping mirrors `runReplWatchdogTick`: only pool keys whose owning substrate
+ * points at THIS `replRegistryPath` (Codex P2 — one registry is shared by
+ * substrates that differ). Only LIVE children with a resolvable pid + a canonical
+ * cwd are probed; a registry-only / dead row has no child to ask lsof about and is
+ * left to the wedge watchdog. Exported so the live wiring is directly testable
+ * (brief § 9 anti-pattern #1 — no built-but-not-wired core).
+ */
+export async function runCwdDriftWatchdogTick(
+  options: PersistentReplSubstrateOptions,
+  wopts: ReplWatchdogOptions = {},
+): Promise<CwdDriftTickResult[]> {
+  const registryPath = options.replRegistryPath
+  if (registryPath === undefined) return []
+  const registry = loadRegistry(registryPath)
+  const ownedPoolKeys = [...pool.keys()].filter(
+    (k) => supervisedBySessionKey.get(k)?.replRegistryPath === registryPath,
+  )
+
+  const entries: CwdDriftSupervisedEntry[] = []
+  for (const sessionKey of ownedPoolKeys) {
+    const p = pool.get(sessionKey)
+    if (p === undefined) continue
+    let session: ReplSession
+    try {
+      session = await p
+    } catch {
+      continue // spawn failed — wedge watchdog owns this row.
+    }
+    if (session.hasChildExited()) continue
+    const canonicalCwd = registry[sessionKey]?.cwd
+    if (!canonicalCwd) continue // no canonical recorded → nothing to compare against.
+    let pid: number
+    try {
+      pid = session.child.pid
+    } catch {
+      continue // child detached (test fake / mid-teardown).
+    }
+    entries.push({ sessionKey, pid, canonicalCwd })
+  }
+
+  return runCwdDriftTick({
+    entries,
+    ...(wopts.cwdDriftProbeCwd ? { probeCwd: wopts.cwdDriftProbeCwd } : {}),
+    ...(wopts.cwdDriftCanonicalExists ? { canonicalExists: wopts.cwdDriftCanonicalExists } : {}),
+    lastDriftRespawnAt: (k) => cwdDriftRespawnState.get(k),
+    markDriftRespawn: (k, at) => cwdDriftRespawnState.set(k, at),
+    respawn: (entry) => {
+      // Respawn with the OWNING substrate's options (env / instance-id / spawn
+      // opts), resolved by pool key — never the tick's own options (an
+      // unregistered key would resume under the wrong identity; mirror the wedge
+      // tick's guard). `respawnReplSession` re-spawns from `record.cwd`, pinning
+      // the child back to canonical.
+      const keyOptions = supervisedBySessionKey.get(entry.sessionKey)
+      if (keyOptions === undefined) return false
+      const outcome = respawnReplSession(
+        keyOptions,
+        entry.sessionKey,
+        'cwd-drift-watchdog',
+        `cwd drifted off ${entry.canonicalCwd}`,
+      )
+      return outcome.ok
+    },
+    ...(wopts.postAlert ? { postAlert: wopts.postAlert } : {}),
+    ...(wopts.now ? { now: wopts.now } : {}),
+    ...(wopts.cwdDriftThrottleMs !== undefined ? { throttleMs: wopts.cwdDriftThrottleMs } : {}),
+  })
+}
+
+/**
  * Start the live REPL watchdog: an in-flight-gated tick (default 15s) that
  * self-heals wedged/crashed REPLs via `runReplWatchdogTick`, plus (when
  * `heartbeatFile` is set) the 100ms heartbeat that the systemd
@@ -2630,12 +2731,26 @@ export function startReplWatchdog(
   }
   const handle = setIntervalFn(tick, intervalMs)
 
+  // Separate, slower cwd-drift tick (default 60s) on its OWN in-flight gate: lsof
+  // is heavier than the wedge tick's `/health` fetch, and the two ticks are
+  // independent (a slow drift probe must not serialize the wedge/crash recovery).
+  const cwdDriftIntervalMs = wopts.cwdDriftIntervalMs ?? DEFAULT_CWD_DRIFT_INTERVAL_MS
+  const cwdDriftGate = makeInFlightGate()
+  const cwdDriftTick = (): void => {
+    if (!cwdDriftGate.claim()) return
+    void runCwdDriftWatchdogTick(options, wopts)
+      .catch((e) => console.error(`cwd-drift-watchdog: tick error: ${e}`))
+      .finally(() => cwdDriftGate.release())
+  }
+  const cwdDriftHandle = setIntervalFn(cwdDriftTick, cwdDriftIntervalMs)
+
   let stopped = false
   const watchdog: ReplWatchdog = {
     stop: () => {
       if (stopped) return
       stopped = true
       clearIntervalFn(handle)
+      clearIntervalFn(cwdDriftHandle)
       heartbeat?.stop()
       if (activeWatchdogs.get(registryPath) === watchdog) activeWatchdogs.delete(registryPath)
     },
