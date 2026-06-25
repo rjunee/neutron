@@ -68,8 +68,14 @@ the JSONL-first resume path; auto-picking any picker option.
   bypassing the stale-id registry and sidestepping a race with this spawn's own
   registry write. The current in-flight turn finishes on the fresh
   child; the notice tells the user the recovered context is **active from their next
-  message**. A miss surfaces a "session lost — starting fresh" notice + one operator
-  alert. Spawn-time notices route through `ReplSession.pushNotice` (buffered until the
+  message**. A **miss** (nothing on disk) surfaces a "session lost — starting fresh"
+  notice + one operator alert AND fires `onNoRecovery`, which sets
+  `session.forceFreshRespawn` + poisons: the stale `--resume` id `spawnSession` wrote
+  as `has_session: true` would otherwise reopen the picker on a later crash/watchdog
+  respawn, so the next turn evicts + respawns with resume FORCED OFF (a new
+  `evictedForceFresh` branch), and that fresh spawn rewrites the registry
+  `has_session: false` — breaking the stale-resume loop (Codex P2). Spawn-time
+  notices route through `ReplSession.pushNotice` (buffered until the
   first live turn, since the picker fires before `start()` assigns `activeTurn`) and
   drained by `flushPendingNotices` — Codex P2: a direct `activeTurn?.channel.push`
   would have silently dropped the notice. Transcript root is resolved by the shared
@@ -83,17 +89,19 @@ whose TITLE contains "Resume Session" but footer is `esc to cancel` all do NOT f
 (no collision with #1, Codex P2); fenced / `>`-quoted / inline-backtick doc-quote
 guards; edge-latch fires-once / holds-while-present / re-arms on absent; recovery
 sends EXACTLY `['escape']` (no digit/Enter in any outcome); recovered → notice +
-`requestResume`; none-found → "session lost" notice + alert.
-`__tests__/session-disk-recovery.test.ts` (8) — null on missing dir / no
-transcripts; picks newest mtime; skips empty/whitespace ghosts; ignores non-jsonl;
-excludes the stale id; null when only the excluded id remains. Full `persistent/`
-suite **363 pass / 0 fail** (36 files). `tsc --noEmit` clean for the changed files.
+`requestResume` + NO miss callback; none-found → "session lost" notice + alert +
+`onNoRecovery`. `__tests__/session-disk-recovery.test.ts` (8) — null on missing dir
+/ no transcripts; picks newest mtime; skips empty/whitespace ghosts; ignores
+non-jsonl; excludes the stale id; null when only the excluded id remains. Full
+`persistent/` suite **381 pass / 0 fail** (38 files; the higher count vs the row-#7
+branch base is the rebased-in row-#6 channel-wedge tests). `tsc --noEmit` clean for
+the changed files.
 
 **Additive edit.** The registration is purely additive (one new `register` block
 after `compact-resume-picker` + one new branch in `runOutputScan`) plus two new
 files; the only edits to existing flows are the shared `resolveTranscriptProjectsDir`
 helper (also adopted by the API-5xx watcher site), the `pushNotice`/`flushPendingNotices`
-buffer, and the `evictedResume` `forceResume` branch. All existing `register({})`
+buffer, and the `evictedResume`/`evictedForceFresh` resume-resolution branches. All existing `register({})`
 blocks left intact with their own closers.
 
 ## Per-turn API-5xx dead-turn notifier (JSONL watcher, port row #11)

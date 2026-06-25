@@ -121,10 +121,14 @@ export interface ResumePickerRecoveryDeps {
    *  (dev-channel). */
   surface: (text: string) => void
   /** Re-resume the recovered session (optional). In prod the substrate wires this
-   *  to mark the recovered session id resumable for the next respawn — the
-   *  existing Neutron registry/resume mechanism, NOT a change to the JSONL-first
-   *  path. Omitted ⇒ notice-only. */
+   *  to move the live REPL onto the recovered session id (poison + forceResume on
+   *  the next turn) — NOT a change to the JSONL-first path. Omitted ⇒ notice-only. */
   requestResume?: (sessionId: string) => void
+  /** Called when the disk scan found NOTHING to recover (optional). In prod the
+   *  substrate wires this to clear the now-stale persisted resume state so a later
+   *  crash/watchdog respawn does a clean FRESH spawn instead of re-`--resume`ing the
+   *  stale id back into the picker (Codex P2). Omitted ⇒ notice-only. */
+  onNoRecovery?: () => void
   /** One operator alert (optional) — e.g. when no session could be recovered. */
   alert?: (text: string) => void
   /** Await between the Escape and the disk scan (the TUI needs a beat to dismiss
@@ -177,7 +181,10 @@ export async function runResumePickerRecovery(
   }
 
   // No recoverable session on disk: do NOT silently pretend nothing happened —
-  // surface that context was lost so the fresh session isn't a silent surprise.
+  // surface that context was lost so the fresh session isn't a silent surprise, and
+  // clear the now-stale persisted resume state (the registry still points at the
+  // stale `--resume` id) so a later respawn won't reopen the picker (Codex P2).
+  deps.onNoRecovery?.()
   deps.surface(
     `⚠️ Resume picker appeared (cached session was stale) and no prior session was ` +
       `found on disk to recover. Escaped out and started a fresh session — earlier ` +

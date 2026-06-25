@@ -174,21 +174,35 @@ function fakeDeps(latestSession: string | null): {
   surfaced: string[]
   resumed: string[]
   alerts: string[]
+  noRecovery: number
 } {
   const keysSent: Key[] = []
   const surfaced: string[] = []
   const resumed: string[] = []
   const alerts: string[] = []
+  let noRecovery = 0
   const deps: ResumePickerRecoveryDeps = {
     writeKey: (k) => keysSent.push(k),
     findLatestSession: () => latestSession,
     surface: (t) => surfaced.push(t),
     requestResume: (id) => resumed.push(id),
+    onNoRecovery: () => {
+      noRecovery += 1
+    },
     alert: (t) => alerts.push(t),
     delay: async () => {},
     escapeSettleMs: 0,
   }
-  return { deps, keysSent, surfaced, resumed, alerts }
+  return {
+    deps,
+    keysSent,
+    surfaced,
+    resumed,
+    alerts,
+    get noRecovery() {
+      return noRecovery
+    },
+  }
 }
 
 describe('runResumePickerRecovery — escape-then-recover (never blind-answer)', () => {
@@ -206,25 +220,28 @@ describe('runResumePickerRecovery — escape-then-recover (never blind-answer)',
     expect(surfaced).toHaveLength(1)
   })
 
-  test('recovery found a session → resumes it (notice + requestResume)', async () => {
-    const { deps, surfaced, resumed, alerts } = fakeDeps('recovered-uuid-1234')
+  test('recovery found a session → resumes it (notice + requestResume), no miss callback', async () => {
+    const { deps, surfaced, resumed, alerts, noRecovery } = fakeDeps('recovered-uuid-1234')
     const res = await runResumePickerRecovery(deps)
     expect(res).toMatchObject({ recovered: true, sessionId: 'recovered-uuid-1234' })
     expect(resumed).toEqual(['recovered-uuid-1234'])
     expect(surfaced[0]).toContain('recovered')
-    // A successful recovery is not an operator-alert situation.
+    // A successful recovery is not an operator-alert nor a miss situation.
     expect(alerts).toHaveLength(0)
+    expect(noRecovery).toBe(0)
   })
 
-  test('no session found → fresh + "session lost" notice (+ alert), no resume', async () => {
-    const { deps, surfaced, resumed, alerts } = fakeDeps(null)
-    const res = await runResumePickerRecovery(deps)
+  test('no session found → fresh + "session lost" notice (+ alert) + onNoRecovery, no resume', async () => {
+    const fd = fakeDeps(null)
+    const res = await runResumePickerRecovery(fd.deps)
     expect(res.recovered).toBe(false)
     expect(res.sessionId).toBeUndefined()
-    expect(resumed).toHaveLength(0)
-    expect(surfaced).toHaveLength(1)
-    expect(surfaced[0]).toContain('lost')
-    expect(alerts).toHaveLength(1)
+    expect(fd.resumed).toHaveLength(0)
+    expect(fd.surfaced).toHaveLength(1)
+    expect(fd.surfaced[0]).toContain('lost')
+    expect(fd.alerts).toHaveLength(1)
+    // The miss callback fires so the substrate can clear the stale resume state.
+    expect(fd.noRecovery).toBe(1)
   })
 
   test('NEVER blind-answers: only Escape is ever sent (no digit / Enter), in any outcome', async () => {

@@ -388,6 +388,16 @@ function dispatchResumePickerRecovery(
       session.pendingResumeSessionId = recoveredSessionId
       session.poisoned = true
     },
+    // MISS: nothing recoverable on disk. `spawnSession` wrote the registry
+    // `has_session: true` for the stale `--resume` id, so a later crash/watchdog
+    // respawn would re-`--resume` it and reopen the picker. Flag a forced-fresh
+    // respawn + poison so the next turn cleanly respawns FRESH, whose spawnSession
+    // rewrites the registry `has_session: false` — breaking the stale-resume loop
+    // (Codex P2). The current fresh child keeps serving until then.
+    onNoRecovery: () => {
+      session.forceFreshRespawn = true
+      session.poisoned = true
+    },
     alert: (text) => process.stderr.write(`[resume-picker] ${text}\n`),
     delay: (ms) => new Promise((res) => setTimeout(res, ms)),
   })
@@ -775,6 +785,14 @@ class ReplSession {
    *  context, not merely patch a registry the warm child never re-reads (Codex P1);
    *  it also sidesteps racing `spawnSession`'s own registry write. */
   pendingResumeSessionId: string | undefined
+  /** Set by the resume-session-picker recovery (row #7) when the disk scan found
+   *  NOTHING to recover. `spawnSession` optimistically wrote the registry as
+   *  `has_session: true` for the stale `--resume` id that dropped into the picker,
+   *  so a later crash/watchdog respawn would re-`--resume` it and reopen the same
+   *  picker. This flag (paired with `poisoned`) makes the next turn evict + respawn
+   *  with resume FORCED OFF — a clean fresh spawn whose `spawnSession` rewrites the
+   *  registry `has_session: false`, breaking the stale-resume loop (Codex P2). */
+  forceFreshRespawn = false
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -1627,16 +1645,24 @@ async function getOrSpawnSession(
   // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
   // P1/P2) rather than the stale-id registry that would re-trip the picker.
   let evictedResume: ResumeDirective | undefined
+  // Set when the evicted session's resume-picker recovery found NOTHING to recover:
+  // the next spawn must be FRESH (resume forced off) so it rewrites the stale-id
+  // registry `has_session: false` instead of re-`--resume`ing the stale id into the
+  // picker (Codex P2). Captured alongside `evictedResume` below.
+  let evictedForceFresh = false
   const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
-    // Capture the resume-picker recovery's recovered id BEFORE the alive/exited
-    // branch split (Codex P2): a poisoned session whose escaped child has ALREADY
-    // exited before the next dispatch still falls through to the spawn below, and
-    // without this it would fall back to `resolveResumeDirective` → the stale-id
-    // registry → reopen the picker. Applies whether the child is alive or dead.
+    // Capture the resume-picker recovery's directives BEFORE the alive/exited branch
+    // split (Codex P2): a poisoned session whose escaped child has ALREADY exited
+    // before the next dispatch still falls through to the spawn below, and without
+    // this it would fall back to `resolveResumeDirective` → the stale-id registry →
+    // reopen the picker. Applies whether the child is alive or dead.
     if (session.pendingResumeSessionId !== undefined) {
       evictedResume = { sessionId: session.pendingResumeSessionId }
+    }
+    if (session.forceFreshRespawn) {
+      evictedForceFresh = true
     }
     if (!session.hasChildExited()) {
       // Two reuse guards gate serving a turn on the warm child; BOTH must pass or
@@ -1709,7 +1735,12 @@ async function getOrSpawnSession(
       pool.delete(sessionKey)
     }
   }
-  const resume = forceResume ?? evictedResume ?? resolveResumeDirective(sessionKey, options)
+  // Precedence: an explicit caller `forceResume` (admin/watchdog) wins; else a
+  // resume-picker MISS forces a fresh spawn (`evictedForceFresh`, breaking the
+  // stale-resume loop); else a resume-picker HIT resumes the recovered transcript
+  // (`evictedResume`); else the normal registry-resolved directive.
+  const resume = forceResume
+    ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
   spawning.catch(() => {

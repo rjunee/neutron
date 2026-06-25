@@ -1010,8 +1010,12 @@ not kill.
   `--resume`s the recovered transcript (bypassing the stale-id registry — and the
   race against this spawn's own registry write). The current in-flight turn finishes
   on the fresh child; the notice tells the user the recovered context is **active
-  from their next message**. A miss surfaces a "session lost — starting fresh" notice
-  + one operator alert. Spawn-time notices route through `ReplSession.pushNotice`
+  from their next message**. A **miss** surfaces a "session lost — starting fresh"
+  notice + one operator alert AND fires `onNoRecovery` → `session.forceFreshRespawn`
+  + poison, so the next turn respawns with resume FORCED OFF (the `evictedForceFresh`
+  branch) and rewrites the registry `has_session: false` — otherwise the stale
+  `--resume` id `spawnSession` persisted would reopen the picker on a later
+  crash/watchdog respawn (Codex P2). Spawn-time notices route through `ReplSession.pushNotice`
   (buffered until the first live turn, since the picker fires before `start()`
   assigns `activeTurn`) and are drained by `flushPendingNotices`. This closes
   master-table **row #7**. It is **largely obviated** by Neutron's
