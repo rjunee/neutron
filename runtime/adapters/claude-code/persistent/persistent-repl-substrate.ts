@@ -254,6 +254,23 @@ function sendKey(child: PtyChild, key: Key): void {
   else child.write(encodeKey(key))
 }
 
+/** Resolve the Claude Code transcript root the SAME way the JSONL ghost gate and
+ *  the API-5xx dead-turn watcher do: an explicit `options.projectsDir` wins
+ *  (custom / per-instance transcript root); else `CLAUDE_CONFIG_DIR`'s `projects`
+ *  (CC writes transcripts there when `claudeConfigDir` is set); else the default
+ *  `~/.claude/projects`. Shared so the resume-picker disk recovery
+ *  (`findLatestResumableSession`) and the dead-turn watcher can never diverge on
+ *  WHERE the transcripts live — a divergence would make the recovery scan miss
+ *  the isolated-config session and falsely report "no prior session" (Codex P2). */
+function resolveTranscriptProjectsDir(options: PersistentReplSubstrateOptions): string {
+  return (
+    options.projectsDir ??
+    (options.claudeConfigDir !== undefined
+      ? join(options.claudeConfigDir, 'projects')
+      : join(homedir(), '.claude', 'projects'))
+  )
+}
+
 /**
  * Run the registered output-scan detectors against the session ring and actuate
  * the ones that fired on this tick's rising edge. Shared by BOTH drive sites:
@@ -339,16 +356,23 @@ function dispatchResumePickerRecovery(
   if (session.resumePickerRecovering) return
   session.resumePickerRecovering = true
   const cwd = options.cwd ?? process.cwd()
+  // Resolve the transcript root the SAME way the spawn / dead-turn watcher do so
+  // an isolated `CLAUDE_CONFIG_DIR` session's JSONL is actually found (Codex P2) —
+  // a raw `options.projectsDir` is undefined under claudeConfigDir and would fall
+  // back to `~/.claude/projects`, missing the recoverable transcript.
+  const projectsDir = resolveTranscriptProjectsDir(options)
   void runResumePickerRecovery({
     writeKey: (key) => sendKey(child, key),
     // JSONL/disk is the source of truth (invariant §5). Exclude the session this
     // REPL was spawned under: if it's the stale id that dropped us into the
     // picker, we must not "recover" the very session that just failed to resume.
     findLatestSession: () =>
-      findLatestResumableSession(cwd, options.projectsDir, { excludeSessionId: session.sessionId }),
-    surface: (text) => {
-      session.activeTurn?.channel.push({ kind: 'status', message: text })
-    },
+      findLatestResumableSession(cwd, projectsDir, { excludeSessionId: session.sessionId }),
+    // This detector fires during SPAWN, BEFORE start() assigns activeTurn, so a
+    // direct `activeTurn?.channel.push` would be a silent no-op and DROP the
+    // required recovered/lost notice (Codex P2). Route through `pushNotice`, which
+    // buffers until the first live turn flushes it.
+    surface: (text) => session.pushNotice(text),
     // Mark the recovered session resumable so the EXISTING registry/respawn path
     // (`resolveResumeDirective`) picks it up on the next (re)spawn — we do NOT
     // touch the JSONL-first resume path itself (explicitly out of scope). No-op
@@ -764,6 +788,12 @@ class ReplSession {
    *  `tmpdir()` forever, directly countering the bounding-growth goal (Argus r5
    *  IMPORTANT). Unlinked on dispose + on child exit (covers pool + crash). */
   configPaths: readonly string[] = []
+  /** Notices that must reach the user but were produced while NO turn was active.
+   *  The resume-picker recovery (row #7) fires during SPAWN — before `start()`
+   *  assigns `activeTurn` — so its "session recovered/lost" notice would be a
+   *  silent no-op if pushed straight to `activeTurn?.channel` (Codex P2). Buffer
+   *  here and flush onto the first live turn's channel via `flushPendingNotices`. */
+  private pendingNotices: string[] = []
   /** The PTY child — attached right after spawn (we register the session in
    *  the sink BEFORE spawning so a fast /channel-ready can't race). */
   private childRef: PtyChild | undefined
@@ -874,6 +904,30 @@ class ReplSession {
     const t = this.activeTurn
     if (t === undefined || t.settled) return
     t.channel.push({ kind: 'status', message: 'working' })
+  }
+
+  /** Surface a status notice to the user. Pushed straight onto the active turn's
+   *  channel when a turn is live, otherwise BUFFERED until the next turn flushes
+   *  it (`flushPendingNotices`). The resume-picker recovery surfaces through here
+   *  because it fires at SPAWN time, before any turn exists (Codex P2). */
+  pushNotice(text: string): void {
+    const t = this.activeTurn
+    if (t !== undefined && !t.settled) {
+      t.channel.push({ kind: 'status', message: text })
+    } else {
+      this.pendingNotices.push(text)
+    }
+  }
+
+  /** Drain any spawn-time buffered notices onto the current live turn's channel.
+   *  Called by `start()` once a turn is injected + its channel is confirmed
+   *  working, so a "session recovered/lost" notice produced before the turn
+   *  existed still reaches the user on the very next turn. No-op when empty. */
+  flushPendingNotices(): void {
+    const t = this.activeTurn
+    if (t === undefined || t.settled || this.pendingNotices.length === 0) return
+    for (const text of this.pendingNotices) t.channel.push({ kind: 'status', message: text })
+    this.pendingNotices = []
   }
 
   /** Fail the in-flight turn (process death). Retryable so the caller respawns. */
@@ -1345,11 +1399,7 @@ async function spawnSession(
   // explicit `options.projectsDir` wins (custom / per-instance transcript root —
   // Codex P2), then `CLAUDE_CONFIG_DIR`'s `projects` (CC writes transcripts there
   // when `claudeConfigDir` is set), then the default `~/.claude/projects`.
-  const projectsDir =
-    options.projectsDir ??
-    (options.claudeConfigDir !== undefined
-      ? join(options.claudeConfigDir, 'projects')
-      : join(homedir(), '.claude', 'projects'))
+  const projectsDir = resolveTranscriptProjectsDir(options)
   const deadTurnNotify =
     options.onDeadTurnNotice ??
     ((notice: DeadTurnNotice): void => {
@@ -2150,6 +2200,10 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // pre-inject-park and inject-in-flight windows (see ActiveTurn.turnId).
           await injectMessage(session.channelPort, spec.prompt, turn.turnId)
           channel.push({ kind: 'status', message: 'working' })
+          // Flush any spawn-time buffered notices (e.g. the resume-picker
+          // recovered/lost notice, which fired before this turn existed) onto the
+          // now-live channel so they reach the user (Codex P2).
+          session.flushPendingNotices()
         } catch (err) {
           // (keepalive is started AFTER this try succeeds — see below)
           if (!turn.settled) {
