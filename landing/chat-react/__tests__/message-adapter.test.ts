@@ -15,6 +15,8 @@ function msg(over: Partial<RenderMessage> = {}): RenderMessage {
     createdAt: 1,
     delivery: null,
     reactions: [],
+    edited: false,
+    deleted: false,
     ...over,
   }
 }
@@ -69,5 +71,12 @@ describe('toThreadMessage', () => {
   it('seeds an empty text part for an empty streaming bubble', () => {
     const t = toThreadMessage(msg({ role: 'agent', text: '', streaming: true }))
     expect(t.content).toEqual([{ type: 'text', text: '' }])
+  })
+
+  it('renders a deleted message as a tombstone placeholder, ignoring body + attachments (Track B Phase 4)', () => {
+    const t = toThreadMessage(
+      msg({ role: 'user', text: '', deleted: true, attachments: ['https://x/doc.pdf'] }),
+    )
+    expect(t.content).toEqual([{ type: 'text', text: '🚫 This message was deleted' }])
   })
 })

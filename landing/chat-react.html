@@ -251,6 +251,27 @@
   .car-reaction-add:hover { opacity: 1; }
   .car-reaction-picker { display: inline-flex; gap: 2px; margin-left: 2px; }
   .car-reaction-pick { font-size: 15px; background: none; border: none; cursor: pointer; padding: 1px 3px; }
+  /* Track B Phase 4 — message edit/delete: edited marker, actions, inline editor. */
+  .car-edited { font-size: 11px; opacity: 0.55; margin-top: 2px; display: inline-block; }
+  .car-msg-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .car-msg-action {
+    font-size: 11px; background: none; border: none; cursor: pointer;
+    color: var(--muted, #888); padding: 0; opacity: 0.7;
+  }
+  .car-msg-action:hover { opacity: 1; text-decoration: underline; }
+  .car-msg-action-danger:hover { color: var(--danger, #e5534b); }
+  .car-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .car-edit-input {
+    width: 100%; min-height: 48px; resize: vertical; font: inherit;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--surface, rgba(255,255,255,0.04));
+    color: inherit; padding: 6px 8px;
+  }
+  .car-edit-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .car-edit-btn {
+    font-size: 12px; padding: 3px 10px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface, rgba(255,255,255,0.04)); color: inherit;
+  }
+  .car-edit-save { border-color: var(--accent); color: var(--accent); }
   .car-scroll-bottom {
     position: absolute; right: 16px; bottom: 78px; z-index: 5;
     width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);

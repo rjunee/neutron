@@ -40,6 +40,12 @@ type ContentPart =
 export function toThreadMessage(m: RenderMessage, origin = ''): ThreadMessageLike {
   const role: 'assistant' | 'user' = m.role === 'agent' ? 'assistant' : 'user'
   const parts: ContentPart[] = []
+  // Track B Phase 4 (edit/delete) — a tombstoned message renders a deleted
+  // placeholder instead of its (cleared) body + attachments.
+  if (m.deleted) {
+    const tomb = { id: m.id, role, content: [{ type: 'text', text: '🚫 This message was deleted' }] } as const
+    return role === 'assistant' ? { ...tomb, status: { type: 'complete', reason: 'stop' } } : tomb
+  }
   if (m.text.length > 0) parts.push({ type: 'text', text: m.text })
   if (m.attachments !== null) {
     for (const raw of m.attachments) {
