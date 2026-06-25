@@ -123,8 +123,12 @@ export function stripDocQuotes(lines: readonly string[]): string[] {
   return out
 }
 
-/** Build the {@link DetectorContext} for one detector's bottom-N window. */
-function buildContext(rawRing: string, bottomN: number, now: number): DetectorContext {
+/** Build the {@link DetectorContext} for one detector's bottom-N window.
+ *  Exported so a stateful recovery routine (e.g. the wedged-prompt escape/ctrl-c
+ *  ladder) can re-run a detector's `present` predicate against a freshly-read
+ *  ring between keystrokes, applying the identical bottom-N + doc-quote windowing
+ *  the live `scan()` uses. */
+export function buildDetectorContext(rawRing: string, bottomN: number, now: number): DetectorContext {
   const windowText = bottomNLines(rawRing, bottomN)
   const lines = stripDocQuotes(windowText.length > 0 ? windowText.split('\n') : [])
   return { lines, normalized: normalizePtyText(lines.join('\n')), now }
@@ -165,7 +169,7 @@ export class OutputScanner {
     for (const det of this.detectors) {
       const st = this.state.get(det.id)
       if (st === undefined) continue // unreachable (register seeds it)
-      const ctx = buildContext(rawRing, det.bottomN ?? DEFAULT_BOTTOM_N, now)
+      const ctx = buildDetectorContext(rawRing, det.bottomN ?? DEFAULT_BOTTOM_N, now)
       const present = det.present(ctx)
       if (!present) {
         // Falling edge: clear the latch so a fresh present→ can fire again.
