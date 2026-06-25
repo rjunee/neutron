@@ -55,7 +55,7 @@ import { bunTerminalHost } from './bun-terminal-host.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import type { PtyChild, PtyHost } from './pty-host.ts'
 import { PtyRing, type RecentOutputOpts } from './pty-ring.ts'
-import { OutputScanner } from './output-scan.ts'
+import { buildDetectorContext, OutputScanner } from './output-scan.ts'
 import { dashifyCwd } from './session-validation.ts'
 import {
   startApi5xxDeadTurnWatcher,
@@ -68,6 +68,14 @@ import {
   runWedgedRecovery,
   WEDGED_PROMPT_DETECTOR_ID,
 } from './wedged-prompt-detector.ts'
+import {
+  createRateLimitBannerDetector,
+  matchRateLimitBanner,
+  RATE_LIMIT_BANNER_BOTTOM_N,
+  RATE_LIMIT_BANNER_SEVERITIES,
+  severityForBannerDetectorId,
+  type RateLimitBannerSeverity,
+} from './rate-limit-banner.ts'
 import {
   createResumePickerDetector,
   runResumePickerRecovery,
@@ -317,6 +325,12 @@ function runOutputScan(
       dispatchWedgeRecovery(session, child, options)
     } else if (fired.id === RESUME_PICKER_DETECTOR_ID) {
       dispatchResumePickerRecovery(session, child, options)
+    } else if (severityForBannerDetectorId(fired.id) !== undefined) {
+      // Master-table row #10: a temporary / usage-cap BANNER crossed the rising
+      // edge. NOTIFY-ONLY — surface a notice, never a keystroke (`scan` already
+      // stamped the per-`threadId::severity` latch, so this is fire-once and
+      // clears only when the banner falls off — invariant §1/§4).
+      dispatchRateLimitBannerNotice(session, options, fired.id, now)
     } else if (fired.keys !== undefined) {
       sendKeys(child, fired.keys)
     }
@@ -484,6 +498,65 @@ function surfaceSizeAlert(
   }
 }
 
+/** A rate-limit / overload banner that crossed the rising edge (master-table row
+ *  #10). Surfaced through the injected {@link PersistentReplSubstrateOptions.onRateLimitBanner}
+ *  seam (the gateway wires real chat delivery — the substrate is a runtime-layer
+ *  module and MUST NOT import the gateway). NOTIFY-ONLY: there is no keystroke and
+ *  no auto-retry. */
+export interface RateLimitBannerNotice {
+  /** Stable discriminator (mirrors {@link DeadTurnNotice.reason}). */
+  reason: 'rate_limit_banner'
+  /** The owning REPL session. */
+  sessionId: string
+  /** `temporary` (Anthropic-side transient 429/529/overload/502 — CC retries) or
+   *  `usage-cap` (subscription window cap — no auto-recovery). */
+  severity: RateLimitBannerSeverity
+  /** The verbatim banner line that matched (trimmed) — surfaced so the user can
+   *  cross-check which limit is in effect. */
+  matched: string
+}
+
+/** Surface a rate-limit / overload banner notice on the rising edge (row #10).
+ *  Notify-only — mirrors {@link surfaceSizeAlert}'s three surfaces: (a) the active
+ *  turn's channel if one is in flight (inline visibility), (b) an operator stderr
+ *  log (always), and (c) the injected `onRateLimitBanner` hook so a gateway can
+ *  wire a richer chat-surface delivery. The scanner already stamped the
+ *  per-`threadId::severity` edge-latch BEFORE this runs, so it is fire-once per
+ *  rising edge and a hook failure can NOT un-latch or re-fire (invariant §1/§4). */
+function dispatchRateLimitBannerNotice(
+  session: ReplSession,
+  options: PersistentReplSubstrateOptions,
+  detectorId: string,
+  now: number,
+): void {
+  const severity = severityForBannerDetectorId(detectorId)
+  if (severity === undefined) return // unreachable (caller already filtered)
+  // Re-derive the matched line from the SAME bottom-N + doc-quote window the
+  // detector saw (the ring is unchanged on this synchronous tick). The framework's
+  // FiredDetection carries only id/keys, so the verbatim banner line is recovered
+  // here rather than threaded through the latch state.
+  const ctx = buildDetectorContext(session.ring.raw(), RATE_LIMIT_BANNER_BOTTOM_N, now)
+  const matched = matchRateLimitBanner(severity, ctx.lines) ?? '(rate-limit banner)'
+  const message =
+    severity === 'usage-cap'
+      ? `🚧 Claude usage limit reached — the subscription window is capped and won't auto-recover until it resets.\n${matched}`
+      : `⏳ Claude is temporarily rate-limited / overloaded (transient — it will retry on its own).\n${matched}`
+  session.activeTurn?.channel.push({ kind: 'status', message })
+  process.stderr.write(
+    `[rate-limit-banner] ${severity} session=${session.sessionId.slice(0, 8)} matched=${matched}\n`,
+  )
+  try {
+    options.onRateLimitBanner?.({
+      reason: 'rate_limit_banner',
+      sessionId: session.sessionId,
+      severity,
+      matched,
+    })
+  } catch {
+    // A bad notice hook must never crash the scan tick.
+  }
+}
+
 /** A reply recovered by the replay-after-resume path (#106). The substrate is a
  *  runtime-layer module and MUST NOT import the gateway delivery layer, so the
  *  gateway injects `onRecoveredReply` (a runtime→gateway DI seam) and the
@@ -547,6 +620,15 @@ export interface PersistentReplSubstrateOptions {
    *  seam (mirrors `onRecoveredReply`/`postWedgeAlert`). Default: a structured
    *  stderr notice. */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  /** Rate-limit / overload BANNER notice sink (master-table row #10). Fired on the
+   *  rising edge when the output scanner sees a `temporary` (429/529/overload/502)
+   *  or `usage-cap` (subscription window) banner in the ring — NOTIFY-ONLY, no
+   *  keystroke. Edge-triggered per `threadId::severity` (one detector per severity)
+   *  so a stale banner in an idle pane NEVER re-fires (the hourly-re-fire bug). The
+   *  gateway wires this to a richer chat-surface alert; runtime-layer DI seam
+   *  (mirrors `onDeadTurnNotice`). Default: a structured stderr notice + an inline
+   *  status push if a turn is in flight. */
+  onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /**
    * STATELESS-ONE-SHOT mode (Argus r4 BLOCKER, 2026-06-08). When `true`, a
    * `start(spec)` dispatch that carries NO `spec.session` gets its OWN fresh,
@@ -1481,6 +1563,22 @@ async function spawnSession(
   // resume (`session-respawn.ts`/`session-validation.ts`), which avoids the picker
   // in the normal path — this is a pure safety net for if it ever appears.
   session.scanner.register(createResumePickerDetector())
+  // P2: rate-limit / overload BANNER alert (master-table row #10). DISTINCT from
+  // the `rate-limit-options-stop` detector above — that PRESSES `3` on the
+  // interactive ORG-CAP picker; THIS passively notices the temporary / usage-cap
+  // BANNER CC prints and edge-fires a NOTIFY-ONLY alert (no keystroke, no
+  // auto-retry — those are row #4's job). One detector per severity, so the
+  // framework's per-detector edge-latch IS the Vajra `${threadId}::${severity}`
+  // latch: fire on absent→present, clear ONLY on present→absent. THIS is the fix
+  // for the bug a pure time-dedupe caused — re-firing the alert HOURLY FOREVER on a
+  // stale banner sitting in an idle pane. Guards: the framework's doc-quote strip +
+  // bottom-30 window, plus the detector's own not-at-idle-prompt walk (which skips
+  // bypass-permissions / "new task?" / box-drawing chrome so a retired 429 above
+  // the chrome doesn't false-fire — book topic, 4 alerts 2026-05-15). Carries NO
+  // `keys`; `runOutputScan` routes a fired banner to `dispatchRateLimitBannerNotice`.
+  for (const severity of RATE_LIMIT_BANNER_SEVERITIES) {
+    session.scanner.register(createRateLimitBannerDetector(severity))
+  }
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).

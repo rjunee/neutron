@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## PTY terminal-detection P2 — rate-limit / overload banner alert (notify-only, port row #10)
+
+**What shipped.** A new module `runtime/adapters/claude-code/persistent/rate-limit-banner.ts`
++ two output-scan detectors (`id: 'rate-limit-banner-temporary'` /
+`'rate-limit-banner-usage-cap'`) registered on every session's `OutputScanner` in
+`persistent-repl-substrate.ts`, plus a `dispatchRateLimitBannerNotice` surface and an
+`onRateLimitBanner` DI seam on `PersistentReplSubstrateOptions`. Ports Vajra's
+`pane-scan-watchdog.ts decideRateLimitAlert` + `rate-limit-patterns.ts` (research
+row #10) onto the F1/F3 substrate. **No feature flag — ON by default.**
+
+**Spec-conformance.** SPEC row #10 = ring-detect the temporary/usage-cap banners
+with doc-quote + bottom-30 + not-idle-prompt guards, EDGE-TRIGGERED per
+`threadId::severity`, notify via the chat surface, carrying the idle-prompt
+chrome-skip list. CURRENT wiring already handles the *interactive* org-cap picker
+(`rate-limit-options-stop`, row #4, presses `3`) but nothing surfaced the *passive*
+banner — the gap this closes. Distinct mechanism: this one is NOTIFY-ONLY, no
+keystroke. **Out of scope (unchanged):** any keystroke / auto-action (row #4) and
+auto-retry.
+
+- **Patterns.** `temporary` (`Server is temporarily limiting requests`+`API Error`,
+  `Overloaded`+`API Error`, `502 Bad Gateway`+`api.anthropic.com`) and `usage-cap`
+  (`Claude usage limit reached`, `5-hour rate limit reached`, `usage limit. Please
+  try again at`). All cues required on one line — bare "Rate limited"/"Overloaded"
+  noise and an unrelated-host 502 do NOT match.
+- **Edge-latch invariant.** The framework's per-detector edge-latch IS the Vajra
+  `${threadId}::${severity}` latch — one detector per severity, fires absent→present,
+  clears only present→absent. NEVER time-dedupe (the hourly-re-fire-on-stale-banner
+  bug). Verified by a present→present→absent→present test (fire, hold across a
+  simulated +1h tick, clear, re-fire).
+- **Guards.** doc-quote (framework `stripDocQuotes`), bottom-30
+  (`RATE_LIMIT_BANNER_BOTTOM_N`), and a box-border-tolerant not-at-idle-prompt walk
+  that SKIPS bypass-permissions / "new task?" / `ctrl+…` / box-drawing chrome
+  (book-topic false-alert, 2026-05-15). The `IDLE_PROMPT_PATTERN` is widened
+  (`(?:\s|$)`) so a trailing-space-trimmed bare caret still reads as idle, and an
+  `unboxLine` step tolerates the Ink TUI's `│ … │` box wrapping (◆
+  ADAPTED-AT-BOUNDARY vs Vajra's tmux capture).
+- **Surface.** NOTIFY-ONLY (no `keys`). `runOutputScan` routes a fired banner to
+  `dispatchRateLimitBannerNotice` → active-turn channel push (if a turn is live) +
+  stderr + the injected `onRateLimitBanner` seam (gateway wires real chat delivery;
+  default = structured stderr notice).
+- **Tests.** `rate-limit-banner.test.ts` (27): each temporary + usage-cap pattern
+  fires once on the rising edge (via the REAL `OutputScanner`); cue-framing
+  negatives; doc-quote (inline-backtick / fenced / diff-line) → no fire;
+  edge-latch fire/hold/clear/re-fire; bottom-30 in/out of window; chrome-skip
+  not-at-idle-prompt (retired-banner-above-idle-prompt → no fire, active-banner+chrome
+  → fires); severity independence; notify-only (no `keys`); id⇄severity mapping. New
+  suite green; full `persistent/` suite **462 pass / 0 fail** (with `runtime/node_modules`
+  resolvable). `tsc -p runtime/tsconfig.json --noEmit` clean for the changed files
+  (the only errors are pre-existing missing-dep resolutions in `dev-channel.ts` /
+  `jwt-validator`, unrelated to this change).
+
 ## PTY terminal-detection P2 — resume-session-failure picker safety net (port row #7)
 
 **What shipped.** On the merged F1/F2/F3 substrate (#54), a new output-scan
