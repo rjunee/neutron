@@ -362,6 +362,23 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   enable embeddings; the explicit `NEUTRON_EMBEDDINGS` opt-in keeps cloud
   embedding cost from ever being a surprise.
 
+- **Installer provisions the binary (`install.sh#ensure_gbrain`).** The runtime
+  above spawns `gbrain serve`; without the `gbrain` binary on PATH that spawn
+  fails and memory degrades SILENTLY to on-disk entity pages (latched after the
+  first `Executable not found in $PATH: gbrain` — see
+  `gbrain-memory/memory-store.ts#isGbrainBinaryMissingError`). So a fresh
+  self-host gets REAL memory out of the box, `install.sh` installs GBrain by
+  default in the Dependencies phase via `bun install -g github:garrytan/gbrain`
+  (source ref overridable with `NEUTRON_GBRAIN_REF`). The step is **idempotent**
+  (an already-present `gbrain` is detected, not reinstalled) and **non-fatal**:
+  if the install fails or the binary can't be resolved on PATH, the installer
+  DETECTS it and reports the gap LOUDLY (a `DEGRADED` line in the final banner +
+  the exact `bun install -g …` recovery command) rather than aborting — the
+  runtime's graceful-degradation path stays intact. Opt out with `--no-gbrain`
+  / `NEUTRON_SKIP_GBRAIN=1` (memory then degrades to disk-only, reported the
+  same way). Covered by `tests/integration/install-gbrain.test.ts` via the
+  `NEUTRON_INSTALL_PRINT_GBRAIN` seam.
+
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 
 The admin add/rotate path (`app/app/admin.tsx` → the gateway admin surface)

@@ -2,6 +2,46 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-25 — Installer self-installs the GBrain memory binary (parity gap #1, P0)
+
+**What shipped.** `install.sh#ensure_gbrain` — the installer now provisions
+Neutron's real memory substrate so a fresh self-host has knowledge-graph +
+semantic recall out of the box. The runtime (`gbrain-memory/`) spawns
+`gbrain serve` over stdio MCP; before this change `install.sh` had ZERO gbrain
+references, so the `gbrain` binary was never on PATH and memory degraded SILENTLY
+to on-disk entity pages (latched after the first `Executable not found in $PATH:
+gbrain` — `gbrain-memory/memory-store.ts#isGbrainBinaryMissingError`). Closes
+gap #1 of the 2026-06-25 Vajra→Neutron parity audit.
+
+- **Default install.** In the Dependencies phase (right after `bun install`),
+  `ensure_gbrain` runs `bun install -g github:garrytan/gbrain` (the canonical
+  path from GBrain's README; binary lands in `$BUN_INSTALL/bin`, which the step
+  ensures is on PATH). Source ref overridable via `NEUTRON_GBRAIN_REF`.
+- **Idempotent.** An already-present `gbrain` (re-install / hand-install) is
+  detected and the install command is skipped.
+- **Non-fatal + LOUD on failure (the audit's core requirement: never silently
+  degrade).** If the install fails or the binary can't be resolved on PATH, the
+  installer reports the gap — a `Memory: DEGRADED` line in the final banner plus
+  the exact `bun install -g …` recovery command — and CONTINUES; the runtime's
+  graceful-degradation path (entity pages on disk) stays intact.
+- **Opt-out.** `--no-gbrain` / `NEUTRON_SKIP_GBRAIN=1` skips the install and
+  reports the degraded state the same way.
+- **Banner.** Both the fancy and plain "Ready" panels now carry a `Memory` line
+  (GBrain installed vs DEGRADED) so the memory state is never invisible.
+
+**Why no runtime change.** The graceful-degradation logic
+(`build-gbrain-memory.ts` boot probe + `gbrain-stdio-client.ts` latched
+`GBrainUnavailableError`) already existed and is correct; the only missing piece
+was the installer never putting the binary on PATH. Pure installer + docs + test
+change; the memory runtime is untouched.
+
+**Tests.** `tests/integration/install-gbrain.test.ts` — 7 cases over the new
+`NEUTRON_INSTALL_PRINT_GBRAIN` seam (install-ok, idempotent, install-failed,
+binary-not-on-PATH, `--no-gbrain`, `NEUTRON_SKIP_GBRAIN`, `NEUTRON_GBRAIN_REF`
+override), all via an injected `NEUTRON_GBRAIN_INSTALL_CMD` so no network. 7 pass
+/ 0 fail; existing `install-auth-gate.test.ts` still 8/8; `sh -n install.sh`
+clean.
+
 ## 2026-06-24 — Trident: fleet premature-completion / cross-model-review wedge reconciliation
 
 **What shipped.** The first high-value Vajra→Neutron fix-reconciliation pass
