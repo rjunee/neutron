@@ -229,3 +229,77 @@ describe('enforce-reply Stop hook', () => {
     expect(out.decision).toBeUndefined()
   })
 })
+
+/**
+ * Mechanism #9 (stuck-typing reaper + pane-scrape recovery) — VERIFIED-OBVIATED.
+ *
+ * Vajra's #9 watched the tmux pane go byte-static with no active tool call,
+ * scraped the last assistant block out of the pane, re-posted it with a
+ * "recovered" banner, and `send-keys`-nudged the agent to call `reply()`. It
+ * encodes the HEADLESS-PANE INVISIBILITY failure: anything the agent prints to
+ * the terminal instead of calling `reply()` is invisible to the user, so the
+ * typing indicator spins forever.
+ *
+ * Neutron answers this STRUCTURALLY, not by scraping: the Stop hook blocks a
+ * channel turn that ENDS without `reply()` and re-instructs the agent that
+ * terminal output is invisible — the exact #9 lesson, applied BEFORE the content
+ * is lost rather than scraped back after. These tests pin that the hook IS the
+ * #9 mechanism (the turn-end case) so a future refactor can't silently drop the
+ * lesson and reopen the stuck-typing class.
+ *
+ * The only sliver enforce-reply structurally can't see — a turn that goes
+ * byte-static MID-stream (never reaches the Stop hook) — is bounded OUTSIDE this
+ * hook by the substrate's unconditional per-turn `setTimeout(turnTimeoutMs)`
+ * (→ retryable error + channel close + session poison; the typing indicator
+ * resolves, no infinite spin) and the 10s liveness keepalive that re-runs
+ * `runOutputScan` each tick (a STATIC interactive-prompt wedge is recovered by
+ * the P0 detector, port row #1). A ring-scrape re-post would deliver
+ * un-correlated content (no `turn_id`), which `onReply`'s correlation guard
+ * rejects by design — so #9 ports as a doc note + this verify test, NOT code.
+ * See docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md row #9.
+ */
+describe('mechanism #9 (stuck-typing) — enforce-reply obviates the pane-scraper', () => {
+  it('BLOCKS the stuck-typing shape: agent printed its answer to the terminal, never called reply()', () => {
+    // The exact Vajra #9 scenario: a multi-block turn that finished thinking and
+    // PRINTED a full answer to the terminal, then tried to end the turn without
+    // ever calling reply(). In tmux this went byte-static and spun the typing
+    // indicator; here the Stop hook intercepts the stop attempt and re-prompts.
+    const path = writeTranscript('stuck-typing-printed-answer', [
+      channelUser('draft a follow-up email', 'user="sam"'),
+      assistantText('Here is the draft:'),
+      assistantText('Subject: Following up\n\nHi — wanted to circle back on ...'),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'test-9-printed' })
+    expect(out.decision).toBe('block')
+  })
+
+  it('the block reason ENCODES the headless-invisibility lesson (terminal output invisible + call reply)', () => {
+    // This is what makes enforce-reply strictly better than scrape-and-recover:
+    // the reason re-instructs the agent with the same lesson #9's banner carried,
+    // BEFORE the content is lost. Pin the lesson so a refactor can't drop it.
+    const path = writeTranscript('stuck-typing-reason', [
+      channelUser('summarize the thread', 'user="sam"'),
+      assistantText('The thread is about ...'),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'test-9-reason' })
+    expect(out.decision).toBe('block')
+    const reason = (out.reason ?? '').toLowerCase()
+    expect(reason).toContain('invisible')
+    expect(reason).toContain('reply')
+    expect(reason).toContain('terminal')
+  })
+
+  it('does NOT scrape: a normal turn that DID call reply() resolves with no block (no re-post)', () => {
+    // The structural guarantee — when reply() was called there is nothing to
+    // recover, so the hook is a clean no-op. Neutron never re-posts scraped ring
+    // text (that would be un-correlated to a turn_id); reply() is the only path.
+    const path = writeTranscript('stuck-typing-replied', [
+      channelUser('draft a follow-up email', 'user="sam"'),
+      assistantText('Here is the draft:'),
+      assistantMcpReplyCall(),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'test-9-replied' })
+    expect(out.decision).toBeUndefined()
+    expect(out.stdout).toBe('')
+  })
+})

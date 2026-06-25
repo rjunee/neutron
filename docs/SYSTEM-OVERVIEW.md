@@ -1285,6 +1285,47 @@ and answering, just rooted in the wrong place.
 This closes master-table **port row #12** (previously the last MISSING P3 watchdog
 in `docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md`).
 
+## Stuck-typing reaper (port row #9) — VERIFIED-OBVIATED, no scraper
+
+Vajra's #9 (`pane-scan-watchdog.ts decideStuckTypingAction` + `index.ts
+recoverStuckTopic`) watched the tmux pane go byte-static with no active tool
+call, scraped the last assistant block out of the pane, re-posted it with a
+"recovered" banner, and `send-keys`-nudged the agent to call `reply()`. It
+encodes **headless-pane invisibility**: anything the agent prints to the terminal
+instead of calling `reply()` is invisible to the user, so the typing indicator
+spins forever. A verify-first pass confirmed Neutron already covers this
+**structurally**, so #9 ships as a doc note + verify test, **not** a scraper.
+
+- **Turn-END case → `enforce-reply.ts` (the Stop hook), strictly better than
+  scraping.** When a `<channel>` turn tries to end without a `reply()` tool call,
+  the hook returns `{decision:'block', reason:…}` re-instructing the agent that
+  *terminal output is invisible — call the reply tool now*. The lesson is applied
+  **before** the content is lost rather than scraped back after, and the agent is
+  forced to deliver via the one correlated path (`reply()` → one `completion`),
+  never an un-correlated ring re-post.
+- **Mid-stream byte-static sliver (the only thing the Stop hook can't see) is
+  bounded elsewhere.** A turn that stalls mid-generation never reaches the Stop
+  hook, but the substrate's unconditional per-turn `setTimeout(turnTimeoutMs)`
+  (default 180s) fires a `retryable` error + closes the channel + poisons the warm
+  session — the typing indicator **resolves** (no infinite spin), and the next
+  dispatch lands on a clean REPL. Concurrently the 10s liveness keepalive re-runs
+  `runOutputScan` each tick, so the *recoverable* cause of a static stall — a
+  wedged interactive prompt — is cleared by the P0 detector (row #1).
+- **Why no scraper, on purpose.** Re-posting scraped ring text would deliver
+  content with no `turn_id`, which `onReply`'s correlation guard rejects by
+  design (`[repl-sink] dropped uncorrelated reply`). Scraping would *regress* the
+  reply()-only delivery guarantee the whole substrate is built on.
+- **Verify test.** `enforce-reply.test.ts` (now 18, +3) pins the #9 turn-end
+  shape: an agent that PRINTED its answer to the terminal and ended the turn is
+  blocked; the block reason carries the headless-invisibility lesson
+  (`invisible` + `terminal` + `reply`); a turn that DID call `reply()` is a clean
+  no-op (nothing scraped, nothing re-posted).
+
+This closes master-table **port row #9** as VERIFIED-OBVIATED in
+`docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md` (was
+PARTIAL/P2): the no-reply case is covered structurally and better; the mid-stream
+sliver is bounded by the turn timeout + keepalive re-scan; no new code warranted.
+
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 
 The real overnight-work engine: while the user sleeps, the highest-priority
