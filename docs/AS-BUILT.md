@@ -2,6 +2,30 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Parity gap #1 (P0) — installer self-installs the GBrain memory binary
+
+**What shipped.** `install.sh#ensure_gbrain` provisions Neutron's real memory
+substrate so a fresh self-host has knowledge-graph + semantic recall out of the
+box. The runtime (`gbrain-memory/`) spawns `gbrain serve` over stdio MCP; before
+this change `install.sh` had ZERO gbrain references, so the binary was never on
+PATH and memory degraded SILENTLY to on-disk entity pages. Closes gap #1 of the
+2026-06-25 Vajra→Neutron parity audit.
+
+- **Default install** in the Dependencies phase: `bun install -g
+  github:garrytan/gbrain` (canonical README path; `NEUTRON_GBRAIN_REF` overrides
+  the ref). **Idempotent** — an already-present `gbrain` is detected, not
+  reinstalled.
+- **Non-fatal + LOUD on failure** (the audit's core requirement: never silently
+  degrade). A failed/unresolvable install reports the gap — `Memory: DEGRADED`
+  in the final banner + the exact `bun install -g …` recovery command — and
+  continues; the runtime's graceful-degradation path is preserved.
+- **Opt-out** via `--no-gbrain` / `NEUTRON_SKIP_GBRAIN=1`.
+- Pure installer + docs + test change; the memory runtime is untouched (its
+  degradation logic already existed and was correct).
+- **Tests** — `tests/integration/install-gbrain.test.ts`, 7 cases over the new
+  `NEUTRON_INSTALL_PRINT_GBRAIN` seam (no network; injected install command).
+  7 pass / 0 fail; `install-auth-gate.test.ts` still 8/8.
+
 ## WAVE 3 — Email Core: thread read (`email_thread`) + doc reconciliation
 
 **What shipped.** The Email-Managed Core (`cores/free/email/`) gained the

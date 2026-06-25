@@ -43,6 +43,8 @@
 # Flags:
 #   --no-start     do NOT auto-start the server (default: start + print URL)
 #   --no-service   do NOT install the launchd/systemd boot+crash service
+#   --no-gbrain    do NOT install the GBrain memory binary (memory degrades to
+#                  entity pages on disk — no knowledge-graph / semantic recall)
 #   --no-backup    do NOT schedule the git data-backup timer
 #   --no-open      do NOT open the chat URL in a browser on macOS
 #   --start        accepted for back-compat (auto-start is now the default)
@@ -57,6 +59,9 @@
 #   NEUTRON_SRC_DIR    code directory for the clone path (default $HOME/neutron/core)
 #   NEUTRON_HOME       data directory (default $HOME/neutron/data)
 #   NEUTRON_PORT       HTTP port the server binds + the printed URL uses (default 7800)
+#   NEUTRON_GBRAIN_REF       source ref for the GBrain memory binary
+#                            (default github:garrytan/gbrain; installed via bun install -g)
+#   NEUTRON_GBRAIN_INSTALL_CMD  override the gbrain install command entirely (test seam)
 #   NEUTRON_BACKUP_REMOTE    git remote for offsite backup pushes (default: local-only)
 #   NEUTRON_BACKUP_INTERVAL  seconds between backups (default 43200 = 12h)
 #
@@ -80,6 +85,15 @@ DO_START=1
 DO_SERVICE=1
 DO_BACKUP=1
 DO_OPEN=1
+# GBrain is Neutron's real memory substrate (knowledge-graph + semantic recall);
+# the runtime spawns `gbrain serve` over stdio MCP. Install it by default so a
+# fresh self-host has REAL memory out of the box, with a --no-gbrain opt-out that
+# preserves the graceful no-real-memory degradation. Source ref is overridable.
+DO_GBRAIN=1
+GBRAIN_REF=${NEUTRON_GBRAIN_REF:-github:garrytan/gbrain}
+# Set to 1 by ensure_gbrain once the `gbrain` binary is confirmed on PATH — the
+# final banner reads this so it never claims real memory when it silently degraded.
+GBRAIN_INSTALLED=0
 ASSUME_YES=0
 DIR_OVERRIDE=""
 # Offsite git remote for data backups. A --backup-remote <url> flag (or a live
@@ -593,6 +607,87 @@ ensure_bun() {
   info "bun installed ($(command -v bun))"
 }
 
+# Install the GBrain memory binary so a fresh self-host has REAL memory.
+#
+# WHY THIS EXISTS: the runtime (gbrain-memory/) spawns `gbrain serve` over stdio
+# MCP for the knowledge-graph + semantic recall that is core to the experience.
+# When the binary is ABSENT it degrades SILENTLY — entity pages still land on
+# disk, but every KG/semantic memory op fails (latched after the first
+# "Executable not found in $PATH: gbrain"; see gbrain-memory/memory-store.ts
+# isGbrainBinaryMissingError). Before this step install.sh had ZERO gbrain
+# references, so every fresh install ran without real memory. This closes that.
+#
+# CONTRACT: non-fatal. GBrain is an external dependency (github.com/garrytan/
+# gbrain, MIT, installed onto PATH via `bun install -g`); if it can't be
+# installed we DETECT it and report the gap LOUDLY, but never abort the install
+# — the runtime's graceful-degradation path stays intact (entity pages on disk).
+# Opt out entirely with --no-gbrain / NEUTRON_SKIP_GBRAIN=1.
+ensure_gbrain() {
+  if [ "$DO_GBRAIN" != 1 ] || [ "${NEUTRON_SKIP_GBRAIN:-}" = 1 ]; then
+    warn "skipping GBrain memory install (--no-gbrain / NEUTRON_SKIP_GBRAIN)."
+    warn "  Memory degrades to entity pages on disk — NO knowledge-graph / semantic recall."
+    warn "  Enable it later with:  bun install -g $GBRAIN_REF   (then restart Neutron)"
+    return 0
+  fi
+
+  # `bun install -g` drops global bins into $BUN_INSTALL/bin (default ~/.bun/bin).
+  # The bun installer wires that onto the login shell, but THIS process may not
+  # have it yet (esp. when bun was just installed in ensure_bun). Put it on PATH
+  # so both the idempotent pre-check and the post-install probe can find gbrain.
+  _bun_bin=${BUN_INSTALL:-$HOME/.bun}/bin
+  case ":$PATH:" in *":$_bun_bin:"*) : ;; *) PATH="$_bun_bin:$PATH"; export PATH ;; esac
+
+  # Idempotent: an existing gbrain (re-install, or hand-installed) → done.
+  if command -v gbrain >/dev/null 2>&1; then
+    GBRAIN_INSTALLED=1
+    info "GBrain memory already installed ($(command -v gbrain)) — real KG/semantic memory enabled"
+    return 0
+  fi
+
+  # The test seam replaces the real network install with an injected command;
+  # production uses the canonical `bun install -g <ref>` from GBrain's README.
+  if [ -n "${NEUTRON_GBRAIN_INSTALL_CMD:-}" ]; then
+    _gb_cmd="$NEUTRON_GBRAIN_INSTALL_CMD"
+  else
+    _gb_cmd="bun install -g $GBRAIN_REF"
+  fi
+
+  spin_start "installing GBrain memory ($GBRAIN_REF)"
+  _gb_log=$(mktemp 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/neutron-gbrain.$$")
+  if sh -c "$_gb_cmd" >"$_gb_log" 2>&1; then
+    # The global bin dir may have just been created — re-probe PATH before lookup.
+    case ":$PATH:" in *":$_bun_bin:"*) : ;; *) PATH="$_bun_bin:$PATH"; export PATH ;; esac
+    if command -v gbrain >/dev/null 2>&1; then
+      GBRAIN_INSTALLED=1
+      spin_end 0 "GBrain memory installed — real KG/semantic memory enabled"
+      # spin_end is a no-op in plain mode; echo the confirmation so the line is
+      # visible there too (mirrors the migrations step).
+      [ "$FANCY" = 1 ] || info "GBrain memory installed ($(command -v gbrain)) — real KG/semantic memory enabled"
+      rm -f "$_gb_log"
+    else
+      # Installed without error but not resolvable — almost always a PATH gap.
+      # Report it; do NOT die (memory degrades, the rest of Neutron is fine).
+      spin_end 1
+      warn "GBrain installed but 'gbrain' is not on PATH (expected in $_bun_bin)."
+      warn "  Memory will run DEGRADED (entity pages on disk; no KG/semantic recall)."
+      warn "  Fix: ensure $_bun_bin is on your PATH, then restart Neutron."
+      cat "$_gb_log" >&2
+      rm -f "$_gb_log"
+    fi
+  else
+    # Install failed (offline, ref unreachable, build error). Non-fatal: the
+    # runtime degrades gracefully. Report the gap + the exact manual recovery.
+    spin_end 1
+    warn "GBrain memory install failed — Neutron will run with DEGRADED memory"
+    warn "  (entity pages stay on disk; knowledge-graph / semantic recall DISABLED)."
+    warn "  This is non-fatal; the install continues. Enable memory later with:"
+    warn "    bun install -g $GBRAIN_REF   # then restart Neutron"
+    cat "$_gb_log" >&2
+    rm -f "$_gb_log"
+  fi
+  return 0
+}
+
 # Run `claude setup-token` and capture the long-lived `sk-ant-oat…` token it
 # prints to stdout, mirroring the Managed install-token flow (the
 # install-token-script renderer in the onboarding-api landing module).
@@ -779,6 +874,7 @@ while [ $# -gt 0 ]; do
     --start) DO_START=1; shift ;;
     --no-start) DO_START=0; shift ;;
     --no-service) DO_SERVICE=0; shift ;;
+    --no-gbrain) DO_GBRAIN=0; shift ;;
     --no-backup) DO_BACKUP=0; shift ;;
     --no-open) DO_OPEN=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -868,6 +964,16 @@ if [ "${NEUTRON_INSTALL_PRINT_AUTH:-}" = "1" ]; then
   exit 0
 fi
 
+# Test seam (harness only): run the GBrain memory install/detect step in
+# isolation and exit, without bun install / migrations. Lets the unit tests
+# assert the install branches (already-present / installed-ok / install-failed /
+# opted-out) via NEUTRON_GBRAIN_INSTALL_CMD without hitting the network.
+if [ "${NEUTRON_INSTALL_PRINT_GBRAIN:-}" = "1" ]; then
+  ensure_gbrain
+  printf 'GBRAIN_INSTALLED=%s\n' "$GBRAIN_INSTALLED"
+  exit 0
+fi
+
 if [ "$MODE" = "local" ]; then
   info "installing in place from existing checkout: $SRC_DIR"
 else
@@ -913,6 +1019,11 @@ if [ "$FANCY" = 1 ]; then
 else
   bun install || die "bun install failed"
 fi
+
+# Install GBrain — Neutron's real memory substrate — so a fresh self-host ships
+# with knowledge-graph + semantic recall instead of silently degrading to
+# on-disk entity pages. Non-fatal + opt-out aware (see ensure_gbrain).
+ensure_gbrain
 
 # ── config ───────────────────────────────────────────────────────────────────
 ui_phase "2/6" "Configuration"
@@ -1146,6 +1257,13 @@ if [ "$FANCY" = 1 ]; then
   fi
   printf '  %s  %sCode%s     %s%s%s\n' "$_g" "$C_MUTE" "$C_RESET" "$C_DIM" "$SRC_DIR" "$C_RESET"
   printf '  %s  %sData%s     %s%s%s\n' "$_g" "$C_MUTE" "$C_RESET" "$C_DIM" "$NEUTRON_HOME_RESOLVED" "$C_RESET"
+  if [ "$GBRAIN_INSTALLED" = 1 ]; then
+    printf '  %s  %sMemory%s   %sGBrain installed — knowledge-graph + semantic recall ON%s\n' \
+      "$_g" "$C_MUTE" "$C_RESET" "$C_DIM" "$C_RESET"
+  else
+    printf '  %s  %sMemory%s   %sDEGRADED — entity pages on disk only (run: bun install -g %s)%s\n' \
+      "$_g" "$C_MUTE" "$C_RESET" "$C_WARN" "$GBRAIN_REF" "$C_RESET"
+  fi
   if [ "$CLAUDE_AUTH_PENDING" = 1 ]; then
     printf '  %s\n' "$_g"
     printf '  %s  %sAuthenticate Claude, then start Neutron:%s\n' "$_g" "$C_WARN" "$C_RESET"
@@ -1178,6 +1296,11 @@ else
   fi
   printf '  code:    %s\n' "$SRC_DIR"
   printf '  data:    %s\n' "$NEUTRON_HOME_RESOLVED"
+  if [ "$GBRAIN_INSTALLED" = 1 ]; then
+    printf '  memory:  GBrain installed (knowledge-graph + semantic recall enabled)\n'
+  else
+    printf '  memory:  DEGRADED — entity pages on disk only; enable with: bun install -g %s\n' "$GBRAIN_REF"
+  fi
   if [ "$SERVICE_INSTALLED" = 1 ]; then
     printf '  service: installed (boots at login, restarts on crash)\n'
     printf '  control: neutron start | stop | restart | status | logs\n'
