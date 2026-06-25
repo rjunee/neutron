@@ -69,6 +69,20 @@ export const DEFAULT_SIZE_CHECK_INTERVAL_MS = 5 * 60 * 1000
 /** Min ms between successive Compact actuations on one session — a floor on top
  *  of the mid-compact lock so a rapid double-press can't double-send. */
 export const DEFAULT_COMPACT_DEBOUNCE_MS = 30 * 1000
+/**
+ * Max time the mid-compact lock is held before it auto-clears (2 min). A
+ * compaction's `"isCompactSummary":true` marker lands within seconds, so this is
+ * comfortably above the real grow-before-marker window yet well under the 5-min
+ * cadence. WITHOUT this ceiling the lock would clear ONLY when the post-compact
+ * size drops below the warn band — but a genuinely large conversation can stay
+ * ≥5 MB even AFTER a successful compaction (or the actuated `/compact` may have
+ * failed entirely), in which case the lock would NEVER clear and the watchdog
+ * would permanently suppress every future alert + refuse every `requestCompact`
+ * (Codex review, 2026-06-25). The timeout is the completion signal that does not
+ * depend on the size dropping, so a still-large or failed-compaction session
+ * re-surfaces the affordance instead of going dark forever.
+ */
+export const DEFAULT_COMPACT_LOCK_MAX_MS = 2 * 60 * 1000
 
 /**
  * The compact-summary record marker, as CC serializes it. CC writes its
@@ -198,6 +212,10 @@ export interface SessionSizeWatchdogDeps {
   intervalMs?: number
   /** Min ms between Compact actuations. Default {@link DEFAULT_COMPACT_DEBOUNCE_MS}. */
   compactDebounceMs?: number
+  /** Max ms the mid-compact lock is held before it auto-clears (the completion
+   *  signal that doesn't depend on the size dropping). Default
+   *  {@link DEFAULT_COMPACT_LOCK_MAX_MS}. */
+  compactLockMaxMs?: number
   /** DI: setInterval shim (tests advance the clock manually). */
   setIntervalFn?: (cb: () => void, ms: number) => unknown
   /** DI: clearInterval shim; accepts whatever setIntervalFn returned. */
@@ -237,6 +255,7 @@ export interface SessionSizeWatchdog {
 export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): SessionSizeWatchdog {
   const intervalMs = deps.intervalMs ?? DEFAULT_SIZE_CHECK_INTERVAL_MS
   const compactDebounceMs = deps.compactDebounceMs ?? DEFAULT_COMPACT_DEBOUNCE_MS
+  const compactLockMaxMs = deps.compactLockMaxMs ?? DEFAULT_COMPACT_LOCK_MAX_MS
   const now = deps.now ?? Date.now
   const setIntervalFn =
     deps.setIntervalFn ?? ((cb: () => void, ms: number) => globalThis.setInterval(cb, ms))
@@ -252,7 +271,15 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
 
   const tracker = new SessionSizeTracker()
   let compacting = false
+  let compactStartedAt = -Infinity
   let lastCompactAt = -Infinity
+
+  /** Release the mid-compact lock and reset the tiered latch so the (possibly
+   *  still-large) post-compaction size re-evaluates cleanly on the next tick. */
+  const clearCompactLock = (): void => {
+    compacting = false
+    tracker.reset()
+  }
 
   const tick = (): void => {
     try {
@@ -260,13 +287,21 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
       if (size === null) return // no transcript yet / unreadable → skip (truth-on-disk)
       if (compacting) {
         // PreCompact lock held: a compaction we actuated is mid-flight. Skip
-        // alerting during the grow-before-marker window. Clear the lock once the
-        // post-compact region has shrunk below the warn band — that means the
-        // new `"isCompactSummary":true` marker landed and the live context is
-        // small again. Reset the tiered latch so a subsequent climb re-fires.
-        if (size < SIZE_WARN_BYTES) {
-          compacting = false
-          tracker.reset()
+        // alerting during the grow-before-marker window. Clear the lock when
+        // EITHER:
+        //   (a) the post-compact region shrank below the warn band — the new
+        //       `"isCompactSummary":true` marker landed and the live context is
+        //       small again (the happy path); OR
+        //   (b) the lock has been held past `compactLockMaxMs` — the completion
+        //       signal that does NOT depend on the size dropping. A genuinely
+        //       large conversation can stay ≥5 MB even after a successful
+        //       compaction, and an actuated `/compact` may have failed outright;
+        //       without (b) the lock would never clear and the watchdog would go
+        //       dark forever (Codex review, 2026-06-25).
+        // Either way `clearCompactLock` resets the latch so a still-large session
+        // re-surfaces the affordance on the next tick instead of being silenced.
+        if (size < SIZE_WARN_BYTES || now() - compactStartedAt >= compactLockMaxMs) {
+          clearCompactLock()
         }
         return
       }
@@ -285,6 +320,7 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
     // level write failure must NOT leave us un-locked and able to re-actuate
     // next press, double-sending `/compact` into the REPL.
     compacting = true
+    compactStartedAt = t
     lastCompactAt = t
     deps.writeKey('escape')
     deps.write('/compact\r')

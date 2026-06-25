@@ -225,6 +225,32 @@ describe('Compact action — escape then /compact\\r, fire-once + mid-compact lo
     expect(alerts).toEqual([{ severity: 'warn', size: SIZE_WARN_BYTES + 1 }])
   })
 
+  test('lock auto-clears via timeout when post-compact stays ≥5MB (Codex P2)', () => {
+    // A genuinely large conversation can stay ≥5MB even after a successful
+    // compaction, OR the actuated /compact may have failed. The lock must NOT
+    // persist forever silencing the watchdog — it auto-clears past the max-lock
+    // window, and a still-large session re-surfaces the affordance.
+    let size = SIZE_WARN_BYTES + 100
+    const { wd, alerts, advance } = makeHarness(() => size)
+    expect(wd.requestCompact()).toBe(true)
+    expect(wd.isCompacting()).toBe(true)
+    // Ticks within the lock window: still mid-compact, never clears on size alone
+    // because the post-compact region stays ≥5MB.
+    size = SIZE_CRITICAL_BYTES + 100
+    advance(60_000) // < DEFAULT_COMPACT_LOCK_MAX_MS (2 min)
+    wd.tick()
+    expect(wd.isCompacting()).toBe(true)
+    expect(alerts).toHaveLength(0)
+    // Past the max-lock window → the lock auto-clears even though size is huge.
+    advance(61_000) // now > 2 min total since actuation
+    wd.tick()
+    expect(wd.isCompacting()).toBe(false)
+    // The tracker was reset, so the still-large size re-fires on the NEXT tick.
+    wd.tick()
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]?.severity).toBe('critical')
+  })
+
   test('debounce floor blocks a second actuation even after the lock clears', () => {
     let size = SIZE_WARN_BYTES
     const { wd, writes, advance } = makeHarness(() => size)

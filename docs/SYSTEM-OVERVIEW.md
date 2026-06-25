@@ -1178,7 +1178,13 @@ unchanged and still apply; this recovery path never bypasses them.
     pre-summary turn is still appended before the marker lands). The watchdog
     holds a mid-compact lock from the moment **it** actuates a compaction until
     the post-compact size drops back below the warn band (the summary landed), and
-    **skips all alerting** while held — no spurious per-compaction warn.
+    **skips all alerting** while held — no spurious per-compaction warn. The lock
+    ALSO auto-clears past a max-lock window (`compactLockMaxMs`, 2 min) so it can
+    never permanently silence the watchdog: a genuinely large conversation can
+    stay ≥5 MB even after a successful compaction (and an actuated `/compact` may
+    fail), so the timeout is a completion signal independent of the size dropping
+    — a still-large session re-surfaces the affordance instead of going dark
+    (Codex review, 2026-06-25).
   - **Tiered edge-latch** (cross-cutting invariant §1): warn fires once on
     entering the warn band, critical once on entering critical (incl. a
     warn→critical escalation); the latch clears on shrink so re-entry re-fires.

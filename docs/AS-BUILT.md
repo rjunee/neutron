@@ -184,6 +184,15 @@ the "tax topic" hit 11.8 MB).
   mid-compact lock from when **it** actuates a compaction until the post-compact
   size drops below the warn band (the summary landed), and **skips all alerting**
   while held — no spurious per-compaction warn.
+- **Codex review fix (P2) — the lock can never permanently silence the watchdog.**
+  Codex flagged that clearing the lock ONLY on `size < 5 MB` would deadlock the
+  watchdog if a post-compaction region legitimately stays ≥5 MB (a genuinely
+  large session) or the actuated `/compact` failed: `compacting` would never
+  clear, so all future alerts are suppressed and `requestCompact` always returns
+  false. Fixed by adding a `compactLockMaxMs` (2 min) timeout completion signal —
+  the lock auto-clears past the window even with a huge size, and the latch reset
+  re-surfaces the affordance. `session-size-watchdog.test.ts` (+1, now 22) pins
+  the timeout-clear-then-re-fire path.
 - **Tiered edge-latch** (`SessionSizeTracker`, cross-cutting invariant §1): warn
   fires once entering ≥5 MB, critical once entering ≥10 MB (incl. a warn→critical
   escalation); the latch clears on shrink so re-entry re-fires. Never
