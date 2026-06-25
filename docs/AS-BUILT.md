@@ -191,8 +191,12 @@ the "tax topic" hit 11.8 MB).
   clear, so all future alerts are suppressed and `requestCompact` always returns
   false. Fixed by adding a `compactLockMaxMs` (2 min) timeout completion signal —
   the lock auto-clears past the window even with a huge size, and the latch reset
-  re-surfaces the affordance. `session-size-watchdog.test.ts` (+1, now 22) pins
-  the timeout-clear-then-re-fire path.
+  re-surfaces the affordance. A second Codex pass noted the timeout was only
+  checked in `tick()` (5-min cadence), so a user pressing Compact after the 2-min
+  max lock but before the next tick still hit the stale `compacting` guard;
+  `requestCompact` now clears a timed-out lock on the press itself so the max-lock
+  window actually bounds the affordance lockout. `session-size-watchdog.test.ts`
+  (+2, now 23) pins the timeout-clear-then-re-fire path (via tick + via press).
 - **Tiered edge-latch** (`SessionSizeTracker`, cross-cutting invariant §1): warn
   fires once entering ≥5 MB, critical once entering ≥10 MB (incl. a warn→critical
   escalation); the latch clears on shrink so re-entry re-fires. Never

@@ -313,8 +313,17 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
   }
 
   const requestCompact = (): boolean => {
-    if (compacting) return false // a compaction is already mid-flight
     const t = now()
+    // Honor the max-lock timeout HERE too, not only in `tick()` (Codex review #2,
+    // 2026-06-25): the cadence tick is 5 min, so a user who presses Compact after
+    // the 2-min max lock has elapsed — but before the next tick clears it — would
+    // otherwise hit the stale `compacting` guard and get no `/compact`. Clearing
+    // the timed-out lock here makes the max-lock window actually bound the
+    // affordance lockout (a failed/still-large prior compaction can be retried).
+    if (compacting && t - compactStartedAt >= compactLockMaxMs) {
+      clearCompactLock()
+    }
+    if (compacting) return false // a compaction is genuinely still mid-flight
     if (t - lastCompactAt < compactDebounceMs) return false
     // STAMP THE LOCK + DEBOUNCE BEFORE THE WRITES (invariant §4): a transport-
     // level write failure must NOT leave us un-locked and able to re-actuate

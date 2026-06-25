@@ -251,6 +251,20 @@ describe('Compact action — escape then /compact\\r, fire-once + mid-compact lo
     expect(alerts[0]?.severity).toBe('critical')
   })
 
+  test('requestCompact honors the max-lock timeout without waiting for a tick (Codex #2)', () => {
+    // The cadence tick is 5 min, but a user can press Compact at any time. After
+    // the 2-min max lock elapses, a fresh press must be accepted (not rejected by
+    // a stale lock) — the prior /compact may have failed or left a huge file.
+    const { wd, writes, advance } = makeHarness(() => SIZE_CRITICAL_BYTES)
+    expect(wd.requestCompact()).toBe(true)
+    expect(wd.isCompacting()).toBe(true)
+    advance(60_000) // within the 2-min lock → still rejected
+    expect(wd.requestCompact()).toBe(false)
+    advance(61_000) // past 2 min total → stale lock cleared on press, fires again
+    expect(wd.requestCompact()).toBe(true)
+    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(2)
+  })
+
   test('debounce floor blocks a second actuation even after the lock clears', () => {
     let size = SIZE_WARN_BYTES
     const { wd, writes, advance } = makeHarness(() => size)
