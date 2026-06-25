@@ -155,6 +155,60 @@ file suite green; full `persistent/` suite 335 pass (the one
 `dev-channel-exit-on-close` failure is a pre-existing, change-independent
 subprocess-exit timing flake on origin/main — confirmed failing with this PR's
 changes stashed). `tsc --noEmit` clean for the changed files.
+## PTY terminal-detection P2 — session-size watchdog + compact affordance (port row #13)
+
+**What shipped.** `runtime/adapters/claude-code/persistent/session-size-watchdog.ts`
+— a warm/persistent session-size watchdog that measures the **post-compact**
+transcript-JSONL size on a 5-min cadence and surfaces a Reset/Compact affordance
+before the session grows large enough to block `claude --resume`. Port of Vajra's
+`session-size-watchdog.ts` (research row #13). Closes the gap that
+`reset_context_per_turn` (`/clear`) only caps growth on the import path — a
+conversational REPL had **no** size monitor and could grow until `--resume` is
+refused and the session falls into an infinite restart loop (Vajra 2026-04-16:
+the "tax topic" hit 11.8 MB).
+
+- **THE LOAD-BEARING LESSON — POST-COMPACT size, never raw `stat.size`.**
+  `measurePostCompactBytes(buf)` returns the bytes **after the last record
+  carrying `"isCompactSummary":true"`** — a byte-accurate `Buffer.lastIndexOf`
+  scan (operates on a `Buffer`, not a decoded string, so it's correct across
+  multi-byte UTF-8 and never decodes a multi-MB file). `/compact` does NOT shrink
+  the file on disk (CC appends a summary record and keeps writing), so a raw-size
+  watchdog would warn → user compacts → raw size barely moves → warn re-fires
+  forever ("Compact does nothing"). The post-compact region is the only signal
+  that drops when a compaction actually helps. (The merged stuck-turn reader's
+  256 KB tail reader is unsuitable here: the marker can sit megabytes before the
+  tail — that distance IS the warn condition — so a full-file marker scan is
+  required, not a duplicate of the tail helper.)
+- **PreCompact lock.** A compaction in flight momentarily looks huge (the
+  pre-summary turn is appended before the marker lands). The watchdog holds a
+  mid-compact lock from when **it** actuates a compaction until the post-compact
+  size drops below the warn band (the summary landed), and **skips all alerting**
+  while held — no spurious per-compaction warn.
+- **Tiered edge-latch** (`SessionSizeTracker`, cross-cutting invariant §1): warn
+  fires once entering ≥5 MB, critical once entering ≥10 MB (incl. a warn→critical
+  escalation); the latch clears on shrink so re-entry re-fires. Never
+  time-dedupe.
+- **Compact action** = `writeKey('escape')` THEN `write('/compact\r')`,
+  fire-once — the lock + 30s debounce are stamped **before** the writes (invariant
+  §4) so a transport failure can't double-`/compact`. It is a **surfaced
+  affordance the user presses** (`requestSessionCompact(sessionKey)` → the live
+  session's `sizeWatchdog.requestCompact()`), never silent/automatic.
+- **Wiring.** `startSessionSizeWatchdog` is started in `getOrSpawnSession` right
+  after the post-spawn assertion passes (`session.sizeWatchdog`), reads the size
+  via `measurePostCompactSize(sessionJsonlPath(sessionId, cwd, projectsDir))`,
+  surfaces via `surfaceSizeAlert` (active turn channel + operator stderr log + the
+  injected `options.onSizeAlert` hook), and is stopped on child exit + every
+  teardown path (dispose / shutdown / pool-walk). The cadence timer is `unref`'d.
+  **No feature flag** — on by default; `sizeCheckIntervalMs` only tunes the
+  cadence.
+- **Tests.** `session-size-watchdog.test.ts` (21): post-compact measurement
+  incl. the huge-raw-file-small-post-compact case, multi-marker, multi-byte
+  byte-accuracy, absent-file null; tiered latch (warn once / clears on shrink /
+  critical escalation / de-escalation); tick wiring; the escape-then-`/compact\r`
+  fire-once + mid-compact-lock + debounce. `session-size-watchdog-wiring.test.ts`
+  (3): a real fake-host spawn with a pre-seeded ≥5 MB transcript surfaces a warn
+  via `onSizeAlert`, and `requestSessionCompact` actuates escape+`/compact\r`
+  fire-once on the live child. Full `runtime/` suite green (965).
 
 ## PTY terminal-detection P1 — /rate-limit-options org-cap auto-stop (port row #4)
 

@@ -1152,6 +1152,43 @@ thin fs-injectable wrapper) and best-effort at the boot seam — a classificatio
 or marker-write failure can never block watchdog startup. Per-thread respawn
 caps (`RESPAWN_CAP_MAX` 3/hr → `capped_at` hard-stop, invariant #6) are
 unchanged and still apply; this recovery path never bypasses them.
+- **P2 — session-size watchdog + compact affordance (port row #13).**
+  `session-size-watchdog.ts` watches a **warm/persistent** session's transcript
+  growth, the one class the F3 output-scan detectors don't cover (it keys off the
+  JSONL on disk, not the PTY ring). Started right after the post-spawn assertion
+  passes (`session.sizeWatchdog`) and stopped on child exit / teardown, it
+  measures the **post-compact** JSONL size every 5 min and, on a rising edge into
+  the warn (≥5 MB) / critical (≥10 MB) band, surfaces a Reset/Compact affordance
+  via `surfaceSizeAlert` (active turn channel + operator log + the injected
+  `onSizeAlert` hook). It exists because `reset_context_per_turn` (`/clear`) only
+  caps growth on the import path — a conversational REPL had **no** size monitor
+  and could grow until `claude --resume` is refused and the session falls into an
+  infinite restart loop (Vajra 2026-04-16: the "tax topic" hit 11.8 MB).
+  - **THE LOAD-BEARING LESSON — measure POST-COMPACT size, never raw
+    `stat.size`.** The size that matters is the bytes **after the last record
+    carrying `"isCompactSummary":true"`** (`measurePostCompactBytes`, a byte-
+    accurate `Buffer.lastIndexOf` scan — the marker can sit far past the 256 KB
+    tail the stuck-turn reader uses, so that tail reader is unsuitable here). When
+    a user runs `/compact` the file does **not** shrink on disk — CC appends a
+    summary record and keeps writing, so raw bytes stay huge. A raw-size watchdog
+    would warn, the user would Compact, raw size would barely move, and the warn
+    would **re-fire forever** ("Compact does nothing"). The post-compact region is
+    the only signal that actually drops when a compaction helps.
+  - **PreCompact lock.** A compaction in flight momentarily looks huge (the
+    pre-summary turn is still appended before the marker lands). The watchdog
+    holds a mid-compact lock from the moment **it** actuates a compaction until
+    the post-compact size drops back below the warn band (the summary landed), and
+    **skips all alerting** while held — no spurious per-compaction warn.
+  - **Tiered edge-latch** (cross-cutting invariant §1): warn fires once on
+    entering the warn band, critical once on entering critical (incl. a
+    warn→critical escalation); the latch clears on shrink so re-entry re-fires.
+    Never time-dedupe.
+  - **Compact action** = `writeKey('escape')` THEN `child.write('/compact\r')`,
+    fire-once — the lock + debounce are stamped **before** the writes (invariant
+    §4) so a transport failure can't double-`/compact`. It is a **surfaced
+    affordance the user presses** (`requestSessionCompact(sessionKey)`), never
+    silent/automatic — auto-compaction without a surfaced affordance is out of
+    scope.
 
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 

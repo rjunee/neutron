@@ -112,6 +112,13 @@ import {
 import { makeInFlightGate, type InFlightGate } from './in-flight-gate.ts'
 import { startHeartbeatWatchdog, type HeartbeatWatchdog } from './heartbeat-watchdog.ts'
 import {
+  measurePostCompactSize,
+  sessionJsonlPath,
+  startSessionSizeWatchdog,
+  type SessionSizeWatchdog,
+  type SizeSeverity,
+} from './session-size-watchdog.ts'
+import {
   clearPendingRespawns,
   enqueuePendingRespawn,
   loadPendingRespawns,
@@ -414,6 +421,37 @@ function dispatchResumePickerRecovery(
     })
 }
 
+/** Surface a session-size warn/critical affordance (Vajra port row #13). The
+ *  watchdog has crossed a rising edge into the warn (≥5 MB) / critical (≥10 MB)
+ *  post-compact band. We surface it to (a) the active turn's channel if one is in
+ *  flight, so the user sees it inline, (b) an operator stderr log (always), and
+ *  (c) the injected `onSizeAlert` hook so a gateway can wire a richer
+ *  Reset/Compact/Snooze affordance. Auto-compaction is deliberately NOT triggered
+ *  here — the Compact action is a surfaced affordance the user presses (see
+ *  `requestSessionCompact`), never silent. */
+function surfaceSizeAlert(
+  session: ReplSession,
+  sessionKey: string,
+  severity: SizeSeverity,
+  sizeBytes: number,
+  options: PersistentReplSubstrateOptions,
+): void {
+  const mb = (sizeBytes / (1024 * 1024)).toFixed(1)
+  const message =
+    severity === 'critical'
+      ? `🛑 This session's transcript is ${mb} MB of live context (≥10 MB) — \`--resume\` will soon be refused and the session could wedge. Reset the session or compact it now.`
+      : `⚠️ This session's transcript is ${mb} MB of live context (≥5 MB) and growing. Consider compacting or resetting it before it gets large enough to block resume.`
+  session.activeTurn?.channel.push({ kind: 'status', message })
+  process.stderr.write(
+    `[session-size] ${severity} session=${session.sessionId.slice(0, 8)} post_compact=${mb}MB\n`,
+  )
+  try {
+    options.onSizeAlert?.({ sessionKey, severity, sizeBytes })
+  } catch {
+    // A bad alert hook must never crash the watchdog tick.
+  }
+}
+
 /** A reply recovered by the replay-after-resume path (#106). The substrate is a
  *  runtime-layer module and MUST NOT import the gateway delivery layer, so the
  *  gateway injects `onRecoveredReply` (a runtime→gateway DI seam) and the
@@ -535,8 +573,16 @@ export interface PersistentReplSubstrateOptions {
   devChannelPath?: string
   /** Path to the agent-base system prompt. Default: the shipped one. */
   appendSystemPromptFile?: string
-  /** Per-instance `~/.claude/projects` root for the JSONL ghost-gate. */
+  /** Per-instance `~/.claude/projects` root for the JSONL ghost-gate AND the
+   *  session-size watchdog's post-compact measurement (row #13). */
   projectsDir?: string
+  /** Vajra port row #13: notified when a warm session's POST-COMPACT transcript
+   *  size crosses a rising edge into the warn (≥5 MB) / critical (≥10 MB) band. A
+   *  gateway wires this to a Reset/Compact/Snooze affordance; unset → the alert
+   *  still surfaces to the active turn channel + an operator stderr log. */
+  onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
+  /** Override the session-size watchdog cadence (ms). Default 5 min. */
+  sizeCheckIntervalMs?: number
   /**
    * Per-instance `CLAUDE_CONFIG_DIR`. When set, the child's claude config (login,
    * trust state, MCP cache) is isolated under this dir and auth flows via the
@@ -804,6 +850,13 @@ class ReplSession {
    *  with resume FORCED OFF — a clean fresh spawn whose `spawnSession` rewrites the
    *  registry `has_session: false`, breaking the stale-resume loop (Codex P2). */
   forceFreshRespawn = false
+  /** Vajra port row #13: the warm-session size watchdog. Started right after the
+   *  post-spawn assertion passes; measures the POST-COMPACT JSONL size on a
+   *  cadence and surfaces a Reset/Compact affordance before the transcript grows
+   *  large enough to block `--resume`. Stopped on child exit / teardown. Exposes
+   *  `requestCompact()` for the surfaced Compact affordance (see
+   *  `requestSessionCompact`). */
+  sizeWatchdog: SessionSizeWatchdog | undefined
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -1461,6 +1514,8 @@ async function spawnSession(
     // terminal; a respawn starts a fresh watcher for the new child.
     session.deadTurnWatcher?.stop()
     session.deadTurnWatcher = undefined
+    // Stop the size-watchdog cadence — the child it watched is gone (row #13).
+    session.sizeWatchdog?.stop()
     sink.unregisterIf(sessionId, session)
     // Reclaim the temp config files now the child is gone (covers pool eviction,
     // crash, and shutdown — the ephemeral dispose path unlinks eagerly too).
@@ -1515,6 +1570,24 @@ async function spawnSession(
     pool.delete(sessionKey)
     throw new Error(`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})`)
   }
+
+  // Vajra port row #13: start the warm-session size watchdog now the REPL is
+  // verified alive. It measures the POST-COMPACT JSONL size (bytes after the last
+  // `"isCompactSummary":true` marker — NEVER raw `stat.size`, or "Compact does
+  // nothing" re-fires forever) on a cadence and surfaces a Reset/Compact
+  // affordance before the transcript grows large enough to block `--resume` (the
+  // 2026-04-16 11.8 MB infinite-restart incident). `requestCompact()` actuates
+  // `escape` + `/compact\r` through the same PTY write seam the disclaimer-dismiss
+  // path uses, behind the surfaced affordance (see `requestSessionCompact`). The
+  // timer is unref'd and stopped on child exit / teardown.
+  session.sizeWatchdog = startSessionSizeWatchdog({
+    readSize: () => measurePostCompactSize(sessionJsonlPath(sessionId, cwd, options.projectsDir)),
+    surface: (severity, sizeBytes) =>
+      surfaceSizeAlert(session, sessionKey, severity, sizeBytes, options),
+    writeKey: (key) => sendKey(child, key),
+    write: (data) => child.write(data),
+    ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
+  })
 
   // Sprint-2 supervision: persist a registry record so this session is
   // recoverable across crash / gateway-restart. has_session starts true on a
@@ -2140,6 +2213,7 @@ export async function spawnEphemeralSession(
  */
 async function disposeEphemeralSession(session: ReplSession): Promise<void> {
   ephemeralSessions.delete(session)
+  session.sizeWatchdog?.stop()
   try {
     if (!session.hasChildExited()) await terminateChild(session.child)
   } catch {
@@ -2475,6 +2549,7 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
     pool.delete(key)
     try {
       const session = await p
+      session.sizeWatchdog?.stop()
       session.child.kill()
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
@@ -2487,6 +2562,7 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   // at shutdown would orphan its process + leak its temp configs.
   for (const session of ephemeralSessions) {
     try {
+      session.sizeWatchdog?.stop()
       session.child.kill()
       sink.unregister(session.sessionId)
       unlinkSessionConfigs(session)
@@ -3104,4 +3180,38 @@ export function getReplRegistrySnapshot(registryPath: string): Record<string, Re
 /** Whether the module pool currently holds a (possibly dead) session for a key. */
 export function poolHasSessionForTest(sessionKey: string): boolean {
   return pool.has(sessionKey)
+}
+
+/**
+ * Actuate the surfaced Compact affordance (Vajra port row #13) for a pooled warm
+ * session: `escape` + `/compact\r`, fire-once, behind the watchdog's mid-compact
+ * lock + debounce. This is the entry point a gateway calls when the user presses
+ * "🗜️ Compact" on a surfaced size alert — compaction is never silent/automatic.
+ * Returns false when there is no live session for the key or a compaction is
+ * already mid-flight / within the debounce floor.
+ */
+export async function requestSessionCompact(sessionKey: string): Promise<boolean> {
+  const p = pool.get(sessionKey)
+  if (p === undefined) return false
+  try {
+    const session = await p
+    if (session.hasChildExited()) return false
+    return session.sizeWatchdog?.requestCompact() ?? false
+  } catch {
+    return false
+  }
+}
+
+/** Test/introspection: the live size watchdog for a pooled session, or undefined.
+ *  Lets the wiring test drive a synchronous `tick()` against a pre-seeded JSONL. */
+export async function peekSizeWatchdogForTest(
+  sessionKey: string,
+): Promise<SessionSizeWatchdog | undefined> {
+  const p = pool.get(sessionKey)
+  if (p === undefined) return undefined
+  try {
+    return (await p).sizeWatchdog
+  } catch {
+    return undefined
+  }
 }
