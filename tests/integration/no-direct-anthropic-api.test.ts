@@ -45,6 +45,10 @@ const ROOTS = ['gateway', 'runtime', 'onboarding'] as const
 const ALLOW_LIST: ReadonlyArray<string> = [
   // CC adapter header documents the removed direct HTTPS path.
   'runtime/adapters/claude-code/cli-transport.ts',
+  // Rate-limit/overload banner detector (Vajra port row #10): matches the host
+  // string as a DETECTION CUE in CC's own "502 Bad Gateway from api.anthropic.com"
+  // error line — it is NOT an LLM call / direct API probe.
+  'runtime/adapters/claude-code/persistent/rate-limit-banner.ts',
 ]
 
 const ALLOW_DIR_PREFIXES: ReadonlyArray<string> = [
