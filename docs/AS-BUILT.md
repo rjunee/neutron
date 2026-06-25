@@ -2,6 +2,47 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## PTY terminal-detection P1 — auto-approve tool-use prompt (port row #2)
+
+**What shipped.** On the merged F1/F2/F3 substrate (PR #54), a second
+output-scan detector (`id: 'tool-use-approve'`) registered on every session's
+`OutputScanner` in `persistent-repl-substrate.ts` auto-approves CC's tool-use
+permission prompt. Port of Vajra's `gateway-core.ts isToolUsePrompt` +
+`pane-scan-watchdog.ts decideAutoApproveAction` (research row #2).
+
+- **Detect — BOTH cues required.** Fires only when the normalized bottom-N view
+  contains the question (`/doyouwantto(makethisedit|proceed|runthiscommand|create)/i`,
+  the spec regex carried in whitespace-free form because Ink shreds each word
+  across cursor-move escapes) **AND** the `❯ 1. Yes` selector (`/❯1\.yes/i`).
+  Single-cue matching false-fires on lingering scrollback (a prior approval's
+  selector with no live question).
+- **Action.** `writeKey('1')` then `writeKey('enter')` (`keys: ['1','enter']`)
+  on the rising edge — selects "Yes".
+- **Fire-once / no double-Enter.** `debounceMs: 5000` floor; the F3 framework
+  stamps the latch + last-fire BEFORE returning the fired detection, so a
+  transport-failed keystroke write can NOT retry next tick and DOUBLE-Enter onto
+  the approval (cross-cutting invariant §4).
+- **Why it's needed.** These prompts render even under
+  `--dangerously-skip-permissions` for key-to-kingdom paths (`.git/hooks/*`,
+  writes outside the project root), so the substrate must clear them itself.
+- **Tests.** `output-scan.test.ts` (+1, now 16): both-cue frame → `1`+`enter`;
+  selector-only and question-only do NOT fire; debounce stamped before await
+  (same-frame retry does not re-fire; re-arm within 5s suppressed, past 5s
+  fires). `tsc` clean (no new errors in touched files vs baseline).
+- **Known limitation (Codex cross-model review, tracked).** The F1 ring is an
+  append-only byte log, so a just-approved prompt's text lingers in the bottom-N
+  window until new output scrolls it out. If a second prompt renders with
+  < bottomN lines of intervening output, the latch can stay up and the second
+  prompt won't auto-approve until the prior signature clears. This is inherent to
+  the F1 raw-ring + F3 edge-latch substrate (#54) — every content detector shares
+  it; the disclaimer escapes only by firing once at spawn. Not mitigated
+  in-detector on purpose: a tighter positional window would MISS live prompts
+  (the `❯ 1. Yes` selector sits above its 2./3. option lines), and a timed
+  re-fire would inject a stray `1`+enter into a live session. Proper fix is
+  substrate-level (rendered-screen ring or latch-clear-on-fresh-data); the P0
+  wedge-recovery detector (#1) is the designed backstop for a genuinely-stuck
+  prompt.
+
 ## GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
 
 **What shipped.** `gbrain-memory/gbrain-doctor.ts` — a deterministic, NO-LLM

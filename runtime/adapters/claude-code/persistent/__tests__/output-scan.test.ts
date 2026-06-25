@@ -146,6 +146,49 @@ describe('OutputScanner — registration', () => {
     expect(() => s.register(sigDetector('dup', 'Y'))).toThrow(/duplicate detector id/)
   })
 
+  test('P1 tool-use-approve: BOTH cues fire 1+enter; single cue does NOT; debounce stamped before await', () => {
+    // Mirrors the substrate registration (port row #2): question + `❯ 1. Yes`
+    // selector, both matched on the normalized (whitespace-stripped) view.
+    const QUESTION = /doyouwantto(makethisedit|proceed|runthiscommand|create)/i
+    const SELECTOR = /❯1\.yes/i
+    const s = new OutputScanner()
+    s.register({
+      id: 'tool-use-approve',
+      debounceMs: 5000,
+      present: (ctx: { normalized: string }) =>
+        QUESTION.test(ctx.normalized) && SELECTOR.test(ctx.normalized),
+      keys: ['1', 'enter'] as const,
+    })
+
+    // BOTH cues present (Ink shreds the question across cursor moves) → fires
+    // `1`+`enter`.
+    const live = 'Do you\x1b[8G want to\x1b[16G proceed?\n❯ 1. Yes\n  2. No'
+    const fired = s.scan(live, 0)
+    expect(fired.map((f) => f.id)).toEqual(['tool-use-approve'])
+    expect(fired[0]?.keys).toEqual(['1', 'enter'])
+
+    // Single cue only — selector with no question (lingering scrollback) does
+    // NOT fire; question with no selector also does NOT fire.
+    const s2 = new OutputScanner()
+    s2.register({
+      id: 'tool-use-approve',
+      present: (ctx: { normalized: string }) =>
+        QUESTION.test(ctx.normalized) && SELECTOR.test(ctx.normalized),
+      keys: ['1', 'enter'] as const,
+    })
+    expect(s2.scan('some output\n❯ 1. Yes\n  2. No', 0).length).toBe(0)
+    expect(s2.scan('Do you want to proceed with the plan', 1).length).toBe(0)
+
+    // Debounce stamped BEFORE return → a retry on the same frame (caller's
+    // keystroke write threw) does NOT re-fire and double-Enter, and a re-arm
+    // within 5s is suppressed by the floor.
+    expect(s.scan(live, 1).length).toBe(0) // latched, identical frame
+    expect(s.scan('idle prompt', 2).length).toBe(0) // falling edge clears latch
+    expect(s.scan(live, 2000).length).toBe(0) // rising edge but within 5s floor
+    expect(s.scan('idle prompt', 6000).length).toBe(0) // falling edge again
+    expect(s.scan(live, 6001).map((f) => f.id)).toEqual(['tool-use-approve']) // past floor
+  })
+
   test('the disclaimer-style detector: a single Enter on the rising edge', () => {
     const s = new OutputScanner()
     s.register({
