@@ -809,6 +809,35 @@ guards close gap-audit §(b) #8 ("watchdog is generic, not agent-aware"):
   is already gone. It does not auto-respawn (deferred); the event carries enough
   context for a caller to retry/notify.
 
+  - **`stuck` keys off JSONL turn-progress, not the in-memory clock** (ported
+    from Vajra `stuck-turn-watchdog.ts`, incident 2026-04-21: a CC turn wedged
+    3+ min while its `/health` port probe still answered OK — *port probes lie;
+    the transcript JSONL is the source of truth for whether a turn advanced*).
+    The same trap exists subtly here: `registry.update()` refreshes
+    `last_event_at` on EVERY patch (defaults to `now()`), so a heartbeat / status
+    touch / queue bookkeeping bumps it without real progress — masking a wedge.
+    So the stuck check consults an injectable `turn_progress_at(rec)` probe wired
+    in production to a tail-read of the child's transcript JSONL
+    (`turn-progress.ts`: `parseTailForLastTurnProgress` over `realReadJsonlTail`,
+    composed by `makeJsonlTurnProgressProbe`; "progress" = the latest `assistant`
+    output or genuine `user`/`tool_result` activity, ignoring `system` /
+    `queue-operation` noise). When the probe returns a timestamp it is
+    AUTHORITATIVE — `last_event_at` is ignored for the staleness calc, the
+    surfaced event records the overriding `turn_progress_at`, and `age_ms`
+    reflects true JSONL staleness. When unwired or null (no transcript yet, an
+    in-process `core` agent) the check falls back to `last_event_at` (legacy
+    behaviour, preserved). A readable transcript whose 256 KB tail holds no real
+    progress (the last `assistant`/`user`/`tool_result` record scrolled out,
+    leaving only noise) reports `earliestEventMs` — a sound staleness floor — not
+    null, so a long wedge can't evade detection by ageing its progress record out
+    of the tail (Codex P2, 2026-06-25). The probe flows through `runLifecycleTick`
+    untouched, so production wiring is a config change, not a watchdog change.
+    **S4 wiring prerequisite:** `resolveTranscriptPath` needs the child's cwd to
+    build `<projectsDir>/<cwd-dashed>/<child_session_id>.jsonl` (`dashifyCwd`,
+    `session-validation.ts`); the in-process S3 registry carries
+    `child_session_id` but not the cwd, so the SQLite-backed S4 registry must
+    persist the child cwd before the gateway tick can wire the probe.
+
 The two are complementary: the watchdog reaps a registry-live-but-process-dead
 record so a legitimate re-spawn proceeds, while the guard blocks a concurrent
 duplicate while the first is genuinely in flight. Both are substrate-agnostic

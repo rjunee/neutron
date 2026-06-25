@@ -43,3 +43,12 @@ export type {
   StuckThresholdConfig,
   WatchdogReason,
 } from './watchdog.ts'
+
+export {
+  isRealTurnEvent,
+  parseTailForLastTurnProgress,
+  realReadJsonlTail,
+  makeJsonlTurnProgressProbe,
+  JSONL_TURN_TAIL_BYTES,
+} from './turn-progress.ts'
+export type { TurnProgressParse, JsonlTurnProgressProbeDeps } from './turn-progress.ts'

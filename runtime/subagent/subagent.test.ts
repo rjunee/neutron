@@ -293,6 +293,40 @@ describe('lifecycle prune pass', () => {
     expect(registry.byRunId('done')).toBeUndefined()
     expect(affected).toBe(2) // 1 surfaced + 1 pruned
   })
+
+  test('the JSONL turn_progress_at probe flows through to the watchdog (prod wiring is config, not code)', async () => {
+    // The lifecycle tick threads its `watchdog` deps straight into
+    // runAgentWatchdog, so a production caller wires the JSONL source-of-truth
+    // probe (makeJsonlTurnProgressProbe) here with no watchdog code change.
+    // Proof: a heartbeat-fresh last_event_at no longer hides a wedge once the
+    // probe reports a stale JSONL timestamp.
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    const wedged = await spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge' },
+      { registry, verify_delegation: async () => validClaims, mint_run_id: () => 'wedged' },
+    )
+    const now = STALE_THRESHOLD_MS + 10_000
+    registry.update(wedged.run_id, { status: 'running', last_event_at: now - 1 }) // heartbeat-fresh
+    registerCanceller(ctrl, wedged.run_id, async () => {})
+
+    const surfaced: string[] = []
+    await runLifecycleTick({
+      registry,
+      now: () => now,
+      watchdog: {
+        control: ctrl,
+        pid_alive: () => true,
+        turn_progress_at: () => 0, // stale JSONL — the source of truth
+        notify: (e) => {
+          surfaced.push(e.run_id)
+        },
+      },
+    })
+
+    expect(surfaced).toEqual(['wedged'])
+    expect(statusOf(ctrl, 'wedged')?.failure_reason).toBe('stuck')
+  })
 })
 
 describe('announce', () => {
