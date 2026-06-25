@@ -2,6 +2,38 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## PTY terminal-detection #9 — stuck-typing reaper VERIFIED-OBVIATED (verify test + doc note)
+
+**What shipped.** A verify-first pass on Vajra master-table **port row #9**
+(stuck-typing reaper + pane-scrape recovery). Vajra scraped the byte-static tmux
+pane's last assistant block and re-posted it + nudged `reply()`, encoding
+headless-pane invisibility. Neutron already covers this **structurally**, so #9
+ships as a doc note + verify test — **no scraper, no new runtime code** (Neutron
+has a ring, not a tmux pane; a scrape-and-repost would regress the reply()-only
+delivery guarantee).
+
+- **Verified.** `enforce-reply.ts` (the Stop hook) blocks any `<channel>` turn
+  that ENDS without a `reply()` call and re-instructs the agent that terminal
+  output is invisible — strictly better than scraping (lesson applied before the
+  content is lost, and delivery forced through the one correlated `reply()` →
+  `completion` path). The only sliver it can't see — a turn going byte-static
+  MID-stream — is bounded by the substrate's unconditional per-turn
+  `setTimeout(turnTimeoutMs=180s)` (→ retryable error + channel close + session
+  poison; typing indicator resolves, no infinite spin) and the 10s liveness
+  keepalive that re-runs `runOutputScan` each tick (a STATIC interactive-prompt
+  wedge is recovered by the P0 detector, row #1). Conclusion: GAP = none reachable.
+- **Verify test.** `enforce-reply.test.ts` +3 (15 → 18, all pass): the #9
+  turn-end shape (agent printed its answer to the terminal, ended without
+  `reply()`) is blocked; the block reason carries the headless-invisibility
+  lesson (`invisible` + `terminal` + `reply`); a turn that DID call `reply()` is
+  a clean no-op (nothing scraped / re-posted).
+- **Docs.** `SYSTEM-OVERVIEW.md` adds the "Stuck-typing reaper (port row #9) —
+  VERIFIED-OBVIATED" section; this AS-BUILT entry. Master-table row #9 moves
+  PARTIAL/P2 → VERIFIED-OBVIATED.
+- **Explicitly out of scope.** No pane scraper (no tmux pane in Neutron); no
+  re-implementation of enforce-reply; no ring-scrape re-post (un-correlated
+  content is rejected by `onReply`'s `turn_id` guard by design).
+
 ## PTY terminal-detection P2 — rate-limit / overload banner alert (notify-only, port row #10)
 
 **What shipped.** A new module `runtime/adapters/claude-code/persistent/rate-limit-banner.ts`
