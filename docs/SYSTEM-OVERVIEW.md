@@ -862,8 +862,46 @@ themselves land in follow-on P0/P1 PRs). See
   BEFORE the await** (the latch + last-fire are committed inside `scan()`, so a
   transport-failed keystroke write can never retry and double-send onto an
   approval prompt). The dev-channel first-run disclaimer auto-dismiss is now the
-  first registered detector; P0 wedge-prompt recovery + P1 auto-approve /
+  first registered detector; P0 wedge-prompt recovery (below) + P1 auto-approve /
   compact-resume / rate-limit-stop register the same way next.
+
+## Wedged-interactive-prompt detect + recover (P0) — `wedged-prompt-detector.ts`
+
+The flagship terminal detector (master-table row #1). When `claude` renders an
+`AskUserQuestion` / arrow-menu **mid-turn**, the REPL deadlocks — the chat
+surface has no keystroke path to the TUI, so the menu sits forever and the only
+thing that notices is the 5-minute inactivity watchdog, which **kills** the
+agent. Per Ryan's 2026-06-25 SPEC Decisions Log the policy is detect+**recover**,
+not kill.
+
+- **Detect (`isWedgedInteractivePrompt`, all gates ported verbatim).** Over the
+  bottom-54 ring window (so the footer-in-bottom-24 *and* a cursor up to 30 lines
+  above both fit): **(0)** reject the normal live/working chrome (`⏵⏵` / `bypass
+  permissions` / `esc to interrupt` / `? for shortcuts`) — that's not a wedged
+  menu; **(a)** a footer carrying all of `enter to select` + `to navigate` +
+  `esc to cancel` within the bottom-24; **(b)** a live cursor `/^❯\s*\d+\./` in
+  the ~30 lines above the footer; **(c)** a `seenLastTick` **2-tick stability
+  gate** (`createWedgedPromptDetector` — a half-rendered menu present for a single
+  tick never fires). The F3 doc-quote guard + the `^❯` line anchor reject a
+  fenced / `>`-quoted / backtick-wrapped menu (a docs example can't false-fire).
+- **Recover (`runWedgedRecovery`, bounded ladder).** `writeKey('escape')` →
+  wait → re-read the ring → verify cleared; if not, `escape` again → verify;
+  if not, `ctrl-c` → verify. A **failed re-capture (`null`) counts as
+  NOT-cleared**, so it keeps escalating rather than assuming success. It **NEVER
+  auto-picks** — only escape/ctrl-c ever leave the keyboard, never a digit or
+  Enter. On a persistent block after the full ladder it surfaces the captured
+  question to the active turn's chat channel (the dev-channel surface) and fires
+  **one** operator alert (`postWedgeAlert`).
+- **Drive sites.** `runOutputScan` is shared by the PTY `onData` callback (fires
+  while the menu is still emitting render output) and the per-turn liveness
+  keepalive (the wedge can only happen mid-turn — exactly when that interval
+  runs — and a STATIC wedge emits no further output, so the keepalive cadence is
+  what satisfies the 2-tick stability gate and detects it). `session.wedge
+  Recovering` guards the async ladder window against a concurrent relaunch.
+- **Lessons carried (comments).** AskUserQuestion deadlocks with no keystroke
+  path from chat (2026-06-06 Neutron incident); bottom-N widened 8→24 after the
+  2026-06-16 Robobuddha status-panel-below-footer miss; the `^❯` anchor rejects
+  quoted / diff menu lines; a failed re-capture is NOT a clear.
 
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 

@@ -2,6 +2,44 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-25 — Wedged-interactive-prompt detect + recover (P0 flagship)
+
+**What shipped.** `runtime/adapters/claude-code/persistent/wedged-prompt-detector.ts`
+— the first content detector built on the just-merged F1/F2/F3 PTY substrate
+(#54). When `claude` renders an `AskUserQuestion` / arrow-menu mid-turn the REPL
+deadlocks (no keystroke path from chat); rather than let the 5-min inactivity
+watchdog KILL the agent, this recognises the wedge and clears it with a bounded
+escape→escape→ctrl-c ladder (Ryan 2026-06-25 SPEC Decisions Log: detect+RECOVER,
+not kill). Ports Vajra's `pane-scan-watchdog.ts isWedgedInteractivePrompt /
+runWedgedRecovery`.
+
+- **Detect — all gates ported verbatim** over a bottom-54 ring window:
+  **(0)** reject the normal live/working chrome (`⏵⏵` / `bypass permissions` /
+  `esc to interrupt` / `? for shortcuts`); **(a)** a footer with `enter to
+  select` + `to navigate` + `esc to cancel` inside the bottom-24; **(b)** a live
+  cursor `/^❯\s*\d+\./` in the ~30 lines above the footer; **(c)** a `seenLastTick`
+  2-tick stability gate. The F3 doc-quote guard + the `^❯` line anchor reject a
+  fenced / `>`-quoted / backtick-wrapped menu.
+- **Recover — bounded ladder with verify between each step.**
+  `writeKey('escape')` → re-read ring → verify cleared → `escape` → verify →
+  `ctrl-c` → verify. A failed re-capture (`null`) counts as NOT-cleared so it
+  escalates. **NEVER auto-picks** (only escape/ctrl-c, never a digit/Enter). On a
+  persistent block: surface the question to the active turn's chat channel +
+  ONE operator alert (`postWedgeAlert`).
+- **Wiring.** Registered on the session `OutputScanner` (no `keys` — recovery is
+  the verify ladder). `runOutputScan` (shared helper) drives it from BOTH the
+  `onData` callback AND the per-turn liveness keepalive — a STATIC wedge emits no
+  further output, so the keepalive cadence is what satisfies the 2-tick stability
+  gate. `session.wedgeRecovering` guards the async ladder against concurrent
+  relaunch. Refactor: `pty-text.ts` now exports `stripAnsi` (ANSI gone, line
+  structure kept) for the `^❯` anchor; `output-scan.ts` exports
+  `buildDetectorContext` for the ladder's verify re-read.
+- **Tests.** `__tests__/wedged-prompt-detector.test.ts` (19): all-gates fire,
+  each gate's negative, doc-quoted menu does NOT fire, 2-tick stability,
+  ladder escalates escape→escape→ctrl-c with verify, null-recapture keeps
+  escalating, persistent-block surfaces+alerts, NEVER auto-picks. `tsc` clean;
+  affected persistent suites green (substrate+supervision 34, F1/F2/F3 siblings 48).
+
 ## 2026-06-25 — GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
 
 **What shipped.** `gbrain-memory/gbrain-doctor.ts` — a deterministic, NO-LLM

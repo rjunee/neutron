@@ -51,7 +51,12 @@ import type { PtyChild, PtyHost } from './pty-host.ts'
 import { PtyRing, type RecentOutputOpts } from './pty-ring.ts'
 import { OutputScanner } from './output-scan.ts'
 import { normalizePtyText } from './pty-text.ts'
-import { encodeKeys, type Key } from './keystrokes.ts'
+import {
+  createWedgedPromptDetector,
+  runWedgedRecovery,
+  WEDGED_PROMPT_DETECTOR_ID,
+} from './wedged-prompt-detector.ts'
+import { encodeKeys, encodeKey, type Key } from './keystrokes.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import {
   getRecord,
@@ -180,6 +185,83 @@ function sendKeys(child: PtyChild, keys: readonly Key[]): void {
   else child.write(encodeKeys(keys))
 }
 
+/** Send ONE structured key, degrading to a raw `write(encodeKey(...))` when the
+ *  backend predates the F2 `writeKey` extension. The wedged-prompt recovery
+ *  ladder writes keys one-at-a-time (escape→verify→escape→verify→ctrl-c), so it
+ *  needs the single-key seam rather than `sendKeys`. */
+function sendKey(child: PtyChild, key: Key): void {
+  if (child.writeKey !== undefined) child.writeKey(key)
+  else child.write(encodeKey(key))
+}
+
+/**
+ * Run the registered output-scan detectors against the session ring and actuate
+ * the ones that fired on this tick's rising edge. Shared by BOTH drive sites:
+ * the PTY `onData` callback (fires while the menu is still rendering output) AND
+ * the per-turn liveness keepalive (fires on a STATIC wedge that emits no further
+ * output — the case the inactivity watchdog used to just kill). `scan` stamps
+ * each detector's latch BEFORE returning, so every keystroke write here is
+ * fire-once even if the transport throws (invariant §4).
+ *
+ * The wedged-interactive-prompt detector carries NO `keys` (its recovery is the
+ * multi-step escape/ctrl-c verify ladder, not a fire-once keystroke); when it
+ * fires we launch {@link dispatchWedgeRecovery} instead of `sendKeys`.
+ */
+function runOutputScan(
+  session: ReplSession,
+  child: PtyChild,
+  options: PersistentReplSubstrateOptions,
+  now: number,
+): void {
+  for (const fired of session.scanner.scan(session.ring.raw(), now)) {
+    if (fired.id === WEDGED_PROMPT_DETECTOR_ID) {
+      dispatchWedgeRecovery(session, child, options)
+    } else if (fired.keys !== undefined) {
+      sendKeys(child, fired.keys)
+    }
+  }
+}
+
+/** Launch the wedged-interactive-prompt escape/ctrl-c recovery ladder (P0). The
+ *  scanner latch already prevents a re-fire while the menu is still present, but
+ *  the ladder is async, so `session.wedgeRecovering` additionally guards the
+ *  in-flight window. Fire-and-forget: the ladder writes its own keystrokes and
+ *  surfaces/alerts on a persistent block. */
+function dispatchWedgeRecovery(
+  session: ReplSession,
+  child: PtyChild,
+  options: PersistentReplSubstrateOptions,
+): void {
+  if (session.wedgeRecovering) return
+  session.wedgeRecovering = true
+  const alert =
+    options.postWedgeAlert ?? ((text: string) => process.stderr.write(`[wedge-recover] ${text}\n`))
+  void runWedgedRecovery({
+    writeKey: (key) => sendKey(child, key),
+    // In-process ring read always returns a string; the null-as-not-cleared
+    // contract is honoured at the module boundary for hosts that can fail a
+    // re-capture (the Vajra tmux `capture-pane` lesson).
+    readRing: () => session.ring.raw(),
+    delay: (ms) => new Promise((res) => setTimeout(res, ms)),
+    // Surface the still-wedged question to the active turn's chat channel (the
+    // dev-channel surface) so the user can see what the agent is blocked on.
+    surface: (questionText) => {
+      session.activeTurn?.channel.push({
+        kind: 'status',
+        message: `⚠️ Blocked on an interactive prompt I couldn't auto-dismiss:\n${questionText}`,
+      })
+    },
+    alert,
+    now: () => Date.now(),
+  })
+    .catch((err: unknown) => {
+      process.stderr.write(`[wedge-recover] ladder threw: ${String(err)}\n`)
+    })
+    .finally(() => {
+      session.wedgeRecovering = false
+    })
+}
+
 /** A reply recovered by the replay-after-resume path (#106). The substrate is a
  *  runtime-layer module and MUST NOT import the gateway delivery layer, so the
  *  gateway injects `onRecoveredReply` (a runtime→gateway DI seam) and the
@@ -229,6 +311,11 @@ export interface PersistentReplSubstrateOptions {
    *  calls it with the recovered reply + routing handle instead of discarding it.
    *  Runtime-layer DI seam — keeps the substrate from importing `gateway/*`. */
   onRecoveredReply?: (reply: RecoveredReply) => void | Promise<void>
+  /** Operator-alert sink for the wedged-interactive-prompt recovery: fired ONCE
+   *  when the escape→escape→ctrl-c ladder cannot clear a deadlocked menu (the
+   *  question is also surfaced to the active turn's chat channel). Default: write
+   *  the alert to stderr. Mirrors `ReplWatchdogOptions.postAlert`. */
+  postWedgeAlert?: (text: string) => void
   /**
    * STATELESS-ONE-SHOT mode (Argus r4 BLOCKER, 2026-06-08). When `true`, a
    * `start(spec)` dispatch that carries NO `spec.session` gets its OWN fresh,
@@ -518,6 +605,11 @@ class ReplSession {
    *  registered here (generalized from the old inline `onData` check); the
    *  P0/P1 recovery detectors register signature+action in follow-on PRs. */
   readonly scanner = new OutputScanner()
+  /** True while the wedged-interactive-prompt escape/ctrl-c recovery ladder is
+   *  in flight, so a second scan tick can't launch a concurrent ladder on the
+   *  same still-present menu (the scanner latch already guards the rising edge;
+   *  this guards the async window the ladder runs in). */
+  wedgeRecovering = false
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -982,6 +1074,14 @@ async function spawnSession(
     present: (ctx) => DEV_CHANNEL_DISCLAIMER_RE.test(ctx.normalized),
     keys: ['enter'],
   })
+  // P0 wedged-interactive-prompt detect+recover (master-table row #1). An
+  // `AskUserQuestion` / arrow-menu rendered mid-turn deadlocks the REPL with no
+  // keystroke path from chat; rather than let the inactivity watchdog KILL the
+  // agent, this detector (footer + live `^❯` cursor + 2-tick stability + the
+  // framework's doc-quote guard) trips the bounded escape→escape→ctrl-c recovery
+  // ladder in `runOutputScan` (it carries no `keys` — recovery is a verify
+  // ladder, never an auto-pick).
+  session.scanner.register(createWedgedPromptDetector())
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).
@@ -997,13 +1097,11 @@ async function spawnSession(
       const target = scanChild
       if (target === undefined) return
       // Run the registered detectors against the ring and actuate the ones that
-      // fired on the rising edge. `scan` stamps each detector's latch + debounce
-      // BEFORE returning, so the keystroke write here is fire-once even if the
-      // transport throws — a failed write can't retry next tick and double-send
-      // onto an approval prompt (invariant §4).
-      for (const fired of session.scanner.scan(session.ring.raw(), now)) {
-        if (fired.keys !== undefined) sendKeys(target, fired.keys)
-      }
+      // fired on the rising edge (disclaimer Enter, wedged-prompt recovery, …).
+      // `scan` stamps each detector's latch BEFORE returning, so the keystroke
+      // write is fire-once even if the transport throws — a failed write can't
+      // retry next tick and double-send onto an approval prompt (invariant §4).
+      runOutputScan(session, target, options, now)
     },
   })
   scanChild = child
@@ -1785,6 +1883,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           if (turn.settled || channel.closed) return
           if (session === undefined || session.hasChildExited()) return
           channel.push({ kind: 'status', message: 'working' })
+          // P0: a wedged AskUserQuestion / arrow-menu emits NO further output, so
+          // the `onData` scan never re-fires to satisfy the 2-tick stability gate.
+          // Re-run the output scan on this same keepalive cadence (the wedge can
+          // only happen mid-turn, which is exactly when this interval runs) so a
+          // STATIC wedge is detected + recovered instead of being killed by the
+          // inactivity watchdog.
+          runOutputScan(session, session.child, options, Date.now())
         }, keepaliveMs)
         ;(keepalive as { unref?: () => void }).unref?.()
 
