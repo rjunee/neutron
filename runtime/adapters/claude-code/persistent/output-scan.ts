@@ -92,8 +92,9 @@ interface DetectorState {
  * Strip doc-quoted lines so a signature match can only come from LIVE terminal
  * chrome, never from quoted documentation/menus the agent printed:
  *   • lines inside (or delimiting) a ``` / ~~~ fenced block
- *   • lines whose trimmed start is a diff/quote/bullet marker: `+ `/`- `/`> `/
- *     `* `, or a leading `+`/`>` diff marker
+ *   • lines whose trimmed start is a diff/quote/bullet marker: a bare leading
+ *     `+`/`-`/`>` (unified-diff add/delete + blockquote — the delete marker is
+ *     bare, e.g. `-Do you want to proceed`, NOT `- `) or a `* ` bullet
  *   • inline-backtick spans are blanked out, so a backtick-wrapped signature on
  *     an otherwise-live line still can't match
  * (cross-cutting invariant §2.) Lines that survive are returned verbatim
@@ -110,8 +111,12 @@ export function stripDocQuotes(lines: readonly string[]): string[] {
       continue
     }
     if (inFence) continue
-    // Diff / blockquote / bullet markers (a quoted menu, not live chrome).
-    if (/^([+>]|[-*]\s)/.test(trimmed)) continue
+    // Diff / blockquote / bullet markers (a quoted menu, not live chrome). A
+    // unified-diff add/delete or a blockquote marker is BARE (`+`/`-`/`>` with
+    // no following space — `-Do you want to proceed`); a markdown bullet is
+    // `* `. Bare `-`/`+`/`>` is safe to drop: live Ink chrome anchors menus on
+    // `❯`/digits/box-drawing, never an ASCII diff marker at column 0.
+    if (/^([-+>]|\*\s)/.test(trimmed)) continue
     // Blank inline-backtick spans so a backtick-wrapped signature can't match.
     out.push(line.replace(/`[^`]*`/g, (m) => ' '.repeat(m.length)))
   }

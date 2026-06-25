@@ -82,6 +82,14 @@ describe('stripDocQuotes — doc-quote guards (invariant §2)', () => {
     ])
   })
 
+  test('drops BARE diff add/delete markers (no trailing space)', () => {
+    // Unified-diff deletion: `-Do you want to proceed` (Codex P2). A bare `-`/`+`
+    // diff marker must not read as live chrome.
+    expect(stripDocQuotes(['-Do you want to proceed', '+Yes please', '>quote', 'kept'])).toEqual([
+      'kept',
+    ])
+  })
+
   test('blanks inline-backtick spans so a wrapped signature cannot match', () => {
     const [line] = stripDocQuotes(['press `1. Yes` to confirm'])
     expect(line).not.toContain('1. Yes')
