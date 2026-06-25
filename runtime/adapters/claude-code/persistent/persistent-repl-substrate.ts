@@ -1622,14 +1622,22 @@ async function getOrSpawnSession(
   forceResume?: ResumeDirective,
 ): Promise<ReplSession> {
   const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
-  // Carried out of the eviction branch: a resume-session-picker recovery (row #7)
-  // poisons the warm session AND records the disk-recovered session id here, so
-  // the clean respawn below resumes THAT transcript (Codex P1) rather than the
-  // stale-id registry that would re-trip the picker.
+  // A resume-session-picker recovery (row #7) poisons the warm session AND records
+  // the disk-recovered session id on it; captured below (for BOTH the alive-evict
+  // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
+  // P1/P2) rather than the stale-id registry that would re-trip the picker.
   let evictedResume: ResumeDirective | undefined
   const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
+    // Capture the resume-picker recovery's recovered id BEFORE the alive/exited
+    // branch split (Codex P2): a poisoned session whose escaped child has ALREADY
+    // exited before the next dispatch still falls through to the spawn below, and
+    // without this it would fall back to `resolveResumeDirective` → the stale-id
+    // registry → reopen the picker. Applies whether the child is alive or dead.
+    if (session.pendingResumeSessionId !== undefined) {
+      evictedResume = { sessionId: session.pendingResumeSessionId }
+    }
     if (!session.hasChildExited()) {
       // Two reuse guards gate serving a turn on the warm child; BOTH must pass or
       // the child is evicted + respawned (resuming the captured session when
@@ -1688,11 +1696,6 @@ async function getOrSpawnSession(
         process.stderr.write(
           `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,
         )
-        // Resume-picker recovery (row #7): respawn onto the disk-recovered session
-        // it found, bypassing the stale-id registry that would re-open the picker.
-        if (session.pendingResumeSessionId !== undefined) {
-          evictedResume = { sessionId: session.pendingResumeSessionId }
-        }
       }
       // Evict, then AWAIT the old child's exit before falling through to spawn so a
       // supervised `--resume` replacement (same sessionId) never co-owns the session

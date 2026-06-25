@@ -26,10 +26,11 @@ normal path; it ships as a **pure safety net** for if the picker ever appears.
 `Resume Session` || `Enter to select` || `Esc to clear`. A bare OR over those
 single phrases would false-fire (`Enter to select` is shared with the ordinary
 AskUserQuestion footer that detector #1 handles). The shipped detector therefore
-anchors on the **distinctive `Resume Session` title AND requires a picker footer
-cue** (`Esc to clear` / `Enter to select`). The `Esc to clear` footer is what
-distinguishes this picker from the AskUserQuestion menu (`Esc to cancel`), so the
-two detectors never collide. CURRENT WIRING before this PR: JSONL-first resume
+anchors on the **distinctive `Resume Session` title AND requires the distinctive
+`Esc to clear` footer** — NOT the shared `Enter to select`. The AskUserQuestion
+menu's footer is `Esc to cancel`, so requiring `Esc to clear` keeps the two
+detectors strictly disjoint even for a live question whose title contains "Resume
+Session" (Codex P2). CURRENT WIRING before this PR: JSONL-first resume
 avoided the picker; nothing handled it if it DID appear (an unhandled picker would
 wedge the REPL). THIS PR FIXES that gap. **Out of scope (by design):** changing
 the JSONL-first resume path; auto-picking any picker option.
@@ -61,9 +62,11 @@ the JSONL-first resume path; auto-picking any picker option.
   so merely patching the registry would leave subsequent turns on the fresh REPL
   despite the notice; the poison makes the next turn evict + respawn, and
   `pendingResumeSessionId` is carried as the `forceResume` directive (a new
-  `evictedResume` branch in `getOrSpawnSession`) so that respawn `--resume`s the
-  recovered transcript — bypassing the stale-id registry and sidestepping a race with
-  this spawn's own registry write. The current in-flight turn finishes on the fresh
+  `evictedResume` capture in `getOrSpawnSession`, hoisted ABOVE the alive/exited
+  branch split so it also covers a poisoned child that exited before the next
+  dispatch — Codex P2) so that respawn `--resume`s the recovered transcript —
+  bypassing the stale-id registry and sidestepping a race with this spawn's own
+  registry write. The current in-flight turn finishes on the fresh
   child; the notice tells the user the recovered context is **active from their next
   message**. A miss surfaces a "session lost — starting fresh" notice + one operator
   alert. Spawn-time notices route through `ReplSession.pushNotice` (buffered until the
