@@ -373,30 +373,52 @@ function dispatchResumePickerRecovery(
     // required recovered/lost notice (Codex P2). Route through `pushNotice`, which
     // buffers until the first live turn flushes it.
     surface: (text) => session.pushNotice(text),
-    // Actually move the live REPL onto the recovered session (Codex P1). Record
-    // the recovered id on the session and POISON it: the warm child that just
-    // escaped the picker is contextless, and `getOrSpawnSession` does not re-read
-    // `resolveResumeDirective` while an unpoisoned warm child is alive — so merely
-    // patching the registry would leave subsequent turns on the fresh REPL despite
-    // the "recovered" notice. Poisoning makes the NEXT turn evict + respawn, and
-    // `pendingResumeSessionId` is carried as the `forceResume` directive so that
-    // respawn `--resume`s the recovered transcript (bypassing the stale-id
-    // registry, and sidestepping a race with this spawn's own registry write). The
-    // current in-flight turn finishes on the fresh child; the notice tells the user
-    // the recovered context is active from their next message.
+    // Actually move the live REPL onto the recovered session (Codex P1). Two
+    // mechanisms, covering the live-next-turn path AND the durable crash path:
+    //   • IN-MEMORY: record the recovered id + POISON. `getOrSpawnSession` does not
+    //     re-read `resolveResumeDirective` while an unpoisoned warm child is alive,
+    //     so the poison is what makes the NEXT turn evict + respawn with
+    //     `pendingResumeSessionId` carried as the `forceResume` directive (`--resume`
+    //     the recovered transcript). The current in-flight turn finishes on the
+    //     fresh child; the notice says the recovered context is active next message.
+    //   • DURABLE: patch the REGISTRY to the recovered id. The in-memory flags are
+    //     lost if this child exits before the next dispatch (the pool drops the
+    //     session on `child.exited`), so the crash/watchdog respawn — which reads the
+    //     registry, not the session — must see the recovered id, else it re-`--resume`s
+    //     the stale id and reopens the picker (Codex P2). `spawnSession`'s own
+    //     flag-aware registry write covers the reverse ordering (recovery finishing
+    //     before that write); together every ordering converges on the recovered id.
     requestResume: (recoveredSessionId) => {
       session.pendingResumeSessionId = recoveredSessionId
       session.poisoned = true
+      if (options.replRegistryPath !== undefined) {
+        try {
+          patchRecord(options.replRegistryPath, session.sessionKey, {
+            sessionId: recoveredSessionId,
+            has_session: true,
+          })
+        } catch {
+          /* best-effort — a registry write failure must never brick a live REPL */
+        }
+      }
     },
-    // MISS: nothing recoverable on disk. `spawnSession` wrote the registry
+    // MISS: nothing recoverable on disk. `spawnSession` optimistically persisted
     // `has_session: true` for the stale `--resume` id, so a later crash/watchdog
-    // respawn would re-`--resume` it and reopen the picker. Flag a forced-fresh
-    // respawn + poison so the next turn cleanly respawns FRESH, whose spawnSession
-    // rewrites the registry `has_session: false` — breaking the stale-resume loop
-    // (Codex P2). The current fresh child keeps serving until then.
+    // respawn would re-`--resume` it and reopen the picker. (IN-MEMORY) flag a
+    // forced-fresh respawn + poison so the next turn cleanly respawns FRESH; AND
+    // (DURABLE) patch the registry `has_session: false` now so the decision survives
+    // this child exiting before the next dispatch — breaking the stale-resume loop
+    // (Codex P2). The current fresh child keeps serving until the next turn.
     onNoRecovery: () => {
       session.forceFreshRespawn = true
       session.poisoned = true
+      if (options.replRegistryPath !== undefined) {
+        try {
+          patchRecord(options.replRegistryPath, session.sessionKey, { has_session: false })
+        } catch {
+          /* best-effort */
+        }
+      }
     },
     alert: (text) => process.stderr.write(`[resume-picker] ${text}\n`),
     delay: (ms) => new Promise((res) => setTimeout(res, ms)),
@@ -1510,12 +1532,28 @@ async function spawnSession(
   // resume (we already know the JSONL exists) and false on a fresh spawn (the
   // capture gate below flips it once the JSONL lands).
   if (options.replRegistryPath !== undefined) {
+    // Persist the resume-picker recovery (row #7) DECISION into the durable
+    // registry, not the optimistic stale-id resume (Codex P2). The recovery runs
+    // mid-spawn (escape during the post-spawn assertion wait); by the time we write
+    // here it may have already (a) recovered a different session from disk
+    // (`pendingResumeSessionId`) or (b) found nothing (`forceFreshRespawn`). The
+    // crash/watchdog respawn reads the REGISTRY, not this in-memory session — which
+    // is dropped from the pool on child exit — so the decision MUST land on disk or
+    // a child that exits before the next turn would re-`--resume` the stale id and
+    // reopen the picker. (The recovery callbacks ALSO `patchRecord` directly, so the
+    // OTHER ordering — recovery finishing AFTER this write — is covered too.)
+    const recoveredSessionId = session.pendingResumeSessionId
+    const recoveryForcesFresh = session.forceFreshRespawn
     const record: ReplRegistryRecord = {
       sessionKey,
-      sessionId,
+      sessionId: recoveredSessionId ?? sessionId,
       cwd,
       channelName,
-      has_session: resume !== undefined,
+      has_session: recoveryForcesFresh
+        ? false
+        : recoveredSessionId !== undefined
+          ? true
+          : resume !== undefined,
       model,
       pid: child.pid,
       first_ready_at: Date.now(),
