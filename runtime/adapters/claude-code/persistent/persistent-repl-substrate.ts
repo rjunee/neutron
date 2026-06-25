@@ -68,6 +68,12 @@ import {
   runWedgedRecovery,
   WEDGED_PROMPT_DETECTOR_ID,
 } from './wedged-prompt-detector.ts'
+import {
+  createResumePickerDetector,
+  runResumePickerRecovery,
+  RESUME_PICKER_DETECTOR_ID,
+} from './resume-picker-detector.ts'
+import { findLatestResumableSession } from './session-disk-recovery.ts'
 import { encodeKeys, encodeKey, type Key } from './keystrokes.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import {
@@ -253,6 +259,23 @@ function sendKey(child: PtyChild, key: Key): void {
   else child.write(encodeKey(key))
 }
 
+/** Resolve the Claude Code transcript root the SAME way the JSONL ghost gate and
+ *  the API-5xx dead-turn watcher do: an explicit `options.projectsDir` wins
+ *  (custom / per-instance transcript root); else `CLAUDE_CONFIG_DIR`'s `projects`
+ *  (CC writes transcripts there when `claudeConfigDir` is set); else the default
+ *  `~/.claude/projects`. Shared so the resume-picker disk recovery
+ *  (`findLatestResumableSession`) and the dead-turn watcher can never diverge on
+ *  WHERE the transcripts live — a divergence would make the recovery scan miss
+ *  the isolated-config session and falsely report "no prior session" (Codex P2). */
+function resolveTranscriptProjectsDir(options: PersistentReplSubstrateOptions): string {
+  return (
+    options.projectsDir ??
+    (options.claudeConfigDir !== undefined
+      ? join(options.claudeConfigDir, 'projects')
+      : join(homedir(), '.claude', 'projects'))
+  )
+}
+
 /**
  * Run the registered output-scan detectors against the session ring and actuate
  * the ones that fired on this tick's rising edge. Shared by BOTH drive sites:
@@ -275,6 +298,8 @@ function runOutputScan(
   for (const fired of session.scanner.scan(session.ring.raw(), now)) {
     if (fired.id === WEDGED_PROMPT_DETECTOR_ID) {
       dispatchWedgeRecovery(session, child, options)
+    } else if (fired.id === RESUME_PICKER_DETECTOR_ID) {
+      dispatchResumePickerRecovery(session, child, options)
     } else if (fired.keys !== undefined) {
       sendKeys(child, fired.keys)
     }
@@ -318,6 +343,74 @@ function dispatchWedgeRecovery(
     })
     .finally(() => {
       session.wedgeRecovering = false
+    })
+}
+
+/** Launch the resume-session-failure picker escape-then-recover ladder (P2,
+ *  master-table row #7). When `--resume <stale-id>` drops to CC's interactive
+ *  "Resume Session" picker, this ESCAPES out (never blind-answers), scans disk
+ *  JSONL for the user's most-recent real session, and surfaces a recovered/lost
+ *  notice. The scanner latch guards the rising edge; `session.resumePickerRecovering`
+ *  additionally guards the async window so a second scan tick can't launch a
+ *  concurrent ladder on the still-present picker. Fire-and-forget. */
+function dispatchResumePickerRecovery(
+  session: ReplSession,
+  child: PtyChild,
+  options: PersistentReplSubstrateOptions,
+): void {
+  if (session.resumePickerRecovering) return
+  session.resumePickerRecovering = true
+  const cwd = options.cwd ?? process.cwd()
+  // Resolve the transcript root the SAME way the spawn / dead-turn watcher do so
+  // an isolated `CLAUDE_CONFIG_DIR` session's JSONL is actually found (Codex P2) —
+  // a raw `options.projectsDir` is undefined under claudeConfigDir and would fall
+  // back to `~/.claude/projects`, missing the recoverable transcript.
+  const projectsDir = resolveTranscriptProjectsDir(options)
+  void runResumePickerRecovery({
+    writeKey: (key) => sendKey(child, key),
+    // JSONL/disk is the source of truth (invariant §5). Exclude the session this
+    // REPL was spawned under: if it's the stale id that dropped us into the
+    // picker, we must not "recover" the very session that just failed to resume.
+    findLatestSession: () =>
+      findLatestResumableSession(cwd, projectsDir, { excludeSessionId: session.sessionId }),
+    // This detector fires during SPAWN, BEFORE start() assigns activeTurn, so a
+    // direct `activeTurn?.channel.push` would be a silent no-op and DROP the
+    // required recovered/lost notice (Codex P2). Route through `pushNotice`, which
+    // buffers until the first live turn flushes it.
+    surface: (text) => session.pushNotice(text),
+    // Actually move the live REPL onto the recovered session (Codex P1). Record
+    // the recovered id on the session and POISON it: the warm child that just
+    // escaped the picker is contextless, and `getOrSpawnSession` does not re-read
+    // `resolveResumeDirective` while an unpoisoned warm child is alive — so merely
+    // patching the registry would leave subsequent turns on the fresh REPL despite
+    // the "recovered" notice. Poisoning makes the NEXT turn evict + respawn, and
+    // `pendingResumeSessionId` is carried as the `forceResume` directive so that
+    // respawn `--resume`s the recovered transcript (bypassing the stale-id
+    // registry, and sidestepping a race with this spawn's own registry write). The
+    // current in-flight turn finishes on the fresh child; the notice tells the user
+    // the recovered context is active from their next message.
+    requestResume: (recoveredSessionId) => {
+      session.pendingResumeSessionId = recoveredSessionId
+      session.poisoned = true
+    },
+    // MISS: nothing recoverable on disk. `spawnSession` wrote the registry
+    // `has_session: true` for the stale `--resume` id, so a later crash/watchdog
+    // respawn would re-`--resume` it and reopen the picker. Flag a forced-fresh
+    // respawn + poison so the next turn cleanly respawns FRESH, whose spawnSession
+    // rewrites the registry `has_session: false` — breaking the stale-resume loop
+    // (Codex P2). The current fresh child keeps serving until then.
+    onNoRecovery: () => {
+      session.forceFreshRespawn = true
+      session.poisoned = true
+    },
+    alert: (text) => process.stderr.write(`[resume-picker] ${text}\n`),
+    delay: (ms) => new Promise((res) => setTimeout(res, ms)),
+  })
+    .catch((err: unknown) => {
+      process.stderr.write(`[resume-picker] ladder threw: ${String(err)}\n`)
+    })
+    .finally(() => {
+      session.resumePickerRecovering = false
     })
 }
 
@@ -689,6 +782,28 @@ class ReplSession {
    *  same still-present menu (the scanner latch already guards the rising edge;
    *  this guards the async window the ladder runs in). */
   wedgeRecovering = false
+  /** True while the resume-session-picker escape-then-recover ladder (P2, row #7)
+   *  is in flight, so a second scan tick can't launch a concurrent recovery on
+   *  the same still-present picker (the scanner latch guards the rising edge; this
+   *  guards the async window the ladder runs in). */
+  resumePickerRecovering = false
+  /** Set by the resume-session-picker recovery (row #7) to the session id it
+   *  recovered from disk. When this session is later evicted (it is also marked
+   *  `poisoned`), `getOrSpawnSession` carries this as a `forceResume` directive so
+   *  the clean respawn `--resume`s the RECOVERED transcript instead of re-reading
+   *  the stale-id registry (which would drop straight back into the picker). This
+   *  is what makes the recovery actually move the live REPL onto the recovered
+   *  context, not merely patch a registry the warm child never re-reads (Codex P1);
+   *  it also sidesteps racing `spawnSession`'s own registry write. */
+  pendingResumeSessionId: string | undefined
+  /** Set by the resume-session-picker recovery (row #7) when the disk scan found
+   *  NOTHING to recover. `spawnSession` optimistically wrote the registry as
+   *  `has_session: true` for the stale `--resume` id that dropped into the picker,
+   *  so a later crash/watchdog respawn would re-`--resume` it and reopen the same
+   *  picker. This flag (paired with `poisoned`) makes the next turn evict + respawn
+   *  with resume FORCED OFF — a clean fresh spawn whose `spawnSession` rewrites the
+   *  registry `has_session: false`, breaking the stale-resume loop (Codex P2). */
+  forceFreshRespawn = false
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -711,6 +826,12 @@ class ReplSession {
    *  `tmpdir()` forever, directly countering the bounding-growth goal (Argus r5
    *  IMPORTANT). Unlinked on dispose + on child exit (covers pool + crash). */
   configPaths: readonly string[] = []
+  /** Notices that must reach the user but were produced while NO turn was active.
+   *  The resume-picker recovery (row #7) fires during SPAWN — before `start()`
+   *  assigns `activeTurn` — so its "session recovered/lost" notice would be a
+   *  silent no-op if pushed straight to `activeTurn?.channel` (Codex P2). Buffer
+   *  here and flush onto the first live turn's channel via `flushPendingNotices`. */
+  private pendingNotices: string[] = []
   /** The PTY child — attached right after spawn (we register the session in
    *  the sink BEFORE spawning so a fast /channel-ready can't race). */
   private childRef: PtyChild | undefined
@@ -821,6 +942,30 @@ class ReplSession {
     const t = this.activeTurn
     if (t === undefined || t.settled) return
     t.channel.push({ kind: 'status', message: 'working' })
+  }
+
+  /** Surface a status notice to the user. Pushed straight onto the active turn's
+   *  channel when a turn is live, otherwise BUFFERED until the next turn flushes
+   *  it (`flushPendingNotices`). The resume-picker recovery surfaces through here
+   *  because it fires at SPAWN time, before any turn exists (Codex P2). */
+  pushNotice(text: string): void {
+    const t = this.activeTurn
+    if (t !== undefined && !t.settled) {
+      t.channel.push({ kind: 'status', message: text })
+    } else {
+      this.pendingNotices.push(text)
+    }
+  }
+
+  /** Drain any spawn-time buffered notices onto the current live turn's channel.
+   *  Called by `start()` once a turn is injected + its channel is confirmed
+   *  working, so a "session recovered/lost" notice produced before the turn
+   *  existed still reaches the user on the very next turn. No-op when empty. */
+  flushPendingNotices(): void {
+    const t = this.activeTurn
+    if (t === undefined || t.settled || this.pendingNotices.length === 0) return
+    for (const text of this.pendingNotices) t.channel.push({ kind: 'status', message: text })
+    this.pendingNotices = []
   }
 
   /** Fail the in-flight turn (process death). Retryable so the caller respawns. */
@@ -1237,6 +1382,20 @@ async function spawnSession(
       COMPACT_RESUME_SUMMARY_RE.test(ctx.normalized) || COMPACT_RESUME_FULL_RE.test(ctx.normalized),
     keys: ['down', 'enter'],
   })
+  // P2: resume-session-failure picker safety net (master-table row #7). When
+  // `--resume <stale-id>` is started against a session id that no longer exists,
+  // CC drops into an interactive "Resume Session" picker that BLOCKS the REPL.
+  // The hard-won lesson is ESCAPE-THEN-RECOVER, never BLIND-ANSWER: a stale
+  // cached session_id must NOT silently spawn a fresh (empty-context) session
+  // without a disk-recovery attempt + a user-visible "session lost" notice. This
+  // detector carries NO `keys` (recovery is the escape-then-disk-scan ladder in
+  // `dispatchResumePickerRecovery`, not a fire-once keystroke); it anchors on the
+  // distinctive `Resume Session` title + the `Esc to clear` footer (which
+  // distinguishes it from the AskUserQuestion `esc to cancel` menu detector #1
+  // handles, so the two never collide). LARGELY OBVIATED by Neutron's JSONL-first
+  // resume (`session-respawn.ts`/`session-validation.ts`), which avoids the picker
+  // in the normal path — this is a pure safety net for if it ever appears.
+  session.scanner.register(createResumePickerDetector())
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).
@@ -1278,11 +1437,7 @@ async function spawnSession(
   // explicit `options.projectsDir` wins (custom / per-instance transcript root —
   // Codex P2), then `CLAUDE_CONFIG_DIR`'s `projects` (CC writes transcripts there
   // when `claudeConfigDir` is set), then the default `~/.claude/projects`.
-  const projectsDir =
-    options.projectsDir ??
-    (options.claudeConfigDir !== undefined
-      ? join(options.claudeConfigDir, 'projects')
-      : join(homedir(), '.claude', 'projects'))
+  const projectsDir = resolveTranscriptProjectsDir(options)
   const deadTurnNotify =
     options.onDeadTurnNotice ??
     ((notice: DeadTurnNotice): void => {
@@ -1496,9 +1651,30 @@ async function getOrSpawnSession(
   forceResume?: ResumeDirective,
 ): Promise<ReplSession> {
   const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
+  // A resume-session-picker recovery (row #7) poisons the warm session AND records
+  // the disk-recovered session id on it; captured below (for BOTH the alive-evict
+  // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
+  // P1/P2) rather than the stale-id registry that would re-trip the picker.
+  let evictedResume: ResumeDirective | undefined
+  // Set when the evicted session's resume-picker recovery found NOTHING to recover:
+  // the next spawn must be FRESH (resume forced off) so it rewrites the stale-id
+  // registry `has_session: false` instead of re-`--resume`ing the stale id into the
+  // picker (Codex P2). Captured alongside `evictedResume` below.
+  let evictedForceFresh = false
   const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
+    // Capture the resume-picker recovery's directives BEFORE the alive/exited branch
+    // split (Codex P2): a poisoned session whose escaped child has ALREADY exited
+    // before the next dispatch still falls through to the spawn below, and without
+    // this it would fall back to `resolveResumeDirective` → the stale-id registry →
+    // reopen the picker. Applies whether the child is alive or dead.
+    if (session.pendingResumeSessionId !== undefined) {
+      evictedResume = { sessionId: session.pendingResumeSessionId }
+    }
+    if (session.forceFreshRespawn) {
+      evictedForceFresh = true
+    }
     if (!session.hasChildExited()) {
       // Two reuse guards gate serving a turn on the warm child; BOTH must pass or
       // the child is evicted + respawned (resuming the captured session when
@@ -1570,7 +1746,12 @@ async function getOrSpawnSession(
       pool.delete(sessionKey)
     }
   }
-  const resume = forceResume ?? resolveResumeDirective(sessionKey, options)
+  // Precedence: an explicit caller `forceResume` (admin/watchdog) wins; else a
+  // resume-picker MISS forces a fresh spawn (`evictedForceFresh`, breaking the
+  // stale-resume loop); else a resume-picker HIT resumes the recovered transcript
+  // (`evictedResume`); else the normal registry-resolved directive.
+  const resume = forceResume
+    ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
   spawning.catch(() => {
@@ -2111,6 +2292,10 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // pre-inject-park and inject-in-flight windows (see ActiveTurn.turnId).
           await injectMessage(session.channelPort, spec.prompt, turn.turnId)
           channel.push({ kind: 'status', message: 'working' })
+          // Flush any spawn-time buffered notices (e.g. the resume-picker
+          // recovered/lost notice, which fired before this turn existed) onto the
+          // now-live channel so they reach the user (Codex P2).
+          session.flushPendingNotices()
         } catch (err) {
           // (keepalive is started AFTER this try succeeds — see below)
           if (!turn.settled) {
