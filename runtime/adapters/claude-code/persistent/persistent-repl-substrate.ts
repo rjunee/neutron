@@ -68,6 +68,12 @@ import {
   runWedgedRecovery,
   WEDGED_PROMPT_DETECTOR_ID,
 } from './wedged-prompt-detector.ts'
+import {
+  createResumePickerDetector,
+  runResumePickerRecovery,
+  RESUME_PICKER_DETECTOR_ID,
+} from './resume-picker-detector.ts'
+import { findLatestResumableSession } from './session-disk-recovery.ts'
 import { encodeKeys, encodeKey, type Key } from './keystrokes.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import {
@@ -270,6 +276,8 @@ function runOutputScan(
   for (const fired of session.scanner.scan(session.ring.raw(), now)) {
     if (fired.id === WEDGED_PROMPT_DETECTOR_ID) {
       dispatchWedgeRecovery(session, child, options)
+    } else if (fired.id === RESUME_PICKER_DETECTOR_ID) {
+      dispatchResumePickerRecovery(session, child, options)
     } else if (fired.keys !== undefined) {
       sendKeys(child, fired.keys)
     }
@@ -313,6 +321,57 @@ function dispatchWedgeRecovery(
     })
     .finally(() => {
       session.wedgeRecovering = false
+    })
+}
+
+/** Launch the resume-session-failure picker escape-then-recover ladder (P2,
+ *  master-table row #7). When `--resume <stale-id>` drops to CC's interactive
+ *  "Resume Session" picker, this ESCAPES out (never blind-answers), scans disk
+ *  JSONL for the user's most-recent real session, and surfaces a recovered/lost
+ *  notice. The scanner latch guards the rising edge; `session.resumePickerRecovering`
+ *  additionally guards the async window so a second scan tick can't launch a
+ *  concurrent ladder on the still-present picker. Fire-and-forget. */
+function dispatchResumePickerRecovery(
+  session: ReplSession,
+  child: PtyChild,
+  options: PersistentReplSubstrateOptions,
+): void {
+  if (session.resumePickerRecovering) return
+  session.resumePickerRecovering = true
+  const cwd = options.cwd ?? process.cwd()
+  void runResumePickerRecovery({
+    writeKey: (key) => sendKey(child, key),
+    // JSONL/disk is the source of truth (invariant §5). Exclude the session this
+    // REPL was spawned under: if it's the stale id that dropped us into the
+    // picker, we must not "recover" the very session that just failed to resume.
+    findLatestSession: () =>
+      findLatestResumableSession(cwd, options.projectsDir, { excludeSessionId: session.sessionId }),
+    surface: (text) => {
+      session.activeTurn?.channel.push({ kind: 'status', message: text })
+    },
+    // Mark the recovered session resumable so the EXISTING registry/respawn path
+    // (`resolveResumeDirective`) picks it up on the next (re)spawn — we do NOT
+    // touch the JSONL-first resume path itself (explicitly out of scope). No-op
+    // when supervision is off (no registry path).
+    requestResume: (recoveredSessionId) => {
+      if (options.replRegistryPath === undefined) return
+      try {
+        patchRecord(options.replRegistryPath, session.sessionKey, {
+          sessionId: recoveredSessionId,
+          has_session: true,
+        })
+      } catch {
+        /* best-effort — a registry write failure must never brick a live REPL */
+      }
+    },
+    alert: (text) => process.stderr.write(`[resume-picker] ${text}\n`),
+    delay: (ms) => new Promise((res) => setTimeout(res, ms)),
+  })
+    .catch((err: unknown) => {
+      process.stderr.write(`[resume-picker] ladder threw: ${String(err)}\n`)
+    })
+    .finally(() => {
+      session.resumePickerRecovering = false
     })
 }
 
@@ -678,6 +737,11 @@ class ReplSession {
    *  same still-present menu (the scanner latch already guards the rising edge;
    *  this guards the async window the ladder runs in). */
   wedgeRecovering = false
+  /** True while the resume-session-picker escape-then-recover ladder (P2, row #7)
+   *  is in flight, so a second scan tick can't launch a concurrent recovery on
+   *  the same still-present picker (the scanner latch guards the rising edge; this
+   *  guards the async window the ladder runs in). */
+  resumePickerRecovering = false
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -1226,6 +1290,20 @@ async function spawnSession(
       COMPACT_RESUME_SUMMARY_RE.test(ctx.normalized) || COMPACT_RESUME_FULL_RE.test(ctx.normalized),
     keys: ['down', 'enter'],
   })
+  // P2: resume-session-failure picker safety net (master-table row #7). When
+  // `--resume <stale-id>` is started against a session id that no longer exists,
+  // CC drops into an interactive "Resume Session" picker that BLOCKS the REPL.
+  // The hard-won lesson is ESCAPE-THEN-RECOVER, never BLIND-ANSWER: a stale
+  // cached session_id must NOT silently spawn a fresh (empty-context) session
+  // without a disk-recovery attempt + a user-visible "session lost" notice. This
+  // detector carries NO `keys` (recovery is the escape-then-disk-scan ladder in
+  // `dispatchResumePickerRecovery`, not a fire-once keystroke); it anchors on the
+  // distinctive `Resume Session` title + the `Esc to clear` footer (which
+  // distinguishes it from the AskUserQuestion `esc to cancel` menu detector #1
+  // handles, so the two never collide). LARGELY OBVIATED by Neutron's JSONL-first
+  // resume (`session-respawn.ts`/`session-validation.ts`), which avoids the picker
+  // in the normal path — this is a pure safety net for if it ever appears.
+  session.scanner.register(createResumePickerDetector())
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
   // spawn, before any onData can fire on the event loop).

@@ -2,6 +2,78 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## PTY terminal-detection P2 — resume-session-failure picker safety net (port row #7)
+
+**What shipped.** On the merged F1/F2/F3 substrate (#54), a new output-scan
+detector (`id: 'resume-session-picker'`) registered on every session's
+`OutputScanner` in `persistent-repl-substrate.ts`, plus two new modules:
+`resume-picker-detector.ts` (signature + escape-then-recover ladder) and
+`session-disk-recovery.ts` (`findLatestResumableSession` — the Neutron analog of
+Vajra's `findLatestSessionForTopic`). Closes master-table **row #7** (Vajra
+`index.ts:1865` resume-session-failure handler).
+
+**Why.** When `claude --resume <stale-id>` is started against a session id that no
+longer exists, CC drops into an interactive **"Resume Session"** picker that
+blocks the REPL. The hard-won lesson is **ESCAPE-THEN-RECOVER, never blind-answer**:
+a stale cached `session_id` must NOT silently spawn a fresh, empty-context session
+without a disk-recovery attempt + a user-visible "session lost" notice — blind-
+picking an option throws away the user's context silently. This is **largely
+obviated** by Neutron's JSONL-first resume (`session-respawn.ts` /
+`session-validation.ts` / `session-capture.ts`), which avoids the picker in the
+normal path; it ships as a **pure safety net** for if the picker ever appears.
+
+**Spec-conformance diff.** SPEC row #7 describes the signature loosely as
+`Resume Session` || `Enter to select` || `Esc to clear`. A bare OR over those
+single phrases would false-fire (`Enter to select` is shared with the ordinary
+AskUserQuestion footer that detector #1 handles). The shipped detector therefore
+anchors on the **distinctive `Resume Session` title AND requires a picker footer
+cue** (`Esc to clear` / `Enter to select`). The `Esc to clear` footer is what
+distinguishes this picker from the AskUserQuestion menu (`Esc to cancel`), so the
+two detectors never collide. CURRENT WIRING before this PR: JSONL-first resume
+avoided the picker; nothing handled it if it DID appear (an unhandled picker would
+wedge the REPL). THIS PR FIXES that gap. **Out of scope (by design):** changing
+the JSONL-first resume path; auto-picking any picker option.
+
+**How (escape-then-recover; invariants carried verbatim):**
+- **Detect (`isResumeSessionPicker`).** Over the F3-windowed (bottom-40, doc-quote-
+  stripped) normalized ring: require the `Resume Session` title (`/resumesession/i`)
+  AND one of `Esc to clear` (`/esctoclear/i`) / `Enter to select`
+  (`/entertoselect/i`). The framework's **doc-quote guard** keeps a fenced /
+  `>`-quoted / inline-backtick mention of "Resume Session" from firing.
+- **Edge-latch (invariant §1).** The detector carries **no `keys`** (recovery is the
+  multi-step ladder, not a fire-once keystroke); the framework fires it once per
+  absent→present transition and re-arms on present→absent.
+- **Recover (`runResumePickerRecovery`, dispatched by `dispatchResumePickerRecovery`,
+  guarded by `session.resumePickerRecovering`).** Sends a **single `Escape`** (never a
+  digit / Enter — the no-blind-answer invariant, asserted by tests), then scans disk
+  via `findLatestResumableSession(cwd, projectsDir, { excludeSessionId })`. The scan
+  reads `<projectsDir>/<dashifyCwd(cwd)>/*.jsonl` and returns the most-recently-
+  modified transcript with ≥1 non-empty line (**JSONL-is-truth, invariant §5**;
+  mirrors `validateAndPersistSessionId`'s ghost guard). The stale id this REPL was
+  spawned under is excluded so it can't "recover" itself.
+- **Surface + retry.** A hit surfaces a "session recovered" notice to the active
+  turn's chat channel and (via the optional `requestResume` dep) `patchRecord`s the
+  registry so the **existing** registry/respawn path (`resolveResumeDirective`)
+  resumes the recovered session on the next spawn — the JSONL-first path itself is
+  untouched. A miss surfaces a "session lost — starting fresh" notice + one operator
+  alert. Debounce/latch stamped before the keystroke write (fire-once, invariant §4).
+
+**Tests.** `__tests__/resume-picker-detector.test.ts` (16) — full-picker fires;
+missing title / missing footer cue does NOT; the AskUserQuestion `esc to cancel`
+menu does NOT fire this detector (no collision with #1); fenced / `>`-quoted /
+inline-backtick doc-quote guards; edge-latch fires-once / holds-while-present /
+re-arms on absent; recovery sends EXACTLY `['escape']` (no digit/Enter in any
+outcome); recovered → notice + `requestResume`; none-found → "session lost" notice
++ alert. `__tests__/session-disk-recovery.test.ts` (8) — null on missing dir / no
+transcripts; picks newest mtime; skips empty/whitespace ghosts; ignores non-jsonl;
+excludes the stale id; null when only the excluded id remains. Full `persistent/`
+suite **361 pass / 0 fail** (36 files). `tsc --noEmit` clean for the changed files.
+
+**Additive edit.** The registration is purely additive (one new `register` block
+after `compact-resume-picker` + one new branch in `runOutputScan`) plus two new
+files, to limit conflict with sibling detector PRs. All existing `register({})`
+blocks left intact with their own closers.
+
 ## Per-turn API-5xx dead-turn notifier (JSONL watcher, port row #11)
 
 **What shipped.** A new JSONL watcher,
