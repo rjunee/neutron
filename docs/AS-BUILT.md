@@ -110,6 +110,41 @@ permission prompt. Port of Vajra's `gateway-core.ts isToolUsePrompt` +
   substrate-level (rendered-screen ring or latch-clear-on-fresh-data); the P0
   wedge-recovery detector (#1) is the designed backstop for a genuinely-stuck
   prompt.
+## Stuck-turn watchdog keys off JSONL turn-progress, not `last_event_at` (Vajra P1 port)
+
+**What shipped.** The agent-aware watchdog (`runtime/subagent/watchdog.ts`) now
+detects the "port probe lied — turn actually wedged" class. Ports the hard-won
+lesson from Vajra `stuck-turn-watchdog.ts` (incident 2026-04-21): a CC turn
+wedged 3+ min while its `/health` port probe still answered OK, its JSONL
+filling with only `system`/`queue-operation` records — *port probes lie; the
+transcript JSONL is the source of truth for whether a turn advanced*. Builds on
+the merged F1/F2/F3 PTY substrate (#54).
+
+- **The gap.** `runAgentWatchdog` keyed `stuck` off `rec.last_event_at` alone.
+  But `registry.update()` refreshes `last_event_at` to `now()` on EVERY patch,
+  so any heartbeat / status touch / queue bookkeeping kept it fresh while the
+  turn was wedged — a heartbeat could mask a wedge forever. (The spec-conformance
+  diff: the watchdog only ever consulted the in-memory clock, never the JSONL.)
+- **The fix (`watchdog.ts`).** Added an injectable `turn_progress_at(rec)` probe.
+  When wired and reporting a timestamp it is AUTHORITATIVE: `last_event_at` is
+  ignored for the staleness calc (so a heartbeat can't keep a wedged turn looking
+  alive), `age_ms` reflects true JSONL staleness, and the surfaced event records
+  the overriding `turn_progress_at`. Unwired / `null` (no transcript, in-process
+  `core` agent) falls back to `last_event_at` — legacy behaviour preserved.
+  `process_dead` still takes precedence.
+- **The reader (`turn-progress.ts`, new).** Pure + injectable, mirroring Vajra:
+  `isRealTurnEvent` (progress = `assistant` output or genuine `user`/`tool_result`
+  activity; `system`/`queue-operation`/meta excluded), `parseTailForLastTurnProgress`
+  (string→latest progress ms, truncated-head safe), `realReadJsonlTail` (256 KB
+  tail, never throws), and `makeJsonlTurnProgressProbe` (composes them behind a
+  caller-supplied `resolveTranscriptPath`, keeping the watchdog free of the
+  cwd/projects-dir knowledge the registry doesn't carry).
+- **Tests.** `watchdog.test.ts` +4: stale-JSONL + heartbeat-fresh `last_event_at`
+  + live process → flagged; JSONL-progressing + stale `last_event_at` → not
+  flagged; null probe → falls back to `last_event_at`; `process_dead` precedence
+  holds when JSONL looks fresh. `turn-progress.test.ts` (new, 12): filter rules,
+  wedged-vs-progressing tails, truncated head, real-fs tail read, probe
+  composition. `tsc --noEmit` clean; `runtime/subagent` suite green (54).
 
 ## GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
 

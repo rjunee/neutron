@@ -160,6 +160,97 @@ describe('agent-aware watchdog — stuck', () => {
   })
 })
 
+describe('agent-aware watchdog — JSONL turn-progress is the source of truth', () => {
+  // The registry's last_event_at is refreshed by registry.update() on EVERY
+  // patch, so a heartbeat / queue-operation keeps it fresh while the turn is
+  // wedged. The watchdog must key `stuck` off the injected turn_progress_at
+  // probe (the JSONL signal), not last_event_at. Vajra incident 2026-04-21.
+
+  test('stale JSONL + heartbeat-fresh last_event_at + live process → flagged stuck', async () => {
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    const now = DEFAULT_STUCK_THRESHOLD_MS + 5_000
+    // last_event_at is FRESH (a heartbeat just bumped it to ~now) — pre-fix this
+    // would never look stuck. The JSONL, though, has not advanced in ages (t=0).
+    liveRecord(registry, { run_id: 'r-wedged', pid: 1, last_event_at: now - 1 })
+
+    const res = await runAgentWatchdog({
+      control: ctrl,
+      registry,
+      now: () => now,
+      pid_alive: () => true, // process alive (port probe would say "fine")
+      turn_progress_at: () => 0, // …but the transcript JSONL is stale
+    })
+
+    expect(res.surfaced).toHaveLength(1)
+    const event = res.surfaced[0]!
+    expect(event.reason).toBe('stuck')
+    // age_ms reflects JSONL staleness (now - 0), NOT the fresh last_event_at.
+    expect(event.age_ms).toBe(now)
+    expect(event.turn_progress_at).toBe(0)
+    expect(registry.byRunId('r-wedged')?.status).toBe('crashed')
+    expect(registry.byRunId('r-wedged')?.failure_reason).toBe('stuck')
+  })
+
+  test('JSONL progressing + stale last_event_at → NOT flagged', async () => {
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    // last_event_at is ANCIENT (would trip the legacy threshold), but the JSONL
+    // shows the turn advanced moments ago — the agent is working, not stuck.
+    liveRecord(registry, { run_id: 'r-working', pid: 1, last_event_at: 0 })
+
+    const res = await runAgentWatchdog({
+      control: ctrl,
+      registry,
+      now: () => DEFAULT_STUCK_THRESHOLD_MS + 5_000,
+      pid_alive: () => true,
+      turn_progress_at: () => DEFAULT_STUCK_THRESHOLD_MS + 4_000, // fresh JSONL progress
+    })
+
+    expect(res.surfaced).toHaveLength(0)
+    expect(registry.byRunId('r-working')?.status).toBe('running')
+  })
+
+  test('probe returns null (no transcript) → falls back to last_event_at', async () => {
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    // No JSONL signal for this record → the watchdog uses last_event_at as before.
+    liveRecord(registry, { run_id: 'r-notranscript', pid: 1, last_event_at: 0 })
+
+    const res = await runAgentWatchdog({
+      control: ctrl,
+      registry,
+      now: () => DEFAULT_STUCK_THRESHOLD_MS + 1,
+      pid_alive: () => true,
+      turn_progress_at: () => null, // no transcript progress signal available
+    })
+
+    expect(res.surfaced).toHaveLength(1)
+    expect(res.surfaced[0]?.reason).toBe('stuck')
+    // No JSONL override → the event carries no turn_progress_at and age_ms is
+    // computed from last_event_at (legacy behaviour preserved).
+    expect(res.surfaced[0]?.turn_progress_at).toBeUndefined()
+    expect(res.surfaced[0]?.age_ms).toBe(DEFAULT_STUCK_THRESHOLD_MS + 1)
+  })
+
+  test('process_dead still takes precedence even when JSONL looks fresh', async () => {
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    liveRecord(registry, { run_id: 'r-dead', pid: 42, last_event_at: 0 })
+
+    const res = await runAgentWatchdog({
+      control: ctrl,
+      registry,
+      now: () => DEFAULT_STUCK_THRESHOLD_MS + 1,
+      pid_alive: () => false, // process gone
+      turn_progress_at: () => DEFAULT_STUCK_THRESHOLD_MS, // JSONL "fresh" — irrelevant
+    })
+
+    expect(res.surfaced[0]?.reason).toBe('process_dead')
+    expect(res.surfaced[0]?.pid).toBe(42)
+  })
+})
+
 describe('agent-aware watchdog — surfacing semantics', () => {
   test('delivery_target rides along so a notice can be routed back to its origin', async () => {
     const registry = new SubagentRegistry()
