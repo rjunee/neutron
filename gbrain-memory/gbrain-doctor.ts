@@ -247,11 +247,21 @@ export interface CommandRunner {
 export function bunCommandRunner(): CommandRunner {
   return {
     async run(cmd, args, opts) {
+      // INHERIT the caller's environment, then layer overrides. `bun install -g`
+      // resolves the global bin dir from HOME/BUN_INSTALL, and both bun + `git
+      // ls-remote` may need proxy/cert env (HTTP(S)_PROXY, *_CA_*) — a minimal
+      // {PATH-only} env would silently break the upgrade in scheduled/CI runs or
+      // install the binary into the wrong global dir (Codex r1 P2).
+      const env: Record<string, string> = {}
+      for (const [k, v] of Object.entries(process.env)) {
+        if (typeof v === 'string') env[k] = v
+      }
+      if (opts?.env !== undefined) Object.assign(env, opts.env)
       const proc = Bun.spawn([cmd, ...args], {
         stdin: 'ignore',
         stdout: 'pipe',
         stderr: 'pipe',
-        env: { PATH: process.env['PATH'] ?? '', ...(opts?.env ?? {}) },
+        env,
       })
       const timeoutMs = opts?.timeoutMs ?? 30_000
       let timedOut = false
