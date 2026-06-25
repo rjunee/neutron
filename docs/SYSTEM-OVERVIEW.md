@@ -915,6 +915,23 @@ not kill.
   These prompts render even under `--dangerously-skip-permissions` for
   key-to-kingdom paths (`.git/hooks/*`, writes outside the project root), so the
   substrate must clear them itself.
+- **P1 — /rate-limit-options org-cap auto-stop (port row #4).** A third detector
+  (`id: 'rate-limit-options-stop'`) registered on every session's
+  `OutputScanner` auto-stops CC's `/rate-limit-options` org-monthly-cap picker
+  (Ryan 2026-05-23: "Just select stop and wait for limit to reset"). It fires
+  only when **BOTH** cues are present in the normalized **bottom-30** view — the
+  slash command (`/\/rate-limit-options/i`) **AND** option 3's verbatim text
+  (`/stopandwaitforlimittoreset/i`) — and sends `3`+`enter` on the rising edge
+  (`'3'` is position-independent). The **bottom-30 positional guard is
+  load-bearing**: pressing `3` STOPS CC, so no new output scrolls the picker away
+  and the stale text would otherwise re-fire `select-stop` into dead input for
+  days (Vajra PR #132 r1) — the bottom-N window lets idle whitespace push the
+  picker past the threshold so the detector correctly stops. A 60s `debounceMs`
+  floor + the framework's before-await latch stamp make `3`+enter fire-once. The
+  F3 doc-quote guard keeps a quoted/backtick mention of the command from firing.
+  Vajra's viewport-pre-check-gates-recapture lesson (Argus #132 r3) is obviated:
+  Neutron's in-memory ring read IS the cheap viewport check — no scrollback
+  recapture to gate.
 
 ## Autonomous overnight work (`onboarding/overnight/`) — runs ON Trident
 

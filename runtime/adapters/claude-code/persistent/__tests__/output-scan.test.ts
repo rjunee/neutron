@@ -189,6 +189,59 @@ describe('OutputScanner — registration', () => {
     expect(s.scan(live, 6001).map((f) => f.id)).toEqual(['tool-use-approve']) // past floor
   })
 
+  test('P1 rate-limit-options-stop: both cues in bottom-N fire 3+enter; doc-quoted slash does NOT', () => {
+    // Mirrors the substrate registration (port row #4): the `/rate-limit-options`
+    // slash command name AND option 3's verbatim `Stop and wait for limit to
+    // reset`, both matched on the normalized (whitespace-stripped) view, within
+    // the bottom-30 window. `3`+`enter` selects "Stop and wait" (position-
+    // independent). Ryan 2026-05-23 directive.
+    const OPTIONS = /\/rate-limit-options/i
+    const STOP = /stopandwaitforlimittoreset/i
+    const mk = () => {
+      const s = new OutputScanner()
+      s.register({
+        id: 'rate-limit-options-stop',
+        bottomN: 30,
+        debounceMs: 60_000,
+        present: (ctx: { normalized: string }) => OPTIONS.test(ctx.normalized) && STOP.test(ctx.normalized),
+        keys: ['3', 'enter'] as const,
+      })
+      return s
+    }
+
+    // BOTH cues present (Ink shreds the picker across cursor moves) → fires
+    // `3`+`enter`.
+    const live =
+      'You[8G hit your[16G org limit\n/rate-limit-options\n  1. Upgrade\n  2. Switch model\n❯ 3. Stop and wait for limit to reset'
+    const fired = mk().scan(live, 0)
+    expect(fired.map((f) => f.id)).toEqual(['rate-limit-options-stop'])
+    expect(fired[0]?.keys).toEqual(['3', 'enter'])
+
+    // A doc-quote of the slash command (the option-3 line still present, e.g. a
+    // brief or this very PR) does NOT fire: stripDocQuotes blanks the inline-
+    // backtick span so `/rate-limit-options` never reaches the normalized view.
+    const quoted =
+      'CC injects the `/rate-limit-options` picker; we auto-press\nStop and wait for limit to reset (option 3).'
+    expect(mk().scan(quoted, 0).length).toBe(0)
+    // Fenced quote of both cues also does NOT fire (whole block dropped).
+    const fenced = '```\n/rate-limit-options\nStop and wait for limit to reset\n```'
+    expect(mk().scan(fenced, 0).length).toBe(0)
+
+    // Single cue only — slash command with no option-3 text (a conversational
+    // mention) does NOT fire.
+    expect(mk().scan('run /rate-limit-options to see your usage', 0).length).toBe(0)
+
+    // Fire-once: debounce stamped BEFORE return, so an identical next frame is
+    // latched and a re-arm within 60s is suppressed by the floor.
+    const s = mk()
+    expect(s.scan(live, 0).length).toBe(1) // rising edge fires
+    expect(s.scan(live, 1).length).toBe(0) // latched, identical frame
+    expect(s.scan('idle prompt', 2).length).toBe(0) // falling edge clears latch
+    expect(s.scan(live, 30_000).length).toBe(0) // rising edge but within 60s floor
+    expect(s.scan('idle prompt', 61_000).length).toBe(0) // falling edge again
+    expect(s.scan(live, 61_001).map((f) => f.id)).toEqual(['rate-limit-options-stop']) // past floor
+  })
+
   test('the disclaimer-style detector: a single Enter on the rising edge', () => {
     const s = new OutputScanner()
     s.register({
