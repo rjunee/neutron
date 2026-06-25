@@ -48,6 +48,10 @@ import { captureSession, makeJsonlExistsProbe, type CaptureSessionConfig } from 
 import { bunTerminalHost } from './bun-terminal-host.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import type { PtyChild, PtyHost } from './pty-host.ts'
+import { PtyRing, type RecentOutputOpts } from './pty-ring.ts'
+import { OutputScanner } from './output-scan.ts'
+import { normalizePtyText } from './pty-text.ts'
+import { encodeKeys, type Key } from './keystrokes.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import {
   getRecord,
@@ -108,12 +112,16 @@ const DEFAULT_AGENT_BASE_PROMPT = join(HERE, 'repl-agent-base.md')
 
 const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
 const DEFAULT_TURN_TIMEOUT_MS = 180_000
-const RING_BUFFER_MAX = 16_384
 /** Signature of the `--dangerously-load-development-channels` first-run
  *  disclaimer, matched against the PTY text with ALL ANSI escapes + whitespace
  *  stripped (the Ink TUI positions each word with cursor-move escapes, so the
  *  phrase is never contiguous in the raw stream). */
 const DEV_CHANNEL_DISCLAIMER_RE = /forlocalchanneldevelopment|usingthisforlocaldevelopment/i
+/** Bottom-N line window the disclaimer detector scans. Generous (vs the default
+ *  bottom-24) because the disclaimer renders as a multi-line box at spawn; this
+ *  preserves the old whole-ring match behavior while still excluding unbounded
+ *  scrollback. */
+const DISCLAIMER_BOTTOM_N = 200
 const REPL_DEBUG = process.env['NEUTRON_REPL_DEBUG'] === '1'
 /** After a turn's reply settles, hold the turn lock until the REPL's PTY has
  *  been quiet for this long (claude returned to idle) before allowing the next
@@ -160,11 +168,16 @@ const RESPAWN_CAP_MAX = 3
  *  child is dead, so exactly one process owns the session transcript at a time
  *  (Argus r3 BLOCKER 1). */
 const CHILD_KILL_GRACE_MS = 2_000
-/** Collapse a PTY chunk to bare letters: drop ANSI/CSI/OSC escapes + whitespace
- *  so dialog-signature matching survives the Ink TUI's cursor positioning. */
-function normalizePtyText(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?/g, '').replace(/\x1b[[\]()][0-9;?]*[A-Za-z]?/g, '').replace(/\s+/g, '')
+/** Send a structured key sequence to a PTY child, degrading to a raw `write`
+ *  when the backend predates the F2 `writeKeys` extension (every real
+ *  `bun-terminal-host` child implements it; a lightweight test fake may not).
+ *  Used to actuate an output-scan detector's fired keystrokes (`output-scan.ts`,
+ *  F3). The encoding is the pure `encodeKeys` (`keystrokes.ts`), so this stays a
+ *  single fire-once write per detection (invariant §4). */
+function sendKeys(child: PtyChild, keys: readonly Key[]): void {
+  if (keys.length === 0) return
+  if (child.writeKeys !== undefined) child.writeKeys(keys)
+  else child.write(encodeKeys(keys))
 }
 
 /** A reply recovered by the replay-after-resume path (#106). The substrate is a
@@ -497,8 +510,14 @@ class ReplSession {
    *  while claude is still finishing the prior turn drops the notification
    *  (the back-to-back-turn race that timed out the 3-turn proof). */
   lastDataAt = Date.now()
-  /** Debug-only accessor for the PTY ring buffer (set when NEUTRON_REPL_DEBUG). */
-  debugRing: (() => string) | undefined
+  /** F1: the public, line-addressable PTY ring. Every chunk the child emits is
+   *  appended here; `getRecentOutput` reads it (line-addressable, bottom-N,
+   *  optionally normalized). Replaces the old debug-gated 16 KB closure. */
+  readonly ring = new PtyRing()
+  /** F3: the output-scan detector framework. The disclaimer auto-dismiss is
+   *  registered here (generalized from the old inline `onData` check); the
+   *  P0/P1 recovery detectors register signature+action in follow-on PRs. */
+  readonly scanner = new OutputScanner()
   /** The built-in tool surface this REPL was SPAWNED with, as a stable
    *  comma-joined key (`--tools` value). The reuse guard refuses to serve a turn
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
@@ -566,6 +585,14 @@ class ReplSession {
 
   attachChild(child: PtyChild): void {
     this.childRef = child
+  }
+
+  /** F1 public ring-read accessor. Recent PTY output for a content detector:
+   *  `{ bottomN }` for a line-addressed bottom-N slice, `{ normalize }` to
+   *  collapse Ink ANSI for contiguous-signature matching. Always available (no
+   *  longer `NEUTRON_REPL_DEBUG`-gated). */
+  getRecentOutput(opts: RecentOutputOpts = {}): string {
+    return this.ring.getRecentOutput(opts)
   }
 
   get child(): PtyChild {
@@ -941,35 +968,49 @@ async function spawnSession(
     childEnv['CLAUDE_CONFIG_DIR'] = options.claudeConfigDir
   }
 
-  // Liveness ring buffer (Sprint-2 watchdogs read this; we just bound it).
-  let ring = ''
-  // The `--dangerously-load-development-channels` flag renders a first-run
-  // disclaimer ("…using this for local development?") that has NO config seed
-  // (unlike trust + bypass) and BLOCKS MCP-server loading until dismissed. Its
-  // default-selected option IS the accept, so a single Enter clears it. We
-  // detect the prompt in the PTY stream and press Enter ONCE. Without this the
-  // spawn wedges `no-channel-ready` forever (no keystroke path otherwise).
-  let childForDismiss: PtyChild | undefined
-  let disclaimerDismissed = false
+  // F3 output-scan tick: the `--dangerously-load-development-channels` flag
+  // renders a first-run disclaimer ("…using this for local development?") that
+  // has NO config seed (unlike trust + bypass) and BLOCKS MCP-server loading
+  // until dismissed; its default-selected option IS the accept, so a single
+  // Enter clears it. We GENERALIZE that one-off check into a registered detector
+  // on the session's `OutputScanner` (F3) rather than a competing scan loop —
+  // the P0/P1 recovery detectors register the same way in follow-on PRs. Without
+  // this dismiss the spawn wedges `no-channel-ready` forever.
+  session.scanner.register({
+    id: 'dev-channel-disclaimer',
+    bottomN: DISCLAIMER_BOTTOM_N,
+    present: (ctx) => DEV_CHANNEL_DISCLAIMER_RE.test(ctx.normalized),
+    keys: ['enter'],
+  })
+  // The spawn `const child` isn't assigned when the `onData` closure is defined,
+  // so route fired-detector keystrokes through this mirror (set right after
+  // spawn, before any onData can fire on the event loop).
+  let scanChild: PtyChild | undefined
 
   const child = ptyHost.spawn(argv, {
     cwd,
     env: childEnv,
     onData: (chunk) => {
-      ring = (ring + Buffer.from(chunk).toString('utf8')).slice(-RING_BUFFER_MAX)
-      session.lastDataAt = Date.now()
-      if (!disclaimerDismissed && DEV_CHANNEL_DISCLAIMER_RE.test(normalizePtyText(ring))) {
-        disclaimerDismissed = true
-        childForDismiss?.write('\r')
+      session.ring.append(Buffer.from(chunk).toString('utf8'))
+      const now = Date.now()
+      session.lastDataAt = now
+      const target = scanChild
+      if (target === undefined) return
+      // Run the registered detectors against the ring and actuate the ones that
+      // fired on the rising edge. `scan` stamps each detector's latch + debounce
+      // BEFORE returning, so the keystroke write here is fire-once even if the
+      // transport throws — a failed write can't retry next tick and double-send
+      // onto an approval prompt (invariant §4).
+      for (const fired of session.scanner.scan(session.ring.raw(), now)) {
+        if (fired.keys !== undefined) sendKeys(target, fired.keys)
       }
     },
   })
-  childForDismiss = child
+  scanChild = child
   session.attachChild(child)
   // Synchronous handle mirror so a respawn can detect alive-but-wedged without
   // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
   childByKey.set(sessionKey, child)
-  if (REPL_DEBUG) session.debugRing = () => ring
 
   // Wire process death → fail in-flight turn + evict from pool so the next
   // start() respawns. Leaves cleanup to GC; the dev-channel SIGTERMs itself.
@@ -1750,7 +1791,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         const timer = setTimeout(() => {
           if (!turn.settled) {
             if (REPL_DEBUG && session !== undefined) {
-              const r = session.debugRing?.() ?? ''
+              const r = session.getRecentOutput()
               process.stderr.write(`[repl-timeout] PTY tail:\n${normalizePtyText(r).slice(-1200)}\n`)
             }
             turn.settled = true
