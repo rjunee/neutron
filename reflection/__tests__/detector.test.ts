@@ -7,6 +7,7 @@ import type { SessionHandle } from '../../runtime/session-handle.ts'
 import {
   composeJudgePrompt,
   detectCorrection,
+  extractJsonObject,
   looksLikeCorrection,
   parseJudgment,
 } from '../detector.ts'
@@ -103,6 +104,39 @@ describe('parseJudgment', () => {
   test('garbage → negative verdict', () => {
     expect(parseJudgment('not json').is_correction).toBe(false)
     expect(parseJudgment('').is_correction).toBe(false)
+  })
+})
+
+describe('extractJsonObject (fence strip is redos-hardened)', () => {
+  test('direct parse wins', () => {
+    expect(extractJsonObject('{"a":1}')).toEqual({ a: 1 })
+  })
+
+  test('strips a ```json fence and the whitespace after the opener', () => {
+    expect(extractJsonObject('```json\n  {"b":2}\n```')).toEqual({ b: 2 })
+  })
+
+  test('strips a bare ``` fence with surrounding prose', () => {
+    expect(
+      extractJsonObject('here you go:\n``` {"c":3} ```\nthanks'),
+    ).toEqual({ c: 3 })
+  })
+
+  test('falls back to a balanced-brace slice when no fence is present', () => {
+    expect(extractJsonObject('prefix {"d":4} suffix')).toEqual({ d: 4 })
+  })
+
+  test('completes in <50ms on an unterminated fence + whitespace flood', () => {
+    // The old `/```(?:json)?\s*([\s\S]+?)```/` backtracks on a fence opener
+    // followed by a long whitespace run with no closing fence: `\s*` and
+    // `[\s\S]+?` both match spaces, so the engine retries the split at every
+    // offset — O(n²). With the leading `\s*` dropped there is no overlap.
+    const evil = '```' + ' '.repeat(500_000)
+    const t0 = performance.now()
+    const out = extractJsonObject(evil)
+    const elapsed = performance.now() - t0
+    expect(out).toBeNull()
+    expect(elapsed).toBeLessThan(50)
   })
 })
 

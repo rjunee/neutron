@@ -30,12 +30,26 @@ export function slugify(text: string): string {
 }
 
 /**
+ * Strip a run of trailing `.` characters, linear-time.
+ *
+ * Behaviourally identical to `.replace(/\.+$/, '')`, but a bare unanchored
+ * `/\.+$/` restarts the `\.+` scan at every offset when `$` fails (e.g. a
+ * string of dots followed by a non-dot tail), which is quadratic — the
+ * CodeQL js/polynomial-redos alert. A single backward scan is O(n).
+ */
+function stripTrailingDots(s: string): string {
+  let end = s.length
+  while (end > 0 && s[end - 1] === '.') end--
+  return s.slice(0, end)
+}
+
+/**
  * Derive trigger phrases from the workflow intent. Conservative + deterministic:
  * the intent itself plus a couple of natural imperative paraphrases. The user
  * can always edit these on approve.
  */
 export function deriveTriggers(intent: string): string[] {
-  const cleaned = intent.trim().replace(/\.+$/, '')
+  const cleaned = stripTrailingDots(intent.trim())
   const lower = cleaned.toLowerCase()
   const triggers = [lower, `do the ${lower} workflow`, `run ${lower} again`]
   // Dedupe while preserving order.

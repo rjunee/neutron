@@ -21,7 +21,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, unlinkSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, unlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -1079,6 +1079,25 @@ describe('Argus r2 IMPORTANT — concurrent write+delete on same path keeps anch
     // delete). With OCC set the writer would 409 cleanly, so the race only
     // matters for the no-OCC case.
     const deleterP = docStore.deleteDoc(PROJECT_ID, 'r.md')
+    // Gate the writer on the deleter's unlink rather than launching both at
+    // the same instant. Previously the two ops were fired simultaneously, so
+    // the writer's temp-file write (which sets the mtime the writer later
+    // fstat's — rename preserves it) could land BEFORE the deleter's unlink.
+    // That made writer_mtime < delete_time on a fast host, the materialiser
+    // dropped the writer's anchor_relocated as stale, and the anchor flaked
+    // DEAD even though r.md existed at the end of the race — a wall-clock
+    // ordering dependency, not a real regression. Waiting for the unlink
+    // pins writer_mtime strictly after delete_time. The concurrency this
+    // test guards is unchanged: the deleter is still mid-flight inside its
+    // slow 50ms recordCommit() window (the L613-L645 gap) when the writer
+    // lands its rename + hook — exactly the T4/T5 interleaving above.
+    const raceDeadline = Date.now() + 2000
+    while (existsSync(join(docsRoot, 'r.md'))) {
+      if (Date.now() >= raceDeadline) {
+        throw new Error('deleter did not unlink r.md within 2000ms')
+      }
+      await new Promise((r) => setTimeout(r, 1))
+    }
     const writerP = docStore.writeDoc({
       project_id: PROJECT_ID,
       path: 'r.md',
