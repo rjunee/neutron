@@ -31,10 +31,14 @@ import {
   registerSupervisedSubstrate,
   startReplWatchdog,
   type PersistentReplSubstrateOptions,
+  type RateLimitBannerNotice,
   type RecoveredReply,
 } from './persistent/persistent-repl-substrate.ts'
+import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
+export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
 
 export interface ClaudeCodeSubstrateOptions {
   /**
@@ -114,6 +118,20 @@ export interface ClaudeCodeSubstrateOptions {
    *  substrate's replay path calls it with a recovered reply instead of discarding
    *  it. Runtime-layer DI seam (the substrate never imports `gateway/*`). */
   onRecoveredReply?: (reply: RecoveredReply) => void | Promise<void>
+  /** Notice-family DI seams — runtime→gateway sinks the persistent substrate fires
+   *  on the rising edge of a detected condition (the substrate never imports
+   *  `gateway/*`). Without forwarding them here, a caller built through
+   *  `createClaudeCodeSubstrateAuto` could not deliver them and they degraded to a
+   *  stderr-only fallback (Codex review, PR #67). All three are notify-only:
+   *   - `onDeadTurnNotice` (row #11) — a mid-turn API 5xx killed a turn before
+   *     `reply()`; surface a "resend your last message" retry affordance.
+   *   - `onSizeAlert` (row #13) — a warm session's post-compact transcript crossed
+   *     the warn (≥5 MB) / critical (≥10 MB) band; surface Reset/Compact.
+   *   - `onRateLimitBanner` (row #10) — a rate-limit / overload BANNER appeared;
+   *     surface a notify-only alert (no keystroke, no auto-retry). */
+  onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
+  onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /**
    * Argus r4 BLOCKER (2026-06-08) — STATELESS-ONE-SHOT mode. When `true`, a
    * dispatch with no `spec.session` runs on a fresh disposable REPL that is
@@ -192,6 +210,11 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   if (options.instance_slug !== undefined) p.instance_slug = options.instance_slug
   if (options.delivery_topic_id !== undefined) p.delivery_topic_id = options.delivery_topic_id
   if (options.onRecoveredReply !== undefined) p.onRecoveredReply = options.onRecoveredReply
+  // Notice-family DI seams (rows #10/#11/#13) — forward so the gateway path can
+  // wire user-facing delivery instead of the stderr-only fallback (Codex PR #67).
+  if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
+  if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
+  if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode (session-less
   // dispatches get a fresh, terminated-after-turn REPL; no shared transcript).
   if (options.ephemeral !== undefined) p.ephemeral = options.ephemeral

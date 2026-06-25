@@ -42,6 +42,14 @@ auto-retry.
   `dispatchRateLimitBannerNotice` → active-turn channel push (if a turn is live) +
   stderr + the injected `onRateLimitBanner` seam (gateway wires real chat delivery;
   default = structured stderr notice).
+- **Public-adapter forwarding (Codex review, PR #67).** `createClaudeCodeSubstrateAuto`
+  / `ClaudeCodeSubstrateOptions` now forward the whole notice family —
+  `onRateLimitBanner` (row #10) **plus** the previously-latent `onDeadTurnNotice`
+  (#11) and `onSizeAlert` (#13) — so the gateway path can deliver user-facing
+  notices instead of the stderr-only fallback. (Codex's other finding — the
+  session-size watchdog reading `~/.claude/projects` under an isolated
+  `claudeConfigDir` — is a pre-existing bug in the merged #62 code, outside this
+  diff; flagged for a separate fix, not addressed here to keep the PR focused.)
 - **Tests.** `rate-limit-banner.test.ts` (27): each temporary + usage-cap pattern
   fires once on the rising edge (via the REAL `OutputScanner`); cue-framing
   negatives; doc-quote (inline-backtick / fenced / diff-line) → no fire;
