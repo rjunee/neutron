@@ -64,12 +64,20 @@ export function isRealTurnEvent(ev: JsonlEvent): boolean {
 }
 
 export interface TurnProgressParse {
-  /** Epoch ms of the latest real turn event in the tail, or null if none. */
+  /** Epoch ms of the latest REAL turn event in the tail, or null if none. */
   lastProgressMs: number | null
+  /** Epoch ms of the EARLIEST timestamped record of ANY type in the tail
+   *  (`system`/`queue-operation` noise included), or null if the tail had no
+   *  parseable timestamps. Lets the probe distinguish "transcript readable but
+   *  the last real progress scrolled out of the tail window" (records present,
+   *  `lastProgressMs === null`) from "no transcript at all" — see
+   *  `makeJsonlTurnProgressProbe`. */
+  earliestEventMs: number | null
 }
 
 /**
- * Parse the tail of a JSONL buffer into the latest real-turn-progress timestamp.
+ * Parse the tail of a JSONL buffer into the latest real-turn-progress timestamp
+ * (and the earliest timestamp of any record, for the no-progress-in-tail case).
  * The first line of the buffer may be truncated (we started mid-record when
  * reading from a non-zero offset) — `hadTruncatedHead` discards it so a partial
  * JSON line is never misparsed.
@@ -81,6 +89,7 @@ export function parseTailForLastTurnProgress(
   const lines = tail.split('\n')
   const startIdx = hadTruncatedHead ? 1 : 0
   let lastProgressMs: number | null = null
+  let earliestEventMs: number | null = null
 
   for (let i = startIdx; i < lines.length; i += 1) {
     const trimmed = lines[i]?.trim()
@@ -92,16 +101,20 @@ export function parseTailForLastTurnProgress(
     } catch {
       continue
     }
-    if (!isRealTurnEvent(ev)) continue
 
     const ts = ev.timestamp
     if (typeof ts !== 'string') continue
     const ms = Date.parse(ts)
     if (!Number.isFinite(ms)) continue
 
+    // Earliest-of-any tracks the start of the visible window (any record type),
+    // used as a sound staleness floor when no real progress is in the tail.
+    if (earliestEventMs === null || ms < earliestEventMs) earliestEventMs = ms
+
+    if (!isRealTurnEvent(ev)) continue
     if (lastProgressMs === null || ms > lastProgressMs) lastProgressMs = ms
   }
-  return { lastProgressMs }
+  return { lastProgressMs, earliestEventMs }
 }
 
 /**
@@ -154,10 +167,20 @@ export interface JsonlTurnProgressProbeDeps {
 
 /**
  * Build the `turn_progress_at` probe the watchdog injects. Resolves the record's
- * transcript path, tail-reads its JSONL, and returns the latest real-turn-progress
- * timestamp — or null when there is no transcript or no progress event in the
- * tail (the watchdog then falls back to `last_event_at`). Pure relative to its
- * injected deps; the only side effect is the fs read inside `readTail`.
+ * transcript path, tail-reads its JSONL, and returns the authoritative
+ * turn-progress timestamp. Pure relative to its injected deps; the only side
+ * effect is the fs read inside `readTail`.
+ *
+ * It returns `null` ONLY when there is genuinely no JSONL signal — no transcript
+ * path, or an unreadable/empty file — so the watchdog falls back to
+ * `last_event_at`. Critically, a READABLE transcript whose tail holds no real
+ * progress event (the last `assistant`/`user`/`tool_result` record scrolled out
+ * of the 256 KB window, leaving only `system`/`queue-operation` noise — the exact
+ * long-wedge shape this watchdog exists to catch) does NOT return null: it
+ * reports `earliestEventMs`, a sound staleness floor (real progress provably
+ * predates the earliest visible record), so the watchdog treats the turn as
+ * (eventually) stale instead of trusting a heartbeat-fresh `last_event_at`.
+ * Codex P2 finding, 2026-06-25.
  */
 export function makeJsonlTurnProgressProbe(
   deps: JsonlTurnProgressProbeDeps,
@@ -169,8 +192,13 @@ export function makeJsonlTurnProgressProbe(
     if (!path) return null
     const read = readTail(path, tailBytes)
     if (!read) return null
-    return parseTailForLastTurnProgress(read.bytes, {
+    const { lastProgressMs, earliestEventMs } = parseTailForLastTurnProgress(read.bytes, {
       hadTruncatedHead: read.hadTruncatedHead,
-    }).lastProgressMs
+    })
+    // Real progress in the tail → authoritative. Otherwise, if the tail has any
+    // records at all (readable transcript, just no progress in-window), report
+    // the earliest visible timestamp as a stale floor rather than null. Only a
+    // tail with zero parseable timestamps yields null (→ last_event_at fallback).
+    return lastProgressMs ?? earliestEventMs
   }
 }

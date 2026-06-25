@@ -135,16 +135,25 @@ the merged F1/F2/F3 PTY substrate (#54).
 - **The reader (`turn-progress.ts`, new).** Pure + injectable, mirroring Vajra:
   `isRealTurnEvent` (progress = `assistant` output or genuine `user`/`tool_result`
   activity; `system`/`queue-operation`/meta excluded), `parseTailForLastTurnProgress`
-  (string→latest progress ms, truncated-head safe), `realReadJsonlTail` (256 KB
-  tail, never throws), and `makeJsonlTurnProgressProbe` (composes them behind a
-  caller-supplied `resolveTranscriptPath`, keeping the watchdog free of the
-  cwd/projects-dir knowledge the registry doesn't carry).
-- **Tests.** `watchdog.test.ts` +4: stale-JSONL + heartbeat-fresh `last_event_at`
-  + live process → flagged; JSONL-progressing + stale `last_event_at` → not
-  flagged; null probe → falls back to `last_event_at`; `process_dead` precedence
-  holds when JSONL looks fresh. `turn-progress.test.ts` (new, 12): filter rules,
-  wedged-vs-progressing tails, truncated head, real-fs tail read, probe
-  composition. `tsc --noEmit` clean; `runtime/subagent` suite green (54).
+  (string→latest progress ms + earliest-event floor, truncated-head safe),
+  `realReadJsonlTail` (256 KB tail, never throws), and `makeJsonlTurnProgressProbe`
+  (composes them behind a caller-supplied `resolveTranscriptPath`, keeping the
+  watchdog free of the cwd/projects-dir knowledge the registry doesn't carry).
+  A readable transcript whose tail holds only noise (the real progress record
+  scrolled out of the 256 KB window) reports the earliest-event floor, NOT null,
+  so a long wedge can't evade detection by ageing its progress out of the tail
+  (Codex P2). Production wiring (the gateway's `resolveTranscriptPath`) needs the
+  child cwd, which the in-process S3 registry doesn't yet carry — deferred to the
+  SQLite-backed S4 registry; the probe already flows through `runLifecycleTick`
+  untouched, so it's a config change then, not a watchdog change.
+- **Tests.** `watchdog.test.ts` (15, +4): stale-JSONL + heartbeat-fresh
+  `last_event_at` + live process → flagged; JSONL-progressing + stale
+  `last_event_at` → not flagged; null probe → falls back to `last_event_at`;
+  `process_dead` precedence holds when JSONL looks fresh. `turn-progress.test.ts`
+  (new, 15): filter rules, wedged-vs-progressing tails, earliest-floor / empty /
+  noise-only cases, truncated head, real-fs tail read, probe composition.
+  `subagent.test.ts` +1: the probe flows through `runLifecycleTick`. `tsc
+  --noEmit` clean; `runtime/subagent` suite green (58).
 
 ## GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
 

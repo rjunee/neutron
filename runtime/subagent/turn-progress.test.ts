@@ -77,11 +77,21 @@ describe('parseTailForLastTurnProgress', () => {
     )
   })
 
-  test('no real turn events → null', () => {
-    const tail = [line({ type: 'system', timestamp: TS(1) }), line({ type: 'queue-operation' })].join(
-      '\n',
-    )
-    expect(parseTailForLastTurnProgress(tail, { hadTruncatedHead: false }).lastProgressMs).toBeNull()
+  test('no real turn events → lastProgressMs null, but earliestEventMs tracks the noise floor', () => {
+    const tail = [
+      line({ type: 'system', timestamp: TS(2_000) }),
+      line({ type: 'queue-operation', timestamp: TS(3_000) }),
+      line({ type: 'queue-operation' }), // no timestamp — ignored
+    ].join('\n')
+    const parsed = parseTailForLastTurnProgress(tail, { hadTruncatedHead: false })
+    expect(parsed.lastProgressMs).toBeNull()
+    expect(parsed.earliestEventMs).toBe(2_000) // earliest timestamped record of any type
+  })
+
+  test('a truly empty tail → both null', () => {
+    const parsed = parseTailForLastTurnProgress('', { hadTruncatedHead: false })
+    expect(parsed.lastProgressMs).toBeNull()
+    expect(parsed.earliestEventMs).toBeNull()
   })
 })
 
@@ -135,6 +145,32 @@ describe('makeJsonlTurnProgressProbe', () => {
       }),
     })
     expect(probe(rec)).toBe(1_000) // system record after the assistant is ignored
+  })
+
+  test('readable transcript with only noise in the tail → earliest floor, NOT null (no last_event_at fallback)', () => {
+    // The last real progress record scrolled out of the 256 KB window; the tail
+    // holds only system/queue noise. The probe must report a stale floor so the
+    // watchdog stays on the JSONL signal rather than falling back to a
+    // heartbeat-fresh last_event_at. Codex P2 finding, 2026-06-25.
+    const probe = makeJsonlTurnProgressProbe({
+      resolveTranscriptPath: () => '/fake/path.jsonl',
+      readTail: () => ({
+        bytes: [
+          line({ type: 'system', timestamp: TS(4_000) }),
+          line({ type: 'queue-operation', timestamp: TS(5_000) }),
+        ].join('\n'),
+        hadTruncatedHead: false,
+      }),
+    })
+    expect(probe(rec)).toBe(4_000)
+  })
+
+  test('readable but zero parseable timestamps → null (genuine no-signal)', () => {
+    const probe = makeJsonlTurnProgressProbe({
+      resolveTranscriptPath: () => '/fake/path.jsonl',
+      readTail: () => ({ bytes: 'not json\nalso not json\n', hadTruncatedHead: false }),
+    })
+    expect(probe(rec)).toBeNull()
   })
 
   test('null path (no transcript) → null', () => {
