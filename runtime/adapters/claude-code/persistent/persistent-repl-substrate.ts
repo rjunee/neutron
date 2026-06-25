@@ -1329,18 +1329,23 @@ async function spawnSession(
     options.assertConfig ?? {},
   )
   if (!assertion.ok) {
-    child.kill()
     if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
     sink.unregister(sessionId)
     // channel-wedged is owned by the bounded-respawn wrapper (port row #6): throw
     // the TYPED error and DON'T pool.delete here — the wrapper holds the pool
     // entry and either retries on the same key or propagates the cap, so deleting
     // it mid-loop would orphan a successful retry's warm session. Every OTHER
-    // reason keeps the original delete-and-throw (the wrapper passes it straight
-    // through as a non-wedged failure).
+    // reason keeps the original kill-and-throw (the wrapper passes it straight
+    // through as a non-wedged failure, no retry).
     if (assertion.reason === 'channel-wedged') {
+      // AWAIT the wedged child's exit (graceful SIGTERM→await→SIGKILL) BEFORE the
+      // wrapper launches the next attempt: on a supervised/resume spawn a
+      // SIGTERM-slow old `claude` must not overlap a new `claude --resume` on the
+      // same transcript (the one-owner-per-transcript invariant). Codex r1 [P1].
+      await terminateChild(child)
       throw new ChannelWedgedSpawnError(sessionKey, assertion.detail)
     }
+    child.kill()
     pool.delete(sessionKey)
     throw new Error(`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})`)
   }
@@ -1893,7 +1898,12 @@ export async function spawnEphemeralSession(
   const ephemeralOptions: PersistentReplSubstrateOptions = { ...options }
   delete ephemeralOptions.replRegistryPath
   delete ephemeralOptions.pendingRespawnsPath
-  const session = await spawnSession(ephemeralKey, ephemeralOptions, spec)
+  // Route the disposable one-shot through the SAME bounded channel-wedge respawn
+  // (port row #6, Codex r1 [P2]): a Stage-4 `channel-wedged` assertion would
+  // otherwise throw straight to `start()` with no bounded recovery + no cap alert.
+  // resume is undefined here, so each retry gets a FRESH sessionId (no transcript
+  // sharing) — clean to retry on the same disposable key.
+  const session = await spawnWithChannelWedgeRespawn(ephemeralKey, ephemeralOptions, spec)
   // Track for shutdown teardown — ephemeral sessions are never pooled, so the
   // pool-walk in `shutdownAllPersistentRepls` would otherwise miss them.
   ephemeralSessions.add(session)
