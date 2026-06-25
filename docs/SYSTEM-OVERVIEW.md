@@ -379,6 +379,38 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   same way). Covered by `tests/integration/install-gbrain.test.ts` via the
   `NEUTRON_INSTALL_PRINT_GBRAIN` seam.
 
+- **Auto-upgrade + doctor (`gbrain-memory/gbrain-doctor.ts`).** `ensure_gbrain`
+  pins a point-in-time snapshot of an UNPINNED default branch with no upgrade
+  path and no health verification. The doctor — modeled on Vajra's
+  `cc-update-doctor` — closes both gaps with a deterministic, NO-LLM engine:
+  - **DOCTOR** (`neutron doctor`) verifies gbrain actually WORKS, not just that
+    the binary exists: (1) `gbrain` on PATH, (2) the binary responds
+    (`gbrain --version`), and (3) a real **memory round-trip** — connect →
+    `put_page` → `list_pages` read-back through the PRODUCTION transport
+    (`GBrainStdioMcpClient` → `GBrainMemoryStore`) against an EPHEMERAL throwaway
+    brain (a temp `GBRAIN_HOME`), so it exercises the live code path without
+    touching the owner's brain. Downstream checks short-circuit (a missing
+    binary can't round-trip) and are reported `skipped`.
+  - **AUTO-UPGRADE** (`neutron doctor --upgrade`) resolves the latest upstream
+    commit (`git ls-remote github:garrytan/gbrain HEAD`), and re-installs ONLY
+    when it advanced past the recorded ref — IDEMPOTENT, pinned to the resolved
+    commit (`github:garrytan/gbrain#<sha>`) for reproducibility since gbrain
+    ships no semver release tags. It then runs the doctor to VERIFY; an upgrade
+    that breaks the round-trip ROLLS BACK to the previously-recorded ref (the
+    `cc-update-doctor` contract). The recorded ref + last-verified state live at
+    `<NEUTRON_HOME>/gbrain-doctor.json`.
+  - **Host-level, never in-process.** Neutron runs GBrain in **notify** mode
+    inside a running instance and NEVER silently auto-upgrades there — a memory
+    schema change mid-session is volatile state the owner must gate (see
+    `gbrain-memory/version-notice.ts`). So the auto-upgrade runs OUT of the
+    instance process: `install.sh` schedules `neutron doctor --upgrade` on a
+    daily cadence via `neutron-service.sh install-doctor` (launchd
+    `StartInterval` / systemd `.timer`, the same boundary `cc-update-doctor`
+    runs at), opt-out aware (`--no-gbrain`) and best-effort (a scheduling
+    failure never aborts the install). Covered by
+    `gbrain-memory/__tests__/gbrain-doctor.test.ts` (working-vs-broken
+    detection + idempotent upgrade + rollback, against injected probes).
+
 ## Credential management — onboarding OPTIONAL keys (WAVE 1) — `onboarding/optional-keys.ts`
 
 The admin add/rotate path (`app/app/admin.tsx` → the gateway admin surface)

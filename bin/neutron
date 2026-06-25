@@ -12,6 +12,8 @@
 #   neutron status           is it loaded/running?
 #   neutron logs             tail the server log (Ctrl-C to stop)
 #   neutron backup           run one data-backup pass now
+#   neutron doctor           verify GBrain memory works (binary + round-trip)
+#   neutron doctor --upgrade re-install latest GBrain if upstream advanced, then verify
 #   neutron url              print the local chat URL
 #
 # The CLI resolves the checkout it belongs to from its own location (it lives at
@@ -41,6 +43,7 @@ BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
 CODE_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
 SERVICE="$CODE_DIR/neutron-service.sh"
 BACKUP="$CODE_DIR/neutron-backup.sh"
+DOCTOR="$CODE_DIR/gbrain-memory/gbrain-doctor.ts"
 
 NEUTRON_SERVICE_CODE_DIR=$CODE_DIR
 export NEUTRON_SERVICE_CODE_DIR
@@ -81,13 +84,35 @@ case "$cmd" in
   backup)
     [ -f "$BACKUP" ] || { printf 'neutron: backup helper missing at %s\n' "$BACKUP" >&2; exit 1; }
     exec sh "$BACKUP" run ;;
+  doctor)
+    # GBrain memory health-check + auto-upgrade (the cc-update-doctor analogue).
+    #   neutron doctor              verify gbrain works (binary, responds, round-trip)
+    #   neutron doctor --upgrade    re-install latest upstream if advanced, then verify
+    # Runs the deterministic TS doctor (gbrain-memory/gbrain-doctor.ts) via bun.
+    shift
+    [ -f "$DOCTOR" ] || { printf 'neutron: doctor helper missing at %s\n' "$DOCTOR" >&2; exit 1; }
+    _bun=${BUN_BIN:-$(command -v bun 2>/dev/null || true)}
+    [ -n "$_bun" ] || { printf 'neutron: bun not found — cannot run the gbrain doctor (set BUN_BIN or install bun)\n' >&2; exit 1; }
+    # Translate the user-facing `--upgrade` flag into the doctor's `upgrade`
+    # subcommand; default (no flag) is the read-only `check`. Remaining flags
+    # (--json / --force) pass straight through.
+    _sub=check
+    _rest=""
+    for _a in "$@"; do
+      case "$_a" in
+        --upgrade) _sub=upgrade ;;
+        *) _rest="$_rest $_a" ;;
+      esac
+    done
+    # shellcheck disable=SC2086
+    exec "$_bun" run "$DOCTOR" "$_sub" $_rest ;;
   url)
     printf 'http://127.0.0.1:%s/chat\n' "$(_port)" ;;
   ""|--help|-h)
     if [ "$_B" != "" ]; then
       printf '%s⚛ neutron%s  %sthe single-owner Open control CLI%s\n' "$_B" "$_R" "$_M" "$_R"
     fi
-    printf 'usage: neutron {start|stop|restart|status|logs|backup|url}\n' ;;
+    printf 'usage: neutron {start|stop|restart|status|logs|backup|doctor|url}\n' ;;
   *)
     printf 'neutron: unknown command: %s (try --help)\n' "$cmd" >&2; exit 1 ;;
 esac

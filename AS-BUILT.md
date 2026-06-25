@@ -2,6 +2,57 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-25 — GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
+
+**What shipped.** `gbrain-memory/gbrain-doctor.ts` — a deterministic, NO-LLM
+engine that keeps the GBrain memory binary CURRENT and VERIFIED, modeled on
+Vajra's `cc-update-doctor` (which keeps Claude Code current). Closes the
+follow-on gap from PR #51: `ensure_gbrain` pinned a point-in-time snapshot of an
+UNPINNED default branch with no upgrade path and no health check — "the binary
+exists" was all it ever proved.
+
+- **DOCTOR — `neutron doctor`.** Verifies gbrain actually WORKS via three
+  ordered, short-circuiting checks: (1) `gbrain` on PATH (`Bun.which`), (2) the
+  binary responds (`gbrain --version` exits 0), and (3) a real **memory
+  round-trip** — connect → `put_page` → empty-query `list_pages` read-back of a
+  sentinel slug, through the PRODUCTION transport (`GBrainStdioMcpClient` →
+  `GBrainMemoryStore`) against an EPHEMERAL throwaway brain (a temp
+  `GBRAIN_HOME`), so it exercises the live code path without touching the
+  owner's brain and needs no embedder (keyword/page store only). Catches the
+  present-but-broken case "binary exists" misses. Downstream checks are recorded
+  `skipped` when a prerequisite fails.
+- **AUTO-UPGRADE — `neutron doctor --upgrade`.** Resolves the latest upstream
+  commit (`git ls-remote https://github.com/garrytan/gbrain HEAD`) and
+  re-installs ONLY when it advanced past the recorded ref — IDEMPOTENT. Pins to
+  the resolved commit (`bun install -g github:garrytan/gbrain#<sha>`) for
+  reproducibility (gbrain ships no semver release tags, only an
+  `eval-run-*-baseline`). Re-runs the doctor to VERIFY; an upgrade that breaks
+  the round-trip ROLLS BACK to the previously-recorded ref (the cc-doctor
+  contract). State (`installed_ref`, `verified_ok`, `last_check_iso`) persists
+  at `<NEUTRON_HOME>/gbrain-doctor.json`. Honors the `NEUTRON_GBRAIN_INSTALL_CMD`
+  test seam (same one `ensure_gbrain` uses).
+- **Host-level scheduling, never in-process.** Neutron runs GBrain in **notify**
+  mode inside a running instance and NEVER silently auto-upgrades there — a
+  memory-substrate schema change mid-session is volatile state the owner must
+  gate (`gbrain-memory/version-notice.ts`). So the cadence runs OUT of the
+  instance: `install.sh` (after a successful `ensure_gbrain`, opt-out aware)
+  calls `neutron-service.sh install-doctor`, which writes a launchd
+  `StartInterval` agent (macOS) / systemd oneshot + `.timer` (Linux) running
+  `neutron doctor --upgrade` daily — the same boundary `cc-update-doctor` runs
+  at. Best-effort + non-fatal: a scheduling failure never aborts the install
+  (the doctor stays runnable by hand). `uninstall.sh` tears the schedule down.
+- **CLI.** `bin/neutron doctor [--upgrade] [--json] [--force]` (added to the
+  usage banner); `neutron-service.sh` gains `doctor`, `install-doctor`,
+  `uninstall-doctor`, `print-doctor`.
+
+**Testability.** Pure decision logic (`runDoctor`, `decideUpgrade`, `runUpgrade`,
+`resolveLatestUpstreamRef`, state I/O) is separated from the real probes/runner
+and exhaustively unit-tested with injected doubles —
+`gbrain-memory/__tests__/gbrain-doctor.test.ts` (24 tests): working-vs-broken
+doctor detection + short-circuit, idempotent upgrade decision, install-failure
+preserves the old ref, broken-upgrade rollback, first-install-broken-no-rollback.
+`tsc` clean (root + `gbrain-memory`); full `gbrain-memory` suite green (88).
+
 ## 2026-06-25 — Installer self-installs the GBrain memory binary (parity gap #1, P0)
 
 **What shipped.** `install.sh#ensure_gbrain` — the installer now provisions

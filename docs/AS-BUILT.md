@@ -2,6 +2,33 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## GBrain memory auto-upgrade + doctor (the cc-update-doctor analogue)
+
+**What shipped.** `gbrain-memory/gbrain-doctor.ts` — a deterministic, NO-LLM
+engine that keeps the GBrain memory binary CURRENT and VERIFIED, modeled on
+Vajra's `cc-update-doctor`. Closes the follow-on gap from PR #51: `ensure_gbrain`
+pinned an UNPINNED default-branch snapshot with no upgrade path and no health
+check.
+
+- **DOCTOR — `neutron doctor`.** Verifies gbrain WORKS, not just exists: binary
+  on PATH, `gbrain --version` responds, AND a real memory **round-trip**
+  (connect → `put_page` → `list_pages` read-back) through the production
+  `GBrainStdioMcpClient` → `GBrainMemoryStore` against an ephemeral throwaway
+  brain. Catches the present-but-broken case.
+- **AUTO-UPGRADE — `neutron doctor --upgrade`.** `git ls-remote` the upstream
+  HEAD, re-install only when it advanced (IDEMPOTENT), pinned to the resolved
+  commit (`github:garrytan/gbrain#<sha>`) for reproducibility, then VERIFY and
+  ROLL BACK a broken upgrade to the recorded ref. State in
+  `<NEUTRON_HOME>/gbrain-doctor.json`.
+- **Host-level cadence, never in-process** (preserves the notify-only doctrine
+  in `version-notice.ts`): `install.sh` schedules `neutron doctor --upgrade`
+  daily via `neutron-service.sh install-doctor` (launchd `StartInterval` /
+  systemd `.timer`), opt-out aware (`--no-gbrain`), best-effort. `bin/neutron
+  doctor` added to the CLI; `uninstall.sh` tears the schedule down.
+- **Tests.** `gbrain-memory/__tests__/gbrain-doctor.test.ts` (24): working-vs-
+  broken detection, idempotent upgrade, install-failure preserves old ref,
+  broken-upgrade rollback. `tsc` clean; `gbrain-memory` suite green (88).
+
 ## Parity gap #1 (P0) — installer self-installs the GBrain memory binary
 
 **What shipped.** `install.sh#ensure_gbrain` provisions Neutron's real memory

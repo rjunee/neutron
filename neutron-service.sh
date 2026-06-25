@@ -133,6 +133,19 @@ UNIT_PATH="$UNIT_DIR/$LABEL.service"
 LAUNCHCTL=${NEUTRON_SERVICE_LAUNCHCTL:-launchctl}
 SYSTEMCTL=${NEUTRON_SERVICE_SYSTEMCTL:-systemctl}
 
+# GBrain memory auto-upgrade + doctor timer (the cc-update-doctor analogue,
+# install-doctor/uninstall-doctor subcommands). A SEPARATE scheduled unit from
+# the server: launchd runs `neutron doctor --upgrade` on a daily StartInterval;
+# systemd a oneshot + daily timer. Out-of-process by design — Neutron NEVER
+# auto-upgrades GBrain inside a running instance (gbrain-memory/version-notice.ts).
+DOCTOR_LABEL=neutron-gbrain-doctor
+DOCTOR_PLIST_PATH="$HOME/Library/LaunchAgents/$DOCTOR_LABEL.plist"
+DOCTOR_UNIT_PATH="$UNIT_DIR/$DOCTOR_LABEL.service"
+DOCTOR_TIMER_PATH="$UNIT_DIR/$DOCTOR_LABEL.timer"
+DOCTOR_TS="$CODE_DIR/gbrain-memory/gbrain-doctor.ts"
+# Cadence (seconds). Default daily; override for tests / faster cadences.
+DOCTOR_INTERVAL=${NEUTRON_DOCTOR_INTERVAL:-86400}
+
 # ── service-file generators ──────────────────────────────────────────────────
 # launchd LaunchAgent plist. KeepAlive + RunAtLoad = boot + crash-restart. We
 # run the entrypoint directly (`bun run open/server.ts`) from WorkingDirectory,
@@ -204,6 +217,86 @@ StandardError=append:$LOG_FILE
 
 [Install]
 WantedBy=default.target
+UNIT
+}
+
+# ── gbrain doctor timer generators ─────────────────────────────────────────────
+# launchd LaunchAgent that runs `neutron doctor --upgrade` every DOCTOR_INTERVAL
+# seconds (StartInterval) plus once at load (RunAtLoad) so a fresh install is
+# verified immediately. NOT KeepAlive — this is a periodic one-shot, not a daemon.
+DOCTOR_LOG_FILE="$LOG_DIR/gbrain-doctor.log"
+generate_doctor_plist() {
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$DOCTOR_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$BUN_BIN</string>
+		<string>run</string>
+		<string>$DOCTOR_TS</string>
+		<string>upgrade</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>$CODE_DIR</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>$DOCTOR_INTERVAL</integer>
+	<key>StandardOutPath</key>
+	<string>$DOCTOR_LOG_FILE</string>
+	<key>StandardErrorPath</key>
+	<string>$DOCTOR_LOG_FILE</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>$HOME</string>
+		<key>NEUTRON_HOME</key>
+		<string>$DATA_DIR</string>
+		<key>PATH</key>
+		<string>$(_service_path)</string>
+	</dict>
+</dict>
+</plist>
+PLIST
+}
+
+# systemd oneshot service that runs one upgrade+verify pass.
+generate_doctor_service() {
+  cat <<UNIT
+[Unit]
+Description=Neutron GBrain memory auto-upgrade + doctor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$CODE_DIR
+ExecStart=$BUN_BIN run $DOCTOR_TS upgrade
+Environment=NEUTRON_HOME=$DATA_DIR
+Environment=PATH=$(_service_path)
+StandardOutput=append:$DOCTOR_LOG_FILE
+StandardError=append:$DOCTOR_LOG_FILE
+UNIT
+}
+
+# systemd timer that fires the oneshot daily (Persistent catches up a missed
+# run after the box was asleep — same posture as cc-update-doctor's cron).
+generate_doctor_timer() {
+  cat <<UNIT
+[Unit]
+Description=Schedule Neutron GBrain memory auto-upgrade + doctor
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${DOCTOR_INTERVAL}s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
 UNIT
 }
 
@@ -367,18 +460,100 @@ do_print() {
   esac
 }
 
+# ── gbrain doctor: run + schedule install/uninstall ────────────────────────────
+# Run one doctor pass NOW (verify, or verify+upgrade with --upgrade). Thin
+# wrapper so `neutron-service.sh doctor` works standalone; bin/neutron drives it.
+do_doctor() {
+  [ -f "$DOCTOR_TS" ] || die "gbrain doctor helper missing at $DOCTOR_TS"
+  [ -n "$BUN_BIN" ] || die "bun not found — cannot run the gbrain doctor (set BUN_BIN or install bun)"
+  _sub=check
+  [ "${1:-}" = "--upgrade" ] && _sub=upgrade
+  exec "$BUN_BIN" run "$DOCTOR_TS" "$_sub"
+}
+
+# Install the scheduled doctor timer. Best-effort + non-fatal: a failure to
+# schedule must never abort install.sh — the doctor is still runnable by hand
+# (`neutron doctor --upgrade`). Mirrors do_install's load/verify shape.
+do_install_doctor() {
+  [ -n "$BUN_BIN" ] || { warn "bun not found — skipping gbrain doctor schedule (run 'neutron doctor --upgrade' manually)"; return 0; }
+  mkdir -p "$LOG_DIR"
+  case "$OS" in
+    darwin)
+      mkdir -p "$(dirname "$DOCTOR_PLIST_PATH")"
+      generate_doctor_plist > "$DOCTOR_PLIST_PATH"
+      info "wrote gbrain doctor agent → $DOCTOR_PLIST_PATH (runs every ${DOCTOR_INTERVAL}s)"
+      _domain="gui/$(id -u)"
+      "$LAUNCHCTL" bootout "$_domain/$DOCTOR_LABEL" >/dev/null 2>&1 || true
+      "$LAUNCHCTL" bootstrap "$_domain" "$DOCTOR_PLIST_PATH" 2>/dev/null \
+        || "$LAUNCHCTL" load -w "$DOCTOR_PLIST_PATH" 2>/dev/null || true
+      "$LAUNCHCTL" enable "$_domain/$DOCTOR_LABEL" >/dev/null 2>&1 || true
+      if "$LAUNCHCTL" print "$_domain/$DOCTOR_LABEL" >/dev/null 2>&1; then
+        info "gbrain doctor scheduled ($DOCTOR_LABEL) — auto-upgrade + verify on a daily cadence"
+      else
+        warn "gbrain doctor agent did not load ($DOCTOR_LABEL) — run 'neutron doctor --upgrade' manually"
+      fi
+      ;;
+    linux)
+      mkdir -p "$UNIT_DIR"
+      generate_doctor_service > "$DOCTOR_UNIT_PATH"
+      generate_doctor_timer > "$DOCTOR_TIMER_PATH"
+      info "wrote gbrain doctor unit + timer → $DOCTOR_TIMER_PATH (every ${DOCTOR_INTERVAL}s)"
+      "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true
+      if "$SYSTEMCTL" --user enable --now "$DOCTOR_LABEL.timer" >/dev/null 2>&1; then
+        info "gbrain doctor scheduled ($DOCTOR_LABEL.timer) — auto-upgrade + verify on a daily cadence"
+      else
+        warn "could not enable $DOCTOR_LABEL.timer (no user session/bus?) — run 'neutron doctor --upgrade' manually"
+      fi
+      ;;
+    *)
+      warn "unsupported OS for gbrain doctor schedule — run 'neutron doctor --upgrade' manually"
+      ;;
+  esac
+  return 0
+}
+
+do_uninstall_doctor() {
+  case "$OS" in
+    darwin)
+      _domain="gui/$(id -u)"
+      "$LAUNCHCTL" bootout "$_domain/$DOCTOR_LABEL" >/dev/null 2>&1 \
+        || "$LAUNCHCTL" unload -w "$DOCTOR_PLIST_PATH" >/dev/null 2>&1 || true
+      [ -f "$DOCTOR_PLIST_PATH" ] && { rm -f "$DOCTOR_PLIST_PATH"; info "removed $DOCTOR_PLIST_PATH"; } || true
+      ;;
+    linux)
+      "$SYSTEMCTL" --user disable --now "$DOCTOR_LABEL.timer" >/dev/null 2>&1 || true
+      [ -f "$DOCTOR_TIMER_PATH" ] && { rm -f "$DOCTOR_TIMER_PATH"; info "removed $DOCTOR_TIMER_PATH"; } || true
+      [ -f "$DOCTOR_UNIT_PATH" ] && { rm -f "$DOCTOR_UNIT_PATH"; info "removed $DOCTOR_UNIT_PATH"; } || true
+      "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true
+      ;;
+    *) : ;;
+  esac
+}
+
+do_print_doctor() {
+  case "$OS" in
+    darwin) generate_doctor_plist ;;
+    linux)  generate_doctor_service; printf -- '---\n'; generate_doctor_timer ;;
+    *) die "unsupported OS for print-doctor" ;;
+  esac
+}
+
 # ── dispatch ─────────────────────────────────────────────────────────────────
 cmd=${1:-}
 case "$cmd" in
-  install)   do_install ;;
-  uninstall) do_uninstall ;;
-  start)     do_start ;;
-  stop)      do_stop ;;
-  restart)   do_restart ;;
-  status)    do_status ;;
-  logs)      do_logs ;;
-  print)     do_print ;;
+  install)          do_install ;;
+  uninstall)        do_uninstall ;;
+  start)            do_start ;;
+  stop)             do_stop ;;
+  restart)          do_restart ;;
+  status)           do_status ;;
+  logs)             do_logs ;;
+  print)            do_print ;;
+  doctor)           shift; do_doctor "$@" ;;
+  install-doctor)   do_install_doctor ;;
+  uninstall-doctor) do_uninstall_doctor ;;
+  print-doctor)     do_print_doctor ;;
   ""|--help|-h)
-    printf 'usage: neutron-service.sh {install|uninstall|start|stop|restart|status|logs|print}\n' ;;
+    printf 'usage: neutron-service.sh {install|uninstall|start|stop|restart|status|logs|print|doctor|install-doctor|uninstall-doctor|print-doctor}\n' ;;
   *) die "unknown command: $cmd (try --help)" ;;
 esac
