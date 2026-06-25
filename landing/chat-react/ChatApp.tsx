@@ -104,9 +104,31 @@ function AttachmentImagePart({ image }: { image: string }): React.JSX.Element {
   return <AttachmentImage src={image} />
 }
 
-/** Part-component map: route image parts through the authed renderer; text
- *  falls back to assistant-ui's default text part. */
-const PART_COMPONENTS = { Image: AttachmentImagePart } as const
+/**
+ * Custom text content part rendered with `smooth={false}`.
+ *
+ * Track B Phase 4 (edit/delete) — assistant-ui's default Text part smooths
+ * (typewriter-reveals) any text change whose new value extends the displayed
+ * one. An edit that APPENDS to a delivered message (e.g. "Hi Sam" → "Hi Sam
+ * (edited)") looks exactly like a streaming append, so the default defers the
+ * new body behind a `requestAnimationFrame` reveal — the edited text only
+ * appears once the animation runs (and never under jsdom/happy-dom, where RAF
+ * doesn't flush). Neutron already streams via chat-core partials, so we don't
+ * want assistant-ui's typewriter on top: disabling it makes the rendered body
+ * reflect the message synchronously, which is the correct UX for an edit (the
+ * new body shows immediately, not letter-by-letter). Mirrors the web default's
+ * `<p style="white-space: pre-line">` wrapper. */
+function TextPart(): React.JSX.Element {
+  return (
+    <p className="car-text" style={{ whiteSpace: 'pre-line' }}>
+      <MessagePartPrimitive.Text smooth={false} />
+    </p>
+  )
+}
+
+/** Part-component map: route image parts through the authed renderer and render
+ *  text without assistant-ui's typewriter smoothing (see {@link TextPart}). */
+const PART_COMPONENTS = { Image: AttachmentImagePart, Text: TextPart } as const
 
 /** Quick-reaction palette the web "add reaction" affordance offers. */
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const
