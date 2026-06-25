@@ -2,6 +2,55 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## PTY terminal-detection P1 — /rate-limit-options org-cap auto-stop (port row #4)
+
+**What shipped.** On the merged F1/F2/F3 substrate (PR #54), a third output-scan
+detector (`id: 'rate-limit-options-stop'`) registered on every session's
+`OutputScanner` in `persistent-repl-substrate.ts` auto-stops CC's
+`/rate-limit-options` org-monthly-cap picker. Port of Vajra's
+`pane-scan-watchdog.ts decideRateLimitOptionsAction` (research row #4). Ryan
+2026-05-23 directive: "I need you to handle when this pane appears. Just select
+stop and wait for limit to reset."
+
+- **Detect — BOTH cues required, in the bottom-30.** Fires only when the
+  normalized (whitespace-stripped) `bottomN: 30` view contains the slash command
+  (`/\/rate-limit-options/i`) **AND** option 3's verbatim text
+  (`/stopandwaitforlimittoreset/i`). A single cue (a conversational mention or a
+  doc quote of the command) must not trip it.
+- **Action.** `writeKey('3')` then `writeKey('enter')` (`keys: ['3','enter']`) on
+  the rising edge — selects "Stop and wait for limit to reset". `'3'` is
+  position-independent: pressing it highlights option 3 regardless of the
+  cursor's resting row.
+- **Positional bottom-30 guard is LOAD-BEARING.** Pressing `3` STOPS CC, so NO
+  new output scrolls the picker text away afterward — it just sits in the ring
+  until the cap resets. Without the bottom-N window the stale picker text would
+  satisfy `present` on every later tick and `select-stop` would re-inject
+  `3`+Enter into dead input for days (Vajra PR #132 r1). Once CC has stopped,
+  idle whitespace / a shell prompt pushes the picker text up past the bottom-30
+  threshold, which lets the detector correctly STOP firing. The F3 framework's
+  `buildDetectorContext` bottom-N windowing provides this guard.
+- **Fire-once / no double-press.** `debounceMs: 60_000` floor (Vajra
+  `RATE_LIMIT_OPTIONS_DEDUPE_MS`); the F3 framework stamps the latch + last-fire
+  BEFORE returning the fired detection, so a transport-failed keystroke write can
+  NOT retry next tick and double-send `3`+Enter (cross-cutting invariant §4).
+- **Doc-quote guard (free from F3).** `stripDocQuotes` drops fenced/diff/bullet
+  lines and blanks inline-backtick spans before `present` runs, so a markdown
+  brief or backtick-quoted mention of the command never fires the auto-press.
+- **Viewport pre-check lesson — architecturally obviated.** Vajra's Argus PR #132
+  r3 BLOCKER added a cheap viewport pre-check to gate an unconditional
+  `tmux capture-pane -S -100` (~120 extra captures/min). Neutron's ring is an
+  in-memory byte log, so the bottom-N read (`bottomNLines`) IS the cheap viewport
+  check — there is no separate scrollback recapture to gate.
+- **Tests.** `output-scan.test.ts` (+1, now 17): both-cue bottom-N frame →
+  `3`+`enter`; doc-quoted slash (inline-backtick and fenced) does NOT fire;
+  single-cue conversational mention does NOT fire; debounce stamped before await
+  (same-frame retry does not re-fire; re-arm within 60s suppressed, past 60s
+  fires). `tsc` clean — 21 pre-existing repo errors, zero new in touched files
+  (verified by applying the diff onto a fully-installed checkout; a bare worktree
+  reports inflated counts because workspace `@neutronai/*` packages aren't linked).
+- **Additive edit.** The output-scan registration is purely additive (new
+  constants + one `register` block) to limit conflict with sibling detector PRs.
+
 ## PTY terminal-detection P1 — auto-approve tool-use prompt (port row #2)
 
 **What shipped.** On the merged F1/F2/F3 substrate (PR #54), a second

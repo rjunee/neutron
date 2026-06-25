@@ -140,6 +140,24 @@ const DISCLAIMER_BOTTOM_N = 200
  *  clear them itself. */
 const TOOL_USE_QUESTION_RE = /doyouwantto(makethisedit|proceed|runthiscommand|create)/i
 const TOOL_USE_SELECTOR_RE = /❯1\.yes/i
+/** P1 /rate-limit-options org-cap auto-stop (port row #4). BOTH cues are
+ *  required in the bottom-30 lines: the `/rate-limit-options` slash command name
+ *  AND option 3's verbatim text `Stop and wait for limit to reset` — a single
+ *  cue (a conversational mention or a quoted brief) must not trip it. Matched
+ *  against the whitespace-stripped `normalized` view because Ink shreds the
+ *  picker across cursor-move escapes (same reason as the disclaimer/tool-use
+ *  cues; see pty-text.ts), so the spec substrings are carried here in their
+ *  space-free normalized form. */
+const RATE_LIMIT_OPTIONS_RE = /\/rate-limit-options/i
+const RATE_LIMIT_STOP_RE = /stopandwaitforlimittoreset/i
+/** Bottom-N window the rate-limit-options detector scans (Vajra
+ *  RATE_LIMIT_OPTIONS_BOTTOM_N_LINES). LOAD-BEARING positional guard — see the
+ *  registration comment for why. */
+const RATE_LIMIT_OPTIONS_BOTTOM_N = 30
+/** Debounce floor for the rate-limit-options auto-stop (Vajra
+ *  RATE_LIMIT_OPTIONS_DEDUPE_MS) — suppresses a re-press if the picker
+ *  re-renders briefly while the prior `3`+enter is still settling. */
+const RATE_LIMIT_OPTIONS_DEBOUNCE_MS = 60_000
 const REPL_DEBUG = process.env['NEUTRON_REPL_DEBUG'] === '1'
 /** After a turn's reply settles, hold the turn lock until the REPL's PTY has
  *  been quiet for this long (claude returned to idle) before allowing the next
@@ -1120,6 +1138,39 @@ async function spawnSession(
     present: (ctx) =>
       TOOL_USE_QUESTION_RE.test(ctx.normalized) && TOOL_USE_SELECTOR_RE.test(ctx.normalized),
     keys: ['1', 'enter'],
+  })
+  // P1: /rate-limit-options org-cap auto-stop (master-table row #4). When the
+  // Claude org hits its monthly usage cap, CC injects an interactive picker that
+  // blocks the REPL until an option is chosen. Ryan 2026-05-23 directive: "I need
+  // you to handle when this pane appears. Just select stop and wait for limit to
+  // reset." Option 3 = "Stop and wait for limit to reset", so `3`+`enter` selects
+  // it (position-independent — pressing `3` highlights option 3 regardless of the
+  // cursor's resting row).
+  //
+  // The positional bottom-30 guard (`RATE_LIMIT_OPTIONS_BOTTOM_N`) is LOAD-
+  // BEARING and unique to this detector: pressing `3` STOPS CC, so NO new output
+  // scrolls the picker text away afterward — it just sits in the ring until the
+  // monthly cap resets. Without the bottom-N window the stale picker text would
+  // satisfy `present` on every later tick and `select-stop` would re-inject
+  // `3`+Enter into the dead input for days (Vajra PR #132 r1). Once CC has
+  // stopped, idle whitespace / a shell prompt pushes the picker text up past the
+  // bottom-30 threshold, which lets the detector correctly STOP firing. The
+  // framework's bottom-N windowing (`buildDetectorContext`) provides this guard;
+  // the latch + debounce-before-await make the `3`+enter fire-once per rising
+  // edge (invariant §4) so a transport failure can't double-send.
+  //
+  // The Vajra "cheap viewport pre-check gates the recapture" lesson (Argus PR
+  // #132 r3 BLOCKER — an unconditional `tmux capture-pane -S -100` was ~120 extra
+  // captures/min) is architecturally obviated here: Neutron's ring is an
+  // in-memory byte log, so the bottom-N read (`bottomNLines`) is already the
+  // cheap viewport check — there is no separate scrollback recapture to gate.
+  session.scanner.register({
+    id: 'rate-limit-options-stop',
+    bottomN: RATE_LIMIT_OPTIONS_BOTTOM_N,
+    debounceMs: RATE_LIMIT_OPTIONS_DEBOUNCE_MS,
+    present: (ctx) =>
+      RATE_LIMIT_OPTIONS_RE.test(ctx.normalized) && RATE_LIMIT_STOP_RE.test(ctx.normalized),
+    keys: ['3', 'enter'],
   })
   // The spawn `const child` isn't assigned when the `onData` closure is defined,
   // so route fired-detector keystrokes through this mirror (set right after
