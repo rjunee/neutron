@@ -171,6 +171,41 @@ describe('ChatApp render (happy-dom)', () => {
     })
     expect(container.textContent).toContain('👍 1')
 
+    // Track B Phase 4 (edit/delete) — an edit_update rewrites the rendered body
+    // + shows the "edited" marker; a later delete renders the tombstone.
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'edit_update',
+        message_id: 'm1',
+        seq: 1,
+        rev: 1,
+        body: 'Hi Sam (edited)',
+        deleted: false,
+        edited_at: 50,
+        ts: 5,
+      })
+      await tick()
+    })
+    expect(container.textContent).toContain('Hi Sam (edited)')
+    expect(container.textContent).toContain('edited')
+
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'edit_update',
+        message_id: 'm1',
+        seq: 1,
+        rev: 2,
+        body: '',
+        deleted: true,
+        edited_at: 60,
+        ts: 6,
+      })
+      await tick()
+    })
+    expect(container.textContent).toContain('This message was deleted')
+
     await act(async () => {
       root.unmount()
     })

@@ -89,7 +89,6 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
     message_id: incoming.message_id ?? existing.message_id,
     seq: incoming.seq ?? existing.seq,
     role: existing.role,
-    body: incoming.body.length > 0 ? incoming.body : existing.body,
     project_id: incoming.project_id ?? existing.project_id,
     attachments: incoming.attachments ?? existing.attachments,
     // Keep the original optimistic timestamp so the bubble doesn't jump.
@@ -106,6 +105,68 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
     // higher-`rev` aggregate replaces the lower one wholesale. A re-delivered
     // message (carrying no reaction info) leaves the stored reactions untouched.
     ...pickReactionState(existing, incoming),
+    // Track B Phase 4 (edit/delete) — body + edited_at + deleted are governed by
+    // a monotonic edit_rev (last-writer-wins), so an edit/delete update replaces
+    // them and a re-delivery of the ORIGINAL body never resurrects an edited one.
+    // pickEditState owns `body` (incl. the normal optimistic→echo reconciliation).
+    ...pickEditState(existing, incoming),
+  }
+}
+
+/**
+ * Pick a message's edit state (body + edited_at + deleted + edit_rev) when
+ * merging `incoming` onto `existing`. Like reactions, edits are NOT a union: the
+ * aggregate carrying the higher monotonic `edit_rev` wins (last-writer-wins).
+ * This function OWNS the merged `body` so an edit/delete replaces it and a plain
+ * re-delivery of the original body never clobbers an edited/tombstoned one:
+ *
+ *   - incoming has NO edit info (`edit_rev` absent) → keep existing edit state;
+ *     body follows the normal optimistic→echo merge ONLY when nothing was edited;
+ *   - incoming `rev` >= existing `rev` (or existing has none) → take incoming
+ *     (a delete normalizes body to `''`, the tombstone);
+ *   - otherwise the incoming edit is stale → keep existing.
+ *
+ * Idempotent + order-independent: replaying the same or an older update is a
+ * no-op on the rendered body.
+ */
+export function pickEditState(
+  existing: Pick<ChatMessage, 'body' | 'edited_at' | 'deleted' | 'edit_rev'>,
+  incoming: Pick<ChatMessage, 'body' | 'edited_at' | 'deleted' | 'edit_rev'>,
+): { body: string; edited_at: number | null; deleted: boolean; edit_rev: number | null } {
+  const incomingRev = incoming.edit_rev
+  const existingRev = existing.edit_rev
+  if (incomingRev === null || incomingRev === undefined) {
+    // No edit authority on incoming (plain apply / re-delivery / receipt /
+    // reaction update). Preserve any edit we already hold; otherwise the body
+    // follows the normal optimistic-bubble → server-echo reconciliation.
+    if (existingRev !== null && existingRev !== undefined) {
+      return {
+        body: existing.body,
+        edited_at: existing.edited_at ?? null,
+        deleted: existing.deleted ?? false,
+        edit_rev: existingRev,
+      }
+    }
+    return {
+      body: incoming.body.length > 0 ? incoming.body : existing.body,
+      edited_at: existing.edited_at ?? null,
+      deleted: existing.deleted ?? false,
+      edit_rev: null,
+    }
+  }
+  if (existingRev === null || existingRev === undefined || incomingRev >= existingRev) {
+    return {
+      body: incoming.deleted === true ? '' : incoming.body,
+      edited_at: incoming.edited_at ?? null,
+      deleted: incoming.deleted ?? false,
+      edit_rev: incomingRev,
+    }
+  }
+  return {
+    body: existing.body,
+    edited_at: existing.edited_at ?? null,
+    deleted: existing.deleted ?? false,
+    edit_rev: existingRev,
   }
 }
 

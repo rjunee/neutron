@@ -41,6 +41,8 @@ import type {
   OutgoingMessage,
 } from '../../types.ts'
 import type {
+  AppChatEditAction,
+  AppChatEditLog,
   AppChatMessageLog,
   AppChatReactionAction,
   AppChatReactionLog,
@@ -48,6 +50,7 @@ import type {
   AppChatReceiptState,
   AppChatRow,
 } from '../../../persistence/index.ts'
+import { AppChatEditNotAuthorizedError } from '../../../persistence/index.ts'
 import type { AppWsSessionRegistry } from './session-registry.ts'
 import {
   sanitizeProjectId,
@@ -55,6 +58,7 @@ import {
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentMessageDocRef,
   type AppWsOutboundAgentMessageUploadAffordance,
+  type AppWsOutboundEditUpdate,
   type AppWsOutboundReactionUpdate,
   type AppWsOutboundReceiptUpdate,
   type AppWsOutboundUserMessageEcho,
@@ -101,6 +105,14 @@ export interface AppWsAdapterOptions {
    * reaction state on resume. ABSENT → reactions are inert (legacy behaviour).
    */
   reaction_log?: AppChatReactionLog
+  /**
+   * Track B Phase 4 (message edit/delete) — durable per-message edit log. When
+   * supplied, the adapter records author-authorized edit/delete mutations via
+   * {@link AppWsAdapter.recordEdit} and fans the message's new state as an
+   * `edit_update`, and replays edit state on resume. ABSENT → edit/delete is
+   * inert (legacy behaviour).
+   */
+  edit_log?: AppChatEditLog
 }
 
 export class AppWsAdapter implements ChannelAdapter {
@@ -112,6 +124,7 @@ export class AppWsAdapter implements ChannelAdapter {
   private readonly chat_log: AppChatMessageLog | undefined
   private readonly receipt_log: AppChatReceiptLog | undefined
   private readonly reaction_log: AppChatReactionLog | undefined
+  private readonly edit_log: AppChatEditLog | undefined
 
   constructor(opts: AppWsAdapterOptions) {
     this.registry = opts.registry
@@ -121,6 +134,7 @@ export class AppWsAdapter implements ChannelAdapter {
     this.chat_log = opts.chat_log
     this.receipt_log = opts.receipt_log
     this.reaction_log = opts.reaction_log
+    this.edit_log = opts.edit_log
   }
 
   /** Whether a durable message log is wired (enables seq + resume). */
@@ -136,6 +150,11 @@ export class AppWsAdapter implements ChannelAdapter {
   /** Whether the reaction log is wired (enables emoji reactions). */
   get hasReactions(): boolean {
     return this.reaction_log !== undefined
+  }
+
+  /** Whether the edit log is wired (enables message edit/delete). */
+  get hasEdits(): boolean {
+    return this.edit_log !== undefined
   }
 
   /**
@@ -547,6 +566,95 @@ export class AppWsAdapter implements ChannelAdapter {
         message_id: agg.message_id,
         rev: agg.rev,
         reactions: agg.reactions.map((r) => ({ emoji: r.emoji, device_id: r.device_id })),
+        ts,
+      }
+      if (agg.seq > 0) env.seq = agg.seq
+      return env
+    })
+  }
+
+  /**
+   * Track B Phase 4 (message edit/delete) — record an author-authorized edit or
+   * delete (the editor device is set from the socket, or
+   * `APP_CHAT_AGENT_DEVICE_ID` for an agent-issued edit) and fan an `edit_update`
+   * carrying the message's new body + tombstone flag + monotonic `rev` to EVERY
+   * device on the topic, so each device converges. Returns the fanned envelope
+   * (for tests / telemetry), or `null` when the edit log isn't wired / the input
+   * is empty. RE-THROWS {@link AppChatEditNotAuthorizedError} so the surface can
+   * answer the editor with a `not_authorized` frame; any other persist error is
+   * failure-isolated (warn + `null`) rather than thrown into the socket loop.
+   */
+  async recordEdit(input: {
+    channel_topic_id: string
+    message_id: string
+    editor_device_id: string
+    action: AppChatEditAction
+    body?: string
+    project_id?: string
+  }): Promise<AppWsOutboundEditUpdate | null> {
+    if (this.edit_log === undefined) return null
+    if (input.message_id.length === 0 || input.editor_device_id.length === 0) return null
+    const body = input.action === 'edit' ? (input.body ?? '') : ''
+    if (input.action === 'edit' && body.length === 0) return null
+    let agg
+    try {
+      agg = await this.edit_log.record({
+        topic_id: input.channel_topic_id,
+        message_id: input.message_id,
+        editor_device_id: input.editor_device_id,
+        action: input.action,
+        body,
+        at: this.now(),
+      })
+    } catch (err) {
+      // Authorization failures are the editor's problem, not the socket's — let
+      // the surface map them to a `not_authorized` error frame.
+      if (err instanceof AppChatEditNotAuthorizedError) throw err
+      console.warn(
+        `[app-ws] topic=${input.channel_topic_id} edit persist failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      return null
+    }
+    const env: AppWsOutboundEditUpdate = {
+      v: 1,
+      type: 'edit_update',
+      message_id: input.message_id,
+      rev: agg.rev,
+      body: agg.body,
+      deleted: agg.deleted,
+      edited_at: agg.edited_at,
+      ts: this.now(),
+    }
+    if (agg.seq > 0) env.seq = agg.seq
+    if (input.project_id !== undefined) env.project_id = input.project_id
+    this.registry.send(input.channel_topic_id, env)
+    return env
+  }
+
+  /**
+   * Track B Phase 4 (message edit/delete) — replay edit state to a reconnecting
+   * device after the message replay. Returns one `edit_update` per edited/deleted
+   * message (with seq > after_seq), ascending by seq. `[]` when the edit log
+   * isn't wired.
+   */
+  async replayEditsAfter(
+    channel_topic_id: string,
+    after_seq: number,
+  ): Promise<AppWsOutboundEditUpdate[]> {
+    if (this.edit_log === undefined) return []
+    const aggregates = await this.edit_log.aggregatesAfter(channel_topic_id, after_seq)
+    const ts = this.now()
+    return aggregates.map((agg) => {
+      const env: AppWsOutboundEditUpdate = {
+        v: 1,
+        type: 'edit_update',
+        message_id: agg.message_id,
+        rev: agg.rev,
+        body: agg.body,
+        deleted: agg.deleted,
+        edited_at: agg.edited_at,
         ts,
       }
       if (agg.seq > 0) env.seq = agg.seq

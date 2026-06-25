@@ -27,6 +27,17 @@ export {
   type AppChatReactionAggregate,
   type AppChatReactionStoreOptions,
 } from './app-chat-reactions.ts'
+export {
+  AppChatEditStore,
+  AppChatEditNotAuthorizedError,
+  APP_CHAT_AGENT_DEVICE_ID,
+  DEFAULT_EDIT_REPLAY_LIMIT,
+  type AppChatEditLog,
+  type AppChatEditAction,
+  type AppChatEditRecordInput,
+  type AppChatEditAggregate,
+  type AppChatEditStoreOptions,
+} from './app-chat-edits.ts'
 export { PersistenceError, BusyRetryExhaustedError } from './errors.ts'
 export {
   withBusyRetry,

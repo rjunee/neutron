@@ -25,10 +25,12 @@ import { SendQueue } from './send-queue.ts'
 import { InMemoryStore, type Store } from './store.ts'
 import { SyncEngine } from './sync-engine.ts'
 import {
+  normalizeEditUpdate,
   normalizeInbound,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
   type ChatMessage,
+  type OutboundEdit,
   type OutboundReaction,
   type OutboundReceipt,
   type ReactionAction,
@@ -198,6 +200,15 @@ export class WebChatSession {
       if (applied) this.emitChange()
       return
     }
+    // Track B Phase 4 (edit/delete) — an edit_update carries the message's new
+    // body + tombstone flag + monotonic rev. Apply it (rev-LWW) so the bubble
+    // re-renders; no-op if the message isn't local yet or the update is stale.
+    const edit = normalizeEditUpdate(data)
+    if (edit !== null) {
+      const { applied } = await this.engine.applyEditUpdate(this.topic_id, edit)
+      if (applied) this.emitChange()
+      return
+    }
     const msg = normalizeInbound(data)
     if (msg === null) return
     await this.engine.applyInbound(this.topic_id, msg)
@@ -236,6 +247,34 @@ export class WebChatSession {
   react(message_id: string, emoji: string, action: ReactionAction): boolean {
     if (message_id.length === 0 || emoji.length === 0) return false
     const env: OutboundReaction = { v: 1, type: 'reaction', message_id, emoji, action }
+    return this.ws.send(env)
+  }
+
+  /**
+   * Edit a message's body (Track B Phase 4). Sends an `edit` frame over the
+   * socket; the server authorizes it against the message's author (a human
+   * device may edit `user` messages) and fans an `edit_update` (new body +
+   * monotonic rev) back to every device, which {@link handleInbound} applies.
+   * The authoritative state is the server's fanned aggregate. Best-effort over
+   * the open socket; a frame sent while offline returns `false` and the UI can
+   * re-issue. An empty body is rejected (use {@link deleteMessage} to remove).
+   */
+  editMessage(message_id: string, body: string): boolean {
+    if (message_id.length === 0 || body.length === 0) return false
+    const env: OutboundEdit = { v: 1, type: 'edit', message_id, action: 'edit', body }
+    return this.ws.send(env)
+  }
+
+  /**
+   * Delete (tombstone) a message (Track B Phase 4). Sends an `edit` frame with
+   * `action:'delete'`; the server authorizes it against the message's author and
+   * fans an `edit_update` with `deleted:true` to every device, which clears the
+   * body and renders a "message deleted" placeholder. Best-effort over the open
+   * socket.
+   */
+  deleteMessage(message_id: string): boolean {
+    if (message_id.length === 0) return false
+    const env: OutboundEdit = { v: 1, type: 'edit', message_id, action: 'delete' }
     return this.ws.send(env)
   }
 

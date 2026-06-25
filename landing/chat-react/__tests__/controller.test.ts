@@ -251,4 +251,48 @@ describe('NeutronChatController — view model over chat-core', () => {
     agent = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
     expect(agent?.reactions).toEqual([])
   })
+
+  it('reflects an edit_update + delete on the VM and sends edit/delete frames (Track B Phase 4)', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'helo', ts: 1 })
+    await tick()
+
+    // An edit_update rewrites the body + sets the edited marker.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'edit_update',
+      message_id: 'm1',
+      seq: 1,
+      rev: 1,
+      body: 'hello',
+      deleted: false,
+      edited_at: 50,
+      ts: 2,
+    })
+    await tick()
+    let msg = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
+    expect(msg?.text).toBe('hello')
+    expect(msg?.edited).toBe(true)
+    expect(msg?.deleted).toBe(false)
+
+    // editMessage()/deleteMessage() put frames on the wire.
+    controller.editMessage('m1', 'hello there')
+    controller.deleteMessage('m1')
+    const editFrames = sockets[0]!.sent
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((e) => e['type'] === 'edit')
+    expect(editFrames).toContainEqual({ v: 1, type: 'edit', message_id: 'm1', action: 'edit', body: 'hello there' })
+    expect(editFrames).toContainEqual({ v: 1, type: 'edit', message_id: 'm1', action: 'delete' })
+
+    // A higher-rev delete tombstones the message.
+    sockets[0]!.deliver({ v: 1, type: 'edit_update', message_id: 'm1', seq: 1, rev: 2, body: '', deleted: true, edited_at: 60, ts: 3 })
+    await tick()
+    msg = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
+    expect(msg?.deleted).toBe(true)
+    expect(msg?.text).toBe('')
+    expect(msg?.edited).toBe(false)
+  })
 })

@@ -104,9 +104,31 @@ function AttachmentImagePart({ image }: { image: string }): React.JSX.Element {
   return <AttachmentImage src={image} />
 }
 
-/** Part-component map: route image parts through the authed renderer; text
- *  falls back to assistant-ui's default text part. */
-const PART_COMPONENTS = { Image: AttachmentImagePart } as const
+/**
+ * Custom text content part rendered with `smooth={false}`.
+ *
+ * Track B Phase 4 (edit/delete) — assistant-ui's default Text part smooths
+ * (typewriter-reveals) any text change whose new value extends the displayed
+ * one. An edit that APPENDS to a delivered message (e.g. "Hi Sam" → "Hi Sam
+ * (edited)") looks exactly like a streaming append, so the default defers the
+ * new body behind a `requestAnimationFrame` reveal — the edited text only
+ * appears once the animation runs (and never under jsdom/happy-dom, where RAF
+ * doesn't flush). Neutron already streams via chat-core partials, so we don't
+ * want assistant-ui's typewriter on top: disabling it makes the rendered body
+ * reflect the message synchronously, which is the correct UX for an edit (the
+ * new body shows immediately, not letter-by-letter). Mirrors the web default's
+ * `<p style="white-space: pre-line">` wrapper. */
+function TextPart(): React.JSX.Element {
+  return (
+    <p className="car-text" style={{ whiteSpace: 'pre-line' }}>
+      <MessagePartPrimitive.Text smooth={false} />
+    </p>
+  )
+}
+
+/** Part-component map: route image parts through the authed renderer and render
+ *  text without assistant-ui's typewriter smoothing (see {@link TextPart}). */
+const PART_COMPONENTS = { Image: AttachmentImagePart, Text: TextPart } as const
 
 /** Quick-reaction palette the web "add reaction" affordance offers. */
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const
@@ -188,12 +210,105 @@ function MessageReactions(): React.JSX.Element | null {
   )
 }
 
+/**
+ * Track B Phase 4 (edit/delete) — per-message edit state + author edit/delete
+ * callbacks, shared to the bubbles (which only get the render id via
+ * `useMessage`). Keyed by render `id`; `canMutate` marks the bubbles this client
+ * authored (so only the user's own `user` messages offer Edit/Delete — the agent
+ * is immutable from the web client; the server would reject it anyway).
+ */
+interface EditsCtx {
+  byRenderId: Map<
+    string,
+    { messageId: string | null; text: string; edited: boolean; deleted: boolean; canMutate: boolean }
+  >
+  onEdit: (messageId: string, body: string) => void
+  onDelete: (messageId: string) => void
+}
+const EditsContext = createContext<EditsCtx | null>(null)
+
+/** The "edited" marker shown under an edited (non-deleted) bubble. */
+function EditedMarker(): React.JSX.Element | null {
+  const ctx = useContext(EditsContext)
+  const message = useMessage()
+  if (ctx === null) return null
+  const entry = ctx.byRenderId.get(message.id)
+  if (entry === undefined || !entry.edited || entry.deleted) return null
+  return <span className="car-edited" aria-label="edited">edited</span>
+}
+
+/**
+ * Edit/Delete affordance for a user's own message + the in-place editor. Reads
+ * the message id + current text from {@link EditsContext}. Editing swaps the
+ * bubble actions for a textarea with Save/Cancel; Delete tombstones the message.
+ * Renders nothing for a bubble the client can't mutate or that's deleted.
+ */
+function MessageActions(): React.JSX.Element | null {
+  const ctx = useContext(EditsContext)
+  const message = useMessage()
+  const [draft, setDraft] = useState<string | null>(null)
+  if (ctx === null) return null
+  const entry = ctx.byRenderId.get(message.id)
+  if (entry === undefined || entry.messageId === null || entry.deleted || !entry.canMutate) return null
+  const messageId = entry.messageId
+
+  if (draft !== null) {
+    const save = (): void => {
+      const next = draft.trim()
+      if (next.length > 0 && next !== entry.text) ctx.onEdit(messageId, next)
+      setDraft(null)
+    }
+    return (
+      <div className="car-edit">
+        <textarea
+          className="car-edit-input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          aria-label="Edit message"
+          autoFocus
+        />
+        <div className="car-edit-actions">
+          <button type="button" className="car-edit-btn" onClick={() => setDraft(null)}>
+            Cancel
+          </button>
+          <button type="button" className="car-edit-btn car-edit-save" onClick={save}>
+            Save
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="car-msg-actions">
+      <button
+        type="button"
+        className="car-msg-action"
+        onClick={() => setDraft(entry.text)}
+        aria-label="Edit message"
+      >
+        Edit
+      </button>
+      <button
+        type="button"
+        className="car-msg-action car-msg-action-danger"
+        onClick={() => ctx.onDelete(messageId)}
+        aria-label="Delete message"
+      >
+        Delete
+      </button>
+    </div>
+  )
+}
+
 function UserMessage(): React.JSX.Element {
   return (
     <MessagePrimitive.Root className="car-row car-row-user">
       <div className="car-bubble car-bubble-user">
         <MessagePrimitive.Parts components={PART_COMPONENTS} />
+        <EditedMarker />
         <MessageReactions />
+        <MessageActions />
       </div>
     </MessagePrimitive.Root>
   )
@@ -207,6 +322,7 @@ function AssistantMessage(): React.JSX.Element {
       </div>
       <div className="car-bubble car-bubble-agent">
         <MessagePrimitive.Parts components={PART_COMPONENTS} />
+        <EditedMarker />
         <MessageReactions />
       </div>
     </MessagePrimitive.Root>
@@ -222,6 +338,26 @@ function buildReactionIndex(
   const map = new Map<string, { messageId: string | null; reactions: ReactionChip[] }>()
   for (const m of messages) {
     map.set(m.id, { messageId: m.messageId, reactions: m.reactions })
+  }
+  return map
+}
+
+/** Track B Phase 4 (edit/delete) — render-id → {messageId,text,edited,deleted,
+ *  canMutate} lookup the bubbles read for the edited marker + edit/delete UI. */
+function buildEditIndex(
+  messages: readonly RenderMessage[],
+): EditsCtx['byRenderId'] {
+  const map: EditsCtx['byRenderId'] = new Map()
+  for (const m of messages) {
+    map.set(m.id, {
+      messageId: m.messageId,
+      text: m.text,
+      edited: m.edited,
+      deleted: m.deleted,
+      // Author-only: the web client owns the `user` messages on its topic; the
+      // agent's are immutable here (server rejects a cross-author mutation).
+      canMutate: m.role === 'user' && !m.streaming,
+    })
   }
   return map
 }
@@ -483,12 +619,18 @@ export function ChatApp({
     onReact: (messageId, emoji, reactedBySelf) =>
       controller.react(messageId, emoji, reactedBySelf ? 'remove' : 'add'),
   }
+  const editsCtx: EditsCtx = {
+    byRenderId: buildEditIndex(vm.messages),
+    onEdit: (messageId, body) => controller.editMessage(messageId, body),
+    onDelete: (messageId) => controller.deleteMessage(messageId),
+  }
   const uploadsCtx: UploadsCtx = fetchImpl !== undefined
     ? { token: config.token, origin: config.origin, fetchImpl }
     : { token: config.token, origin: config.origin }
   return (
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
+    <EditsContext.Provider value={editsCtx}>
     <div className="car-shell">
       {config.projects.length > 0 && (
         <TopicRail
@@ -521,6 +663,7 @@ export function ChatApp({
         </ThreadPrimitive.Root>
       </main>
     </div>
+    </EditsContext.Provider>
     </ReactionsContext.Provider>
     </UploadsContext.Provider>
   )

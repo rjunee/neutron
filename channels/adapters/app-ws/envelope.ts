@@ -89,6 +89,23 @@ export interface AppWsInboundReaction {
   seq?: number
 }
 
+/**
+ * Track B Phase 4 (message edit/delete) — a client edits or deletes a message it
+ * authored. The server AUTHORIZES it against the message's author (resolved from
+ * the message log) — a human socket may mutate `user` messages, the agent may
+ * mutate `agent` messages — and the editor is taken from the SOCKET, never the
+ * frame. `body` is the new text on an `edit`; absent/ignored on a `delete`.
+ * `seq` is the message's server seq when the client knows it; omitted otherwise.
+ */
+export interface AppWsInboundEdit {
+  v: 1
+  type: 'edit'
+  message_id: string
+  action: 'edit' | 'delete'
+  body?: string
+  seq?: number
+}
+
 export type AppWsInbound = AppWsInboundUserMessage
 
 export interface AppWsOutboundSessionReady {
@@ -310,6 +327,33 @@ export interface AppWsOutboundReactionUpdate {
   project_id?: string
 }
 
+/**
+ * Track B Phase 4 (message edit/delete) — the current edit state of one message.
+ * Fanned out to EVERY device on the topic whenever the author edits/deletes a
+ * message, and replayed (per edited/deleted message) after a resume. The client
+ * REPLACES its body with whichever `edit_update` carries the highest `rev`
+ * (last-writer-wins, chat-core `pickEditState`); a `deleted` update tombstones
+ * the bubble and clears the body.
+ */
+export interface AppWsOutboundEditUpdate {
+  v: 1
+  type: 'edit_update'
+  message_id: string
+  /** The message's server seq (lets a client scope/ignore stale updates). */
+  seq?: number
+  /** Monotonic per-message edit revision (last-writer-wins key). */
+  rev: number
+  /** The message's current body after the edit (`''` for a delete tombstone). */
+  body: string
+  /** True once the message has been tombstoned (deleted). */
+  deleted: boolean
+  /** unix-ms time of the edit/delete (drives the "edited" marker). */
+  edited_at: number
+  ts: number
+  /** P5.2 parity — project the underlying message belongs to. */
+  project_id?: string
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
@@ -317,6 +361,7 @@ export type AppWsOutbound =
   | AppWsOutboundAgentMessagePartial
   | AppWsOutboundReceiptUpdate
   | AppWsOutboundReactionUpdate
+  | AppWsOutboundEditUpdate
   | AppWsOutboundError
 
 /**
@@ -457,6 +502,42 @@ export function sanitizeReactionEmoji(raw: unknown): string | null {
     if (/\s/u.test(ch)) return null
   }
   return raw
+}
+
+/**
+ * Track B Phase 4 (edit/delete) — decode a
+ * `{ v:1, type:'edit', message_id, action:'edit'|'delete', body? }` frame.
+ * SEPARATE from the message / resume / receipt / reaction decoders so each path
+ * keeps its narrow type. Returns `null` for anything malformed. The editor
+ * device id is intentionally NOT read from the frame — the surface attributes
+ * the mutation to the socket's own device id and authorizes it against the
+ * message's author, so a client can't forge an edit as another party. An `edit`
+ * REQUIRES a non-empty body bounded by {@link MAX_USER_MESSAGE_LEN}; a `delete`
+ * ignores any body.
+ */
+export function decodeAppWsEdit(raw: unknown): AppWsInboundEdit | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'edit') return null
+  if (e['action'] !== 'edit' && e['action'] !== 'delete') return null
+  const message_id = e['message_id']
+  if (typeof message_id !== 'string' || message_id.length === 0 || message_id.length > 256) {
+    return null
+  }
+  const action = e['action']
+  const out: AppWsInboundEdit = { v: 1, type: 'edit', message_id, action }
+  if (action === 'edit') {
+    const body = e['body']
+    if (typeof body !== 'string') return null
+    if (body.length === 0 || body.length > MAX_USER_MESSAGE_LEN) return null
+    out.body = body
+  }
+  const raw_seq = e['seq']
+  if (typeof raw_seq === 'number' && Number.isFinite(raw_seq)) {
+    out.seq = Math.max(0, Math.trunc(raw_seq))
+  }
+  return out
 }
 
 /**

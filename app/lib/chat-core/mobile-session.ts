@@ -35,6 +35,7 @@
 import {
   ChatWsClient,
   InMemoryStore,
+  normalizeEditUpdate,
   normalizeInbound,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
@@ -42,6 +43,7 @@ import {
   SyncEngine,
   type ChatMessage,
   type ConnStatus,
+  type OutboundEdit,
   type OutboundReaction,
   type OutboundReceipt,
   type ReactionAction,
@@ -214,6 +216,29 @@ export class MobileChatSession {
     return this.ws.send(env);
   }
 
+  /**
+   * Edit a message's body (Track B Phase 4). Sends an `edit` frame; the server
+   * authorizes it against the message's author and fans an `edit_update` to
+   * every device, which {@link handleInbound} applies. An empty body is rejected
+   * (use {@link deleteMessage} to remove). Returns whether the frame was sent.
+   */
+  editMessage(message_id: string, body: string): boolean {
+    if (message_id.length === 0 || body.length === 0) return false;
+    const env: OutboundEdit = { v: 1, type: 'edit', message_id, action: 'edit', body };
+    return this.ws.send(env);
+  }
+
+  /**
+   * Delete (tombstone) a message (Track B Phase 4). Sends an `edit` frame with
+   * `action:'delete'`; the server authorizes + fans an `edit_update` with
+   * `deleted:true` to every device. Returns whether the frame was sent.
+   */
+  deleteMessage(message_id: string): boolean {
+    if (message_id.length === 0) return false;
+    const env: OutboundEdit = { v: 1, type: 'edit', message_id, action: 'delete' };
+    return this.ws.send(env);
+  }
+
   private async handleInbound(data: unknown): Promise<void> {
     // Hand the raw frame to the UI first so streaming partials + typing
     // brackets render even though chat-core only persists final messages.
@@ -240,6 +265,15 @@ export class MobileChatSession {
     const reaction = normalizeReactionUpdate(data);
     if (reaction !== null) {
       const { applied } = await this.engine.applyReactionUpdate(this.topic_id, reaction);
+      if (applied) this.emitChange();
+      return;
+    }
+    // Track B Phase 4 (edit/delete) — an edit_update carries the message's new
+    // body + tombstone flag + rev. Apply (rev-LWW) so the bubble re-renders;
+    // no-op if the message isn't local yet or the update is stale.
+    const edit = normalizeEditUpdate(data);
+    if (edit !== null) {
+      const { applied } = await this.engine.applyEditUpdate(this.topic_id, edit);
       if (applied) this.emitChange();
       return;
     }

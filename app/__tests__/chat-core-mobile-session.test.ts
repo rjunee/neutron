@@ -343,6 +343,46 @@ describe('MobileChatSession — offline send-queue + resume', () => {
     msgs = await session.messages();
     expect(msgs.find((m) => m.message_id === 'a1')?.reactions ?? null).toBeNull();
   });
+
+  it('applies an edit_update + delete tombstone and sends edit/delete frames (Track B Phase 4)', async () => {
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a1', seq: 1, body: 'helo', ts: 2 });
+    await tick();
+
+    // An edit_update rewrites the stored message body.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'edit_update',
+      message_id: 'a1',
+      seq: 1,
+      rev: 1,
+      body: 'hello',
+      deleted: false,
+      edited_at: 50,
+      ts: 3,
+    });
+    await tick();
+    let m = (await session.messages()).find((x) => x.message_id === 'a1');
+    expect(m?.body).toBe('hello');
+    expect(m?.edited_at).toBe(50);
+
+    // editMessage()/deleteMessage() put frames on the wire.
+    session.editMessage('a1', 'hello there');
+    expect(sockets[0]!.sentEnvelopes()).toContainEqual({ v: 1, type: 'edit', message_id: 'a1', action: 'edit', body: 'hello there' })
+    session.deleteMessage('a1');
+    expect(sockets[0]!.sentEnvelopes()).toContainEqual({ v: 1, type: 'edit', message_id: 'a1', action: 'delete' })
+
+    // A higher-rev delete tombstones the message (empty body, deleted).
+    sockets[0]!.deliver({ v: 1, type: 'edit_update', message_id: 'a1', seq: 1, rev: 2, body: '', deleted: true, edited_at: 60, ts: 4 });
+    await tick();
+    m = (await session.messages()).find((x) => x.message_id === 'a1');
+    expect(m?.deleted).toBe(true);
+    expect(m?.body).toBe('');
+  });
 });
 
 /** Let the session's async apply/flush microtasks settle. */

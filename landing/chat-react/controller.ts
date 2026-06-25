@@ -65,6 +65,12 @@ export interface RenderMessage {
   /** Track B Phase 4 — per-emoji reaction chips for this message (empty when
    *  none). `reactedBySelf` marks chips this client added. */
   reactions: ReactionChip[]
+  /** Track B Phase 4 (edit/delete) — true when this message has been edited
+   *  (shows an "edited" marker). Always false for a deleted message. */
+  edited: boolean
+  /** Track B Phase 4 (edit/delete) — true when this message is tombstoned;
+   *  the UI renders a "message deleted" placeholder instead of the body. */
+  deleted: boolean
 }
 
 export interface ChatViewModel {
@@ -98,6 +104,10 @@ export interface ControllerSession {
   /** Track B Phase 4 — add/remove an emoji reaction (optional so legacy fakes
    *  still satisfy the interface). */
   react?(messageId: string, emoji: string, action: ReactionAction): boolean
+  /** Track B Phase 4 (edit/delete) — edit / delete a message the client
+   *  authored (optional so legacy fakes still satisfy the interface). */
+  editMessage?(messageId: string, body: string): boolean
+  deleteMessage?(messageId: string): boolean
   /** This client's device id, for read-tick self-exclusion (optional). */
   readonly device_id?: string
 }
@@ -288,6 +298,27 @@ export class NeutronChatController {
     this.session.react?.(messageId, emoji, action)
   }
 
+  /**
+   * Track B Phase 4 (edit/delete) — edit a message's body. The server
+   * authorizes it against the message's author and fans the authoritative
+   * `edit_update` back (applied via `onChange`). A no-op when the session
+   * predates edits (legacy fake), the id is empty, or the body is blank.
+   */
+  editMessage(messageId: string, body: string): void {
+    if (messageId.length === 0 || body.trim().length === 0) return
+    this.session.editMessage?.(messageId, body.trim())
+  }
+
+  /**
+   * Track B Phase 4 (edit/delete) — delete (tombstone) a message. The server
+   * authorizes + fans an `edit_update` with `deleted:true` back. A no-op when
+   * the session predates edits or the id is empty.
+   */
+  deleteMessage(messageId: string): void {
+    if (messageId.length === 0) return
+    this.session.deleteMessage?.(messageId)
+  }
+
   private publish(): void {
     this.vm = this.computeVm()
     for (const fn of this.listeners) fn(this.vm)
@@ -305,6 +336,8 @@ export class NeutronChatController {
       createdAt: m.created_at,
       delivery: deliveryFor(m, this.deviceId),
       reactions: groupReactions(m.reactions, this.deviceId),
+      edited: m.deleted !== true && m.edited_at !== null && m.edited_at !== undefined,
+      deleted: m.deleted === true,
     }))
     // Append live streaming bubbles whose final message hasn't persisted yet.
     const persistedIds = new Set<string>()
@@ -323,6 +356,8 @@ export class NeutronChatController {
         createdAt: entry.createdAt,
         delivery: null,
         reactions: [],
+        edited: false,
+        deleted: false,
       })
     }
     liveStreams.sort((a, b) => a.createdAt - b.createdAt)
