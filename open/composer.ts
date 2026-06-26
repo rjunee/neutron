@@ -56,9 +56,8 @@ import { SubagentRegistry } from '../runtime/subagent/registry.ts'
 import { newControlState } from '../runtime/subagent/control.ts'
 import {
   DispatchService,
+  buildCancellableDispatchTurn,
   defaultPersonaLoader,
-  type DispatchReporter,
-  type DispatchTurn,
 } from '../agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -308,13 +307,20 @@ export function buildOpenGraphComposer(
     // When no credential resolves (`llmPool === null`) the dispatch stays null
     // and `composition.trident` is left unset — the tick loop runs its
     // restart-safe `stubAdvanceDeps` no-op, the unchanged LLM-less behaviour.
-    const tridentDispatch =
-      llmPool !== null
-        ? buildSubstrateTridentDispatch({
-            build_substrate: (cwd: string): Substrate => {
-              const s = buildLlmCallSubstrate({
+    // A FRESH ephemeral CC-subprocess substrate per turn, rooted at the call's
+    // cwd. Shared by the Trident build loop and the agent-dispatch family below
+    // (each passes its own `instance_id` prefix) so both spawn through the SAME
+    // path (NEVER a direct api.anthropic.com call). Throws on an empty pool so a
+    // dispatch surfaces as a crashed turn rather than a silent no-op.
+    const makeEphemeralSubstrate =
+      (instance_prefix: string) =>
+      (cwd: string): Substrate => {
+        const s =
+          llmPool === null
+            ? null
+            : buildLlmCallSubstrate({
                 pool: llmPool,
-                substrate_instance_id: `cc-trident-${internal_handle}`,
+                substrate_instance_id: `${instance_prefix}-${internal_handle}`,
                 cwd,
                 internal_handle,
                 user_id: OWNER_USER_ID,
@@ -323,15 +329,15 @@ export function buildOpenGraphComposer(
                 ephemeral: true,
                 ...(substrateFactory !== undefined ? { substrateFactory } : {}),
               })
-              if (s === null) {
-                // Eager pool drained to empty between boot and dispatch — surface
-                // as a crashed build turn (TridentSessionManager treats a thrown
-                // dispatch as `crashed`) rather than a silent no-op.
-                throw new Error('trident: empty Anthropic credential pool')
-              }
-              return s
-            },
-          })
+        if (s === null) {
+          throw new Error(`${instance_prefix}: empty Anthropic credential pool`)
+        }
+        return s
+      }
+
+    const tridentDispatch =
+      llmPool !== null
+        ? buildSubstrateTridentDispatch({ build_substrate: makeEphemeralSubstrate('cc-trident') })
         : null
 
     // Agent-dispatch family (parity gap #3) — the general named-specialist +
@@ -339,43 +345,28 @@ export function buildOpenGraphComposer(
     // adhoc → a one-shot agent) that mirrors Vajra's `spawn-agent.sh`. It is
     // built ON the same `runtime/subagent/` registry + watchdog the Trident
     // loop uses (one registry, one concurrency cap, one supervisor), and it
-    // spawns through the SAME CC-subprocess substrate closure as `/code` — the
-    // `tridentDispatch` factory above (NEVER a direct api.anthropic.com call).
-    // Gated on the same credential availability as Trident: with no credential
-    // the surface is simply unregistered (no feature flag).
+    // spawns a fresh `cc-dispatch-*` REPL per turn via the SAME factory. The
+    // turn is CANCELLABLE (`buildCancellableDispatchTurn`): a `/dispatch stop` or
+    // a watchdog reap actually terminates the subprocess. Gated on the same
+    // credential availability as Trident (no credential → unregistered; no flag).
     const dispatchService = ((): DispatchService | null => {
-      const td = tridentDispatch
-      if (td === null) return null
+      if (llmPool === null) return null
       const registry = new SubagentRegistry()
       const control = newControlState(registry)
-      // `kind` is structural-only: `buildSubstrateTridentDispatch` dispatches
-      // purely on user_message/model/repo_path/timeout (the persona rides
-      // user_message — `AgentSpec` has no system field), but its input type
-      // excludes the ad-hoc 'core' kind. Coerce 'core' → 'atlas' to satisfy the
-      // type; the value is never read by the substrate closure.
-      const dispatchTurn: DispatchTurn = async (input) =>
-        td({
-          kind: input.kind === 'core' ? 'atlas' : input.kind,
-          system: input.system,
-          user_message: input.user_message,
-          repo_path: input.repo_path,
-          trident_run_id: input.trident_run_id,
-          model: input.model,
-          timeout_ms: input.timeout_ms,
-        })
-      // First-cut report-back: surface the dispatch result to the boot log. The
-      // live WS `agent_message` splice into the owner's chat is the documented
-      // follow-up (Open is WS-native + single-owner, no Telegram channel).
-      const report: DispatchReporter = async (r) => {
-        console.log(
-          `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
-        )
-      }
       return new DispatchService({
         registry,
         control,
-        dispatch: dispatchTurn,
-        report,
+        dispatch: buildCancellableDispatchTurn({
+          build_substrate: makeEphemeralSubstrate('cc-dispatch'),
+        }),
+        report: async (r) => {
+          // First-cut report-back: log the announcement. The live WS
+          // `agent_message` splice is the documented follow-up (Open is
+          // WS-native + single-owner, no Telegram channel).
+          console.log(
+            `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
+          )
+        },
         instance_key: internal_handle,
         repo_path: owner_home,
         default_model: BEST_MODEL,

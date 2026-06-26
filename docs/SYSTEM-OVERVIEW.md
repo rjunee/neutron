@@ -904,8 +904,17 @@ single autonomous **Trident** build loop; `agent-dispatch/` restores the
   `ControlState` with the Trident loop, so the agent-aware **watchdog**
   supervises dispatched agents too; `watchdog-report.ts` adapts a reaped
   `AgentWatchdogEvent` (stuck / process_dead) onto the same `report` sink so a
-  supervised failure surfaces instead of vanishing. `stop(run_id)` cancels a
-  live dispatch (registry → `cancelled`; the late substrate result is discarded).
+  supervised failure surfaces instead of vanishing. `stop(run_id)` (and a
+  watchdog reap) ACTUALLY cancels: the per-dispatch `AbortController` aborts, the
+  cancellable turn runner (`substrate-turn.ts`) calls `handle.cancel()` on the
+  live `SessionHandle`, and the registry goes `cancelled` — so the spawned
+  subprocess is terminated, not just the record.
+
+- **Cancellable turn (`substrate-turn.ts`).** The production `DispatchTurn`.
+  Mirrors `buildSubstrateTridentDispatch` (fresh ephemeral CC-subprocess per
+  turn rooted at `repo_path`; coalesce tokens; map completion/error/timeout) but
+  honors an `AbortSignal` by cancelling the handle — the one capability the
+  Trident closure lacks and a general dispatcher needs.
 
 - **Persona rides the user turn, not `system`.** The runtime `AgentSpec` has no
   `system` field — the CC subprocess owns its own system prompt — so the

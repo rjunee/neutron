@@ -151,7 +151,10 @@ registry/spawn-guard/watchdog primitive (NOT a parallel system):
   `running` → one substrate turn in the background → terminal
   (`finished`/`crashed`) → structured announcement (`announce.ts`) to a `report`
   sink. Shares the instance registry + `ControlState` with Trident, so the
-  agent-aware watchdog supervises dispatches too. `stop(run_id)` cancels.
+  agent-aware watchdog supervises dispatches too. `stop(run_id)` (and a
+  watchdog reap) ACTUALLY cancels the spawned subprocess via a per-dispatch
+  `AbortController` → the cancellable turn runner (`substrate-turn.ts`) calls
+  `handle.cancel()` — not just the registry record (fixes Codex review P1).
 - **Three kinds (`prompts.ts`).** `research → atlas`, `review → sentinel`,
   `adhoc → core`. Forge/Argus are NOT dispatchable (they keep their native
   Trident contract).
@@ -171,10 +174,11 @@ registry/spawn-guard/watchdog primitive (NOT a parallel system):
 - **`watchdog-report.ts`** adapts a reaped `AgentWatchdogEvent` onto the report
   sink (forge/argus skipped — Trident's).
 
-**Tests.** 23 module tests (`service.test.ts` — the dispatch→registry→substrate
-→report seam, caps, crash/timeout reflected, coalesce, stop, watchdog reap;
-`surface.test.ts` — tool + command share one backend, parser grammar;
-`watchdog-report.test.ts`) + a prod-boot wiring gate
+**Tests.** 28 module tests (`service.test.ts` — the dispatch→registry→substrate
+→report seam, caps, crash/timeout reflected, coalesce, stop wires a real abort,
+watchdog reap; `surface.test.ts` — tool + command share one backend, parser
+grammar; `watchdog-report.test.ts`; `substrate-turn.test.ts` — abort actually
+cancels the handle) + a prod-boot wiring gate
 (`open/__tests__/open-agent-dispatch-wiring.test.ts`) that boots the REAL Open
 composer with a mocked substrate and proves a dispatched research agent spawns +
 reports + registers, and degrades cleanly with no credential. Typecheck clean;

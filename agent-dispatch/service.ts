@@ -84,6 +84,13 @@ export interface DispatchTurnInput {
   trident_run_id: string
   model: string
   timeout_ms: number
+  /**
+   * Cancellation signal. A production `DispatchTurn` (`substrate-turn.ts`) MUST
+   * cancel the underlying substrate when this aborts, so a `/dispatch stop` or a
+   * watchdog reap actually terminates the spawned subprocess rather than only
+   * marking the registry terminal. Optional so a test stub can ignore it.
+   */
+  signal?: AbortSignal
 }
 
 export interface DispatchTurnResult {
@@ -302,12 +309,14 @@ export class DispatchService {
     const role = this.systemFor(kind)
     const user_message = `${role}\n\n---\n\nYour task:\n\n${req.task}`
 
-    // The canceller is the watchdog's / a caller-stop's hook to mark intent.
-    // We do not have an external abort channel into the substrate turn (the
-    // `DispatchTurn` closure owns its own timeout), so cancellation flips the
-    // registry terminal and the late substrate result is discarded below.
+    // The canceller is the watchdog's / a caller-stop's hook. It aborts the
+    // dispatch's `AbortController`, which a production `DispatchTurn`
+    // (`substrate-turn.ts`) honors by calling `handle.cancel()` — so a stop /
+    // reap ACTUALLY terminates the spawned subprocess, not just the registry
+    // record. The terminal STATUS transition is still owned by cancelRun/failRun.
+    const abort = new AbortController()
     registerCanceller(this.deps.control, run_id, async () => {
-      /* intent only — the terminal transition is owned by cancelRun/failRun */
+      abort.abort()
     })
 
     const completion = (async (): Promise<DispatchOutcome> => {
@@ -321,6 +330,7 @@ export class DispatchService {
           trident_run_id: run_id,
           model,
           timeout_ms,
+          signal: abort.signal,
         })
       } catch {
         // A closure that throws (e.g. empty credential pool) is a crashed agent.
@@ -340,7 +350,16 @@ export class DispatchService {
         return this.report(cur, kind, agent_kind, turn.result, delivery_target)
       }
 
-      const status: SubagentStatus = turn.status === 'completed' ? 'finished' : 'crashed'
+      // Normally cancellation runs through cancelRun/failRun (which set the
+      // terminal status BEFORE the turn resolves, caught above); this mapping is
+      // the fresh-completion path. Handle a `cancelled` turn defensively so an
+      // abort that somehow lands here is not mis-recorded as `crashed`.
+      const status: SubagentStatus =
+        turn.status === 'completed'
+          ? 'finished'
+          : turn.status === 'cancelled'
+            ? 'cancelled'
+            : 'crashed'
       const patch: Partial<Omit<SubagentRecord, 'run_id'>> = {
         status,
         ended_at: this.now(),

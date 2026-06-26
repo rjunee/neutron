@@ -224,6 +224,38 @@ describe('DispatchService — stop + supervision', () => {
     expect(h.registry.byRunId('run-1')?.status).toBe('cancelled')
   })
 
+  test('stop aborts the AbortSignal the substrate turn received (real cancellation wired)', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    let receivedSignal: AbortSignal | undefined
+    const dispatch: DispatchTurn = (input) => {
+      receivedSignal = input.signal
+      return new Promise<DispatchTurnResult>((resolve) => {
+        input.signal?.addEventListener('abort', () => resolve({ result: '', status: 'cancelled' }), {
+          once: true,
+        })
+      })
+    }
+    const service = new DispatchService({
+      registry,
+      control,
+      dispatch,
+      report: () => {},
+      instance_key: 'inst-a',
+      repo_path: '/home/owner',
+      default_model: 'm',
+      persona_loader: stubPersona,
+      mint_run_id: () => 'run-cancel-1',
+    })
+    const handle = await service.dispatch({ kind: 'adhoc', task: 'long' })
+    expect(receivedSignal).toBeInstanceOf(AbortSignal)
+    expect(receivedSignal!.aborted).toBe(false)
+    await service.stop('run-cancel-1')
+    expect(receivedSignal!.aborted).toBe(true)
+    expect((await handle.completion).status).toBe('cancelled')
+    expect(registry.byRunId('run-cancel-1')?.status).toBe('cancelled')
+  })
+
   test('liveDispatches excludes terminal + foreign-instance records', async () => {
     const h = makeHarness()
     await h.service.dispatch({ kind: 'research', task: 'a' })
