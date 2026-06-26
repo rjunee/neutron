@@ -808,7 +808,14 @@ export class ButtonStore {
         [number, string, string, string]
       >(
         `SELECT topic_id,
-                (SELECT body FROM button_prompts b2
+                -- Prefer the agent body, but fall back to the user's freeform
+                -- text for an inert USER turn (Connect tag_gated quiet message,
+                -- which stores an empty body + the text in resolution_freeform_text).
+                -- Without the COALESCE the sidebar preview would blank out after
+                -- such a turn (Codex review 2026-06-26).
+                (SELECT CASE WHEN b2.body <> '' THEN b2.body
+                             ELSE COALESCE(b2.resolution_freeform_text, b2.body) END
+                   FROM button_prompts b2
                   WHERE b2.topic_id = bp.topic_id
                   ORDER BY b2.created_at DESC, b2.prompt_id DESC LIMIT 1) AS last_body,
                 MAX(created_at) AS last_created_at,
