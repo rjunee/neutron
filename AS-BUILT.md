@@ -78,6 +78,66 @@ liveness + `/health` and is blind to this. Ports Vajra's `cwd-drift-watchdog.ts`
   Closes master-table **port row #12** (last MISSING P3 watchdog). `tsc` clean on
   the changed files; full persistent `__tests__` green (1 pre-existing
   worktree-only `@modelcontextprotocol` resolution failure, unrelated).
+## 2026-06-26 — Cores→scribe phase-2 fan-out wired into the Open boot path (parity gap #1)
+
+**What shipped.** `gateway/cores/mount-cores-scribe-fan-out.ts` + a 5-line wire in
+`open/composer.ts` — the phase-2 Cores→scribe fan-out is now LIVE on the
+single-owner Open daily-driver path, not test-only.
+
+**The gap (verified, not assumed).** The fan-out seam was fully built and
+unit-tested but **never threaded in production**: `gateway/cores/calendar-wiring.ts:208`
++ `gateway/cores/email-managed-wiring.ts:106` accept a `scribeFanOut?` and call
+it inside their scheduler `fire` callbacks, but the only references to
+`scribeFanOut` / `scribe.extractFromCoresSource` were `__tests__` — confirmed by
+grep across all non-test code. So per-Core ambient memory extraction (calendar
+events / inbox mail → GBrain) was DEAD; only chat-turn extraction
+(`scribe.handleUserTurn`, `open/composer.ts:486`) ran. A deeper trace also found
+the Calendar/Email **schedulers themselves were never constructed in any
+in-repo composer** — the Managed composer was split out-of-repo at the C2 OSS
+split (2026-06-10), and `open/composer.ts` wired scribe (chat-turn only) but no
+calendar/email Cores. So "thread the param" required first composing the
+scheduled fire-path into Open.
+
+**What it does.**
+- `buildScribeCoresFanOut(scribe)` — the composer-owned BINDING the
+  `scribe-fan-out.ts` docblock specifies: converts the awaitable
+  `extractFromCoresSource(...)` into the `void` fire-and-forget `ScribeFanOut`
+  shape (errors swallowed — never throws into a Core's brief/triage path), and
+  exposes `idle()` so shutdown drains in-flight extractions (and tests can assert
+  the extraction reached the writer).
+- `mountCoresScribeFanOut(input)` — composes the Calendar pre-meeting-brief
+  scheduler + the Email daily-triage scheduler via the SAME built factories
+  (`buildCalendarPreMeetingBriefSchedulerDeps` / `buildEmailTriageSchedulerDeps`
+  + `buildPreMeetingBriefScheduler` / `buildTriageScheduler`), threads the
+  binding, starts them, returns `stop()` (drains + tears down). Each scheduler
+  owns its own self-tick — **no new poller/timer/fetch** (preserves the phase-2
+  "no duplicate poller" invariant; the wiring module adds no `setInterval`).
+- `open/composer.ts` mounts it **gated on scribe being live** (`scribe !== null`)
+  and registers `stop()` against `realmode_cleanups`. LLM-less boxes (no scribe)
+  are completely unaffected.
+
+**Graceful degradation / no feature flags.** Until a Google-OAuth-backed
+`CalendarClient`/`GmailClient` is composed into Open (a separate, still-open
+parity gap: "Calendar/Email Cores not composed into Open"), the in-memory
+fallback clients (the same fallback `buildCoresBackendFactories` uses for
+OAuth-less boxes) yield an empty calendar/inbox — the schedulers run harmlessly
+and fan out nothing. The wire goes live with **zero further changes** the moment
+a real client is supplied. No env flag gates this; it is always-on when scribe is.
+
+**Tests.** `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts` (6 tests)
+exercises the WIRING, not `scribeFanOut` in isolation: the real binding threaded
+through the real production factories + a real scribe (canned extractor +
+recording `writeEntity`), asserting fired events/inbox messages produce entities
+that REACH THE WRITER (`person:dana-wu`, `company:northwind`), plus
+`mountCoresScribeFanOut` end-to-end (email tick → fan-out → writer) and lifecycle
+(`stop()` drains + closes handles). `bun test gateway/cores/__tests__/
+scribe/__tests__/ open/__tests__/` → 87 + 47 green; gateway + root `tsc` clean.
+
+**Scope.** Did NOT redesign scribe, add OAuth, or compose the calendar/email
+Cores' MCP-tool / `/cal` / `/email` chat-command surfaces into Open (those remain
+the separate "Cores not composed into Open" parity gap). This PR closes gap #1
+only: the fan-out is no longer test-only — it is bound and threaded through the
+live Open composer.
 
 ## 2026-06-25 — Wedged-interactive-prompt detect + recover (P0 flagship)
 
