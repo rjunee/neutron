@@ -488,6 +488,68 @@ test('2026-06-17 import-blocker — spawn ENOENT (claude not on PATH) is FATAL, 
   expect(err!.kind === 'error' && /not found on the server PATH/i.test(err!.message)).toBe(true)
 })
 
+test('2026-06-26 dev-channel wedge — channel-wedged spawn failure is a SUBSTRATE failure, NOT a cred cooldown: no reportFailure, re-emitted non-retryable + actionable', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  // The persistent-REPL substrate surfaces a wedged spawn RETRYABLE with the
+  // `persistent-repl: spawn failed (channel-wedged; …)` text (ChannelWedgedSpawnError).
+  // Pre-fix `mapStatusForPoolCooldown(null, true)` → 429 → reportFailure cooled
+  // down a healthy credential, eventually surfacing as "all Anthropic credentials
+  // are in cooldown". It must be classified channel-wedged FIRST: no cooldown,
+  // re-emitted as a distinct, non-retryable, actionable error.
+  const cap = captureFactory()
+  cap.emitError({
+    retryable: true,
+    message: 'persistent-repl: spawn failed (channel-wedged; pid=4242 port=51999)',
+  })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  // No cooldown — a wedged spawn is not a credential condition.
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  // Re-emitted as the distinct substrate-failure message, non-retryable.
+  const err = events.find((e) => e.kind === 'error')
+  expect(err).toBeDefined()
+  expect(err!.kind === 'error' && err!.retryable).toBe(false)
+  expect(err!.kind === 'error' && /session channel failed to bind/i.test(err!.message)).toBe(true)
+  expect(err!.kind === 'error' && /NOT an Anthropic credential cooldown/i.test(err!.message)).toBe(
+    true,
+  )
+})
+
+test('the other post-spawn-assertion failures (no-channel-ready / no-http-health / dead-child) also skip the cred cooldown', async () => {
+  for (const reason of ['no-channel-ready', 'no-http-health', 'dead-child']) {
+    const pool = newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+    })
+    const cap = captureFactory()
+    cap.emitError({ retryable: true, message: `persistent-repl: spawn failed (${reason}; pid=1)` })
+    const sub = buildLlmCallSubstrate({
+      pool,
+      substrate_instance_id: 'inst-1',
+      cwd: workdir,
+      substrateFactory: cap.substrateFactory,
+    })
+    const handle = sub!.start(runSpec())
+    for await (const _ev of handle.events) {
+      // drain
+    }
+    expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+    expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 7. Cooldown reporting — CLI auth failure → auth_401 cooldown via
 //    detectCliAuthFailure.

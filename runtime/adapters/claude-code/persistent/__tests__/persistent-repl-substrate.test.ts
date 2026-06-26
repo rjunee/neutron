@@ -582,3 +582,101 @@ describe('PersistentReplSubstrate — liveness keepalive', () => {
     expect(statusCount).toBeGreaterThanOrEqual(3)
   })
 })
+
+describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06-26)', () => {
+  // A fake host that captures the spawn `env` AND behaves like the real
+  // claude+dev-channel (announces /channel-ready, serves /health, replies per
+  // /message) so the turn still round-trips to completion.
+  function makeEnvCapturingReplHost(responder: Responder): {
+    host: PtyHost
+    lastEnv: () => Record<string, string | undefined> | undefined
+  } {
+    let captured: Record<string, string | undefined> | undefined
+    let spawns = 0
+    const host: PtyHost = {
+      spawn(argv: string[], opts): PtyChild {
+        captured = opts.env
+        spawns += 1
+        const pid = 200000 + spawns
+        const i = argv.indexOf('--session-id')
+        const r = argv.indexOf('--resume')
+        const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : '') as string
+        const { port: sinkPort, token } = getReplSinkInfo()
+        let hasExited = false
+        let exitResolve: (code: number | null) => void = () => {}
+        const exited = new Promise<number | null>((res) => {
+          exitResolve = res
+        })
+        const post = (path: string, body: unknown): Promise<unknown> =>
+          fetch(`http://127.0.0.1:${sinkPort}${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+            body: JSON.stringify(body),
+          }).catch(() => undefined)
+        const server = Bun.serve({
+          port: 0,
+          hostname: '127.0.0.1',
+          async fetch(req) {
+            const url = new URL(req.url)
+            if (url.pathname === '/health') return Response.json({ ok: true })
+            if (req.method === 'POST' && url.pathname === '/message') {
+              const body = (await req.json()) as { text: string; turn_id?: string }
+              void post('/reply', { session_id: sid, text: responder([], body.text), turn_id: body.turn_id })
+              return Response.json({ status: 'delivered' })
+            }
+            return new Response('not found', { status: 404 })
+          },
+        })
+        void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+        return {
+          pid,
+          write() {},
+          resize() {},
+          kill() {
+            if (hasExited) return
+            hasExited = true
+            try {
+              server.stop(true)
+            } catch {
+              // ignore
+            }
+            exitResolve(143)
+          },
+          exited,
+          hasExited: () => hasExited,
+        }
+      },
+    }
+    return { host, lastEnv: () => captured }
+  }
+
+  it('forces MCP_CONNECTION_NONBLOCKING=false on the REPL spawn (claude AWAITS the dev-channel handshake before turn 1 — the wedge fix)', async () => {
+    // ROOT CAUSE: claude defaults to loading the `--mcp-config` dev-channel ASYNC
+    // non-blocking, so the first auto-injected onboarding/chat turn lands before
+    // the stdio handshake binds the channel → every reply fails "no MCP server
+    // configured with that name" → channel-wedged. The substrate MUST spawn the
+    // REPL with MCP_CONNECTION_NONBLOCKING=false so claude blocks on the handshake.
+    const { host, lastEnv } = makeEnvCapturingReplHost((_h, m) => `ok:${m}`)
+    const sub = createPersistentReplSubstrate(baseOptions(host))
+    await drain(sub.start(spec('first onboarding turn')))
+    const env = lastEnv()
+    expect(env).toBeDefined()
+    expect(env!['MCP_CONNECTION_NONBLOCKING']).toBe('false')
+  })
+
+  it('END-TO-END SMOKE: a real LLM turn completes through the substrate — healthz-200 alone is NOT proof the LLM path is alive', async () => {
+    // The regression guard the live wedge needed: the box was only ever verified
+    // with `healthz` (HTTP up), never an actual LLM turn — so a dead LLM path
+    // passed as "deployed + working". This drives a turn through the FULL
+    // persistent-REPL path (spawn → post-spawn assertion incl. dev-channel
+    // /channel-ready handshake + /health → /message inject → reply-sink → turn
+    // completion) and asserts the turn actually COMPLETES with the reply body.
+    const { host } = makeEnvCapturingReplHost((_h, m) => `assistant-reply-to:${m}`)
+    const sub = createPersistentReplSubstrate(baseOptions(host))
+    const { text, events } = await drain(sub.start(spec('who are you?')))
+    // The turn round-tripped to a real reply (not just a 200 health probe).
+    expect(text).toBe('assistant-reply-to:who are you?')
+    expect(events.filter((e) => e.kind === 'completion').length).toBe(1)
+    expect(events.some((e) => e.kind === 'error')).toBe(false)
+  })
+})

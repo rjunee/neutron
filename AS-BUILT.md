@@ -2,6 +2,73 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — P0: dev-channel MCP handshake race → every LLM turn dead (fix the bind, stop the cred-cooldown mislabel)
+
+**Symptom (live dogfood).** Every Neutron LLM turn (onboarding + chat) failed.
+The server log showed `[channel-wedged] … channel MCP never bound (/health 200
+but unwired) … "no MCP server configured with that name"`, bounded respawn
+exhausted 2/2, auto-recovery disabled — and the failure was then MIS-REPORTED
+downstream as `[llm-router] router LLM call failed … all Anthropic credentials
+are in cooldown (429/402/401)` (a credential lie; the creds were fine).
+
+**Root cause (verified live, not inferred).** `claude` 2.1.186 loads
+`--mcp-config` MCP servers **asynchronously and NON-BLOCKING** by default — its
+own `--debug mcp` prints `[MCP] --mcp-config servers running fully async
+(nonblocking)`. The dev-channel's stdio MCP handshake completes ~270–490 ms
+after spawn on an idle box (longer under spawn-time CPU/memory pressure), but the
+dev-channel POSTs `/channel-ready` at mere transport-ATTACH (+~8 ms,
+`dev-channel.ts` after `mcp.connect()`), i.e. BEFORE `claude` has bound the
+`claude/channel` capability + registered the `reply` tool. The substrate's
+post-spawn assertion gates the first turn inject on `/channel-ready`
+(`post-spawn-assertion.ts` Stage 2), so that gate is a **false-ready**: the FIRST
+auto-injected onboarding/chat turn lands in an unbound channel → every `reply()`
+fails `no MCP server configured with that name` → `channel-wedged`. Unlike Vajra
+(whose first turn arrives with human Telegram latency that masks the race),
+Neutron auto-injects the first turn immediately after spawn, so the race bites
+every cold start. Proven by reconstructing the exact spawn argv against the live
+install: with the default async load the agent runs before the `reply` tool
+exists; setting `MCP_CONNECTION_NONBLOCKING=false` makes the "running fully
+async" branch vanish and `claude` AWAITS the handshake before turn 1.
+(`oninitialized`/`tools/list`/`getClientCapabilities` were each tested as a
+dev-channel-side bind signal and **none** fire — `claude` does a minimal
+handshake with deferred tool loading — so the fix had to gate the LOAD, not
+observe the bind.)
+
+**Fix (no feature flags — the single, always-on spawn path).**
+- **(a) Block the handshake.** `spawnSession` now sets
+  `MCP_CONNECTION_NONBLOCKING=false` on the REPL child env
+  (`persistent-repl-substrate.ts`), so `claude` awaits the dev-channel MCP
+  connect at startup before accepting the first turn. The REPL's `--mcp-config`
+  holds only the one dev-channel server, so blocking adds no collateral slowdown;
+  startup is already 30 s-budgeted by the assertion. `/channel-ready` becomes a
+  TRUE readiness signal again.
+- **(b) Stop the cred-cooldown mislabel.** `build-llm-call-substrate.ts` now
+  classifies a persistent-REPL spawn/channel failure (`channel-wedged`,
+  `no-channel-ready`, `no-http-health`, `dead-child`) BEFORE the pool-cooldown
+  map (mirrors the existing binary-not-found fast-path): it skips `reportFailure`
+  entirely and re-emits a distinct `CHANNEL_WEDGED_MESSAGE` so a healthy
+  credential is never parked and "all credentials in cooldown" can never mask a
+  substrate/spawn failure again.
+- **(c) End-to-end LLM-turn smoke test.** New substrate tests drive a real turn
+  through the full path (spawn → post-spawn assertion incl. dev-channel
+  `/channel-ready` + `/health` → `/message` inject → reply-sink → completion) and
+  assert the turn COMPLETES with its reply body — `healthz`-200 alone is no
+  longer accepted as proof the LLM path is alive. A companion test asserts the
+  spawn env carries `MCP_CONNECTION_NONBLOCKING=false`.
+
+**Tests.** `build-llm-call-substrate.test.ts` (+2: channel-wedged and the three
+sibling spawn-failure reasons skip the cooldown, re-emit non-retryable);
+`persistent-repl-substrate.test.ts` (+2: env-forces-blocking guard + end-to-end
+turn smoke). Related suites green: persistent-repl / post-spawn-assertion /
+channel-wedge-respawn / channel-unwired-detector / build-repl-argv /
+build-llm-call / build-import — 89 pass / 0 fail. `tsc --noEmit` clean.
+
+**Not changed.** The credential system itself; onboarding UX copy (#329) beyond
+ensuring the real error class propagates; the Managed `CLAUDE_CONFIG_DIR` trust
+path; the existing channel-wedge detector/bounded-respawn (the underlying
+handshake is fixed so they stop firing). The live `~/neutron/core` install was
+diagnosed against but NOT edited — the fix ships via this PR + redeploy.
+
 ## 2026-06-26 — Connect group-chat agent ENGAGEMENT MODE (per-project `tag_gated | all_messages`)
 
 **What shipped.** A per-project setting, `agent_engagement_mode`, that chooses how

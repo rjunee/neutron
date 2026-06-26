@@ -1351,6 +1351,35 @@ a longer wait (the root cause is pressure, not timeout tuning).
   first attempt; this wrapper owns only the channel-wedged class. The cap'd
   failure flows through the existing `getOrSpawnSession` pool-cleanup path.
 
+### Blocking MCP handshake — the structural cause of the wedge (P0 2026-06-26)
+
+The detector above is the *backstop*; the structural cause is a **race**, now
+fixed at the source. `claude` (2.1.186) loads `--mcp-config` MCP servers
+**asynchronously and NON-BLOCKING** by default (its `--debug mcp` literally
+prints `[MCP] --mcp-config servers running fully async (nonblocking)`). The
+dev-channel POSTs `/channel-ready` at MCP transport-**attach** (~8 ms, right after
+`mcp.connect()`), which is BEFORE `claude` finishes the stdio handshake that binds
+the `claude/channel` capability + registers the `reply` tool (~270–490 ms idle,
+longer under spawn-time pressure). Because Stage 2 above gates the first inject on
+`/channel-ready`, that gate was a **false-ready** — the first auto-injected
+onboarding/chat turn could land in an *unbound* channel and fail
+`no MCP server configured with that name`. (Vajra's first turn arrives with human
+Telegram latency that masks the race; Neutron auto-injects immediately after
+spawn, so every cold start hit it.)
+
+**Fix:** `spawnSession` (`persistent-repl-substrate.ts`) sets
+**`MCP_CONNECTION_NONBLOCKING=false`** on the REPL child env, which forces
+`claude` onto its BLOCKING load path — it awaits the dev-channel MCP connect at
+startup before accepting the first turn. The REPL's `--mcp-config` holds only the
+single dev-channel server, so blocking adds no collateral slowdown, and startup is
+already 30 s-budgeted by the assertion. With this, `/channel-ready` is a TRUE
+readiness signal again and the detector's fast-fail path is back to being a rare
+backstop. **No feature flag** — set unconditionally on the sole spawn path. A
+spawn/channel failure that still surfaces to the LLM caller is classified as a
+SUBSTRATE failure in `build-llm-call-substrate.ts` (`detectChannelWedged` →
+`CHANNEL_WEDGED_MESSAGE`, skips the pool cooldown) so it can never be relabeled
+"all Anthropic credentials are in cooldown".
+
 ## Disk-JSONL recovery + restart-rate crash-loop guard (#20) — `disk-recovery.ts` + `restart-rate.ts`
 
 The cross-restart recovery substrate (master-table row #20). It encodes one

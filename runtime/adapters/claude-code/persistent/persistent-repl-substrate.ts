@@ -1494,6 +1494,34 @@ async function spawnSession(
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
   // the dev-channel MCP server (the `no-channel-ready` failure class).
   const childEnv = mergeEnv(options.env)
+  // P0 ROOT-CAUSE FIX (dev-channel MCP handshake race): force `claude` to load
+  // the `--mcp-config` dev-channel SYNCHRONOUSLY (await the stdio MCP handshake
+  // at startup) instead of its default async, NON-BLOCKING load. Verified live
+  // against claude 2.1.186: by default the REPL logs
+  //   `[MCP] --mcp-config servers running fully async (nonblocking)`
+  // and accepts its first input BEFORE the dev-channel's stdio handshake binds
+  // the `claude/channel` capability + registers the `reply` tool (~270-490ms idle,
+  // longer under spawn-time CPU/memory pressure). The substrate's post-spawn
+  // assertion gates the first inject on `/channel-ready`, which the dev-channel
+  // posts at mere transport-ATTACH (+8ms) — well before the bind — so the FIRST
+  // onboarding/chat turn is injected into an unbound channel and every reply()
+  // fails `no MCP server configured with that name` → `channel-wedged` → bounded
+  // respawn exhausts → every LLM turn dies (and downstream is then MISLABELED as
+  // an Anthropic credential cooldown). Unlike Vajra (whose first turn arrives with
+  // human Telegram latency that masks the race), Neutron auto-injects the first
+  // turn immediately after spawn, so the race bites every cold start.
+  //
+  // `claude`'s loader reads `MCP_CONNECTION_NONBLOCKING`: an explicit FALSE-like
+  // value (`false`/`0`/`no`/`off`) forces the BLOCKING path (binary fn `el()` →
+  // `mcpConnectNonBlocking=false` → the connect group is awaited, the "running
+  // fully async" branch is skipped). The REPL's `--mcp-config` contains ONLY the
+  // single dev-channel server, so blocking has no collateral slowdown; startup is
+  // already budgeted 30s by the post-spawn assertion. This makes `/channel-ready`
+  // a TRUE readiness signal: when the assertion passes, the channel is bound and
+  // the reply tool is live. NOT a feature flag — it is the single, always-on
+  // correctness invariant for the sole spawn path. Set UNCONDITIONALLY so a
+  // host-leaked `MCP_CONNECTION_NONBLOCKING=true` can never re-open the race.
+  childEnv['MCP_CONNECTION_NONBLOCKING'] = 'false'
   if (options.skipTrustSeed !== true) {
     const trustInput: Parameters<typeof ensureClaudeTrust>[0] = { cwd }
     if (options.claudeConfigDir !== undefined) trustInput.configDir = options.claudeConfigDir
