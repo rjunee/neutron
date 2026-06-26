@@ -5,9 +5,10 @@
  * § Terminal-detection port, master-table row #6 + cross-cutting invariant §6
  * (bounded respawn caps with a hard-stop + ONE operator alert). When the
  * post-spawn assertion fast-fails a spawn as `channel-wedged` (dev-channel
- * `/health` 200 but the MCP never bound — see `channel-unwired-detector.ts`),
- * the root cause is transient memory/CPU pressure, so a respawn usually clears
- * it. But a re-arming cause would loop forever without a cap — so this is a
+ * `/health` 200 but the MCP never bound — no `/channel-bound` signal within the
+ * Stage-4 budget; see `post-spawn-assertion.ts`), the root cause is transient
+ * memory/CPU pressure, so a respawn usually clears it. But a re-arming cause
+ * would loop forever without a cap — so this is a
  * HARD-CAPPED bounded respawn: `MAX_FLEET_RESPAWNS` retries, then exactly one
  * operator alert and give up (no infinite loop).
  *

@@ -153,6 +153,7 @@ function makeFakeReplHost(): {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
 
       const child: PtyChild = {
         pid,
@@ -1101,6 +1102,7 @@ describe('S2 supervision — cross-incarnation turnId collision (Argus r6)', () 
           },
         })
         void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 300000 + myIndex })
+        void post('/channel-bound', { session_id: sid })
         const child: PtyChild = {
           pid: 300000 + myIndex,
           write() {},

@@ -103,6 +103,7 @@ function makeWedgeThenHealthyHost(): {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid,
         write() {},
@@ -247,6 +248,7 @@ describe('warm reused session — an abandoned/runaway turn must not poison the 
           },
         })
         void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+        void post('/channel-bound', { session_id: sid })
         void incarnation
         return {
           pid,

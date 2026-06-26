@@ -619,48 +619,56 @@ Port of Vajra's `gateway-core.ts isCompactResumePicker` (research row #3).
   limitation documented on `tool-use-approve` applies here too; the P0
   wedge-recovery detector (#1) is the designed backstop for a genuinely-stuck
   picker.
-## PTY terminal-detection P1 — channel-MCP-unwired fast-fail (port row #6)
+## PTY terminal-detection P1 — channel-MCP-bound gate (port row #6)
 
 **What shipped.** A fourth post-spawn-assertion stage that fast-fails a spawn
-which came up `/health`-200 but never bound its dev-channel MCP — the
-**channel-MCP-unwired wedge**. Port of Vajra's `fleet-spawn-core.ts
-isChannelMcpUnwired` onto the F1/F3 substrate (research row #6). On the merged
-F1/F2/F3 substrate (PR #54) + post-spawn-assertion path. ON by default — no flag.
+which came up `/health`-200 but whose dev-channel MCP claude never handshaked —
+the **channel-MCP-unwired wedge** — and `channel-wedge-respawn.ts`'s bounded
+respawn. ON by default — no flag.
 
-- **The wedge.** After the dev-channel confirm is answered and the TUI is up, the
-  REPL sometimes never binds the channel MCP under spawn-time memory/CPU pressure;
-  `/health` still returns 200 (spawn LOOKS alive) but every `reply()` prints
-  **"no MCP server configured with that name"** and the turn never delivers
-  (2026-06-20: 17/23 wedged forge/argus spawns showed exactly that as their last
-  frame). Root cause = pressure, not timeout tuning → the fix is an explicit
-  signature + **fast-fail**, not a longer wait.
-- **Detect (`channel-unwired-detector.ts`).** Pure signature
-  (`/noMCPserverconfiguredwiththatname/i`, normalized bottom-24) run through the
-  F3 `buildDetectorContext`, so the **doc-quote guard** keeps a fenced /
-  backtick-wrapped / diff-quoted quotation of the phrase from false-firing. NO
-  keystroke — detect → fast-fail → bounded respawn only.
-- **Re-read AFTER health-up (invariant §7, load-bearing).** `post-spawn-
-  assertion.ts` Stage 4 re-captures the ring **FRESH** strictly after the
-  `/health` gate flips (a stale pre-health snapshot could read `!unwired` and let
-  a same-tick-unwired channel through). The signature must **persist** across a
-  short confirm grace (default 2s — a spawn-path window, not the 60s topic
-  readiness grace) before fast-failing `channel-wedged`; a `null`/failed
-  re-capture counts as NOT-unwired so a glitch can't fail a healthy spawn. Stage 4
-  is skipped when no ring reader is wired (back-compat for the existing tests).
-- **Bounded respawn (`channel-wedge-respawn.ts`, invariant §6).** A
+> **2026-06-26 P0 CORRECTION (this build).** The original Stage-4 implementation
+> detected the wedge by scanning the PTY ring for **"no MCP server configured with
+> that name"** (`channel-unwired-detector.ts`, ported verbatim from Vajra's
+> `isChannelMcpUnwired`). Reproduced live under the real Bun PTY harness
+> (`Bun.spawn({terminal})` + the real `build-repl-argv` argv + the real
+> `dev-channel.ts`), that string turned out to be a **benign warning claude 2.1.186
+> ALWAYS prints** for an `--mcp-config`-provided development-channel server — even
+> when the channel is fully wired and `reply()` round-trips end-to-end. So the
+> detector was a **false-positive that failed EVERY interactive spawn** →
+> bounded-respawn cap → every LLM turn died (then mislabeled downstream as an
+> Anthropic credential cooldown). A plain `claude -p` repro never showed the line
+> (print mode skips the channel-status TUI render), which is why every manual repro
+> "passed" and #79's blocking-handshake theory chased a non-bug. The string
+> detector + its test are **removed**; Stage 4 now gates on a real protocol signal.
+
+- **The real signal (`/channel-bound`).** `dev-channel.ts` sets
+  `mcp.oninitialized` → POSTs `/channel-bound` to the reply-sink when claude
+  completes the MCP `initialize`/`initialized` handshake (the SDK fires that hook on
+  the `initialized` notification). That is the only reliable proof claude actually
+  wired the `claude/channel` capability + `reply` tool. The sink records it on the
+  `ReplSession` (`channelBound` / `onChannelBound`).
+- **Stage 4 gate (`post-spawn-assertion.ts`).** After `/health` is up, poll
+  `isChannelBound()` within `channelBoundBudgetMs` (default 15s, generous because
+  the dev-channel disclaimer can defer the handshake until the output scanner
+  dismisses it). Never arrives → reason `channel-wedged`. A genuine no-bind wedge
+  (claude never handshakes) is still caught (no `/channel-bound`); the benign TUI
+  warning no longer fails a working channel. Stage 4 is skipped when no bind probe
+  is wired (back-compat).
+- **`MCP_CONNECTION_NONBLOCKING=false`** (kept from #79) is now documented as a
+  belt-and-suspenders that makes claude block on the single dev-channel connect
+  group before accepting input — NOT the wedge fix.
+- **Bounded respawn (`channel-wedge-respawn.ts`, invariant §6).** Unchanged: a
   `channel-wedged` assertion throws a typed `ChannelWedgedSpawnError`;
   `getOrSpawnSession` wraps the spawn in `runBoundedChannelWedgeRespawn` — retry up
-  to **`MAX_FLEET_RESPAWNS = 2`**, then **one** operator alert (`postWedgeAlert`)
-  and give up (no infinite loop). Any OTHER spawn failure propagates on the first
-  attempt; the channel-wedged path doesn't `pool.delete` (the wrapper owns the
-  pool entry across retries), so a successful retry keeps its warm session.
-- **Tests** (`channel-unwired-detector.test.ts` +7, `channel-wedge-respawn.test.ts`
-  +5, `post-spawn-assertion.test.ts` +8): unwired signature after health-up →
-  `channel-wedged`; same phrase doc-quoted (backtick/fence/diff) → does NOT fire;
-  healthy bound channel → does NOT fire; re-read happens only AFTER health
-  (ordering); null re-capture + transient-clears-within-grace → ok; respawn capped
-  at 2 then alert-only; non-wedged failure propagates with no retry/alert. Full
-  persistent suite green (327 pass).
+  to **`MAX_FLEET_RESPAWNS = 2`**, then **one** operator alert and give up.
+- **Tests.** `post-spawn-assertion.test.ts` rewritten to the `/channel-bound` gate
+  (never-arrives → `channel-wedged`; arrives → ok; mid-poll arrival → ok;
+  dead-child during the wait → `dead-child`; no bind probe → skip). New
+  **real-PTY regression guard** `dev-channel-pty-bind.e2e.test.ts` spawns claude
+  under `Bun.spawn({terminal})` and asserts `/channel-bound` fires + a turn
+  round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`; skipped in
+  CI). The integration fakes now post `/channel-bound` after `/channel-ready`.
+  Full persistent suite green (541 pass, 1 opt-in skip).
 ## PTY #20 — disk-JSONL recovery classifier + restart-rate crash-loop guard
 
 **What shipped.** The two remaining pieces of Vajra master-table row #20

@@ -340,6 +340,25 @@ process.on('SIGINT', () => shutdownChannel('SIGINT'))
 
 // --- Connect MCP transport, then announce readiness to the sink ---
 
+// TRUE-BIND SIGNAL (P0 channel-wedged false-positive fix): claude 2.1.186
+// ALWAYS renders `server:<name> · no MCP server configured with that name` in
+// the dev-channel TUI header for an `--mcp-config`-provided channel server, even
+// when the channel is fully wired and `reply()` works (verified live under the
+// PTY harness). So that TUI string is NOT a wedge signal — gating on it (the now-
+// removed PTY-ring "no MCP server configured" scan) false-failed EVERY spawn. The
+// only reliable proof that claude actually wired this MCP server is the handshake:
+// claude sends `initialize`, we answer, claude sends `notifications/initialized`.
+// The SDK fires `oninitialized` on that notification — so we POST `/channel-bound`
+// to the sink THEN, giving the post-spawn assertion a real readiness gate. A
+// genuine no-bind wedge never reaches `initialized`, so `/channel-bound` never
+// fires and the assertion still fast-fails (real wedges stay covered).
+mcp.oninitialized = () => {
+  void postToSink('/channel-bound', { session_id: SESSION_ID, pid: process.pid }).catch((e) => {
+    process.stderr.write(`neutron-channel: channel-bound announce failed: ${e}\n`)
+  })
+  process.stderr.write('neutron-channel: MCP handshake complete (initialized)\n')
+}
+
 const transport = new StdioServerTransport()
 await mcp.connect(transport)
 process.stderr.write('neutron-channel: MCP connected\n')

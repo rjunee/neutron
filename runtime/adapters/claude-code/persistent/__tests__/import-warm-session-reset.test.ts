@@ -87,6 +87,7 @@ function makeRecordingHost(): {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid,
         write(data: string | Uint8Array) {

@@ -1312,73 +1312,60 @@ one never sends a keystroke and never auto-retries — it only informs.
   **ON by default, no feature flag.** **Out of scope:** any keystroke / auto-action
   (row #4 owns that) and auto-retry.
 
-## Post-spawn liveness assertion — channel-MCP-unwired fast-fail (port row #6) — `post-spawn-assertion.ts`
+## Post-spawn liveness assertion — channel-MCP-bound gate (port row #6) — `post-spawn-assertion.ts`
 
 `assertReplAlive` gates every fresh spawn before the first inject, in ordered
 stages, the first to fail returning its specific reason: **(1)** child alive
-(`!hasExited`) → `dead-child`; **(2)** dev-channel handshake seen
+(`!hasExited`) → `dead-child`; **(2)** dev-channel transport attached
 (`/channel-ready`) → `no-channel-ready`; **(3)** dev-channel HTTP `/health`
-responds → `no-http-health`. Port row #6 adds a **fourth** stage, the
-**channel-MCP-unwired wedge**: after the dev-channel confirm is answered and the
-TUI is up, the REPL sometimes *never binds the channel MCP* under spawn-time
-memory/CPU pressure — `/health` still returns 200, so the spawn LOOKS alive, but
-every `reply()` prints **"no MCP server configured with that name"** and the turn
-never delivers (2026-06-20: 17/23 wedged forge/argus spawns showed exactly that
-line as their last frame). The fix is an explicit signature + **fast-fail**, NOT
-a longer wait (the root cause is pressure, not timeout tuning).
+responds → `no-http-health`; **(4)** dev-channel MCP handshake complete
+(`/channel-bound`) → `channel-wedged`. Stage 4 is the **channel-MCP-unwired
+wedge** guard: a spawn can come up `/health`-200 (LOOKS alive) yet claude never
+wired the channel MCP, so every `reply()` fails and the turn never delivers.
 
-- **Detect (`channel-unwired-detector.ts`).** The Vajra `isChannelMcpUnwired`
-  signature (`/noMCPserverconfiguredwiththatname/i`, matched on the normalized
-  bottom-24 view so Ink per-word-cursor ANSI doesn't break it), run through the
-  F3 `buildDetectorContext` so the **doc-quote guard** holds — a fenced /
-  backtick-wrapped / diff-quoted *quotation* of the phrase can NOT trip the wedge.
-  **NO keystroke** — this is detect → fast-fail → bounded respawn only.
-- **Re-read AFTER health-up (cross-cutting invariant §7, LOAD-BEARING).** Stage 4
-  re-captures the ring **FRESH** — strictly *after* Stage 3's `/health` gate
-  flips. A stale pre-health snapshot could read `!unwired` and let a same-tick-
-  unwired channel through, so the unwired re-read must never run before health.
-  The signature must **persist** across a short confirm grace (default 2s — a
-  spawn-path window, NOT the 60s topic-readiness grace) before fast-failing: a
-  transient mid-render frame mustn't fail a spawn that's about to bind. A
-  `null`/failed re-capture counts as NOT-unwired so a capture glitch can't fail a
-  healthy spawn. On persistence → reason `channel-wedged`.
-- **Bounded respawn (`channel-wedge-respawn.ts`, cross-cutting invariant §6).**
-  A `channel-wedged` assertion throws a typed `ChannelWedgedSpawnError`; the spawn
-  path retries up to **`MAX_FLEET_RESPAWNS = 2`** times (a respawn usually clears
-  the transient pressure). If the wedge persists past the cap, it fires **exactly
-  one** operator alert (`postWedgeAlert`) and gives up — **no infinite loop**. Any
-  OTHER spawn failure (`dead-child` / `no-http-health` / …) is propagated on the
-  first attempt; this wrapper owns only the channel-wedged class. The cap'd
-  failure flows through the existing `getOrSpawnSession` pool-cleanup path.
+### The 2026-06-26 P0 correction — the wedge was a false-positive
 
-### Blocking MCP handshake — the structural cause of the wedge (P0 2026-06-26)
+The original Stage 4 detected the wedge by scanning the PTY ring for **"no MCP
+server configured with that name"** (`channel-unwired-detector.ts`, ported from
+Vajra's `isChannelMcpUnwired`). Reproduced **live under the real Bun PTY harness**
+(`Bun.spawn({terminal})` + the real `build-repl-argv` argv + the real
+`dev-channel.ts`, instrumented at the stdio JSON-RPC boundary), that string is a
+**benign warning claude 2.1.186 ALWAYS prints** for an `--mcp-config`-provided
+development-channel server — the dev-channel completed a clean
+`initialize`/`tools/list` handshake AND a real injected turn round-tripped through
+the `reply` tool, while the TUI still showed the warning. So the detector was a
+**false-positive that fast-failed EVERY interactive spawn** → bounded-respawn cap
+→ every LLM turn died (then mislabeled downstream as a credential cooldown). A
+plain `claude -p` repro never showed the line (print mode skips the channel-status
+TUI render), so every manual repro "passed" and #79's blocking-handshake theory
+chased a non-bug. The string detector + its test were **removed**.
 
-The detector above is the *backstop*; the structural cause is a **race**, now
-fixed at the source. `claude` (2.1.186) loads `--mcp-config` MCP servers
-**asynchronously and NON-BLOCKING** by default (its `--debug mcp` literally
-prints `[MCP] --mcp-config servers running fully async (nonblocking)`). The
-dev-channel POSTs `/channel-ready` at MCP transport-**attach** (~8 ms, right after
-`mcp.connect()`), which is BEFORE `claude` finishes the stdio handshake that binds
-the `claude/channel` capability + registers the `reply` tool (~270–490 ms idle,
-longer under spawn-time pressure). Because Stage 2 above gates the first inject on
-`/channel-ready`, that gate was a **false-ready** — the first auto-injected
-onboarding/chat turn could land in an *unbound* channel and fail
-`no MCP server configured with that name`. (Vajra's first turn arrives with human
-Telegram latency that masks the race; Neutron auto-injects immediately after
-spawn, so every cold start hit it.)
-
-**Fix:** `spawnSession` (`persistent-repl-substrate.ts`) sets
-**`MCP_CONNECTION_NONBLOCKING=false`** on the REPL child env, which forces
-`claude` onto its BLOCKING load path — it awaits the dev-channel MCP connect at
-startup before accepting the first turn. The REPL's `--mcp-config` holds only the
-single dev-channel server, so blocking adds no collateral slowdown, and startup is
-already 30 s-budgeted by the assertion. With this, `/channel-ready` is a TRUE
-readiness signal again and the detector's fast-fail path is back to being a rare
-backstop. **No feature flag** — set unconditionally on the sole spawn path. A
-spawn/channel failure that still surfaces to the LLM caller is classified as a
-SUBSTRATE failure in `build-llm-call-substrate.ts` (`detectChannelWedged` →
-`CHANNEL_WEDGED_MESSAGE`, skips the pool cooldown) so it can never be relabeled
-"all Anthropic credentials are in cooldown".
+- **Real bind signal (`/channel-bound`).** `dev-channel.ts` sets
+  `mcp.oninitialized` (the SDK fires it on claude's `initialized` notification) →
+  POSTs `/channel-bound` to the reply-sink. That is the only reliable proof claude
+  wired the `claude/channel` capability + `reply` tool. The sink records it on the
+  `ReplSession` (`channelBound`).
+- **Stage 4 gate.** After `/health` is up, poll `isChannelBound()` within
+  `channelBoundBudgetMs` (default 15s — generous because the interactive
+  dev-channel disclaimer can defer the handshake until the F3 output scanner
+  dismisses it). Never arrives → `channel-wedged`. A genuine no-bind wedge (claude
+  never handshakes → no `/channel-bound`) is still caught; the benign TUI warning
+  no longer fails a working channel. Stage 4 is skipped when no bind probe is wired.
+- **`MCP_CONNECTION_NONBLOCKING=false`** (kept from #79) forces claude onto its
+  blocking MCP-load path so the single dev-channel server connects + handshakes
+  before the first input — a belt-and-suspenders that makes `/channel-bound` land
+  promptly, **NOT** the wedge fix.
+- **Bounded respawn (`channel-wedge-respawn.ts`, invariant §6).** Unchanged: a
+  `channel-wedged` assertion throws `ChannelWedgedSpawnError`; the spawn path
+  retries up to **`MAX_FLEET_RESPAWNS = 2`**, then fires **exactly one** operator
+  alert and gives up — no infinite loop. A spawn/channel failure that still
+  surfaces to the LLM caller is classified as a SUBSTRATE failure in
+  `build-llm-call-substrate.ts` (skips the pool cooldown) so it can never be
+  relabeled "all Anthropic credentials are in cooldown".
+- **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
+  real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
+  round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in
+  CI — needs a real claude binary + credentials).
 
 ## Disk-JSONL recovery + restart-rate crash-loop guard (#20) — `disk-recovery.ts` + `restart-rate.ts`
 

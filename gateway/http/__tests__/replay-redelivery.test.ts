@@ -216,6 +216,7 @@ function makeCrashHost(): { host: PtyHost } {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 271828 })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid: 271828,
         write() {},
