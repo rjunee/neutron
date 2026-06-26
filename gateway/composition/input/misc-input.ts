@@ -56,6 +56,16 @@ export interface MiscCompositionInput {
     argus_model?: string
     subagent_timeout_ms?: number
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
+    /**
+     * Skill-forge trigger (parity gap #5) — an OPTIONAL observer the trident
+     * module fires for EVERY terminal run (done OR failed), AFTER the terminal
+     * row is persisted and the result delivered. The composer wires this to
+     * Skill Forge's auto-skillify audit (`skillForge.onWorkflowCompleted` over
+     * `completedWorkflowFromTridentRun`); the audit itself drops non-`done`
+     * runs, so the hook stays generic. Failure-safe: the trident module wraps
+     * the call in try/catch so a hook error never un-terminates a finished run.
+     */
+    on_run_terminal?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
@@ -108,5 +118,19 @@ export interface MiscCompositionInput {
    */
   agent_dispatch?: {
     service: import('../../../agent-dispatch/service.ts').DispatchService
+  }
+  /**
+   * Skill-forge (auto-skillify, parity gap #5) — when supplied, the `tools`
+   * module registers the `skill_forge_list` + `skill_forge_decide` agent tools
+   * backed by this shared backend, so the live chat agent can list / approve /
+   * decline Skill Forge proposals (agent-native parity with the `/skills` chat
+   * command, which shares the SAME backend). The backend is constructed by the
+   * production composer (which owns the proposals store + the `SkillForge`
+   * orchestrator + the skills dir); omitting it leaves the surface
+   * unregistered (and the auto-propose TRIGGER is wired separately via
+   * `trident.on_run_terminal`).
+   */
+  skill_forge?: {
+    backend: import('../../../skill-forge/backend.ts').SkillForgeBackend
   }
 }

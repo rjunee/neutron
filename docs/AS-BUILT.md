@@ -2,6 +2,35 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Skill Forge composed into the Open boot path (parity gap #5 — the LAST gap)
+
+**What shipped.** Skill Forge (`skill-forge/`, auto-skillify) now composes into the
+single-owner **Open** daily-driver: the auto-propose trigger fires off a completed
+Trident run, and an agent-native manage surface (MCP tools + a `/skills` chat command,
+sharing ONE backend) lets the owner and the agent list / approve / decline proposals.
+**No feature flag; Open still boots with zero creds.**
+
+**Verify-first result (cited).** The package was fully built (audit → distill →
+propose → approve → register) and migration `0086_skill_forge_proposals` existed, but
+a grep of `open/`, `gateway/`, `trident/` for `skill-forge`/`SkillForge` returned ZERO
+hits outside the package + tests (`docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md`
+§2.R / §5.5). Built ≠ wired: a completed Trident workflow was never audited; auto-skillify
+was unreachable.
+
+**The wiring (mirrors gap #2 `mount-open-cores.ts` + gap #3 agent-dispatch).**
+`open/composer.ts` builds ONE `SkillForge` + `SkillForgeProposalsStore` + shared
+`SkillForgeBackend`, then threads `trident.on_run_terminal` (the trigger,
+chained into the Trident terminal hook in `build-core-modules.ts`) and
+`skill_forge: { backend }` (the MCP tools `skill_forge_list`/`skill_forge_decide`).
+The `/skills` `ChatCommandFilter` is chained into `buildLandingStack` next to the
+Cores filters. The audit drops non-`done` runs; the trigger hook is try/catch-wrapped.
+
+**Files.** New `skill-forge/{backend,tool,command}.ts` + tests
+`skill-forge/{tool,command}.test.ts`, `open/__tests__/open-skill-forge-wiring.test.ts`;
+wired `open/composer.ts`, `gateway/composition/input/misc-input.ts`,
+`gateway/composition/build-core-modules.ts`. **Verification:** tsc clean; full suite
+8747 pass / 0 fail.
+
 ## Free Cores composed into the Open boot path (parity gap #2)
 
 **What shipped.** The free Cores (Calendar / Email / Google-Workspace + Notes /

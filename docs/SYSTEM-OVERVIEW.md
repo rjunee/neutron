@@ -1924,9 +1924,32 @@ silently.
   agent-discoverable and, being on disk, **survives a fresh session**. Decline
   marks the row declined and creates nothing.
 - **Trigger source (`trident-adapter.ts`).** `completedWorkflowFromTridentRun`
-  maps a terminal `done` Trident run into the generic `CompletedWorkflow`. The
-  live wiring seam is the Trident tick loop's `onTerminal(run)` hook
-  (`trident/tick.ts`); see `AS-BUILT.md` for the one-line composition.
+  maps a terminal `done` Trident run into the generic `CompletedWorkflow`.
+
+### Composed into the Open boot path (parity gap #5) — `open/composer.ts`
+
+Skill Forge is **wired into the single-owner daily-driver** (it was built-but-unwired
+until this — `docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md` §2.R/§5.5).
+The composer mirrors the gap-#2 Cores (`mount-open-cores.ts`) + gap-#3 agent-dispatch
+shape: it constructs ONE `SkillForge` + `SkillForgeProposalsStore` over the per-instance
+ProjectDb, plus a `SkillForgeBackend` the tool **and** chat command share. **No feature
+flag; built unconditionally so the manage surface works even on an LLM-less box.**
+
+- **The auto-propose trigger.** The composer threads `trident.on_run_terminal` onto
+  `CompositionInput`; `gateway/composition/build-core-modules.ts` chains it into the
+  Trident tick loop's terminal hook (after delivery), so a `done` run fires
+  `skillForge.onWorkflowCompleted(completedWorkflowFromTridentRun(run))` (the audit
+  drops non-`done` runs). Failure-safe: the trident module wraps the call in try/catch.
+- **Agent-native surface (one backend, two front doors).** `skill_forge_list` (read-only,
+  `read:project_data`, `auto`) + `skill_forge_decide` (`write:project_data`, `prompt-user`)
+  MCP tools (`skill-forge/tool.ts`, registered by the `tools` module when
+  `composition.skill_forge` is set) AND a `/skills` chat command
+  (`skill-forge/command.ts`, a `ChatCommandFilter` chained into `buildLandingStack`
+  alongside the Cores filters). Both call the SAME `SkillForgeBackend` — the agent can
+  list / approve / decline exactly what the owner can.
+- **Notifier.** Open is WS-native + single-owner, so the proposal `ProposalNotifier`
+  logs (mirroring agent-dispatch's report sink); the persisted `skill_forge_proposals`
+  row is the source of truth, surfaced on demand via `/skills list`.
 
 ## Testing & CI — the bounded-memory partitioned runner (`scripts/run-tests.sh`)
 
