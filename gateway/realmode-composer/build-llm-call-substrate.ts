@@ -520,6 +520,29 @@ export function buildLlmCallSubstrate(
                 yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false }
                 continue
               }
+              // P0a ROOT-CAUSE FIX (2026-06-26 chat-blocker): a per-turn TIMEOUT
+              // (`persistent-repl: turn timeout`) is a transient TURN failure —
+              // the warm REPL was slow/wedged on THIS turn, not the credential.
+              // The substrate surfaces it RETRYABLE with no HTTP status, so the
+              // `else` branch below maps `mapStatusForPoolCooldown(null, true)` →
+              // 429 → `reportFailure` parks a perfectly healthy credential.
+              // Across a few timed-out turns the whole pool cools down and EVERY
+              // subsequent turn dies with "all Anthropic credentials are in
+              // cooldown (429/402/401)" — the exact cascade the live dogfood hit
+              // (one slow "whats the veeva narrative?" turn timed out, then the
+              // next turns showed "your AI connection may need attention"). The
+              // substrate already self-heals a timeout by POISONING the warm
+              // session so the NEXT dispatch respawns a clean REPL
+              // (persistent-repl-substrate.ts:2707); that recovery only works if
+              // the credential is NOT wrongly parked here. Classify it BEFORE the
+              // cooldown map (mirrors binary-not-found / channel-wedged): skip the
+              // pool cooldown entirely and re-emit the timeout UNCHANGED
+              // (retryable:true) so the turn is retried on the SAME healthy
+              // credential, never laundered into a quota lie.
+              if (detectTurnTimeout(ev.message)) {
+                yield ev
+                continue
+              }
               const httpStatus = parseHttpStatusFromMessage(ev.message)
               let cooldownStatus: number | null
               if (httpStatus !== null) {
@@ -679,6 +702,24 @@ export function detectChannelWedged(message: string): boolean {
   }
   if (/\bchannel-wedged\b/i.test(message)) return true
   return false
+}
+
+/**
+ * Detect a per-turn TIMEOUT surfaced by the persistent-REPL substrate. The
+ * substrate emits `persistent-repl: turn timeout` (retryable:true) when a warm
+ * REPL fails to settle a turn inside `DEFAULT_TURN_TIMEOUT_MS` (180s) — the turn
+ * was slow or wedged, the credential is fine. This is NEITHER an HTTP-status
+ * failure NOR a CLI auth failure, so without this fast-path it falls through to
+ * `mapStatusForPoolCooldown(null, retryable=true)` → 429 → `reportFailure`,
+ * parking a healthy credential and cascading into "all credentials in cooldown".
+ * Callers MUST check this BEFORE the cooldown classification and MUST NOT call
+ * `reportFailure` when it returns true (mirrors `detectBinaryNotFound` /
+ * `detectChannelWedged`). Unlike those two the timeout stays RETRYABLE — the
+ * substrate poisons + respawns the warm session, so the next dispatch lands on a
+ * clean REPL and the retry succeeds on the same credential.
+ */
+export function detectTurnTimeout(message: string): boolean {
+  return /persistent-repl:\s*turn timeout/i.test(message)
 }
 
 /**

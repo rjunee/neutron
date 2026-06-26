@@ -1362,6 +1362,14 @@ chased a non-bug. The string detector + its test were **removed**.
   surfaces to the LLM caller is classified as a SUBSTRATE failure in
   `build-llm-call-substrate.ts` (skips the pool cooldown) so it can never be
   relabeled "all Anthropic credentials are in cooldown".
+- **Per-turn timeout is NOT a credential fault (P0a, 2026-06-26).** A
+  `persistent-repl: turn timeout` (a turn that fails to settle inside
+  `DEFAULT_TURN_TIMEOUT_MS=180_000`) is surfaced RETRYABLE with no HTTP status.
+  `build-llm-call-substrate.ts`'s `detectTurnTimeout()` fast-path classifies it
+  BEFORE the cooldown map (alongside binary-not-found / channel-wedged), skips
+  `reportFailure`, and re-emits it unchanged — so a slow turn is a recoverable
+  single-turn retry (the substrate poisons + respawns the warm session) instead
+  of parking the credential and cascading into "all credentials in cooldown".
 - **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
   real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in
