@@ -40,6 +40,9 @@ const INSTALLED_SLUGS = [
   'notes',
   'reminders_core',
   'research_core',
+  // Scraping Core (parity gap #6) — installs cleanly; its `apify`
+  // byo_api_key is optional (required: false).
+  'scraping_core',
   'tasks_core',
   'agent_settings',
   ...(HAS_PAID_STAGING ? ['dtc_analytics'] : []),
@@ -131,10 +134,10 @@ describe('GET /api/cores', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as { ok: boolean; cores: Array<{ slug: string; install_state: string; install_error?: { code: string } }> }
     expect(body.ok).toBe(true)
-    // 8 Tier 1 free Cores + 1 Tier 2 staging Core (DTC Analytics) = 9 in the
-    // monorepo / Managed tree. (agent_settings, the "tweak later" Core,
-    // added 2026-06-03.) The Sprint C Open carve strips `cores/paid-staging/`,
-    // so the carved Open tree returns 8; the Managed adapter's multi-root
+    // 9 Tier 1 free Cores + 1 Tier 2 staging Core (DTC Analytics) = 10 in the
+    // monorepo / Managed tree. (scraping_core, parity gap #6, added
+    // 2026-06-26.) The Sprint C Open carve strips `cores/paid-staging/`,
+    // so the carved Open tree returns 9; the Managed adapter's multi-root
     // walk re-surfaces the paid Core (per docs/research/neutron-cores-
     // marketplace-split-2026-05-17.md § 3).
     expect(body.cores).toHaveLength(EXPECTED_CATALOG_LEN)

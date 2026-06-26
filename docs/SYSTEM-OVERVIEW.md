@@ -74,6 +74,41 @@ Agent-native parity: every read/search/draft/send is also reachable from
 chat via `/email` commands (`/email thread <id>`, `/email search <q>`,
 `/email summarize <id>`, `/email triage`, `/email draft …`).
 
+### Scraping Core (`cores/free/scraping/`, `@neutronai/scraping-core`)
+
+Tier 1 free Core for Instagram + X/Twitter scraping via Apify (Vajra parity
+gap #6 — a direct port of `~/vajra/scripts/ig-scrape.sh` + `tx-scrape.sh`).
+WebFetch/oEmbed can't see this content (Meta gates IG; X serves only the React
+shell), so the Core calls the Apify `run-sync-get-dataset-items` endpoint
+against three no-approval actors: `apify/instagram-scraper`,
+`kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest` (tweets /
+threads / profiles), and `fastcrawler/x-twitter-article-to-markdown` (X long-form
+Articles).
+
+**Optional-until-credentialed (the load-bearing invariant).** The Core declares
+a single `byo_api_key` secret (label `apify`, `required: false`) in its manifest.
+That slot auto-surfaces in the admin Integrations surface (`/api/cores/api-keys/apify`)
+AND the agent-native `integrations_list` / `integrations_connect` chat tools —
+both read the bundled-Cores registry dynamically, so no gateway wiring is needed
+for the slot to appear. The backend resolves the token PER CALL via the
+capability-gated `SecretsAccessor` (`accessor.get('byo_api_key', 'apify')`), so a
+token pasted after boot takes effect with no restart. **With no token stored the
+capability no-ops** — it returns `{ok:false, code:'no_token'}` with guidance to
+add the token in admin and **never calls Apify**. The Core still installs cleanly
+(the secret is optional), it just stays inert until credentialed.
+
+Two MCP tools (capability-guarded + audited under `network:browse`):
+`scrape_instagram` (modes `json`·`caption`·`summary`) and `scrape_x` (modes
+`json`·`text`·`summary`·`article`, plus `thread` for author-filtered
+conversations). Agent-native parity: the same backend powers the `/scrape <url>
+[mode] [--thread]` chat command (`createScrapingChatCommandFilter`), which
+auto-detects IG vs X from the pasted URL. The production wiring helper
+`buildProductionScrapingCoreWiring(secretsAccessor)` builds the one shared
+backend both surfaces use; the MCP path is wired self-sufficiently in
+`buildCoresBackendFactories` (`scraping_core` factory reads
+`installation.secrets_accessor`), so the tools work the moment Cores compose —
+no composer-threaded backend required (unlike `research_core`).
+
 ### Cores→scribe phase-2 fan-out (`gateway/cores/mount-cores-scribe-fan-out.ts`)
 
 The scheduled Calendar + Email Cores feed scribe's extract→GBrain path as

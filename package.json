@@ -27,6 +27,7 @@
     "cores/free/code-gen",
     "cores/free/email",
     "cores/free/research",
+    "cores/free/scraping",
     "cores/free/agent-settings",
     "prompts",
     "mcp",

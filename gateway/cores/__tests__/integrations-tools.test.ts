@@ -121,7 +121,9 @@ test('integrations_list returns OAuth + API-key slots', async () => {
     'google_calendar',
     'google_workspace',
   ])
-  expect(out.api_keys.map((k) => k.label)).toEqual(['tavily'])
+  // `apify` (Scraping Core, parity gap #6) joins `tavily` (Research Core)
+  // as an agent-manageable byo_api_key slot.
+  expect(out.api_keys.map((k) => k.label).sort()).toEqual(['apify', 'tavily'])
 })
 
 test('integrations_connect on an API-key slot stores the key (state mutation)', async () => {

@@ -1,0 +1,112 @@
+{
+  "name": "@neutronai/scraping-core",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./manifest": "./src/manifest.ts",
+    "./backend": "./src/backend.ts",
+    "./tools": "./src/tools.ts"
+  },
+  "private": true,
+  "dependencies": {
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*"
+  },
+  "neutron": {
+    "capabilities": ["network:browse"],
+    "tier_support": ["regular", "private"],
+    "tools": [
+      {
+        "name": "scrape_instagram",
+        "description": "Scrape any public Instagram URL (post, reel, profile, story, highlight) via the Apify `apify/instagram-scraper` actor. Returns the caption, media URLs, like/comment counts, hashtags, mentions, owner, and timestamp — content WebFetch/oEmbed can't see (Meta gates them). OPTIONAL-UNTIL-CREDENTIALED: when the user has not stored an Apify API token in admin, this tool does NOT call Apify; it returns `ok:false code:no_token` with guidance to add the token. Never calls Apify without the user's token.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "An instagram.com URL (post /p/, reel /reel/, profile, story)."
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["json", "caption", "summary"],
+              "description": "Output shape. `json` = full dataset item (default); `caption` = caption text only; `summary` = human-readable digest with engagement counts."
+            }
+          },
+          "required": ["url"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "platform": { "type": "string" },
+            "mode": { "type": "string" },
+            "url": { "type": "string" },
+            "text": { "type": "string" },
+            "data": {},
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "guidance": { "type": "string" }
+          },
+          "required": ["ok"]
+        },
+        "capability_required": "network:browse"
+      },
+      {
+        "name": "scrape_x",
+        "description": "Scrape any public X (Twitter) URL — tweet, thread, profile, or long-form Article — via Apify (kaitoeasyapi tweet scraper; fastcrawler article-to-markdown for `--article`). Returns the real content, not the React shell WebFetch sees. Accepts x.com, twitter.com, and the bare /i/status/<id> form. OPTIONAL-UNTIL-CREDENTIALED: when the user has not stored an Apify API token in admin, this tool does NOT call Apify; it returns `ok:false code:no_token` with guidance to add the token. Never calls Apify without the user's token.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "An x.com / twitter.com URL (tweet, profile, or /i/status/<id>)."
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["json", "text", "summary", "article"],
+              "description": "Output shape. `json` = full dataset items (default); `text` = handle + timestamp + body; `summary` = digest with engagement counts; `article` = X long-form Article body as markdown (URL must be the share-tweet URL, not /i/article/<id>)."
+            },
+            "thread": {
+              "type": "boolean",
+              "description": "When true, fetch the full conversation and return only the original author's tweets (keeps the thread coherent). Ignored in `article` mode."
+            }
+          },
+          "required": ["url"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "platform": { "type": "string" },
+            "mode": { "type": "string" },
+            "url": { "type": "string" },
+            "text": { "type": "string" },
+            "data": {},
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "guidance": { "type": "string" }
+          },
+          "required": ["ok"]
+        },
+        "capability_required": "network:browse"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [
+      {
+        "name": "apify_api_token",
+        "kind": "byo_api_key",
+        "label": "apify",
+        "scope": "scrape",
+        "required": false,
+        "install_prompt": "Paste your Apify API token (https://apify.com — free tier ~2000 results/month, no card). Optional: without it, Instagram/X scraping stays hidden and no-ops. Find it under Apify Console → Settings → Integrations → API token."
+      }
+    ],
+    "compat": { "coreApi": "^0.1.0" },
+    "build": { "neutronVersion": "0.2.0" }
+  }
+}

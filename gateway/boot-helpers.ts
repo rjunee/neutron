@@ -1101,6 +1101,25 @@ export async function buildCoresBackendFactories(
       }
       return { backend: wrapResearchBackendWithDefaultProjectId(researchProjectBackend) }
     },
+    scraping_core: async ({ installation }) => {
+      // Scraping Core (Vajra parity gap #6) — IG/X scraping via Apify.
+      // Unlike research_core, this factory is fully SELF-SUFFICIENT: it
+      // builds the backend from the per-install capability-gated
+      // `SecretsAccessor` (`installation.secrets_accessor`), so the MCP
+      // tools (`scrape_instagram` / `scrape_x`) get a real backend even
+      // when no composer threads anything in. The token is read PER-CALL
+      // via `tokenProviderFromAccessor`, so a token pasted in admin after
+      // boot takes effect with no restart — and a missing token no-ops
+      // with guidance instead of calling Apify (optional-until-credentialed).
+      const mod = await import('@neutronai/scraping-core')
+      return {
+        backend: mod.buildScrapingBackend({
+          tokenProvider: mod.tokenProviderFromAccessor(
+            installation.secrets_accessor,
+          ),
+        }),
+      }
+    },
     codegen_core: async () => {
       // S2 (2026-05-22) — when the production composer threads its
       // wiring-built orchestrator, reuse it so the Core's MCP tools

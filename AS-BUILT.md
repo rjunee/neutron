@@ -2,6 +2,53 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — IG/X scraping via Apify, optional-until-credentialed (Vajra parity gap #6)
+
+**What shipped.** A new Tier 1 free Core `cores/free/scraping/`
+(`@neutronai/scraping-core`) porting Vajra's `ig-scrape.sh` + `tx-scrape.sh` to
+an in-process Core: Instagram + X/Twitter scraping via the Apify
+`run-sync-get-dataset-items` endpoint (actors: `apify/instagram-scraper`,
+`kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest`,
+`fastcrawler/x-twitter-article-to-markdown`). Surfaces: two MCP tools
+(`scrape_instagram`, `scrape_x`) + a `/scrape <url> [mode] [--thread]` chat
+command, both sharing ONE backend (agent-native parity).
+
+**Optional-until-credentialed (cross-cutting pattern, Ryan 2026-06-25).** The
+Core declares a single `byo_api_key` secret (label `apify`, `required: false`)
+in its `package.json` manifest. That reuses the existing registry-driven admin
+plumbing for free: the slot auto-surfaces in `/api/cores/api-keys/apify` AND the
+agent-native `integrations_list`/`integrations_connect` tools (both read the
+bundled-Cores registry, which walks `cores/free/*` — no hardcoded list). The
+backend resolves the token PER CALL via the capability-gated `SecretsAccessor`
+(`accessor.get('byo_api_key','apify')`), so a token pasted in admin after boot
+takes effect with no restart. **No token → the capability no-ops** with a
+`{ok:false, code:'no_token'}` + "add your Apify token in admin" guidance and
+**never calls Apify**. NO FEATURE FLAGS; the token is per-user/admin-collected,
+never an env var or hardcode.
+
+- **Files.** New package: `cores/free/scraping/{package.json,tsconfig.json,index.ts}`
+  + `src/{manifest,url-detect,apify-client,backend,tools,chat-commands,chat-bridge,wiring-production}.ts`
+  + 5 test files (38 tests). Wiring: `gateway/boot-helpers.ts` (`scraping_core`
+  backend factory, self-sufficient via `installation.secrets_accessor`), root
+  `package.json` + `gateway/package.json` workspace deps.
+- **Backend self-sufficiency.** Unlike `research_core` (which requires the
+  composer to thread `researchProjectBackend`), the `scraping_core` factory
+  builds its backend from the per-install `SecretsAccessor` alone, so the MCP
+  tools get a real backend the moment Cores compose — no composer threading.
+- **Scope boundary (verified).** Composing every free Core's chat-command filter
+  into `open/composer.ts` is a pre-existing repo-wide gap (research / calendar /
+  notes are equally not chained into Open's web-chat pipeline today —
+  `open/composer.ts` threads no `cores.backends` and no chat filters). That is
+  gap #1/#9 territory, NOT gap #6; per the parity report's gap-6 guidance
+  ("package as optional Cores; not core to the harness") it is out of scope here.
+  The Core is integrated at the SAME depth as every other free Core.
+- **Tests.** 38 new Core tests (manifest round-trip + apify slot; URL
+  classification; backend token-present builds the correct actor call with a
+  mocked fetch; **token-absent no-ops with zero Apify calls** — the invariant;
+  IG vs X routing; thread/article semantics; Apify error envelope;
+  capability-guard wiring). Updated 4 count-sensitive registry/integrations tests
+  to include `scraping_core` + the `apify` slot. Full suite green (821 files).
+
 ## 2026-06-25 — model-update watchdog + graceful upgrade (P3, Vajra port row #16)
 
 **What shipped.** `runtime/adapters/claude-code/persistent/model-update-watchdog.ts`

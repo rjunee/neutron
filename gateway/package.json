@@ -14,6 +14,7 @@
     "@neutronai/notes": "workspace:*",
     "@neutronai/reminders-core": "workspace:*",
     "@neutronai/research-core": "workspace:*",
+    "@neutronai/scraping-core": "workspace:*",
     "@neutronai/tasks-core": "workspace:*",
     "@neutronai/agent-settings": "workspace:*",
     "jose": "^5.9.0"
