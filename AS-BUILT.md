@@ -2,6 +2,40 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — P1a: stamp `topic_id` on every outbound web envelope (notification misrouting fix)
+
+**Context.** The web client multiplexes every topic over ONE socket and uses a
+per-topic drop-guard: it only paints a message whose `topic_id` matches the
+focused topic (else it routes to that topic's own view / hydrates on switch). The
+live-agent main reply already stamped `topic_id` (`build-live-agent-turn.ts:446`),
+but several other outbound envelopes did NOT — so a notification that fired while
+the user was on a different topic painted into the FOCUSED topic (cross-project
+bleed). The canonical case is an async wow-moment or a recovered reply replayed on
+reconnect.
+
+**Fix — stamp `topic_id` at every confirmed-missing site (the destination topic
+is always in scope):**
+- `gateway/realmode-composer/build-wow-dispatcher.ts` — `sendText` agent_message
+  envelope + the `emitPrompt` button-prompt envelope (`renderButtonPromptForWeb`
+  now takes an optional `topic_id`).
+- `gateway/http/recovered-reply-store.ts` — `renderRecoveredReply(text, topic_id)`
+  now stamps it (both the live-deliver and the reconnect-drain callers pass it).
+- `gateway/http/chat-bridge.ts` — the chat-command reply, both live-agent
+  bridge-failure agent_messages, both `agent_ack` envelopes, all four `error`
+  envelopes, and the slug-rename courtesy notice.
+- `gateway/realmode-composer/build-live-agent-turn.ts` — the cold-start ack +
+  both failure-body agent_messages (the main reply already stamped it).
+- Types: added optional `topic_id` to `AgentAckOutbound` + `ErrorOutbound`
+  (`landing/server.ts`); `AgentMessageOutbound.topic_id` already existed.
+
+The app-ws (Expo mobile) surface is intentionally untouched — it carries
+`project_id`/`message_id` on its own envelope shape, not the web `topic_id`.
+
+**Tests.** New `wow-dispatcher-topic-id.test.ts` asserts both wow envelopes carry
+`topic_id`; updated the recovered-reply (`replay-redelivery.test.ts`) +
+`agent_ack` (`chat-bridge.test.ts`) exact-match assertions. tsc clean; gateway
+http + realmode-composer suites green (617 pass).
+
 ## 2026-06-26 — P0a: a per-turn TIMEOUT no longer parks the credential (stop the "all credentials in cooldown" chat-blocker cascade)
 
 **Context (live dogfood, the screenshot bug).** A fresh single-owner Open install

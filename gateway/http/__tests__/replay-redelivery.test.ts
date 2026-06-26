@@ -59,7 +59,7 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     sink({ topic_id: topic, turn_id: 'abc:1', text: 'recovered answer' })
 
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toEqual({ type: 'agent_message', body: 'recovered answer' })
+    expect(sent[0]).toEqual({ type: 'agent_message', body: 'recovered answer', topic_id: topic })
     // Online delivery → nothing left to drain on reconnect.
     expect(store.takeUndelivered(topic, ++clock)).toHaveLength(0)
   })
@@ -79,7 +79,7 @@ describe('makeRecoveredReplySink — online / offline / dedupe', () => {
     const sent: ChatOutbound[] = []
     const emitted = drainRecoveredReplies({ topic_id: topic, store, send: (e) => sent.push(e), now: () => ++clock })
     expect(emitted).toBe(1)
-    expect(sent[0]).toEqual({ type: 'agent_message', body: 'answer for offline user' })
+    expect(sent[0]).toEqual({ type: 'agent_message', body: 'answer for offline user', topic_id: topic })
 
     // A second drain (e.g. another reconnect) re-emits NOTHING — already delivered.
     const sent2: ChatOutbound[] = []

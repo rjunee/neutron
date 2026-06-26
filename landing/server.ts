@@ -275,6 +275,12 @@ export interface AgentMessageOutbound {
  */
 export interface AgentAckOutbound {
   type: 'agent_ack'
+  /**
+   * P1a (2026-06-26) — the topic this ack belongs to. Stamped so the
+   * per-topic client drop-guard attributes the ack to the right topic
+   * instead of whatever is focused (notification misrouting fix).
+   */
+  topic_id?: string
 }
 
 /**
@@ -376,6 +382,12 @@ export interface AgentTypingEndOutbound {
 export interface ErrorOutbound {
   type: 'error'
   message: string
+  /**
+   * P1a (2026-06-26) — the topic this error belongs to. Stamped so the
+   * per-topic client drop-guard renders the error in the right topic
+   * instead of whatever is focused (notification misrouting fix).
+   */
+  topic_id?: string
 }
 
 /**

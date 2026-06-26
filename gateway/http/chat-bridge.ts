@@ -406,7 +406,7 @@ function emitTypingBracket(
  * The landing client (`landing/chat.ts`) parses `type:'agent_message'`
  * + `options` to render the keyboard locally.
  */
-export function renderButtonPromptForWeb(prompt: ButtonPrompt): ChatOutbound {
+export function renderButtonPromptForWeb(prompt: ButtonPrompt, topic_id?: string): ChatOutbound {
   // Sprint 28 Codex r4 P1 — propagate `kind` + per-option `image_url`
   // so the image-gallery picker actually renders thumbnails on the
   // web client. Pre-Sprint-28 prompts have neither field set; the
@@ -436,6 +436,9 @@ export function renderButtonPromptForWeb(prompt: ButtonPrompt): ChatOutbound {
   if (upload !== null) {
     out.upload_affordance = upload
   }
+  // P1a — stamp the owning topic so the per-topic client drop-guard routes this
+  // prompt to ITS topic, not whatever is focused (notification misrouting).
+  if (topic_id !== undefined) out.topic_id = topic_id
   return out
 }
 
@@ -483,11 +486,15 @@ function normalizeUploadAffordance(
 export function renderSlugRenameConfirmationForWeb(input: {
   new_slug: string
   base_domain: string
+  topic_id?: string
 }): ChatOutbound {
-  return {
+  const out: ChatOutbound = {
     type: 'agent_message',
     body: `Your URL is set to https://${input.new_slug}.${input.base_domain}/chat — bookmark it for next time. I'll continue our conversation right here.`,
   }
+  // P1a — stamp the owning topic so the courtesy notice routes to its topic.
+  if (input.topic_id !== undefined) out.topic_id = input.topic_id
+  return out
 }
 
 /**
@@ -1515,6 +1522,7 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
             type: 'error',
             message:
               'That topic is not yours to open. Refresh the chat surface and try again.',
+            topic_id: wire_topic_id,
           })
           return
         }
@@ -1620,6 +1628,7 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
         send({
           type: 'error',
           message: 'That control isn’t a valid tap. Try typing your reply instead.',
+          topic_id: wire_topic_id,
         })
         return
       }
@@ -1661,7 +1670,7 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
             `${LOG_TAG} handleInbound event=chat_command_routed project=${project_slug} topic=${wire_topic_id} user=${user_id} chars=${event.body.length}`,
           )
           try {
-            send({ type: 'agent_message', body: command_result.text })
+            send({ type: 'agent_message', body: command_result.text, topic_id: wire_topic_id })
           } catch {
             // dead socket — durable history + reconnect hydration cover it
           }
@@ -1806,7 +1815,7 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
                 }`,
               )
               try {
-                send({ type: 'agent_message', body: LIVE_AGENT_BRIDGE_FAILURE_BODY })
+                send({ type: 'agent_message', body: LIVE_AGENT_BRIDGE_FAILURE_BODY, topic_id })
               } catch {
                 /* dead socket — reconnect hydration covers it */
               }
@@ -2143,6 +2152,7 @@ export function buildSlugPickerEngineHook(
           renderSlugRenameConfirmationForWeb({
             new_slug: pfInput.new_url_slug,
             base_domain: baseDomain,
+            topic_id: input.topic_id,
           }),
         )
         console.warn(
@@ -2653,7 +2663,7 @@ async function handleProjectTopicInbound(input: {
         }`,
       )
       try {
-        send({ type: 'agent_message', body: LIVE_AGENT_BRIDGE_FAILURE_BODY })
+        send({ type: 'agent_message', body: LIVE_AGENT_BRIDGE_FAILURE_BODY, topic_id: input.wire_topic_id })
       } catch {
         /* dead socket — reconnect hydration covers it */
       }
@@ -2707,7 +2717,7 @@ async function handleProjectTopicInbound(input: {
           log_tag,
         })
       }
-      send({ type: 'agent_ack' })
+      send({ type: 'agent_ack', topic_id: input.wire_topic_id })
       return
     }
     // Engaged. Tag-to-delegate (spec §4): in `tag_gated` a tagged TASK (vs a
@@ -2796,6 +2806,7 @@ async function handleProjectTopicInbound(input: {
         send({
           type: 'error',
           message: 'That prompt is no longer available.',
+          topic_id: input.wire_topic_id,
         })
         return
       }
@@ -2806,6 +2817,7 @@ async function handleProjectTopicInbound(input: {
         send({
           type: 'error',
           message: 'That prompt belongs to a different chat. Switch back to that conversation to answer it.',
+          topic_id: input.wire_topic_id,
         })
         return
       }
@@ -2864,7 +2876,7 @@ async function handleProjectTopicInbound(input: {
         console.info(
           `${log_tag} handleInbound event=project_topic_silent_skip project=${input.project_slug} topic=${input.wire_topic_id} prompt_id=${prompt_id}`,
         )
-        send({ type: 'agent_ack' })
+        send({ type: 'agent_ack', topic_id: input.wire_topic_id })
         return
       }
     }

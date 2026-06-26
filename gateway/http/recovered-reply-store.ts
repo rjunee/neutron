@@ -164,9 +164,13 @@ export class InMemoryRecoveredReplyStore implements RecoveredReplyStore {
 }
 
 /** Render a recovered reply as the plain assistant-message wire envelope (no
- *  buttons) — what an ordinary completed conversational turn ships. */
-export function renderRecoveredReply(text: string): ChatOutbound {
-  return { type: 'agent_message', body: text }
+ *  buttons) — what an ordinary completed conversational turn ships. P1a: stamp
+ *  the owning `topic_id` so the client's per-topic drop-guard routes the
+ *  recovered reply to ITS topic, not whatever is focused on reconnect (a
+ *  recovered reply is replayed exactly when the user may be on another topic —
+ *  the canonical misrouting case). */
+export function renderRecoveredReply(text: string, topic_id: string): ChatOutbound {
+  return { type: 'agent_message', body: text, topic_id }
 }
 
 /**
@@ -191,7 +195,7 @@ export function makeRecoveredReplySink(deps: {
     const registry = deps.registry()
     if (registry !== undefined && registry.has(reply.topic_id)) {
       try {
-        const delivered = registry.send(reply.topic_id, renderRecoveredReply(reply.text))
+        const delivered = registry.send(reply.topic_id, renderRecoveredReply(reply.text, reply.topic_id))
         if (delivered) {
           deps.store.markDelivered(reply.topic_id, reply.turn_id, t)
           return
@@ -234,7 +238,7 @@ export function drainRecoveredReplies(deps: {
   let emitted = 0
   for (const row of rows) {
     try {
-      deps.send(renderRecoveredReply(row.text))
+      deps.send(renderRecoveredReply(row.text, deps.topic_id))
       deps.store.markDelivered(deps.topic_id, row.turn_id, clock())
       emitted += 1
     } catch (err) {

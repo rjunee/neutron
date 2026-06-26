@@ -1798,6 +1798,18 @@ the user text). Layer order, top to bottom:
   destination's full history via `GET /api/v1/chat/history?topic_id=…`.
   Historical rows render inert (resolved → [agent][user]; unresolved → agent
   bubble), with the single active prompt left for the live re-emit.
+- *Per-topic envelope routing (P1a, 2026-06-26).* The web client multiplexes
+  every topic over ONE socket and runs a per-topic drop-guard: it only paints a
+  message whose `topic_id` matches the focused topic (otherwise it routes to that
+  topic's own view / hydrates on switch). So EVERY outbound web envelope stamps
+  the destination `topic_id` — the live-agent reply + cold-start/failure bodies
+  (`build-live-agent-turn.ts`), the wow `sendText`/`emitPrompt`
+  (`build-wow-dispatcher.ts`), the recovered-reply replay
+  (`recovered-reply-store.ts`), and the chat-bridge command/failure/`agent_ack`/
+  `error`/slug-rename envelopes (`chat-bridge.ts`). Without it an async
+  notification (a wow-moment, a reconnect-replayed recovered reply) painted into
+  whatever topic was focused (cross-project bleed). The app-ws (Expo mobile)
+  surface carries `project_id`/`message_id` on its own envelope shape instead.
 - *Wow brief persistence (2026-06-20).* The wow channel adapter's `sendText`
   (`buildWowChannelAdapter`, `gateway/realmode-composer/build-wow-dispatcher.ts`)
   persists every delivered agent statement — notably action 01's first-week

@@ -1329,7 +1329,7 @@ describe('buildWebChatBridge — handleProjectTopicInbound silent skip-for-now (
     // body (the stub reply is silenced), no error (the resolve
     // succeeded), no second ack (idempotency).
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toEqual({ type: 'agent_ack' })
+    expect(sent[0]).toEqual({ type: 'agent_ack', topic_id: projectTopic })
     expect(sent.filter((e) => e.type === 'agent_message')).toHaveLength(0)
     expect(sent.filter((e) => e.type === 'error')).toHaveLength(0)
 
@@ -1417,7 +1417,7 @@ describe('buildWebChatBridge — handleProjectTopicInbound silent skip-for-now (
     // around `resolve` MUST swallow the already-resolved throw and
     // fall through to the silent-skip return.
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toEqual({ type: 'agent_ack' })
+    expect(sent[0]).toEqual({ type: 'agent_ack', topic_id: projectTopic })
     expect(sent.filter((e) => e.type === 'agent_message')).toHaveLength(0)
     expect(sent.filter((e) => e.type === 'error')).toHaveLength(0)
 
