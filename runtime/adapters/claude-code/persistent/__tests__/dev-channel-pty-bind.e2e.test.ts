@@ -111,7 +111,7 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
     const host = new BunTerminalHost()
     const chunks: Buffer[] = []
     let dismissed = false
-    let child: { writeKey?: (k: 'enter') => void; kill: (s?: string) => void } | null = null
+    let child: ReturnType<BunTerminalHost['spawn']> | null = null
     child = host.spawn(argv, {
       cwd: cfgDir,
       env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
