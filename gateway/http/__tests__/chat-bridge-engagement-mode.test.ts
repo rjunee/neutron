@@ -81,15 +81,22 @@ function makeNoopEngine(state: OnboardingState): InterviewEngine {
   } as unknown as InterviewEngine
 }
 
-/** Minimal ButtonStore double — records the user-turn persistence resolve. */
+/**
+ * Minimal ButtonStore double — records the user-turn persistence. Stateful: the
+ * single prior row starts UNRESOLVED and flips resolved on the first stamp, so
+ * a second consecutive gated message finds no open row and must fall through to
+ * `persistInertUserTurn` (the consecutive-message durability path).
+ */
 function makeFakeButtonStore() {
   const resolves: Array<{ prompt_id: string; choice_value: string; freeform_text?: string }> = []
+  const inertUserTurns: Array<{ text: string; speaker_user_id: string }> = []
+  let priorResolved = false
   const store = {
     async listHistoryByTopic(_i: unknown) {
-      // One unresolved prior row so the gate's persist path stamps onto it.
-      return { turns: [{ prompt_id: 'pid-prior', resolved: false }] }
+      return { turns: [{ prompt_id: 'pid-prior', resolved: priorResolved }] }
     },
     async resolve(input: { choice: { prompt_id: string; choice_value: string; freeform_text?: string } }) {
+      priorResolved = true
       resolves.push({
         prompt_id: input.choice.prompt_id,
         choice_value: input.choice.choice_value,
@@ -99,8 +106,12 @@ function makeFakeButtonStore() {
       })
       return { ok: true }
     },
+    async persistInertUserTurn(input: { text: string; speaker_user_id: string }) {
+      inertUserTurns.push({ text: input.text, speaker_user_id: input.speaker_user_id })
+      return { prompt_id: `pid-inert-${inertUserTurns.length}` }
+    },
   }
-  return { store, resolves }
+  return { store, resolves, inertUserTurns }
 }
 
 interface HarnessOpts {
@@ -128,7 +139,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
     kid: 'kid-test',
     publicKey: publicKey as KeyLike,
   }
-  const { store: buttonStore, resolves } = makeFakeButtonStore()
+  const { store: buttonStore, resolves, inertUserTurns } = makeFakeButtonStore()
 
   const bridge = buildWebChatBridge({
     expected_project_slug: 'alice',
@@ -176,7 +187,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       active_topic_id: 'web:u-1:projx',
     })
 
-  return { sent, turns, delegations, resolves, post }
+  return { sent, turns, delegations, resolves, inertUserTurns, post }
 }
 
 const types = (sent: ChatOutbound[]) => sent.map((e) => e.type)
@@ -213,6 +224,25 @@ describe('engagement mode — tag_gated', () => {
     expect(h.resolves).toHaveLength(1)
     expect(h.resolves[0]!.choice_value).toBe('__freeform__')
     expect(h.resolves[0]!.freeform_text).toBe('just chatting with the team about lunch')
+  })
+
+  test('CONSECUTIVE non-mention posts each persist (no dropped transcript message)', async () => {
+    // Codex review 2026-06-26: after the first quiet message resolves the prior
+    // unresolved row, the second has no open row to attach to — it MUST persist
+    // as its own durable inert user turn, not silently vanish from history.
+    const h = await makeHarness({ mode: 'tag_gated' })
+    await h.post('first quiet message')
+    await h.post('second quiet message')
+    await h.post('third quiet message')
+    expect(h.turns).toHaveLength(0)
+    // First stamped onto the prior unresolved agent prompt…
+    expect(h.resolves).toHaveLength(1)
+    expect(h.resolves[0]!.freeform_text).toBe('first quiet message')
+    // …the next two persisted as standalone durable user turns.
+    expect(h.inertUserTurns.map((t) => t.text)).toEqual([
+      'second quiet message',
+      'third quiet message',
+    ])
   })
 
   test('@neutron question triggers an INLINE agent turn', async () => {

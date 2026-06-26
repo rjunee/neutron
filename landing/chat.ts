@@ -1539,9 +1539,16 @@ export class ChatClient {
     // case is symmetric with the live-arrives-second case.
     if (this.renderedPromptIds.has(turn.prompt_id)) return
     this.renderedPromptIds.add(turn.prompt_id)
-    const agentRun = this.openOrJoinHistoryRun('agent', ctx, fragment)
-    this.appendBubble(agentRun, 'agent', turn.body)
-    this.refreshHistoryTail(agentRun, turn.created_at)
+    // Connect engagement mode (2026-06-26) — a `tag_gated` quiet message
+    // persists as an inert USER turn with an EMPTY `body` (the text lives in
+    // `resolution_text`). Skip the agent bubble for an empty body so it paints
+    // as a user-only bubble; every pre-existing turn has a non-empty agent body
+    // so this guard is a no-op for them.
+    if (turn.body.length > 0) {
+      const agentRun = this.openOrJoinHistoryRun('agent', ctx, fragment)
+      this.appendBubble(agentRun, 'agent', turn.body)
+      this.refreshHistoryTail(agentRun, turn.created_at)
+    }
     if (turn.resolved && turn.resolution_text.length > 0) {
       const userRun = this.openOrJoinHistoryRun('user', ctx, fragment)
       this.appendBubble(userRun, 'user', turn.resolution_text)

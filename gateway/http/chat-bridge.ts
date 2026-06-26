@@ -2484,6 +2484,8 @@ async function persistProjectUserTurnOnly(input: {
     })
     const latest = turns[0]
     if (latest !== undefined && !latest.resolved) {
+      // First quiet message after an agent prompt: stamp onto that unresolved
+      // row so history renders [agent prompt][user reply] in order.
       await buttonStore.resolve({
         choice: {
           prompt_id: latest.prompt_id,
@@ -2494,7 +2496,20 @@ async function persistProjectUserTurnOnly(input: {
           channel_kind: input.channel_kind,
         },
       })
+      return
     }
+    // No unresolved row to attach to — e.g. CONSECUTIVE quiet messages in a
+    // `tag_gated` project (the prior one already resolved the last open row).
+    // Persist this message as its own durable inert user turn so the shared
+    // transcript never drops a gated message (Codex cross-model review,
+    // 2026-06-26). Without this, the second+ quiet message in a stretch would
+    // silently vanish from hydrated history.
+    await buttonStore.persistInertUserTurn({
+      topic_id: input.topic_id,
+      text: input.user_text,
+      speaker_user_id: input.user_id,
+      channel_kind: input.channel_kind,
+    })
   } catch (err) {
     console.warn(
       `${log_tag} persistProjectUserTurnOnly event=user_turn_persist_skipped project=${input.project_slug} topic=${input.topic_id} err=${
