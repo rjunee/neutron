@@ -45,12 +45,13 @@ import {
 import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
 import { ReminderStore } from '../../reminders/store.ts'
 import { ReminderTickLoop } from '../../reminders/tick.ts'
-import { TridentRunStore, type TridentRun } from '../../trident/store.ts'
+import { TridentRunStore } from '../../trident/store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from '../../trident/tick.ts'
 import { stubAdvanceDeps } from '../../trident/state-machine.ts'
 import { TridentSessionManager } from '../../trident/session.ts'
 import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
 import { buildTridentDelivery } from '../../trident/delivery.ts'
+import { withTerminalObserver } from '../../trident/terminal-observer.ts'
 import { spawnCapture } from '../../trident/git-mode.ts'
 import { TaskStore } from '../../tasks/store.ts'
 import {
@@ -268,28 +269,16 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       const router = ctx.graph.get<ChannelRouter>('channels')
       const delivery = buildTridentDelivery({ sink: router })
       // Skill-forge trigger (parity gap #5) — when the composer wired an
-      // `on_run_terminal` observer, fire it AFTER delivery on every terminal
-      // run so a completed Trident workflow can be auto-skillified. The
-      // run row is already committed; a hook throw is logged, never
-      // re-thrown, so it can't un-terminate a finished build.
+      // `on_run_terminal` observer, run it on every terminal run, ISOLATED
+      // from delivery (`withTerminalObserver`): a delivery outage must not skip
+      // the auto-skillify audit, since the run is already terminal and the loop
+      // won't re-fire the hook. Observer errors are logged, never propagated;
+      // a delivery error is still re-thrown so the loop's try/catch logs it.
       const runTerminalObserver = tridentWiring?.on_run_terminal
       const on_terminal: TridentTerminalHook =
         runTerminalObserver === undefined
           ? delivery
-          : {
-              async onTerminal(run: TridentRun): Promise<void> {
-                await delivery.onTerminal(run)
-                try {
-                  await runTerminalObserver(run)
-                } catch (err) {
-                  console.warn(
-                    `[trident] on_run_terminal observer failed for run ${run.id}: ${
-                      err instanceof Error ? err.message : String(err)
-                    }`,
-                  )
-                }
-              },
-            }
+          : withTerminalObserver(delivery, runTerminalObserver)
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
         const session = new TridentSessionManager({ dispatch: tridentWiring.dispatch })
