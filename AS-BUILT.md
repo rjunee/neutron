@@ -2,6 +2,48 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — P0a: a per-turn TIMEOUT no longer parks the credential (stop the "all credentials in cooldown" chat-blocker cascade)
+
+**Context (live dogfood, the screenshot bug).** A fresh single-owner Open install
+hit a chat that died on EVERY turn. The server log showed one slow turn time out —
+`[live-agent-turn] event=turn_failed … err=cc-llm-call: persistent-repl: turn
+timeout` (elapsed_ms≈185 026, i.e. it hit `DEFAULT_TURN_TIMEOUT_MS=180_000` at
+`runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts:177`/`:2708`)
+— and then the NEXT turns failed `cc-llm-call substrate: all Anthropic credentials
+are in cooldown (429/402/401)`. The user saw "I hit a problem answering that… your
+AI connection may need attention in settings" three times.
+
+**Root cause.** The substrate emits a per-turn timeout as a RETRYABLE error with
+no HTTP status (`persistent-repl: turn timeout`, retryable:true). In
+`gateway/realmode-composer/build-llm-call-substrate.ts` the error classifier had
+fast-paths for binary-not-found and channel-wedged but NOT for a turn timeout, so
+the timeout fell through to `mapStatusForPoolCooldown(null, retryable=true)` → 429
+→ `reportFailure(pool, cred.id, 429)`, parking a perfectly healthy credential.
+Across a few slow turns the whole pool cooled down and every subsequent turn died
+"all credentials in cooldown" — a transient turn slowness laundered into a
+permanent quota lie that blocked ALL chat. (#79 fixed spawn-failures being
+mislabeled; #80 added the channel-wedged fast-path; the TIMEOUT case still
+cascaded.)
+
+**Fix.** New `detectTurnTimeout()` classifier + a fast-path in the substrate's
+error branch (mirrors `detectBinaryNotFound` / `detectChannelWedged`): a turn
+timeout is classified BEFORE the cooldown map, skips `reportFailure` entirely, and
+is re-emitted UNCHANGED (still retryable:true). The substrate already POISONS the
+warm session on timeout (`persistent-repl-substrate.ts:2707`) so the next dispatch
+respawns a clean REPL — that self-heal only worked once the credential stopped
+being wrongly parked. Net: a slow turn now fails as a recoverable single-turn
+retry on the SAME healthy credential instead of killing the whole chat.
+
+**Files.** `gateway/realmode-composer/build-llm-call-substrate.ts`
+(`detectTurnTimeout` + fast-path at the error classifier),
+`gateway/realmode-composer/__tests__/build-llm-call-substrate.test.ts` (new test
+asserting a `persistent-repl: turn timeout` error leaves the credential un-parked
+and re-emits retryable). NOTE on bug (1) "why a turn runs 180s": the timeout is a
+turn-level slowness (heavy first-turn tool use / occasional reply-correlation miss
+in the dev-channel `TurnIdEcho` path) that the poison→respawn already recovers
+from once the cred is not parked; deeper completion-detection work is tracked
+separately and needs a live repro.
+
 ## 2026-06-26 — Deterministic "prior reply" lookup (fix a PRE-EXISTING reflection-test flake surfaced alongside the MCP-wedge PR)
 
 **Context.** While landing the dev-channel MCP-wedge fix (below), CI's `test` job

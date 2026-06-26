@@ -550,6 +550,41 @@ test('the other post-spawn-assertion failures (no-channel-ready / no-http-health
   }
 })
 
+test('2026-06-26 chat-blocker — a per-turn timeout is a TRANSIENT turn failure, NOT a cred cooldown: no reportFailure, re-emitted UNCHANGED (retryable)', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'k1', kind: 'oauth', secret: 'oauth-1' }],
+  })
+  // The persistent-REPL substrate surfaces a per-turn timeout RETRYABLE with the
+  // `persistent-repl: turn timeout` text (persistent-repl-substrate.ts:2708).
+  // Pre-fix `mapStatusForPoolCooldown(null, true)` → 429 → reportFailure cooled
+  // down a healthy credential; across a few slow turns the whole pool cooled and
+  // every subsequent turn died "all Anthropic credentials are in cooldown" — the
+  // live dogfood chat-blocker. It must be classified turn-timeout FIRST: no
+  // cooldown, re-emitted UNCHANGED so the turn retries on the same credential.
+  const cap = captureFactory()
+  cap.emitError({ retryable: true, message: 'persistent-repl: turn timeout' })
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-1',
+    cwd: workdir,
+    substrateFactory: cap.substrateFactory,
+  })
+  const handle = sub!.start(runSpec())
+  const events: Event[] = []
+  for await (const ev of handle.events) events.push(ev)
+  // No cooldown — a slow turn is not a credential condition, so the NEXT turn
+  // can land on this same healthy credential (the cascade fix).
+  expect(pool.credentials[0]!.cooldown_until).toBeUndefined()
+  expect(pool.credentials[0]!.cooldown_reason).toBeUndefined()
+  expect(pool.credentials[0]!.consecutive_failures).toBe(0)
+  // Re-emitted UNCHANGED — still retryable so the gateway can retry the turn.
+  const err = events.find((e) => e.kind === 'error')
+  expect(err).toBeDefined()
+  expect(err!.kind === 'error' && err!.retryable).toBe(true)
+  expect(err!.kind === 'error' && /turn timeout/i.test(err!.message)).toBe(true)
+})
+
 // ---------------------------------------------------------------------------
 // 7. Cooldown reporting — CLI auth failure → auth_401 cooldown via
 //    detectCliAuthFailure.
