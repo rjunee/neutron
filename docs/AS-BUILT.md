@@ -2,6 +2,66 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Session-compaction POLICY — idle-gated auto-compaction (parity gap #4)
+
+**What shipped.** The actual **compaction trigger** for warm/persistent sessions,
+closing parity gap #4 (`docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md`
+§P, §5.4). The #62 session-size watchdog already SURFACED a Reset/Compact
+affordance, but verification this run found that nothing in Open actuates it:
+`requestSessionCompact`/`onSizeAlert` have **zero callers** in `gateway/`/`open/`,
+and Open's web chat is WS-native (no inline keyboard). So a long-lived single-owner
+session was told "consider compacting" with **no in-product way to do it** — it
+could still grow until `claude --resume` wedges (the 2026-04-16 11.8 MB
+infinite-restart incident the watchdog was built to prevent). Vajra is the *same*
+warn-only engine, but its "policy" is the clickable Telegram buttons it posts;
+Open has no button surface, so it closes the loop with an idle-gated automatic
+actuation. **No feature flag** — on wherever a live PTY child is wired.
+
+**Verify-first result (cited).** Open's `session-size-watchdog.ts` `surface()` →
+`surfaceSizeAlert` (`persistent-repl-substrate.ts:492`) only pushes a chat status
++ stderr + the unwired `onSizeAlert` hook; its actuator `requestCompact()` is
+reachable only via `requestSessionCompact` (`persistent-repl-substrate.ts:3679`),
+which `git grep` confirms **no `gateway/`/`open/` code calls**. The old code
+comments explicitly said compaction is "never silent/automatic … out of scope" —
+that was the gap. Vajra (`~/vajra/gateway/session-size-watchdog.ts`) likewise only
+warns at the engine level and relies on `buildSswKeyboard` (line 1304) buttons.
+
+- **The policy.** `startSessionSizeWatchdog` gained an optional `isIdle?: () =>
+  boolean` dep. When wired AND the **post-compact** size reaches the **critical**
+  band (≥10 MB), the watchdog actuates the SAME `escape`+`/compact` the affordance
+  surfaces — but only when `isIdle()` is true. The substrate wires `isIdle` as
+  `session.activeTurn === undefined && Date.now() - session.lastDataAt >=
+  SESSION_COMPACT_IDLE_QUIESCE_MS` (30 s; overridable via
+  `sizeCompactIdleQuiesceMs` for deterministic tests). Reuses **all** #62
+  plumbing — post-compact measurement, the mid-compact lock, the debounce floor,
+  the tiered surface latch — and adds no parallel size monitor.
+- **Edge-latched + cooldown (no re-fire loop).** An outer `autoCompactLatched`
+  flag fires the auto-compaction **once per critical episode**. It de-latches only
+  on the happy-path lock clear (post-compact size dropped below warn → the
+  compaction worked → a future re-climb may fire again), and is **kept** on the
+  timeout lock clear (still-large / failed `/compact` → must not re-actuate every
+  tick). A session that crossed critical while **busy** stays un-latched so the
+  next idle tick still actuates — no missed one-shot. Driven off the measured
+  size, not the rising-edge `fired`, precisely so the busy-then-idle case works.
+- **Idle-gated only.** Auto-compaction never injects keystrokes mid-turn
+  (`activeTurn` gate) — the alert still surfaces inline, but the actuation waits
+  for the session to go quiet (mirrors the model-update watchdog's idle quiesce,
+  the other keystroke-injecting watchdog).
+- **Tests.** `session-size-watchdog.test.ts` +6 (idle critical → actuate once;
+  busy → not actuated, then idle → actuated; warn band never auto-compacts;
+  de-latch on drop-then-re-climb → second actuation; no `isIdle` → surface-only).
+  `session-size-watchdog-wiring.test.ts` +1 (a real idle warm session at ≥10 MB
+  AUTO-compacts through the live substrate with no `requestSessionCompact` call,
+  fire-once). Full `runtime/adapters/claude-code/persistent/` suite green save one
+  **pre-existing, unrelated** failure (`dev-channel — exit on MCP transport close
+  #217`, fails identically on pristine `origin/main` in this checkout — see
+  STATUS.md).
+- **Files.** `runtime/adapters/claude-code/persistent/session-size-watchdog.ts`
+  (the `isIdle` dep + `maybeAutoCompact` policy + reason-coupled latch),
+  `persistent-repl-substrate.ts` (wire `isIdle`, `SESSION_COMPACT_IDLE_QUIESCE_MS`,
+  `sizeCompactIdleQuiesceMs` option, refreshed comments), the two test files, and
+  `docs/SYSTEM-OVERVIEW.md`.
+
 ## PTY terminal-detection P3 — model-update watchdog + graceful upgrade (port row #16)
 
 **What shipped.** A new module

@@ -147,8 +147,10 @@ describe('SessionSizeTracker — tiered edge-latch (invariant §1)', () => {
 })
 
 /** Build a watchdog with a manual clock + a fake PTY write seam, returning the
- *  surfaced alerts and the raw key/data writes for assertion. */
-function makeHarness(sizes: () => number | null) {
+ *  surfaced alerts and the raw key/data writes for assertion. Pass `isIdle` to
+ *  exercise the idle-gated auto-compaction POLICY (gap #4); omit it to keep the
+ *  watchdog surface-only (the default, matching a button-wired gateway). */
+function makeHarness(sizes: () => number | null, isIdle?: () => boolean) {
   const alerts: Array<{ severity: SizeSeverity; size: number }> = []
   const writes: string[] = []
   let clock = 0
@@ -157,6 +159,7 @@ function makeHarness(sizes: () => number | null) {
     surface: (severity, size) => alerts.push({ severity, size }),
     writeKey: (k) => writes.push(`KEY:${encodeKey(k)}`),
     write: (d) => writes.push(d),
+    ...(isIdle !== undefined ? { isIdle } : {}),
     now: () => clock,
     // No real timer — tests call wd.tick() directly.
     setIntervalFn: () => 0,
@@ -164,6 +167,9 @@ function makeHarness(sizes: () => number | null) {
   })
   return { wd, alerts, writes, advance: (ms: number) => (clock += ms) }
 }
+
+/** The escape+/compact actuation a single auto-compaction emits, in order. */
+const COMPACT_WRITES = [`KEY:${encodeKey('escape')}`, '/compact\r']
 
 describe('startSessionSizeWatchdog — tick wiring', () => {
   test('a post-compact size ≥5MB fires warn; ≥10MB fires critical', () => {
@@ -278,5 +284,71 @@ describe('Compact action — escape then /compact\\r, fire-once + mid-compact lo
     advance(30_000) // now past the floor
     expect(wd.requestCompact()).toBe(true)
     expect(writes.filter((w) => w === '/compact\r')).toHaveLength(2)
+  })
+})
+
+describe('idle-gated auto-compaction POLICY (gap #4) — close the wedge loop', () => {
+  test('an IDLE session at critical auto-compacts ONCE (escape+/compact)', () => {
+    const { wd, writes } = makeHarness(() => SIZE_CRITICAL_BYTES, () => true)
+    wd.tick()
+    // The SAME actuation the manual affordance fires — no human press needed.
+    expect(writes).toEqual(COMPACT_WRITES)
+    // Still critical (file does not shrink mid-flight) → the mid-compact lock +
+    // outer latch suppress every subsequent tick: NOT re-fired while still over.
+    wd.tick()
+    wd.tick()
+    expect(writes).toEqual(COMPACT_WRITES)
+  })
+
+  test('a BUSY (mid-turn) session at critical is NOT auto-compacted', () => {
+    let idle = false
+    const { wd, writes, alerts } = makeHarness(() => SIZE_CRITICAL_BYTES, () => idle)
+    wd.tick()
+    // The alert still surfaces (the user sees it inline), but no keystroke is
+    // injected mid-turn — auto-compaction is idle-gated only.
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]?.severity).toBe('critical')
+    expect(writes).toHaveLength(0)
+    // It stays UN-latched while busy, so when the turn ends and the session goes
+    // idle the very next tick actuates (no missed one-shot).
+    idle = true
+    wd.tick()
+    expect(writes).toEqual(COMPACT_WRITES)
+  })
+
+  test('warn band alone never auto-compacts — only critical does', () => {
+    let size = SIZE_WARN_BYTES + 10
+    const { wd, writes } = makeHarness(() => size, () => true)
+    wd.tick()
+    expect(writes).toHaveLength(0) // ≥5MB warns, but the POLICY fires at ≥10MB
+    size = SIZE_CRITICAL_BYTES
+    wd.tick()
+    expect(writes).toEqual(COMPACT_WRITES)
+  })
+
+  test('drop below critical de-latches → a re-climb auto-compacts again', () => {
+    let size = SIZE_CRITICAL_BYTES
+    const { wd, writes, advance } = makeHarness(() => size, () => true)
+    wd.tick()
+    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(1)
+    // Compaction succeeds: post-compact size drops below warn → mid-compact lock
+    // clears AND the outer auto-compact latch de-latches (size < critical).
+    size = 1024
+    wd.tick()
+    expect(wd.isCompacting()).toBe(false)
+    // Move past the debounce floor, then the session grows back into critical.
+    advance(60_000)
+    size = SIZE_CRITICAL_BYTES
+    wd.tick()
+    // A genuinely new critical episode → it auto-compacts a SECOND time.
+    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(2)
+  })
+
+  test('no isIdle wired → surface-only, never auto-compacts (button-gateway parity)', () => {
+    const { wd, writes, alerts } = makeHarness(() => SIZE_CRITICAL_BYTES)
+    wd.tick()
+    wd.tick()
+    expect(alerts).toHaveLength(1) // critical surfaced once (edge-latched)
+    expect(writes).toHaveLength(0) // …but NO automatic actuation without isIdle
   })
 })
