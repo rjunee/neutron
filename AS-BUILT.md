@@ -138,6 +138,56 @@ Cores' MCP-tool / `/cal` / `/email` chat-command surfaces into Open (those remai
 the separate "Cores not composed into Open" parity gap). This PR closes gap #1
 only: the fan-out is no longer test-only — it is bound and threaded through the
 live Open composer.
+## 2026-06-26 — Agent-dispatch family: named specialists + ad-hoc spawn (`agent-dispatch/`)
+
+**What shipped.** The general agent-dispatch surface the parity scan flagged as
+missing (§2.F / §5.3: "the Vajra Forge/Atlas/Sentinel/Argus family is collapsed
+into the single Trident loop — no standalone Atlas/Sentinel/ad-hoc spawn"). New
+`agent-dispatch/` module, built directly ON the existing `runtime/subagent/`
+registry/spawn-guard/watchdog primitive (NOT a parallel system):
+
+- **`service.ts` — `DispatchService`.** `dispatch(req)` → `spawnSubagent`
+  (shares `MAX_CONCURRENT_SUBAGENTS` + the `spawn_key` double-spawn guard) →
+  `running` → one substrate turn in the background → terminal
+  (`finished`/`crashed`) → structured announcement (`announce.ts`) to a `report`
+  sink. Shares the instance registry + `ControlState` with Trident, so the
+  agent-aware watchdog supervises dispatches too. `stop(run_id)` (and a
+  watchdog reap) ACTUALLY cancels the spawned subprocess via a per-dispatch
+  `AbortController` → the cancellable turn runner (`substrate-turn.ts`) calls
+  `handle.cancel()` — not just the registry record (fixes Codex review P1).
+- **Three kinds (`prompts.ts`).** `research → atlas`, `review → sentinel`,
+  `adhoc → core`. Forge/Argus are NOT dispatchable (they keep their native
+  Trident contract).
+- **Persona rides the user turn.** `AgentSpec` has no `system` field (the CC
+  subprocess owns its system prompt) and the production substrate drops
+  `system`, so the persona is folded into `user_message` — the channel
+  Forge/Argus already use. Caught during the build by reading
+  `buildSubstrateTridentDispatch`; a naive `system`-pass would have silently
+  dropped the persona.
+- **Agent-native parity.** `dispatch_agent` tool (`tool.ts`, cap
+  `agent:dispatch_subagent`) + `/dispatch` command (`command.ts`) call ONE
+  `DispatchService.dispatch` backend.
+- **Wired into boot (no feature flag).** `open/composer.ts` builds the service
+  over the same `tridentDispatch` CC-subprocess closure `/code` uses and threads
+  `agent_dispatch: { service }`; `build-core-modules.ts` registers the tool.
+  Gated on the same credential availability as Trident.
+- **`watchdog-report.ts`** adapts a reaped `AgentWatchdogEvent` onto the report
+  sink (forge/argus skipped — Trident's).
+
+**Tests.** 28 module tests (`service.test.ts` — the dispatch→registry→substrate
+→report seam, caps, crash/timeout reflected, coalesce, stop wires a real abort,
+watchdog reap; `surface.test.ts` — tool + command share one backend, parser
+grammar; `watchdog-report.test.ts`; `substrate-turn.test.ts` — abort actually
+cancels the handle) + a prod-boot wiring gate
+(`open/__tests__/open-agent-dispatch-wiring.test.ts`) that boots the REAL Open
+composer with a mocked substrate and proves a dispatched research agent spawns +
+reports + registers, and degrades cleanly with no credential. Typecheck clean;
+no direct-anthropic guard green.
+
+**Deferred (first cut).** `/dispatch` chat-bridge `ChatCommandFilter` thread;
+live WS `agent_message` report-back splice (first cut logs it); a periodic
+watchdog tick registered in Open; the rest of Vajra's persona set + cross-topic
+dispatch. Itemized in the PR body + SYSTEM-OVERVIEW.
 
 ## 2026-06-25 — Wedged-interactive-prompt detect + recover (P0 flagship)
 

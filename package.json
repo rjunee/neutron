@@ -10,6 +10,7 @@
     "gbrain-memory",
     "reminders",
     "trident",
+    "agent-dispatch",
     "tasks",
     "skill-forge",
     "cron",
