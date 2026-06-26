@@ -1,6 +1,6 @@
 ---
 title: "Neutron Connect — group-chat agent engagement mode (per-project setting)"
-status: spec (build-ready) — awaiting Ryan's sign-off on the DEFAULT mode
+status: spec (build-ready) — DEFAULT confirmed `all_messages` (Ryan 2026-06-26); cleared for Forge build
 created: 2026-06-26
 author: Neutron Coding orchestrator (written inline after the Atlas spec spawn wedged twice on the Vajra-fleet channel-MCP transient)
 decision_source: Ryan 2026-06-26 ("a setting in each group project: 1) tag-gated @mention neutron, or 2) ALL messages auto-sent to neutron")
@@ -23,13 +23,13 @@ A per-shared-project enum **`agent_engagement_mode`** with exactly two values:
 
 One setting per shared project. Settable by the project owner (admin/project-settings surface) and agent-natively (an MCP tool / chat command so the agent can read+set it on request — parity rule).
 
-### Proposed DEFAULT (awaiting Ryan)
-**`tag_gated`** is the recommended default. Rationale: a multi-human group chat where the agent replies to every human-to-human message is noisy and surprising; "quiet until tagged" matches the Claude Tag mental model and is the safer default. `all_messages` is opt-in for projects that genuinely want the agent reacting to everything (e.g. a solo project, or a "scribe-everything" workflow). **OPEN QUESTION for Ryan: confirm `tag_gated` as default, or prefer `all_messages` to preserve today's behavior for existing projects?** (Migration note: existing projects are on `all_messages`-equivalent today; defaulting new projects to `tag_gated` changes nothing for them but should be an explicit backfill decision.)
+### DEFAULT — `all_messages` (Ryan-confirmed 2026-06-26)
+**Default = `all_messages`.** Ryan: "default should be all_messages, which is how single person chat behaves." Rationale: a group project should behave like a single-person chat out of the box (the agent sees every message); **`tag_gated` is the opt-in** for projects that want the agent quiet until @-mentioned. This also means existing projects need no behavior change (they're already all-messages-equivalent). The schema default is therefore `'all_messages'`.
 
 ## Mechanics
 
 ### 1. Storage
-Add `agent_engagement_mode TEXT NOT NULL DEFAULT '<chosen-default>'` to the shared-project / project row (the same row the Connect shared-project reference lives on — connect-spec §1.7). Forward-only migration. TS type `'tag_gated' | 'all_messages'`. Read at message-ingress.
+Add `agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'` to the shared-project / project row (the same row the Connect shared-project reference lives on — connect-spec §1.7). Forward-only migration. TS type `'tag_gated' | 'all_messages'`. Read at message-ingress.
 
 ### 2. Routing seam (the core change)
 At the ingress where a member post enters the host's ONE shared session (connect-spec §1.5 — Forge: grep the actual seam, likely the chat-bridge / connect-relay ingress that stamps `author` and forwards to the session):
@@ -55,7 +55,7 @@ The agent's tools/Cores when acting in a group chat are scoped to that shared pr
 - **No-mention in tag_gated with no agent reply:** ensure the UI doesn't show a spurious typing indicator (the agent isn't engaging).
 
 ## Implementation sequence (Forge-ready; NO FEATURE FLAGS — the setting IS the behavior)
-1. Schema + TS type + migration for `agent_engagement_mode` (default = Ryan's choice).
+1. Schema + TS type + migration for `agent_engagement_mode` (default = all_messages, Ryan-confirmed).
 2. Project-settings surface to set it (admin UI + agent-native MCP tool/command).
 3. Ingress tag-gate filter at the shared-session routing seam (§1.5) — `all_messages` passthrough vs `tag_gated` mention-gate; transcript always persists.
 4. `@neutron` mention detector (handle/alias, doc-quote guard).
