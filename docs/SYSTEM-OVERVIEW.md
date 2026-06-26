@@ -1285,6 +1285,78 @@ and answering, just rooted in the wrong place.
 This closes master-table **port row #12** (previously the last MISSING P3 watchdog
 in `docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md`).
 
+## Model-update watchdog + graceful upgrade (P3, port row #16) — `model-update-watchdog.ts`
+
+Auto-detects when Anthropic ships a newer top-tier Claude model and gracefully
+moves every warm session onto it — so the box never drifts on a stale model for
+days (Vajra 2026-04-16: Opus 4.7 shipped overnight, the gateway sat on 4.6 for
+hours because nothing noticed). A **NON-substrate**, instance-wide watchdog
+(NOT an `OutputScanner` ring detector): a periodic probe + an idle-gated respawn
+loop, started once per instance alongside the wedge watchdog
+(`createClaudeCodeSubstrateAuto`).
+
+- **Probe (every 6h, NO `--fallback-model` — the load-bearing lesson).** A
+  15-min cadence tick is gated by `shouldRunModelUpdateCheck` (a persisted 6h
+  cache) so the actual probe runs ~4×/day. The probe runs `claude -p --model opus
+  "Reply ONLY with: MODEL_ID=<id>"` **asynchronously** (`child_process.spawn`, not
+  `spawnSync` — a multi-second round-trip must never freeze the event loop / starve
+  the heartbeat) and parses the `MODEL_ID=` line. **`buildProbeArgs` NEVER passes
+  `--fallback-model`** (pinned by test): with a fallback configured, during an
+  Opus OUTAGE the CLI returns the HAIKU id instead of erroring, and a naive
+  "new id → respawn" would then SILENTLY DOWNGRADE every session to Haiku. With no
+  fallback the CLI errors during an outage, which the watchdog treats as
+  "probe failed → retry next tick" (the 6h gate is NOT advanced on failure/outage).
+- **Detect (defense-in-depth + edge-triggered).** As a second guard,
+  `isFallbackModel` rejects any probed id that is a known fallback/downgrade model
+  (`getKnownFallbackModels()` = FAST/SONNET aliases, snapshot-stripped) as an
+  outage, never a new model. The new-vs-known comparison is **snapshot-normalized**
+  (`claude-opus-4-7-20260101` ≡ `claude-opus-4-7`). The baseline is the box's
+  **configured** model (`getBestModel()`) on the first-ever probe, so a box sitting
+  on 4.6 while 4.7 already shipped is detected on the first probe (Vajra's
+  seed-silently-on-first-probe would have missed exactly that). `decideModelUpdate`
+  is **edge-triggered**: it returns `notify` once per genuinely-new id, then
+  `no-change` after adoption advances `last_known_model` (a 24h renotify re-nags an
+  un-adopted model; a second, even-newer rollover inside the window notifies
+  immediately so a stale version is never acked).
+- **Adopt through the REAL config path.** On `notify` the watchdog flips the
+  process-level `setBestModelOverride(newModel)` in `runtime/models.ts`, so every
+  **fresh** persistent-REPL spawn resolves `--model` through `getBestModel()` and
+  comes up on the new model — no redeploy, no env change ("auto-upgrade like
+  Claude Code, applied to the model"). The two former hardcoded `'claude-opus-4-7'`
+  spawn fallbacks now read `getBestModel()` so the override actually reaches fresh
+  spawns.
+- **Graceful upgrade (idle-gated, never hard-bounce an active turn).** A
+  round-robin `runGracefulUpgrade` loop moves each EXISTING warm session: each
+  round checks every still-pending session once, respawning any that are idle and
+  retiring any past its 30-min deadline, then sleeps and repeats (no head-of-line
+  blocking). The idle gate (`isSessionIdleForUpgrade`) requires ALL four Vajra
+  signals: **not mid-turn/typing** (`activeTurn` unset), **no tool-prompt pending**
+  (`!wedgeRecovering`), **assistant quiet ≥30s** (`lastDataAt`), **JSONL cold ≥5s**
+  (transcript mtime). An idle session's `record.model` is rewritten to the new id
+  **BEFORE** the respawn (so `resumeSpecFor` → `--resume` re-attaches on the new
+  model), then `respawnReplSession(..., 'model-update-watchdog', ...)` fires —
+  context preserved via the resume-is-always-resume invariant.
+- **Bounded.** ONE upgrade attempt per detected new id; a session that never idles
+  within 30 min is **left on the old model** (logged, not force-killed) and picks
+  up the new model on its next natural respawn. The probe/upgrade are
+  in-flight-gated (one at a time) and the watchdog is idempotent per model-update
+  state path.
+- **Notice surface.** The detection fires the `onModelUpdate` DI seam once (edge)
+  with `{newModel, oldModel, text}` (the Graceful framing); a gateway wires it to a
+  dev-channel notice, else it logs to stderr. Mirrors the row #10/#11/#13
+  notice-family seams.
+- **Pure + injectable.** Every decision core (`buildProbeArgs`, `extractModelId`,
+  `normalizeModelId`, `isFallbackModel`, `shouldRunModelUpdateCheck`,
+  `decideModelUpdate`, `isSessionIdleForUpgrade`, `runGracefulUpgrade`,
+  `startModelUpdateWatchdog`) is unit-tested without a process or PTY
+  (`model-update-watchdog.test.ts`); the live wiring (`startModelUpdateWatchdogForInstance`)
+  is exercised end-to-end against the real substrate
+  (`model-update-watchdog-wiring.test.ts`: a new id → notice + adopt + respawn onto
+  the new model; a fallback id → none of that).
+
+This closes master-table **port row #16** (previously MISSING/P3) in
+`docs/research/vajra-terminal-detection-keystroke-port-2026-06-25.md`.
+
 ## Stuck-typing reaper (port row #9) — VERIFIED-OBVIATED, no scraper
 
 Vajra's #9 (`pane-scan-watchdog.ts decideStuckTypingAction` + `index.ts

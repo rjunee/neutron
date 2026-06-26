@@ -29,6 +29,7 @@ import type { Substrate } from '../../substrate.ts'
 import {
   createPersistentReplSubstrate,
   registerSupervisedSubstrate,
+  startModelUpdateWatchdogForInstance,
   startReplWatchdog,
   type PersistentReplSubstrateOptions,
   type RateLimitBannerNotice,
@@ -132,6 +133,10 @@ export interface ClaudeCodeSubstrateOptions {
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
+  /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
+   *  watchdog detects a genuinely-new top-tier Claude model and begins the
+   *  idle-gated graceful upgrade. Unset → the notice logs to stderr. */
+  onModelUpdate?: (notice: { newModel: string; oldModel: string; text: string }) => void
   /**
    * Argus r4 BLOCKER (2026-06-08) — STATELESS-ONE-SHOT mode. When `true`, a
    * dispatch with no `spec.session` runs on a fresh disposable REPL that is
@@ -167,6 +172,7 @@ export interface ReplSupervisionPaths {
   pendingRespawnsPath: string
   restartMarkersPath: string
   heartbeatFile: string
+  modelUpdateStatePath: string
 }
 
 export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
@@ -177,6 +183,7 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
     pendingRespawnsPath: join(stateDir, '.pending-respawns.json'),
     restartMarkersPath: join(stateDir, '.restart-markers.json'),
     heartbeatFile: join(stateDir, '.heartbeat'),
+    modelUpdateStatePath: join(stateDir, '.model-update-state.json'),
   }
 }
 
@@ -215,6 +222,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
+  if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate
   // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode (session-less
   // dispatches get a fresh, terminated-after-turn REPL; no shared transcript).
   if (options.ephemeral !== undefined) p.ephemeral = options.ephemeral
@@ -240,6 +248,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     p.replRegistryPath = paths.replRegistryPath
     p.pendingRespawnsPath = paths.pendingRespawnsPath
     p.restartMarkersPath = paths.restartMarkersPath
+    p.modelUpdateStatePath = paths.modelUpdateStatePath
     // Register the live options so the watchdog tick + the operator admin-respawn
     // endpoint actuate each session with its OWNING substrate's options (keyed by
     // pool key).
@@ -248,6 +257,10 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     // for shutdown), so a per-turn call starts exactly ONE watchdog per instance
     // registry and a post-shutdown restart re-arms cleanly.
     startReplWatchdog(p, { heartbeatFile: paths.heartbeatFile })
+    // Vajra port row #16: the 6h model-version probe + idle-gated graceful
+    // upgrade. Idempotent per model-update state path; the notice routes through
+    // `onModelUpdate` (else stderr).
+    startModelUpdateWatchdogForInstance(p)
   }
   return createPersistentReplSubstrate(p)
 }

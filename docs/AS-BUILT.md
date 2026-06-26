@@ -2,6 +2,61 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## PTY terminal-detection P3 — model-update watchdog + graceful upgrade (port row #16)
+
+**What shipped.** A new module
+`runtime/adapters/claude-code/persistent/model-update-watchdog.ts` + its live
+wiring, closing Vajra master-table **port row #16** (the last MISSING watchdog).
+Auto-detects when Anthropic ships a newer top-tier Claude model and gracefully
+moves every warm session onto it — so the box never drifts on a stale model
+(Vajra 2026-04-16: Opus 4.7 shipped overnight, the gateway sat on 4.6 for hours).
+Built ON as the real default; no feature flag.
+
+- **Probe (6h-gated, NO `--fallback-model`).** A 15-min cadence tick gated by a
+  persisted 6h cache (`shouldRunModelUpdateCheck`) runs `claude -p --model opus
+  "Reply ONLY with: MODEL_ID=<id>"` **async** (`child_process.spawn`, never
+  `spawnSync` — must not freeze the event loop) and parses the `MODEL_ID=` line.
+  **`buildProbeArgs` NEVER passes `--fallback-model`** (pinned by test): with a
+  fallback configured, during an Opus OUTAGE the CLI returns the HAIKU id and a
+  naive "new id → respawn" would SILENTLY DOWNGRADE every session to Haiku. With
+  no fallback the CLI errors during an outage → "probe failed, retry" (the 6h gate
+  is NOT advanced on failure/outage).
+- **Detect (edge-triggered, snapshot-normalized, fallback-guarded).**
+  `isFallbackModel` rejects any known fallback/downgrade id (`getKnownFallbackModels()`,
+  snapshot-stripped) as an outage (defense-in-depth). `decideModelUpdate` compares
+  the probed id (snapshot-normalized) against the box's CONFIGURED model
+  (`getBestModel()`) on the first probe — so a box on 4.6 while 4.7 shipped is
+  caught on the first probe — and fires `notify` ONCE per genuinely-new id (24h
+  renotify for an un-adopted model; an even-newer second rollover notifies
+  immediately).
+- **Adopt + graceful upgrade.** On `notify`: `setBestModelOverride(newModel)` in
+  `runtime/models.ts` (so FRESH spawns resolve `--model` through `getBestModel()`),
+  then a round-robin `runGracefulUpgrade` respawns each EXISTING warm session
+  **only when idle** — `isSessionIdleForUpgrade` requires all four Vajra signals
+  (not mid-turn, no tool-prompt pending, assistant quiet ≥30s, JSONL cold ≥5s).
+  An idle session's `record.model` is rewritten to the new id BEFORE the
+  `respawnReplSession(..., 'model-update-watchdog', ...)` so `--resume` re-attaches
+  on the new model. ONE attempt per id; a never-idle session is left on the old
+  model (logged), never hard-bounced mid-turn.
+- **Real config path.** The two former hardcoded `'claude-opus-4-7'` spawn
+  fallbacks in the substrate now read `getBestModel()`, so the runtime override
+  reaches fresh spawns. New `RespawnTrigger` value `'model-update-watchdog'`.
+- **Notice.** New `onModelUpdate` DI seam (mirrors row #10/#11/#13) fired once with
+  `{newModel, oldModel, text}`; unset → stderr.
+- **Wiring.** `startModelUpdateWatchdogForInstance` is started in
+  `createClaudeCodeSubstrateAuto` (idempotent per `.model-update-state.json`,
+  added to `deriveReplSupervisionPaths`), stopped in `shutdownAllPersistentRepls`.
+- **Tests.** `model-update-watchdog.test.ts` (40 pure-core/cadence cases — the
+  `--fallback-model` invariant, the outage→skip trap, edge-trigger once, the
+  idle gate, round-robin upgrade) + `model-update-watchdog-wiring.test.ts` (2
+  end-to-end: a new id → notice + adopt + respawn onto the new model; a fallback
+  id → no notice/adopt/respawn). Full runtime suite green (1169 pass).
+- **Docs.** `SYSTEM-OVERVIEW.md` adds the "Model-update watchdog + graceful
+  upgrade (P3, port row #16)" section; master-table row #16 moves MISSING → DONE.
+- **Explicitly out of scope.** Hard mid-turn restarts; passing `--fallback-model`
+  to the probe; a Restart-all (kill-every-pane) variant — only the graceful,
+  idle-gated path ships.
+
 ## PTY terminal-detection #9 — stuck-typing reaper VERIFIED-OBVIATED (verify test + doc note)
 
 **What shipped.** A verify-first pass on Vajra master-table **port row #9**
