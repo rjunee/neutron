@@ -878,6 +878,61 @@ the `watchdog/` AlertStore) when the registry moves to SQLite-backed
 persistence in S4. (Distinct from the OS-process-level `watchdog/` module, which
 runs the same liveness idea over `tools/process-registry.ts` for crons/tools.)
 
+## Agent dispatch family — named specialists + ad-hoc spawn (`agent-dispatch/`)
+
+Vajra dispatches a small family of background specialist agents (and ad-hoc
+ones) via `spawn-agent.sh` — each a separate Claude Code process that does a
+task and reports back to the topic. Neutron's port collapsed that into the
+single autonomous **Trident** build loop; `agent-dispatch/` restores the
+**general dispatch surface** (parity scan §2.F / §5.3), built directly ON the
+`runtime/subagent/` registry above (it does NOT fork a parallel system).
+
+- **Kinds (`prompts.ts`).** Three owner/agent-facing kinds map onto the shared
+  registry `AgentKind`: `research → atlas` (the lifted Atlas persona —
+  research / analysis / ops / strategy / writing), `review → sentinel` (Sentinel
+  — an independent quality check of NON-code work), and `adhoc → core` (a
+  one-shot "just run this task" agent with a terse inline role). Forge/Argus are
+  intentionally NOT dispatchable here — they are Trident build-loop agents with
+  their own native parse contract.
+
+- **`DispatchService` (`service.ts`).** The backend. `dispatch(req)` registers a
+  `SubagentRecord` via `spawnSubagent` (so the SAME `MAX_CONCURRENT_SUBAGENTS`
+  cap + double-spawn `spawn_key` guard apply), flips it to `running`, fires ONE
+  substrate turn in the background, and on terminal drives the record
+  `finished`/`crashed` + hands a structured announcement (`announce.ts`) to a
+  `report` sink — the report-back. It shares the instance's registry +
+  `ControlState` with the Trident loop, so the agent-aware **watchdog**
+  supervises dispatched agents too; `watchdog-report.ts` adapts a reaped
+  `AgentWatchdogEvent` (stuck / process_dead) onto the same `report` sink so a
+  supervised failure surfaces instead of vanishing. `stop(run_id)` cancels a
+  live dispatch (registry → `cancelled`; the late substrate result is discarded).
+
+- **Persona rides the user turn, not `system`.** The runtime `AgentSpec` has no
+  `system` field — the CC subprocess owns its own system prompt — so the
+  production substrate (`buildSubstrateTridentDispatch`) drops `system`. To
+  actually deliver a persona, the service folds `<role>\n\n---\n\nYour task:\n\n
+  <task>` into the `user_message` (the same channel Forge/Argus ride).
+
+- **Agent-native parity (hard invariant).** The `dispatch_agent` agent tool
+  (`tool.ts`, capability `agent:dispatch_subagent`, `prompt-user` approval) and
+  the `/dispatch` chat command (`command.ts` — `/dispatch research|review
+  <task>`, ad-hoc fallthrough, `/dispatch stop [id]`) call the SAME
+  `DispatchService.dispatch` backend. Neither owns dispatch logic.
+
+- **Wiring (no feature flag).** `open/composer.ts` constructs the service over
+  the same CC-subprocess `tridentDispatch` closure `/code` uses (NEVER a direct
+  api.anthropic.com call) and threads `agent_dispatch: { service }` onto the
+  `CompositionInput`; `gateway/composition/build-core-modules.ts` registers the
+  `dispatch_agent` tool. Gated on the same credential availability as Trident
+  (no credential → the surface is simply unregistered).
+
+- **Deferred follow-ups (this is a first cut).** The `/dispatch` command's
+  chat-bridge `ChatCommandFilter` thread (the parser/executor + their tests ship
+  here); a live WS `agent_message` splice for the report-back (the first cut
+  logs the announcement); a periodic watchdog tick registered over this registry
+  in Open (the dispatch turn self-times-out as the primary bound; the watchdog is
+  the backstop); and the rest of Vajra's persona set + cross-topic dispatch.
+
 ## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
 
 The persistent-REPL substrate drives the interactive `claude` TUI over a single

@@ -52,6 +52,14 @@ import {
 } from '../onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import { buildSubstrateTridentDispatch } from '../trident/substrate-dispatch.ts'
+import { SubagentRegistry } from '../runtime/subagent/registry.ts'
+import { newControlState } from '../runtime/subagent/control.ts'
+import {
+  DispatchService,
+  defaultPersonaLoader,
+  type DispatchReporter,
+  type DispatchTurn,
+} from '../agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
@@ -325,6 +333,55 @@ export function buildOpenGraphComposer(
             },
           })
         : null
+
+    // Agent-dispatch family (parity gap #3) — the general named-specialist +
+    // ad-hoc background-agent surface (research → Atlas, review → Sentinel,
+    // adhoc → a one-shot agent) that mirrors Vajra's `spawn-agent.sh`. It is
+    // built ON the same `runtime/subagent/` registry + watchdog the Trident
+    // loop uses (one registry, one concurrency cap, one supervisor), and it
+    // spawns through the SAME CC-subprocess substrate closure as `/code` — the
+    // `tridentDispatch` factory above (NEVER a direct api.anthropic.com call).
+    // Gated on the same credential availability as Trident: with no credential
+    // the surface is simply unregistered (no feature flag).
+    const dispatchService = ((): DispatchService | null => {
+      const td = tridentDispatch
+      if (td === null) return null
+      const registry = new SubagentRegistry()
+      const control = newControlState(registry)
+      // `kind` is structural-only: `buildSubstrateTridentDispatch` dispatches
+      // purely on user_message/model/repo_path/timeout (the persona rides
+      // user_message — `AgentSpec` has no system field), but its input type
+      // excludes the ad-hoc 'core' kind. Coerce 'core' → 'atlas' to satisfy the
+      // type; the value is never read by the substrate closure.
+      const dispatchTurn: DispatchTurn = async (input) =>
+        td({
+          kind: input.kind === 'core' ? 'atlas' : input.kind,
+          system: input.system,
+          user_message: input.user_message,
+          repo_path: input.repo_path,
+          trident_run_id: input.trident_run_id,
+          model: input.model,
+          timeout_ms: input.timeout_ms,
+        })
+      // First-cut report-back: surface the dispatch result to the boot log. The
+      // live WS `agent_message` splice into the owner's chat is the documented
+      // follow-up (Open is WS-native + single-owner, no Telegram channel).
+      const report: DispatchReporter = async (r) => {
+        console.log(
+          `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
+        )
+      }
+      return new DispatchService({
+        registry,
+        control,
+        dispatch: dispatchTurn,
+        report,
+        instance_key: internal_handle,
+        repo_path: owner_home,
+        default_model: BEST_MODEL,
+        persona_loader: defaultPersonaLoader,
+      })
+    })()
 
     // Dedicated WARM history-import / synthesis substrate (2026-06-17 Step 2b —
     // single-session synthesis cut-over). The live onboarding import now runs
@@ -1060,6 +1117,11 @@ export function buildOpenGraphComposer(
       ...(tridentDispatch !== null
         ? { trident: { dispatch: tridentDispatch } }
         : {}),
+      // Agent-dispatch family (parity gap #3) — register the `dispatch_agent`
+      // tool when the dispatch service was built (same credential gate as
+      // trident). The live chat agent can then dispatch a research/review/
+      // ad-hoc background agent that shares the SubagentRegistry + watchdog.
+      ...(dispatchService !== null ? { agent_dispatch: { service: dispatchService } } : {}),
       // Tear down the upload-session sweeper on shutdown.
       realmode_cleanups: realmodeCleanups,
       landing_server: {

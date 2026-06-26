@@ -95,4 +95,18 @@ export interface MiscCompositionInput {
   message_search?: {
     runtime: import('../../../message-search/runtime.ts').MessageSearchRuntime
   }
+  /**
+   * Agent-dispatch family (parity gap #3 — the named-specialist + ad-hoc
+   * background-agent surface that mirrors Vajra's `spawn-agent.sh`). When
+   * supplied, the `tools` module registers the `dispatch_agent` agent tool
+   * backed by this service, so the live chat agent can dispatch a research
+   * (Atlas) / review (Sentinel) / ad-hoc background agent that registers in the
+   * shared `SubagentRegistry`, spawns via the substrate, is supervised by the
+   * watchdog, and reports its result back to chat. The service is constructed
+   * by the production composer (which owns the substrate dispatch closure +
+   * the report-back sink); omitting it leaves the surface unregistered.
+   */
+  agent_dispatch?: {
+    service: import('../../../agent-dispatch/service.ts').DispatchService
+  }
 }

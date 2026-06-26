@@ -1,0 +1,9 @@
+{
+  "name": "@neutronai/agent-dispatch",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/trident": "workspace:*"
+  }
+}

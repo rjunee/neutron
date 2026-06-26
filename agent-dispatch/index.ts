@@ -1,0 +1,51 @@
+/**
+ * @neutronai/agent-dispatch — public barrel.
+ *
+ * The general agent-dispatch surface: named specialists (research → Atlas,
+ * review → Sentinel) + an ad-hoc "run this task" agent, built ON the
+ * `runtime/subagent/` registry/spawn-guard/watchdog primitive. Spawns via the
+ * substrate (never a direct api.anthropic.com call), supervised by the
+ * already-ported watchdog, and reports results back to chat. Agent-native: the
+ * `dispatch_agent` tool + the `/dispatch` command share one `DispatchService`.
+ */
+
+export {
+  DISPATCH_KINDS,
+  AGENT_KIND_BY_DISPATCH_KIND,
+  DISPATCH_KIND_BY_AGENT_KIND,
+  ADHOC_SYSTEM_PROMPT,
+  type DispatchKind,
+  type DispatchPersonaKind,
+} from './prompts.ts'
+
+export {
+  DispatchService,
+  type DispatchServiceDeps,
+  type DispatchRequest,
+  type DispatchHandle,
+  type DispatchOutcome,
+  type DispatchTurn,
+  type DispatchTurnInput,
+  type DispatchTurnResult,
+  type DispatchReport,
+  type DispatchReporter,
+  type DeliveryTarget,
+  type PersonaLoader,
+  type PersonaPrompt,
+} from './service.ts'
+
+export { defaultPersonaLoader } from './persona.ts'
+
+export { buildDispatchWatchdogNotifier } from './watchdog-report.ts'
+
+export { registerDispatchToolSurface, DISPATCH_AGENT_TOOL } from './tool.ts'
+
+export {
+  parseDispatchCommand,
+  executeDispatchCommand,
+  parseAndExecuteDispatchCommand,
+  type DispatchCommand,
+  type DispatchCommandResponse,
+  type DispatchCommandContext,
+  type DispatchCommandErrorCode,
+} from './command.ts'

@@ -18,6 +18,7 @@ import { McpServer } from '../../mcp/server.ts'
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
+import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
@@ -151,6 +152,13 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // full-text-search the conversation mid-turn.
       if (input.message_search !== undefined) {
         registerMessageSearchToolSurface(reg, input.message_search.runtime)
+      }
+      // Agent-dispatch family (parity gap #3) — register `dispatch_agent` when
+      // the composer wired the service, so the live agent can dispatch a
+      // named/ad-hoc background specialist that shares the SubagentRegistry +
+      // watchdog with the Trident loop and reports its result back to chat.
+      if (input.agent_dispatch !== undefined) {
+        registerDispatchToolSurface(reg, input.agent_dispatch.service)
       }
       return reg
     },
