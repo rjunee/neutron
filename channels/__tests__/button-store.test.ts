@@ -513,3 +513,43 @@ describe('ButtonStore.persistInertUserTurn (Connect tag_gated quiet messages)', 
     ).rejects.toThrow(ButtonStoreError)
   })
 })
+
+describe('ButtonStore.latestTurnByTopic — insertion-order recency (same-ms tiebreak)', () => {
+  test('two rows minted in the SAME ms resolve to the LAST-inserted row (rowid), not a random prompt_id', async () => {
+    // The reflection-layer bug: an inert user-turn row and the agent-reply row can
+    // share a `created_at` ms; listHistoryByTopic's `prompt_id DESC` (random UUID)
+    // tiebreak would non-deterministically pick either. latestTurnByTopic must
+    // ALWAYS return the one inserted last. Run enough rounds that a UUID-ordered
+    // implementation would flake.
+    for (let i = 0; i < 20; i++) {
+      rmSync(tmp, { recursive: true, force: true })
+      tmp = mkdtempSync(join(tmpdir(), 'neutron-bs-recency-'))
+      db.close()
+      db = ProjectDb.open(join(tmp, 'project.db'))
+      applyMigrations(db.raw())
+      now = 1_000_000
+      store = new ButtonStore({ db, now: () => now })
+
+      // Both emitted at the SAME `now` → tied created_at. `second` is inserted last.
+      await store.emit(samplePrompt({ body: 'first' }), { topic_id: 'topic-1' })
+      const last = await store.emit(samplePrompt({ body: 'second' }), { topic_id: 'topic-1' })
+
+      const latest = await store.latestTurnByTopic({ topic_id: 'topic-1', before: now, now })
+      expect(latest).not.toBeNull()
+      expect(latest!.body).toBe('second')
+      expect(latest!.prompt_id).toBe(last.prompt_id)
+    }
+  })
+
+  test('returns null for a topic with no rows', async () => {
+    const latest = await store.latestTurnByTopic({ topic_id: 'empty-topic', before: now, now })
+    expect(latest).toBeNull()
+  })
+
+  test('excludes expired unresolved ghost rows (same filter as listHistoryByTopic)', async () => {
+    await store.emit(samplePrompt({ body: 'ghost', expires_in_ms: 10 }), { topic_id: 'topic-1' })
+    const after = now + 1000 // past the 10ms TTL
+    const latest = await store.latestTurnByTopic({ topic_id: 'topic-1', before: after, now: after })
+    expect(latest).toBeNull()
+  })
+})

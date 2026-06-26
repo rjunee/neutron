@@ -2,6 +2,35 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — Deterministic "prior reply" lookup (fix a PRE-EXISTING reflection-test flake surfaced alongside the MCP-wedge PR)
+
+**Context.** While landing the dev-channel MCP-wedge fix (below), CI's `test` job
+flagged `build-live-agent-turn — reflection wiring > … judges the PRIOR reply`.
+Investigation showed this is a **pre-existing flaky test, NOT a regression** from
+the MCP change: on clean `main` (59cb886) the full suite fails the SAME test (and
+a sibling, `… resolves the previous unresolved reply row … __freeform__`) ~1-in-3
+runs; the MCP-fix diff is dead code for these tests (they inject a stub
+substrate) and merely perturbed async timing enough to flip the flake.
+
+**Root cause.** `resolvePreviousRowWithUserText` (the reflection "judge the PRIOR
+reply" lookup) used `ButtonStore.listHistoryByTopic({ limit: 1 })`, whose
+`ORDER BY created_at DESC, prompt_id DESC` is a *pagination* cursor. When the
+inert user-turn row and the agent-reply row are minted in the SAME millisecond
+(a fast warm turn, or any test that pins the clock), the tiebreak is the **random
+`prompt_id` UUID** — so "most recent" non-deterministically returned the EMPTY
+inert row instead of the reply, and the prior reply judged blank. Recency must
+mean *last-inserted*, which only `rowid` encodes.
+
+**Fix.** New `ButtonStore.latestTurnByTopic()` returns the single most-recent row
+by INSERTION order (`ORDER BY created_at DESC, rowid DESC LIMIT 1`, same
+expiry/ghost filter as `listHistoryByTopic`); `resolvePreviousRowWithUserText`
+now uses it. The paginated `listHistoryByTopic` is untouched (its `prompt_id`
+cursor stays stable). Both previously-flaky reflection tests are now 10/10
+deterministic; `latestTurnByTopic` gets its own same-ms-tiebreak unit test. (The
+remaining occasional full-suite chunk timeouts — `DocsClient`,
+`chat-history-surface` — are pre-existing load-induced flakes on a busy host;
+each passes in isolation and is unrelated to this change.)
+
 ## 2026-06-26 — P0: dev-channel MCP handshake race → every LLM turn dead (fix the bind, stop the cred-cooldown mislabel)
 
 **Symptom (live dogfood).** Every Neutron LLM turn (onboarding + chat) failed.

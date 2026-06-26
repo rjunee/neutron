@@ -734,6 +734,50 @@ export class ButtonStore {
   }
 
   /**
+   * The single MOST-RECENT turn for a topic by INSERTION ORDER — the latest row
+   * at or before `now`, tie-broken by `rowid DESC` (monotonic with insertion) so
+   * two rows minted in the SAME millisecond resolve deterministically to the one
+   * inserted LAST. Distinct from {@link listHistoryByTopic}, whose `created_at
+   * DESC, prompt_id DESC` ordering is a STABLE *pagination* cursor — correct for
+   * paging, but its tiebreak is the random `prompt_id` UUID, so "most recent"
+   * across a `created_at` collision is non-deterministic (it picks the
+   * lexically-greatest UUID, NOT the last-written row). That ambiguity is the
+   * reflection layer's `resolvePreviousRowWithUserText` bug: when the inert
+   * user-turn row and the agent-reply row land in the same ms (e.g. a fast warm
+   * turn, or any test that pins the clock), the lookup could return the EMPTY
+   * inert row instead of the reply, so the "prior reply" judged on the next turn
+   * came back blank. Recency must mean last-inserted, which only `rowid` encodes.
+   * Same expiry/ghost filter as `listHistoryByTopic` (`resolved_at IS NOT NULL OR
+   * expires_at > now`). Returns null when the topic has no qualifying row.
+   */
+  async latestTurnByTopic(input: {
+    topic_id: string
+    /** Upper bound (inclusive) on `created_at` — the caller's wall clock. */
+    before: number
+    /** Wall clock used to drop expired unresolved "ghost" rows. */
+    now: number
+  }): Promise<ChatHistoryTurn | null> {
+    if (typeof input.topic_id !== 'string' || input.topic_id.length === 0) {
+      throw new ButtonStoreError(
+        'invalid_prompt',
+        `latestTurnByTopic requires a non-empty topic_id`,
+      )
+    }
+    const row = this.db
+      .prepare<PromptRow, [string, number, number]>(
+        `SELECT ${SELECT_PROMPT_COLS}
+           FROM button_prompts
+          WHERE topic_id = ?
+            AND created_at <= ?
+            AND (resolved_at IS NOT NULL OR expires_at > ?)
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT 1`,
+      )
+      .get(input.topic_id, input.before, input.now)
+    return row === undefined || row === null ? null : rowToHistoryTurn(row)
+  }
+
+  /**
    * Sidebar topic rail (2026-05-28 sprint) — enumerate the distinct
    * `topic_id`s for a user with per-topic metadata (latest body, latest
    * `created_at`, count of active unresolved prompts). Caller is the
