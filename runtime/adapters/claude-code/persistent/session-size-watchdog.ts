@@ -203,6 +203,22 @@ export interface SessionSizeWatchdogDeps {
    *  ONLY on a rising edge into a band. The substrate routes this to the active
    *  turn channel + an operator log; a gateway can wire a richer affordance. */
   surface: (severity: SizeSeverity, sizeBytes: number) => void
+  /**
+   * Returns true when the watched REPL is QUIESCENT — no turn in flight and the
+   * PTY has been silent long enough that injecting keystrokes is safe. When
+   * provided AND the post-compact size reaches the CRITICAL band, the watchdog
+   * idle-gates an AUTOMATIC compaction: the SAME `escape`+`/compact` actuation
+   * `requestCompact` performs, fired once per critical episode. This is the
+   * compaction POLICY (Vajra port row #13, gap #4) — it closes the
+   * wedge-prevention loop on surfaces that surface the size alert but wire NO
+   * human-pressable Compact control (Open's WS-native web chat: there is no
+   * inline keyboard and `requestSessionCompact` has no caller). Omit it (the
+   * default) to keep the watchdog surface-only — Vajra's gateway, which DOES
+   * wire clickable Reset/Compact/Snooze buttons, never sets it, and a busy
+   * (mid-turn) session is never auto-actuated. NOT a feature flag: the policy is
+   * active exactly when an actuation surface (the live PTY child) is wired but a
+   * human affordance is not. */
+  isIdle?: () => boolean
   /** Send one structured key to the PTY child (the `escape` of the Compact
    *  action). Production: `(k) => child.writeKey?.(k) ?? child.write(encodeKey(k))`. */
   writeKey: (key: Key) => void
@@ -273,43 +289,19 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
   let compacting = false
   let compactStartedAt = -Infinity
   let lastCompactAt = -Infinity
+  /** Outer latch for the idle-gated auto-compaction POLICY (see `maybeAutoCompact`):
+   *  true once we've actuated for the CURRENT critical episode, cleared when the
+   *  post-compact size drops back below critical. Distinct from `tracker` (which
+   *  latches the warn/critical SURFACE) and from `compacting` (the inner
+   *  mid-compact lock) — this one stops a still-large idle session from
+   *  re-actuating `/compact` on every 5-min tick. */
+  let autoCompactLatched = false
 
   /** Release the mid-compact lock and reset the tiered latch so the (possibly
    *  still-large) post-compaction size re-evaluates cleanly on the next tick. */
   const clearCompactLock = (): void => {
     compacting = false
     tracker.reset()
-  }
-
-  const tick = (): void => {
-    try {
-      const size = deps.readSize()
-      if (size === null) return // no transcript yet / unreadable → skip (truth-on-disk)
-      if (compacting) {
-        // PreCompact lock held: a compaction we actuated is mid-flight. Skip
-        // alerting during the grow-before-marker window. Clear the lock when
-        // EITHER:
-        //   (a) the post-compact region shrank below the warn band — the new
-        //       `"isCompactSummary":true` marker landed and the live context is
-        //       small again (the happy path); OR
-        //   (b) the lock has been held past `compactLockMaxMs` — the completion
-        //       signal that does NOT depend on the size dropping. A genuinely
-        //       large conversation can stay ≥5 MB even after a successful
-        //       compaction, and an actuated `/compact` may have failed outright;
-        //       without (b) the lock would never clear and the watchdog would go
-        //       dark forever (Codex review, 2026-06-25).
-        // Either way `clearCompactLock` resets the latch so a still-large session
-        // re-surfaces the affordance on the next tick instead of being silenced.
-        if (size < SIZE_WARN_BYTES || now() - compactStartedAt >= compactLockMaxMs) {
-          clearCompactLock()
-        }
-        return
-      }
-      const fired = tracker.evaluate(size)
-      if (fired !== null) deps.surface(fired, size)
-    } catch (err) {
-      onError(err)
-    }
   }
 
   const requestCompact = (): boolean => {
@@ -334,6 +326,86 @@ export function startSessionSizeWatchdog(deps: SessionSizeWatchdogDeps): Session
     deps.writeKey('escape')
     deps.write('/compact\r')
     return true
+  }
+
+  /**
+   * The idle-gated AUTOMATIC compaction POLICY (Vajra port row #13, parity gap
+   * #4). The #62 watchdog SURFACES a Compact affordance, but Open's WS-native web
+   * chat wires no human-pressable control to actuate it (no inline keyboard;
+   * `requestSessionCompact` has no caller), so a long-lived single-owner session
+   * keeps growing until `--resume` wedges (the 2026-04-16 11.8 MB infinite-restart
+   * incident). This closes the loop: when the POST-COMPACT size is CRITICAL and
+   * the session is idle (no turn in flight, PTY quiet), actuate the SAME
+   * `escape`+`/compact` the affordance surfaces — once per critical episode.
+   *
+   * Edge-latched + cooldown so it never re-fires while still over (invariant):
+   *   • Below critical               → de-latch, so a later re-climb fires again.
+   *   • Critical + idle + un-latched → actuate; latch on a successful fire.
+   *   • Critical + busy (mid-turn)   → do NOT actuate; stay un-latched so the
+   *     next idle tick can still fire (the affordance stays surface-only mid-turn).
+   *   • Critical + already latched   → nothing (no per-tick re-fire loop).
+   * `requestCompact`'s own lock + debounce are the inner guard; this latch is the
+   * outer "don't re-actuate a still-large idle session every tick" guard. The
+   * mid-compact `compacting` branch in `tick` returns before reaching here, so a
+   * compaction in flight is never double-actuated. No-op unless `isIdle` is wired
+   * (surface-only otherwise) — never a feature flag.
+   */
+  const maybeAutoCompact = (size: number): void => {
+    if (deps.isIdle === undefined) return // no actuation surface wired → surface-only
+    if (size < SIZE_CRITICAL_BYTES) {
+      autoCompactLatched = false
+      return
+    }
+    if (autoCompactLatched) return
+    if (!deps.isIdle()) return // mid-turn — leave un-latched for a later idle tick
+    if (requestCompact()) autoCompactLatched = true
+  }
+
+  const tick = (): void => {
+    try {
+      const size = deps.readSize()
+      if (size === null) return // no transcript yet / unreadable → skip (truth-on-disk)
+      if (compacting) {
+        // PreCompact lock held: a compaction we actuated is mid-flight. Skip
+        // alerting during the grow-before-marker window. Clear the lock when
+        // EITHER:
+        //   (a) the post-compact region shrank below the warn band — the new
+        //       `"isCompactSummary":true` marker landed and the live context is
+        //       small again (the happy path); OR
+        //   (b) the lock has been held past `compactLockMaxMs` — the completion
+        //       signal that does NOT depend on the size dropping. A genuinely
+        //       large conversation can stay ≥5 MB even after a successful
+        //       compaction, and an actuated `/compact` may have failed outright;
+        //       without (b) the lock would never clear and the watchdog would go
+        //       dark forever (Codex review, 2026-06-25).
+        // Either way `clearCompactLock` resets the SURFACE latch so a still-large
+        // session re-surfaces the affordance on the next tick instead of being
+        // silenced. The auto-compaction latch (`autoCompactLatched`) is handled
+        // separately by lock-clear reason: cleared ONLY on the happy path (live
+        // context shrank below warn — the compaction demonstrably worked, so a
+        // future re-climb may auto-compact again), but KEPT on the timeout path
+        // (the /compact may have failed or the convo is genuinely huge — clearing
+        // the lock must not let the next tick immediately re-actuate `/compact` in
+        // a loop on a session that stays critical).
+        if (size < SIZE_WARN_BYTES) {
+          clearCompactLock()
+          autoCompactLatched = false
+        } else if (now() - compactStartedAt >= compactLockMaxMs) {
+          clearCompactLock()
+        }
+        return
+      }
+      const fired = tracker.evaluate(size)
+      if (fired !== null) deps.surface(fired, size)
+      // POLICY: after surfacing, idle-gate an automatic compaction at the
+      // critical band (no-op unless `isIdle` is wired — see `maybeAutoCompact`).
+      // Driven off the measured `size`, NOT the rising-edge `fired`, so a session
+      // that crossed critical while BUSY still auto-compacts on the next idle
+      // tick instead of missing its one-shot.
+      maybeAutoCompact(size)
+    } catch (err) {
+      onError(err)
+    }
   }
 
   const handle = setIntervalFn(tick, intervalMs)

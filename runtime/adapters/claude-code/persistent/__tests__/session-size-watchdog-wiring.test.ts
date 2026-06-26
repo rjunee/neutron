@@ -20,7 +20,7 @@ import {
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
-import { sessionJsonlPath, SIZE_WARN_BYTES } from '../session-size-watchdog.ts'
+import { sessionJsonlPath, SIZE_WARN_BYTES, SIZE_CRITICAL_BYTES } from '../session-size-watchdog.ts'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -169,6 +169,48 @@ describe('session-size watchdog — substrate wiring (row #13)', () => {
 
       // A second press while mid-compact is a no-op (fire-once).
       expect(await requestSessionCompact(poolKeyFor(opts))).toBe(false)
+      expect(writes().filter((w) => w === '/compact\r')).toHaveLength(1)
+    } finally {
+      rmSync(projectsDir, { recursive: true, force: true })
+    }
+  })
+
+  it('an IDLE warm session at ≥10MB AUTO-compacts (gap #4 policy) without a manual press', async () => {
+    const projectsDir = mkdtempSync(join(tmpdir(), 'neutron-size-wire-'))
+    try {
+      const { host, writes } = makeHost()
+      const sessionId = '33333333-3333-4333-8333-333333333333'
+      // sizeCompactIdleQuiesceMs:0 → the post-start session counts as idle the
+      // moment its turn completes, so a single deterministic tick exercises the
+      // policy without waiting out the real 30s quiesce window.
+      const opts = optsWith(host, {
+        projectsDir,
+        idGen: () => sessionId,
+        sizeCompactIdleQuiesceMs: 0,
+      })
+      // Seed a CRITICAL (≥10MB) post-compact transcript.
+      seedJsonl(projectsDir, sessionId, opts.cwd as string, SIZE_CRITICAL_BYTES + 4096)
+
+      const sub = createPersistentReplSubstrate(opts)
+      await drainOK(sub.start({ prompt: 'hi', tools: [], model_preference: ['claude-opus-4-7'] }))
+      // The turn driver clears `session.activeTurn` in a finally that runs just
+      // after the completion event drains (microtask gap) — settle so the session
+      // is observably idle before we tick.
+      await Bun.sleep(100)
+
+      const wd = await peekSizeWatchdogForTest(poolKeyFor(opts))
+      expect(wd).toBeDefined()
+      // No requestSessionCompact() call — the watchdog actuates on its own because
+      // the session is idle + critical.
+      wd?.tick()
+
+      const idxEsc = writes().indexOf(`KEY:${encodeKey('escape')}`)
+      const idxCompact = writes().indexOf('/compact\r')
+      expect(idxEsc).toBeGreaterThanOrEqual(0)
+      expect(idxCompact).toBeGreaterThan(idxEsc)
+      // Fire-once: subsequent ticks while still critical do NOT re-actuate.
+      wd?.tick()
+      wd?.tick()
       expect(writes().filter((w) => w === '/compact\r')).toHaveLength(1)
     } finally {
       rmSync(projectsDir, { recursive: true, force: true })

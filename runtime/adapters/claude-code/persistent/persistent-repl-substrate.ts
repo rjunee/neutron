@@ -235,6 +235,15 @@ const DEFAULT_IDLE_QUIET_MS = 900
 /** Cap on the post-reply idle wait (defensive — a TUI that never goes fully
  *  quiet still releases after this). */
 const DEFAULT_IDLE_MAX_MS = 6_000
+/** Quiescence window the size-watchdog's idle-gated auto-compaction (Vajra port
+ *  row #13, gap #4) requires before it injects `escape`+`/compact`. Generous on
+ *  purpose: the auto-compaction must only fire when the session is GENUINELY at
+ *  rest, not merely between PTY chunks mid-turn. `activeTurn === undefined`
+ *  already proves no turn is in flight; this PTY-quiet floor is the secondary
+ *  guard against a background write landing right as we actuate. 30 s mirrors the
+ *  model-update watchdog's idle quiesce — the other keystroke-injecting
+ *  watchdog. */
+const SESSION_COMPACT_IDLE_QUIESCE_MS = 30_000
 /**
  * LIVENESS KEEPALIVE cadence (2026-06-18 synthesis false-wedge fix). While a turn
  * is in flight AND the `claude` child is still alive, the session emits a `status`
@@ -486,9 +495,11 @@ function dispatchResumePickerRecovery(
  *  post-compact band. We surface it to (a) the active turn's channel if one is in
  *  flight, so the user sees it inline, (b) an operator stderr log (always), and
  *  (c) the injected `onSizeAlert` hook so a gateway can wire a richer
- *  Reset/Compact/Snooze affordance. Auto-compaction is deliberately NOT triggered
- *  here — the Compact action is a surfaced affordance the user presses (see
- *  `requestSessionCompact`), never silent. */
+ *  Reset/Compact/Snooze affordance. This SURFACE path never actuates a
+ *  compaction itself — the watchdog's separate idle-gated POLICY does that at the
+ *  critical band when the session is at rest (see the `isIdle` wiring above and
+ *  `maybeAutoCompact` in session-size-watchdog.ts), and a gateway/user can still
+ *  press the surfaced affordance via `requestSessionCompact`. */
 function surfaceSizeAlert(
   session: ReplSession,
   sessionKey: string,
@@ -711,6 +722,11 @@ export interface PersistentReplSubstrateOptions {
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   /** Override the session-size watchdog cadence (ms). Default 5 min. */
   sizeCheckIntervalMs?: number
+  /** Override the idle-quiescence window (ms) the size watchdog's auto-compaction
+   *  POLICY (gap #4) requires before injecting `escape`+`/compact`. Default
+   *  {@link SESSION_COMPACT_IDLE_QUIESCE_MS} (30 s). Exposed mainly for tests that
+   *  drive a deterministic idle tick; production uses the default. */
+  sizeCompactIdleQuiesceMs?: number
   /**
    * Per-instance `CLAUDE_CONFIG_DIR`. When set, the child's claude config (login,
    * trust state, MCP cache) is isolated under this dir and auth flows via the
@@ -1746,12 +1762,26 @@ async function spawnSession(
   // `escape` + `/compact\r` through the same PTY write seam the disclaimer-dismiss
   // path uses, behind the surfaced affordance (see `requestSessionCompact`). The
   // timer is unref'd and stopped on child exit / teardown.
+  //
+  // POLICY (gap #4): the surfaced alert alone is a dead end on Open's WS-native
+  // web chat — there is no inline keyboard and `requestSessionCompact` has no
+  // caller, so the single-owner session would just keep growing until `--resume`
+  // wedges. We therefore wire `isIdle` so the watchdog idle-gates an AUTOMATIC
+  // compaction at the critical band: it injects the SAME `escape`+`/compact` the
+  // affordance surfaces, but ONLY when no turn is in flight AND the PTY has been
+  // quiet ≥ SESSION_COMPACT_IDLE_QUIESCE_MS (never mid-turn). Edge-latched +
+  // debounced in the watchdog so a still-large session can't re-fire. NOT a
+  // feature flag — the policy is on wherever a live PTY child is wired.
   session.sizeWatchdog = startSessionSizeWatchdog({
     readSize: () => measurePostCompactSize(sessionJsonlPath(sessionId, cwd, options.projectsDir)),
     surface: (severity, sizeBytes) =>
       surfaceSizeAlert(session, sessionKey, severity, sizeBytes, options),
     writeKey: (key) => sendKey(child, key),
     write: (data) => child.write(data),
+    isIdle: () =>
+      session.activeTurn === undefined &&
+      Date.now() - session.lastDataAt >=
+        (options.sizeCompactIdleQuiesceMs ?? SESSION_COMPACT_IDLE_QUIESCE_MS),
     ...(options.sizeCheckIntervalMs !== undefined ? { intervalMs: options.sizeCheckIntervalMs } : {}),
   })
 
@@ -3647,10 +3677,13 @@ export function poolHasSessionForTest(sessionKey: string): boolean {
 /**
  * Actuate the surfaced Compact affordance (Vajra port row #13) for a pooled warm
  * session: `escape` + `/compact\r`, fire-once, behind the watchdog's mid-compact
- * lock + debounce. This is the entry point a gateway calls when the user presses
- * "🗜️ Compact" on a surfaced size alert — compaction is never silent/automatic.
- * Returns false when there is no live session for the key or a compaction is
- * already mid-flight / within the debounce floor.
+ * lock + debounce. This is the MANUAL entry point a gateway calls when the user
+ * presses "🗜️ Compact" on a surfaced size alert. (The watchdog ALSO actuates the
+ * same compaction automatically at the critical band when the session is idle —
+ * the gap-#4 POLICY — so a single-owner Open session with no pressable affordance
+ * still can't wedge; this manual path remains for any surface that wires a
+ * button.) Returns false when there is no live session for the key or a
+ * compaction is already mid-flight / within the debounce floor.
  */
 export async function requestSessionCompact(sessionKey: string): Promise<boolean> {
   const p = pool.get(sessionKey)

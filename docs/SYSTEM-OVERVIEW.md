@@ -1234,10 +1234,31 @@ unchanged and still apply; this recovery path never bypasses them.
     Never time-dedupe.
   - **Compact action** = `writeKey('escape')` THEN `child.write('/compact\r')`,
     fire-once — the lock + debounce are stamped **before** the writes (invariant
-    §4) so a transport failure can't double-`/compact`. It is a **surfaced
-    affordance the user presses** (`requestSessionCompact(sessionKey)`), never
-    silent/automatic — auto-compaction without a surfaced affordance is out of
-    scope.
+    §4) so a transport failure can't double-`/compact`. It is reachable both as a
+    **surfaced affordance** any gateway/user presses (`requestSessionCompact(
+    sessionKey)`) AND automatically via the idle-gated POLICY below.
+  - **Idle-gated auto-compaction POLICY (gap #4 — the actual compaction trigger).**
+    The watchdog SURFACES the alert, but on Open's **WS-native web chat** there is
+    no inline keyboard and **nothing calls `requestSessionCompact`** — so the
+    affordance alone is a dead end and a long-lived single-owner session would just
+    keep growing until `--resume` wedges (the 2026-04-16 11.8 MB incident). The
+    substrate therefore wires an `isIdle` dep so the watchdog **actuates the same
+    `escape`+`/compact` automatically when the post-compact size reaches the
+    **critical** band AND the session is at rest** (`session.activeTurn ===
+    undefined` and the PTY quiet ≥ `SESSION_COMPACT_IDLE_QUIESCE_MS`, 30 s — never
+    mid-turn). It is **edge-latched + debounced**: it fires **once per critical
+    episode** (an outer `autoCompactLatched` flag), de-latches only when the
+    post-compact size drops back below critical (a re-climb may fire again), and
+    is **kept latched** when the mid-compact lock clears via timeout on a
+    still-large/failed compaction (so it can't re-fire `/compact` in a loop). A
+    session that crossed critical while **busy** is left un-latched so the next
+    idle tick still actuates (no missed one-shot). This is **not a feature flag** —
+    the policy is active wherever a live PTY child is wired (the default); a
+    gateway that DOES wire a pressable Reset/Compact button (Vajra's Telegram
+    inline keyboard) simply omits `isIdle` and stays surface-only. Vajra's own
+    `session-size-watchdog.ts` is likewise warn-only at the engine level — its
+    "policy" is the clickable buttons it posts; Open closes the same loop with the
+    idle auto-actuation because it has no button surface.
 
 ## cwd-drift watchdog (P3, port row #12) — `cwd-drift-watchdog.ts`
 
