@@ -69,6 +69,7 @@ import { DocSearchRuntime } from '../doc-search/runtime.ts'
 import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/message-search-wiring.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
+import { mountCoresScribeFanOut } from '../gateway/cores/mount-cores-scribe-fan-out.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
@@ -484,6 +485,31 @@ export function buildOpenGraphComposer(
     // and swallows its own errors — it never throws into the chat path).
     const scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined =
       scribe !== null ? (input: UserTurnInput): void => scribe.handleUserTurn(input) : undefined
+
+    // ── Cores→scribe phase-2 fan-out (Vajra parity gap #1) ─────────────────
+    // The chat-turn extractor (`scribeOnUserTurn` above) is only HALF of scribe:
+    // the phase-2 Cores→scribe fan-out lets the scheduled Calendar + Email Cores
+    // contribute their OWN ambient extraction (today's events / inbox mail →
+    // GBrain). That seam (`scribeFanOut` in `gateway/cores/{calendar,email-managed}
+    // -wiring.ts`) was built but never threaded — its only callers were tests, so
+    // per-Core memory extraction was DEAD. Mount it here so it runs on the live
+    // single-owner Open boot path, gated on scribe being live (no extraction
+    // target otherwise — LLM-less boxes are unaffected). Until a Google-backed
+    // calendar/gmail client is composed in (separate parity gap), the in-memory
+    // fallback clients yield an empty calendar/inbox, so the schedulers run
+    // harmlessly and fan out nothing; the wire goes live with zero further
+    // changes the moment a real client is supplied. Cleanup drains in-flight
+    // extractions + tears the schedulers down at SIGTERM.
+    if (scribe !== null) {
+      const coresFanOut = mountCoresScribeFanOut({
+        scribe,
+        project_slug,
+        owner_home,
+      })
+      realmodeCleanups.push(() => {
+        void coresFanOut.stop().catch(() => undefined)
+      })
+    }
 
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,

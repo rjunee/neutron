@@ -74,6 +74,30 @@ Agent-native parity: every read/search/draft/send is also reachable from
 chat via `/email` commands (`/email thread <id>`, `/email search <q>`,
 `/email summarize <id>`, `/email triage`, `/email draft …`).
 
+### Cores→scribe phase-2 fan-out (`gateway/cores/mount-cores-scribe-fan-out.ts`)
+
+The scheduled Calendar + Email Cores feed scribe's extract→GBrain path as
+**ambient extraction sources on top of the Cores** (no new pollers): the
+pre-meeting-brief + daily-triage scheduler `fire` callbacks hand their
+already-fetched event/inbox rows to a `scribeFanOut` hook
+(`gateway/cores/{calendar,email-managed}-wiring.ts`), which the composer binds to
+`scribe.extractFromCoresSource(...)`. This complements the chat-turn extractor
+(`scribeOnUserTurn` → `scribe.handleUserTurn`): chat captures what the owner
+*says*; the fan-out captures what their *calendar and inbox* contain.
+
+**Wired into the Open boot path** (`open/composer.ts`, gated on scribe being
+live) via `mountCoresScribeFanOut(...)`, which composes both schedulers using the
+built factories, threads the binding, starts them, and registers a drain+teardown
+`stop()` against `realmode_cleanups`. The binding is fire-and-forget (a failed
+extraction never throws into a Core's brief/triage path) and exposes `idle()` for
+clean shutdown draining. Each scheduler owns its own self-tick — **no duplicate
+poller, no extra timer/fetch** beyond the Cores' own cadence. Until a
+Google-OAuth-backed calendar/gmail client is composed into Open (a separate
+parity item — the Cores' MCP-tool + `/cal` / `/email` chat surfaces remain
+Managed-side), the in-memory fallback clients yield an empty calendar/inbox so
+the schedulers run harmlessly; the fan-out goes live with no further wiring the
+moment a real client is supplied. Always-on when scribe is — **no feature flag**.
+
 ## Tab resolver (WAVE 3 tabbed shell) — `tabs/` + `gateway/http/app-tabs-surface.ts`
 
 The project (and global) tab set is resolved **engine-side** so both clients
