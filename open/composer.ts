@@ -77,6 +77,8 @@ import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/mes
 import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
 import { mountCoresScribeFanOut } from '../gateway/cores/mount-cores-scribe-fan-out.ts'
+import { mountOpenCores } from '../gateway/cores/mount-open-cores.ts'
+import { SecretsStore } from '../auth/secrets-store.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
@@ -559,6 +561,44 @@ export function buildOpenGraphComposer(
       })
     }
 
+    // ── Free Cores → Open boot (Vajra parity gap #2) ───────────────────────
+    // Compose the bundled free Cores (Calendar / Email / Google-Workspace /
+    // Notes / Reminders / Research) into the single-owner daily-driver, REUSING
+    // the Managed mechanism (`buildCoresBackendFactories` + the chained
+    // chat-command filter — `gateway/cores/mount-open-cores.ts`):
+    //   - `cores.backends` (below) drives `installBundledCores` so each Core's
+    //     `buildTools(deps)` MCP surface registers (agent-native parity).
+    //   - `coresWiring.chatCommandFilter` is threaded into `buildLandingStack`
+    //     so a typed `/cal` / `/email` / `/note` / `/remind` / `/research` is
+    //     routed to its Core BEFORE the LLM turn (the repo-wide chat-filter gap).
+    // Optional-until-credentialed: a per-instance OAuthTokenManager over the
+    // shared SecretsStore. With no `NEUTRON_CORES_GOOGLE_CLIENT_ID` (the
+    // zero-creds Open default) the Calendar/Gmail/Workspace backends fall back to
+    // in-memory clients — `/cal`/`/email` show an empty calendar/inbox, never a
+    // hard error, never a boot block. The LLM-driven Core calls run on a DEDICATED
+    // ephemeral `cc-cores-*` substrate (isolated from the chat REPL), or degrade
+    // gracefully when LLM-less. Built unconditionally — Cores compose with zero
+    // creds; only the LLM-backed sub-paths gate on `llmPool`.
+    const secretsStore = new SecretsStore({ data_dir: owner_home, db })
+    const coresSubstrate =
+      llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
+    const coresWiring = await mountOpenCores({
+      projectDb: db,
+      owner_home,
+      project_slug,
+      secretsStore,
+      env,
+      substrate: coresSubstrate,
+    })
+    realmodeCleanups.push(() => {
+      coresWiring.cleanup()
+    })
+    console.info(
+      `[open] cores composed: oauth_configured=${coresWiring.oauthConfigured} (Calendar/Email/Google ${
+        coresWiring.oauthConfigured ? 'live-cred-capable' : 'in-memory until Google OAuth connected'
+      })`,
+    )
+
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
       env,
@@ -761,6 +801,10 @@ export function buildOpenGraphComposer(
       // box has LLM creds, a real user turn fans into scribe's extract→GBrain
       // path; LLM-less, this is omitted and the chat-bridge no-ops the hook.
       ...(scribeOnUserTurn !== undefined ? { scribeOnUserTurn } : {}),
+      // Free-Core chat-command filter (parity gap #2) — `/cal` / `/email` /
+      // `/note` / `/remind` / `/research` are routed to their Core (sharing the
+      // same backend the MCP tools use) before the LLM turn.
+      chatCommandFilter: coresWiring.chatCommandFilter,
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────
@@ -1064,6 +1108,24 @@ export function buildOpenGraphComposer(
       heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
       platform,
       cron_jobs: cronJobs,
+      // Free Cores (parity gap #2) — `composition.cores` flips on the cores
+      // module in `composeProductionGraph` (`build-core-modules.ts:535`) so
+      // `installBundledCores` discovers the bundled Cores (rootDirs from the
+      // platform adapter) and registers each Core's `buildTools(deps)` MCP
+      // surface against the shared ToolRegistry. The `backends` map (built by
+      // `mountOpenCores` via `buildCoresBackendFactories`) supplies the
+      // optional-until-credentialed Calendar/Email/Google clients; per-Core
+      // install is fail-soft (`install-bundled.ts:167-247`) so a Core lacking
+      // creds is marked failed without blocking boot.
+      cores: {
+        dataDir: owner_home,
+        secretsStore,
+        backends: coresWiring.backends,
+        // Read connected OAuth tokens from the SecretsStore at install time so a
+        // Google-backed Core installs LIVE the moment its grant exists, and
+        // fail-soft/hidden until then (optional-until-credentialed at install).
+        prompter: coresWiring.prompter,
+      },
       // Doc-search agent tools (doc_search / doc_read) — registered by the
       // `tools` module when a runtime is present. Omitted if the index
       // failed to open (boot stays healthy without doc search).

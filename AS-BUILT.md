@@ -48,6 +48,34 @@ never an env var or hardcode.
   IG vs X routing; thread/article semantics; Apify error envelope;
   capability-guard wiring). Updated 4 count-sensitive registry/integrations tests
   to include `scraping_core` + the `apify` slot. Full suite green (821 files).
+## 2026-06-26 — free Cores composed into the Open boot path (parity gap #2)
+
+**What shipped.** The free Cores (Calendar / Email / Google-Workspace + Notes /
+Reminders / Research) now compose into the single-owner **Open** daily-driver —
+backends + MCP tools + chat-command filters, optional-until-credentialed, no
+feature flag, Open still boots with zero creds. Two gaps closed: (1) `open/composer.ts`
+never set `composition.cores`, so `installBundledCores` never ran in Open (no Core
+MCP tools); (2) the Open web-chat path had **no chat-command-filter seam** (only the
+Expo `createAppWsSurface` did), so `/cal` / `/email` fell through to the LLM.
+
+- New `gateway/cores/mount-open-cores.ts` (`mountOpenCores`) builds the
+  `buildCoresBackendFactories(...)` backend map + the chained free-Core filter
+  (`/cal`, `/email`, `/note`, `/remind`, `/research`) — REUSING the Managed
+  mechanism (`buildChainedChatCommandFilter`), not a fork. The composer sets
+  `composition.cores` (dataDir + `SecretsStore` + map + `SecretsStorePrompter`);
+  `boot()` runs it through `composeProductionGraph` → the cores module installs
+  each Core's MCP tools (fail-soft per Core).
+- `buildWebChatBridge` gained an optional `chatCommandFilter` (threaded via a new
+  `buildLandingStack` param); the bridge invokes `.match()` at the top of the
+  `user_message` handler and short-circuits to an `agent_message` when a Core
+  claims the command — mirroring `app-ws-surface.ts:658`.
+- Optional-until-credentialed: a per-instance `OAuthTokenManager` over the
+  `SecretsStore`. No `NEUTRON_CORES_GOOGLE_CLIENT_ID` → in-memory Calendar/Gmail/
+  Workspace clients (graceful empty, never error) and the Google Cores' MCP install
+  hidden until a grant exists; the `SecretsStorePrompter` surfaces a connected
+  token so those Cores install live with no restart.
+- Full detail + tests in `docs/AS-BUILT.md` and
+  `docs/plans/2026-06-26-gap2-cores-into-open.md`.
 
 ## 2026-06-25 — model-update watchdog + graceful upgrade (P3, Vajra port row #16)
 

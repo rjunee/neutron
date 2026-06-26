@@ -2,6 +2,64 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Free Cores composed into the Open boot path (parity gap #2)
+
+**What shipped.** The free Cores (Calendar / Email / Google-Workspace + Notes /
+Reminders / Research) now compose into the single-owner **Open** daily-driver —
+backends + MCP tools + chat-command filters — closing parity gap #2
+(`docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md` §5 #2, lines
+97/180) and the gap-#6 forge's repo-wide chat-command-filter finding. **No feature
+flag; Open still boots with zero creds.**
+
+**Verify-first result (cited).** `open/composer.ts` never set `composition.cores`,
+so `gateway/composition/build-core-modules.ts:535` skipped the cores module →
+`installBundledCores` never ran in Open → **no Core MCP tools registered** (grep
+of `open/composer.ts` for `cores:` / `buildCoresBackendFactories` = empty). And
+the Open web-chat path (`buildLandingStack` → `gateway/http/chat-bridge.ts`) had
+**no chat-command-filter seam** — the only `chat_command_filter` consumer was the
+Expo `createAppWsSurface` (`app-ws-surface.ts:658`), which Open does not mount. So
+a typed `/cal` / `/email` fell straight through to the LLM. The
+`buildCoresBackendFactories` + `buildChainedChatCommandFilter` helpers existed in
+`gateway/boot-helpers.ts` but were only **re-exported** by `gateway/index.ts` —
+their real call sites live in the carved-out Managed composer.
+
+- **The wiring (reuse, not fork).** New `gateway/cores/mount-open-cores.ts`
+  (`mountOpenCores`) builds (1) the `buildCoresBackendFactories(...)` backend map
+  for `composition.cores.backends`, and (2) the chained free-Core chat-command
+  filter (`/cal`, `/email`, `/note`, `/remind`, `/research`). The composer sets
+  `composition.cores` (dataDir + per-instance `SecretsStore` + the map + a
+  `SecretsStorePrompter`); `boot()` already runs every composition through
+  `composeProductionGraph`, so this flips on the cores module → `installBundledCores`
+  registers each Core's `buildTools(deps)` MCP surface. Per-Core install is
+  fail-soft, so a Core lacking creds is hidden without blocking boot.
+- **Web-chat filter seam.** `buildWebChatBridge` gained an optional
+  `chatCommandFilter` (threaded via a new `buildLandingStack` param); the bridge
+  invokes `.match()` at the top of the `user_message` handler and short-circuits
+  to an `agent_message` reply when a Core claims the command — for both General
+  and project topics (`project_id` parsed from `web:<uid>:<project>`). A filter
+  throw is swallowed (degrades to the normal agent dispatch); a Core-less box omits
+  the filter entirely (chat path unchanged).
+- **Optional-until-credentialed.** A per-instance `OAuthTokenManager` over the
+  `SecretsStore`. No `NEUTRON_CORES_GOOGLE_CLIENT_ID` → in-memory Calendar/Gmail/
+  Workspace clients (`/cal`/`/email` answer empty, never error) and the Google
+  Cores' MCP install stays hidden (required `oauth_token` unprovisioned); once the
+  store holds the grant the `SecretsStorePrompter` surfaces it and those Cores
+  install live. Agent-native parity: each Core's MCP tools + chat filter share one
+  backend instance.
+- **Out of scope / follow-up.** The in-product OAuth-connect admin HTTP surface
+  (Open's cookie-auth ↔ the Cores surfaces' bearer-token `AppWsAuthResolver`
+  contract) is deferred; the token-present install path is wired + tested. The
+  Tasks Core's `wrapWithTasksChatRouter` (a different router shape) is not in the
+  chain.
+
+**Tests.** `gateway/cores/__tests__/mount-open-cores.test.ts` (backend map
+composed; `/cal`+`/email`+`/note` routed, prose falls through; zero-creds
+graceful; install hidden→live once the `google_calendar` token exists) +
+`gateway/http/__tests__/chat-bridge-cores-command-filter.test.ts` (a `/cal`
+user_message short-circuits the live-agent/engine; null match falls through;
+project-topic `project_id` parsing; throwing filter degrades; no-filter unchanged).
+Plan: `docs/plans/2026-06-26-gap2-cores-into-open.md`.
+
 ## Session-compaction POLICY — idle-gated auto-compaction (parity gap #4)
 
 **What shipped.** The actual **compaction trigger** for warm/persistent sessions,
