@@ -502,6 +502,24 @@ export function buildLlmCallSubstrate(
                 yield { kind: 'error', message: BINARY_NOT_FOUND_MESSAGE, retryable: false }
                 continue
               }
+              // P0 ROOT-CAUSE FIX (b): a persistent-REPL spawn/channel failure
+              // (`channel-wedged`, `no-channel-ready`, `no-http-health`,
+              // `dead-child`) is a SUBSTRATE failure, NOT a credential condition.
+              // The CC adapter surfaces it as a retryable error with no HTTP
+              // status, so the `else` branch below would `mapStatusForPoolCooldown
+              // (null, retryable=true)` → 429 → `reportFailure` cools down a
+              // perfectly healthy credential. Repeated across the pool this lands
+              // as "all Anthropic credentials are in cooldown (429/402/401)" — the
+              // exact MISLABEL the live dogfood hit while the real cause was the
+              // dev-channel MCP never binding (see the substrate's
+              // MCP_CONNECTION_NONBLOCKING fix). Classify it BEFORE the cooldown
+              // map (mirrors the binary-not-found fast-path): skip the pool
+              // cooldown entirely and re-emit a distinct error that names the real
+              // class so the credential is never wrongly parked.
+              if (detectChannelWedged(ev.message)) {
+                yield { kind: 'error', message: CHANNEL_WEDGED_MESSAGE, retryable: false }
+                continue
+              }
               const httpStatus = parseHttpStatusFromMessage(ev.message)
               let cooldownStatus: number | null
               if (httpStatus !== null) {
@@ -627,6 +645,39 @@ export function detectBinaryNotFound(message: string): boolean {
   if (/\bENOENT\b/.test(message) && /claude/i.test(message)) return true
   if (/claude:\s*command not found/i.test(message)) return true
   if (/no such file or directory/i.test(message) && /claude/i.test(message)) return true
+  return false
+}
+
+/**
+ * The single actionable error surfaced when the persistent-REPL substrate fails
+ * to START a session (the dev-channel MCP never bound, the REPL child died during
+ * bootstrap, or `/health` never came up). This is a SUBSTRATE/spawn failure, NOT
+ * a credential/quota condition — the Anthropic credentials are fine. Surfacing the
+ * real class stops the failure laundering into a pool cooldown ("all Anthropic
+ * credentials are in cooldown") that masks a dead LLM path behind a quota lie.
+ */
+export const CHANNEL_WEDGED_MESSAGE =
+  "Neutron's LLM session channel failed to bind — the persistent-REPL substrate " +
+  'could not start its dev-channel MCP before the turn. This is a substrate/spawn ' +
+  'failure, NOT an Anthropic credential cooldown (the credentials are fine). Check ' +
+  'the server log for `channel-wedged` / `no-channel-ready` and restart Neutron if it persists.'
+
+/**
+ * Detect a persistent-REPL spawn/channel-bind failure surfaced by the substrate.
+ * The substrate throws `persistent-repl: spawn failed (<reason>; …)` for the four
+ * post-spawn-assertion reasons (`channel-wedged`, `no-channel-ready`,
+ * `no-http-health`, `dead-child`) and `ChannelWedgedSpawnError` carries the same
+ * `spawn failed (channel-wedged; …)` text. None of these are credential conditions
+ * — the substrate has ALREADY exhausted its own bounded respawn by the time the
+ * error surfaces here, so rotating to a different credential cannot help and MUST
+ * NOT cool one down. Callers MUST check this BEFORE the cooldown classification and
+ * MUST NOT call `reportFailure` when it returns true (mirrors `detectBinaryNotFound`).
+ */
+export function detectChannelWedged(message: string): boolean {
+  if (/spawn failed \((?:channel-wedged|no-channel-ready|no-http-health|dead-child)/i.test(message)) {
+    return true
+  }
+  if (/\bchannel-wedged\b/i.test(message)) return true
   return false
 }
 

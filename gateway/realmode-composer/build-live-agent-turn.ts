@@ -513,15 +513,20 @@ async function resolvePreviousRowWithUserText(
   wall_now: number,
 ): Promise<string | null> {
   try {
-    const { turns } = await buttonStore.listHistoryByTopic({
+    // Use the INSERTION-ORDER recency lookup, NOT the pagination-ordered
+    // listHistoryByTopic: the agent-reply row and a preceding inert user-turn row
+    // can share a `created_at` ms (fast warm turn / pinned test clock), and
+    // pagination's `prompt_id DESC` tiebreak (a random UUID) would
+    // non-deterministically return the EMPTY inert row instead of the reply —
+    // making the "prior reply" judged on this turn come back blank. `rowid DESC`
+    // resolves the tie to the last-written row (the reply). See
+    // ButtonStore.latestTurnByTopic.
+    const latest = await buttonStore.latestTurnByTopic({
       topic_id: turn.topic_id,
       before: wall_now,
-      before_prompt_id: null,
-      limit: 1,
       now: wall_now,
     })
-    const latest = turns[0]
-    if (latest === undefined || latest.resolved) {
+    if (latest === null || latest.resolved) {
       // No UNRESOLVED row to stamp the user text onto — either the first turn
       // on this topic, or the latest row is already resolved (e.g. an inert
       // `tag_gated` quiet turn persisted while the agent was silent). Persist
@@ -537,7 +542,7 @@ async function resolvePreviousRowWithUserText(
           channel_kind: 'app-socket',
         })
       }
-      return latest !== undefined && typeof latest.body === 'string' ? latest.body : null
+      return latest !== null && typeof latest.body === 'string' ? latest.body : null
     }
     const priorBody = typeof latest.body === 'string' ? latest.body : null
     await buttonStore.resolve({
