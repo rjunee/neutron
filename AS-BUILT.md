@@ -2,6 +2,84 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — Connect group-chat agent ENGAGEMENT MODE (per-project `tag_gated | all_messages`)
+
+**What shipped.** A per-project setting, `agent_engagement_mode`, that chooses how
+the shared agent engages in a Connect group/shared project. Spec:
+`docs/specs/connect-agent-engagement-mode-2026-06-26.md`. **No feature flag — the
+stored setting IS the behaviour.**
+
+- **`all_messages`** (the DEFAULT, Ryan-confirmed) — every member post triggers an
+  agent turn, exactly like a single-person chat. Existing projects need no change.
+- **`tag_gated`** — the agent stays quiet until a member `@neutron`-mentions it.
+  Members converse freely; the agent engages only when addressed.
+
+**Verify-before-assert — the live routing seam.** The spec named the seam
+conceptually; the actual live ingress where a project-topic post triggers the
+shared agent is `gateway/http/chat-bridge.ts` → `handleProjectTopicInbound` →
+`runProjectAgentTurn` (the `user_message && liveAgentEligible` branch). That is
+where the gate was applied (cited + grepped before editing). The connect cross-
+instance inbound (`connect/api/handlers/on-inbound-message.ts` → `ChannelRouter`)
+routes to a topic handler that is a **no-op stub** in Open
+(`open/composer.ts:1163`, "agent loop is later P5 work"), so the chat-bridge
+project-topic path is the real, testable agent-turn trigger today.
+
+**The pieces.**
+1. **Schema** — `migrations/0088_project_agent_engagement_mode.sql` adds
+   `agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages' CHECK (… IN
+   ('tag_gated','all_messages'))` to `projects` (forward-only `ALTER TABLE ADD
+   COLUMN`; snapshot regenerated). TS type + vocabulary + the pure gate live in
+   `connect/agent-engagement.ts`.
+2. **Pure core (`connect/agent-engagement.ts`)** — `AgentEngagementMode`,
+   `DEFAULT_AGENT_ENGAGEMENT_MODE`, `detectAgentMention` (case-insensitive,
+   handle/alias aware, **doc-quote guarded** — ignores `@neutron` inside inline-
+   code / fenced blocks / blockquotes; `@neutrons` and `a@neutron.com` don't
+   match; multiple mentions = one trigger), `resolveEngagement` (the gate:
+   mode + text + member access → engage?), and `classifyTaggedIntent`
+   (inline-answer vs delegate-to-subagent). Zero I/O; 31 unit tests.
+3. **The gate at the seam (`chat-bridge.ts`)** — reads the per-project mode via
+   an injected `resolveEngagementMode`; in `tag_gated` a non-mention post
+   **persists to the shared transcript** (`persistProjectUserTurnOnly` — the
+   user-turn-stamp half of the stub persistence, NO agent reply) and clears the
+   optimistic typing dots with a no-render `agent_ack` — **no agent turn, no
+   typing indicator**. The transcript ALWAYS persists in BOTH modes; only the
+   agent-turn TRIGGER is gated.
+4. **Tag-to-delegate (spec §4, rides gap #3 `agent-dispatch/`)** — in `tag_gated`,
+   a tagged TASK (heuristic on a leading imperative verb, or explicit
+   `/delegate [research|review] …`) routes to an injected `delegateDispatch`
+   hook that spawns a background subagent reporting back into the thread; a quick
+   tagged question is answered inline. Without the hook wired it degrades to an
+   inline turn. (The hook→`DispatchService` production binding is the remaining
+   glue; the bridge-side routing is built + tested.)
+5. **Production reader** — `gateway/realmode-composer/build-landing-stack.ts`
+   wires `resolveEngagementMode` unconditionally off this instance's `projects`
+   table (read-only, failure-safe, defaults to `all_messages`).
+6. **Admin surface (human)** — `gateway/http/app-projects-surface.ts` PATCH
+   `/api/app/projects/<id>/settings` now whitelists `agent_engagement_mode`
+   alongside `privacy_mode`, validated against the mode set; `SqliteProjectSettingsStore`
+   reads/writes the column; `buildDefaultSettings` defaults it.
+7. **Agent-native surface (parity) — `cores/free/agent-settings/`** — two new MCP
+   tools `get_engagement_mode` / `set_engagement_mode` (read/write capability)
+   sharing the SAME `projects`-table backend as the admin PATCH. Resolve a
+   project by display name; emit a Telegram confirmation on a successful set
+   (mirrors `rename_project`). TOOL_NAMES is now nine.
+
+**Edge cases handled (spec §"Edge cases").** Read-only member `@mention` → no
+trigger (`resolveEngagement` access gate); mode-switch mid-conversation → takes
+effect on the next message, no replay; no spurious typing indicator in `tag_gated`
+with no mention (the `agent_ack` clears dots without a typing bracket); attribution
+unchanged (the requester's turn persists author-stamped; the agent's own posts /
+dispatch report carry the agent envelope).
+
+**Tests (exercise the WIRING).** `gateway/http/__tests__/chat-bridge-engagement-mode.test.ts`
+drives the real `buildWebChatBridge`: `all_messages` engages every post;
+`tag_gated` + non-mention persists-but-no-turn (asserts the transcript resolve,
+the `agent_ack`, and the absent typing bracket); `tag_gated` + `@neutron` question
+→ inline turn; `tag_gated` + `@neutron` task + delegate hook → hands off (no inline
+turn) and acks; reader-unwired falls back to `all_messages`. Plus the 31 pure-core
+tests, the agent-settings tool round-trip tests (set→get, unknown-project), and
+the surface PATCH round-trip.
+
 ## 2026-06-26 — Compose Skill Forge into the Open boot path (Vajra parity gap #5, the LAST gap)
 
 **What shipped.** Skill Forge (`skill-forge/`, auto-skillify) is now **composed into

@@ -19,6 +19,14 @@
 export type PrivacyMode = 'private' | 'public';
 export type BillingMode = 'personal';
 
+/**
+ * Connect group-chat agent engagement mode. The app side keeps its own copy
+ * of this literal union (mirroring `PrivacyMode` above) so the client bundle
+ * doesn't import the gateway's `connect/agent-engagement.ts`. Source of truth
+ * is that module + migration 0088; this duplicate must stay in lockstep.
+ */
+export type AgentEngagementMode = 'tag_gated' | 'all_messages';
+
 export const ALL_PRIVACY_MODES: readonly PrivacyMode[] = ['private', 'public'];
 
 export const ALL_BILLING_MODES: readonly BillingMode[] = ['personal'];
@@ -36,6 +44,7 @@ export interface ProjectSettings {
   persona: string;
   privacy_mode: PrivacyMode;
   billing_mode: BillingMode;
+  agent_engagement_mode: AgentEngagementMode;
   members: ProjectMember[];
 }
 

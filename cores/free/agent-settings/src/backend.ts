@@ -40,6 +40,11 @@
 
 import type { ProjectDb } from '../../../../persistence/index.ts'
 import { TELEGRAM_BIND_TOKEN_TTL_MS } from '../../../../onboarding/interview/final-handoff-config.ts'
+import {
+  DEFAULT_AGENT_ENGAGEMENT_MODE,
+  isAgentEngagementMode,
+  type AgentEngagementMode,
+} from '../../../../connect/agent-engagement.ts'
 
 /** The user-facing project shape every tool returns. */
 export interface ProjectView {
@@ -171,6 +176,33 @@ export interface AgentSettingsBackend {
     success: boolean
     deep_link?: string
     expires_in_minutes?: number
+    error?: string
+  }>
+  /**
+   * Report a shared project's `agent_engagement_mode` (the per-project
+   * Connect engagement switch — `all_messages` = engage on every member
+   * post, `tag_gated` = engage only on an `@neutron` mention). Resolves
+   * the project by display name; unknown name → `success:false` + error.
+   */
+  getEngagementMode(project_name: string): Promise<{
+    success: boolean
+    project_name?: string
+    mode?: AgentEngagementMode
+    error?: string
+  }>
+  /**
+   * Set a shared project's `agent_engagement_mode`. Validates the mode,
+   * resolves the project by display name (unknown → `success:false` +
+   * error), writes the canonical `projects` column, and emits a Telegram
+   * confirmation on success (mirrors the other mutating project tools).
+   */
+  setEngagementMode(
+    project_name: string,
+    mode: AgentEngagementMode,
+  ): Promise<{
+    success: boolean
+    project_name?: string
+    mode?: AgentEngagementMode
     error?: string
   }>
 }
@@ -479,6 +511,59 @@ export function buildAgentSettingsBackend(
         deep_link,
         expires_in_minutes: Math.round(TELEGRAM_BIND_TOKEN_TTL_MS / 60_000),
       }
+    },
+
+    async getEngagementMode(project_name: string): Promise<{
+      success: boolean
+      project_name?: string
+      mode?: AgentEngagementMode
+      error?: string
+    }> {
+      const row = findLiveByName(project_name)
+      if (row === null) {
+        return { success: false, error: `project not found: ${project_name}` }
+      }
+      const modeRow = projectDb
+        .prepare<{ agent_engagement_mode: string | null }, [string]>(
+          `SELECT agent_engagement_mode FROM projects WHERE id = ?`,
+        )
+        .get(row.id)
+      const raw = modeRow?.agent_engagement_mode
+      const mode = isAgentEngagementMode(raw)
+        ? raw
+        : DEFAULT_AGENT_ENGAGEMENT_MODE
+      return { success: true, project_name: row.name, mode }
+    },
+
+    async setEngagementMode(
+      project_name: string,
+      mode: AgentEngagementMode,
+    ): Promise<{
+      success: boolean
+      project_name?: string
+      mode?: AgentEngagementMode
+      error?: string
+    }> {
+      if (!isAgentEngagementMode(mode)) {
+        return { success: false, error: `invalid engagement mode: ${String(mode)}` }
+      }
+      const row = findLiveByName(project_name)
+      if (row === null) {
+        return { success: false, error: `project not found: ${project_name}` }
+      }
+      const ts = nowIso()
+      await projectDb.run(
+        `UPDATE projects SET agent_engagement_mode = ?, updated_at = ? WHERE id = ?`,
+        [mode, ts, row.id],
+      )
+      // Confirm on success — mirrors renameProject's best-effort Telegram
+      // confirmation on every committed project mutation.
+      await telegram.sendConfirmation(
+        mode === 'tag_gated'
+          ? `In "${row.name}" I'll now stay quiet until someone @-mentions me.`
+          : `In "${row.name}" I'll now respond to every message.`,
+      )
+      return { success: true, project_name: row.name, mode }
     },
   }
 }

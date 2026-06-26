@@ -108,6 +108,9 @@ describe('app-projects surface — GET /settings', () => {
     expect(json.project.name).toBe('Neutron')
     expect(json.project.privacy_mode).toBe('private')
     expect(json.project.billing_mode).toBe('personal')
+    // Connect engagement mode defaults to all_messages (migration 0088): a
+    // fresh group project behaves like a single-person chat out of the box.
+    expect(json.project.agent_engagement_mode).toBe('all_messages')
     // Generic default shell — no hardcoded demo members (R6 removed the seed).
     expect(json.project.members).toEqual([])
   })
@@ -164,6 +167,48 @@ describe('app-projects surface — PATCH /settings', () => {
     )
     const rereadJson = (await reread.json()) as SettingsResponse
     expect(rereadJson.project.privacy_mode).toBe('public')
+  })
+
+  it('PATCH agent_engagement_mode persists + round-trips (Connect 0088)', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ agent_engagement_mode: 'tag_gated' }),
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SettingsResponse
+    expect(json.project.agent_engagement_mode).toBe('tag_gated')
+    // privacy_mode is untouched by an engagement-only PATCH:
+    expect(json.project.privacy_mode).toBe('private')
+
+    // Re-read confirms the write survives:
+    const reread = await authedFetch(
+      harness.base,
+      `/api/app/projects/${PROJECT_ID}/settings`,
+    )
+    const rereadJson = (await reread.json()) as SettingsResponse
+    expect(rereadJson.project.agent_engagement_mode).toBe('tag_gated')
+  })
+
+  it('PATCH accepts privacy_mode + agent_engagement_mode together', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ privacy_mode: 'public', agent_engagement_mode: 'tag_gated' }),
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SettingsResponse
+    expect(json.project.privacy_mode).toBe('public')
+    expect(json.project.agent_engagement_mode).toBe('tag_gated')
+  })
+
+  it('PATCH rejects invalid agent_engagement_mode values', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ agent_engagement_mode: 'whenever' }),
+    })
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { code: string; field?: string }
+    expect(json.code).toBe('invalid_agent_engagement_mode')
+    expect(json.field).toBe('agent_engagement_mode')
   })
 
   it('PATCH rejects fields other than privacy_mode with field_not_writable', async () => {

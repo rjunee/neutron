@@ -504,6 +504,81 @@ describe('agent-settings tools — registry writer unavailable (honest no-op)', 
   })
 })
 
+/**
+ * Connect per-project engagement mode (get/set). The `agent_engagement_mode`
+ * column is added to the canonical `projects` table by migration 0088 (owned
+ * by a separate worker). This Core's worktree may not carry 0088 yet, so the
+ * harness ensures the column exists IDEMPOTENTLY — a no-op once 0088 lands.
+ */
+function ensureEngagementColumn(): void {
+  const cols = projectDb
+    .prepare<{ name: string }, []>(`PRAGMA table_info(projects)`)
+    .all()
+  if (!cols.some((c) => c.name === 'agent_engagement_mode')) {
+    projectDb
+      .prepare(
+        `ALTER TABLE projects
+           ADD COLUMN agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'`,
+      )
+      .run()
+  }
+}
+
+describe('agent-settings tools — engagement mode (Connect)', () => {
+  test('a freshly seeded project defaults to all_messages', async () => {
+    ensureEngagementColumn()
+    await seedProject({ id: 'grp', name: 'Family Trip' })
+    const tools = buildToolsForTest()
+    const out = await tools.get_engagement_mode({ project_name: 'Family Trip' })
+    expect(out.success).toBe(true)
+    expect(out.project_name).toBe('Family Trip')
+    expect(out.mode).toBe('all_messages')
+  })
+
+  test('set_engagement_mode → get_engagement_mode round-trips, confirms', async () => {
+    ensureEngagementColumn()
+    await seedProject({ id: 'grp', name: 'Family Trip', topic_id: '5' })
+    const { telegram, calls } = buildRecordingTelegram()
+    const tools = buildToolsForTest({ telegram })
+
+    const set = await tools.set_engagement_mode({
+      project_name: 'Family Trip',
+      mode: 'tag_gated',
+    })
+    expect(set.success).toBe(true)
+    expect(set.mode).toBe('tag_gated')
+    expect(calls.confirmations[0]).toContain('@-mention')
+
+    const get = await tools.get_engagement_mode({ project_name: 'Family Trip' })
+    expect(get.success).toBe(true)
+    expect(get.mode).toBe('tag_gated')
+
+    // Flip back to all_messages and confirm the round-trip again.
+    const reset = await tools.set_engagement_mode({
+      project_name: 'family trip', // case-insensitive resolve
+      mode: 'all_messages',
+    })
+    expect(reset.success).toBe(true)
+    expect(reset.mode).toBe('all_messages')
+    const get2 = await tools.get_engagement_mode({ project_name: 'Family Trip' })
+    expect(get2.mode).toBe('all_messages')
+  })
+
+  test('unknown project → success:false + error on both get and set', async () => {
+    ensureEngagementColumn()
+    const tools = buildToolsForTest()
+    const get = await tools.get_engagement_mode({ project_name: 'Nope' })
+    expect(get.success).toBe(false)
+    expect(get.error).toContain('Nope')
+    const set = await tools.set_engagement_mode({
+      project_name: 'Nope',
+      mode: 'tag_gated',
+    })
+    expect(set.success).toBe(false)
+    expect(set.error).toContain('Nope')
+  })
+})
+
 describe('agent-settings tools — capability gate + audit', () => {
   test('successful calls record tool_call success rows in the audit log', async () => {
     await seedProject({ id: 'p', name: 'P', topic_id: '1' })

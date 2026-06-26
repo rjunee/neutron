@@ -22,6 +22,7 @@ function makeProject(overrides: Partial<ProjectSettings> = {}): ProjectSettings 
     persona: 'Forge — pragmatic build agent',
     privacy_mode: 'private',
     billing_mode: 'personal',
+    agent_engagement_mode: 'all_messages',
     members: [{ user_id: 'sam', name: 'Sam', role: 'owner' }],
     ...overrides,
   };

@@ -5,15 +5,17 @@
  * onboarding final-handoff makes ("you can rename / delete / merge
  * projects, switch personality, update my name later — just ask me").
  *
- * Seven MCP tools:
- *   - list_projects      — current (non-deleted) projects
- *   - rename_project     — rename + retitle the Telegram forum topic
- *   - delete_project     — soft-delete + close/archive the topic
- *   - merge_projects     — move context + soft-delete `from` + archive
- *   - update_personality — agent archetype / description phrase
- *   - update_agent_name  — agent display name
- *   - connect_telegram   — mint a fresh one-time Telegram bind deep link
- *                          (Item 3 resumable connect, 2026-06-10)
+ * Nine MCP tools:
+ *   - list_projects       — current (non-deleted) projects
+ *   - rename_project      — rename + retitle the Telegram forum topic
+ *   - delete_project      — soft-delete + close/archive the topic
+ *   - merge_projects      — move context + soft-delete `from` + archive
+ *   - update_personality  — agent archetype / description phrase
+ *   - update_agent_name   — agent display name
+ *   - connect_telegram    — mint a fresh one-time Telegram bind deep link
+ *                           (Item 3 resumable connect, 2026-06-10)
+ *   - get_engagement_mode — read a shared project's agent engagement mode
+ *   - set_engagement_mode — set tag_gated / all_messages (Connect §1.5)
  *
  * Projects mutate the canonical per-project `projects` table (migration
  * 0038 + soft-delete columns from 0053). Personality + agent name
@@ -64,11 +66,15 @@ export {
   type ConnectTelegramOutput,
   type DeleteProjectInput,
   type DeleteProjectOutput,
+  type GetEngagementModeInput,
+  type GetEngagementModeOutput,
   type ListProjectsOutput,
   type MergeProjectsInput,
   type MergeProjectsOutput,
   type RenameProjectInput,
   type RenameProjectOutput,
+  type SetEngagementModeInput,
+  type SetEngagementModeOutput,
   type ToolDeps,
   type UpdateAgentNameInput,
   type UpdateAgentNameOutput,

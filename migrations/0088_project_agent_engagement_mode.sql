@@ -1,0 +1,55 @@
+-- 0088_project_agent_engagement_mode.sql
+--
+-- Neutron Connect group-chat AGENT ENGAGEMENT MODE (per-project). Single-owner
+-- Vajra port. Spec: docs/specs/connect-agent-engagement-mode-2026-06-26.md.
+--
+-- A shared (group) project now carries one `agent_engagement_mode` column on
+-- its canonical `projects` row (migration 0038, rebuilt verbatim in 0053). It
+-- is the "stay quiet until tagged" switch for the shared agent session:
+--
+--   * 'all_messages' — every member post auto-routes to the shared agent
+--                      session. This is the CURRENT behaviour and the DEFAULT,
+--                      so a freshly-created group project behaves exactly like a
+--                      single-person chat out of the box (the agent sees every
+--                      message). Ryan-confirmed 2026-06-26. Choosing this as the
+--                      default means EXISTING projects need no behaviour change:
+--                      the backfilled value reproduces today's routing.
+--   * 'tag_gated'    — the shared agent engages ONLY when a member @-mentions it
+--                      (`@neutron`); members otherwise converse freely while the
+--                      transcript still persists every message for context.
+--
+-- The setting IS the behaviour (no feature flag): the value on this column is
+-- read directly at the chat-bridge agent-turn trigger seam and at the
+-- project-settings surface. The mode gates ONLY whether to TRIGGER an agent
+-- turn — the shared transcript always persists every message in both modes
+-- (spec §2), so this column never affects message storage.
+--
+-- Migration mechanics:
+--   `projects` is a STRICT table (0038 / 0053). SQLite forbids adding a
+--   NOT-NULL-without-default column to a STRICT table, but a NOT NULL column
+--   WITH a non-NULL DEFAULT is legal and atomic under the runner's BEGIN/COMMIT
+--   wrap — every existing row is backfilled with the DEFAULT in the same
+--   statement. We therefore use a plain forward-only `ALTER TABLE ... ADD
+--   COLUMN` (cheaper + clearer than the STRICT table-rebuild dance, and there
+--   is no column-ordering or CHECK-supersetting reason to rebuild here).
+--
+--   The CHECK constrains the value to the two spec-locked modes. The TS
+--   `AgentEngagementMode` type (connect/agent-engagement.ts) is the
+--   authoritative write-side gate; the CHECK is defense-in-depth at the SQLite
+--   layer. Forward-only — reversing ships as a new forward migration.
+--
+-- SNAPSHOT REGEN REQUIRED: this ADD COLUMN changes the `projects` table shape,
+-- so `migrations/expected-schema.txt` MUST be regenerated
+-- (`bun run migrations/regen-snapshot.ts`) and committed alongside this file or
+-- `migrations/snapshot.test.ts` will fail with schema drift.
+--
+-- Verification (post-migration, per-project DB):
+--   table_info(projects) shows agent_engagement_mode TEXT NOT NULL, dflt 'all_messages'.
+--   SELECT agent_engagement_mode, COUNT(*) FROM projects GROUP BY 1;  -- all backfilled to 'all_messages'
+--
+-- (No connection-level preamble: this migration is a single ADD COLUMN,
+--  wrapped atomically by the runner's BEGIN/COMMIT.)
+
+ALTER TABLE projects
+    ADD COLUMN agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'
+        CHECK (agent_engagement_mode IN ('tag_gated', 'all_messages'));
