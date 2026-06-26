@@ -19,6 +19,7 @@ import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
+import { registerSkillForgeToolSurface } from '../../skill-forge/tool.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
@@ -50,6 +51,7 @@ import { stubAdvanceDeps } from '../../trident/state-machine.ts'
 import { TridentSessionManager } from '../../trident/session.ts'
 import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
 import { buildTridentDelivery } from '../../trident/delivery.ts'
+import { withTerminalObserver } from '../../trident/terminal-observer.ts'
 import { spawnCapture } from '../../trident/git-mode.ts'
 import { TaskStore } from '../../tasks/store.ts'
 import {
@@ -160,6 +162,13 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       if (input.agent_dispatch !== undefined) {
         registerDispatchToolSurface(reg, input.agent_dispatch.service)
       }
+      // Skill-forge (parity gap #5) — register `skill_forge_list` +
+      // `skill_forge_decide` when the composer wired the backend, so the live
+      // agent can list / approve / decline Skill Forge proposals (agent-native
+      // parity with the `/skills` chat command, which shares the SAME backend).
+      if (input.skill_forge !== undefined) {
+        registerSkillForgeToolSurface(reg, input.skill_forge.backend)
+      }
       return reg
     },
   }
@@ -258,7 +267,18 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // hook. Failure-safe: the tick loop wraps `onTerminal` in its own
       // try/catch so a posting outage never un-terminates a finished build.
       const router = ctx.graph.get<ChannelRouter>('channels')
-      const on_terminal: TridentTerminalHook = buildTridentDelivery({ sink: router })
+      const delivery = buildTridentDelivery({ sink: router })
+      // Skill-forge trigger (parity gap #5) — when the composer wired an
+      // `on_run_terminal` observer, run it on every terminal run, ISOLATED
+      // from delivery (`withTerminalObserver`): a delivery outage must not skip
+      // the auto-skillify audit, since the run is already terminal and the loop
+      // won't re-fire the hook. Observer errors are logged, never propagated;
+      // a delivery error is still re-thrown so the loop's try/catch logs it.
+      const runTerminalObserver = tridentWiring?.on_run_terminal
+      const on_terminal: TridentTerminalHook =
+        runTerminalObserver === undefined
+          ? delivery
+          : withTerminalObserver(delivery, runTerminalObserver)
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
         const session = new TridentSessionManager({ dispatch: tridentWiring.dispatch })

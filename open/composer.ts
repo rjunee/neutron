@@ -78,6 +78,16 @@ import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.t
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
 import { mountCoresScribeFanOut } from '../gateway/cores/mount-cores-scribe-fan-out.ts'
 import { mountOpenCores } from '../gateway/cores/mount-open-cores.ts'
+import { buildChainedChatCommandFilter } from '../gateway/boot-helpers.ts'
+import {
+  SkillForge,
+  SkillForgeProposalsStore,
+  buildSkillForgeBackend,
+  buildSkillForgeChatCommandFilter,
+  resolveSkillsDir,
+  completedWorkflowFromTridentRun,
+} from '../skill-forge/index.ts'
+import type { TridentRun } from '../trident/store.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
@@ -375,6 +385,47 @@ export function buildOpenGraphComposer(
         persona_loader: defaultPersonaLoader,
       })
     })()
+
+    // ── Skill-forge → Open boot (Vajra parity gap #5) ──────────────────────
+    // Auto-skillify: audit a COMPLETED Trident workflow and, gated by the
+    // propose-then-approve step, distill it into a saved, re-invokable skill
+    // under `<owner_home>/skills/conventions/` — the dir the realmode composer
+    // splices into every LLM turn (`registrar.ts`), so an approved skill is
+    // immediately agent-discoverable and survives a fresh session.
+    //
+    // Built UNCONDITIONALLY (no `llmPool` gate, no feature flag): the
+    // approve/decline/list surface — the `skill_forge_*` MCP tools (agent-native)
+    // AND the `/skills` chat command, sharing ONE `SkillForgeBackend` — must work
+    // even on an LLM-less box (a persisted proposal can still be approved). The
+    // auto-propose TRIGGER is wired separately, into the Trident terminal hook
+    // (`trident.on_run_terminal` below) — it only fires on a `done` run, which
+    // itself only advances when `tridentDispatch !== null` (i.e. llmPool exists),
+    // so an LLM-less box simply never produces a proposal.
+    //
+    // Notifier mirrors agent-dispatch's report sink (Open is WS-native +
+    // single-owner, no Telegram channel): it logs the proposal. The proposal is
+    // PERSISTED regardless of delivery (the store row is the source of truth),
+    // so `/skills list` surfaces it even if the notify is a no-op log.
+    const skillForgeStore = new SkillForgeProposalsStore({ db })
+    const skillForge = new SkillForge({
+      store: skillForgeStore,
+      notifier: {
+        async notify(proposal, message): Promise<void> {
+          console.log(
+            `[skill-forge] proposal ${proposal.id} (${proposal.proposed_name}):\n${message}`,
+          )
+        },
+      },
+      skillsDir: resolveSkillsDir(owner_home),
+    })
+    const skillForgeBackend = buildSkillForgeBackend(skillForge, skillForgeStore)
+    // The Trident-terminal trigger: on every terminal run, audit a `done`
+    // workflow for skill-worthiness (the audit itself drops non-`done` runs).
+    // Fire-and-forget by the trident module (it wraps this in try/catch).
+    const skillForgeOnRunTerminal = async (run: TridentRun): Promise<void> => {
+      if (run.phase !== 'done') return
+      await skillForge.onWorkflowCompleted(completedWorkflowFromTridentRun(run))
+    }
 
     // Dedicated WARM history-import / synthesis substrate (2026-06-17 Step 2b —
     // single-session synthesis cut-over). The live onboarding import now runs
@@ -801,10 +852,18 @@ export function buildOpenGraphComposer(
       // box has LLM creds, a real user turn fans into scribe's extract→GBrain
       // path; LLM-less, this is omitted and the chat-bridge no-ops the hook.
       ...(scribeOnUserTurn !== undefined ? { scribeOnUserTurn } : {}),
-      // Free-Core chat-command filter (parity gap #2) — `/cal` / `/email` /
-      // `/note` / `/remind` / `/research` are routed to their Core (sharing the
-      // same backend the MCP tools use) before the LLM turn.
-      chatCommandFilter: coresWiring.chatCommandFilter,
+      // Chat-command filters routed BEFORE the LLM turn, chained in order:
+      //   - Free Cores (parity gap #2) — `/cal` / `/email` / `/note` /
+      //     `/remind` / `/research` (sharing each Core's MCP-tool backend).
+      //   - Skill-forge (parity gap #5) — `/skills` (list / approve / decline),
+      //     sharing the SAME `SkillForgeBackend` as the `skill_forge_*` MCP
+      //     tools (agent-native parity).
+      // Each filter returns null for a non-match, so the chain falls through to
+      // the LLM exactly as a single filter would.
+      chatCommandFilter: buildChainedChatCommandFilter([
+        coresWiring.chatCommandFilter,
+        buildSkillForgeChatCommandFilter(skillForgeBackend),
+      ]),
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────
@@ -1167,14 +1226,23 @@ export function buildOpenGraphComposer(
       // Omitted when no credential resolves (`tridentDispatch === null`) →
       // unchanged LLM-less behaviour (loop stays live + restart-safe but
       // advances nothing).
+      // The `on_run_terminal` observer fires Skill Forge's auto-skillify audit
+      // (parity gap #5) on every terminal run — the audit drops non-`done`
+      // runs. Wired only on the live (dispatch) path; an LLM-less box never
+      // advances a run to terminal, so there is nothing to skillify.
       ...(tridentDispatch !== null
-        ? { trident: { dispatch: tridentDispatch } }
+        ? { trident: { dispatch: tridentDispatch, on_run_terminal: skillForgeOnRunTerminal } }
         : {}),
       // Agent-dispatch family (parity gap #3) — register the `dispatch_agent`
       // tool when the dispatch service was built (same credential gate as
       // trident). The live chat agent can then dispatch a research/review/
       // ad-hoc background agent that shares the SubagentRegistry + watchdog.
       ...(dispatchService !== null ? { agent_dispatch: { service: dispatchService } } : {}),
+      // Skill-forge (parity gap #5) — register the `skill_forge_list` +
+      // `skill_forge_decide` agent tools, backed by the SAME `SkillForgeBackend`
+      // the `/skills` chat command uses (agent-native parity). Built
+      // unconditionally so the approve/decline/list surface works LLM-less.
+      skill_forge: { backend: skillForgeBackend },
       // Tear down the upload-session sweeper on shutdown.
       realmode_cleanups: realmodeCleanups,
       landing_server: {

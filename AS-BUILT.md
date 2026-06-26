@@ -2,6 +2,61 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — Compose Skill Forge into the Open boot path (Vajra parity gap #5, the LAST gap)
+
+**What shipped.** Skill Forge (`skill-forge/`, auto-skillify) is now **composed into
+the single-owner Open daily-driver**. It was fully built — audit → distill →
+propose → approve → register, plus migration `0086_skill_forge_proposals` — but
+**never wired**: a verify-first grep of `open/`, `gateway/`, `trident/` for
+`skill-forge`/`SkillForge` returned ZERO hits outside the package + its tests
+(parity scan `docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md`
+§2.R / §5.5). So a completed Trident workflow was never audited, no proposal ever
+surfaced, and the owner had no manage surface — auto-skillify was unreachable.
+**No feature flag.**
+
+**The wiring (mirrors gap #2 `mount-open-cores.ts` + gap #3 agent-dispatch).**
+`open/composer.ts` constructs ONE `SkillForge` + `SkillForgeProposalsStore` over
+the per-instance ProjectDb and a shared `SkillForgeBackend`, then threads:
+- **Auto-propose trigger** — `trident.on_run_terminal` onto `CompositionInput`;
+  `gateway/composition/build-core-modules.ts` chains it into the Trident tick
+  loop's terminal hook (after delivery), so a `done` run fires
+  `skillForge.onWorkflowCompleted(completedWorkflowFromTridentRun(run))`. The
+  audit (`detector.ts`) drops non-`done` runs; the hook is try/catch-wrapped so it
+  can never un-terminate a finished build. This is the live seam the
+  `trident-adapter.ts` docblock documented but left unwired.
+- **Agent-native surface (one backend, two front doors)** — `skill_forge_list`
+  (read-only, `read:project_data`, `auto`) + `skill_forge_decide`
+  (`write:project_data`, `prompt-user`) MCP tools (registered by the `tools`
+  module when `composition.skill_forge` is set), AND a `/skills` chat command
+  (a `ChatCommandFilter` chained into `buildLandingStack` next to the Cores
+  filters). Both call the SAME backend — list / approve / decline parity between
+  the agent and the owner.
+
+**Built unconditionally (no `llmPool` gate).** The manage surface (tools +
+`/skills`) works even on an LLM-less box — a persisted proposal can still be
+approved offline (the approve path writes a markdown file, no LLM). The trigger
+only fires on a `done` Trident run, which only advances when `tridentDispatch !==
+null` (llmPool present), so an LLM-less box simply never produces a proposal.
+Open boots cleanly with zero creds. Notifier logs (Open is WS-native +
+single-owner, mirroring agent-dispatch's report sink); the `skill_forge_proposals`
+row is the source of truth, surfaced via `/skills list`.
+
+- **Files.** New: `skill-forge/{backend,tool,command}.ts` (+ re-exports in
+  `skill-forge/index.ts`), tests `skill-forge/{tool,command}.test.ts` +
+  `open/__tests__/open-skill-forge-wiring.test.ts`. Wired: `open/composer.ts`
+  (construct + thread), `gateway/composition/input/misc-input.ts` (`skill_forge`
+  + `trident.on_run_terminal` fields), `gateway/composition/build-core-modules.ts`
+  (tool registration + terminal-hook chaining). Docs: `docs/SYSTEM-OVERVIEW.md`.
+- **Verification.** `tsc -p tsconfig.json` clean (0 errors); full suite 8747 pass /
+  0 fail. The new boot-wiring test boots the REAL Open composer and proves the
+  trigger persists a proposal on `done`, NOT on `failed`, and that approve works
+  offline.
+- **Out of scope (unchanged).** The skill-forge package internals; the Managed composer.
+- **Process note.** The fleet brief said "execute via /slfg"; given this was a
+  well-scoped, fully-recon'd change and /slfg is the path flagged for the
+  fleet-wide Codex-gate hang (`slfg-codex-gate-hang`), it was executed directly
+  with the sanctioned synchronous cross-model review instead.
+
 ## 2026-06-26 — IG/X scraping via Apify, optional-until-credentialed (Vajra parity gap #6)
 
 **What shipped.** A new Tier 1 free Core `cores/free/scraping/`

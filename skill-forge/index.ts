@@ -20,6 +20,19 @@ export { workflowSignature, normalizeAction } from './signature.ts'
 export { composeProposalMessage } from './proposal-message.ts'
 export { registerSkillFile, resolveSkillsDir } from './registrar.ts'
 export type { RegisterSkillResult } from './registrar.ts'
+export { buildSkillForgeBackend } from './backend.ts'
+export type { SkillForgeBackend } from './backend.ts'
+export {
+  registerSkillForgeToolSurface,
+  SKILL_FORGE_LIST_TOOL,
+  SKILL_FORGE_DECIDE_TOOL,
+} from './tool.ts'
+export {
+  buildSkillForgeChatCommandFilter,
+  parseSkillForgeCommand,
+  executeSkillForgeCommand,
+  type SkillForgeCommand,
+} from './command.ts'
 export {
   completedWorkflowFromTridentRun,
   type TridentRunLike,
