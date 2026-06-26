@@ -104,6 +104,7 @@ function makeEchoHost(): {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
       spawned.push({ sid, killed: () => hasExited })
       return {
         pid,
@@ -350,6 +351,7 @@ function makeCrashHost(): ProbeHost {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
       spawned.push({ killed: () => hasExited })
       return {
         pid,
@@ -518,6 +520,7 @@ function makeEchoHostCapturingConfigs(): ProbeHost {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
       spawned.push({ killed: () => hasExited })
       return {
         pid,

@@ -922,6 +922,12 @@ class ReplSink {
         session.onChannelReady(port)
         return Response.json({ status: 'ok' })
       }
+      if (url.pathname === '/channel-bound') {
+        // True MCP-handshake-complete signal (dev-channel `mcp.oninitialized`):
+        // the post-spawn assertion Stage 4 gates the first inject on this.
+        session.onChannelBound()
+        return Response.json({ status: 'ok' })
+      }
       if (url.pathname === '/reply') {
         const text = typeof body['text'] === 'string' ? (body['text'] as string) : ''
         const turnId = typeof body['turn_id'] === 'string' ? (body['turn_id'] as string) : undefined
@@ -1121,6 +1127,17 @@ class ReplSession {
       this.readyResolve()
       this.readyResolve = undefined
     }
+  }
+
+  /** True once the dev-channel POSTed `/channel-bound` — claude completed the MCP
+   *  `initialize`/`initialized` handshake and wired the `claude/channel`
+   *  capability. This is the post-spawn assertion's TRUE readiness gate (Stage 4),
+   *  replacing the false-positive "no MCP server configured with that name" TUI
+   *  scan (claude 2.1.186 prints that warning even for a fully-wired channel). */
+  channelBound = false
+
+  onChannelBound(): void {
+    this.channelBound = true
   }
 
   onReply(text: string, turnId?: string): void {
@@ -1494,33 +1511,28 @@ async function spawnSession(
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
   // the dev-channel MCP server (the `no-channel-ready` failure class).
   const childEnv = mergeEnv(options.env)
-  // P0 ROOT-CAUSE FIX (dev-channel MCP handshake race): force `claude` to load
-  // the `--mcp-config` dev-channel SYNCHRONOUSLY (await the stdio MCP handshake
-  // at startup) instead of its default async, NON-BLOCKING load. Verified live
-  // against claude 2.1.186: by default the REPL logs
-  //   `[MCP] --mcp-config servers running fully async (nonblocking)`
-  // and accepts its first input BEFORE the dev-channel's stdio handshake binds
-  // the `claude/channel` capability + registers the `reply` tool (~270-490ms idle,
-  // longer under spawn-time CPU/memory pressure). The substrate's post-spawn
-  // assertion gates the first inject on `/channel-ready`, which the dev-channel
-  // posts at mere transport-ATTACH (+8ms) — well before the bind — so the FIRST
-  // onboarding/chat turn is injected into an unbound channel and every reply()
-  // fails `no MCP server configured with that name` → `channel-wedged` → bounded
-  // respawn exhausts → every LLM turn dies (and downstream is then MISLABELED as
-  // an Anthropic credential cooldown). Unlike Vajra (whose first turn arrives with
-  // human Telegram latency that masks the race), Neutron auto-injects the first
-  // turn immediately after spawn, so the race bites every cold start.
+  // Force `claude` to load the `--mcp-config` dev-channel SYNCHRONOUSLY (await the
+  // stdio MCP connect group at startup) instead of its default async, non-blocking
+  // load. `claude`'s loader reads `MCP_CONNECTION_NONBLOCKING`: an explicit
+  // FALSE-like value (`false`/`0`/`no`/`off`) forces the blocking path so the
+  // single dev-channel server is connected + handshaken before the REPL accepts
+  // its first input. The REPL's `--mcp-config` contains ONLY that one server, so
+  // blocking has no collateral slowdown; startup is already budgeted by the
+  // post-spawn assertion. This makes the dev-channel's `/channel-bound` signal
+  // (its `mcp.oninitialized` hook) land promptly, tightening the Stage-4 gate.
   //
-  // `claude`'s loader reads `MCP_CONNECTION_NONBLOCKING`: an explicit FALSE-like
-  // value (`false`/`0`/`no`/`off`) forces the BLOCKING path (binary fn `el()` →
-  // `mcpConnectNonBlocking=false` → the connect group is awaited, the "running
-  // fully async" branch is skipped). The REPL's `--mcp-config` contains ONLY the
-  // single dev-channel server, so blocking has no collateral slowdown; startup is
-  // already budgeted 30s by the post-spawn assertion. This makes `/channel-ready`
-  // a TRUE readiness signal: when the assertion passes, the channel is bound and
-  // the reply tool is live. NOT a feature flag — it is the single, always-on
-  // correctness invariant for the sole spawn path. Set UNCONDITIONALLY so a
-  // host-leaked `MCP_CONNECTION_NONBLOCKING=true` can never re-open the race.
+  // HISTORICAL NOTE (P0, 2026-06-26): this env was originally added by #79 as the
+  // claimed root-cause fix for `channel-wedged`, on the theory that the first turn
+  // was injected before the stdio handshake bound the channel. That theory was
+  // WRONG — reproduced live under the real Bun PTY harness, the handshake
+  // completes cleanly and the channel `reply()`s fine; the real bug was the
+  // post-spawn assertion false-failing on the always-present
+  // "no MCP server configured with that name" TUI warning (claude 2.1.186 prints
+  // it even for a fully-wired channel). The real fix is the `/channel-bound`
+  // protocol gate in `post-spawn-assertion.ts`. This env is kept as a harmless,
+  // mildly-helpful belt-and-suspenders (bind sooner), NOT as the fix. Set
+  // UNCONDITIONALLY so a host-leaked `MCP_CONNECTION_NONBLOCKING=true` can't
+  // re-introduce an async-load window.
   childEnv['MCP_CONNECTION_NONBLOCKING'] = 'false'
   if (options.skipTrustSeed !== true) {
     const trustInput: Parameters<typeof ensureClaudeTrust>[0] = { cwd }
@@ -1743,17 +1755,20 @@ async function spawnSession(
     }
   })
 
-  // Post-spawn assertion: child alive → dev-channel handshake → HTTP /health.
+  // Post-spawn assertion: child alive → /channel-ready (transport attached) →
+  // HTTP /health → /channel-bound (MCP handshake complete).
   const assertion = await assertReplAlive(
     { pid: child.pid },
     {
       isChildAlive: () => !child.hasExited(),
       getChannelPort: () => session.channelPort,
       hasHttpHealth: (port) => httpHealth(port),
-      // Stage 4 (channel-MCP-unwired, port row #6): re-read the ring FRESH —
-      // the assertion only calls this AFTER /health is up (invariant §7), so a
-      // stale pre-health snapshot can never gate the unwired check.
-      readRingFresh: () => session.ring.raw(),
+      // Stage 4 (channel-MCP-bound, port row #6): the dev-channel posts
+      // `/channel-bound` from `mcp.oninitialized` once claude completes the MCP
+      // handshake — the TRUE readiness gate, replacing the false-positive "no MCP
+      // server configured with that name" TUI scan (claude 2.1.186 always prints
+      // that warning even for a fully-wired, working channel).
+      isChannelBound: () => session.channelBound,
       sleep: (ms) => Bun.sleep(ms),
       now: () => Date.now(),
     },

@@ -62,6 +62,7 @@ function makeHost(): { host: PtyHost; writes: () => string[] } {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 4242 })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid: 4242,
         write: (d) => writes.push(typeof d === 'string' ? d : Buffer.from(d).toString('utf8')),

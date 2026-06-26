@@ -86,6 +86,7 @@ function makeReplyHost(reply: string): PtyHost {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 4242 })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid: 4242,
         write() {},

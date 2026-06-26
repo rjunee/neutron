@@ -100,6 +100,7 @@ function makeFakeReplHost(responder: Responder): { host: PtyHost; spawnCount: ()
 
       // Announce readiness (the race-free handshake the real dev-channel does).
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
 
       return {
         pid,
@@ -290,6 +291,13 @@ describe('PersistentReplSubstrate — failure + status', () => {
           headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
           body: JSON.stringify({ session_id: sid, channel_port: server.port, pid: 999 }),
         }).catch(() => undefined)
+        // MCP handshake-complete signal (real dev-channel posts this from
+        // mcp.oninitialized) so the post-spawn assertion's Stage-4 bind gate passes.
+        void fetch(`http://127.0.0.1:${sinkPort}/channel-bound`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify({ session_id: sid, pid: 999 }),
+        }).catch(() => undefined)
         return {
           pid: 999,
           write() {},
@@ -374,6 +382,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
           },
         })
         void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 777 })
+        void post('/channel-bound', { session_id: sid })
         return {
           pid: 777,
           write() {},
@@ -472,6 +481,7 @@ describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does
           },
         })
         void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 778 })
+        void post('/channel-bound', { session_id: sid })
         return {
           pid: 778,
           write() {},
@@ -545,6 +555,7 @@ function makeDelayedReplyReplHost(replyDelayMs: number): PtyHost {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid,
         write() {},
@@ -628,6 +639,7 @@ describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06
           },
         })
         void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+        void post('/channel-bound', { session_id: sid })
         return {
           pid,
           write() {},
@@ -650,12 +662,14 @@ describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06
     return { host, lastEnv: () => captured }
   }
 
-  it('forces MCP_CONNECTION_NONBLOCKING=false on the REPL spawn (claude AWAITS the dev-channel handshake before turn 1 — the wedge fix)', async () => {
-    // ROOT CAUSE: claude defaults to loading the `--mcp-config` dev-channel ASYNC
-    // non-blocking, so the first auto-injected onboarding/chat turn lands before
-    // the stdio handshake binds the channel → every reply fails "no MCP server
-    // configured with that name" → channel-wedged. The substrate MUST spawn the
-    // REPL with MCP_CONNECTION_NONBLOCKING=false so claude blocks on the handshake.
+  it('forces MCP_CONNECTION_NONBLOCKING=false on the REPL spawn (claude AWAITS the dev-channel handshake before turn 1)', async () => {
+    // Belt-and-suspenders (NOT the wedge fix — that is the /channel-bound gate in
+    // post-spawn-assertion.ts): claude defaults to loading the `--mcp-config`
+    // dev-channel ASYNC non-blocking. Forcing MCP_CONNECTION_NONBLOCKING=false
+    // makes claude block on the single dev-channel connect group before accepting
+    // input, so the handshake (and the dev-channel's /channel-bound signal) lands
+    // promptly. The real channel-wedged false-positive was the removed PTY-ring
+    // "no MCP server configured with that name" scan; this env just tightens timing.
     const { host, lastEnv } = makeEnvCapturingReplHost((_h, m) => `ok:${m}`)
     const sub = createPersistentReplSubstrate(baseOptions(host))
     await drain(sub.start(spec('first onboarding turn')))

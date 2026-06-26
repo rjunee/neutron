@@ -7,21 +7,26 @@
  * structure is the Nova logic. THE CHECK SWAP (per the brief): the tmux
  * window/pane-pid stages are gone; the stage set is now
  *   1. child alive (`kill -0`)
- *   2. dev-channel handshake seen (`/channel-ready` received)
+ *   2. dev-channel transport attached (`/channel-ready` received)
  *   3. dev-channel HTTP `/health` responds
- *   4. channel-MCP-unwired wedge (port row #6) — re-read the ring FRESH AFTER
- *      /health is up; if "no MCP server configured with that name" persists past
- *      a short confirm grace, fast-fail `channel-wedged` (the spawn LOOKS alive
- *      — /health 200 — but the agent can never `reply()`).
+ *   4. dev-channel MCP HANDSHAKE complete (`/channel-bound` received) — claude
+ *      actually sent the MCP `initialize`/`initialized` round-trip, so the
+ *      `claude/channel` capability + `reply` tool are live. If it never arrives
+ *      within the budget, fast-fail `channel-wedged` (the spawn LOOKS alive —
+ *      /health 200 — but claude never wired the channel, so the agent can never
+ *      `reply()`).
  * All probes are dep-injected so the function stays unit-testable.
  *
- * RE-READ-AFTER-HEALTH ORDERING (cross-cutting invariant §7, LOAD-BEARING):
- * Stage 4 re-captures the ring ONLY after Stage 3's /health gate flips. A stale
- * pre-health snapshot could read `!unwired` and let a same-tick-unwired channel
- * through — so the unwired re-read MUST happen after health, never before.
+ * WHY A PROTOCOL SIGNAL, NOT A TUI STRING (P0 fix, 2026-06-26): the prior Stage 4
+ * scanned the PTY ring for `no MCP server configured with that name` and fast-
+ * failed if it persisted. But claude 2.1.186 ALWAYS renders that warning in the
+ * dev-channel TUI header for an `--mcp-config`-provided channel server — even
+ * when the channel is fully wired and `reply()` round-trips (verified live under
+ * the real Bun PTY harness). The string is therefore a FALSE-POSITIVE wedge
+ * signal that failed every spawn → bounded-respawn cap → every LLM turn died.
+ * `/channel-bound` (the dev-channel's `mcp.oninitialized` hook) is the only
+ * signal that proves the handshake actually completed, so we gate on it instead.
  */
-
-import { channelUnwiredSignaturePresent } from './channel-unwired-detector.ts'
 
 export type SpawnAssertionResult =
   | { ok: true; pid: number; channelPort: number }
@@ -36,26 +41,26 @@ export type SpawnAssertionFailureReason =
   /** Child + handshake look alive but the dev-channel HTTP `/health` never
    *  responded — a wedged spawn that never finished binding. */
   | 'no-http-health'
-  /** Child alive + handshake seen + `/health` 200, BUT a fresh re-read of the
-   *  ring AFTER health-up shows the channel-MCP-unwired signature ("no MCP
-   *  server configured with that name") persisting past the confirm grace — the
-   *  REPL never bound the channel MCP and can never `reply()` (port row #6). */
+  /** Child alive + transport attached + `/health` 200, BUT the dev-channel never
+   *  POSTed `/channel-bound` within the budget — claude never completed the MCP
+   *  `initialize`/`initialized` handshake, so it never wired the `claude/channel`
+   *  capability and the agent can never `reply()` (port row #6). */
   | 'channel-wedged'
 
 export interface SpawnAssertionDeps {
   /** True iff the spawned child is still alive (`kill -0` / `!hasExited`). */
   isChildAlive: () => boolean
-  /** Return the channel port once the dev-channel POSTed `/channel-ready`,
-   *  else undefined (handshake not seen yet). */
+  /** Return the channel port once the dev-channel POSTed `/channel-ready`
+   *  (transport attached), else undefined. */
   getChannelPort: () => number | undefined
   /** True iff the dev-channel HTTP `/health` on `port` responds ok. */
   hasHttpHealth: (port: number) => Promise<boolean>
-  /** Re-read the PTY ring FRESH (raw text), or `null` on a failed capture. Called
-   *  ONLY in Stage 4, AFTER `/health` is up (invariant §7) — so a stale pre-health
-   *  snapshot can never gate the unwired check. A `null` capture counts as
-   *  NOT-unwired (a capture glitch must not fast-fail a healthy spawn). OMIT to
-   *  skip Stage 4 entirely (back-compat: the channel-wedged gate is off). */
-  readRingFresh?: () => string | null
+  /** True once the dev-channel POSTed `/channel-bound` — i.e. claude completed
+   *  the MCP `initialize`/`initialized` handshake and wired the `claude/channel`
+   *  capability (`mcp.oninitialized` fired). This is the TRUE readiness signal
+   *  (NOT the always-present "no MCP server configured" TUI warning). OMIT to skip
+   *  Stage 4 entirely (back-compat: the channel-wedged gate is off). */
+  isChannelBound?: () => boolean
   /** Sleep `ms` between retries. */
   sleep: (ms: number) => Promise<void>
   /** Clock. */
@@ -71,15 +76,15 @@ export interface SpawnAssertionConfig {
   healthBudgetMs?: number
   /** Poll interval for the health stage. Default 500ms. */
   healthIntervalMs?: number
-  /** Stage-4 confirm grace: how long the channel-MCP-unwired signature must
-   *  PERSIST (re-read fresh each poll, AFTER health-up) before we fast-fail
-   *  `channel-wedged`. A transient mid-render frame mustn't fast-fail a spawn
-   *  that's about to bind, so the signature has to survive this window. This is
-   *  a short SPAWN-PATH confirm window — NOT the 60s topic-readiness grace the
-   *  wedge-detector owns. Default 2s. */
-  channelWedgeGraceMs?: number
-  /** Poll interval for the Stage-4 unwired re-read. Default 250ms. */
-  channelWedgeIntervalMs?: number
+  /** Stage-4 budget: how long to wait for the dev-channel's `/channel-bound`
+   *  signal (claude's MCP handshake) AFTER `/health` is up before fast-failing
+   *  `channel-wedged`. The handshake normally lands within tens of ms of
+   *  `/channel-ready`, but the interactive dev-channel disclaimer can defer it
+   *  until the output scanner dismisses it, and spawn-time CPU/memory pressure
+   *  widens the window — so this allows a generous margin. Default 15s. */
+  channelBoundBudgetMs?: number
+  /** Poll interval for the Stage-4 `/channel-bound` wait. Default 250ms. */
+  channelBoundIntervalMs?: number
 }
 
 /**
@@ -96,8 +101,8 @@ export async function assertReplAlive(
   const readyInterval = config.readyIntervalMs ?? 250
   const healthBudget = config.healthBudgetMs ?? 10_000
   const healthInterval = config.healthIntervalMs ?? 500
-  const channelWedgeGrace = config.channelWedgeGraceMs ?? 2_000
-  const channelWedgeInterval = config.channelWedgeIntervalMs ?? 250
+  const channelBoundBudget = config.channelBoundBudgetMs ?? 15_000
+  const channelBoundInterval = config.channelBoundIntervalMs ?? 250
 
   // Stage 1 + 2: child alive AND dev-channel handshake seen, within one
   // budget. We re-check child-alive every poll so a crash during boot fails
@@ -130,35 +135,33 @@ export async function assertReplAlive(
     await deps.sleep(healthInterval)
   }
 
-  // Stage 4: channel-MCP-unwired wedge (port row #6). The spawn now LOOKS alive
-  // (child up, handshake seen, /health 200) — but under spawn-time memory/CPU
-  // pressure the REPL can finish booting WITHOUT binding the channel MCP, so
-  // every `reply()` prints "no MCP server configured with that name" and the
-  // turn never delivers. We re-read the ring FRESH — strictly AFTER the /health
-  // gate above (invariant §7: a stale pre-health snapshot could read !unwired and
-  // let a same-tick-unwired channel through) — and require the signature to
-  // PERSIST across the confirm grace before fast-failing (a transient mid-render
-  // frame mustn't fast-fail a spawn that's about to bind). A `null`/failed
-  // capture counts as NOT-unwired so a capture glitch can't fast-fail a healthy
-  // spawn. NO keystroke — detect → fast-fail → (caller) bounded respawn only.
-  // Stage 4 is skipped entirely when no ring reader is wired (back-compat).
-  if (deps.readRingFresh !== undefined) {
-    const wedgeDeadline = deps.now() + channelWedgeGrace
+  // Stage 4: dev-channel MCP HANDSHAKE complete (port row #6). The spawn now
+  // LOOKS alive (child up, transport attached, /health 200) — but a `/health` 200
+  // only proves the dev-channel's loopback HTTP server is up; it does NOT prove
+  // claude wired the MCP. The TRUE bind signal is `/channel-bound`, posted from
+  // the dev-channel's `mcp.oninitialized` hook when claude completes the
+  // `initialize`/`initialized` round-trip. We poll for it within a budget; if it
+  // never arrives, claude never wired the channel and every `reply()` would fail
+  // → fast-fail `channel-wedged` → (caller) bounded respawn. We do NOT scan the
+  // PTY ring for "no MCP server configured with that name": claude 2.1.186 prints
+  // that warning even for a fully-wired channel, so it is a false-positive (the
+  // bug this fix removes). Stage 4 is skipped when no bind probe is wired
+  // (back-compat).
+  if (deps.isChannelBound !== undefined) {
+    const boundDeadline = deps.now() + channelBoundBudget
     while (true) {
       if (!deps.isChildAlive()) {
         return { ok: false, reason: 'dead-child', detail: `pid=${args.pid}` }
       }
-      const ring = deps.readRingFresh()
-      const unwired = ring !== null && channelUnwiredSignaturePresent(ring, deps.now())
-      if (!unwired) break // signature cleared (or never present) → channel bound OK
-      if (deps.now() >= wedgeDeadline) {
+      if (deps.isChannelBound()) break // MCP handshake complete → channel wired OK
+      if (deps.now() >= boundDeadline) {
         return {
           ok: false,
           reason: 'channel-wedged',
           detail: `pid=${args.pid} port=${channelPort}`,
         }
       }
-      await deps.sleep(channelWedgeInterval)
+      await deps.sleep(channelBoundInterval)
     }
   }
 
@@ -178,6 +181,6 @@ export function describeReplAssertionFailure(
     case 'no-http-health':
       return `[repl-spawn-fail] ${sessionKey}: dev-channel HTTP /health never responded (${result.detail ?? 'no detail'}).`
     case 'channel-wedged':
-      return `[repl-spawn-fail] ${sessionKey}: dev-channel /health 200 but the channel MCP never bound — "no MCP server configured with that name" persisted (${result.detail ?? 'no detail'}).`
+      return `[repl-spawn-fail] ${sessionKey}: dev-channel /health 200 but the channel MCP never bound — no /channel-bound (claude never completed the MCP handshake) (${result.detail ?? 'no detail'}).`
   }
 }

@@ -100,6 +100,7 @@ function makeCorrelationHost(): { host: PtyHost } {
         },
       })
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 314159 })
+      void post('/channel-bound', { session_id: sid })
       return {
         pid: 314159,
         write() {},
