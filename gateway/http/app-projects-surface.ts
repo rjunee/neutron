@@ -23,12 +23,12 @@
  *     0038). Replaces the in-memory store in the production composer
  *     (`gateway/index.ts`) so PATCH writes survive a gateway restart.
  *
- * Settings PATCH whitelist: only `privacy_mode`. Any other field →
- * 400 with `field_not_writable`. This is the minimum mutation
- * surface that delivers user-visible value at P5.2; other fields
- * (persona / billing_mode / members / description) are read-only
- * here and edited via follow-up surfaces (P5.7 admin, member-invite,
- * etc.).
+ * Settings PATCH whitelist: `privacy_mode` + `agent_engagement_mode`
+ * (the Connect group-chat engagement setting, migration 0088). Any
+ * other field → 400 with `field_not_writable`. A valid PATCH must set
+ * at least one of the two. Other fields (persona / billing_mode /
+ * members / description) are read-only here and edited via follow-up
+ * surfaces (P5.7 admin, member-invite, etc.).
  *
  * List endpoint: read-only at ISSUES #9. Project create / delete via
  * HTTP is explicitly out of scope (deferred — see PR description) —
@@ -39,6 +39,12 @@
 
 import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import {
+  type AgentEngagementMode,
+  ALL_AGENT_ENGAGEMENT_MODES,
+  DEFAULT_AGENT_ENGAGEMENT_MODE,
+  isAgentEngagementMode,
+} from '../../connect/agent-engagement.ts'
 import {
   handleAppProjectInvite,
   httpStatusForInvite,
@@ -74,6 +80,12 @@ export interface ProjectSettings {
   persona: string
   privacy_mode: PrivacyMode
   billing_mode: BillingMode
+  /**
+   * Connect group-chat engagement mode (migration 0088). `all_messages`
+   * (the default) routes every member post to the shared agent; `tag_gated`
+   * engages only on an `@neutron` mention. See connect/agent-engagement.ts.
+   */
+  agent_engagement_mode: AgentEngagementMode
   members: ProjectMember[]
 }
 
@@ -151,7 +163,7 @@ export interface ProjectSettingsStore {
   update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode },
+    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode },
   ): Promise<ProjectSettings | null>
   list(project_slug: string): Promise<ProjectSettings[]>
 }
@@ -173,6 +185,7 @@ export function buildDefaultSettings(project_id: string): ProjectSettings {
     persona: '',
     privacy_mode: 'private',
     billing_mode: 'personal',
+    agent_engagement_mode: DEFAULT_AGENT_ENGAGEMENT_MODE,
     members: [],
   }
 }
@@ -208,13 +221,14 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
   async update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode },
+    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode },
   ): Promise<ProjectSettings | null> {
     const current = await this.get(project_slug, project_id)
     if (current === null) return null
     const updated: ProjectSettings = {
       ...current,
       privacy_mode: patch.privacy_mode ?? current.privacy_mode,
+      agent_engagement_mode: patch.agent_engagement_mode ?? current.agent_engagement_mode,
     }
     this.rows.set(this.keyFor(project_slug, project_id), updated)
     return cloneSettings(updated)
@@ -249,6 +263,7 @@ function cloneSettings(s: ProjectSettings): ProjectSettings {
     persona: s.persona,
     privacy_mode: s.privacy_mode,
     billing_mode: s.billing_mode,
+    agent_engagement_mode: s.agent_engagement_mode,
     members: s.members.map((m) => ({ ...m })),
   }
 }
@@ -325,7 +340,10 @@ const CONNECT_INVITES_RE = /^\/api\/app\/projects\/([^/]+)\/connect-invites$/
 const CONNECT_MEMBERS_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members$/
 const CONNECT_REVOKE_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members\/([^/]+)\/revoke$/
 
-const ALLOWED_PATCH_FIELDS: ReadonlyArray<'privacy_mode'> = ['privacy_mode']
+const ALLOWED_PATCH_FIELDS: ReadonlyArray<'privacy_mode' | 'agent_engagement_mode'> = [
+  'privacy_mode',
+  'agent_engagement_mode',
+]
 const ALLOWED_PATCH_FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_PATCH_FIELDS)
 
 export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppProjectsSurface {
@@ -533,6 +551,9 @@ function sharedItemToListItem(item: SharedProjectItem): ProjectListItem {
     persona: '',
     privacy_mode: 'private',
     billing_mode: 'personal',
+    // A shared item carries the cross-instance projection only; a member
+    // doesn't own the origin's settings, so the engagement mode defaults.
+    agent_engagement_mode: DEFAULT_AGENT_ENGAGEMENT_MODE,
     members: [],
     kind: 'shared',
     origin_instance: item.owning_instance_slug,
@@ -572,25 +593,45 @@ async function handlePatch(
       })
     }
   }
-  if (!('privacy_mode' in fields)) {
+  const hasPrivacy = 'privacy_mode' in fields
+  const hasEngagement = 'agent_engagement_mode' in fields
+  if (!hasPrivacy && !hasEngagement) {
     return jsonError(
       400,
       'empty_patch',
-      'PATCH body must include at least one writable field (privacy_mode)',
+      'PATCH body must include at least one writable field (privacy_mode, agent_engagement_mode)',
     )
   }
-  const raw = fields['privacy_mode']
-  if (typeof raw !== 'string' || !ALL_PRIVACY_MODES.includes(raw as PrivacyMode)) {
-    return jsonError(
-      400,
-      'invalid_privacy_mode',
-      `privacy_mode must be one of: ${ALL_PRIVACY_MODES.join(', ')}`,
-      { field: 'privacy_mode' },
-    )
+
+  const patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode } = {}
+
+  if (hasPrivacy) {
+    const raw = fields['privacy_mode']
+    if (typeof raw !== 'string' || !ALL_PRIVACY_MODES.includes(raw as PrivacyMode)) {
+      return jsonError(
+        400,
+        'invalid_privacy_mode',
+        `privacy_mode must be one of: ${ALL_PRIVACY_MODES.join(', ')}`,
+        { field: 'privacy_mode' },
+      )
+    }
+    patch.privacy_mode = raw as PrivacyMode
   }
-  const updated = await store.update(project_slug, project_id, {
-    privacy_mode: raw as PrivacyMode,
-  })
+
+  if (hasEngagement) {
+    const raw = fields['agent_engagement_mode']
+    if (!isAgentEngagementMode(raw)) {
+      return jsonError(
+        400,
+        'invalid_agent_engagement_mode',
+        `agent_engagement_mode must be one of: ${ALL_AGENT_ENGAGEMENT_MODES.join(', ')}`,
+        { field: 'agent_engagement_mode' },
+      )
+    }
+    patch.agent_engagement_mode = raw
+  }
+
+  const updated = await store.update(project_slug, project_id, patch)
   if (updated === null) {
     return jsonError(404, 'project_not_found', `project_id=${project_id}`)
   }

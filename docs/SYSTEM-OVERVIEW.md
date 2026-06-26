@@ -1016,6 +1016,46 @@ single autonomous **Trident** build loop; `agent-dispatch/` restores the
   in Open (the dispatch turn self-times-out as the primary bound; the watchdog is
   the backstop); and the rest of Vajra's persona set + cross-topic dispatch.
 
+## Connect group-chat agent engagement mode — `connect/agent-engagement.ts` + the chat-bridge gate
+
+A per-project setting, `agent_engagement_mode`, controls how the shared agent
+engages in a Connect group/shared project (spec:
+`docs/specs/connect-agent-engagement-mode-2026-06-26.md`). Two values, **no
+feature flag** — the stored setting IS the behaviour:
+
+- **`all_messages`** (DEFAULT) — every member post triggers an agent turn
+  (single-person-chat-consistent; existing projects unchanged).
+- **`tag_gated`** — the agent stays quiet until a member `@neutron`-mentions it.
+
+**Storage.** `agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'` on the
+`projects` row (migration `0088_project_agent_engagement_mode.sql`).
+
+**Pure core (`connect/agent-engagement.ts`, zero I/O).** The mode vocabulary +
+`detectAgentMention` (case-insensitive, handle/alias aware, doc-quote guarded —
+ignores `@neutron` inside inline-code / fenced blocks / blockquotes; rejects
+`@neutrons` and `a@neutron.com`; multiple mentions collapse to one trigger),
+`resolveEngagement` (the gate: mode + text + member access → engage?), and
+`classifyTaggedIntent` (inline-answer vs delegate-to-subagent, by leading
+imperative verb or explicit `/delegate [research|review]`).
+
+**The routing gate (the live seam).** `gateway/http/chat-bridge.ts`
+`handleProjectTopicInbound` reads the per-project mode (injected
+`resolveEngagementMode`, wired in `build-landing-stack.ts` off this instance's
+`projects` table, read-only + failure-safe → `all_messages`). In `tag_gated` a
+non-mention post **persists to the shared transcript** (`persistProjectUserTurnOnly`)
+and clears the optimistic typing dots with a no-render `agent_ack` — **no agent
+turn, no typing indicator**. The transcript ALWAYS persists in both modes; only
+the agent-turn TRIGGER is gated. A tagged TASK (in `tag_gated`) routes to the
+optional `delegateDispatch` hook (the gap#3 `agent-dispatch/` family) which spawns
+a background subagent that reports back into the thread; a tagged question is
+answered inline.
+
+**Surfaces (agent-native parity).** Human admin: PATCH
+`/api/app/projects/<id>/settings` whitelists `agent_engagement_mode`
+(`gateway/http/app-projects-surface.ts` + `SqliteProjectSettingsStore`). Agent:
+`get_engagement_mode` / `set_engagement_mode` MCP tools on the `agent-settings`
+Core (`cores/free/agent-settings/`), sharing the same `projects`-table backend.
+
 ## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
 
 The persistent-REPL substrate drives the interactive `claude` TUI over a single

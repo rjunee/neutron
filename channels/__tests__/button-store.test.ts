@@ -444,3 +444,72 @@ describe('Sprint 28 — kind persistence (Codex r4 P2)', () => {
     expect(got?.kind).toBeUndefined()
   })
 })
+
+describe('ButtonStore.persistInertUserTurn (Connect tag_gated quiet messages)', () => {
+  test('persists a standalone resolved USER turn (empty body, freeform text)', async () => {
+    const topic = 'web:u-1:projx'
+    await store.persistInertUserTurn({
+      topic_id: topic,
+      text: 'a quiet message',
+      speaker_user_id: 'u-1',
+      channel_kind: 'app_socket',
+    })
+    const { turns } = await store.listHistoryByTopic({
+      topic_id: topic,
+      before: now + 1,
+      before_prompt_id: null,
+      limit: 10,
+      now,
+    })
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.resolved).toBe(true)
+    // The agent body is empty; the user's text rides resolution_text.
+    expect(turns[0]!.body).toBe('')
+    expect(turns[0]!.resolution_text).toBe('a quiet message')
+  })
+
+  test('consecutive inert user turns each persist (no dropped message)', async () => {
+    const topic = 'web:u-1:projx'
+    for (const text of ['one', 'two', 'three']) {
+      now += 10
+      await store.persistInertUserTurn({
+        topic_id: topic,
+        text,
+        speaker_user_id: 'u-1',
+        channel_kind: 'app_socket',
+      })
+    }
+    const { turns } = await store.listHistoryByTopic({
+      topic_id: topic,
+      before: now + 1,
+      before_prompt_id: null,
+      limit: 10,
+      now,
+    })
+    expect(turns.map((t) => t.resolution_text)).toEqual(['three', 'two', 'one'])
+  })
+
+  test('sidebar preview falls back to freeform text for an inert user turn', async () => {
+    const topic = 'web:u-1:projx'
+    await store.persistInertUserTurn({
+      topic_id: topic,
+      text: 'latest quiet line',
+      speaker_user_id: 'u-1',
+      channel_kind: 'app_socket',
+    })
+    const rows = await store.listTopicsByUser({ user_id_prefix: 'web:u-1', now })
+    const row = rows.find((r) => r.topic_id === topic)
+    expect(row).toBeDefined()
+    // Without the COALESCE this would be '' (the empty agent body).
+    expect(row!.last_body).toBe('latest quiet line')
+  })
+
+  test('rejects empty text / topic', async () => {
+    await expect(
+      store.persistInertUserTurn({ topic_id: '', text: 'x', speaker_user_id: 'u', channel_kind: 'app_socket' }),
+    ).rejects.toThrow(ButtonStoreError)
+    await expect(
+      store.persistInertUserTurn({ topic_id: 't', text: '', speaker_user_id: 'u', channel_kind: 'app_socket' }),
+    ).rejects.toThrow(ButtonStoreError)
+  })
+})

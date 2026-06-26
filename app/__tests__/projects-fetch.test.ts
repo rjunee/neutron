@@ -67,6 +67,7 @@ describe('fetchProjects (ISSUES #9)', () => {
         persona: 'Forge',
         privacy_mode: 'private',
         billing_mode: 'personal',
+        agent_engagement_mode: 'all_messages',
         members: [
           { user_id: 'sam', name: 'Sam', role: 'owner' },
           { user_id: 'nova', name: 'Nova', role: 'member' },
@@ -82,6 +83,7 @@ describe('fetchProjects (ISSUES #9)', () => {
         persona: '',
         privacy_mode: 'private',
         billing_mode: 'personal',
+        agent_engagement_mode: 'all_messages',
         members: [],
         kind: 'shared',
         origin_instance: 'acme',

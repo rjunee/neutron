@@ -1,9 +1,10 @@
 /**
  * @neutronai/agent-settings — capability-guarded MCP tool wiring.
  *
- * Seven tools the manifest declares (list_projects / rename_project /
+ * Nine tools the manifest declares (list_projects / rename_project /
  * delete_project / merge_projects / update_personality /
- * update_agent_name / connect_telegram). Each is wrapped by the Sprint 31
+ * update_agent_name / connect_telegram / get_engagement_mode /
+ * set_engagement_mode). Each is wrapped by the Sprint 31
  * `CapabilityGuard.wrapToolHandler` so every dispatch:
  *   - records `op='tool_call' outcome='ok'` on success
  *   - records `op='tool_call' outcome='capability_denied'` + throws
@@ -34,6 +35,7 @@ import type {
   ProjectView,
   AgentSettingsBackend,
 } from './backend.ts'
+import type { AgentEngagementMode } from '../../../../connect/agent-engagement.ts'
 
 export interface ListProjectsOutput {
   projects: ProjectView[]
@@ -82,6 +84,27 @@ export interface UpdateAgentNameOutput {
    *  (Argus r5 IMPORTANT). Relayed verbatim to the owner CC / user. */
   error?: string
 }
+export interface GetEngagementModeInput {
+  project_name: string
+}
+export interface GetEngagementModeOutput {
+  success: boolean
+  project_name?: string
+  mode?: AgentEngagementMode
+  /** Honest failure reason (e.g. unknown project). */
+  error?: string
+}
+export interface SetEngagementModeInput {
+  project_name: string
+  mode: AgentEngagementMode
+}
+export interface SetEngagementModeOutput {
+  success: boolean
+  project_name?: string
+  mode?: AgentEngagementMode
+  /** Honest failure reason (unknown project / invalid mode). */
+  error?: string
+}
 export interface ConnectTelegramOutput {
   success: boolean
   /** Fresh one-time `https://t.me/<bot>?start=bind_<token>` deep link. */
@@ -119,10 +142,16 @@ export interface BuiltTools {
   connect_telegram: (
     input: Record<string, never>,
   ) => Promise<ConnectTelegramOutput>
+  get_engagement_mode: (
+    input: GetEngagementModeInput,
+  ) => Promise<GetEngagementModeOutput>
+  set_engagement_mode: (
+    input: SetEngagementModeInput,
+  ) => Promise<SetEngagementModeOutput>
 }
 
 /**
- * Construct the seven tool handlers, each wrapped by the Sprint 31
+ * Construct the nine tool handlers, each wrapped by the Sprint 31
  * `CapabilityGuard.wrapToolHandler` so every dispatch is audited. The
  * capability strings match the manifest's `tools[]` declarations
  * exactly — wrapping with a different `capability_required` value trips
@@ -222,6 +251,32 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     },
   })
 
+  const get_engagement_mode = guard.wrapToolHandler<
+    GetEngagementModeInput,
+    GetEngagementModeOutput
+  >({
+    tool_name: 'get_engagement_mode',
+    capability_required: READ_CAPABILITY,
+    fn: async (
+      input: GetEngagementModeInput,
+    ): Promise<GetEngagementModeOutput> => {
+      return deps.backend.getEngagementMode(input.project_name)
+    },
+  })
+
+  const set_engagement_mode = guard.wrapToolHandler<
+    SetEngagementModeInput,
+    SetEngagementModeOutput
+  >({
+    tool_name: 'set_engagement_mode',
+    capability_required: WRITE_CAPABILITY,
+    fn: async (
+      input: SetEngagementModeInput,
+    ): Promise<SetEngagementModeOutput> => {
+      return deps.backend.setEngagementMode(input.project_name, input.mode)
+    },
+  })
+
   return {
     list_projects,
     rename_project,
@@ -230,5 +285,7 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     update_personality,
     update_agent_name,
     connect_telegram,
+    get_engagement_mode,
+    set_engagement_mode,
   }
 }

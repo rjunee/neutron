@@ -151,6 +151,41 @@ describe('build-live-agent-turn — reply path', () => {
     expect(row!.topic_id).toBe('web:u-1')
   })
 
+  test('engaged turn AFTER a resolved row still persists the user message (tag_gated quiet-then-tag)', async () => {
+    // Codex review 2026-06-26: in a tag_gated project, quiet messages leave the
+    // latest history row RESOLVED (an inert user turn). The next @neutron turn
+    // must still persist its triggering message — the stamp path no-ops on a
+    // resolved row, so the runner falls back to a standalone inert user turn.
+    const topic = 'web:u-1:projx'
+    // Seed a resolved inert user turn (a prior quiet message).
+    await store.persistInertUserTurn({
+      topic_id: topic,
+      text: 'earlier quiet line',
+      speaker_user_id: 'u-1',
+      channel_kind: 'app_socket',
+    })
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'The launch is on track.', specs }) })
+    await run(makeTurn({ sent, topic_id: topic, project_id: 'projx', user_text: '@neutron status?' }))
+
+    const { turns } = await store.listHistoryByTopic({
+      topic_id: topic,
+      before: now + 1_000_000,
+      before_prompt_id: null,
+      limit: 50,
+      now: now + 1_000_000,
+    })
+    // The triggering tagged message persisted (was lost before the fix)…
+    const userTexts = turns
+      .filter((t) => t.resolved)
+      .map((t) => t.resolution_text)
+    expect(userTexts).toContain('@neutron status?')
+    expect(userTexts).toContain('earlier quiet line')
+    // …and the agent reply row is present too.
+    expect(turns.some((t) => t.body === 'The launch is on track.')).toBe(true)
+  })
+
   test('persona content lands in the FIRST turn prompt; later turns send only the user text', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []

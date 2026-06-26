@@ -311,6 +311,63 @@ export class ButtonStore {
   }
 
   /**
+   * 2026-06-26 (Connect engagement mode) — persist a member's chat message as
+   * an INERT, already-RESOLVED USER-side history turn in a SINGLE atomic
+   * INSERT. The mirror of `persistInertAgentTurn`: the user's text lands in
+   * `resolution_freeform_text` (not `body`), so `rowToHistoryTurn` returns
+   * `{resolved:true, resolution_text:<text>}` and the renderer paints a
+   * user-side bubble with NO agent bubble (the empty `body` is skipped by
+   * `landing/chat.ts:renderHistoricalTurn`).
+   *
+   * Why this exists: in a `tag_gated` Connect project a non-mention post must
+   * persist to the shared transcript WITHOUT an agent turn (spec §2). The first
+   * such message stamps onto the prior unresolved agent prompt, but consecutive
+   * quiet messages have no unresolved row to attach to — without a self-
+   * contained row they would silently drop from hydrated history (Codex cross-
+   * model review, 2026-06-26). One atomic INSERT means each gated message is
+   * durable on its own, independent of any prior row.
+   *
+   * `resolved_at` + `delivered_at` are stamped (the message was delivered + is
+   * inert history); `resolution_value` is the standard `__freeform__` marker so
+   * the freeform render path fires.
+   */
+  async persistInertUserTurn(input: {
+    topic_id: string
+    text: string
+    speaker_user_id: string
+    channel_kind: string
+  }): Promise<{ prompt_id: string }> {
+    if (typeof input.topic_id !== 'string' || input.topic_id.length === 0) {
+      throw new ButtonStoreError('invalid_prompt', `persistInertUserTurn requires a non-empty topic_id`)
+    }
+    if (typeof input.text !== 'string' || input.text.length === 0) {
+      throw new ButtonStoreError('invalid_prompt', `persistInertUserTurn requires non-empty text`)
+    }
+    const prompt_id = randomUUID()
+    const now = this.now()
+    await this.db.run(
+      `INSERT INTO button_prompts
+         (prompt_id, topic_id, body, options_json, allow_freeform,
+          expires_at, idempotency_key, created_at, delivered_at,
+          resolved_at, resolution_value, resolution_freeform_text,
+          resolution_speaker_user_id, resolution_channel_kind, kind)
+       VALUES (?, ?, '', '[]', 1, ?, NULL, ?, ?, ?, '__freeform__', ?, ?, ?, NULL)`,
+      [
+        prompt_id,
+        input.topic_id,
+        now + DEFAULT_EXPIRES_IN_MS,
+        now,
+        now,
+        now,
+        input.text,
+        input.speaker_user_id,
+        input.channel_kind,
+      ],
+    )
+    return { prompt_id }
+  }
+
+  /**
    * Peek at a prompt's lifecycle metadata without round-tripping the
    * full ButtonPrompt shape. Returns null when the row is missing.
    * Used by `InterviewEngine.start` to decide between reuse / advance /
@@ -751,7 +808,14 @@ export class ButtonStore {
         [number, string, string, string]
       >(
         `SELECT topic_id,
-                (SELECT body FROM button_prompts b2
+                -- Prefer the agent body, but fall back to the user's freeform
+                -- text for an inert USER turn (Connect tag_gated quiet message,
+                -- which stores an empty body + the text in resolution_freeform_text).
+                -- Without the COALESCE the sidebar preview would blank out after
+                -- such a turn (Codex review 2026-06-26).
+                (SELECT CASE WHEN b2.body <> '' THEN b2.body
+                             ELSE COALESCE(b2.resolution_freeform_text, b2.body) END
+                   FROM button_prompts b2
                   WHERE b2.topic_id = bp.topic_id
                   ORDER BY b2.created_at DESC, b2.prompt_id DESC LIMIT 1) AS last_body,
                 MAX(created_at) AS last_created_at,

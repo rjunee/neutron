@@ -38,6 +38,7 @@
  */
 
 import type { ProjectDb } from '../../persistence/index.ts'
+import type { AgentEngagementMode } from '../../connect/agent-engagement.ts'
 import {
   type PrivacyMode,
   type BillingMode,
@@ -54,6 +55,7 @@ interface ProjectRow {
   persona: string | null
   privacy_mode: PrivacyMode
   billing_mode: BillingMode
+  agent_engagement_mode: AgentEngagementMode
   created_at: string
   updated_at: string
 }
@@ -67,7 +69,7 @@ interface MemberRow {
 }
 
 const PROJECT_COLS =
-  'id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at'
+  'id, name, description, persona, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -97,6 +99,7 @@ function rowToSettings(row: ProjectRow, members: MemberRow[]): ProjectSettings {
     persona: row.persona ?? '',
     privacy_mode: row.privacy_mode,
     billing_mode: row.billing_mode,
+    agent_engagement_mode: row.agent_engagement_mode,
     members: projectMembers,
   }
 }
@@ -153,22 +156,28 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
   async update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode },
+    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode },
   ): Promise<ProjectSettings | null> {
     // Resolve-or-seed so callers always get a coherent doc back. The
-    // P5.2 surface's PATCH never fabricates a privacy_mode value on
-    // the client — if `patch.privacy_mode` is undefined we leave the
-    // existing value in place.
+    // surface's PATCH never fabricates a value on the client — an
+    // undefined field in `patch` leaves the existing column in place.
     const existing = await this.get(project_slug, project_id)
     if (existing === null) return null
-    if (patch.privacy_mode === undefined) return existing
+    if (patch.privacy_mode === undefined && patch.agent_engagement_mode === undefined) {
+      return existing
+    }
     const ts = nowIso()
+    // Only touch the columns present in `patch` (each independently
+    // optional), mirroring privacy_mode's coalesce-on-undefined contract.
+    const next_privacy = patch.privacy_mode ?? existing.privacy_mode
+    const next_engagement = patch.agent_engagement_mode ?? existing.agent_engagement_mode
     await this.db.run(
       `UPDATE projects
           SET privacy_mode = ?,
+              agent_engagement_mode = ?,
               updated_at = ?
         WHERE id = ?`,
-      [patch.privacy_mode, ts, project_id],
+      [next_privacy, next_engagement, ts, project_id],
     )
     const row = this.readRow(project_id)
     if (row === null) return null
@@ -296,8 +305,8 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       // IGNORE keeps the loser idempotent.
       await tx.run(
         `INSERT OR IGNORE INTO projects
-           (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, name, description, persona, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           seed.id,
           seed.name,
@@ -305,6 +314,7 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
           seed.persona.length > 0 ? seed.persona : null,
           seed.privacy_mode,
           seed.billing_mode,
+          seed.agent_engagement_mode,
           ts,
           ts,
         ],

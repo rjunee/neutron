@@ -137,6 +137,25 @@ describe('SqliteProjectSettingsStore — update PATCH', () => {
     expect(result!.privacy_mode).toBe('private')
   })
 
+  test('update flips agent_engagement_mode independently of privacy_mode; persists', async () => {
+    const before = await store.get(OWNER, 'neutron')
+    // Migration 0088 default.
+    expect(before!.agent_engagement_mode).toBe('all_messages')
+
+    const after = await store.update(OWNER, 'neutron', {
+      agent_engagement_mode: 'tag_gated',
+    })
+    expect(after).not.toBeNull()
+    expect(after!.agent_engagement_mode).toBe('tag_gated')
+    // privacy_mode is untouched by an engagement-only patch.
+    expect(after!.privacy_mode).toBe('private')
+
+    // Re-read from a fresh handle to prove durability.
+    const reread = await store.get(OWNER, 'neutron')
+    expect(reread!.agent_engagement_mode).toBe('tag_gated')
+    expect(reread!.privacy_mode).toBe('private')
+  })
+
   test('CHECK constraint rejects an out-of-band privacy_mode value', async () => {
     // Defence in depth — the HTTP surface validates the enum before
     // the store ever receives it, but we want to guard against a

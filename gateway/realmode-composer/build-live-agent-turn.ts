@@ -521,9 +521,25 @@ async function resolvePreviousRowWithUserText(
       now: wall_now,
     })
     const latest = turns[0]
-    if (latest === undefined) return null
+    if (latest === undefined || latest.resolved) {
+      // No UNRESOLVED row to stamp the user text onto — either the first turn
+      // on this topic, or the latest row is already resolved (e.g. an inert
+      // `tag_gated` quiet turn persisted while the agent was silent). Persist
+      // the user line as its own durable inert turn so the engaged turn that
+      // FOLLOWED a quiet stretch never loses the message that triggered it
+      // (Codex cross-model review, 2026-06-26). Without this the stamp path
+      // no-ops and the triggering tagged message vanishes from history.
+      if (turn.user_text.length > 0) {
+        await buttonStore.persistInertUserTurn({
+          topic_id: turn.topic_id,
+          text: turn.user_text,
+          speaker_user_id: turn.user_id,
+          channel_kind: 'app-socket',
+        })
+      }
+      return latest !== undefined && typeof latest.body === 'string' ? latest.body : null
+    }
     const priorBody = typeof latest.body === 'string' ? latest.body : null
-    if (latest.resolved) return priorBody
     await buttonStore.resolve({
       choice: {
         prompt_id: latest.prompt_id,

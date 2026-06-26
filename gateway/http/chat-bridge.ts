@@ -112,6 +112,16 @@ import { FORBIDDEN_INBOUND_VALUES } from '../../channels/adapters/app-socket/ren
 // branch in `handleProjectTopicInbound` can never drift from the
 // composer that writes the value onto the prompt row.
 import { ONBOARDING_HANDOFF_SKIP_FOR_NOW_VALUE } from '../realmode-composer/build-onboarding-handoff.ts'
+// Connect group-chat engagement mode (spec: connect-agent-engagement-mode-2026-06-26).
+// The routing gate + mention detector + inline/delegate classifier are pure and
+// live in connect/; the bridge reads the per-project mode and applies the gate
+// at the project-topic agent-turn trigger (the live ingress seam, §1.5).
+import {
+  DEFAULT_AGENT_ENGAGEMENT_MODE,
+  classifyTaggedIntent,
+  resolveEngagement,
+  type AgentEngagementMode,
+} from '../../connect/agent-engagement.ts'
 
 /**
  * T10 (2026-05-14) — structured-log tag for the WS upgrade chain.
@@ -929,6 +939,38 @@ export interface BuildWebChatBridgeOptions {
    * omitted on LLM-less / Core-less boxes, where it is a pure no-op.
    */
   chatCommandFilter?: import('./app-ws-surface.ts').ChatCommandFilter
+  /**
+   * Connect group-chat engagement mode (spec §2). Resolves the per-project
+   * `agent_engagement_mode` for a project-topic message (the `projects` row,
+   * migration 0088). When wired, the bridge gates the project-topic agent-turn
+   * trigger: `all_messages` (the default) forwards every post to the agent;
+   * `tag_gated` forwards ONLY on an `@neutron` mention. The shared transcript
+   * ALWAYS persists every message in both modes — only the agent-turn TRIGGER
+   * is gated. Optional — when omitted, every project topic behaves as
+   * `all_messages` (unchanged pre-feature behaviour).
+   */
+  resolveEngagementMode?: (project_id: string) => Promise<AgentEngagementMode>
+  /**
+   * Connect tag-to-delegate (spec §4). When wired AND a `tag_gated` project
+   * topic receives an `@neutron`-tagged TASK (not a quick question), the bridge
+   * hands it to this hook instead of answering inline — the hook dispatches a
+   * background subagent (the gap#3 agent-dispatch family) that reports its
+   * result back into the shared thread. Optional — when omitted, a tagged task
+   * is answered inline on the shared session like any other engaged turn.
+   */
+  delegateDispatch?: (input: {
+    project_id: string
+    topic_id: string
+    user_id: string
+    task: string
+    kind: 'research' | 'review' | 'adhoc'
+  }) => Promise<void>
+  /**
+   * Override the agent handle/alias set used by the `tag_gated` mention
+   * detector. Optional — defaults to the canonical handles in
+   * `connect/agent-engagement.ts` (`@neutron` + the `@claude` courtesy alias).
+   */
+  agentHandles?: readonly string[]
   /** Inject for test determinism. Defaults to `Date.now`. */
   now?: () => number
 }
@@ -1672,6 +1714,16 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
           ...(opts.onboardingStateStore !== undefined
             ? { onboardingStateStore: opts.onboardingStateStore }
             : {}),
+          // Connect group-chat engagement gate (spec §2/§4) — per-project mode
+          // reader + tag-to-delegate hook + handle override. All optional; when
+          // unwired the project topic behaves as `all_messages` (unchanged).
+          ...(opts.resolveEngagementMode !== undefined
+            ? { resolveEngagementMode: opts.resolveEngagementMode }
+            : {}),
+          ...(opts.delegateDispatch !== undefined
+            ? { delegateDispatch: opts.delegateDispatch }
+            : {}),
+          ...(opts.agentHandles !== undefined ? { agentHandles: opts.agentHandles } : {}),
           log_tag: LOG_TAG,
         })
         // Scribe phase 1 — a user message on a PROJECT topic is just as much
@@ -2400,6 +2452,73 @@ const PROJECT_STUB_ROW_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1_000
  * Returns the new row's prompt_id (so the caller can stamp the live
  * envelope for client-side dedup), or null if the emit failed.
  */
+/**
+ * Connect engagement gate (spec §2) — persist a member's turn to the shared
+ * transcript WITHOUT emitting any agent reply. Used by `tag_gated` when a post
+ * doesn't @-mention the agent: humans still see the message and the agent has
+ * it as context the next time it IS tagged, but no agent turn fires. This is
+ * the user-turn-stamping half of `persistProjectStubTurn` with NO stub reply —
+ * it stamps the typed text onto the latest unresolved `button_prompts` row
+ * (the same persistence model live turns use) so chat-history hydration renders
+ * the member bubble in order. Best-effort + guarded: a persistence hiccup never
+ * wedges the chat path.
+ */
+async function persistProjectUserTurnOnly(input: {
+  buttonStore: import('../../channels/button-store.ts').ButtonStore
+  topic_id: string
+  user_id: string
+  project_slug: string
+  channel_kind: ChannelKindForButton
+  observed_at: number
+  user_text: string
+  log_tag: string
+}): Promise<void> {
+  const { buttonStore, log_tag } = input
+  try {
+    const { turns } = await buttonStore.listHistoryByTopic({
+      topic_id: input.topic_id,
+      before: input.observed_at,
+      before_prompt_id: null,
+      limit: 1,
+      now: input.observed_at,
+    })
+    const latest = turns[0]
+    if (latest !== undefined && !latest.resolved) {
+      // First quiet message after an agent prompt: stamp onto that unresolved
+      // row so history renders [agent prompt][user reply] in order.
+      await buttonStore.resolve({
+        choice: {
+          prompt_id: latest.prompt_id,
+          choice_value: '__freeform__',
+          freeform_text: input.user_text,
+          chosen_at: input.observed_at,
+          speaker_user_id: input.user_id,
+          channel_kind: input.channel_kind,
+        },
+      })
+      return
+    }
+    // No unresolved row to attach to — e.g. CONSECUTIVE quiet messages in a
+    // `tag_gated` project (the prior one already resolved the last open row).
+    // Persist this message as its own durable inert user turn so the shared
+    // transcript never drops a gated message (Codex cross-model review,
+    // 2026-06-26). Without this, the second+ quiet message in a stretch would
+    // silently vanish from hydrated history.
+    await buttonStore.persistInertUserTurn({
+      topic_id: input.topic_id,
+      text: input.user_text,
+      speaker_user_id: input.user_id,
+      channel_kind: input.channel_kind,
+    })
+  } catch (err) {
+    console.warn(
+      `${log_tag} persistProjectUserTurnOnly event=user_turn_persist_skipped project=${input.project_slug} topic=${input.topic_id} err=${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+  }
+}
+
 async function persistProjectStubTurn(input: {
   buttonStore: import('../../channels/button-store.ts').ButtonStore
   topic_id: string
@@ -2477,6 +2596,18 @@ async function handleProjectTopicInbound(input: {
    *  turn instead of the stub. */
   liveAgentTurn?: LiveAgentTurnRunner
   onboardingStateStore?: import('../../onboarding/interview/state-store.ts').OnboardingStateStore
+  /** Connect engagement-mode reader (spec §2) — see BuildWebChatBridgeOptions. */
+  resolveEngagementMode?: (project_id: string) => Promise<AgentEngagementMode>
+  /** Connect tag-to-delegate hook (spec §4) — see BuildWebChatBridgeOptions. */
+  delegateDispatch?: (input: {
+    project_id: string
+    topic_id: string
+    user_id: string
+    task: string
+    kind: 'research' | 'review' | 'adhoc'
+  }) => Promise<void>
+  /** Mention-detector handle/alias override. */
+  agentHandles?: readonly string[]
   log_tag: string
 }): Promise<void> {
   const { event, send, log_tag } = input
@@ -2531,6 +2662,113 @@ async function handleProjectTopicInbound(input: {
     }
   }
   if (event.type === 'user_message' && liveAgentEligible) {
+    // Connect group-chat engagement gate (spec §2). Read the per-project
+    // `agent_engagement_mode`; in `tag_gated` a post that doesn't @-mention the
+    // agent persists to the transcript but triggers NO agent turn. The default
+    // (and any box without the reader wired) is `all_messages` — every post
+    // engages, exactly as before this feature.
+    const engagementMode: AgentEngagementMode =
+      input.resolveEngagementMode !== undefined && project_id.length > 0
+        ? await input
+            .resolveEngagementMode(project_id)
+            .catch((err: unknown) => {
+              console.warn(
+                `${log_tag} handleInbound event=engagement_mode_read_failed project=${input.project_slug} topic=${input.wire_topic_id} project_id=${project_id} err=${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              )
+              return DEFAULT_AGENT_ENGAGEMENT_MODE
+            })
+        : DEFAULT_AGENT_ENGAGEMENT_MODE
+    const decision = resolveEngagement({
+      mode: engagementMode,
+      text: event.body,
+      ...(input.agentHandles !== undefined ? { handles: input.agentHandles } : {}),
+    })
+    if (!decision.engage) {
+      // tag_gated + no mention: the transcript MUST still receive the message
+      // (humans see each other; the agent has context next time it IS tagged),
+      // but there is no agent turn and NO typing indicator. Persist the user
+      // turn, then clear the client's optimistic typing dots with a no-render
+      // `agent_ack` (same bookkeeping envelope the silent-skip branch uses) so
+      // they don't spin forever waiting on a reply that isn't coming.
+      console.info(
+        `${log_tag} handleInbound event=engagement_gated mode=${engagementMode} reason=${decision.reason} project=${input.project_slug} topic=${input.wire_topic_id}`,
+      )
+      if (input.buttonStore !== undefined) {
+        await persistProjectUserTurnOnly({
+          buttonStore: input.buttonStore,
+          topic_id: input.wire_topic_id,
+          user_id: input.user_id,
+          project_slug: input.project_slug,
+          channel_kind: input.channel_kind,
+          observed_at: input.observed_at,
+          user_text: event.body,
+          log_tag,
+        })
+      }
+      send({ type: 'agent_ack' })
+      return
+    }
+    // Engaged. Tag-to-delegate (spec §4): in `tag_gated` a tagged TASK (vs a
+    // quick question) hands off to a background subagent that reports back into
+    // the thread, instead of answering inline. Only when the delegate hook is
+    // wired; otherwise the task is answered inline like any engaged turn.
+    if (
+      engagementMode === 'tag_gated' &&
+      decision.mentioned &&
+      input.delegateDispatch !== undefined &&
+      project_id.length > 0
+    ) {
+      const intent = classifyTaggedIntent(event.body, {
+        ...(input.agentHandles !== undefined ? { handles: input.agentHandles } : {}),
+      })
+      if (intent.intent === 'delegate') {
+        console.info(
+          `${log_tag} handleInbound event=tag_to_delegate kind=${intent.kind} project=${input.project_slug} topic=${input.wire_topic_id}`,
+        )
+        // Persist the requester's turn to the transcript, acknowledge inline,
+        // then dispatch. The dispatcher's report-back posts the result into the
+        // thread (author-stamped as the agent, §4).
+        if (input.buttonStore !== undefined) {
+          await persistProjectUserTurnOnly({
+            buttonStore: input.buttonStore,
+            topic_id: input.wire_topic_id,
+            user_id: input.user_id,
+            project_slug: input.project_slug,
+            channel_kind: input.channel_kind,
+            observed_at: input.observed_at,
+            user_text: event.body,
+            log_tag,
+          })
+        }
+        try {
+          send({
+            type: 'agent_message',
+            body: "On it — I'll work on that in the background and post the result here when it's ready.",
+            topic_id: input.wire_topic_id,
+          })
+        } catch {
+          /* dead socket — reconnect hydration covers it */
+        }
+        try {
+          await input.delegateDispatch({
+            project_id,
+            topic_id: input.wire_topic_id,
+            user_id: input.user_id,
+            task: intent.task,
+            kind: intent.kind,
+          })
+        } catch (err) {
+          console.warn(
+            `${log_tag} handleInbound event=tag_to_delegate_threw project=${input.project_slug} topic=${input.wire_topic_id} err=${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        }
+        return
+      }
+    }
     await runProjectAgentTurn(event.body)
     return
   }

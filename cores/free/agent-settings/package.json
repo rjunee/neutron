@@ -205,6 +205,51 @@
           "required": ["success"]
         },
         "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "get_engagement_mode",
+        "description": "Report a group/shared project's agent engagement mode: whether the agent engages on every message (all_messages) or only when @-mentioned (tag_gated). Call this when the user asks how you respond in a shared project, e.g. 'do you reply to every message in the X project?'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "project_name": { "type": "string", "description": "The display name of the project to inspect." }
+          },
+          "required": ["project_name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "project_name": { "type": "string" },
+            "mode": { "type": "string", "enum": ["tag_gated", "all_messages"] },
+            "error": { "type": "string" }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "read:agent_settings"
+      },
+      {
+        "name": "set_engagement_mode",
+        "description": "Set a group/shared project's agent engagement mode. tag_gated = stay quiet until someone @neutron-mentions you; all_messages = engage on every message (the default). Call this when the user says e.g. 'only respond when I tag you in the X project' (tag_gated) or 'respond to every message again' (all_messages).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "project_name": { "type": "string", "description": "The display name of the project to update." },
+            "mode": { "type": "string", "enum": ["tag_gated", "all_messages"], "description": "tag_gated = only on @-mention; all_messages = every message (default)." }
+          },
+          "required": ["project_name", "mode"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "project_name": { "type": "string" },
+            "mode": { "type": "string", "enum": ["tag_gated", "all_messages"] },
+            "error": { "type": "string" }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
       }
     ],
     "ui_components": [],

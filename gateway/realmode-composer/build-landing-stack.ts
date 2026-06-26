@@ -21,6 +21,11 @@ import { fileURLToPath } from 'node:url'
 
 import type { ProjectDb } from '../../persistence/index.ts'
 import type { CronJobRegistry } from '../../cron/jobs.ts'
+import {
+  DEFAULT_AGENT_ENGAGEMENT_MODE,
+  isAgentEngagementMode,
+  type AgentEngagementMode,
+} from '../../connect/agent-engagement.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
 import { JwksCache } from '../../jwt-validator/validator.ts'
 import { buildJwksResolveKey } from '../../jwt-validator/resolve-key.ts'
@@ -1422,6 +1427,27 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
         }
       : {}),
     onboardingStateStore: stateStore,
+    // Connect group-chat engagement mode (spec §2) — the per-project
+    // `agent_engagement_mode` reader, backed by THIS instance's `projects`
+    // table (migration 0088). Wired unconditionally: it is a read-only,
+    // failure-safe lookup that defaults to `all_messages` for any unknown /
+    // unset project, so a project-topic message engages the agent on every
+    // post unless the owner opted that project into `tag_gated`. NO feature
+    // flag — the stored setting IS the behaviour.
+    resolveEngagementMode: async (project_id: string): Promise<AgentEngagementMode> => {
+      try {
+        const row = input.db
+          .prepare<{ agent_engagement_mode: string }, [string]>(
+            `SELECT agent_engagement_mode FROM projects WHERE id = ? AND deleted_at IS NULL`,
+          )
+          .get(project_id)
+        return row !== null && isAgentEngagementMode(row.agent_engagement_mode)
+          ? row.agent_engagement_mode
+          : DEFAULT_AGENT_ENGAGEMENT_MODE
+      } catch {
+        return DEFAULT_AGENT_ENGAGEMENT_MODE
+      }
+    },
   })
   const landingOpts: Parameters<typeof createLandingServer>[0] = {
     static_dir: input.static_dir,

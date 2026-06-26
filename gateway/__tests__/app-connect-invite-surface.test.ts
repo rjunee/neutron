@@ -78,6 +78,7 @@ async function start(): Promise<Harness> {
     persona: '',
     privacy_mode: 'private',
     billing_mode: 'personal',
+    agent_engagement_mode: 'all_messages',
     members: [
       { user_id: 'sam', name: 'Sam', role: 'owner' },
       { user_id: 'nova', name: 'Nova', role: 'member' },
