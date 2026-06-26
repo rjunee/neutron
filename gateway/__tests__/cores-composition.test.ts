@@ -3,15 +3,15 @@
  *
  * Boots `installBundledCores(...)` against the real cores tree (the
  * registry's `findCoreDirs` walks `cores/<container>/<core>/`, so the
- * 7 Tier 1 free Cores under `cores/free/` AND the staging Tier 2
+ * 8 Tier 1 free Cores under `cores/free/` AND the staging Tier 2
  * Cores under `cores/paid-staging/` surface as discovered):
  *
- *   - registry discovers 8 Cores total (7 Tier 1 free + 1 DTC Analytics staging)
- *   - 6 install cleanly (no required secrets); 2 (Calendar, Email-
- *     Managed) fail with `manifest_invalid` because their manifests
- *     declare `required: true` OAuth/BYO-API secrets and the Noop
- *     prompter returns `null` — the brief's failure-isolation path
- *   - `core_installations` rows exist for the 6 successful installs
+ *   - registry discovers 9 Cores total (8 Tier 1 free + 1 DTC Analytics staging)
+ *   - 7 install cleanly (no required secrets); 3 (Calendar, Email-
+ *     Managed, Google Workspace) fail with `manifest_invalid` because
+ *     their manifests declare `required: true` OAuth/BYO-API secrets and
+ *     the Noop prompter returns `null` — the brief's failure-isolation path
+ *   - `core_installations` rows exist for the 7 successful installs
  *   - Sidecar files live at the canonical path for every sidecar-layout install
  *   - The production `ToolRegistry` carries tools from the installed Cores
  *   - The composer's failure-rate gate does NOT trip (2 of 8 = 25%, below 50%)
@@ -44,8 +44,8 @@ const OWNER = 'forge-cores-test'
 // `cores/<container>/<core>/` across REPO_ROOT; the Tier 2 staging Core
 // `dtc_analytics` lives under `cores/paid-staging/`, which the Sprint C
 // Open carve strips (leak-gate FORBIDDEN_PREFIX). So the monorepo / Managed
-// tree discovers 9 (installs 7) while the carved Open tree discovers 8
-// (installs 6). Derive the expected set from what's actually on disk rather
+// tree discovers 10 (installs 8) while the carved Open tree discovers 9
+// (installs 7). Derive the expected set from what's actually on disk rather
 // than hardcoding one tree's inventory.
 const HAS_PAID_STAGING = existsSync(join(REPO_ROOT, 'cores', 'paid-staging', 'dtc-analytics'))
 const DISCOVERED_SLUGS = [
@@ -56,6 +56,7 @@ const DISCOVERED_SLUGS = [
   'notes',
   'reminders_core',
   'research_core',
+  'scraping_core',
   'tasks_core',
   'agent_settings',
   ...(HAS_PAID_STAGING ? ['dtc_analytics'] : []),
@@ -65,6 +66,9 @@ const INSTALLED_SLUGS = [
   'notes',
   'reminders_core',
   'research_core',
+  // Scraping Core (parity gap #6) installs cleanly — its `apify`
+  // byo_api_key is `required: false` (optional-until-credentialed).
+  'scraping_core',
   'tasks_core',
   'agent_settings',
   ...(HAS_PAID_STAGING ? ['dtc_analytics'] : []),
@@ -129,9 +133,9 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
       secretsStore: bench.secrets,
       rootDirs: [REPO_ROOT],
     })
-    // 8 Tier 1 free Cores + 1 Tier 2 staging Core (DTC Analytics) = 9
+    // 9 Tier 1 free Cores + 1 Tier 2 staging Core (DTC Analytics) = 10
     // discovered in the monorepo / Managed tree. The Sprint C Open carve
-    // strips `cores/paid-staging/`, so the carved Open tree discovers 8
+    // strips `cores/paid-staging/`, so the carved Open tree discovers 9
     // (the Managed adapter's multi-root walk re-surfaces the paid Core).
     // Per `docs/research/neutron-cores-marketplace-split-2026-05-17.md § 3`.
     expect(result.discovered).toBe(EXPECTED_DISCOVERED)

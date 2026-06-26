@@ -171,6 +171,14 @@
         "@neutronai/cores-sdk": "workspace:*",
       },
     },
+    "cores/free/scraping": {
+      "name": "@neutronai/scraping-core",
+      "version": "0.2.0",
+      "dependencies": {
+        "@neutronai/cores-runtime": "workspace:*",
+        "@neutronai/cores-sdk": "workspace:*",
+      },
+    },
     "cores/free/tasks": {
       "name": "@neutronai/tasks-core",
       "version": "0.2.0",
@@ -224,6 +232,7 @@
         "@neutronai/notes": "workspace:*",
         "@neutronai/reminders-core": "workspace:*",
         "@neutronai/research-core": "workspace:*",
+        "@neutronai/scraping-core": "workspace:*",
         "@neutronai/tasks-core": "workspace:*",
         "jose": "^5.9.0",
       },
@@ -830,6 +839,8 @@
     "@neutronai/research-core": ["@neutronai/research-core@workspace:cores/free/research"],
 
     "@neutronai/runtime": ["@neutronai/runtime@workspace:runtime"],
+
+    "@neutronai/scraping-core": ["@neutronai/scraping-core@workspace:cores/free/scraping"],
 
     "@neutronai/scribe": ["@neutronai/scribe@workspace:scribe"],
 

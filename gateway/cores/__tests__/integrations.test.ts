@@ -119,8 +119,12 @@ test('collectOAuthSlots + collectApiKeySlots derive slots from real manifests', 
     'google_calendar',
     'google_workspace',
   ])
-  expect([...api.keys()]).toEqual(['tavily'])
+  // Scraping Core (parity gap #6) adds the `apify` byo_api_key slot
+  // alongside Research Core's `tavily`.
+  expect([...api.keys()].sort()).toEqual(['apify', 'tavily'])
   expect(api.get('tavily')?.core_slugs.length).toBeGreaterThan(0)
+  expect(api.get('apify')?.core_slugs).toContain('scraping_core')
+  expect(api.get('apify')?.required).toBe(false)
 })
 
 test('buildIntegrationsStatus reflects connected OAuth account + stored API key', async () => {
