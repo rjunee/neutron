@@ -224,12 +224,21 @@ export function mountCoresScribeFanOut(
     ...(input.scheduleTimer !== undefined ? { scheduleTimer: input.scheduleTimer } : {}),
   })
 
-  // Start both. The Calendar scheduler's `start()` is async (re-walks the
-  // durable queue); the Email scheduler arms its self-tick synchronously.
+  // Start both. BOTH `start()`s are async and AWAIT their initial tick before
+  // arming the recurring self-tick (calendar re-walks the durable queue; email
+  // runs one immediate tick so a (re)start during the daily fire minute doesn't
+  // miss the window). We retain BOTH start promises so `stop()` can await them:
+  // the initial tick's `fire()` → `scribeFanOut(...)` queues its extraction into
+  // the binding's in-flight set BEFORE `start()` resolves, so awaiting the start
+  // promise then draining `binding.idle()` guarantees no fan-out extraction runs
+  // (or touches a closed handle) AFTER teardown — closing Codex r1 P2 (a shutdown
+  // racing the initial fire tick).
   const startCalendar = calendarScheduler.start().catch((err: unknown) => {
     logFailure('calendar scheduler start failed', err)
   })
-  emailScheduler.start()
+  const startEmail = emailScheduler.start().catch((err: unknown) => {
+    logFailure('email scheduler start failed', err)
+  })
 
   return {
     calendarScheduler,
@@ -243,11 +252,13 @@ export function mountCoresScribeFanOut(
         logFailure('calendar scheduler stop failed', err)
       }
       try {
+        await startEmail
         await emailScheduler.stop()
       } catch (err) {
         logFailure('email scheduler stop failed', err)
       }
-      // Drain in-flight extractions before releasing the write handles.
+      // Both initial ticks have settled (their fan-outs are queued); drain all
+      // in-flight extractions before releasing the write handles.
       await binding.idle()
       try {
         calCache.closeAll()
