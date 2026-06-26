@@ -189,7 +189,7 @@ test('buildLandingStack: throws when static_dir is missing chat-react.html', () 
       internal_handle: 't-aaaaaaaa',
       slugHistoryStore: NOOP_SHIM_STORE,
     }),
-  ).toThrow(/landing static_dir missing chat\.html/)
+  ).toThrow(/landing static_dir missing chat-react\.html/)
 })
 
 // Argus r2 [BLOCKING #1] regression — the factory must REJECT an empty
