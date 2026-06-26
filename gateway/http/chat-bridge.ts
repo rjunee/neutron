@@ -917,6 +917,18 @@ export interface BuildWebChatBridgeOptions {
    * (Open self-host / tests / the `=0` rollback where no recovered reply is ever
    * produced), the connect path behaves exactly as before. */
   recoveredReplyStore?: import('./recovered-reply-store.ts').RecoveredReplyStore
+  /**
+   * Parity gap #2 (Cores→Open) — pre-dispatch chat-command filter for the
+   * single-owner web chat. Mirrors the Expo `createAppWsSurface`
+   * (`gateway/http/app-ws-surface.ts:658-666`): when a typed message is a free-Core
+   * slash command (`/cal`, `/email`, `/research`, `/remind`), the chained filter
+   * claims it (`match()` returns non-null) and the bridge ships the Core's reply
+   * as an `agent_message`, short-circuiting BOTH the live-agent turn and the
+   * onboarding engine. When the filter returns null (plain prose, or no Core owns
+   * the command) the message flows to the agent exactly as before. Optional —
+   * omitted on LLM-less / Core-less boxes, where it is a pure no-op.
+   */
+  chatCommandFilter?: import('./app-ws-surface.ts').ChatCommandFilter
   /** Inject for test determinism. Defaults to `Date.now`. */
   now?: () => number
 }
@@ -1568,6 +1580,71 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
           message: 'That control isn’t a valid tap. Try typing your reply instead.',
         })
         return
+      }
+      // Parity gap #2 (Cores→Open) — pre-dispatch chat-command filter. A typed
+      // message that a free-Core claims (`/cal`, `/email`, `/research`, `/remind`)
+      // is answered by the Core and short-circuits BOTH the project-topic branch
+      // below AND the General-topic live-agent/engine path — exactly as the Expo
+      // `createAppWsSurface` does (`app-ws-surface.ts:658-666`). Applies on every
+      // topic: `channel_topic_id` is the wire topic the message arrived on, and
+      // `project_id` is parsed from a `web:<uid>:<project>` topic so a per-project
+      // `/cal` lands on the right project cache. Fire-and-fall-through on a null
+      // match (plain prose, or no Core owns the slash). Guarded so a filter throw
+      // never blocks the chat path — it degrades to the normal agent dispatch.
+      if (event.type === 'user_message' && opts.chatCommandFilter !== undefined) {
+        const command_project_id =
+          wire_topic_id !== topic_id && wire_topic_id.startsWith(`${topic_id}:`)
+            ? wire_topic_id.slice(topic_id.length + 1)
+            : undefined
+        let command_result: import('./app-ws-surface.ts').ChatCommandFilterResult | null =
+          null
+        try {
+          command_result = await opts.chatCommandFilter.match({
+            user_id,
+            project_slug,
+            channel_topic_id: wire_topic_id,
+            body: event.body,
+            ...(command_project_id !== undefined ? { project_id: command_project_id } : {}),
+          })
+        } catch (err) {
+          console.warn(
+            `${LOG_TAG} handleInbound event=chat_command_filter_threw project=${project_slug} topic=${wire_topic_id} err=${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+          command_result = null
+        }
+        if (command_result !== null) {
+          console.info(
+            `${LOG_TAG} handleInbound event=chat_command_routed project=${project_slug} topic=${wire_topic_id} user=${user_id} chars=${event.body.length}`,
+          )
+          try {
+            send({ type: 'agent_message', body: command_result.text })
+          } catch {
+            // dead socket — durable history + reconnect hydration cover it
+          }
+          // Chat-time knowledge: a Core command is still owner intent worth
+          // extracting (same fire-and-forget contract as a normal turn).
+          if (opts.scribeOnUserTurn !== undefined) {
+            try {
+              opts.scribeOnUserTurn({
+                project_slug,
+                user_id,
+                topic_id: wire_topic_id,
+                text: event.body,
+                observed_at,
+                author: { id: 'owner', display: 'owner' },
+              })
+            } catch (err) {
+              console.warn(
+                `${LOG_TAG} handleInbound event=scribe_hook_threw project=${project_slug} topic=${wire_topic_id} err=${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              )
+            }
+          }
+          return
+        }
       }
       // 2026-05-28 sidebar sprint — project-topic inbound stub. When the
       // user is sitting on a per-project topic (`web:<user_id>:<proj>`)

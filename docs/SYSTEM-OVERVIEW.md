@@ -127,11 +127,50 @@ built factories, threads the binding, starts them, and registers a drain+teardow
 extraction never throws into a Core's brief/triage path) and exposes `idle()` for
 clean shutdown draining. Each scheduler owns its own self-tick — **no duplicate
 poller, no extra timer/fetch** beyond the Cores' own cadence. Until a
-Google-OAuth-backed calendar/gmail client is composed into Open (a separate
-parity item — the Cores' MCP-tool + `/cal` / `/email` chat surfaces remain
-Managed-side), the in-memory fallback clients yield an empty calendar/inbox so
-the schedulers run harmlessly; the fan-out goes live with no further wiring the
-moment a real client is supplied. Always-on when scribe is — **no feature flag**.
+Google-OAuth-backed calendar/gmail client is connected, the in-memory fallback
+clients yield an empty calendar/inbox so the schedulers run harmlessly; the
+fan-out goes live with no further wiring the moment a real client is supplied.
+Always-on when scribe is — **no feature flag**. (The Cores' MCP tools + `/cal` /
+`/email` chat surfaces are now composed into Open too — see the next section.)
+
+## Free Cores in the Open boot path (parity gap #2) — `gateway/cores/mount-open-cores.ts`
+
+The single-owner Open composer composes the bundled free Cores
+(Calendar / Email / Google-Workspace / Notes / Reminders / Research) into the
+daily-driver, **reusing the Managed mechanism — not a fork**:
+
+- **Backends + MCP tools.** `open/composer.ts` sets `composition.cores` (dataDir +
+  per-instance `SecretsStore` + the `buildCoresBackendFactories(...)` map +
+  a `SecretsStorePrompter`). Because `boot()` runs every composition through
+  `composeProductionGraph`, that flips on the cores module
+  (`gateway/composition/build-core-modules.ts`) → `installBundledCores` discovers
+  the bundled Cores (rootDirs from the platform adapter) and registers each Core's
+  `buildTools(deps)` MCP surface. Per-Core install is **fail-soft**
+  (`install-bundled.ts`) so a Core lacking creds is hidden without blocking boot.
+- **Chat-command filters.** `mountOpenCores` chains the bundled free-Core filters
+  (`/cal`, `/email`, `/note`, `/remind`, `/research`) via
+  `buildChainedChatCommandFilter([...])` and the composer threads the result into
+  `buildLandingStack` → `buildWebChatBridge`. The web-chat bridge invokes the
+  filter at the top of the `user_message` handler and, when a Core claims the
+  command, ships the Core's reply as an `agent_message` and short-circuits both
+  the live-agent turn and the onboarding engine — mirroring the Expo
+  `createAppWsSurface` seam (`gateway/http/app-ws-surface.ts`). Before this the
+  Open web chat had no slash-command interception at all; a typed `/cal` fell
+  through to the LLM. Each Core's MCP tools and its chat-command filter share **one
+  backend instance** (the pre-built `calendarClient` seam, one
+  `EmailProjectCacheResolver` / `NotesStoreResolver`, the Research
+  `project_backend`) — agent-native parity.
+- **Optional-until-credentialed.** A per-instance `OAuthTokenManager` over the
+  `SecretsStore`. With no `NEUTRON_CORES_GOOGLE_CLIENT_ID` (the zero-creds Open
+  default) the Calendar/Gmail/Workspace backends fall back to in-memory clients —
+  `/cal` / `/email` answer against an empty calendar/inbox, never a hard error,
+  never a boot block; the Google Cores' MCP install is hidden (their `required`
+  `oauth_token` secret is unprovisioned) until a grant exists. The moment the
+  `SecretsStore` holds the token the `SecretsStorePrompter` surfaces it and those
+  Cores install **live** — no restart, no further wiring. **No feature flag.**
+  (The in-product OAuth-connect admin surface — Open's cookie-auth ↔ the Cores
+  surfaces' bearer-token contract — is a documented follow-up; the token-present
+  install path is already wired and tested.)
 
 ## Tab resolver (WAVE 3 tabbed shell) — `tabs/` + `gateway/http/app-tabs-surface.ts`
 

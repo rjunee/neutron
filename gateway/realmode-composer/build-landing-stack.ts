@@ -689,6 +689,15 @@ export interface BuildLandingStackInput {
     transcript: TranscriptWriter
   }) => import('../http/chat-bridge.ts').LiveAgentTurnRunner
   /**
+   * Parity gap #2 (Cores→Open) — pre-dispatch chat-command filter, threaded
+   * verbatim into `buildWebChatBridge`. The Open composer builds it by chaining
+   * the bundled free-Core filters (`/cal`, `/email`, `/research`, `/remind`) via
+   * `buildChainedChatCommandFilter([...])`, so a slash command typed into the
+   * single-owner web chat is claimed by its Core instead of falling through to the
+   * LLM. Optional — omitted on Core-less boxes, where the chat path is unaffected.
+   */
+  chatCommandFilter?: import('../http/app-ws-surface.ts').ChatCommandFilter
+  /**
    * v0.1.80 (2026-05-22) — personality character suggester. When wired,
    * the engine fires `generate(...)` on `personality_offered` phase entry
    * and memoizes the 5 character picks into
@@ -1392,6 +1401,12 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
     // any recovered replies a crash dropped for this user's channel.
     ...(input.recoveredReplyStore !== undefined
       ? { recoveredReplyStore: input.recoveredReplyStore }
+      : {}),
+    // Parity gap #2 (Cores→Open) — forward the chained free-Core chat-command
+    // filter so `/cal`/`/email`/`/research`/`/remind` are routed to their Core
+    // before the LLM turn. Omitted on Core-less boxes (chat path unaffected).
+    ...(input.chatCommandFilter !== undefined
+      ? { chatCommandFilter: input.chatCommandFilter }
       : {}),
     // ISSUES #204 — live-agent turn runner bound to THIS stack's
     // ButtonStore + TranscriptWriter, plus the state store for the
