@@ -329,7 +329,10 @@ describe('Sprint 18 — end-to-end chat flow', () => {
       expect(chatRes.status).toBe(200)
       const chatHtml = await chatRes.text()
       expect(chatHtml).toContain('Neutron')
-      expect(chatHtml).toContain('id="log"')
+      // React is the only chat client now (P0b deleted the vanilla path): /chat
+      // serves the chat-react shell (mount point id="root" + the React bundle).
+      expect(chatHtml).toContain('id="root"')
+      expect(chatHtml).toContain('/chat-react.js')
 
       // Pre-condition: no onboarding_state row yet for this owner.
       const preState = await stack.stateStore.get('alice', 'u-1')
