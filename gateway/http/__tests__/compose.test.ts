@@ -22,7 +22,7 @@ function makeLanding(routeBody: string): LandingHandler {
     fetch: async (req) => {
       const url = new URL(req.url)
       if (url.pathname === '/chat') return new Response(routeBody, { status: 200 })
-      if (url.pathname === '/chat.js') return new Response('js', { status: 200 })
+      if (url.pathname === '/chat-react.js') return new Response('js', { status: 200 })
       if (url.pathname === '/ws/chat') return new Response(null, { status: 101 })
       if (url.pathname === '/api/v1/sign-up') return new Response(null, { status: 302 })
       if (url.pathname === '/invite' || url.pathname === '/') return new Response('invite', { status: 200 })
@@ -295,7 +295,7 @@ describe('composeHttpHandler — slug-check routing (P1.5 § 1.5.8)', () => {
 describe('LANDING_ROUTE_PATHS', () => {
   test('is the locked set of landing-owned exact paths', () => {
     expect(LANDING_ROUTE_PATHS.has('/chat')).toBe(true)
-    expect(LANDING_ROUTE_PATHS.has('/chat.js')).toBe(true)
+    expect(LANDING_ROUTE_PATHS.has('/chat-react.js')).toBe(true)
     expect(LANDING_ROUTE_PATHS.has('/ws/chat')).toBe(true)
     expect(LANDING_ROUTE_PATHS.has('/api/v1/sign-up')).toBe(true)
     expect(LANDING_ROUTE_PATHS.has('/invite')).toBe(true)

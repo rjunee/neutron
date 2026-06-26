@@ -413,8 +413,8 @@ test('BLOCKER #3 — explicit null override opts out of the probe (legacy back-c
 })
 
 function ensureChatHtml(staticDir: string): void {
-  const target = join(staticDir, 'chat.html')
+  const target = join(staticDir, 'chat-react.html')
   if (!existsSync(target)) {
-    writeFileSync(target, '<html></html>')
+    writeFileSync(target, '<html><div id="root"></div></html>')
   }
 }

@@ -1,8 +1,10 @@
 /**
- * landing/server — Track B Phase 3 flag-gated serving of the React chat client.
+ * landing/server — React chat client serving.
  *
- * Verifies the vanilla client stays the default and the React shell + bundle are
- * served only when the flag (env default or `?client=` query) selects them.
+ * The vanilla web chat client has been removed; React is now the only
+ * chat client. `GET /chat` ALWAYS serves the React shell (no flag, no
+ * `?client=` branch, no env default) and `GET /chat-react.js` serves the
+ * bundle.
  */
 
 import { describe, expect, test, mock } from 'bun:test'
@@ -24,40 +26,29 @@ function makeBridge(): ChatBridge {
 
 const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
 
-function get(url: string, opts: { webChatClientDefault?: string } = {}) {
-  const handler = createLandingServer({ static_dir: STATIC_DIR, bridge: makeBridge(), ...opts })
+function get(url: string) {
+  const handler = createLandingServer({ static_dir: STATIC_DIR, bridge: makeBridge() })
   return handler.fetch(new Request(url), fakeServer)
 }
 
-describe('GET /chat — web chat client flag', () => {
-  test('serves the vanilla client by default (no flag)', async () => {
+describe('GET /chat — React is the only chat client', () => {
+  test('serves the React shell unconditionally', async () => {
     const res = await get('http://x.test/chat')
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('id="log"') // vanilla chat.html marker
-    expect(body).not.toContain('/chat-react.js')
+    expect(body).toContain('id="root"')
+    expect(body).toContain('/chat-react.js')
+    // No vanilla client remains.
+    expect(body).not.toContain('id="log"')
   })
 
-  test('serves the React shell when the env default is react', async () => {
-    const res = await get('http://x.test/chat', { webChatClientDefault: 'react' })
+  test('ignores any legacy ?client= query and still serves React', async () => {
+    const res = await get('http://x.test/chat?client=vanilla')
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('id="root"')
     expect(body).toContain('/chat-react.js')
     expect(body).not.toContain('id="log"')
-  })
-
-  test('?client=react overrides a vanilla default', async () => {
-    const res = await get('http://x.test/chat?client=react', { webChatClientDefault: 'vanilla' })
-    const body = await res.text()
-    expect(body).toContain('/chat-react.js')
-  })
-
-  test('?client=vanilla overrides a react default', async () => {
-    const res = await get('http://x.test/chat?client=vanilla', { webChatClientDefault: 'react' })
-    const body = await res.text()
-    expect(body).toContain('id="log"')
-    expect(body).not.toContain('/chat-react.js')
   })
 })
 

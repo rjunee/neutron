@@ -34,7 +34,6 @@ import { fileURLToPath } from 'node:url'
 export { MOBILE_APP_URL } from '../onboarding/interview/final-handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
-import { resolveWebChatClient } from './web-chat-flag.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -815,18 +814,6 @@ export interface LandingServerOptions {
   chatAuthGate?: {
     isUnauthenticated: () => boolean
   }
-  /**
-   * Track B Phase 3 (2026-06-21) — default web chat client for `GET /chat`.
-   * The React/assistant-ui client ships BEHIND THIS FLAG with the vanilla-TS
-   * client as the default fallback. `'react'` opts an instance into the new
-   * surface deploy-wide; a per-request `?client=react|vanilla` query always
-   * overrides it (see `resolveWebChatClient`). Production wires this from
-   * `process.env.NEUTRON_WEB_CHAT_CLIENT`; unset → vanilla (no behaviour
-   * change). The React assets are also existsSync-guarded, so even with the
-   * flag on, an instance that didn't ship `chat-react.html` falls back to
-   * vanilla rather than 404ing the chat surface.
-   */
-  webChatClientDefault?: string
 }
 
 interface SocketState {
@@ -1000,40 +987,28 @@ export function renderChatAuthGateHtml(): string {
  */
 export function createLandingServer(options: LandingServerOptions): LandingServer {
   const static_dir = options.static_dir ?? HERE
-  const chat_html_path = join(static_dir, 'chat.html')
-  if (!existsSync(chat_html_path)) {
-    throw new Error(`landing static_dir missing chat.html: ${chat_html_path}`)
-  }
-  const chat_html = readFileSync(chat_html_path)
-  // Codex r2 P1 fix: chat.html references `/chat.js` but no handler served
-  // it on the prior pass. Look for a pre-built chat.js next to chat.html
-  // (callers can bundle ahead of time via Bun.build) and fall back to a
-  // tiny lazy bundler that compiles chat.ts on first request. This keeps
-  // tests fast (no bundling at construction) and production simple.
-  const chat_js_prebuilt_path = join(static_dir, 'chat.js')
-  let chat_js_cache: string | null = existsSync(chat_js_prebuilt_path)
-    ? readFileSync(chat_js_prebuilt_path, 'utf8')
-    : null
-  const chat_ts_path = join(static_dir, 'chat.ts')
-  // Track B Phase 3 — React/assistant-ui chat client, served BEHIND THE FLAG.
+  // P0b (2026-06-26) — React/assistant-ui is the ONLY web chat client. The
+  // vanilla `chat.html`/`chat.ts` surface and the `NEUTRON_WEB_CHAT_CLIENT`
+  // flag were DELETED (Ryan-locked: no feature flags, no dual code paths), so a
+  // fresh single-owner Open install always serves the tabbed React shell
+  // (ProjectShell → ChatApp with the Documents/Tasks tabs) at `/chat`.
+  //
   // `chat-react.html` is the shell (loads `/chat-react.js`); the JS is either a
   // pre-built `chat-react.js` next to it or lazily bundled from
-  // `chat-react/main.tsx` on first request (same shape as `resolveChatJs`,
-  // minified because it carries React + assistant-ui). Each asset is
-  // existsSync-guarded so an instance that didn't ship the React surface
-  // simply falls back to vanilla even with the flag on.
+  // `chat-react/main.tsx` on first request (minified — it carries React +
+  // assistant-ui). The shell is REQUIRED: a single-owner Open install always
+  // ships it, so its absence is a packaging error (throw at boot), NOT a
+  // silent fall-back to a now-nonexistent vanilla client.
   const chat_react_html_path = join(static_dir, 'chat-react.html')
-  const chat_react_html: Buffer | null = existsSync(chat_react_html_path)
-    ? readFileSync(chat_react_html_path)
-    : null
+  if (!existsSync(chat_react_html_path)) {
+    throw new Error(`landing static_dir missing chat-react.html: ${chat_react_html_path}`)
+  }
+  const chat_react_html = readFileSync(chat_react_html_path)
   const chat_react_js_prebuilt_path = join(static_dir, 'chat-react.js')
   let chat_react_js_cache: string | null = existsSync(chat_react_js_prebuilt_path)
     ? readFileSync(chat_react_js_prebuilt_path, 'utf8')
     : null
   const chat_react_entry_path = join(static_dir, 'chat-react', 'main.tsx')
-  // Deploy-wide default client, resolved once at construction; the per-request
-  // `?client=` query still overrides it inside the `/chat` handler.
-  const web_chat_client_default = options.webChatClientDefault ?? process.env['NEUTRON_WEB_CHAT_CLIENT']
   // P2 S5 — invite landing short-circuit. Optional: callers that haven't
   // wired the invite handler yet skip the route entirely so the existing
   // /chat surface stays untouched. C2 (OSS split): the invite assets are
@@ -1098,26 +1073,6 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     if (existsSync(p)) brand_assets.set(route, { body: readFileSync(p), type })
   }
   const bridge = options.bridge
-  async function resolveChatJs(): Promise<string | null> {
-    if (chat_js_cache !== null) return chat_js_cache
-    if (!existsSync(chat_ts_path)) return null
-    try {
-      const result = await Bun.build({
-        entrypoints: [chat_ts_path],
-        target: 'browser',
-        format: 'esm',
-        minify: false,
-        sourcemap: 'none',
-      })
-      if (!result.success || result.outputs.length === 0) return null
-      const out = result.outputs[0]
-      if (out === undefined) return null
-      chat_js_cache = await out.text()
-      return chat_js_cache
-    } catch {
-      return null
-    }
-  }
   async function resolveChatReactJs(): Promise<string | null> {
     if (chat_react_js_cache !== null) return chat_react_js_cache
     if (!existsSync(chat_react_entry_path)) return null
@@ -1230,25 +1185,17 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
             },
           })
         }
-        // Track B Phase 3 — choose the web chat client. The React surface is
-        // served only when the flag resolves to `react` AND its shell shipped;
-        // otherwise the vanilla client (the default) is served unchanged.
-        const web_chat_client = resolveWebChatClient({
-          envDefault: web_chat_client_default,
-          queryClient: url.searchParams.get('client'),
-        })
-        if (web_chat_client === 'react' && chat_react_html !== null) {
-          return new Response(new Uint8Array(chat_react_html), {
-            headers: { 'content-type': 'text/html; charset=utf-8' },
-          })
-        }
-        return new Response(chat_html, {
+        // P0b — React is the only client. Always serve the tabbed React shell
+        // (no flag, no `?client=` branch, no vanilla fallback). The shell is
+        // loaded + asserted at construction, so this is unconditional.
+        return new Response(new Uint8Array(chat_react_html), {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })
       }
-      // Track B Phase 3 — serve the lazily-bundled React client. Gated the same
-      // way as the shell: only reachable when the React assets shipped; returns
-      // 404 otherwise (the vanilla path never references `/chat-react.js`).
+      // Serve the lazily-bundled React client. Returns 404 only on a packaging
+      // error (the `chat-react/main.tsx` entry missing) — the shell that
+      // references `/chat-react.js` is required at boot, so in a real install
+      // this always resolves.
       if (url.pathname === '/chat-react.js' && req.method === 'GET') {
         const js = await resolveChatReactJs()
         if (js === null) return new Response('chat-react.js unavailable', { status: 404 })
@@ -1297,13 +1244,6 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         return new Response(null, {
           status: 302,
           headers: { location: target },
-        })
-      }
-      if (url.pathname === '/chat.js' && req.method === 'GET') {
-        const js = await resolveChatJs()
-        if (js === null) return new Response('chat.js unavailable', { status: 404 })
-        return new Response(js, {
-          headers: { 'content-type': 'application/javascript; charset=utf-8' },
         })
       }
       if (

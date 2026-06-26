@@ -11,29 +11,8 @@
  * No DOM is required — `atob` + `TextDecoder` are Bun globals.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { GlobalRegistrator } from '@happy-dom/global-registrator'
-
-beforeAll(() => {
-  // The chat.ts module guards its self-bootstrap with `typeof window`,
-  // and importing it under a bare Bun runtime gives `undefined` for
-  // `window` → the guard short-circuits and decodeJwtSubClaim is just
-  // a plain export. We still register a DOM (matching the rest of the
-  // landing test suite) so the import surface stays uniform across
-  // tests and a future module-level DOM access doesn't crash this one.
-  GlobalRegistrator.register({ url: 'https://t-test.neutron.test/chat' })
-  Object.defineProperty(document, 'readyState', { value: 'loading', configurable: true })
-  ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = class {
-    static OPEN = 1
-    readyState = 0
-    addEventListener(): void {}
-    send(): void {}
-    close(): void {}
-  }
-})
-afterAll(async () => {
-  await GlobalRegistrator.unregister()
-})
+import { describe, expect, test } from 'bun:test'
+import { decodeJwtSubClaim } from '../start-token-topic-id.ts'
 
 function b64urlEncode(s: string): string {
   // Bun has Buffer; this avoids pulling in a base64url dep.
@@ -55,49 +34,42 @@ function makeJwt(payload: Record<string, unknown>): string {
 
 describe('decodeJwtSubClaim (S11)', () => {
   test('extracts sub from a well-formed JWT', async () => {
-    const mod = await import('../chat.ts')
     const jwt = makeJwt({
       sub: 'synthetic:e2e:m2-walk-20260517T030139Z',
       aud: 'start-token',
     })
-    expect(mod.decodeJwtSubClaim(jwt)).toBe(
+    expect(decodeJwtSubClaim(jwt)).toBe(
       'synthetic:e2e:m2-walk-20260517T030139Z',
     )
   })
 
   test('returns null for a malformed JWT (no dots)', async () => {
-    const mod = await import('../chat.ts')
-    expect(mod.decodeJwtSubClaim('not-a-jwt')).toBeNull()
+    expect(decodeJwtSubClaim('not-a-jwt')).toBeNull()
   })
 
   test('returns null when payload is not valid JSON', async () => {
-    const mod = await import('../chat.ts')
     const garbage = `${b64urlEncode('{"alg":"EdDSA"}')}.${b64urlEncode('not-json{')}.sig`
-    expect(mod.decodeJwtSubClaim(garbage)).toBeNull()
+    expect(decodeJwtSubClaim(garbage)).toBeNull()
   })
 
   test('returns null when sub is missing', async () => {
-    const mod = await import('../chat.ts')
     const jwt = makeJwt({ aud: 'start-token' })
-    expect(mod.decodeJwtSubClaim(jwt)).toBeNull()
+    expect(decodeJwtSubClaim(jwt)).toBeNull()
   })
 
   test('returns null when sub is empty string', async () => {
-    const mod = await import('../chat.ts')
     const jwt = makeJwt({ sub: '' })
-    expect(mod.decodeJwtSubClaim(jwt)).toBeNull()
+    expect(decodeJwtSubClaim(jwt)).toBeNull()
   })
 
   test('handles base64url segments with no padding', async () => {
-    const mod = await import('../chat.ts')
     // Force a payload whose base64url encoding has a non-zero padding
     // remainder so the manual `=` re-padding path executes.
     const jwt = makeJwt({ sub: 'ab' })
-    expect(mod.decodeJwtSubClaim(jwt)).toBe('ab')
+    expect(decodeJwtSubClaim(jwt)).toBe('ab')
   })
 
   test('returns null for empty string', async () => {
-    const mod = await import('../chat.ts')
-    expect(mod.decodeJwtSubClaim('')).toBeNull()
+    expect(decodeJwtSubClaim('')).toBeNull()
   })
 })

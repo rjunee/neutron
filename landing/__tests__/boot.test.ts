@@ -109,7 +109,7 @@ describe('bootSignup — live listener', () => {
     }
   })
 
-  test('GET /chat serves the static chat.html', async () => {
+  test('GET /chat serves the static React chat shell', async () => {
     const handle = await bootSignup({ port: 0 })
     try {
       const res = await fetch(`http://127.0.0.1:${handle.port}/chat`)
@@ -140,7 +140,7 @@ describe('bootSignup — live listener', () => {
     }
   })
 
-  test('throws on missing chat.html in staticDir', async () => {
+  test('throws on missing chat-react.html in staticDir', async () => {
     let threw: unknown = null
     try {
       await bootSignup({ port: 0, staticDir: '/no/such/path' })
@@ -148,6 +148,6 @@ describe('bootSignup — live listener', () => {
       threw = err
     }
     expect(threw).not.toBeNull()
-    expect((threw as Error).message).toContain('missing chat.html')
+    expect((threw as Error).message).toContain('missing chat-react.html')
   })
 })

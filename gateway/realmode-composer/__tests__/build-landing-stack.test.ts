@@ -104,7 +104,7 @@ test('resolveLandingStaticDir: env override honored when path exists', () => {
 test('resolveLandingStaticDir: falls back to <repo>/landing when env unset', () => {
   // Sanity-check the in-repo fallback the factory expects in dev/tests.
   expect(existsSync(REPO_LANDING_DIR)).toBe(true)
-  expect(existsSync(join(REPO_LANDING_DIR, 'chat.html'))).toBe(true)
+  expect(existsSync(join(REPO_LANDING_DIR, 'chat-react.html'))).toBe(true)
   const env = {} as NodeJS.ProcessEnv
   expect(resolveLandingStaticDir(env)).toBe(REPO_LANDING_DIR)
 })
@@ -173,8 +173,8 @@ test('buildLandingStack: TranscriptWriter materializes <owner_home>/persona/onbo
   expect(existsSync(join(ownerHome, 'persona', 'onboarding-transcript.jsonl'))).toBe(true)
 })
 
-test('buildLandingStack: throws when static_dir is missing chat.html', () => {
-  // Defense-in-depth — the factory delegates the chat.html existence
+test('buildLandingStack: throws when static_dir is missing chat-react.html', () => {
+  // Defense-in-depth — the factory delegates the chat-react.html existence
   // check to `createLandingServer`, but since the realmode-composer is
   // the canonical caller we want to know the failure mode is loud.
   const emptyDir = join(workdir, 'empty-landing')
@@ -256,9 +256,9 @@ function fakeUpgradeServer(): import('bun').Server<unknown> {
 }
 
 function ensureChatHtml(staticDir: string): void {
-  const target = join(staticDir, 'chat.html')
+  const target = join(staticDir, 'chat-react.html')
   if (!existsSync(target)) {
-    writeFileSync(target, '<html></html>')
+    writeFileSync(target, '<html><div id="root"></div></html>')
   }
 }
 

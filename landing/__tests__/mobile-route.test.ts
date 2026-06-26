@@ -140,9 +140,9 @@ describe('GET /mobile — per-instance landing server (<slug>.<instance-host>)',
   })
 })
 
-describe('chat.html — PWA installability links (ISSUES #208)', () => {
+describe('chat-react.html — PWA installability links (ISSUES #208)', () => {
   test('links the manifest + icons the install instructions rely on', () => {
-    const html = readFileSync(join(dirname(HERE), 'chat.html'), 'utf8')
+    const html = readFileSync(join(dirname(HERE), 'chat-react.html'), 'utf8')
     expect(html).toContain('<link rel="manifest" href="/site.webmanifest" />')
     expect(html).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png" />')
     expect(html).toContain('<meta name="apple-mobile-web-app-title" content="Neutron" />')

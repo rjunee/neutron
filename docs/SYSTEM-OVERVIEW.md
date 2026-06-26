@@ -220,6 +220,15 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 
 ### Web client consumption (WAVE 3 PR-4)
 
+> **P0b (2026-06-26) — React is the ONLY web chat client.** The vanilla
+> `landing/chat.ts`/`chat.html` surface and the `NEUTRON_WEB_CHAT_CLIENT` /
+> `?client=` flag (`landing/web-chat-flag.ts`) were **deleted** (no feature flags,
+> no dual path). `GET /chat` now unconditionally serves `chat-react.html`
+> (ProjectShell → ChatApp with the Documents/Tasks tabs); `chat-react.html` is
+> required at boot (`landing/server.ts` + `landing/boot.ts` throw if missing) and
+> `/chat-react.js` is the only served client bundle (`compose.ts` `LANDING_PATHS`).
+> A fresh single-owner Open install serves the tabbed React UI with no env var.
+
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
 and renders the project's tab bar from the same resolver: on the active project
