@@ -37,6 +37,89 @@ export const ACCEPTED_IMAGE_TYPES: readonly string[] = [
 /** The shipped attachment upload/serve endpoint prefix. */
 export const UPLOAD_ENDPOINT = '/api/app/upload'
 
+/**
+ * BUG 4 — the history-import (ChatGPT/Claude export ZIP) upload endpoint. The
+ * server mounts `POST /api/upload/<source>` (`source` ∈ {chatgpt,claude}); the
+ * single-shot handler writes `<owner_home>/imports/<source>.zip`, magic-byte
+ * checks it, and notifies the onboarding engine so it advances out of
+ * `import_upload_pending` and emits the next prompt over the same socket. This
+ * is a SEPARATE path from image attachments (which are image-only).
+ */
+export const IMPORT_UPLOAD_ENDPOINT = '/api/upload'
+
+/** The export sources the import endpoint accepts (mirrors the affordance). */
+export type ImportSource = 'chatgpt' | 'claude'
+
+/**
+ * Header the import handler reads to route the post-upload engine prompt back
+ * to THIS socket's topic (`TOPIC_ID_HEADER` in import-upload-handler.ts). Omit
+ * it and the engine's "reading your export…" prompt is dropped (it falls back
+ * to a topic with no live sender).
+ */
+export const IMPORT_TOPIC_HEADER = 'x-neutron-topic-id'
+
+/** True when a picked/dropped file is a ChatGPT/Claude export ZIP (by MIME or
+ *  by `.zip` extension — some browsers report an empty / generic type). */
+export function isExportZip(file: File): boolean {
+  const t = file.type.toLowerCase()
+  if (t === 'application/zip' || t === 'application/x-zip-compressed' || t === 'application/x-zip') return true
+  return /\.zip$/i.test(file.name)
+}
+
+export interface ImportZipOptions {
+  token: string
+  /** The app-ws topic (`app:<user>`) so the post-upload prompt reaches this
+   *  socket. */
+  topicId?: string
+  /** Defaults to {@link IMPORT_UPLOAD_ENDPOINT}. */
+  endpoint?: string
+  fetchImpl?: FetchImpl
+  signal?: AbortSignal
+}
+
+/**
+ * BUG 4 — upload a history-import export ZIP to `POST /api/upload/<source>`.
+ * Resolves once the server has accepted the bytes + kicked the import (the
+ * engine then drives the rest of onboarding over the WebSocket); rejects with
+ * an {@link AttachmentUploadError} on a client/network/HTTP failure. The
+ * server re-validates magic bytes + size, so this is a thin multipart POST.
+ */
+export async function importHistoryZip(
+  file: File,
+  source: ImportSource,
+  opts: ImportZipOptions,
+): Promise<void> {
+  const base = opts.endpoint ?? IMPORT_UPLOAD_ENDPOINT
+  const endpoint = `${base}/${source}`
+  const doFetch = resolveFetch(opts.fetchImpl)
+  const form = new FormData()
+  form.set('file', file)
+  const headers: Record<string, string> = { authorization: `Bearer ${opts.token}` }
+  if (opts.topicId !== undefined && opts.topicId.length > 0) headers[IMPORT_TOPIC_HEADER] = opts.topicId
+  const init: RequestInit = { method: 'POST', headers, body: form }
+  if (opts.signal !== undefined) init.signal = opts.signal
+  let res: Response
+  try {
+    res = await doFetch(endpoint, init)
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AttachmentUploadError('aborted', 'Import cancelled.')
+    }
+    throw new AttachmentUploadError('network_error', err instanceof Error ? err.message : 'network error')
+  }
+  if (!res.ok) {
+    let message = `import upload failed (status ${res.status})`
+    try {
+      const body = (await res.json()) as { message?: unknown; error?: unknown }
+      if (typeof body.message === 'string') message = body.message
+      else if (typeof body.error === 'string') message = body.error
+    } catch {
+      /* non-JSON error body — keep the status-based message */
+    }
+    throw new AttachmentUploadError(`http_${res.status}`, message, res.status)
+  }
+}
+
 export interface UploadResult {
   /** Relative, bearer-authed GET path (`/api/app/upload/<user>/<hash>.<ext>`). */
   url: string

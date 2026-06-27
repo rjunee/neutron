@@ -229,6 +229,22 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > `/chat-react.js` is the only served client bundle (`compose.ts` `LANDING_PATHS`).
 > A fresh single-owner Open install serves the tabbed React UI with no env var.
 
+> **Onboarding/chat parity fixes (2026-06-27).** Six React-client regressions vs
+> the old vanilla chat were fixed: (1) a fresh onboarding auto-starts — the
+> server pushes the first prompt on connect and the client shows a "Setting
+> things up…" loader (server flag `window.__neutron_onboarding_active` →
+> `BootstrapConfig.onboardingActive`) instead of "Send a message to begin.";
+> (2) tighter bubbles (`min-width:4ch`, 8/13 padding); (3) quick-reply buttons
+> render the real choice text (`opt.body`), not the A/B/C letter `label`;
+> (4) ChatGPT/Claude export ZIP upload wired to `POST /api/upload/<source>`
+> (`uploads.ts` `importHistoryZip`); (5) iMessage-style — reaction "＋" and
+> Edit/Delete are hover-revealed, not always-on; (7) no spurious empty agent
+> bubble above the typing indicator (`controller.ts` drops the empty-delta open
+> frame; the typing dots key off `awaitingFirstToken`). Note: the deeper "run
+> onboarding as a Claude Code session" rearchitecture (BUG 0) is deferred — it
+> needs the external MCP write-tool transport (`mcp/server.ts` in-process-only),
+> see `docs/research/onboarding-cc-session-feasibility-2026-06-27.md`.
+
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
 and renders the project's tab bar from the same resolver: on the active project

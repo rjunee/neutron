@@ -49,6 +49,17 @@ export interface BootstrapConfig {
   /** Track B Phase 4 — this client's device id (read-receipt attribution +
    *  read-tick self-exclusion). Carried on the WS URL `&device_id=`. */
   deviceId: string
+  /**
+   * BUG 1 (auto-start) — true when the owner has NOT finished onboarding, so a
+   * FRESH onboarding session shows a "setting things up…" loader (not the
+   * "Send a message to begin." empty state) while the server pushes the first
+   * onboarding prompt on connect. Injected by the server into the served /chat
+   * HTML (`window.__neutron_onboarding_active`); defaults to false so a
+   * returning, genuinely-empty steady-state chat keeps the plain empty state.
+   * Optional + defaults to false (absent ⇒ steady-state) so existing config
+   * literals (tests) need no change; `resolveBootstrapConfig` always sets it.
+   */
+  onboardingActive?: boolean
 }
 
 export interface WindowLike {
@@ -59,6 +70,7 @@ export interface WindowLike {
   __neutron_user_id?: string
   __neutron_projects?: ProjectTab[]
   __neutron_active_project_id?: string
+  __neutron_onboarding_active?: boolean
 }
 
 /** Synthetic app-ws topic id for a user. Mirrors `appWsTopicId` on the server
@@ -155,5 +167,6 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     origin,
     deviceId,
     token: appWsToken,
+    onboardingActive: win.__neutron_onboarding_active === true,
   }
 }

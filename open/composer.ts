@@ -1127,6 +1127,30 @@ export function buildOpenGraphComposer(
         `window.__neutron_active_project_id=${active};</script>`
       )
     }
+    // BUG 1 (auto-start) — tell the React client whether THIS owner is still
+    // onboarding so a fresh session shows the auto-start loader ("Setting things
+    // up…") instead of the steady-state "Send a message to begin." empty state.
+    // Mirrors `isOnboardingActive` below: no `onboarding_state` row OR a
+    // non-terminal phase ⇒ active. Kept as a SEPARATE injected <script> from
+    // `projectsBootstrapScript` (and away from the `?start=` gate) to minimise
+    // the merge surface with the in-flight forge-p2-followups edits.
+    const onboardingBootstrapScript = (): string => {
+      let active = false
+      try {
+        const row = db
+          .prepare<{ phase: string }, [string, string]>(
+            `SELECT phase FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
+          )
+          .get(project_slug, OWNER_USER_ID)
+        active = row == null ? true : row.phase !== 'completed' && row.phase !== 'failed'
+      } catch {
+        // Unknown (no table yet / read error) → false so a steady-state chat
+        // never wedges on the loader; a genuinely-fresh onboarding briefly shows
+        // the plain empty state before the server's opener lands.
+        active = false
+      }
+      return `<script>window.__neutron_onboarding_active=${active ? 'true' : 'false'};</script>`
+    }
     const withReactBootstrap = async (res: Response | Promise<Response>): Promise<Response> => {
       const r = await res
       const ct = r.headers.get('content-type') ?? ''
@@ -1139,7 +1163,7 @@ export function buildOpenGraphComposer(
       }
       const injected = html.replace(
         '<script type="module" src="/chat-react.js"></script>',
-        `${projectsBootstrapScript()}\n<script type="module" src="/chat-react.js"></script>`,
+        `${projectsBootstrapScript()}\n${onboardingBootstrapScript()}\n<script type="module" src="/chat-react.js"></script>`,
       )
       const headers = new Headers(r.headers)
       headers.delete('content-length')

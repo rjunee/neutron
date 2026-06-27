@@ -100,4 +100,11 @@ describe('resolveBootstrapConfig', () => {
   it('throws ChatBootstrapError when no identity can be derived', () => {
     expect(() => resolveBootstrapConfig(win())).toThrow(ChatBootstrapError)
   })
+
+  it('BUG 1 — defaults onboardingActive to false and reads the server flag when set', () => {
+    expect(resolveBootstrapConfig(win({ __neutron_user_id: 'sam' })).onboardingActive).toBe(false)
+    expect(
+      resolveBootstrapConfig(win({ __neutron_user_id: 'sam', __neutron_onboarding_active: true })).onboardingActive,
+    ).toBe(true)
+  })
 })

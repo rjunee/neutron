@@ -308,15 +308,23 @@ describe('ChatApp render (happy-dom)', () => {
         prompt_id: 'p1',
         kind: 'buttons',
         upload_affordance: { source: 'chatgpt' },
+        // BUG 3 — the server ships an A/B/C letter `label` (Telegram's legend)
+        // alongside the real `body` text; the web buttons must render `body`.
         options: [
-          { label: 'Yes, import', body: 'Yes, import', value: 'yes' },
-          { label: 'Skip', body: 'Skip', value: 'skip' },
+          { label: 'A', body: 'Yes, import', value: 'yes' },
+          { label: 'B', body: 'Skip', value: 'skip' },
         ],
       })
       await tick()
     })
     expect(container.textContent).toContain('Yes, import')
     expect(container.textContent).toContain('Skip')
+    // BUG 3 — buttons show the real choice text, NOT the bare A/B letters.
+    const choiceTexts = Array.from(container.querySelectorAll('.car-choice')).map((b) => b.textContent)
+    expect(choiceTexts).toContain('Yes, import')
+    expect(choiceTexts).toContain('Skip')
+    expect(choiceTexts).not.toContain('A')
+    expect(choiceTexts).not.toContain('B')
     // The upload-affordance hint is surfaced above the composer.
     expect(container.textContent).toContain('ChatGPT export ZIP')
 
