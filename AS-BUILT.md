@@ -75,6 +75,23 @@ when no server is reachable). Verified in a real browser:
 - Scribe-on-user-turn + import-progress hooks were wired to the removed `/ws/chat`
   bridge; the app-ws steady-state path (pre-existing from the earlier P1b) does not
   re-establish them — a separate follow-up if those are wanted on app-ws.
+- **Cross-model (Codex) review P2s, tracked as follow-ups:**
+  - *Project rail stale until reload after fresh onboarding* (`open/composer.ts`
+    `projectsBootstrapScript`): a brand-new owner's `/chat` bootstrap injects
+    `__neutron_projects=[]` (no projects yet); when onboarding later creates
+    projects in the SAME session there is no app-ws signal to refetch, so the
+    Documents/Admin tabs only appear after a manual reload. The pieces are all
+    verified in a real browser (onboarding renders+advances; tabs + steady-state
+    reply render against a project), but the seamless completion→workspace
+    transition over the single socket needs a post-onboarding "projects changed →
+    refetch/reload" signal. (Real-browser tab verification used a seeded project +
+    reload.)
+  - *One-shot `?start=` token no longer claimed* (`open/composer.ts` `/chat?start=`
+    cookie-mint): with `/ws/chat` gone the token is signature-verified by the HTTP
+    gate but never `claimStartTokenJti`'d, so the same `?start=` URL can re-mint the
+    owner cookie within its 15-min TTL. Low real risk (Path A localhost-trust,
+    owner-only, same-owner cookie), but the one-shot semantics regressed — fix is
+    to wire a `consumedTokens` claim into the accepted `/chat?start=` flow.
 
 ## 2026-06-26 — P1b: wire the FULL app-ws/app-api surface stack into Open (React UI works end-to-end)
 
