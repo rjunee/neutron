@@ -117,6 +117,54 @@ def run() -> int:
         results["onboarding_renders_inline"] = True
         shot(page, "01-onboarding-first-prompt.png")
 
+        # ── Step 1b: REGRESSION GUARDS for the React onboarding/chat fixes ──
+        # (2026-06-27 — BUGs 1/2/3/5/7 vs the old vanilla chat). These are
+        # state-independent client invariants that hold on any onboarding phase.
+        def _visible_with_opacity(selector: str) -> list:
+            out = []
+            for el in page.query_selector_all(selector):
+                try:
+                    if el.is_visible():
+                        op = float(page.evaluate("(e)=>getComputedStyle(e).opacity", el))
+                        if op > 0.05:
+                            out.append((el.inner_text() or "").strip())
+                except Exception:
+                    pass
+            return out
+
+        # BUG 1 — auto-start: the first agent prompt rendered with NO user send
+        # (the composer is still empty).
+        composer_val = page.eval_on_selector(".car-input", "el => el.value") or ""
+        results["regress_bug1_autostart"] = (len(first_agent) > 0 and composer_val == "")
+        log("regress", f"BUG1 auto-start (first prompt, empty composer): {results['regress_bug1_autostart']}")
+
+        # BUG 2/5 — a resting bubble is CLEAN: the reaction '+' and Edit/Delete
+        # are in the DOM (a11y) but NOT visible at rest on a hover-capable device.
+        add_vis = _visible_with_opacity(".car-reaction-add")
+        act_vis = _visible_with_opacity(".car-msg-action")
+        results["regress_bug2_5_clean_resting"] = (not add_vis and not act_vis)
+        log("regress", f"BUG2/5 clean resting bubble (no visible +/Edit/Delete): "
+                       f"{results['regress_bug2_5_clean_resting']} (add={add_vis} actions={act_vis})")
+
+        # BUG 3 — when quick-reply buttons are present they show the real choice
+        # text (opt.body), never a bare 'A'/'B'/'C' letter (opt.label).
+        choice_texts = [(c.inner_text() or "").strip() for c in page.query_selector_all(".car-choice")]
+        bare_letters = [c for c in choice_texts if c in ("A", "B", "C", "D", "E")]
+        results["regress_bug3_real_labels"] = (len(bare_letters) == 0)
+        log("regress", f"BUG3 real button labels (no bare letters): "
+                       f"{results['regress_bug3_real_labels']} (choices={choice_texts})")
+
+        # BUG 4 — the composer file input exists; when an import affordance is
+        # shown it advertises .zip.
+        accept = page.eval_on_selector(".car-file-input", "el => el.getAttribute('accept')") \
+            if page.query_selector(".car-file-input") else None
+        hint_present = page.query_selector(".car-upload-hint") is not None
+        results["regress_bug4_zip_accept_when_affordance"] = (
+            (not hint_present) or (accept is not None and "zip" in accept)
+        )
+        log("regress", f"BUG4 zip accept (affordance={hint_present}, accept={accept!r}): "
+                       f"{results['regress_bug4_zip_accept_when_affordance']}")
+
         # ── Step 2: drive fresh onboarding to completion via the real UI ────
         completed = False
         last_agent_count = 0
@@ -182,6 +230,19 @@ def run() -> int:
         page.locator(".car-input").first.click()
         page.locator(".car-input").first.fill(probe)
         page.locator("button.car-send").first.click()
+        # BUG 7 — while the turn is pending, NO spurious EMPTY agent bubble is
+        # rendered above the typing indicator. Sampled right after the send.
+        page.wait_for_timeout(800)
+        empty_agents = 0
+        for bb in page.query_selector_all(".car-bubble-agent"):
+            cls = bb.get_attribute("class") or ""
+            if "car-typing" in cls:
+                continue
+            if ((bb.inner_text() or "").strip()) == "":
+                empty_agents += 1
+        results["regress_bug7_no_empty_bubble"] = (empty_agents == 0)
+        log("regress", f"BUG7 no empty agent bubble while pending: "
+                       f"{results['regress_bug7_no_empty_bubble']} (empty={empty_agents})")
         # Wait for a NEW agent bubble (the reply).
         got_reply = False
         for _ in range(40):
@@ -236,7 +297,17 @@ def run() -> int:
     # Required gates for a PASS. Onboarding completion + steady reply require a
     # live LLM credential on the box; the consolidation itself is proven by
     # onboarding rendering inline over the single socket + the tabs.
-    required = ["react_app_loads", "onboarding_renders_inline"]
+    required = [
+        "react_app_loads",
+        "onboarding_renders_inline",
+        # 2026-06-27 regression guards (BUGs 1/2/3/5 — state-independent client
+        # invariants; BUG 4/7 logged but not gated since they need a specific
+        # phase / a pending turn that this generic walkthrough may not hit).
+        "regress_bug1_autostart",
+        "regress_bug2_5_clean_resting",
+        "regress_bug3_real_labels",
+        "regress_bug4_zip_accept_when_affordance",
+    ]
     ok = all(results.get(k) for k in required)
     print("\n[E2E]", "PASS" if ok else "FAIL", "(required:", required, ")")
     return 0 if ok else 1
