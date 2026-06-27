@@ -2,7 +2,26 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
-## 2026-06-26 — P1b: wire the app-ws/app-api surfaces into Open (React chat + Documents + admin work end-to-end)
+## 2026-06-26 — P1b: wire the FULL app-ws/app-api surface stack into Open (React UI works end-to-end)
+
+**Scope note (final).** Beyond the initial chat/docs/admin wiring, cross-model
+(Codex) review surfaced — and this PR closes — the rest of the React client's
+missing Open integration: the **tabs resolver** (`/api/app/projects/<id>/tabs`, so
+ProjectShell shows Documents/Tasks instead of falling back to chat-only), the
+**Tasks** backend (`/api/app/projects/<id>/tasks*`) and **upload** surface
+(`/api/app/upload`), **slash-command parity** (the `/note`·`/remind`·`/skills`·…
+filter routed through the app-ws path, not just the web bridge), **project-scoped
+chat keying** (`app:<owner>:<project>` so projects don't share warm-session/
+history), **owner-only auth** (the dev-bypass resolver is wrapped to reject any
+bearer whose user_id ≠ the owner — closes the `Bearer dev:anyone` hole), and the
+**React shell bootstrap** (inject `__neutron_user_id` + `__neutron_projects` +
+`__neutron_active_project_id` into the served `/chat`, without which the client
+threw `ChatBootstrapError` before connecting and never showed project tabs).
+**NOT done in this PR:** collapsing onboarding into the single chat path +
+deleting `/ws/chat` — that is a separate architectural migration (the React
+client has no onboarding button UI; the structured onboarding engine would need
+to become a chat mode; the full fresh-onboarding walkthrough needs browser
+verification) and is tracked as the remaining piece.
 
 **Context.** The React client became the only web client (#82), but in a fresh
 single-owner Open install it had **no backends mounted**: the chat socket
