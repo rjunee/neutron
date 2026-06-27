@@ -57,6 +57,12 @@ interface ProjectTabsResponse {
   tabs: TabDescriptor[]
 }
 
+interface GlobalTabsResponse {
+  ok: boolean
+  scope: 'global'
+  tabs: TabDescriptor[]
+}
+
 export class TabsClientError extends Error {
   readonly code: string
   readonly status: number
@@ -111,6 +117,21 @@ export class WebTabsClient {
   /** Resolve the ordered project-scope tab descriptors for one project. */
   async listProjectTabs(project_id: string): Promise<TabDescriptor[]> {
     const path = `/api/app/projects/${encodeURIComponent(project_id)}/tabs`
+    const body = await this.req<ProjectTabsResponse>(path)
+    return body?.tabs ?? []
+  }
+
+  /**
+   * Resolve the ordered GLOBAL-scope tab descriptors (builtin Admin + globally
+   * installed Core tabs). The web shell folds these in alongside the per-project
+   * tabs so the owner can reach the Admin / Integrations surface in the UI.
+   */
+  async listGlobalTabs(): Promise<TabDescriptor[]> {
+    const body = await this.req<GlobalTabsResponse>('/api/app/tabs')
+    return body?.tabs ?? []
+  }
+
+  private async req<T extends { tabs?: TabDescriptor[] }>(path: string): Promise<T | null> {
     let res: Response
     try {
       res = await this.fetchImpl(`${this.base_url}${path}`, {
@@ -132,8 +153,7 @@ export class WebTabsClient {
       const message = body?.message ?? `HTTP ${res.status}`
       throw new TabsClientError(code, message, res.status)
     }
-    const body = json as ProjectTabsResponse | null
-    return body?.tabs ?? []
+    return json as T | null
   }
 }
 

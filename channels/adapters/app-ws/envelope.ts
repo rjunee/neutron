@@ -106,6 +106,26 @@ export interface AppWsInboundEdit {
   seq?: number
 }
 
+/**
+ * Onboarding consolidation (2026-06-26) — a button/quick-reply CHOICE from the
+ * client. When the unified chat surface is in onboarding mode the agent emits
+ * `agent_message` envelopes carrying `options[]` + `prompt_id`; tapping an option
+ * sends THIS frame so the server can resolve the structured choice against the
+ * engine's persisted `button_prompts` row (NOT a freeform text answer — a
+ * button-only phase has `allow_freeform:false`, so the choice MUST carry the
+ * `prompt_id` + `choice_value` to advance deterministically). Kept as a SEPARATE
+ * decoder (like resume/receipt/reaction/edit) so the user_message path keeps its
+ * narrow type. `freeform_text` rides along only when the active prompt allowed a
+ * typed answer (`choice_value === '__freeform__'`).
+ */
+export interface AppWsInboundButtonChoice {
+  v: 1
+  type: 'button_choice'
+  prompt_id: string
+  choice_value: string
+  freeform_text?: string
+}
+
 export type AppWsInbound = AppWsInboundUserMessage
 
 export interface AppWsOutboundSessionReady {
@@ -536,6 +556,36 @@ export function decodeAppWsEdit(raw: unknown): AppWsInboundEdit | null {
   const raw_seq = e['seq']
   if (typeof raw_seq === 'number' && Number.isFinite(raw_seq)) {
     out.seq = Math.max(0, Math.trunc(raw_seq))
+  }
+  return out
+}
+
+/**
+ * Onboarding consolidation (2026-06-26) — decode a
+ * `{ v:1, type:'button_choice', prompt_id, choice_value, freeform_text? }` frame.
+ * SEPARATE from the message / resume / receipt / reaction / edit decoders so each
+ * path keeps its narrow type. Returns `null` for anything malformed. Lengths are
+ * bounded so a malformed client can't push huge strings through the engine's
+ * choice-resolution path; `freeform_text` reuses the user-message cap.
+ */
+export function decodeAppWsButtonChoice(raw: unknown): AppWsInboundButtonChoice | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'button_choice') return null
+  const prompt_id = e['prompt_id']
+  if (typeof prompt_id !== 'string' || prompt_id.length === 0 || prompt_id.length > 256) {
+    return null
+  }
+  const choice_value = e['choice_value']
+  if (typeof choice_value !== 'string' || choice_value.length === 0 || choice_value.length > 512) {
+    return null
+  }
+  const out: AppWsInboundButtonChoice = { v: 1, type: 'button_choice', prompt_id, choice_value }
+  const freeform_text = e['freeform_text']
+  if (typeof freeform_text === 'string' && freeform_text.length > 0) {
+    if (freeform_text.length > MAX_USER_MESSAGE_LEN) return null
+    out.freeform_text = freeform_text
   }
   return out
 }

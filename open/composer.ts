@@ -126,6 +126,15 @@ import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
 import { TaskStore } from '../tasks/store.ts'
 import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
+import {
+  appWsTopicId,
+  type AppWsOutboundAgentMessage,
+} from '../channels/adapters/app-ws/envelope.ts'
+import type { ButtonChoice, ButtonPrompt } from '../channels/button-primitive.ts'
+import type {
+  AppSocketButtonPromptRouter,
+  AppSocketImportProgressRouter,
+} from '../gateway/http/chat-bridge.ts'
 import { createAppWsSurface } from '../gateway/http/app-ws-surface.ts'
 import type { IncomingEvent, OutgoingMessage } from '../channels/types.ts'
 import type { ChatOutbound } from '../landing/server.ts'
@@ -832,10 +841,22 @@ export function buildOpenGraphComposer(
     ])
 
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────
+    // Onboarding consolidation (2026-06-26) — late-bound app-socket routers.
+    // The engine's button-prompt + import-progress senders are fixed at
+    // construction (inside buildLandingStack), but the app-ws registry/adapter
+    // are built AFTER. These mutable holders let the SAME engine route
+    // onboarding emits over the unified `/ws/app/chat` socket: the routed sender
+    // reads `.send` at call time; we fill it once the registry exists (below).
+    // This is what makes onboarding a MODE of the single chat — no /ws/chat, no
+    // second engine, no flag.
+    const appWsButtonPromptRouter: AppSocketButtonPromptRouter = {}
+    const appWsImportProgressRouter: AppSocketImportProgressRouter = {}
     const landing = buildLandingStack({
       db,
       project_slug,
       owner_home,
+      appWsButtonPromptRouter,
+      appWsImportProgressRouter,
       // JWKS is a required field but inert on Open — our start-token verifier
       // is HMAC and never resolves a JWKS key. Pass a never-fetched URL.
       jwks: new JwksCache('https://invalid.local/.well-known/jwks.json'),
@@ -1339,6 +1360,144 @@ export function buildOpenGraphComposer(
     // hazard. The socket cannot dispatch an inbound until boot completes, long
     // after `holder.adapter` is assigned below.
     const appWsHolder: { adapter?: AppWsAdapter } = {}
+
+    // ── Onboarding consolidation (2026-06-26): ONE chat path ───────────────
+    // Onboarding is NOT a separate engine/socket — it is the INITIAL MODE of
+    // this same `/ws/app/chat` surface. The shared `landing.engine` keys its
+    // state on (project_slug, user_id), independent of transport, so the same
+    // InterviewEngine that drove the (now-deleted) `/ws/chat` bridge runs here.
+    // `isOnboardingActive` decides per-turn whether the engine (onboarding) or
+    // the live agent (steady-state) handles the message.
+    const engine = landing.engine
+    const onboardingStateStore = landing.stateStore
+    // No state row = fresh install → start onboarding. A row in a non-terminal
+    // phase = mid-onboarding. 'completed'/'failed' = steady-state chat.
+    const isOnboardingActive = async (user_id: string): Promise<boolean> => {
+      const st = await onboardingStateStore.get(project_slug, user_id)
+      if (st === null) return true
+      return st.phase !== 'completed' && st.phase !== 'failed'
+    }
+    // Reply factory: a live-agent turn emits `ChatOutbound`; translate the
+    // user-facing `agent_message` into an app-ws `OutgoingMessage` and fan it
+    // out via the adapter (which stamps message_id/ts + persists when a chat log
+    // is wired). Typing/ack/status frames are web-shaped and dropped. Carries
+    // any button options/prompt_id/kind/allow_freeform/upload_affordance so
+    // steady-state live-agent prompts render with the SAME button UI onboarding
+    // uses (one renderer, one path).
+    const buildAppWsSendReply =
+      (channel_topic_id: string, project_id?: string) =>
+      (out: ChatOutbound): void => {
+        if (out.type !== 'agent_message') return
+        const msg: OutgoingMessage = {
+          topic: {
+            topic_id: '',
+            channel_kind: 'app_socket',
+            channel_topic_id,
+            project_id: project_id ?? null,
+            privacy_mode: 'regular',
+          },
+          text: out.body,
+        }
+        if (out.options !== undefined && out.options.length > 0) {
+          msg.inline_choices = out.options.map((o) => ({ label: o.label, callback_data: o.value }))
+        }
+        const adapter_options: Record<string, unknown> = {}
+        if (project_id !== undefined) adapter_options['project_id'] = project_id
+        if (out.prompt_id !== undefined) adapter_options['prompt_id'] = out.prompt_id
+        if (out.kind !== undefined) adapter_options['kind'] = out.kind
+        if (out.allow_freeform !== undefined) adapter_options['allow_freeform'] = out.allow_freeform
+        if (out.upload_affordance !== undefined) {
+          adapter_options['upload_affordance'] = out.upload_affordance
+        }
+        if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
+        void appWsHolder.adapter?.send(msg)
+      }
+    // Translate an engine `ButtonPrompt` → the app-ws `agent_message` envelope
+    // (a superset already carrying options/prompt_id/allow_freeform/kind/
+    // upload_affordance) and fan it out over the socket. Ephemeral by design:
+    // the engine owns durability via `button_prompts` + an idempotent re-emit on
+    // the next connect (`on_session_open` below), so we do NOT persist onboarding
+    // prompts into the steady-state app chat log (which would double-render on a
+    // `resume` replay).
+    const emitOnboardingPrompt = (topic_id: string, prompt: ButtonPrompt): boolean => {
+      const env: AppWsOutboundAgentMessage = {
+        v: 1,
+        type: 'agent_message',
+        body: prompt.body,
+        message_id: prompt.prompt_id,
+        ts: Date.now(),
+        prompt_id: prompt.prompt_id,
+        options: prompt.options.map((o) => ({
+          label: o.label,
+          body: o.body,
+          value: o.value,
+          ...(o.image_url !== undefined ? { image_url: o.image_url } : {}),
+        })),
+        allow_freeform: prompt.allow_freeform,
+      }
+      if (prompt.kind !== undefined) env.kind = prompt.kind
+      const rawAff = (prompt.metadata as Record<string, unknown> | undefined)?.['upload_affordance']
+      if (rawAff !== null && typeof rawAff === 'object') {
+        const src = (rawAff as { source?: unknown }).source
+        if (src === 'chatgpt' || src === 'claude') env.upload_affordance = { source: src }
+        // Legacy two-upload 'both' normalizes to 'chatgpt' (mirrors chat-bridge).
+        else if (src === 'both') env.upload_affordance = { source: 'chatgpt' }
+      }
+      return appWsRegistry.send(topic_id, env)
+    }
+    // Drive one onboarding turn from a typed (freeform) answer.
+    const advanceOnboardingText = async (
+      user_id: string,
+      freeform_text: string,
+      observed_at: number,
+    ): Promise<void> => {
+      await engine.advance({
+        project_slug,
+        topic_id: appWsTopicId(user_id),
+        user_id,
+        channel_kind: 'app-socket',
+        freeform_text,
+        observed_at,
+      })
+    }
+    // Drive one onboarding turn from a tapped button (structured choice).
+    const advanceOnboardingChoice = async (
+      user_id: string,
+      prompt_id: string,
+      choice_value: string,
+      freeform_text: string | undefined,
+      observed_at: number,
+    ): Promise<void> => {
+      const choice: ButtonChoice = {
+        prompt_id,
+        choice_value,
+        chosen_at: observed_at,
+        speaker_user_id: user_id,
+        channel_kind: 'app-socket',
+        ...(freeform_text !== undefined ? { freeform_text } : {}),
+      }
+      await engine.advance({
+        project_slug,
+        topic_id: appWsTopicId(user_id),
+        user_id,
+        channel_kind: 'app-socket',
+        choice,
+        observed_at,
+      })
+    }
+    // Fill the late-bound onboarding button-prompt router NOW that the registry
+    // exists. The engine's `sendButtonPrompt` reads this holder at call time
+    // (see buildRoutedSendButtonPrompt) — `app:<user>` topics route here.
+    appWsButtonPromptRouter.send = async ({ topic_id, prompt }) => {
+      const ok = emitOnboardingPrompt(topic_id, prompt)
+      return { message_id: prompt.prompt_id, was_new: ok }
+    }
+    // Import-progress over app-ws: dropped for now (the terminal-state prompt
+    // still lands via the button-prompt path). Left as an explicit no-op holder
+    // so the router prefix is recognised (no "unknown-channel" warn). A future
+    // pass can translate progress → an `agent_message_partial`-style update.
+    void appWsImportProgressRouter
+
     const appWsReceiver = {
       receive: async (event: IncomingEvent): Promise<void> => {
         if (event.channel_kind !== 'app_socket') return
@@ -1356,6 +1515,16 @@ export function buildOpenGraphComposer(
           : []
         if (text.length === 0 && attachments.length === 0) return
         const userText = text.length > 0 ? text : 'Sent an attachment.'
+        const onboardingUserId = event.user.channel_user_id
+        // ONE path: while onboarding is active this typed answer advances the
+        // shared InterviewEngine (which emits the next prompt over THIS socket
+        // via the router above) instead of the steady-state live agent. The
+        // user's text was already echoed/persisted by the surface's
+        // ingestUserMessage, so it renders as a normal user bubble.
+        if (await isOnboardingActive(onboardingUserId)) {
+          await advanceOnboardingText(onboardingUserId, userText, event.received_at)
+          return
+        }
         const project_id =
           typeof event.adapter_metadata?.['project_id'] === 'string'
             ? (event.adapter_metadata['project_id'] as string)
@@ -1373,25 +1542,7 @@ export function buildOpenGraphComposer(
           project_id !== undefined && project_id.length > 0
             ? `${event.channel_topic_id}:${project_id}`
             : event.channel_topic_id
-        // Reply path: the live-agent turn emits `ChatOutbound`; translate the
-        // user-facing `agent_message` into an app-ws `OutgoingMessage` and fan it
-        // out via the adapter (which stamps message_id/ts + persists when a chat
-        // log is wired). Typing/ack/status frames are web-shaped and dropped.
-        const sendReply = (out: ChatOutbound): void => {
-          if (out.type !== 'agent_message') return
-          const msg: OutgoingMessage = {
-            topic: {
-              topic_id: '',
-              channel_kind: 'app_socket',
-              channel_topic_id: event.channel_topic_id,
-              project_id: project_id ?? null,
-              privacy_mode: 'regular',
-            },
-            text: out.body,
-          }
-          if (project_id !== undefined) msg.adapter_options = { project_id }
-          void appWsHolder.adapter?.send(msg)
-        }
+        const sendReply = buildAppWsSendReply(event.channel_topic_id, project_id)
         if (appWsChatTurn === null) {
           sendReply({
             type: 'agent_message',
@@ -1421,6 +1572,52 @@ export function buildOpenGraphComposer(
       // Codex r1 [P2]: route slash commands (/note, /remind, /skills, …) through
       // the SAME chained filter the web chat uses — parity, not a second path.
       chat_command_filter: chatCommandFilter,
+      // Onboarding consolidation — fire the FIRST onboarding prompt over this
+      // socket on connect when the owner hasn't finished onboarding. Idempotent:
+      // engine.start re-emits the active prompt on a reconnect.
+      on_session_open: async ({ user_id, channel_topic_id }) => {
+        if (await isOnboardingActive(user_id)) {
+          await engine.start({
+            project_slug,
+            topic_id: channel_topic_id,
+            user_id,
+            signup_via: 'web',
+          })
+        }
+      },
+      // Onboarding consolidation — a tapped quick-reply button. Onboarding →
+      // structured engine.advance; steady-state → feed the choice to the live
+      // agent as the user's selection (same single surface).
+      on_button_choice: async ({
+        user_id,
+        channel_topic_id,
+        project_id,
+        prompt_id,
+        choice_value,
+        freeform_text,
+      }) => {
+        const now = Date.now()
+        if (await isOnboardingActive(user_id)) {
+          await advanceOnboardingChoice(user_id, prompt_id, choice_value, freeform_text, now)
+          return
+        }
+        if (appWsChatTurn === null) return
+        const turnTopicId =
+          project_id !== undefined && project_id.length > 0
+            ? `${appWsTopicId(user_id)}:${project_id}`
+            : appWsTopicId(user_id)
+        const replyText =
+          freeform_text !== undefined && freeform_text.length > 0 ? freeform_text : choice_value
+        await appWsChatTurn({
+          project_slug,
+          user_id,
+          topic_id: turnTopicId,
+          ...(project_id !== undefined ? { project_id } : {}),
+          user_text: replyText,
+          send: buildAppWsSendReply(channel_topic_id, project_id),
+          observed_at: now,
+        })
+      },
     })
 
     return {
