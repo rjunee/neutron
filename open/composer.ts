@@ -1668,6 +1668,14 @@ export function buildOpenGraphComposer(
       // socket on connect when the owner hasn't finished onboarding. Idempotent:
       // engine.start re-emits the active prompt on a reconnect.
       on_session_open: async ({ user_id, channel_topic_id }) => {
+        // FIX 1 — seed the projects baseline BEFORE engine.start (the page
+        // already bootstrapped with the pre-start set, so the first call only
+        // records it). engine.start can ITSELF create projects on a resume —
+        // crash-resume into `wow_fired` or a `projects_proposed` auto-confirm —
+        // so seeding after it would take the FIRST snapshot post-mutation and
+        // swallow the change (Codex r1 [P2]). Bracketing start with a pre-seed +
+        // a post-emit makes a start()-driven project set land live.
+        emitProjectsChangedIfChanged(user_id)
         if (await isOnboardingActive(user_id)) {
           await engine.start({
             project_slug,
@@ -1676,9 +1684,7 @@ export function buildOpenGraphComposer(
             signup_via: 'web',
           })
         }
-        // FIX 1 — seed the projects baseline at connect (the page already
-        // bootstrapped with the current set, so the first call only records it;
-        // later onboarding turns emit a `projects_changed` frame on real change).
+        // Emit if engine.start (or anything since the pre-seed) changed the set.
         emitProjectsChangedIfChanged(user_id)
       },
       // Onboarding consolidation — a tapped quick-reply button. Onboarding →
