@@ -177,9 +177,10 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
 The live chat agent is a spawned interactive `claude` REPL driven over the
 dev-channel (`runtime/adapters/claude-code/persistent/`). It reaches the
 gateway's in-process tool surface — Cores (`/cal` `/email` `/note` `/remind`
-`/research`), `doc_search` / `doc_read`, `message_search`, `dispatch_agent`,
-`skill_forge_*`, and the `neutron-tools` surface — as **native MCP tool calls**,
-not via the user typing a slash-command.
+`/research`), `doc_search` / `doc_read`, `message_search`, `gbrain_search`
+(memory recall, P0-2), `dispatch_agent`, `skill_forge_*`, and the
+`neutron-tools` surface — as **native MCP tool calls**, not via the user typing
+a slash-command.
 
 - **The transport.** At spawn the substrate writes a per-session `--mcp-config`
   with TWO `mcpServers`: the dev-channel (the reply sink) **and** a `neutron`
@@ -556,6 +557,25 @@ returns the live trio the composer threads in — the `client`, the admin
 fan-out). `resolveGbrainClientOptions` is the pure config seam: it scopes the
 `gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`) and forwards the
 optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
+
+- **Agent memory RECALL (P0-2) — `gbrain_search` (`gbrain-memory/agent-tool.ts`).**
+  The scribe WRITES entities + facts to this store on every turn; `gbrain_search`
+  is the matching READ tool the spawned agent calls natively as
+  `mcp__neutron__gbrain_search` (rides the P0-1 bridge). It is backed by the SAME
+  `memoryStore.query` the admin Memory tab uses — one index, no second client —
+  so the write→read asymmetry is closed: anything the scribe remembered is
+  recallable mid-turn. `read:memory`, read-only, `{ query, limit? }` →
+  `{ results: [{ id, title?, content, score, kind? }] }` (deduped by page; `title`
+  + `kind` from the real GBrain row fields `title` / `type`); empty query lists
+  recent pages; a host without the `gbrain` binary degrades to no results. A
+  committed real-PGLite-brain round-trip test
+  (`gbrain-memory/__tests__/agent-tool-real-brain.test.ts`) proves the full
+  write→native-recall loop. This is the
+  vault-wide / fast-fact recall surface — a different corpus than `doc_search`
+  (project files) + `message_search` (chat history): GBrain holds the entity
+  pages (people/companies/projects/meetings/concepts/originals) + scribe facts.
+  Wired when `open/composer.ts` supplies `MiscCompositionInput.gbrain_search.store`
+  (always, since `buildGBrainMemory` always builds the store).
 
 - **Default — keyword + graph, NO embeddings.** Memory search runs on GBrain's
   BM25 keyword index + the typed-edge graph. No embedding/vector store

@@ -106,6 +106,22 @@ export interface MiscCompositionInput {
     runtime: import('../../../message-search/runtime.ts').MessageSearchRuntime
   }
   /**
+   * Memory recall (P0-2 — `gbrain_search`) — when supplied, the `tools`
+   * module registers the `gbrain_search` agent tool backed by this owner's
+   * `GBrainMemoryStore`, so the live chat agent can recall the entity pages
+   * (people/companies/projects/meetings/concepts/originals) + scribe-extracted
+   * facts that the WRITE path persists every turn. Closes the write→read
+   * asymmetry: scribe writes to GBrain on every turn, this tool reads it back.
+   * Distinct corpus from doc_search (project files) + message_search (chat
+   * history) — the vault-wide / fast-fact recall surface. The store is
+   * constructed by the production composer (which owns the GBrain client);
+   * omitting it leaves the surface unregistered (unchanged pre-recall
+   * behaviour).
+   */
+  gbrain_search?: {
+    store: import('../../../gbrain-memory/memory-store.ts').MemoryStore
+  }
+  /**
    * Agent-dispatch family (parity gap #3 — the named-specialist + ad-hoc
    * background-agent surface that mirrors Vajra's `spawn-agent.sh`). When
    * supplied, the `tools` module registers the `dispatch_agent` agent tool
