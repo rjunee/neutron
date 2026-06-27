@@ -1,8 +1,8 @@
 import type { TaskStore } from '../../../tasks/store.ts'
 import type { LlmCallFn } from '../../../onboarding/interview/phase-spec-resolver.ts'
 import type { PersonaPromptLoader } from '../../realmode-composer/persona-loader.ts'
-import type { ProactiveContextSources } from '../../proactive/morning-brief.ts'
-import type { ProactiveTopicCandidate } from '../../proactive/idle-nudge-sweep.ts'
+import type { BriefComposer, ProactiveContextSources } from '../../proactive/morning-brief.ts'
+import type { NudgeRater, ProactiveTopicCandidate } from '../../proactive/idle-nudge-sweep.ts'
 
 export interface TasksCompositionInput {
   /**
@@ -140,6 +140,22 @@ export interface TasksCompositionInput {
        * watermark for the idle sweep. Required to enable the sweep.
        */
       listIdleTopics?: () => ProactiveTopicCandidate[] | Promise<ProactiveTopicCandidate[]>
+      /**
+       * Optional LLM brief composer (Vajra parity). When supplied, the brief
+       * body is written by the warm LLM over the resolved context; on failure
+       * the deterministic template is used. Production wires
+       * `buildLlmBriefComposer` over the same warm substrate the nudge engine
+       * uses. Absent → the pure template (unchanged default).
+       */
+      composeBrief?: BriefComposer
+      /**
+       * Optional dual-rating ≥7 quality gate for the idle-nudge sweep (Vajra
+       * parity). When supplied, a candidate that clears idle/dedupe is also
+       * rated on leverage + gratitude and only posts when both ≥7. Production
+       * wires `buildLlmNudgeRater`; absent → no quality gate (the sweep would
+       * nudge on every idle topic, so production MUST supply it).
+       */
+      rateNudge?: NudgeRater
       /** Owner IANA timezone (defaults to America/Los_Angeles). */
       timezone?: string
       /** Owner-local hour at/after which the brief may post (default 7). */

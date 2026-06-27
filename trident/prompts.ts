@@ -8,6 +8,20 @@
  * tick loop, so the prompts ask only for the work + the locked terminal
  * contract lines the orchestrator parses.
  *
+ * SINGLE SOURCE OF TRUTH (P1-3 activation): the Forge/Argus contract
+ * bodies now LIVE on disk at `prompts/forge.md` + `prompts/argus.md` and
+ * are read at render time via `@neutronai/prompts` `loadPrompt` — the same
+ * runtime file-read the Atlas/Sentinel personas already use
+ * (`trident/agent-prompts.ts`). This kills the drift landmine the audit
+ * flagged: before, the `.md` files were dead code and the REAL template was
+ * an inline string here, so editing the file the team reads changed nothing.
+ * Those `.md` files were rewritten from the legacy Nova `/forge/delivered`
+ * model to THIS native substrate contract, so loading them is safe — they
+ * satisfy `parseForgeOutput` / `parseArgusVerdict`, not fight them. The
+ * `_FALLBACK` constants below are a terse degraded path used ONLY when the
+ * file cannot be read (bare checkout / partial deploy); they are deliberately
+ * minimal (not a second full copy) so there is no content fork.
+ *
  * Layering note: this module is owned by the foundational `trident/`
  * runtime — it deliberately does NOT import from `cores/free/code-gen`
  * (a Core importing-up into the runtime is fine; the runtime importing
@@ -25,6 +39,7 @@
  *     selects the focused scope from a pre-spawn diff-size probe.
  */
 
+import { buildPromptVars, loadPrompt } from '../prompts/index.ts'
 import type { TridentRun } from './store.ts'
 
 /**
@@ -38,9 +53,15 @@ export const ARGUS_DIFF_LINE_LIMIT = 3000
 // Forge
 // ---------------------------------------------------------------------------
 
-export const FORGE_SYSTEM_PROMPT = `You are Forge — Neutron's autonomous build sub-agent. You build, test, push, and open a PR without blocking on human input.
+/**
+ * Terse DEGRADED-path Forge contract, used ONLY when `prompts/forge.md`
+ * cannot be read (bare checkout / partial deploy). The rich, single-source
+ * contract lives on disk; this minimal copy keeps the parser-locked
+ * `PR_NUMBER=`/`BRANCH=`/`WORKTREE=` lines + render tokens so even a degraded
+ * dispatch round-trips through `parseForgeOutput` rather than crashing.
+ */
+const FORGE_FALLBACK = `You are Forge — Neutron's autonomous build sub-agent. You build, test, push, and open a PR without blocking on human input.
 
-WORKTREE / REPO
 - Working dir: {{repo_path}}
 - Base branch: {{base_branch}}
 - Feature branch (create + use this): {{branch}}
@@ -48,26 +69,37 @@ WORKTREE / REPO
 CONTRACT
 1. Read the task below.
 2. From {{base_branch}}, create + check out {{branch}}.
-3. Make the smallest correct change that satisfies the task. Match the codebase's conventions.
-4. Run the project's test command (e.g. \`bun test\`). Iterate until it is green.
-5. \`git add -A && git commit -m "<one-line title>"\`.
-6. Push the branch ({{push_hint}}).
-7. Open the PR ({{pr_hint}}).
-8. Emit the LAST THREE LINES of your final response with NO trailing text and NOT wrapped in a code fence:
+3. Make the smallest correct change that satisfies the task. Run the tests until green.
+4. Commit, push the branch ({{push_hint}}), and open the PR ({{pr_hint}}).
+5. Emit the LAST THREE LINES with NO trailing text and NOT fenced:
    PR_NUMBER=<integer>
    BRANCH={{branch}}
-   WORKTREE={{repo_path}}
+   WORKTREE={{repo_path}}`
 
-RULES
-- NEVER commit to {{base_branch}}. Always {{branch}}.
-- NEVER block on human input. If ambiguous, make the best judgment call + note it in the PR body.
-- If a test failure is genuinely unrelated to your change, skip it with a one-line reason + flag it in the PR body.
-- Keep the diff minimal. Three similar lines beats a premature abstraction.
+/**
+ * Read the Forge contract body from `prompts/forge.md`, falling back to the
+ * terse inline copy if the file is missing/empty/unreadable. Called fresh on
+ * every render so an edit to the on-disk file takes effect immediately (the
+ * single-source guarantee — no stale module-load snapshot). The file carries
+ * lowercase `{{repo_path}}` etc. render tokens, which `loadPrompt`'s strict
+ * UPPERCASE-only substitution leaves untouched for `fill()` to resolve.
+ */
+export function loadForgeTemplate(): string {
+  try {
+    const content = loadPrompt('forge.md', buildPromptVars())
+    if (typeof content === 'string' && content.trim().length > 0) return content
+  } catch {
+    // Fall through to the degraded inline contract — never throw into dispatch.
+  }
+  return FORGE_FALLBACK
+}
 
-CROSS-MODEL REVIEW (best-effort — NEVER a hang point)
-- Order is FIXED: OPEN THE PR FIRST (push + open, steps 6-7 above), THEN run any cross-model / second-model / Codex review, and ONLY THEN emit the step-8 contract lines. The PR must already exist before the review so a stalled or timed-out review never costs the deliverable. The PR_NUMBER/BRANCH/WORKTREE lines MUST stay the FINAL, unfenced output — never print review results after them (that would push the contract lines out of last position and break parsing).
-- A cross-model review is BEST-EFFORT. It must NEVER gate the PR, block your turn, or be a reason to withhold the contract lines. A failed, empty, or timed-out review is fine — note it and move on.
-- NEVER end your turn to "wait for", "be notified by", or "resume when" an async / background review (or a scheduled wakeup that awaits one). Nothing resumes a yielded headless turn, so it idles until reaped with the PR unshipped. If you run a review at all, run it SYNCHRONOUSLY inline in this turn (a blocking foreground call) and read its result here, or skip it entirely.`
+/**
+ * The Forge contract body, resolved from `prompts/forge.md` at module load.
+ * Retained as a named export for back-compat consumers; `renderForgePrompt`
+ * re-reads via `loadForgeTemplate()` so live file edits are picked up.
+ */
+export const FORGE_SYSTEM_PROMPT = loadForgeTemplate()
 
 /**
  * The Ralph BOOTSTRAP note, appended to the initial Forge prompt when a
@@ -101,7 +133,7 @@ export function renderForgePrompt(run: TridentRun, base_branch: string): string 
     ? `gh pr create --title "<title>" --body "<3-5 line description>"`
     : `there is no GitHub remote — record the branch name as PR_NUMBER is a local placeholder; emit PR_NUMBER=0`
   const ralphNote = run.ralph ? `\n\n${RALPH_BOOTSTRAP_NOTE}` : ''
-  return fill(FORGE_SYSTEM_PROMPT, {
+  return fill(loadForgeTemplate(), {
     repo_path: run.worktree ?? run.repo_path,
     base_branch,
     branch,
@@ -212,7 +244,13 @@ ${numbered}`
 // Argus
 // ---------------------------------------------------------------------------
 
-export const ARGUS_SYSTEM_PROMPT = `You are Argus — Neutron's autonomous code-review sub-agent. You review a branch's changes and return an APPROVE / REQUEST CHANGES verdict.
+/**
+ * Terse DEGRADED-path Argus contract, used ONLY when `prompts/argus.md`
+ * cannot be read. Keeps the parser-locked `APPROVE` / `REQUEST CHANGES`
+ * verdict line + render tokens so a degraded review still round-trips
+ * through `parseArgusVerdict`.
+ */
+const ARGUS_FALLBACK = `You are Argus — Neutron's autonomous code-review sub-agent. You review a branch's changes and return an APPROVE / REQUEST CHANGES verdict.
 
 SCOPE
 - Branch: {{branch}}
@@ -222,14 +260,32 @@ SCOPE
 
 CONTRACT
 1. Read the changes within the scope above.
-2. Identify blockers (must-fix before merge), important issues (should-fix), and minor nits (optional).
-3. Emit a verdict line on its own: either \`APPROVE\` or \`REQUEST CHANGES\`.
-4. If REQUEST CHANGES, follow with a numbered list (blockers first). Be specific: file:line + what's wrong + what to do.
-5. Keep the response under 4 KB.
+2. Emit a verdict line on its own: either \`APPROVE\` or \`REQUEST CHANGES\`.
+3. If REQUEST CHANGES, follow with a numbered list (blockers first): file:line + what's wrong + what to do.
+4. NEVER exit silently: if you cannot complete the review, post a TRUNCATED verdict saying what you could NOT verify.`
 
-RULES
-- NEVER exit silently. If you cannot complete the review (diff too large, a file you can't read), post a TRUNCATED verdict explaining exactly what you could NOT verify — do not vanish.
-- Be terse and fair. Block on correctness, security, and spec adherence — never on style the codebase already contradicts.`
+/**
+ * Read the Argus contract body from `prompts/argus.md`, falling back to the
+ * terse inline copy if unreadable. Read fresh on every render (single-source
+ * — no stale snapshot). Lowercase render tokens survive `loadPrompt` for
+ * `fill()`.
+ */
+export function loadArgusTemplate(): string {
+  try {
+    const content = loadPrompt('argus.md', buildPromptVars())
+    if (typeof content === 'string' && content.trim().length > 0) return content
+  } catch {
+    // Fall through to the degraded inline contract — never throw into dispatch.
+  }
+  return ARGUS_FALLBACK
+}
+
+/**
+ * The Argus contract body, resolved from `prompts/argus.md` at module load.
+ * Retained as a named export for back-compat; `renderArgusPrompt` re-reads via
+ * `loadArgusTemplate()` so live file edits are picked up.
+ */
+export const ARGUS_SYSTEM_PROMPT = loadArgusTemplate()
 
 /**
  * Choose Argus's review scope text from a pre-spawn diff-size probe.
@@ -270,7 +326,7 @@ export function renderArgusPrompt(input: {
     round: input.round,
     diff_line_count: input.diff_line_count,
   })
-  return fill(ARGUS_SYSTEM_PROMPT, {
+  return fill(loadArgusTemplate(), {
     branch: input.branch,
     pr_number: String(input.pr_number),
     round: String(input.round),

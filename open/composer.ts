@@ -102,6 +102,11 @@ import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '../gateway/realmode-composer/persona-loader.ts'
 import type { GraphComposer } from '../gateway/boot-helpers.ts'
 import type { CompositionInput } from '../gateway/composition.ts'
+import { buildLlmBriefComposer } from '../gateway/proactive/morning-brief.ts'
+import {
+  buildLlmNudgeRater,
+  type ProactiveTopicCandidate,
+} from '../gateway/proactive/idle-nudge-sweep.ts'
 import { readSessionCookie, signSessionCookie } from '../landing/session-cookie.ts'
 
 import {
@@ -1376,6 +1381,51 @@ export function buildOpenGraphComposer(
       },
     })
 
+    // ── P1-4 — proactive messaging ACTIVATION (morning brief + idle nudge) ──
+    // The proactive modules (`gateway/proactive/*`) were built + tested but
+    // DEAD: they register only when `tasks.proactive` is set, and the Open
+    // composer never set it. Wire it now so the daily brief + idle-nudge sweep
+    // ship ON (no feature flag). Both post through the production ChannelRouter
+    // (resolved post-boot inside `build-core-modules`), reuse the shared cron
+    // registry, and route LLM work through the SAME warm `cc-llm` substrate the
+    // nudge engine / wow picker use (`buildAnthropicLlmCall`).
+    const proactiveLlm =
+      llmCallSubstrate !== null
+        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
+        : null
+    const proactiveGeneralTopic = webTopicId(OWNER_USER_ID)
+    const tasksConfig: NonNullable<CompositionInput['tasks']> = {
+      // The nudge sweep posts the ranker's "do this next" pick; enable the
+      // ranker so the sweep has fresh picks (no-op every tick when LLM-less).
+      enable_nudge_engine_cron: true,
+      ...(proactiveLlm !== null ? { nudge_engine: { llm: proactiveLlm } } : {}),
+      proactive: {
+        resolveGeneralTopic: (): string => proactiveGeneralTopic,
+        // Enumerate the owner's web topics + their last-activity watermark from
+        // the durable ButtonStore history (the General + per-project rows). The
+        // sweep's idle threshold + dedupe + ≥7 gate decide what actually posts.
+        listIdleTopics: async (): Promise<ProactiveTopicCandidate[]> => {
+          const rows = await landing.buttonStore.listTopicsByUser({
+            user_id_prefix: proactiveGeneralTopic,
+            now: Date.now(),
+          })
+          return rows.map((row) => ({
+            topic_id: row.topic_id,
+            project_slug,
+            last_activity_ms: row.last_created_at,
+          }))
+        },
+        ...(proactiveLlm !== null
+          ? {
+              // LLM brief over real sources (Vajra parity) + the dual-rating
+              // ≥7 nudge quality gate. Both degrade safely without an LLM.
+              composeBrief: buildLlmBriefComposer(proactiveLlm),
+              rateNudge: buildLlmNudgeRater(proactiveLlm),
+            }
+          : {}),
+      },
+    }
+
     // P1b — single-owner localhost-trust auth resolver (Path A, Ryan-locked
     // 2026-06-26). The owner is the sole user, the server binds 127.0.0.1, and
     // the HTTP layer already authenticates them via the start-token/cookie, so
@@ -1914,6 +1964,8 @@ export function buildOpenGraphComposer(
       approval_notifier: { notify: async () => undefined },
       watchdog_notifier: { notify: async () => undefined },
       reminder_dispatcher,
+      // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
+      tasks: tasksConfig,
       heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
       platform,
       cron_jobs: cronJobs,

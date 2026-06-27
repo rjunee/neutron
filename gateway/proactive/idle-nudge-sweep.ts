@@ -61,7 +61,39 @@ export type NudgeSkipReason =
   | 'active'
   | 'no_pick'
   | 'already_nudged'
+  | 'low_quality'
   | 'deliver_failed'
+
+/**
+ * The Vajra dual-rating quality floor. A candidate nudge is rated 1–10 on TWO
+ * dimensions; BOTH must be ≥ this to post. Ported verbatim from
+ * `~/vajra/prompts/re-engagement-nudge-agent.md` ("If EITHER rating is below 7,
+ * output NONE. Better to stay silent than push a middling nudge.").
+ */
+export const NUDGE_QUALITY_FLOOR = 7
+
+/**
+ * The two-dimension self-rating of a candidate nudge (each 1–10):
+ *   • `leverage`  — is this the HIGHEST-leverage action visible in the topic,
+ *                   not merely a plausible one?
+ *   • `gratitude` — would the owner react "good call" (grateful) vs neutral /
+ *                   annoyed?
+ */
+export interface NudgeRating {
+  leverage: number
+  gratitude: number
+}
+
+/**
+ * Rate a candidate nudge before it posts. Returns `null` to ABSTAIN (the
+ * Vajra "output NONE" path) — treated as a skip, never a post. Production
+ * wires an LLM rater (`buildLlmNudgeRater`); tests inject a stub.
+ */
+export type NudgeRater = (input: {
+  project_slug: string
+  pick: TodayPick
+  candidate: ProactiveTopicCandidate
+}) => Promise<NudgeRating | null>
 
 export interface IdleNudgeSweepResult {
   posted: number
@@ -81,6 +113,15 @@ export interface IdleNudgeSweepDeps {
   tz?: string
   idle_threshold_ms?: number
   channel_kind?: Topic['channel_kind']
+  /**
+   * Optional dual-rating quality gate (Vajra parity). When supplied, a
+   * candidate that clears the idle/dedupe gate is ALSO rated 1–10 on leverage
+   * + gratitude and only posts when BOTH are ≥ `NUDGE_QUALITY_FLOOR`; a `null`
+   * rating abstains (skip). Absent → no quality gate (the pre-existing
+   * idle/dedupe-only behaviour, used by tests / LLM-less instances). Production
+   * MUST wire this so the sweep does not nudge on every idle topic.
+   */
+  rateNudge?: NudgeRater
   log?(msg: string): void
 }
 
@@ -165,6 +206,86 @@ export function evaluateNudgeGate(input: {
 }
 
 /**
+ * The dual-rating quality gate. PURE. Posts iff a rating exists AND both
+ * dimensions clear `NUDGE_QUALITY_FLOOR` — a `null` rating (the LLM abstained,
+ * "output NONE") or either dimension below the floor rejects. Vajra parity:
+ * "If EITHER rating is below 7, output NONE."
+ */
+export function evaluateQualityGate(
+  rating: NudgeRating | null,
+):
+  | { post: true }
+  | { post: false; reason: 'low_quality' } {
+  if (rating === null) return { post: false, reason: 'low_quality' }
+  if (rating.leverage < NUDGE_QUALITY_FLOOR || rating.gratitude < NUDGE_QUALITY_FLOOR) {
+    return { post: false, reason: 'low_quality' }
+  }
+  return { post: true }
+}
+
+/** System prompt for the LLM nudge rater — the Vajra "Quality floor" audit. */
+export const LLM_NUDGE_RATER_SYSTEM = [
+  "You rate a candidate re-engagement nudge before it is sent to the owner.",
+  'Rate it on TWO dimensions, each an integer 1–10:',
+  '  LEVERAGE  — is this the HIGHEST-leverage action visible for this topic right',
+  '              now, not just a plausible one? (10 = clearly the top priority)',
+  '  GRATITUDE — would the owner react "good call" (grateful) vs neutral vs',
+  '              annoyed? (10 = strongly grateful for the nudge)',
+  'Be strict: a middling nudge is worse than silence.',
+  'Output EXACTLY two lines and nothing else:',
+  'LEVERAGE=<n>',
+  'GRATITUDE=<n>',
+].join('\n')
+
+/**
+ * Build an LLM-backed nudge rater. Asks the warm LLM to score the candidate
+ * nudge on leverage + gratitude and parses the strict `LEVERAGE=`/`GRATITUDE=`
+ * lines. ANY parse failure / out-of-range value returns `null` (ABSTAIN →
+ * skip) — the safe default, mirroring Vajra's "output NONE when uncertain."
+ */
+export function buildLlmNudgeRater(
+  llm: (input: { system: string; user: string; max_tokens: number }) => Promise<string>,
+  opts: { max_tokens?: number } = {},
+): NudgeRater {
+  const maxTokens = opts.max_tokens ?? 60
+  return async ({ project_slug, pick }): Promise<NudgeRating | null> => {
+    const user = [
+      `Project: ${project_slug}`,
+      `Candidate next action: ${pick.title}`,
+      `Rationale: ${pick.rationale}`,
+      '',
+      'Rate this nudge now.',
+    ].join('\n')
+    let raw: string
+    try {
+      raw = await llm({ system: LLM_NUDGE_RATER_SYSTEM, user, max_tokens: maxTokens })
+    } catch {
+      return null
+    }
+    return parseNudgeRating(raw)
+  }
+}
+
+/**
+ * Parse the rater's `LEVERAGE=<n>` / `GRATITUDE=<n>` lines. Returns null unless
+ * BOTH are present as integers in 1–10. Exported for unit tests.
+ */
+export function parseNudgeRating(raw: string): NudgeRating | null {
+  if (typeof raw !== 'string') return null
+  const lev = /LEVERAGE\s*=\s*(\d{1,2})/i.exec(raw)
+  const grat = /GRATITUDE\s*=\s*(\d{1,2})/i.exec(raw)
+  if (lev === null || grat === null) return null
+  const leverage = parseInt(lev[1] ?? '', 10)
+  const gratitude = parseInt(grat[1] ?? '', 10)
+  if (!inRange(leverage) || !inRange(gratitude)) return null
+  return { leverage, gratitude }
+}
+
+function inRange(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && n <= 10
+}
+
+/**
  * Run one idle-topic nudge sweep. Posts a nudge for each topic that clears
  * the quality gate; records the nudge in the dedupe ledger. Never throws — a
  * per-topic deliver failure is counted + logged and the sweep continues.
@@ -181,7 +302,7 @@ export async function runIdleNudgeSweep(
   const result: IdleNudgeSweepResult = {
     posted: 0,
     skipped: 0,
-    skip_reasons: { active: 0, no_pick: 0, already_nudged: 0, deliver_failed: 0 },
+    skip_reasons: { active: 0, no_pick: 0, already_nudged: 0, low_quality: 0, deliver_failed: 0 },
     posted_topics: [],
   }
 
@@ -214,6 +335,26 @@ export async function runIdleNudgeSweep(
       result.skipped++
       result.skip_reasons.no_pick++
       continue
+    }
+
+    // Dual-rating quality gate (Vajra parity) — only when a rater is wired.
+    // A candidate that cleared idle/dedupe still must clear the ≥7 leverage +
+    // gratitude floor; a null rating abstains. This is what stops the sweep
+    // from nudging on every idle topic.
+    if (deps.rateNudge !== undefined) {
+      let rating: NudgeRating | null
+      try {
+        rating = await deps.rateNudge({ project_slug: candidate.project_slug, pick, candidate })
+      } catch (err) {
+        deps.log?.(`[proactive] idle-nudge rater threw for ${candidate.topic_id}: ${err}`)
+        rating = null
+      }
+      const quality = evaluateQualityGate(rating)
+      if (!quality.post) {
+        result.skipped++
+        result.skip_reasons.low_quality++
+        continue
+      }
     }
 
     const topic = proactiveTopic(candidate.topic_id, channelKind)

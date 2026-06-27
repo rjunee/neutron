@@ -17,6 +17,7 @@ import { ProjectDb } from '../../../persistence/index.ts'
 import type { OutgoingMessage } from '../sink.ts'
 import { ProactiveStateStore } from '../state-store.ts'
 import {
+  buildLlmBriefComposer,
   composeMorningBrief,
   gatherBriefContext,
   ownerLocalHour,
@@ -242,5 +243,51 @@ describe('runMorningBrief (compose + POST)', () => {
     const r2 = await runMorningBrief(deps({ now: () => NOON_LA_MS + 1000 }))
     expect(r2.status).toBe('posted')
     expect(h.sent).toHaveLength(1)
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// P1-4 — LLM brief composition (Vajra parity). When a `composeWithLlm` seam is
+// wired the brief body is written by the warm LLM over the resolved context;
+// the pure template is the deterministic fallback when the LLM fails.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('runMorningBrief — LLM composition over real sources + POST via sink', () => {
+  it('composes via the LLM (grounded in the resolved context) and POSTS that body', async () => {
+    const seen: Array<{ system: string; user: string }> = []
+    const composeWithLlm = buildLlmBriefComposer(async ({ system, user }) => {
+      seen.push({ system, user })
+      return '🌅 Brief — ship the proactive layer today; standup at 09:30.'
+    })
+    const r = await runMorningBrief(deps({ now: () => NOON_LA_MS, composeWithLlm }))
+
+    expect(r.status).toBe('posted')
+    // The LLM-composed body — NOT the deterministic template — reached the sink.
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]!.text).toBe('🌅 Brief — ship the proactive layer today; standup at 09:30.')
+    // The model was grounded in the REAL resolved sources (focus + calendar).
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.user).toContain('Ship the proactive layer')
+    expect(seen[0]!.user).toContain('Standup')
+    expect(seen[0]!.system.toLowerCase()).toContain('never invent')
+  })
+
+  it('falls back to the deterministic template when the LLM throws (brief never lost)', async () => {
+    const composeWithLlm = buildLlmBriefComposer(async () => {
+      throw new Error('llm unavailable')
+    })
+    const r = await runMorningBrief(deps({ now: () => NOON_LA_MS, composeWithLlm }))
+    expect(r.status).toBe('posted')
+    expect(h.sent).toHaveLength(1)
+    // The pure template body — headed "Morning brief — <day>".
+    expect(h.sent[0]!.text).toContain('Morning brief — 2026-06-20')
+    expect(h.sent[0]!.text).toContain('Ship the proactive layer')
+  })
+
+  it('falls back to the template when the LLM returns empty', async () => {
+    const composeWithLlm = buildLlmBriefComposer(async () => '   ')
+    const r = await runMorningBrief(deps({ now: () => NOON_LA_MS, composeWithLlm }))
+    expect(r.status).toBe('posted')
+    expect(h.sent[0]!.text).toContain('Morning brief — 2026-06-20')
   })
 })

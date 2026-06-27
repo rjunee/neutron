@@ -815,6 +815,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           }
           if (proactiveCfg.timezone !== undefined) briefDeps.tz = proactiveCfg.timezone
           if (proactiveCfg.brief_hour !== undefined) briefDeps.brief_hour = proactiveCfg.brief_hour
+          if (proactiveCfg.composeBrief !== undefined) {
+            briefDeps.composeWithLlm = proactiveCfg.composeBrief
+          }
           const briefHandler = buildMorningBriefHandler(briefDeps)
           const briefRegister: Parameters<typeof registerMorningBriefCron>[0] = {
             project_slug: input.project_slug,
@@ -842,6 +845,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           if (proactiveCfg.timezone !== undefined) sweepDeps.tz = proactiveCfg.timezone
           if (proactiveCfg.idle_threshold_ms !== undefined) {
             sweepDeps.idle_threshold_ms = proactiveCfg.idle_threshold_ms
+          }
+          if (proactiveCfg.rateNudge !== undefined) {
+            sweepDeps.rateNudge = proactiveCfg.rateNudge
           }
           const sweepHandler = buildIdleNudgeSweepHandler(sweepDeps)
           const sweepRegister: Parameters<typeof registerIdleNudgeSweepCron>[0] = {

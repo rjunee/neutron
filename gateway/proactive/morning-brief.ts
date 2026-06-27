@@ -208,6 +208,71 @@ export function composeMorningBrief(ctx: BriefContext, day: string): string {
   return lines.join('\n')
 }
 
+/**
+ * Minimal LLM seam (structurally the onboarding `LlmCallFn`): a single
+ * Anthropic-Messages turn. Kept local so this module does not import the
+ * onboarding resolver; production passes the same warm-substrate call it
+ * uses for the nudge engine / wow picker.
+ */
+export type ProactiveLlm = (input: {
+  system: string
+  user: string
+  max_tokens: number
+}) => Promise<string>
+
+/**
+ * Compose the brief body from the resolved context. Production routes this
+ * through the warm LLM (`buildLlmBriefComposer`); the pure `composeMorningBrief`
+ * template is the deterministic fallback when no LLM is wired or it fails.
+ */
+export type BriefComposer = (ctx: BriefContext, day: string) => Promise<string>
+
+/** System prompt for the LLM brief — lifts Vajra's morning-brief intent
+ *  (`~/vajra/prompts/morning-brief.md`): structured, <20 lines, evidence-only,
+ *  no fabrication, no filler. */
+export const LLM_BRIEF_SYSTEM = [
+  "You are Neutron's morning brief agent. Compose a short daily brief from the",
+  'structured context provided — and ONLY that context. Hard rules:',
+  '- NEVER invent events, tasks, or facts not present in the context.',
+  '- Keep it under 20 lines. Lead with what matters today.',
+  '- If a section is empty, omit it. If everything is empty, say it is a clear',
+  '  day in one honest line (do not claim the calendar is clear unless it was',
+  '  actually checked).',
+  '- Plain, direct voice. No preamble, no sign-off, no filler.',
+].join('\n')
+
+/**
+ * Build an LLM-backed brief composer. Renders the resolved `BriefContext`
+ * (the SAME structured sections the pure composer uses, so the model never
+ * sees anything the deterministic path wouldn't) into a user message and asks
+ * the warm LLM to write the brief. The caller (`runMorningBrief`) falls back
+ * to the pure template if this throws or returns empty — the LLM is an
+ * enrichment, never a single point of failure.
+ */
+export function buildLlmBriefComposer(
+  llm: ProactiveLlm,
+  opts: { max_tokens?: number } = {},
+): BriefComposer {
+  const maxTokens = opts.max_tokens ?? 700
+  return async (ctx: BriefContext, day: string): Promise<string> => {
+    // Reuse the pure composer to render the evidence block — it already drops
+    // empty sections and never fabricates — then ask the LLM to turn that
+    // evidence into the brief. This guarantees the model is grounded in
+    // exactly the resolved context, nothing more.
+    const evidence = composeMorningBrief(ctx, day)
+    const user = [
+      `Day: ${day}`,
+      '',
+      'Structured context (the only evidence — do not add anything beyond it):',
+      evidence,
+      '',
+      'Write the morning brief now.',
+    ].join('\n')
+    const out = await llm({ system: LLM_BRIEF_SYSTEM, user, max_tokens: maxTokens })
+    return typeof out === 'string' ? out.trim() : ''
+  }
+}
+
 /** Owner-local hour (0–23) for `nowMs` in `tz`. */
 export function ownerLocalHour(nowMs: number, tz: string): number {
   const fmt = new Intl.DateTimeFormat('en-GB', {
@@ -231,6 +296,13 @@ export interface MorningBriefDeps {
   tz?: string
   /** Owner-local hour at/after which the brief may post. Default 7. */
   brief_hour?: number
+  /**
+   * Optional LLM composer. When supplied, the brief body is written by the
+   * warm LLM over the resolved context (`buildLlmBriefComposer`); on a throw
+   * or empty result the pure `composeMorningBrief` template is used instead.
+   * Absent → the deterministic template (unchanged default).
+   */
+  composeWithLlm?: BriefComposer
   log?(msg: string): void
 }
 
@@ -266,7 +338,19 @@ export async function runMorningBrief(deps: MorningBriefDeps): Promise<MorningBr
   }
 
   const ctx = await gatherBriefContext(deps.sources, day, deps.log)
-  const body = composeMorningBrief(ctx, day)
+  // Prefer the LLM composition over real sources (Vajra parity); the pure
+  // template is the deterministic fallback when no LLM is wired or it fails
+  // — the brief must never be lost to an LLM hiccup.
+  let body = ''
+  if (deps.composeWithLlm !== undefined) {
+    try {
+      const llmBody = await deps.composeWithLlm(ctx, day)
+      if (typeof llmBody === 'string' && llmBody.trim().length > 0) body = llmBody.trim()
+    } catch (err) {
+      deps.log?.(`[proactive] morning-brief LLM compose failed, using template: ${err}`)
+    }
+  }
+  if (body.length === 0) body = composeMorningBrief(ctx, day)
 
   const topic = proactiveTopic(deps.general_topic_id, deps.channel_kind ?? 'telegram')
   try {
