@@ -99,6 +99,7 @@ export class McpServer {
   listToolSchemas(): { name: string; description: string; input_schema: unknown }[] {
     return this.registry
       .list()
+      .filter((r) => r.agent_hidden !== true)
       .map((r) => ({ name: r.name, description: r.description, input_schema: r.input_schema }))
   }
 

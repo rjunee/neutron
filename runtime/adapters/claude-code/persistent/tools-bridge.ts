@@ -134,9 +134,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
     }
     // Return the structured result as a JSON text block so the model gets the
-    // full payload (arrays/objects) it can reason over, not a lossy summary.
+    // full payload (arrays/objects) it can reason over, not a lossy summary. A
+    // handler that returns undefined (the sink's `Response.json` drops the key,
+    // so `parsed.result` is `undefined`) coalesces to the literal `null` — never
+    // a `text: undefined` block, which would serialise to MCP content with no
+    // `text` field and hand the model an empty/degraded result.
     const payload =
-      typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result, null, 2)
+      parsed.result === undefined
+        ? 'null'
+        : typeof parsed.result === 'string'
+          ? parsed.result
+          : JSON.stringify(parsed.result, null, 2)
     return { content: [{ type: 'text', text: payload }] }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -147,27 +155,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 // --- Helper: POST to the substrate reply-sink (same loopback as dev-channel) ---
 
+/**
+ * SINGLE attempt — NO retry. Tool calls are NON-idempotent: a write tool
+ * (reminder_create, note, dispatch_agent, …) ran by the sink handler must not
+ * be re-executed if the loopback connection drops AFTER the handler ran but
+ * BEFORE the response is read (fetch would reject and a retry would double-write).
+ * `/tool-call` carries no idempotency key, so a failed POST surfaces as an
+ * `isError` tool_result the model can retry DELIBERATELY (vs. a silent duplicate).
+ * This is the deliberate divergence from the dev-channel's retried `/reply`
+ * (which is idempotent — turn-id correlated, and a stale re-post is rejected).
+ */
 async function postToSink(path: string, body: Record<string, unknown>): Promise<string> {
-  const maxRetries = 3
-  const url = `http://127.0.0.1:${SINK_PORT}${path}`
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(SINK_TOKEN ? { 'X-Sink-Token': SINK_TOKEN } : {}),
-        },
-        body: JSON.stringify(body),
-      })
-      return await resp.text()
-    } catch (e) {
-      process.stderr.write(`neutron-tools-bridge: POST ${path} FAILED (attempt ${attempt}): ${e}\n`)
-      if (attempt === maxRetries) throw e
-      await new Promise((r) => setTimeout(r, attempt * 1000))
-    }
-  }
-  throw new Error('unreachable')
+  const resp = await fetch(`http://127.0.0.1:${SINK_PORT}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(SINK_TOKEN ? { 'X-Sink-Token': SINK_TOKEN } : {}),
+    },
+    body: JSON.stringify(body),
+  })
+  return await resp.text()
 }
 
 // --- Graceful + orphan-safe shutdown (ported from dev-channel ISSUES #217) ---

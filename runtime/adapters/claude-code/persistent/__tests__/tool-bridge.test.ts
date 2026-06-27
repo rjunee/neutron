@@ -247,7 +247,7 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
 })
 
 describe('P0-1 — McpServer satisfies ReplToolBridge', () => {
-  it('listToolSchemas() carries name + description + input_schema from the registry', () => {
+  it('listToolSchemas() carries name + description + input_schema, and HIDES agent_hidden tools', () => {
     const reg = new ToolRegistry()
     reg.register({
       name: 'reminder_create',
@@ -258,11 +258,25 @@ describe('P0-1 — McpServer satisfies ReplToolBridge', () => {
       approval_policy: 'auto',
       handler: async () => ({ ok: true }),
     })
+    // A stub-surface tool the agent must NOT be offered (Codex review: the
+    // neutron-tools Hermes stubs all throw "lands in a later sprint").
+    reg.register({
+      name: 'messages_send',
+      description: 'stub',
+      input_schema: { type: 'object' },
+      output_schema: { type: 'object' },
+      capability_required: 'write:project_data',
+      approval_policy: 'auto',
+      handler: async () => {
+        throw new Error('not implemented yet')
+      },
+      agent_hidden: true,
+    })
     const server = new McpServer({ project_slug: 'acme', registry: reg })
     // Structural: an McpServer IS a ReplToolBridge.
     const bridge: ReplToolBridge = server
     const schemas = bridge.listToolSchemas()
-    expect(schemas).toHaveLength(1)
+    expect(schemas.map((s) => s.name)).toEqual(['reminder_create']) // messages_send hidden
     expect(schemas[0]).toMatchObject({
       name: 'reminder_create',
       description: 'Create a reminder',

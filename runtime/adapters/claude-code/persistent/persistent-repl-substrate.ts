@@ -1136,6 +1136,11 @@ class ReplSession {
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
    *  `tools:[]`) can never reuse a more-privileged warm REPL (Codex-r1-P1). */
   toolSurface = ''
+  /** P0-1 — whether this REPL was SPAWNED with the native-MCP tool bridge
+   *  attached. Like {@link toolSurface}, it is a spawn-time property the reuse
+   *  guard checks so a bridge-mismatched turn never reuses this warm child
+   *  (defense-in-depth: the bridge restriction stays local, not keying-dependent). */
+  toolBridgeActive = false
   /** Fingerprint of the auth secret this REPL was SPAWNED with (`CLAUDE_CODE_
    *  OAUTH_TOKEN` / `ANTHROPIC_API_KEY`), hashed so no second plaintext copy of
    *  the secret lives on the long-held session. The credential-freshness reuse
@@ -1628,6 +1633,9 @@ async function spawnSession(
   // POST from the dev-channel can never race ahead of the sink registration.
   const session = new ReplSession(sessionKey, sessionId, channelName)
   session.toolSurface = toolSurface.join(',')
+  // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
+  // bridge-mismatched turn (matches the `requestedToolBridge` computation).
+  session.toolBridgeActive = toolBridgeActive
   // Stash the temp config paths so teardown can unlink them (Argus r5 IMPORTANT —
   // ephemeral one-shots write a fresh pair per call; leaked otherwise). The tools
   // manifest is only written when the bridge is active; include it when so.
@@ -2111,6 +2119,13 @@ async function getOrSpawnSession(
   forceResume?: ResumeDirective,
 ): Promise<ReplSession> {
   const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
+  // P0-1 defense-in-depth (Codex r1 [P2]): the native-MCP tool bridge is a
+  // SPAWN-time property of the REPL, exactly like the tool surface. Compute what
+  // THIS request would attach so the reuse guard can refuse to serve a
+  // bridge-mismatched warm child — making the bridge restriction LOCAL, not
+  // dependent on `substrate_instance_id` keying (today they align, so this never
+  // fires; it survives a future edit that varies the bridge at a finer grain).
+  const requestedToolBridge = options.enableToolBridge === true && replToolBridge !== undefined
   // A resume-session-picker recovery (row #7) poisons the warm session AND records
   // the disk-recovered session id on it; captured below (for BOTH the alive-evict
   // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
@@ -2179,6 +2194,8 @@ async function getOrSpawnSession(
       //      so conversational context survives). Self-healing within one turn; NOT
       //      a "there is no window" guarantee.
       const freshSurface = session.toolSurface === requestedToolSurface
+      // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
+      const freshBridge = session.toolBridgeActive === requestedToolBridge
       const freshCredential = session.authFingerprint === authFingerprintFor(options.env)
       // ABANDON-POISON guard (2026-06-18 warm-session hang fix): a session whose
       // prior turn was abandoned (caller timeout / substrate turn-timeout) is left
@@ -2188,7 +2205,7 @@ async function getOrSpawnSession(
       // never delivers (the cascade). Evict + respawn a clean REPL instead, exactly
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
-      if (freshSurface && freshCredential && !session.poisoned) return session
+      if (freshSurface && freshBridge && freshCredential && !session.poisoned) return session
       if (session.poisoned) {
         process.stderr.write(
           `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,
