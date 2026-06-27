@@ -21,6 +21,7 @@ import {
 } from '../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
+import { registerGBrainSearchToolSurface } from '../../gbrain-memory/agent-tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '../../skill-forge/tool.ts'
@@ -159,6 +160,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // full-text-search the conversation mid-turn.
       if (input.message_search !== undefined) {
         registerMessageSearchToolSurface(reg, input.message_search.runtime)
+      }
+      // Memory recall (P0-2) — register the `gbrain_search` agent tool when the
+      // composer wired the owner's GBrainMemoryStore, so the live agent can
+      // READ BACK the entity pages + scribe facts the WRITE path persists every
+      // turn. The agent-native twin of Vajra's `mcp__qmd__query` recall; rides
+      // the #87 tools-bridge as `mcp__neutron__gbrain_search`.
+      if (input.gbrain_search !== undefined) {
+        registerGBrainSearchToolSurface(reg, input.gbrain_search.store)
       }
       // Agent-dispatch family (parity gap #3) — register `dispatch_agent` when
       // the composer wired the service, so the live agent can dispatch a
