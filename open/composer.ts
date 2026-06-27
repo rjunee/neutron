@@ -117,6 +117,7 @@ import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './ow
 // only user and is already authed at the HTTP start-token/cookie layer, so the
 // app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
 import { createAppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
 import { DocStore } from '../gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
 import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
@@ -1173,7 +1174,34 @@ export function buildOpenGraphComposer(
     // single-owner box. Managed layers its own tenant auth as the thin wrapper.
     // ONE resolver feeds BOTH the per-project docs surface AND the cores
     // integrations/api-keys surface (no flag, single code path).
-    const appOwnerAuth = createAppWsAuthResolver({ project_slug, bypass: true })
+    //
+    // Codex r1 [P1] HARDENING: the bare dev-bypass resolver accepts ANY
+    // `dev:<user_id>` (or raw user id), which would let `Bearer dev:anyone`
+    // read project docs or rotate API keys. Single-owner Open has exactly ONE
+    // legitimate identity — the owner — so wrap the resolver to REJECT any
+    // resolved user_id that isn't `OWNER_USER_ID`. This keeps Path A's
+    // localhost-trust ergonomics (the React client's default `dev:<owner>`
+    // bearer still works) while closing the arbitrary-bearer hole. (A box bound
+    // to a non-loopback `NEUTRON_HOST` is still trusting the owner-id constant
+    // by design — that is the operator's Path A choice — but no OTHER identity
+    // is ever accepted.)
+    const appOwnerAuth: AppWsAuthResolver = ((): AppWsAuthResolver => {
+      const base = createAppWsAuthResolver({ project_slug, bypass: true })
+      return {
+        mode: base.mode,
+        resolve: async (token) => {
+          const resolved = await base.resolve(token)
+          if ('code' in resolved) return resolved
+          if (resolved.user_id !== OWNER_USER_ID) {
+            return {
+              code: 'project_mismatch',
+              message: 'single-owner Open: only the owner bearer is accepted',
+            }
+          }
+          return resolved
+        },
+      }
+    })()
 
     // P1b — per-project Documents backend. The chat-react Documents tab
     // (`landing/chat-react/docs-client.ts`) calls
@@ -1227,6 +1255,19 @@ export function buildOpenGraphComposer(
           typeof event.adapter_metadata?.['project_id'] === 'string'
             ? (event.adapter_metadata['project_id'] as string)
             : undefined
+        // Codex r1 [P2]: the React client keeps ONE app-ws channel topic
+        // (`app:<owner>`) and switches projects via the `project_id` field only.
+        // Keying the live-agent turn on the bare channel topic would share the
+        // warm session + first-turn context + button-store history across ALL
+        // projects (wrong-project grounding). Derive a PROJECT-SCOPED turn topic
+        // (`app:<owner>:<project_id>`) — mirrors the web path's
+        // `web:<owner>:<project>` — so each project gets its own warm REPL +
+        // persona + history. The REPLY is still delivered to the socket's real
+        // `channel_topic_id` (below), since that's where the client listens.
+        const turnTopicId =
+          project_id !== undefined && project_id.length > 0
+            ? `${event.channel_topic_id}:${project_id}`
+            : event.channel_topic_id
         // Reply path: the live-agent turn emits `ChatOutbound`; translate the
         // user-facing `agent_message` into an app-ws `OutgoingMessage` and fan it
         // out via the adapter (which stamps message_id/ts + persists when a chat
@@ -1257,7 +1298,8 @@ export function buildOpenGraphComposer(
         await appWsChatTurn({
           project_slug,
           user_id: event.user.channel_user_id,
-          topic_id: event.channel_topic_id,
+          // Project-scoped for warm-session/persona/history keying (Codex [P2]).
+          topic_id: turnTopicId,
           ...(project_id !== undefined ? { project_id } : {}),
           user_text: text,
           send: sendReply,
