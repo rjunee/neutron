@@ -37,13 +37,19 @@ const {
   findInlineDocLinks,
   NEUTRON_SCHEME,
   VAULT_REDIRECTOR_BASE,
-  WEB_APP_BASE,
+  webAppBase,
   parseDocLink,
   resolveDocRefs,
   rewriteDocRefsInBody,
   deriveLabel,
   MAX_DOC_PATH_LEN,
 } = await import('../doc-links.ts')
+
+// buildDocLink reads the web base at CALL time (webAppBase()); derive the
+// expected base the same way (after the env is set above) so expectations match
+// regardless of module import order. Was the boot-frozen `WEB_APP_BASE` const,
+// which went stale when a sibling imported doc-links.ts first.
+const WEB_APP_BASE = webAppBase()
 
 describe('runtime/doc-links — buildDocLink', () => {
   test('app channel produces neutron:// deep link with encoded path', () => {

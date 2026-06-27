@@ -23,7 +23,7 @@ import {
   useComposerRuntime,
 } from '@assistant-ui/react'
 
-import type { ReactionChip } from '@neutron/chat-core'
+import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
 import type { ChatViewModel, RenderMessage } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
@@ -301,6 +301,141 @@ function MessageActions(): React.JSX.Element | null {
   )
 }
 
+/**
+ * P1b (onboarding / quick-reply buttons) — per-message option metadata + a
+ * choose callback, shared down to the assistant-ui message components (which
+ * only receive the render id via `useMessage`). Keyed by the render `id` so an
+ * agent bubble can look up its own options + post the choice back. Mirrors the
+ * reactions/edits context pattern so buttons render off the controller's
+ * `RenderMessage` (not via an assistant-ui custom content part).
+ */
+interface ButtonsCtx {
+  byRenderId: Map<
+    string,
+    {
+      options: readonly ChatMessageOption[]
+      promptId: string | null
+      kind: PromptKind | null
+      chosenValue: string | null
+    }
+  >
+  onChoose: (renderId: string, promptId: string | null, value: string) => void
+}
+const ButtonsContext = createContext<ButtonsCtx | null>(null)
+
+/** One option button. Tap posts the option's `value` (NOT label) — the routing
+ *  key the server's outstanding-prompt store maps back to a canonical choice. */
+function ChoiceButton({
+  opt,
+  onChoose,
+}: {
+  opt: ChatMessageOption
+  onChoose: (value: string) => void
+}): React.JSX.Element {
+  const variant =
+    opt.decoration?.style === 'destructive'
+      ? ' car-choice-destructive'
+      : opt.decoration?.style === 'primary'
+        ? ' car-choice-primary'
+        : ''
+  return (
+    <button
+      type="button"
+      className={`car-choice${variant}`}
+      onClick={() => onChoose(opt.value)}
+      aria-label={opt.label}
+    >
+      {opt.label}
+    </button>
+  )
+}
+
+/**
+ * The option row under an agent message. Renders a wrapped button row by
+ * default; an image-gallery prompt renders a 2-col thumbnail grid (options with
+ * an `image_url`) plus a control row for the rest (regen / skip / upload). Once
+ * the user has chosen, it collapses to a single "→ {label}" summary line so the
+ * buttons can't be re-tapped (optimistic, mirrors the Expo primitive).
+ */
+function ButtonOptionRow({
+  options,
+  kind,
+  chosenValue,
+  onChoose,
+}: {
+  options: readonly ChatMessageOption[]
+  kind: PromptKind | null
+  chosenValue: string | null
+  onChoose: (value: string) => void
+}): React.JSX.Element {
+  if (chosenValue !== null) {
+    const chosen = options.find((o) => o.value === chosenValue)
+    return (
+      <div className="car-choices-chosen" aria-label="chosen option">
+        → {chosen?.label ?? chosenValue}
+      </div>
+    )
+  }
+  if (kind === 'image-gallery') {
+    const hasImage = (o: ChatMessageOption): boolean =>
+      typeof o.image_url === 'string' && o.image_url.length > 0
+    const gallery = options.filter(hasImage)
+    const controls = options.filter((o) => !hasImage(o))
+    return (
+      <div className="car-gallery-wrap">
+        {gallery.length > 0 ? (
+          <div className="car-gallery">
+            {gallery.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                className="car-gallery-tile"
+                onClick={() => onChoose(o.value)}
+                aria-label={o.label}
+              >
+                <img src={o.image_url} alt={o.label} className="car-gallery-img" />
+                <span className="car-gallery-label">{o.label}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {controls.length > 0 ? (
+          <div className="car-choices">
+            {controls.map((o) => (
+              <ChoiceButton key={o.value} opt={o} onChoose={onChoose} />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+  return (
+    <div className="car-choices">
+      {options.map((o) => (
+        <ChoiceButton key={o.value} opt={o} onChoose={onChoose} />
+      ))}
+    </div>
+  )
+}
+
+/** Looks up the current message's options from {@link ButtonsContext} and renders
+ *  the option row. Nothing when the message carries no options. */
+function MessageButtons(): React.JSX.Element | null {
+  const ctx = useContext(ButtonsContext)
+  const message = useMessage()
+  if (ctx === null) return null
+  const entry = ctx.byRenderId.get(message.id)
+  if (entry === undefined || entry.options.length === 0) return null
+  return (
+    <ButtonOptionRow
+      options={entry.options}
+      kind={entry.kind}
+      chosenValue={entry.chosenValue}
+      onChoose={(value) => ctx.onChoose(message.id, entry.promptId, value)}
+    />
+  )
+}
+
 function UserMessage(): React.JSX.Element {
   return (
     <MessagePrimitive.Root className="car-row car-row-user">
@@ -322,6 +457,7 @@ function AssistantMessage(): React.JSX.Element {
       </div>
       <div className="car-bubble car-bubble-agent">
         <MessagePrimitive.Parts components={PART_COMPONENTS} />
+        <MessageButtons />
         <EditedMarker />
         <MessageReactions />
       </div>
@@ -330,6 +466,57 @@ function AssistantMessage(): React.JSX.Element {
 }
 
 const MESSAGE_COMPONENTS = { UserMessage, AssistantMessage } as const
+
+/** P1b — build the render-id → option-metadata lookup the agent bubbles read. */
+function buildButtonsIndex(messages: readonly RenderMessage[]): ButtonsCtx['byRenderId'] {
+  const map: ButtonsCtx['byRenderId'] = new Map()
+  for (const m of messages) {
+    if (m.options !== null && m.options.length > 0) {
+      map.set(m.id, {
+        options: m.options,
+        promptId: m.promptId,
+        kind: m.kind,
+        chosenValue: m.chosenValue,
+      })
+    }
+  }
+  return map
+}
+
+/**
+ * P1b (upload affordance) — the most recent agent message's upload affordance,
+ * or null when none. Mirrors the Expo "latest phase wins / absence clears"
+ * contract: a later agent message without an affordance hides the hint.
+ */
+function latestUploadAffordance(
+  messages: readonly RenderMessage[],
+): ChatMessageUploadAffordance | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m !== undefined && m.role === 'agent') return m.uploadAffordance
+  }
+  return null
+}
+
+/**
+ * P1b — a phase-aware hint above the composer when the agent message advertises
+ * an export-import affordance. Hint-only for now: it tells the user to attach
+ * their export ZIP, reusing the existing composer attach/drag-drop path rather
+ * than adding a new upload widget (kept minimal to avoid composer regressions).
+ */
+function UploadAffordanceHint({
+  affordance,
+}: {
+  affordance: ChatMessageUploadAffordance | null
+}): React.JSX.Element | null {
+  if (affordance === null) return null
+  const source = affordance.source === 'chatgpt' ? 'ChatGPT' : 'Claude'
+  return (
+    <div className="car-upload-hint" role="note">
+      📎 Attach or drop your {source} export ZIP to import your history.
+    </div>
+  )
+}
 
 /** Build the render-id → {messageId, reactions} lookup the bubbles read. */
 function buildReactionIndex(
@@ -624,6 +811,11 @@ export function ChatApp({
     onEdit: (messageId, body) => controller.editMessage(messageId, body),
     onDelete: (messageId) => controller.deleteMessage(messageId),
   }
+  const buttonsCtx: ButtonsCtx = {
+    byRenderId: buildButtonsIndex(vm.messages),
+    onChoose: (renderId, promptId, value) => controller.onChoose(renderId, promptId, value),
+  }
+  const uploadAffordance = latestUploadAffordance(vm.messages)
   const uploadsCtx: UploadsCtx = fetchImpl !== undefined
     ? { token: config.token, origin: config.origin, fetchImpl }
     : { token: config.token, origin: config.origin }
@@ -631,6 +823,7 @@ export function ChatApp({
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
+    <ButtonsContext.Provider value={buttonsCtx}>
     <div className="car-shell">
       {config.projects.length > 0 && (
         <TopicRail
@@ -659,10 +852,12 @@ export function ChatApp({
           </ThreadPrimitive.ScrollToBottom>
           <PendingBadge pending={vm.pending} />
           <DeliveryStatus delivery={vm.latestUserDelivery} isRunning={vm.isRunning} />
+          <UploadAffordanceHint affordance={uploadAffordance} />
           <Composer draft={draft} controller={controller} />
         </ThreadPrimitive.Root>
       </main>
     </div>
+    </ButtonsContext.Provider>
     </EditsContext.Provider>
     </ReactionsContext.Provider>
     </UploadsContext.Provider>

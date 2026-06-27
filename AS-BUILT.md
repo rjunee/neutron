@@ -2,6 +2,153 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — P1b consolidate: ONE chat path (onboarding unified) + web admin panel + real-browser verification
+
+**Scope (Ryan-locked, final).** Finish the consolidation the prior P1b entry
+deferred: "One code path. No feature flags. I do NOT want two chat endpoints. I
+do NOT want onboarding being on some special custom code different to the main
+chat." + a WEB admin panel + "test it with playwright in a real browser."
+
+**What shipped.**
+
+1. **ONE chat WS endpoint.** Onboarding is no longer a separate engine/socket —
+   it is the INITIAL MODE of the single `/ws/app/chat` surface. The shared
+   `InterviewEngine` keys its state on `(project_slug, user_id)` independent of
+   transport, so the same engine that drove the legacy `/ws/chat` bridge now runs
+   over app-ws:
+   - `chat-bridge.ts`: `buildRoutedSendButtonPrompt` + `buildRoutedSendImportProgress`
+     route a new `app:` topic prefix through a late-bound holder
+     (`AppSocketButtonPromptRouter` / `AppSocketImportProgressRouter`). One routed
+     sender, three prefixes (web/tg/app) — no second engine.
+   - `app-ws/envelope.ts`: new `button_choice` inbound (`decodeAppWsButtonChoice`)
+     — a tapped quick-reply is a structured choice, not a freeform message.
+   - `app-ws-surface.ts`: `on_session_open` (fires the first onboarding prompt on
+     connect when onboarding is active) + `on_button_choice` hooks.
+   - `open/composer.ts`: fills the holders (engine `ButtonPrompt` → the app-ws
+     `agent_message` superset that already carries options/prompt_id/allow_freeform/
+     kind/upload_affordance); `isOnboardingActive()` routes each turn to
+     `engine.advance` (onboarding) or the live agent (steady-state); `sendReply`
+     now carries button options for steady-state parity (one renderer, one path).
+
+2. **`/ws/chat` deleted.** The legacy onboarding HTTP-upgrade + chat-bridge
+   websocket handler are removed (`landing/server.ts` now serves the SPA + HTTP
+   routes only; the websocket is a defensive close-stub); `/ws/chat` dropped from
+   `compose.ts` `LANDING_PATHS` and the signup-host 503 stub. grep proves no
+   `/ws/chat` route mount remains (only removal comments + 404-assertion tests).
+   Obsolete `/ws/chat`-onboarding walkthroughs deleted; landing/compose tests now
+   assert `/ws/chat` 404s.
+
+3. **React renders onboarding inline.** `chat-core` now preserves the button
+   metadata (`normalizeInbound`/`applyInbound`/store merge); `controller` exposes
+   it on `RenderMessage` + `onChoose` (sends the `button_choice` frame); `ChatApp`
+   renders `ButtonOptionRow` / image-gallery under the agent message and an
+   upload-affordance hint — mirroring the Expo client. Onboarding buttons + typed
+   answers drive the same chat surface.
+
+4. **Web admin panel.** `landing/chat-react/IntegrationsTab` + `integrations-client`
+   over the wired `GET /api/cores/integrations` + `POST/DELETE
+   /api/cores/api-keys/<label>`; the existing global `admin` tab is surfaced in the
+   web ProjectShell (`listGlobalTabs` + merge). Owner sees + manages connected
+   accounts and API keys in the browser. Route: the **Admin** tab in the project
+   tab bar.
+
+**Real-browser verification (system Playwright, headless Chromium, against a live
+Open branch build).** A regression guard is committed at
+`tests/e2e-browser/onboarding_walkthrough.py` (CI-skippable: prints `E2E SKIP`
+when no server is reachable). Verified in a real browser:
+- `/chat` cold-start-redirects to the React client; it connects to the SINGLE
+  `/ws/app/chat`; the fresh onboarding welcome renders inline ("Hey, what should I
+  call you?") — emitted by the engine via the `app:` router (no `/ws/chat`).
+- Typing the answer echoes the user bubble and advances the engine over app-ws
+  (the next onboarding turn fires) — the onboarding turn round-trips on the one
+  socket.
+- The **Documents** tab lists a real doc (`welcome.md`).
+- The **Admin** tab renders the integrations panel — connected accounts
+  (gmail/calendar/workspace) + API-key slots (apify/tavily) with Save/Clear.
+
+**Known limitations / follow-ups.**
+- A page reload during the very first `signup` prompt does not re-emit it (the
+  engine excludes `signup` from reconnect re-emit). Pre-existing engine behavior
+  (the old `/ws/chat` path used the same engine), not introduced here.
+- Onboarding import-progress over app-ws is dropped for now (the terminal-state
+  prompt still lands); a future pass can translate it to an incremental update.
+- Scribe-on-user-turn + import-progress hooks were wired to the removed `/ws/chat`
+  bridge; the app-ws steady-state path (pre-existing from the earlier P1b) does not
+  re-establish them — a separate follow-up if those are wanted on app-ws.
+- **Cross-model (Codex) review P2s, tracked as follow-ups:**
+  - *Project rail stale until reload after fresh onboarding* (`open/composer.ts`
+    `projectsBootstrapScript`): a brand-new owner's `/chat` bootstrap injects
+    `__neutron_projects=[]` (no projects yet); when onboarding later creates
+    projects in the SAME session there is no app-ws signal to refetch, so the
+    Documents/Admin tabs only appear after a manual reload. The pieces are all
+    verified in a real browser (onboarding renders+advances; tabs + steady-state
+    reply render against a project), but the seamless completion→workspace
+    transition over the single socket needs a post-onboarding "projects changed →
+    refetch/reload" signal. (Real-browser tab verification used a seeded project +
+    reload.)
+  - *One-shot `?start=` token no longer claimed* (`open/composer.ts` `/chat?start=`
+    cookie-mint): with `/ws/chat` gone the token is signature-verified by the HTTP
+    gate but never `claimStartTokenJti`'d, so the same `?start=` URL can re-mint the
+    owner cookie within its 15-min TTL. Low real risk (Path A localhost-trust,
+    owner-only, same-owner cookie), but the one-shot semantics regressed — fix is
+    to wire a `consumedTokens` claim into the accepted `/chat?start=` flow.
+
+## 2026-06-26 — P1b: wire the FULL app-ws/app-api surface stack into Open (React UI works end-to-end)
+
+**Scope note (final).** Beyond the initial chat/docs/admin wiring, cross-model
+(Codex) review surfaced — and this PR closes — the rest of the React client's
+missing Open integration: the **tabs resolver** (`/api/app/projects/<id>/tabs`, so
+ProjectShell shows Documents/Tasks instead of falling back to chat-only), the
+**Tasks** backend (`/api/app/projects/<id>/tasks*`) and **upload** surface
+(`/api/app/upload`), **slash-command parity** (the `/note`·`/remind`·`/skills`·…
+filter routed through the app-ws path, not just the web bridge), **project-scoped
+chat keying** (`app:<owner>:<project>` so projects don't share warm-session/
+history), **owner-only auth** (the dev-bypass resolver is wrapped to reject any
+bearer whose user_id ≠ the owner — closes the `Bearer dev:anyone` hole), and the
+**React shell bootstrap** (inject `__neutron_user_id` + `__neutron_projects` +
+`__neutron_active_project_id` into the served `/chat`, without which the client
+threw `ChatBootstrapError` before connecting and never showed project tabs).
+**NOT done in this PR:** collapsing onboarding into the single chat path +
+deleting `/ws/chat` — that is a separate architectural migration (the React
+client has no onboarding button UI; the structured onboarding engine would need
+to become a chat mode; the full fresh-onboarding walkthrough needs browser
+verification) and is tracked as the remaining piece.
+
+**Context.** The React client became the only web client (#82), but in a fresh
+single-owner Open install it had **no backends mounted**: the chat socket
+(`/ws/app/chat`), the Documents tab API (`/api/app/projects/<id>/docs/*`), and the
+admin/api-key endpoints (`/api/cores/*`) all 404'd. Root cause: `open/composer.ts`
+never constructed the app-ws / app-docs / cores-integrations surfaces and provided
+no auth resolver. So the React UI rendered but didn't function (chat especially —
+`chat-react/config.ts` chats over `/ws/app/chat`, which was unmounted).
+
+**What shipped (Path A, single-owner localhost trust — Ryan-locked; no flags, one
+code path; Managed layers its own auth as the wrapper).** All in `open/composer.ts`:
+- **App-ws CHAT** (`/ws/app/chat` + `/api/app/chat/send`): `InMemoryAppWsSession`
+  `Registry` + `AppWsAdapter` with a hand-rolled `IncomingEventReceiver` that runs
+  a real `buildLiveAgentTurn` (the SAME engine the web `/ws/chat` bridge uses) per
+  inbound app-ws message and fans the reply back via `adapter.send` (translating
+  `ChatOutbound` → app-ws `OutgoingMessage`, echoing `project_id`). No reusable
+  channel→turn bridge exists (the web path embeds dispatch in chat-bridge), so the
+  receiver is hand-rolled. LLM-less boxes mount the surface but reply with a clear
+  "no AI credential" notice.
+- **Per-project Documents** (`/api/app/projects/<id>/docs/*`): `DocStore({owner_
+  home})` + `createAppDocsSurface`, served off the real on-disk tree
+  (`<owner_home>/Projects/<id>/docs`).
+- **Admin/integrations** (`/api/cores/integrations`, `/api/cores/api-keys/*`):
+  adding `cores.auth` makes `wireCoresSurfaces` auto-build them. (The api-key
+  endpoints are reachable; the admin *panel UI* is Expo-mobile-only — a web panel
+  is net-new UI, out of scope.)
+- All three share `createAppWsAuthResolver({ project_slug, bypass: true })`: the
+  owner is the sole user, the box binds 127.0.0.1, and the HTTP start-token/cookie
+  already authenticates them, so the app-bearer (`dev:<owner>`, the React client's
+  default token) is accepted directly.
+
+**Verified in the REAL install over the REAL React path** (`/ws/app/chat`, not the
+bridge): a real turn round-trips (`[live-agent-turn] event=replied topic=app:owner
+scope=ostro elapsed_ms=6678`, reply "PONG"); the docs tree returns real content
+(`history.md`); `/api/cores/integrations` → 200. See PR #84.
+
 ## 2026-06-26 — P1a: stamp `topic_id` on every outbound web envelope (notification misrouting fix)
 
 **Context.** The web client multiplexes every topic over ONE socket and uses a

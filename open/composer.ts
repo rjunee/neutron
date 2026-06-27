@@ -111,6 +111,33 @@ import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
 import { createChatHistorySurface } from '../gateway/http/chat-history-surface.ts'
 import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './owner-identity.ts'
+// P1b (2026-06-26) — wire the per-project Documents backend + the cores
+// integrations/api-keys surface into the single-owner Open boot. Both authorize
+// against ONE single-owner localhost-trust resolver (Path A): the owner is the
+// only user and is already authed at the HTTP start-token/cookie layer, so the
+// app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
+import { createAppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
+import { DocStore } from '../gateway/http/doc-store.ts'
+import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
+import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
+import { createAppTasksSurface } from '../gateway/http/app-tasks-surface.ts'
+import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
+import { TaskStore } from '../tasks/store.ts'
+import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
+import {
+  appWsTopicId,
+  type AppWsOutboundAgentMessage,
+} from '../channels/adapters/app-ws/envelope.ts'
+import type { ButtonChoice, ButtonPrompt } from '../channels/button-primitive.ts'
+import type {
+  AppSocketButtonPromptRouter,
+  AppSocketImportProgressRouter,
+} from '../gateway/http/chat-bridge.ts'
+import { createAppWsSurface } from '../gateway/http/app-ws-surface.ts'
+import type { IncomingEvent, OutgoingMessage } from '../channels/types.ts'
+import type { ChatOutbound } from '../landing/server.ts'
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
@@ -803,11 +830,33 @@ export function buildOpenGraphComposer(
       return { project_slug, user_id: OWNER_USER_ID }
     }
 
+    // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
+    // `/research` + skill-forge `/skills`), chained. Defined ONCE here so BOTH
+    // the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route slash
+    // commands through the IDENTICAL handlers (Codex r1 [P2] — without this the
+    // React app-ws path lost slash commands, sending `/note` etc. to the LLM).
+    const chatCommandFilter = buildChainedChatCommandFilter([
+      coresWiring.chatCommandFilter,
+      buildSkillForgeChatCommandFilter(skillForgeBackend),
+    ])
+
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────
+    // Onboarding consolidation (2026-06-26) — late-bound app-socket routers.
+    // The engine's button-prompt + import-progress senders are fixed at
+    // construction (inside buildLandingStack), but the app-ws registry/adapter
+    // are built AFTER. These mutable holders let the SAME engine route
+    // onboarding emits over the unified `/ws/app/chat` socket: the routed sender
+    // reads `.send` at call time; we fill it once the registry exists (below).
+    // This is what makes onboarding a MODE of the single chat — one socket, no
+    // second engine, no flag.
+    const appWsButtonPromptRouter: AppSocketButtonPromptRouter = {}
+    const appWsImportProgressRouter: AppSocketImportProgressRouter = {}
     const landing = buildLandingStack({
       db,
       project_slug,
       owner_home,
+      appWsButtonPromptRouter,
+      appWsImportProgressRouter,
       // JWKS is a required field but inert on Open — our start-token verifier
       // is HMAC and never resolves a JWKS key. Pass a never-fetched URL.
       jwks: new JwksCache('https://invalid.local/.well-known/jwks.json'),
@@ -860,10 +909,7 @@ export function buildOpenGraphComposer(
       //     tools (agent-native parity).
       // Each filter returns null for a non-match, so the chain falls through to
       // the LLM exactly as a single filter would.
-      chatCommandFilter: buildChainedChatCommandFilter([
-        coresWiring.chatCommandFilter,
-        buildSkillForgeChatCommandFilter(skillForgeBackend),
-      ]),
+      chatCommandFilter,
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────
@@ -1023,6 +1069,60 @@ export function buildOpenGraphComposer(
       }
     }
 
+    // P1b — React shell project bootstrap. `chat-react/config.ts` reads the
+    // owner's project list + active project from `window.__neutron_projects` /
+    // `window.__neutron_active_project_id`; nothing set them, so the React
+    // ProjectShell had `projectId === null` forever and never fetched
+    // `/api/app/projects/<id>/tabs` — the Documents/Tasks tabs stayed hidden even
+    // with their backends mounted (Codex r1). Inject the canonical project list
+    // (from the `projects` table — the source of truth onboarding writes) into
+    // the served `/chat` HTML so the shell opens on a real project with its tabs.
+    const projectsBootstrapScript = (): string => {
+      let rows: { id: string; name: string }[] = []
+      try {
+        rows = db
+          .prepare<{ id: string; name: string }, []>(
+            `SELECT id, name FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC, id ASC`,
+          )
+          .all()
+      } catch {
+        rows = []
+      }
+      const projects = rows.map((r) => ({ id: r.id, label: r.name }))
+      // Escape `<` so a project name can never break out of the <script> context.
+      const enc = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
+      const active = projects.length > 0 ? enc(projects[0]!.id) : 'null'
+      // Codex r1 [P1] — Open's `?start=` token is a local HMAC payload, NOT a JWT
+      // with a `sub` claim, so `chat-react/config.ts:decodeJwtSub` returns null
+      // and the client throws `ChatBootstrapError` before it can open
+      // `/ws/app/chat`. Inject the owner identity explicitly so the client
+      // derives `userId` (→ its default `dev:<owner>` app-ws bearer, the one our
+      // owner-restricted resolver accepts) and connects.
+      return (
+        `<script>window.__neutron_user_id=${enc(OWNER_USER_ID)};` +
+        `window.__neutron_projects=${enc(projects)};` +
+        `window.__neutron_active_project_id=${active};</script>`
+      )
+    }
+    const withReactBootstrap = async (res: Response | Promise<Response>): Promise<Response> => {
+      const r = await res
+      const ct = r.headers.get('content-type') ?? ''
+      if (!ct.includes('text/html')) return r
+      const html = await r.text()
+      // No-op if the React shell marker isn't present (e.g. the auth-gate page).
+      if (!html.includes('/chat-react.js')) {
+        const headers = new Headers(r.headers)
+        return new Response(html, { status: r.status, headers })
+      }
+      const injected = html.replace(
+        '<script type="module" src="/chat-react.js"></script>',
+        `${projectsBootstrapScript()}\n<script type="module" src="/chat-react.js"></script>`,
+      )
+      const headers = new Headers(r.headers)
+      headers.delete('content-length')
+      return new Response(injected, { status: r.status, headers })
+    }
+
     const openFetch = (
       req: Request,
       server: import('bun').Server<unknown>,
@@ -1056,7 +1156,7 @@ export function buildOpenGraphComposer(
       // serves chat.html and resumes via the cookie-only WS path unchanged.
       if (isGet && url.pathname === '/chat' && !hasStart && hasValidCookie) {
         return hasResumableState().then((resumable) =>
-          resumable ? landing.fetch(req, server) : coldStartRedirect(url),
+          resumable ? withReactBootstrap(landing.fetch(req, server)) : coldStartRedirect(url),
         )
       }
 
@@ -1064,11 +1164,16 @@ export function buildOpenGraphComposer(
       // set on the /chat page load so the WS reconnect path works.
       const res = landing.fetch(req, server)
       if (isGet && url.pathname === '/chat' && !hasValidCookie) {
-        return Promise.resolve(res).then((r) => {
+        return withReactBootstrap(res).then((r) => {
           const headers = new Headers(r.headers)
           headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
           return new Response(r.body, { status: r.status, headers })
         })
+      }
+      // A /chat load WITH a valid cookie (e.g. arriving with a fresh `?start=`)
+      // still needs the project bootstrap injected.
+      if (isGet && url.pathname === '/chat') {
+        return withReactBootstrap(res)
       }
       return res
     }
@@ -1152,6 +1257,367 @@ export function buildOpenGraphComposer(
       },
     })
 
+    // P1b — single-owner localhost-trust auth resolver (Path A, Ryan-locked
+    // 2026-06-26). The owner is the sole user, the server binds 127.0.0.1, and
+    // the HTTP layer already authenticates them via the start-token/cookie, so
+    // the app-bearer (`dev:<owner_user_id>`, the chat-react client's default
+    // token) is accepted directly — no cryptographic mint needed for a
+    // single-owner box. Managed layers its own auth as the thin wrapper.
+    // ONE resolver feeds BOTH the per-project docs surface AND the cores
+    // integrations/api-keys surface (no flag, single code path).
+    //
+    // Codex r1 [P1] HARDENING: the bare dev-bypass resolver accepts ANY
+    // `dev:<user_id>` (or raw user id), which would let `Bearer dev:anyone`
+    // read project docs or rotate API keys. Single-owner Open has exactly ONE
+    // legitimate identity — the owner — so wrap the resolver to REJECT any
+    // resolved user_id that isn't `OWNER_USER_ID`. This keeps Path A's
+    // localhost-trust ergonomics (the React client's default `dev:<owner>`
+    // bearer still works) while closing the arbitrary-bearer hole. (A box bound
+    // to a non-loopback `NEUTRON_HOST` is still trusting the owner-id constant
+    // by design — that is the operator's Path A choice — but no OTHER identity
+    // is ever accepted.)
+    const appOwnerAuth: AppWsAuthResolver = ((): AppWsAuthResolver => {
+      const base = createAppWsAuthResolver({ project_slug, bypass: true })
+      return {
+        mode: base.mode,
+        resolve: async (token) => {
+          const resolved = await base.resolve(token)
+          if ('code' in resolved) return resolved
+          if (resolved.user_id !== OWNER_USER_ID) {
+            return {
+              code: 'project_mismatch',
+              message: 'single-owner Open: only the owner bearer is accepted',
+            }
+          }
+          return resolved
+        },
+      }
+    })()
+
+    // P1b — per-project Documents backend. The chat-react Documents tab
+    // (`landing/chat-react/docs-client.ts`) calls
+    // `/api/app/projects/<id>/docs/*`; `createAppDocsSurface` serves it off the
+    // real on-disk docs tree (`DocStore` → `<owner_home>/Projects/<id>/docs`),
+    // which the project setup already populates. Mounted via
+    // `composition.app_docs_surface` (gateway/composition.ts) → compose.ts route
+    // chain. Previously unmounted in Open, so the tab 404'd.
+    const docStore = new DocStore({ owner_home })
+    const appDocsSurface = createAppDocsSurface({
+      store: docStore,
+      auth: appOwnerAuth,
+      project_slug,
+    })
+
+    // P1b — app TABS resolver (`/api/app/projects/<id>/tabs` + `/api/app/tabs`).
+    // The React `ProjectShell` fetches this BEFORE rendering non-chat tabs; when
+    // it 404s the shell falls back to a Chat-only view and the Documents/Tasks
+    // tabs stay HIDDEN even though `/docs/*` is mounted (Codex r1 [P2]). A
+    // builtin-only surface (auth only) returns the per-project Chat/Documents/
+    // Tasks + global Admin descriptors from `tabs/registry.ts`, so the Documents
+    // tab actually renders. (Core-contributed project tabs would need
+    // cores+installations; the builtins cover the parity gate.)
+    const appTabsSurface = createAppTabsSurface({ auth: appOwnerAuth })
+
+    // P1b — Tasks tab backend (`/api/app/projects/<id>/tasks*`) + chat upload
+    // surface (`/api/app/upload`), the remaining app-API endpoints the React UI
+    // calls. Codex r1 [P2]×2: the tabs resolver now SHOWS the Tasks tab and the
+    // composer SHOWS the attachment button, so their backends must exist or those
+    // controls 404. `new TaskStore(db)` reads the SAME canonical project task
+    // data the agent's `cores/free/tasks` backend writes. Same owner auth.
+    const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
+    const appUploadSurface = createAppUploadSurface({
+      auth: appOwnerAuth,
+      project_slug,
+      owner_home,
+    })
+
+    // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
+    // SINGLE chat transport the served React client uses
+    // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). Both
+    // onboarding (engine) and steady-state (live agent) turns flow through this
+    // one surface — there is no second chat socket. An inbound app-ws user
+    // message runs the onboarding engine while onboarding is active, else a real
+    // `buildLiveAgentTurn`, and the reply fans back out over the app-ws registry.
+    // Same Path A localhost-trust auth resolver as docs/admin. Single code path;
+    // Managed layers its own auth as the wrapper.
+    const appWsRegistry = new InMemoryAppWsSessionRegistry()
+    const appWsChatTurn =
+      liveAgentSubstrate !== null
+        ? buildLiveAgentTurn({
+            substrate: liveAgentSubstrate,
+            personaLoader,
+            projectPersonaResolver,
+            reflection,
+            buttonStore: landing.buttonStore,
+            project_slug,
+            owner_home,
+          })
+        : null
+    // adapter ↔ receiver are mutually referential (the receiver replies via
+    // `adapter.send`); a holder breaks the cycle without a `used-before-assigned`
+    // hazard. The socket cannot dispatch an inbound until boot completes, long
+    // after `holder.adapter` is assigned below.
+    const appWsHolder: { adapter?: AppWsAdapter } = {}
+
+    // ── Onboarding consolidation (2026-06-26): ONE chat path ───────────────
+    // Onboarding is NOT a separate engine/socket — it is the INITIAL MODE of
+    // this same `/ws/app/chat` surface. The shared `landing.engine` keys its
+    // state on (project_slug, user_id), independent of transport, so the same
+    // InterviewEngine that drove the (now-removed) legacy onboarding socket runs
+    // here. `isOnboardingActive` decides per-turn whether the engine (onboarding) or
+    // the live agent (steady-state) handles the message.
+    const engine = landing.engine
+    const onboardingStateStore = landing.stateStore
+    // No state row = fresh install → start onboarding. A row in a non-terminal
+    // phase = mid-onboarding. 'completed'/'failed' = steady-state chat.
+    const isOnboardingActive = async (user_id: string): Promise<boolean> => {
+      const st = await onboardingStateStore.get(project_slug, user_id)
+      if (st === null) return true
+      return st.phase !== 'completed' && st.phase !== 'failed'
+    }
+    // Reply factory: a live-agent turn emits `ChatOutbound`; translate the
+    // user-facing `agent_message` into an app-ws `OutgoingMessage` and fan it
+    // out via the adapter (which stamps message_id/ts + persists when a chat log
+    // is wired). Typing/ack/status frames are web-shaped and dropped. Carries
+    // any button options/prompt_id/kind/allow_freeform/upload_affordance so
+    // steady-state live-agent prompts render with the SAME button UI onboarding
+    // uses (one renderer, one path).
+    const buildAppWsSendReply =
+      (channel_topic_id: string, project_id?: string) =>
+      (out: ChatOutbound): void => {
+        if (out.type !== 'agent_message') return
+        const msg: OutgoingMessage = {
+          topic: {
+            topic_id: '',
+            channel_kind: 'app_socket',
+            channel_topic_id,
+            project_id: project_id ?? null,
+            privacy_mode: 'regular',
+          },
+          text: out.body,
+        }
+        if (out.options !== undefined && out.options.length > 0) {
+          msg.inline_choices = out.options.map((o) => ({ label: o.label, callback_data: o.value }))
+        }
+        const adapter_options: Record<string, unknown> = {}
+        if (project_id !== undefined) adapter_options['project_id'] = project_id
+        if (out.prompt_id !== undefined) adapter_options['prompt_id'] = out.prompt_id
+        if (out.kind !== undefined) adapter_options['kind'] = out.kind
+        if (out.allow_freeform !== undefined) adapter_options['allow_freeform'] = out.allow_freeform
+        if (out.upload_affordance !== undefined) {
+          adapter_options['upload_affordance'] = out.upload_affordance
+        }
+        if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
+        void appWsHolder.adapter?.send(msg)
+      }
+    // Translate an engine `ButtonPrompt` → the app-ws `agent_message` envelope
+    // (a superset already carrying options/prompt_id/allow_freeform/kind/
+    // upload_affordance) and fan it out over the socket. Ephemeral by design:
+    // the engine owns durability via `button_prompts` + an idempotent re-emit on
+    // the next connect (`on_session_open` below), so we do NOT persist onboarding
+    // prompts into the steady-state app chat log (which would double-render on a
+    // `resume` replay).
+    const emitOnboardingPrompt = (topic_id: string, prompt: ButtonPrompt): boolean => {
+      const env: AppWsOutboundAgentMessage = {
+        v: 1,
+        type: 'agent_message',
+        body: prompt.body,
+        message_id: prompt.prompt_id,
+        ts: Date.now(),
+        prompt_id: prompt.prompt_id,
+        options: prompt.options.map((o) => ({
+          label: o.label,
+          body: o.body,
+          value: o.value,
+          ...(o.image_url !== undefined ? { image_url: o.image_url } : {}),
+        })),
+        allow_freeform: prompt.allow_freeform,
+      }
+      if (prompt.kind !== undefined) env.kind = prompt.kind
+      const rawAff = (prompt.metadata as Record<string, unknown> | undefined)?.['upload_affordance']
+      if (rawAff !== null && typeof rawAff === 'object') {
+        const src = (rawAff as { source?: unknown }).source
+        if (src === 'chatgpt' || src === 'claude') env.upload_affordance = { source: src }
+        // Legacy two-upload 'both' normalizes to 'chatgpt' (mirrors chat-bridge).
+        else if (src === 'both') env.upload_affordance = { source: 'chatgpt' }
+      }
+      return appWsRegistry.send(topic_id, env)
+    }
+    // Drive one onboarding turn from a typed (freeform) answer.
+    const advanceOnboardingText = async (
+      user_id: string,
+      freeform_text: string,
+      observed_at: number,
+    ): Promise<void> => {
+      await engine.advance({
+        project_slug,
+        topic_id: appWsTopicId(user_id),
+        user_id,
+        channel_kind: 'app-socket',
+        freeform_text,
+        observed_at,
+      })
+    }
+    // Drive one onboarding turn from a tapped button (structured choice).
+    const advanceOnboardingChoice = async (
+      user_id: string,
+      prompt_id: string,
+      choice_value: string,
+      freeform_text: string | undefined,
+      observed_at: number,
+    ): Promise<void> => {
+      const choice: ButtonChoice = {
+        prompt_id,
+        choice_value,
+        chosen_at: observed_at,
+        speaker_user_id: user_id,
+        channel_kind: 'app-socket',
+        ...(freeform_text !== undefined ? { freeform_text } : {}),
+      }
+      await engine.advance({
+        project_slug,
+        topic_id: appWsTopicId(user_id),
+        user_id,
+        channel_kind: 'app-socket',
+        choice,
+        observed_at,
+      })
+    }
+    // Fill the late-bound onboarding button-prompt router NOW that the registry
+    // exists. The engine's `sendButtonPrompt` reads this holder at call time
+    // (see buildRoutedSendButtonPrompt) — `app:<user>` topics route here.
+    appWsButtonPromptRouter.send = async ({ topic_id, prompt }) => {
+      const ok = emitOnboardingPrompt(topic_id, prompt)
+      return { message_id: prompt.prompt_id, was_new: ok }
+    }
+    // Import-progress over app-ws: dropped for now (the terminal-state prompt
+    // still lands via the button-prompt path). Left as an explicit no-op holder
+    // so the router prefix is recognised (no "unknown-channel" warn). A future
+    // pass can translate progress → an `agent_message_partial`-style update.
+    void appWsImportProgressRouter
+
+    const appWsReceiver = {
+      receive: async (event: IncomingEvent): Promise<void> => {
+        if (event.channel_kind !== 'app_socket') return
+        const text = event.body.text.trim()
+        // Codex r1 [P2]: an attachment-only send arrives with empty text but
+        // non-empty `adapter_metadata.attachments`; dropping on empty text alone
+        // would swallow the turn after the echo/read-receipt (user sees no
+        // reply). Only drop a TRULY empty inbound (no text AND no attachments);
+        // for attachment-only, run the turn with a minimal placeholder so the
+        // agent responds. (Full attachment content isn't yet threaded into
+        // `LiveAgentTurnRequest` — its interface carries only `user_text`; that
+        // deeper wiring is a separate follow-up, but we no longer silently drop.)
+        const attachments = Array.isArray(event.adapter_metadata?.['attachments'])
+          ? (event.adapter_metadata!['attachments'] as unknown[])
+          : []
+        if (text.length === 0 && attachments.length === 0) return
+        const userText = text.length > 0 ? text : 'Sent an attachment.'
+        const onboardingUserId = event.user.channel_user_id
+        // ONE path: while onboarding is active this typed answer advances the
+        // shared InterviewEngine (which emits the next prompt over THIS socket
+        // via the router above) instead of the steady-state live agent. The
+        // user's text was already echoed/persisted by the surface's
+        // ingestUserMessage, so it renders as a normal user bubble.
+        if (await isOnboardingActive(onboardingUserId)) {
+          await advanceOnboardingText(onboardingUserId, userText, event.received_at)
+          return
+        }
+        const project_id =
+          typeof event.adapter_metadata?.['project_id'] === 'string'
+            ? (event.adapter_metadata['project_id'] as string)
+            : undefined
+        // Codex r1 [P2]: the React client keeps ONE app-ws channel topic
+        // (`app:<owner>`) and switches projects via the `project_id` field only.
+        // Keying the live-agent turn on the bare channel topic would share the
+        // warm session + first-turn context + button-store history across ALL
+        // projects (wrong-project grounding). Derive a PROJECT-SCOPED turn topic
+        // (`app:<owner>:<project_id>`) — mirrors the web path's
+        // `web:<owner>:<project>` — so each project gets its own warm REPL +
+        // persona + history. The REPLY is still delivered to the socket's real
+        // `channel_topic_id` (below), since that's where the client listens.
+        const turnTopicId =
+          project_id !== undefined && project_id.length > 0
+            ? `${event.channel_topic_id}:${project_id}`
+            : event.channel_topic_id
+        const sendReply = buildAppWsSendReply(event.channel_topic_id, project_id)
+        if (appWsChatTurn === null) {
+          sendReply({
+            type: 'agent_message',
+            body:
+              "I can't answer yet — this box has no AI credential configured. Add one in settings, then try again.",
+          })
+          return
+        }
+        await appWsChatTurn({
+          project_slug,
+          user_id: event.user.channel_user_id,
+          // Project-scoped for warm-session/persona/history keying (Codex [P2]).
+          topic_id: turnTopicId,
+          ...(project_id !== undefined ? { project_id } : {}),
+          user_text: userText,
+          send: sendReply,
+          observed_at: event.received_at,
+        })
+      },
+    }
+    appWsHolder.adapter = new AppWsAdapter({ registry: appWsRegistry, receiver: appWsReceiver })
+    const appWsSurface = createAppWsSurface({
+      adapter: appWsHolder.adapter,
+      registry: appWsRegistry,
+      auth: appOwnerAuth,
+      project_slug,
+      // Codex r1 [P2]: route slash commands (/note, /remind, /skills, …) through
+      // the SAME chained filter the web chat uses — parity, not a second path.
+      chat_command_filter: chatCommandFilter,
+      // Onboarding consolidation — fire the FIRST onboarding prompt over this
+      // socket on connect when the owner hasn't finished onboarding. Idempotent:
+      // engine.start re-emits the active prompt on a reconnect.
+      on_session_open: async ({ user_id, channel_topic_id }) => {
+        if (await isOnboardingActive(user_id)) {
+          await engine.start({
+            project_slug,
+            topic_id: channel_topic_id,
+            user_id,
+            signup_via: 'web',
+          })
+        }
+      },
+      // Onboarding consolidation — a tapped quick-reply button. Onboarding →
+      // structured engine.advance; steady-state → feed the choice to the live
+      // agent as the user's selection (same single surface).
+      on_button_choice: async ({
+        user_id,
+        channel_topic_id,
+        project_id,
+        prompt_id,
+        choice_value,
+        freeform_text,
+      }) => {
+        const now = Date.now()
+        if (await isOnboardingActive(user_id)) {
+          await advanceOnboardingChoice(user_id, prompt_id, choice_value, freeform_text, now)
+          return
+        }
+        if (appWsChatTurn === null) return
+        const turnTopicId =
+          project_id !== undefined && project_id.length > 0
+            ? `${appWsTopicId(user_id)}:${project_id}`
+            : appWsTopicId(user_id)
+        const replyText =
+          freeform_text !== undefined && freeform_text.length > 0 ? freeform_text : choice_value
+        await appWsChatTurn({
+          project_slug,
+          user_id,
+          topic_id: turnTopicId,
+          ...(project_id !== undefined ? { project_id } : {}),
+          user_text: replyText,
+          send: buildAppWsSendReply(channel_topic_id, project_id),
+          observed_at: now,
+        })
+      },
+    })
+
     return {
       db,
       project_slug,
@@ -1184,6 +1650,11 @@ export function buildOpenGraphComposer(
         // Google-backed Core installs LIVE the moment its grant exists, and
         // fail-soft/hidden until then (optional-until-credentialed at install).
         prompter: coresWiring.prompter,
+        // P1b — supplying `auth` triggers `wireCoresSurfaces` to auto-build the
+        // `/api/cores/integrations` + `/api/cores/api-keys/*` admin endpoints
+        // (API-key collection). Without it the surface was never mounted in Open
+        // → the admin/integrations routes 404'd. Single-owner localhost trust.
+        auth: appOwnerAuth,
       },
       // Doc-search agent tools (doc_search / doc_read) — registered by the
       // `tools` module when a runtime is present. Omitted if the index
@@ -1249,6 +1720,22 @@ export function buildOpenGraphComposer(
         fetch: openFetch,
         websocket: landing.websocket,
       },
+      // P1b — mount the app-ws chat surface (the React client's real transport)
+      // + the per-project Documents backend so the chat-react UI works
+      // end-to-end. `gateway/composition.ts` forwards both into the compose.ts
+      // route chain (app_ws also contributes the `/ws/app/chat` websocket).
+      app_ws_surface: {
+        handler: appWsSurface.handler,
+        websocket: appWsSurface.websocket,
+      },
+      app_docs_surface: { handler: appDocsSurface.handler },
+      // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
+      // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
+      app_tabs_surface: { handler: appTabsSurface.handler },
+      // P1b — Tasks tab backend + chat attachment upload, so every visible React
+      // control has a live backend (no 404s behind a shown tab/button).
+      app_tasks_surface: { handler: appTasksSurface.handler },
+      app_upload_surface: { handler: appUploadSurface.handler },
     }
   }
 }

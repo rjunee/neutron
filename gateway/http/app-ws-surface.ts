@@ -21,12 +21,11 @@
  *     and forwards the inbound through `AppWsAdapter.dispatchInbound`
  *     so the gateway's existing `ChannelRouter.receive` pipeline runs.
  *
- * The path `/ws/app/chat` is deliberately distinct from the landing
- * server's existing `/ws/chat` (which is owned by the onboarding chat
- * bridge). Mounting on a separate path means the landing surface's
- * tests, the M2 onboarding flow, and this new surface stay
- * independently composable; no behaviour change to either path when
- * the other is unwired.
+ * `/ws/app/chat` is now the SINGLE chat WebSocket endpoint (2026-06-26
+ * consolidation): onboarding runs as the initial MODE of this surface
+ * (see open/composer.ts on_session_open / on_button_choice), and the
+ * legacy landing onboarding socket has been removed. Steady-state and
+ * onboarding share this one path, one engine, one renderer.
  */
 
 import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
@@ -34,6 +33,7 @@ import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
 import { AppChatEditNotAuthorizedError } from '../../persistence/index.ts'
 import {
   decodeAppWsInbound,
+  decodeAppWsButtonChoice,
   decodeAppWsEdit,
   decodeAppWsReaction,
   decodeAppWsReceipt,
@@ -147,12 +147,45 @@ export interface CreateAppWsSurfaceOptions {
    * back via the session registry.
    */
   chat_command_filter?: ChatCommandFilter
+  /**
+   * Onboarding consolidation (2026-06-26) — fired once per WS `open`, right
+   * after `session_ready`. The Open composer uses it to drive the unified
+   * onboarding: if the owner has not finished onboarding it calls
+   * `engine.start({ topic_id: app:<user> })`, which emits the first onboarding
+   * prompt over THIS socket (the SAME surface steady-state chat uses). A no-op
+   * for fully-onboarded owners. Must never throw — the surface wraps it so a
+   * hook failure can't tear down the socket.
+   */
+  on_session_open?: (input: {
+    user_id: string
+    project_slug: string
+    channel_topic_id: string
+    project_id?: string
+  }) => Promise<void>
+  /**
+   * Onboarding consolidation (2026-06-26) — fired when the client taps an
+   * onboarding/quick-reply button (a `button_choice` frame). The composer
+   * resolves it against the engine's persisted prompt (onboarding) or feeds the
+   * choice to the live agent (steady-state). Decoded BEFORE the user_message
+   * path so the message decoder keeps its narrow type.
+   */
+  on_button_choice?: (input: {
+    user_id: string
+    project_slug: string
+    channel_topic_id: string
+    project_id?: string
+    prompt_id: string
+    choice_value: string
+    freeform_text?: string
+  }) => Promise<void>
 }
 
 export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurface {
   const { adapter, registry, auth } = opts
   const chat_command_filter = opts.chat_command_filter
   const project_slug = opts.project_slug
+  const on_session_open = opts.on_session_open
+  const on_button_choice = opts.on_button_choice
 
   return {
     adapter,
@@ -283,6 +316,26 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         console.info(
           `[app-ws] instance=${data.project_slug} user=${data.user_id} topic=${data.channel_topic_id} project=${data.project_id ?? '-'} platform=${data.platform ?? '-'} event=open`,
         )
+        // Onboarding consolidation (2026-06-26) — after session_ready, give the
+        // composer a chance to fire the FIRST onboarding prompt over this socket
+        // when the owner hasn't finished onboarding. Wrapped so a hook failure
+        // can't tear down the socket (the engine re-emits on the next connect).
+        if (on_session_open !== undefined) {
+          try {
+            await on_session_open({
+              user_id: data.user_id,
+              project_slug: data.project_slug,
+              channel_topic_id: data.channel_topic_id,
+              ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+            })
+          } catch (err) {
+            console.warn(
+              `[app-ws] on_session_open failed user=${data.user_id} topic=${data.channel_topic_id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          }
+        }
       },
       async message(ws, message): Promise<void> {
         const data = ws.data
@@ -416,6 +469,43 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const code = err instanceof AppChatEditNotAuthorizedError ? 'not_authorized' : 'edit_failed'
             const reason = err instanceof Error ? err.message : 'edit error'
             ws.send(JSON.stringify({ v: 1, type: 'error', code, message: reason }))
+          }
+          return
+        }
+        // Onboarding consolidation (2026-06-26) — a button/quick-reply CHOICE.
+        // Routed to the composer's `on_button_choice` (engine.advance for
+        // onboarding, live-agent for steady-state). Decoded BEFORE the message
+        // decoder so the user_message path keeps its narrow type. No
+        // ingest/echo: a tap isn't a typed message — the client renders the
+        // selection optimistically; the engine emits the next prompt.
+        const choice = decodeAppWsButtonChoice(parsed)
+        if (choice !== null) {
+          if (on_button_choice === undefined) {
+            ws.send(
+              JSON.stringify({
+                v: 1,
+                type: 'error',
+                code: 'button_choice_unsupported',
+                message: 'this surface does not accept button_choice',
+              }),
+            )
+            return
+          }
+          try {
+            await on_button_choice({
+              user_id: data.user_id,
+              project_slug,
+              channel_topic_id: data.channel_topic_id,
+              ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+              prompt_id: choice.prompt_id,
+              choice_value: choice.choice_value,
+              ...(choice.freeform_text !== undefined ? { freeform_text: choice.freeform_text } : {}),
+            })
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : 'button_choice error'
+            ws.send(
+              JSON.stringify({ v: 1, type: 'error', code: 'button_choice_failed', message: reason }),
+            )
           }
           return
         }

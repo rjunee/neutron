@@ -110,7 +110,40 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
     // them and a re-delivery of the ORIGINAL body never resurrects an edited one.
     // pickEditState owns `body` (incl. the normal optimistic→echo reconciliation).
     ...pickEditState(existing, incoming),
+    // P1b (onboarding / quick-reply buttons) — agent-message metadata is
+    // immutable wire data, so a re-delivery / resume carries the same set;
+    // preserve whatever's present (incoming wins, falling back to existing) and
+    // only include each key when set so a button-less message stays unchanged.
+    ...pickAgentMeta(existing, incoming),
   }
+}
+
+/**
+ * P1b (onboarding / quick-reply buttons) — pick an agent message's button
+ * metadata (options / prompt_id / allow_freeform / kind / upload_affordance)
+ * when merging `incoming` onto `existing`. Immutable wire data: incoming wins
+ * where present, else the existing value survives a metadata-less re-delivery
+ * (e.g. a receipt/reaction/edit re-upsert). Returns only the keys that are set
+ * so a message with no buttons doesn't grow null fields.
+ */
+export function pickAgentMeta(
+  existing: Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>,
+  incoming: Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>,
+): Partial<Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>> {
+  const out: Partial<
+    Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>
+  > = {}
+  const options = incoming.options ?? existing.options
+  if (options !== null && options !== undefined) out.options = options
+  const promptId = incoming.prompt_id ?? existing.prompt_id
+  if (promptId !== null && promptId !== undefined) out.prompt_id = promptId
+  const allowFreeform = incoming.allow_freeform ?? existing.allow_freeform
+  if (allowFreeform !== null && allowFreeform !== undefined) out.allow_freeform = allowFreeform
+  const kind = incoming.kind ?? existing.kind
+  if (kind !== null && kind !== undefined) out.kind = kind
+  const upload = incoming.upload_affordance ?? existing.upload_affordance
+  if (upload !== null && upload !== undefined) out.upload_affordance = upload
+  return out
 }
 
 /**

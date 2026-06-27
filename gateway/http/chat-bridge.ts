@@ -3,10 +3,12 @@
  *
  * Sprint 18 — per-instance gateway HTTP route composition.
  *
- * `landing/server.ts:createLandingServer` accepts a `ChatBridge` interface
- * for the `/chat` GET + `/ws/chat` upgrade path. P2 S2 shipped a mock
- * bridge for the unit tests; this module ships the production bridge that
- * wires through the locked primitives:
+ * `landing/server.ts:createLandingServer` once accepted a `ChatBridge`
+ * interface for the legacy `/ws/chat` onboarding socket (now removed —
+ * onboarding + chat are unified on `/ws/app/chat`). The bridge + its
+ * routed senders below are still the production path that the engine uses
+ * to emit onboarding over the app-ws surface, wiring through the locked
+ * primitives:
  *
  *   - `signup/start-token.ts:verifyStartToken` — JWT signature + aud + exp.
  *   - `signup/start-token.ts:claimStartTokenJti` — atomic single-use claim
@@ -398,8 +400,9 @@ function emitTypingBracket(
 
 /**
  * Convert a channel-agnostic ButtonPrompt into the locked web envelope
- * (Sprint 16 P2 S5 § 2.5). Adapters that emit on /ws/chat use this
- * shape so the cross-channel parity test stays satisfied:
+ * (Sprint 16 P2 S5 § 2.5). Adapters that emit on the web chat surface
+ * (`/ws/app/chat`) use this shape so the cross-channel parity test stays
+ * satisfied:
  *
  *   { v:1, type:'agent_message', body, prompt_id?, options[]?, allow_freeform? }
  *
@@ -543,6 +546,22 @@ export function buildOwnerRegistryLookupFromRegistry(registry: {
   }
 }
 
+/**
+ * Onboarding consolidation (2026-06-26) — a late-bound app-socket sender holder.
+ *
+ * The Open composer builds the app-ws registry AFTER `buildLandingStack`
+ * constructs the engine (the engine's `sendButtonPrompt` is fixed at
+ * construction), so the `app:` route can't be a concrete function at engine
+ * build time. The composer passes this MUTABLE holder into the routed sender and
+ * fills `.send` once the app-ws adapter/registry exist. The routed closure reads
+ * `holder.send` at CALL time, so the late binding is safe — the first socket
+ * connects long after boot fills the holder. This keeps ONE engine + ONE routed
+ * sender across web/telegram/app-socket (no second onboarding path).
+ */
+export interface AppSocketButtonPromptRouter {
+  send?: SendButtonPromptFn
+}
+
 export interface BuildRoutedSendButtonPromptOptions {
   webRegistry: WebChatSenderRegistry
   /**
@@ -552,6 +571,14 @@ export interface BuildRoutedSendButtonPromptOptions {
    * path stays consistent.
    */
   telegramSender?: SendButtonPromptFn
+  /**
+   * Onboarding consolidation — app-socket (`app:<user_id>`) route. The Open
+   * composer fills the holder's `.send` after the app-ws registry is built so
+   * onboarding prompts emit over the SAME `/ws/app/chat` socket the steady-state
+   * chat uses. Absent on the Managed/web-only path (prompts to an `app:` topic
+   * return was_new=false; the engine retries).
+   */
+  appSocketRouter?: AppSocketButtonPromptRouter
 }
 
 /**
@@ -579,8 +606,21 @@ export interface BuildRoutedSendButtonPromptOptions {
  * closed WS are benign — the registry returns false, the engine ignores
  * the return value, and the next 5 s tick re-emits.
  */
+/**
+ * Onboarding consolidation (2026-06-26) — app-socket import-progress holder.
+ * Same late-bind rationale as {@link AppSocketButtonPromptRouter}. The composer
+ * fills `.send` to translate the UI-only `import_progress` event onto the
+ * `/ws/app/chat` socket so the onboarding import phase renders live progress in
+ * the React client.
+ */
+export interface AppSocketImportProgressRouter {
+  send?: (input: SendImportProgressArgs) => Promise<{ delivered: boolean }>
+}
+
 export interface BuildRoutedSendImportProgressOptions {
   webRegistry: WebChatSenderRegistry
+  /** Onboarding consolidation — `app:<user_id>` route (composer-filled holder). */
+  appSocketRouter?: AppSocketImportProgressRouter
 }
 
 export interface SendImportProgressArgs {
@@ -626,10 +666,14 @@ export function buildRoutedSendImportProgress(
       )
       return { delivered: ok }
     }
+    // Onboarding consolidation (2026-06-26) — app-socket route.
+    if (topic_id.startsWith('app:') && opts.appSocketRouter?.send !== undefined) {
+      return await opts.appSocketRouter.send({ project_slug, topic_id, event })
+    }
     // Telegram + unknown channels: silent drop. The terminal-state
     // agent_message still lands on these channels via the regular
     // `sendButtonPrompt` path.
-    if (!topic_id.startsWith('tg:')) {
+    if (!topic_id.startsWith('tg:') && !topic_id.startsWith('app:')) {
       console.warn(
         `[chat-bridge] sendImportProgress event=drop reason=unknown-channel project=${project_slug} topic=${topic_id} job=${event.job_id}`,
       )
@@ -666,6 +710,14 @@ export function buildRoutedSendButtonPrompt(
     }
     if (topic_id.startsWith('tg:') && opts.telegramSender !== undefined) {
       return await opts.telegramSender({ project_slug, topic_id, prompt })
+    }
+    // Onboarding consolidation (2026-06-26) — app-socket route. Onboarding
+    // prompts addressed to `app:<user_id>` fan out over the unified
+    // `/ws/app/chat` socket via the composer-supplied holder. The holder
+    // translates the ButtonPrompt → the app-ws `agent_message` envelope (which
+    // already carries options/prompt_id/allow_freeform/kind/upload_affordance).
+    if (topic_id.startsWith('app:') && opts.appSocketRouter?.send !== undefined) {
+      return await opts.appSocketRouter.send({ project_slug, topic_id, prompt })
     }
     // No sender for this topic_id. Surface explicitly so a misrouted
     // prefix (Telegram instance on a web-only deploy, or a future

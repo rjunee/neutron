@@ -1636,9 +1636,6 @@ function escapeHtmlAttr(s: string): string {
  * dispatching through their normal handlers; only `/chat` and the
  * other landing-route prefixes route to the gate.
  *
- * `/ws/chat` upgrades are explicitly closed with status 503 because
- * there's no chat-surface to bridge to until the user authorizes Max.
- *
  * Codex r7 P2 — `/api/v1/sign-up` and `/invite*` need sensible
  * responses too. The gate handler ONLY handles `/chat` + `/healthz`;
  * other landing-route paths used to fall through to its 404 default.
@@ -1654,12 +1651,6 @@ export function buildGateLandingServer(
   return {
     fetch: async (req): Promise<Response> => {
       const url = new URL(req.url)
-      // /ws/chat upgrades have no chat surface to bridge — close cleanly.
-      if (url.pathname === '/ws/chat') {
-        return new Response('chat surface unavailable — authorize Max first', {
-          status: 503,
-        })
-      }
       // Sign-up trampoline still works while the chat surface is
       // gated — redirects to identity's `/oauth/<provider>/start`.
       if (url.pathname === '/api/v1/sign-up' && req.method === 'GET') {

@@ -35,9 +35,13 @@ export const NEUTRON_SCHEME = 'neutron';
 // consistent for whatever value this resolves to. Trailing slashes are
 // stripped so `WEB_APP_BASE + '/projects/'` never produces a double slash,
 // matching runtime/doc-links.ts + onboarding/interview/final-handoff-config.ts.
-export const WEB_APP_BASE = (
-  process.env.EXPO_PUBLIC_NEUTRON_WEB_APP_BASE ?? ''
-).replace(/\/+$/, '');
+export function webAppBase(): string {
+  return (process.env.EXPO_PUBLIC_NEUTRON_WEB_APP_BASE ?? '').replace(/\/+$/, '');
+}
+// Back-compat const (boot-time snapshot). buildDocLink/parseDocLink read
+// `webAppBase()` at CALL time (mirror of runtime/doc-links.ts) so the env is
+// honored post-import and the parity test is not import-order-fragile.
+export const WEB_APP_BASE = webAppBase();
 // Configurable via the VAULT_REDIRECTOR_BASE env var; the default is a
 // placeholder that self-hosted installs override. Mirrors runtime/doc-links.ts.
 export const VAULT_REDIRECTOR_BASE =
@@ -147,7 +151,7 @@ export function buildDocLink(input: BuildDocLinkInput): string {
       // P7.3 — the web shape already carries `?path=`, so the anchor
       // appends as `&line=<n>` (or `&range=<n>-<m>`) instead of
       // `?line=…`. Mirror of `runtime/doc-links.ts`.
-      return `${WEB_APP_BASE}/projects/${project_id}/docs?path=${encodeURIComponent(normalised)}${appendToWebQuery(anchor)}`;
+      return `${webAppBase()}/projects/${project_id}/docs?path=${encodeURIComponent(normalised)}${appendToWebQuery(anchor)}`;
     case 'telegram':
       return `${NEUTRON_SCHEME}://docs/${project_id}/${encoded}${anchor}`;
     default: {
@@ -239,7 +243,7 @@ export function parseDocLink(url: string): ParsedDocLink | null {
   // Web shape is the ONLY canonical shape that legitimately carries a
   // query string. Match it before the global `?`/`#` rejection so the
   // rejection can still guard every other shape against smuggling.
-  const webPrefix = `${WEB_APP_BASE}/projects/`;
+  const webPrefix = `${webAppBase()}/projects/`;
   if (url.startsWith(webPrefix)) {
     return parseWebShape(url.slice(webPrefix.length));
   }

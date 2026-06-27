@@ -7,11 +7,18 @@
  * polished Expo/React UI from P5 isn't done."
  *
  * This module wires the `/chat` GET handler (serving `chat.html` from
- * disk) and the `/ws/chat` WebSocket upgrade (relaying agent ↔ user
- * messages through a caller-supplied `ChatBridge`). Production deploys
- * this as a Bun.serve subprocess on the instance gateway host; the
- * instance subdomain reverse-proxy config forwards `<slug>.<base-domain>/chat`
- * + `/ws/chat` to this process.
+ * disk) plus the rest of the landing HTTP surface (SPA shell, brand
+ * assets, /start + /recover + sign-up redirects, install-token routes).
+ * Production deploys this as a Bun.serve subprocess on the instance
+ * gateway host; the instance subdomain reverse-proxy config forwards
+ * `<slug>.<base-domain>/chat` to this process.
+ *
+ * Chat itself is no longer served here: the legacy `/ws/chat` onboarding
+ * socket was removed once onboarding + chat were unified onto the single
+ * `/ws/app/chat` Expo-app WebSocket (see `gateway/http/app-ws-surface.ts`
+ * + `open/composer.ts`). The landing server now serves the SPA + HTTP
+ * routes only; the `websocket` field is a defensive close-stub kept for
+ * type-compat with the gateway multiplex.
  *
  * Codex r1 P1 fix — the prior commit shipped only the static client
  * files, leaving the web sign-up path pointing at a 404. This adds the
@@ -290,9 +297,10 @@ export interface AgentAckOutbound {
  *
  * The `project_slug` field is the NEW slug (post-rename) so the client
  * can correlate. `new_start_token` is the JWT to use for the next
- * `/ws/chat?start=...` upgrade — its embedded `project_slug` claim
- * matches the new slug, so the renamed gateway's `validateStartToken`
- * accepts it without dipping into the slug-history shim.
+ * chat WebSocket upgrade (`/ws/app/chat?start=...`) — its embedded
+ * `project_slug` claim matches the new slug, so the renamed gateway's
+ * `validateStartToken` accepts it without dipping into the slug-history
+ * shim.
  */
 export interface RedirectOutbound {
   type: 'redirect'
@@ -702,8 +710,14 @@ export interface LandingServerOptions {
    * (existsSync-guarded), which is the Open self-host default.
    */
   invite_assets_dir?: string
-  /** Bridge that drives onboarding from inbound user events. */
-  bridge: ChatBridge
+  /**
+   * Legacy onboarding bridge. The `/ws/chat` onboarding socket that
+   * consumed this was removed (onboarding + chat are unified on
+   * `/ws/app/chat`), so the landing server no longer drives a bridge.
+   * The field stays OPTIONAL purely so existing callers that still pass
+   * a bridge keep compiling; nothing in this module reads it anymore.
+   */
+  bridge?: ChatBridge
   /** Port to listen on; production wires to the per-instance gateway port. */
   port?: number
   /** Optional hostname; defaults to '0.0.0.0' for ipv4 binding. */
@@ -778,7 +792,7 @@ export interface LandingServerOptions {
   recoverHandler?: (req: Request) => Promise<Response>
   /**
    * 2026-05-27 persistent-session-cookie sprint (Part B) — resolve the
-   * cookie-authenticated user's identity for a `/ws/chat` upgrade that
+   * cookie-authenticated user's identity for a chat upgrade that
    * arrives with only a session cookie (no `?start=` token). Returns
    * the cookie's `project_slug` + the owner's `user_id` when the cookie
    * is valid for THIS gateway's instance; returns `null` when the cookie
@@ -992,10 +1006,12 @@ export function renderChatAuthGateHtml(): string {
 }
 
 /**
- * Bun.serve handler that surfaces `/chat` (HTTP) + `/ws/chat`
- * (WebSocket). Uses Bun's native upgrade pattern so a single port
- * accepts both. Caller is responsible for SIGTERM handling + graceful
- * shutdown — the returned `stop()` closes the server.
+ * Bun.serve handler that surfaces the landing `/chat` (HTTP) SPA shell
+ * plus the rest of the landing HTTP routes. Chat moved to the unified
+ * `/ws/app/chat` Expo-app socket, so this server no longer upgrades a
+ * websocket; the `websocket` field is a defensive close-stub. Caller is
+ * responsible for SIGTERM handling + graceful shutdown — the returned
+ * `stop()` closes the server.
  */
 export function createLandingServer(options: LandingServerOptions): LandingServer {
   const static_dir = options.static_dir ?? HERE
@@ -1084,7 +1100,6 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     const p = join(static_dir, file)
     if (existsSync(p)) brand_assets.set(route, { body: readFileSync(p), type })
   }
-  const bridge = options.bridge
   async function resolveChatReactJs(): Promise<string | null> {
     if (chat_react_js_cache !== null) return chat_react_js_cache
     if (!existsSync(chat_react_entry_path)) return null
@@ -1312,419 +1327,28 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         }
         return options.inviteAcceptHandler(req)
       }
-      if (url.pathname === '/ws/chat') {
-        // 2026-05-27 persistent-session-cookie sprint (Part B) — the
-        // upgrade handler accepts EITHER a valid `?start=<jwt>` (status
-        // quo precedence — token wins when present) OR a valid session
-        // cookie for THIS gateway's instance. Cookie-only upgrades emit a
-        // refreshed `Set-Cookie` on the 101 response so the session-
-        // cookie expiry rolls forward in lockstep with the HTTP-side
-        // sliding refresh in `landing/auth-gate.ts`.
-        //
-        // Pre-sprint (token-only) behaviour is preserved exactly when
-        // `cookieToUserClaim` is unwired: any request without a
-        // `?start=` query param falls straight through to the 400 below.
-        const start_token = url.searchParams.get('start') ?? ''
-        // 2026-05-28 sidebar sprint — optional active-topic param.
-        // Validated against the resolved user_id below (after claim
-        // resolution) so a crafted topic_id can't pre-bind a sender
-        // before instance auth runs.
-        const active_topic_id_raw = url.searchParams.get('topic_id')
-        // #306 (2026-06-19) — the auto-detected browser timezone. Captured
-        // at upgrade time (Bun's WS `open` can't read the request URL) and
-        // threaded into startSession → engine.start. Light bound here (the
-        // engine re-validates the IANA shape); trimmed empty → undefined.
-        const browser_timezone_raw = (url.searchParams.get('tz') ?? '').trim()
-        const browser_timezone =
-          browser_timezone_raw.length > 0 && browser_timezone_raw.length <= 64
-            ? browser_timezone_raw
-            : undefined
-        if (start_token.length > 0) {
-          // Codex r5 P2: validate-only here (NO jti claim). The atomic
-          // consume happens after upgrade succeeds in the open handler so
-          // a failed upgrade does not burn the token.
-          const claim = await bridge.validateStartToken({ start_token })
-          if (claim === null) {
-            return new Response('invalid start token', { status: 401 })
-          }
-          const active_topic_id = validateActiveTopicId(active_topic_id_raw, claim.user_id)
-          if (active_topic_id === 'invalid') {
-            return new Response('invalid topic_id', { status: 400 })
-          }
-          // ISSUES #94 — also resolve the session cookie (when wired) as a
-          // FALLBACK for the open handler. The `?start=` token still wins
-          // (token precedence is preserved: pending_claim is set from it
-          // and the jti is claimed in `open`), but a reconnect / reload
-          // re-presenting a spent one-shot token would otherwise fail the
-          // atomic claim and strand the authenticated user. Only a cookie
-          // for the SAME identity is a valid recovery net — a cross-identity
-          // cookie is ignored so there is no silent cross-auth. This is the
-          // ONLY place the cookie can be read (Bun's WS `open` has no req).
-          let cookie_fallback_claim: { project_slug: string; user_id: string } | undefined
-          if (options.cookieToUserClaim !== undefined) {
-            // Best-effort: resolving the fallback cookie MUST NOT break the
-            // token auth path. Token always wins; a cookie-hook failure
-            // simply leaves the recovery net unset.
-            try {
-              const cookieClaim = await options.cookieToUserClaim(req)
-              // Same-identity is the `user_id` match. The cookie resolver is
-              // single-instance (it returns null for any cookie that binds a
-              // DIFFERENT instance — see `cookieToUserClaim` docs), so a
-              // non-null claim is already guaranteed to be for THIS gateway's
-              // instance. Do NOT also require `project_slug` equality: during a
-              // no-restart slug rename the token's `claim.project_slug`
-              // collapses to the gateway's frozen downstream slug while the
-              // cookie resolver reports the CURRENT slug, so a strict-equality
-              // gate would drop the fallback for the renamed-host reconnect —
-              // exactly the consumed-token recovery this fix exists to provide
-              // (Codex r1 P1).
-              if (cookieClaim !== null && cookieClaim.user_id === claim.user_id) {
-                cookie_fallback_claim = {
-                  project_slug: cookieClaim.project_slug,
-                  user_id: cookieClaim.user_id,
-                }
-              }
-            } catch (err) {
-              console.error('chat cookieToUserClaim (token-fallback resolve) threw:', err)
-            }
-          }
-          const data: SocketState = {
-            project_slug: claim.project_slug,
-            user_id: claim.user_id,
-            pending_claim: { ...claim, ...(active_topic_id !== undefined ? { active_topic_id } : {}) },
-            session_started: false,
-            current_host: resolveRequestHost(req),
-            ...(active_topic_id !== undefined ? { active_topic_id } : {}),
-            ...(browser_timezone !== undefined ? { browser_timezone } : {}),
-            ...(cookie_fallback_claim !== undefined ? { cookie_fallback_claim } : {}),
-          }
-          const upgraded = server.upgrade(req, { data })
-          if (!upgraded) {
-            return new Response('upgrade failed', { status: 426 })
-          }
-          // server.upgrade returns true on success; the WS lifecycle takes over.
-          return new Response(null, { status: 101 })
-        }
-        // Cookie-only branch — only walked when `?start=` is missing AND
-        // the boot wired `cookieToUserClaim`. Returning null from the
-        // hook (cookie missing / malformed / expired / cross-instance)
-        // collapses to the same 400 a tokenless pre-sprint upgrade
-        // produced, so existing token-only callers (mobile WS clients,
-        // older browsers without the cookie) keep getting their
-        // familiar "missing start token" body.
-        if (options.cookieToUserClaim !== undefined) {
-          const cookieClaim = await options.cookieToUserClaim(req)
-          if (cookieClaim !== null) {
-            const active_topic_id = validateActiveTopicId(active_topic_id_raw, cookieClaim.user_id)
-            if (active_topic_id === 'invalid') {
-              return new Response('invalid topic_id', { status: 400 })
-            }
-            const data: SocketState = {
-              project_slug: cookieClaim.project_slug,
-              user_id: cookieClaim.user_id,
-              // No jti to claim for cookie-only auth; the `open` handler
-              // skips `bridge.startSession` entirely when `pending_claim`
-              // is null (returning user resumes mid-session — there is
-              // no welcome envelope to fire).
-              pending_claim: null,
-              session_started: false,
-              ...(active_topic_id !== undefined ? { active_topic_id } : {}),
-            }
-            // Defence-in-depth: pass the refreshed `Set-Cookie` BOTH on
-            // the upgrade-arg `headers` (newer Bun) AND on the 101
-            // response shell (older Bun) so browser cookie-jar rollover
-            // happens regardless of which path Bun's WS upgrade
-            // ultimately honours. The HTML-side gate at
-            // `landing/auth-gate.ts` rolls the cookie on every gated
-            // HTTP hit; this is the WS-side parity so a long-lived chat
-            // session past the original cookie's 30d window keeps the
-            // cookie alive without an intervening HTTP round-trip.
-            const upgradeOpts: Parameters<typeof server.upgrade>[1] = { data }
-            if (cookieClaim.set_cookie !== undefined) {
-              upgradeOpts.headers = { 'set-cookie': cookieClaim.set_cookie }
-            }
-            const upgraded = server.upgrade(req, upgradeOpts)
-            if (!upgraded) {
-              return new Response('upgrade failed', { status: 426 })
-            }
-            const responseHeaders: Record<string, string> = {}
-            if (cookieClaim.set_cookie !== undefined) {
-              responseHeaders['set-cookie'] = cookieClaim.set_cookie
-            }
-            return new Response(null, { status: 101, headers: responseHeaders })
-          }
-          // Cookie hook returned null — fall through to the missing-
-          // start-token 400 below (cookie absence is indistinguishable
-          // from token absence on the wire; the operator's logs already
-          // surface the underlying signin-needed signal via the gate).
-        }
-        return new Response('missing start token', { status: 400 })
-      }
+      // The legacy `/ws/chat` onboarding WebSocket upgrade was removed —
+      // onboarding + chat are unified on the `/ws/app/chat` Expo-app
+      // socket (see `gateway/http/app-ws-surface.ts`). A request to
+      // `/ws/chat` now simply falls through to the 404 below.
       return new Response('not found', { status: 404 })
     },
     websocket: {
-      async message(ws, message): Promise<void> {
-        const data = ws.data
-        if (data === undefined) return
-        // Codex r5 P1: drop inbound messages before the session has been
-        // started. Otherwise a fast client could send before the open
-        // handler's startSession runs, slipping past the atomic jti claim.
-        if (!data.session_started) {
-          ws.send(JSON.stringify({ type: 'error', message: 'session not started' }))
-          return
-        }
-        let event: ChatInbound
+      open(ws): void {
+        // /ws/chat removed — onboarding + chat are unified on /ws/app/chat.
+        // Nothing upgrades to a landing socket anymore; this is a defensive stub.
         try {
-          event = JSON.parse(typeof message === 'string' ? message : message.toString()) as ChatInbound
+          ws.close(1011, 'chat moved to /ws/app/chat')
         } catch {
-          ws.send(JSON.stringify({ type: 'error', message: 'malformed event' }))
-          return
-        }
-        // Argus Sprint 18 r1 BLOCKING — reuse the per-socket send lambda
-        // captured in `open` so the bridge sees a stable reference for
-        // the lifetime of this socket. handleInbound re-registers on
-        // every inbound; if we passed a fresh lambda each call the
-        // registry would churn and identity-aware unregister could not
-        // tell sockets apart.
-        const send = data.send
-        if (send === undefined) {
-          // open() never ran (extremely unlikely — message before open).
-          // Bail rather than synthesize a fresh send lambda that would
-          // break identity tracking.
-          ws.send(JSON.stringify({ type: 'error', message: 'session not started' }))
-          return
-        }
-        try {
-          await bridge.handleInbound({
-            project_slug: data.project_slug,
-            user_id: data.user_id,
-            event,
-            send,
-            ...(data.active_topic_id !== undefined ? { active_topic_id: data.active_topic_id } : {}),
-            // 2026-05-29 in-place topic switch sprint — let the bridge
-            // mutate `ws.data.active_topic_id` so a `topic_switch` event
-            // updates the per-socket binding atomically with the
-            // sender re-register. The next inbound message on this
-            // socket then reads the NEW topic_id; without this hop the
-            // bridge would re-bind the registry but the server's next
-            // dispatch would still pass the OLD topic_id back in.
-            updateActiveTopicId: (new_id: string): void => {
-              data.active_topic_id = new_id
-            },
-            // 2026-05-29 ISSUES #70 — race-safety read-callback paired
-            // with `updateActiveTopicId`. The bridge's `topic_switch`
-            // handler awaits the seed re-emit DB round-trip BEFORE
-            // acking; if a second `topic_switch` lands during that
-            // await, the helper re-reads ws.data.active_topic_id via
-            // this lambda and drops the stale seed before painting it
-            // into the new destination's just-cleared #log.
-            getActiveTopicId: (): string | undefined => data.active_topic_id,
-          })
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : 'bridge error'
-          ws.send(JSON.stringify({ type: 'error', message: reason }))
+          /* already closed */
         }
       },
-      async open(ws): Promise<void> {
-        const data = ws.data
-        if (data === undefined) return
-        // Capture the per-socket send lambda ONCE so every bridge call
-        // (startSession / handleInbound / closeSession) sees the same
-        // reference. Identity-aware registries (Argus Sprint 18 r1
-        // BLOCKING) compare-and-delete by this ref.
-        //
-        // T10 (2026-05-14) — surface a closed-socket send as a throw.
-        // Bun's `ws.send` returns 0 (NOT -1, NOT a throw) when the
-        // underlying WS is no longer OPEN; pre-T10 this silently
-        // dropped the engine's welcome envelope while reporting success
-        // to the engine. With the throw, the InMemoryWebChatSenderRegistry's
-        // catch (chat-bridge.ts) downgrades the routed-send result to
-        // `was_new=false`, the engine leaves `delivered_at=null`, and
-        // the user's reconnect re-emits the prompt. Without this
-        // discriminator the engine treats the closed-socket send the
-        // same as a successful delivery — the exact silent-drop the
-        // T10 brief calls out.
-        //
-        // T10 r3 (Argus #1 BLOCKING) — distinguish `0` (closed) from
-        // `-1` (backpressure: queued, will flush on drain). The pre-r3
-        // `wrote <= 0` lumped backpressure into closed-socket and would
-        // tear the session down with 4001 mid-onboarding the moment a
-        // slow client got behind on a larger envelope. `=== 0` is the
-        // only real closed-socket signal per Bun's ServerWebSocket
-        // contract.
-        const send = (outbound: ChatOutbound): void => {
-          const wrote = ws.send(JSON.stringify(outbound))
-          if (typeof wrote === 'number' && wrote === 0) {
-            throw new Error(
-              `landing/server: ws.send returned ${wrote} (socket closed)`,
-            )
-          }
-        }
-        data.send = send
-        // 2026-05-27 persistent-session-cookie sprint (Part B) — when
-        // `pending_claim` is null the WS was authed via a valid session
-        // cookie (no `?start=` token); there is no jti to atomically
-        // claim and no agent welcome envelope to fire. Skip
-        // `bridge.startSession` entirely, mark the session live so
-        // subsequent inbound messages walk `handleInbound` normally.
-        // The cookie-only path mirrors a "warm" reconnect — the user is
-        // resuming mid-session and the engine's existing state is
-        // surfaced by the next user inbound, not by a server emit.
-        //
-        // 2026-05-29 r2 BLOCKER fix (Codex catch) — call
-        // `bridge.resumeCookieSession` (if defined) BEFORE marking the
-        // session live. The cookie-only path is the MOST COMMON entry
-        // for a returning user (refresh on a project topic, persisted
-        // localStorage pointer to `web:<u>:<proj>`); without this hook
-        // the project-seed re-emit only fires on fresh start-token or
-        // in-place `topic_switch`, leaving the project topic blank on
-        // refresh (the history hydration's unresolved-skip drops the
-        // active seed row at chat.ts:1195). The bridge registers the
-        // sender at the active topic AND re-emits the active
-        // unresolved seed prompt; failure is swallowed (logged) so it
-        // CANNOT block session bring-up.
-        if (data.pending_claim === null) {
-          if (bridge.resumeCookieSession !== undefined) {
-            try {
-              const out = bridge.resumeCookieSession({
-                project_slug: data.project_slug,
-                user_id: data.user_id,
-                send,
-                ...(data.active_topic_id !== undefined ? { active_topic_id: data.active_topic_id } : {}),
-              })
-              if (out !== undefined && typeof (out as Promise<void>).then === 'function') {
-                await (out as Promise<void>).catch((err: unknown) => {
-                  console.error('chat bridge resumeCookieSession threw:', err)
-                })
-              }
-            } catch (err) {
-              console.error('chat bridge resumeCookieSession threw:', err)
-            }
-          }
-          data.session_started = true
-          // 2026-05-30 Argus r3 P2 #1 fix — push the authed user_id so the
-          // cookie-only client can derive its General topic_id without
-          // re-decoding a `?start=` JWT that doesn't exist on this path.
-          // 2026-06-20 GO-LIVE — `resumed: true`: a cookie-only resume has no
-          // fresh-onboarding setup window, so the client clears its loader.
-          emitSessionReady(send, data.user_id, true)
-          return
-        }
-        // Codex r5 P1 + P2: claim the jti AND fire the agent's opening
-        // prompt now that the upgrade has actually succeeded. If the
-        // claim races (someone else consumed the jti) the bridge returns
-        // false and we close the socket cleanly.
-        let started = false
-        // ISSUES #94 Codex r1 P1 — distinguish a clean `false` return (the
-        // atomic jti claim failed: a spent one-shot token on reconnect — the
-        // bug this fix targets) from a THROW (engine bootstrap failed with the
-        // token UNSPENT). Only the clean-false case is eligible for the
-        // cookie-fallback resume; a throw must preserve the existing retry
-        // contract and close so the client reconnects + retries startSession
-        // (otherwise we'd mark a session live whose opening prompt never
-        // emitted).
-        let startSessionThrew = false
-        try {
-          started = await bridge.startSession({
-            claim: data.pending_claim,
-            send,
-            ...(data.active_topic_id !== undefined ? { active_topic_id: data.active_topic_id } : {}),
-            ...(data.current_host !== undefined ? { current_host: data.current_host } : {}),
-            ...(data.browser_timezone !== undefined ? { browser_timezone: data.browser_timezone } : {}),
-          })
-        } catch (err) {
-          startSessionThrew = true
-          const reason = err instanceof Error ? err.message : 'bridge error'
-          ws.send(JSON.stringify({ type: 'error', message: reason }))
-        }
-        if (!started) {
-          // ISSUES #94 (2026-06-05) — the jti claim failed. The usual cause
-          // in prod is NOT a genuine race but a reconnect / reload
-          // re-presenting a spent one-shot `?start=` token (the
-          // post-completion General socket). If a session cookie for the
-          // SAME identity rode the upgrade, the user is still authenticated:
-          // resume via the cookie-only path (re-register the sender, re-emit
-          // the active seed) and mark the session live instead of closing
-          // with 4001 and stranding them with "session not started" on
-          // every inbound. Mirrors the `pending_claim === null` block above.
-          //
-          // Codex r1 P1 — gate on `!startSessionThrew`: a throw means
-          // bootstrap failed with the token unspent, so we must NOT mark the
-          // session live off the cookie (that would skip the failed opening
-          // prompt). Only a clean `false` (spent-jti claim race) recovers here.
-          const fallback = data.cookie_fallback_claim
-          if (!startSessionThrew && fallback !== undefined) {
-            // Identity already constrained to match the token at upgrade
-            // time; pivot to a cookie-only socket so close()/inbound treat
-            // it like any other warm resume.
-            data.pending_claim = null
-            if (bridge.resumeCookieSession !== undefined) {
-              try {
-                const out = bridge.resumeCookieSession({
-                  project_slug: data.project_slug,
-                  user_id: data.user_id,
-                  send,
-                  ...(data.active_topic_id !== undefined ? { active_topic_id: data.active_topic_id } : {}),
-                })
-                if (out !== undefined && typeof (out as Promise<void>).then === 'function') {
-                  await (out as Promise<void>).catch((err: unknown) => {
-                    console.error('chat bridge resumeCookieSession threw:', err)
-                  })
-                }
-              } catch (err) {
-                console.error('chat bridge resumeCookieSession threw:', err)
-              }
-            }
-            data.session_started = true
-            // 2026-06-20 GO-LIVE — spent-jti cookie fallback is also a resumed
-            // returning session; clear the client loader (no setup window).
-            emitSessionReady(send, data.user_id, true)
-            return
-          }
-          ws.close(4001, 'session start failed')
-          return
-        }
-        data.session_started = true
-        // 2026-05-30 Argus r3 P2 #1 fix — push the authed user_id so the
-        // client uses a server-trusted value (matches the cookie-only
-        // path; keeps the JWT-decode fallback in `chat.ts:switchTopic`
-        // strictly belt-and-braces).
-        emitSessionReady(send, data.user_id)
-      },
-      close(ws): void {
-        // Codex Sprint 18 r1 P2: notify the bridge so it can unregister
-        // per-session sender entries (in-memory registries leak across
-        // long-lived instance processes otherwise). The hook is optional;
-        // platform-landing's no-auth bridge omits it cleanly.
-        const data = ws.data
-        if (data === undefined) return
-        // Only fire closeSession if the WS got past the open handler's
-        // session_started guard — sockets that closed before
-        // bridge.startSession completed never registered a sender.
-        if (!data.session_started) return
-        if (bridge.closeSession === undefined) return
-        // Argus Sprint 18 r1 BLOCKING — pass the same `send` lambda the
-        // bridge saw at startSession so identity-aware unregister works.
-        // If `open` never ran (defensive path) `data.send` is undefined
-        // and we skip closeSession entirely; the registry has no
-        // entry to clean up anyway.
-        const send = data.send
-        if (send === undefined) return
-        try {
-          const out = bridge.closeSession({
-            project_slug: data.project_slug,
-            user_id: data.user_id,
-            send,
-            ...(data.active_topic_id !== undefined ? { active_topic_id: data.active_topic_id } : {}),
-          })
-          if (out !== undefined && typeof (out as Promise<void>).then === 'function') {
-            void (out as Promise<void>).catch((err: unknown) => {
-              console.error('chat bridge closeSession threw:', err)
-            })
-          }
-        } catch (err) {
-          console.error('chat bridge closeSession threw:', err)
-        }
+      // `message` is required by Bun's WebSocketHandler type. Nothing ever
+      // reaches it (the landing server no longer upgrades a socket), but a
+      // defensive no-op keeps the `{ fetch, websocket }` shape type-compatible
+      // with the gateway multiplex.
+      message(): void {
+        /* no landing socket — chat moved to /ws/app/chat */
       },
     },
   }

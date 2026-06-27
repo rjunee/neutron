@@ -14,43 +14,18 @@
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { generateKeyPair, exportJWK, type KeyLike } from 'jose'
 
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
 import { JwksCache } from '../../../jwt-validator/validator.ts'
 import {
-  issueStartToken,
-  verifyStartToken,
-  claimStartTokenJti,
-  buildStartTokenTestPlatform,
-} from '@neutronai/runtime/__tests__/start-token-testkit.ts'
-import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
-import type { SlugHistoryShimStore } from '../../http/chat-bridge.ts'
-import {
   buildLandingStack,
   resolveLandingStaticDir,
 } from '../build-landing-stack.ts'
-
-// C2 OSS-split (2026-06-10) — start-token auth is injection-only now:
-// chat-bridge's lazy dynamic-import fallback of the Managed start-token
-// module was DELETED (a dynamic import is still an open→managed edge),
-// so a stack built without `input.platform` rejects every `?start=`
-// token with `reason=start-token-auth-unwired` (401). WS-upgrade tests
-// mirror the production Managed composer
-// (the managed realmode-composer), which threads the start-token
-// verify/claim primitives through the platform adapter →
-// `platform.verifyStartToken` / `platform.claimStartTokenJti`. The Open
-// testkit's `buildStartTokenTestPlatform` wires the same seam pair onto
-// a Local adapter, reaching the identical bridge auth path without an
-// import edge on the Managed shim (ISSUES #219).
-function makeStartTokenPlatform(): PlatformAdapter {
-  return buildStartTokenTestPlatform({ verifyStartToken, claimStartTokenJti })
-}
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // `<repo>/gateway/realmode-composer/__tests__/build-landing-stack.test.ts`
@@ -212,132 +187,12 @@ test('buildLandingStack: throws when internal_handle is empty (P1.5 § 1.5.5 shi
 })
 
 // ---------------------------------------------------------------------------
-// Argus r2 [BLOCKING #1] end-to-end regression
-//
-// The earlier shape of `buildLandingStack` constructed `buildWebChatBridge`
-// without `internal_handle` / `slugHistoryStore`; the bridge's typed
-// fall-through then `return null`'d from `validateStartToken` whenever
-// the JWT's project_slug differed from `expected_project_slug` — defeating
-// the entire P1.5 § 1.5.5 grace-window shim in production. After any
-// rename, every old-slug JWT 401'd on reconnect.
-//
-// Locked behavior we MUST preserve:
-//   - JWT.project_slug == expected_project_slug → upgrade succeeds (101)
-//   - JWT.project_slug != expected_project_slug AND shim matches    → 101
-//   - JWT.project_slug != expected_project_slug AND shim says null  → 401
-//   - JWT.project_slug != expected_project_slug AND shim throws     → 401
-//     (fail-closed; matches `chat-bridge-jwt-shim.test.ts` semantics)
+// NOTE: the slug-history grace-window shim used to be asserted end-to-end here
+// by upgrading `/ws/chat` with an old-slug JWT (history-match → 101,
+// cross-instance miss → 401). That landing onboarding socket was removed
+// (onboarding + chat are unified on `/ws/app/chat`), so those two
+// upgrade-driven tests were deleted. The shim itself (threaded into the bridge
+// via `internal_handle` / `slugHistoryStore`) is still constructed by
+// `buildLandingStack` and unit-covered at the bridge level in
+// `chat-bridge-jwt-shim.test.ts`.
 // ---------------------------------------------------------------------------
-
-async function makeKeysAndJwks(kid: string): Promise<{
-  signing: { kid: string; privateKey: KeyLike }
-  jwks: JwksCache
-}> {
-  const { publicKey, privateKey } = await generateKeyPair('EdDSA', { extractable: true })
-  const pubJwk = await exportJWK(publicKey)
-  const jwksBody = { keys: [{ ...pubJwk, kid, alg: 'EdDSA', use: 'sig' }] }
-  const fetchImpl = async (): Promise<Response> =>
-    new Response(JSON.stringify(jwksBody), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  return {
-    signing: { kid, privateKey: privateKey as KeyLike },
-    jwks: new JwksCache('https://auth.example.test/.well-known/jwks.json', {
-      fetch: fetchImpl,
-    }),
-  }
-}
-
-function fakeUpgradeServer(): import('bun').Server<unknown> {
-  return {
-    upgrade: () => true,
-  } as unknown as import('bun').Server<unknown>
-}
-
-function ensureChatHtml(staticDir: string): void {
-  const target = join(staticDir, 'chat-react.html')
-  if (!existsSync(target)) {
-    writeFileSync(target, '<html><div id="root"></div></html>')
-  }
-}
-
-test('buildLandingStack: shim wired — old-slug JWT + history match → /ws/chat upgrades 101', async () => {
-  ensureChatHtml(REPO_LANDING_DIR)
-  const { signing, jwks } = await makeKeysAndJwks('k1')
-  const issued = await issueStartToken({
-    project_slug: 'sam', // OLD slug, pre-rename
-    user_id: 'u-1',
-    signup_via: 'web',
-    signing_key: signing,
-  })
-
-  // Shim matches ('sam', 't-aaaaaaaa') with a non-expired window.
-  const shim: SlugHistoryShimStore = {
-    async lookup({ old_slug, internal_handle }) {
-      if (old_slug === 'sam' && internal_handle === 't-aaaaaaaa') {
-        return { expires_at_ms: Date.now() + 60_000 }
-      }
-      return null
-    },
-  }
-
-  const stack = buildLandingStack({
-    db,
-    project_slug: 'nova', // CURRENT slug after rename
-    owner_home: join(workdir, 'project-home'),
-    jwks,
-    static_dir: REPO_LANDING_DIR,
-    internal_handle: 't-aaaaaaaa',
-    slugHistoryStore: shim,
-    // C2 — injection-only start-token auth (see makeStartTokenPlatform).
-    platform: makeStartTokenPlatform(),
-  })
-
-  const res = await stack.fetch(
-    new Request(`http://x/ws/chat?start=${issued.token}`),
-    fakeUpgradeServer(),
-  )
-  // 101 == validateStartToken returned a non-null claim AND server.upgrade fired.
-  // If wiring regresses (shim disabled), validateStartToken returns null → 401.
-  expect(res.status).toBe(101)
-})
-
-test('buildLandingStack: shim wired — old-slug JWT + cross-instance miss → /ws/chat 401', async () => {
-  ensureChatHtml(REPO_LANDING_DIR)
-  const { signing, jwks } = await makeKeysAndJwks('k1')
-  const issued = await issueStartToken({
-    project_slug: 'sam',
-    user_id: 'u-1',
-    signup_via: 'web',
-    signing_key: signing,
-  })
-
-  // Shim returns null for THIS internal_handle ('t-aaaaaaaa') — the slug
-  // 'sam' belongs to some other instance's history, not ours. The bridge
-  // must reject (cross-instance safety) even though shim wiring is alive.
-  const shim: SlugHistoryShimStore = {
-    async lookup() {
-      return null
-    },
-  }
-
-  const stack = buildLandingStack({
-    db,
-    project_slug: 'nova',
-    owner_home: join(workdir, 'project-home'),
-    jwks,
-    static_dir: REPO_LANDING_DIR,
-    internal_handle: 't-aaaaaaaa',
-    slugHistoryStore: shim,
-    // C2 — wire real start-token auth so this 401 asserts the
-    // cross-instance rejection path, not the unwired-auth rejection.
-    platform: makeStartTokenPlatform(),
-  })
-
-  const res = await stack.fetch(
-    new Request(`http://x/ws/chat?start=${issued.token}`),
-    fakeUpgradeServer(),
-  )
-  expect(res.status).toBe(401)
-})

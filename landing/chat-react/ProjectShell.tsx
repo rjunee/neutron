@@ -37,6 +37,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChatApp } from './ChatApp.tsx'
 import { DocumentsTab } from './DocumentsTab.tsx'
 import { TasksTab } from './TasksTab.tsx'
+import { IntegrationsTab } from './IntegrationsTab.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -148,6 +149,17 @@ function TabContent({
       />
     )
   }
+  // Builtin Admin — the owner-facing OAuth + API-key integrations surface. This
+  // is a GLOBAL-scope tab (per-instance, not per-project) folded into the bar.
+  if (tab.mount.target === 'admin') {
+    return (
+      <IntegrationsTab
+        projectId={projectId}
+        config={config}
+        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+      />
+    )
+  }
   // Any other builtin tab whose real view hasn't landed yet.
   return <TabPlaceholder label={tab.label} />
 }
@@ -196,13 +208,21 @@ export function ProjectShell({
     // clicked under the new project's chat — while the new fetch is in flight.
     setActiveKey(CHAT_KEY)
     setTabs([CHAT_TAB])
-    void client
-      .listProjectTabs(projectId)
-      .then((resolved) => {
+    // Resolve per-project tabs (Chat/Documents/Tasks + project Core tabs) and the
+    // GLOBAL tabs (builtin Admin + global Core tabs) in parallel, then fold the
+    // global tabs in AFTER the project tabs so the owner can reach the Admin /
+    // Integrations surface from the project shell. A failed global fetch degrades
+    // to the project-only set (the Admin tab just won't appear) — not a flag.
+    void Promise.all([
+      client.listProjectTabs(projectId),
+      client.listGlobalTabs().catch(() => [] as TabDescriptor[]),
+    ])
+      .then(([projectTabs, globalTabs]) => {
         if (cancelled) return
-        // The resolver always includes Chat; guard against an empty/degenerate
-        // payload so the bar never renders without a Chat tab.
-        setTabs(resolved.length > 0 ? resolved : [CHAT_TAB])
+        const base = projectTabs.length > 0 ? projectTabs : [CHAT_TAB]
+        const seen = new Set(base.map((t) => t.key))
+        const extra = globalTabs.filter((t) => !seen.has(t.key))
+        setTabs([...base, ...extra])
       })
       .catch(() => {
         if (cancelled) return

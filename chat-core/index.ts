@@ -15,6 +15,8 @@ export {
   normalizeReactionUpdate,
   normalizeEditUpdate,
   parseReactions,
+  parseOptions,
+  parseUploadAffordance,
   sortReactions,
   messageIdentity,
   AGENT_DEVICE_ID,
@@ -25,6 +27,9 @@ export {
   type EditAction,
   type MessageReaction,
   type ChatMessage,
+  type ChatMessageOption,
+  type ChatMessageUploadAffordance,
+  type PromptKind,
   type InboundChatMessage,
   type InboundReceiptUpdate,
   type InboundReactionUpdate,
@@ -34,6 +39,7 @@ export {
   type OutboundReceipt,
   type OutboundReaction,
   type OutboundEdit,
+  type OutboundButtonChoice,
 } from './types.ts'
 
 export {
@@ -43,6 +49,7 @@ export {
   unionDeviceIds,
   pickReactionState,
   pickEditState,
+  pickAgentMeta,
   normalizeReactions,
   groupReactions,
   type ReactionChip,

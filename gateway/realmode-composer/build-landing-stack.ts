@@ -36,6 +36,8 @@ import {
   buildRoutedSendImportProgress,
   buildWebChatBridge,
   InMemoryWebChatSenderRegistry,
+  type AppSocketButtonPromptRouter,
+  type AppSocketImportProgressRouter,
   type SlugHistoryShimStore,
   type OwnerRegistryLookup,
   type WebChatSenderRegistry,
@@ -94,6 +96,17 @@ export interface BuildLandingStackInput {
   owner_home: string
   jwks: JwksCache
   static_dir: string
+  /**
+   * Onboarding consolidation (2026-06-26) — late-bound app-socket routers. The
+   * Open composer passes these mutable holders so the SAME engine routes
+   * onboarding button-prompts + import-progress over the unified `/ws/app/chat`
+   * socket (it fills `.send` after the app-ws registry is built). Absent on the
+   * Managed/web-only path — `app:` prompts then return was_new=false and the
+   * engine retries. No second onboarding engine; one routed sender, three
+   * channel prefixes (web/tg/app).
+   */
+  appWsButtonPromptRouter?: AppSocketButtonPromptRouter
+  appWsImportProgressRouter?: AppSocketImportProgressRouter
   /**
    * P1.5 § 1.5.5 — frozen `internal_handle` for THIS instance. Threaded
    * into `buildWebChatBridge` so the JWT slug-history shim can verify
@@ -591,7 +604,7 @@ export interface BuildLandingStackInput {
   recoverHandler?: (req: Request) => Promise<Response>
   /**
    * 2026-05-27 persistent-session-cookie sprint (Part B) — resolve the
-   * cookie-authenticated user's identity for a `/ws/chat` upgrade that
+   * cookie-authenticated user's identity for a `/ws/app/chat` upgrade that
    * arrives with only a session cookie (no `?start=` token). Threaded
    * straight through to `createLandingServer({cookieToUserClaim: …})`
    * without modification.
@@ -603,7 +616,7 @@ export interface BuildLandingStackInput {
    *
    * Optional — dev / smoke deploys that don't co-locate identity (or
    * that haven't set `NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET`) leave
-   * this unset and cookie-only `/ws/chat` upgrades 400 the same way a
+   * this unset and cookie-only `/ws/app/chat` upgrades 400 the same way a
    * tokenless pre-sprint upgrade did.
    */
   cookieToUserClaim?: (req: Request) => Promise<{
@@ -1180,12 +1193,22 @@ export function buildOnboardingEnginePieces(
     buttonStore,
     stateStore,
     transcript,
-    sendButtonPrompt: buildRoutedSendButtonPrompt({ webRegistry: registry }),
+    sendButtonPrompt: buildRoutedSendButtonPrompt({
+      webRegistry: registry,
+      ...(input.appWsButtonPromptRouter !== undefined
+        ? { appSocketRouter: input.appWsButtonPromptRouter }
+        : {}),
+    }),
     // Bug 1, v0.1.75 — import-progress envelope sender. The cron-tick
     // path on engine.pollImportRunningTick calls this every 5s during
     // the import_running phase so the client renders a live progress
     // indicator below the agent prompt.
-    sendImportProgress: buildRoutedSendImportProgress({ webRegistry: registry }),
+    sendImportProgress: buildRoutedSendImportProgress({
+      webRegistry: registry,
+      ...(input.appWsImportProgressRouter !== undefined
+        ? { appSocketRouter: input.appWsImportProgressRouter }
+        : {}),
+    }),
     ...(slugPicker !== null ? { slugPicker } : {}),
     ...(profilePic !== null ? { profilePic } : {}),
     ...(personaSync !== null ? { personaSync } : {}),
