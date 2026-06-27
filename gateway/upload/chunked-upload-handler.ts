@@ -64,6 +64,8 @@ import {
   extractTopicIdFromRequest,
   isUploadSource,
   MAX_UPLOAD_BYTES_DEFAULT,
+  resolveEffectiveSource,
+  SNIFF_MAX_BYTES,
   TOPIC_ID_FALLBACK,
   type UploadSource,
 } from './import-upload-handler.ts'
@@ -533,17 +535,27 @@ async function handlePatch(
   // delete the session row. Any failure path unwinds via the cleanup
   // branch — the partial file is unlinked and the row deleted so the
   // user can retry without orphaning state.
-  return await finaliseUpload(deps, fsImpl, ctx, source, upload_id, row.filename, tempPath)
+  return await finaliseUpload(
+    deps,
+    fsImpl,
+    ctx,
+    source,
+    upload_id,
+    row.filename,
+    tempPath,
+    row.total_bytes,
+  )
 }
 
 async function finaliseUpload(
   deps: ChunkedUploadDeps,
   fsImpl: ChunkedUploadFs,
   ctx: ChunkedUploadInstanceContext,
-  source: UploadSource,
+  urlSource: UploadSource,
   upload_id: string,
   filename: string,
   tempPath: string,
+  totalBytes: number,
 ): Promise<Response> {
   // 1. Magic-bytes check on the assembled file. Same `PK` prefix as the
   //    legacy single-shot handler.
@@ -574,6 +586,14 @@ async function finaliseUpload(
     await cleanupFailedFinal(deps, fsImpl, tempPath, upload_id)
     return jsonError(400, 'not a zip file (magic bytes mismatch)')
   }
+
+  // 1.5. Sniff the REAL source from the assembled zip's entry list. The web
+  //      affordance hardcodes `/api/upload/chatgpt`, so a Claude export needs
+  //      to be re-routed to the Claude parser. The minimal zip reader needs the
+  //      whole archive in memory; skip the sniff above SNIFF_MAX_BYTES (and on
+  //      any read error) and keep the URL source — the sniff must NEVER break
+  //      an otherwise-complete upload.
+  const source = await sniffAssembledSource(fsImpl, tempPath, totalBytes, urlSource)
 
   // 2. Rename to the canonical destination. Same path the legacy
   //    single-shot handler writes to so the import-runner finds it.
@@ -670,6 +690,43 @@ async function cleanupFailedFinal(
   } catch {
     // swallow — DB may already be cleaned
   }
+}
+
+/**
+ * Read the assembled temp file and sniff its real export source (see
+ * `resolveEffectiveSource` / `sniffZipSource` in `import-upload-handler.ts`).
+ * Bounded + fully defensive: above {@link SNIFF_MAX_BYTES} (a heavy ChatGPT
+ * export) OR on any read failure we skip the sniff and keep the URL source —
+ * the sniff must NEVER block an otherwise-complete upload. `totalBytes` is the
+ * session's declared (and fully-written) size, so it is the exact file length.
+ */
+async function sniffAssembledSource(
+  fsImpl: ChunkedUploadFs,
+  tempPath: string,
+  totalBytes: number,
+  urlSource: UploadSource,
+): Promise<UploadSource> {
+  if (totalBytes <= 0 || totalBytes > SNIFF_MAX_BYTES) return urlSource
+  let buf: Buffer
+  try {
+    const handle = await fsImpl.open(tempPath, 'r')
+    try {
+      buf = Buffer.alloc(totalBytes)
+      await handle.read(buf, 0, totalBytes, 0)
+    } finally {
+      try {
+        await handle.close()
+      } catch {
+        // swallow — best-effort close
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[chunked-upload] source sniff read failed (non-fatal, keeping url source ${urlSource}): ${errMsg(err)}`,
+    )
+    return urlSource
+  }
+  return resolveEffectiveSource(urlSource, buf, (msg) => console.info(msg))
 }
 
 function tempFilePath(owner_home: string, upload_id: string): string {

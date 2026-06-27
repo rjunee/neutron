@@ -448,3 +448,48 @@ describe('NeutronChatController — live projects_changed (FIX 1)', () => {
     expect(vm.projectId).toBeNull()
   })
 })
+
+describe('NeutronChatController — BUG 7 (no empty bubble above the typing indicator)', () => {
+  it('does NOT materialize a streaming bubble for a leading empty-delta open frame; keeps the typing indicator', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    // Server opens the stream with a zero-length delta (a "starting" signal).
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: '', ts: 1 })
+    await tick()
+    let vm = controller.getViewModel()
+    // No empty agent bubble — only the user message renders.
+    expect(vm.messages.filter((m) => m.streaming).length).toBe(0)
+    expect(vm.messages.filter((m) => m.role === 'agent').length).toBe(0)
+    // The reply is still pending with nothing streamed → the typing indicator
+    // (driven by awaitingFirstToken) is shown.
+    expect(vm.awaitingFirstToken).toBe(true)
+    expect(vm.isRunning).toBe(true)
+    // First REAL token materializes the bubble AND hides the typing dots (the
+    // bubble itself is now the pending affordance).
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'Hi', ts: 2 })
+    await tick()
+    vm = controller.getViewModel()
+    const live = vm.messages.find((m) => m.streaming)
+    expect(live?.text).toBe('Hi')
+    expect(vm.awaitingFirstToken).toBe(false)
+    expect(vm.isRunning).toBe(true)
+  })
+
+  it('awaitingFirstToken is false once a streaming bubble exists (no double indicator)', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'Hel', ts: 1 })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.messages.some((m) => m.streaming)).toBe(true)
+    expect(vm.awaitingFirstToken).toBe(false)
+  })
+})

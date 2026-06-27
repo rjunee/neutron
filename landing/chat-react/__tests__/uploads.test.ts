@@ -8,9 +8,12 @@ import { describe, expect, it } from 'bun:test'
 import {
   AttachmentUploadError,
   ACCEPTED_IMAGE_TYPES,
+  IMPORT_TOPIC_HEADER,
   MAX_ATTACHMENT_BYTES,
   fetchAttachmentObjectUrl,
+  importHistoryZip,
   isAuthedAttachmentUrl,
+  isExportZip,
   uploadAttachment,
 } from '../uploads.ts'
 
@@ -19,6 +22,61 @@ const okUpload = () =>
     JSON.stringify({ ok: true, url: '/api/app/upload/sam/abc.png', content_type: 'image/png', size_bytes: 3 }),
     { status: 200, headers: { 'content-type': 'application/json' } },
   )
+
+describe('BUG 4 — history-import ZIP upload', () => {
+  it('isExportZip detects zips by MIME or .zip extension, not images', () => {
+    expect(isExportZip(new File(['x'], 'export.zip', { type: 'application/zip' }))).toBe(true)
+    expect(isExportZip(new File(['x'], 'EXPORT.ZIP', { type: '' }))).toBe(true)
+    expect(isExportZip(new File(['x'], 'archive', { type: 'application/x-zip-compressed' }))).toBe(true)
+    expect(isExportZip(new File(['x'], 'shot.png', { type: 'image/png' }))).toBe(false)
+  })
+
+  it('POSTs the zip multipart to /api/upload/<source> with the bearer + topic header', async () => {
+    let seenUrl = ''
+    let seenAuth = ''
+    let seenTopic = ''
+    let bodyIsForm = false
+    await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+      token: 'dev:sam',
+      topicId: 'app:sam',
+      fetchImpl: async (url, init) => {
+        seenUrl = url
+        const h = init?.headers as Record<string, string>
+        seenAuth = String(h['authorization'])
+        seenTopic = String(h[IMPORT_TOPIC_HEADER])
+        bodyIsForm = init?.body instanceof FormData
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      },
+    })
+    expect(seenUrl).toBe('/api/upload/chatgpt')
+    expect(seenAuth).toBe('Bearer dev:sam')
+    expect(seenTopic).toBe('app:sam')
+    expect(bodyIsForm).toBe(true)
+  })
+
+  it('routes the claude source to /api/upload/claude', async () => {
+    let seenUrl = ''
+    await importHistoryZip(new File(['PK'], 'c.zip', { type: 'application/zip' }), 'claude', {
+      token: 't',
+      fetchImpl: async (url) => {
+        seenUrl = url
+        return new Response('{}', { status: 200 })
+      },
+    })
+    expect(seenUrl).toBe('/api/upload/claude')
+  })
+
+  it('surfaces the server error message on a non-ok response', async () => {
+    const err = await importHistoryZip(new File(['PK'], 'x.zip', { type: 'application/zip' }), 'chatgpt', {
+      token: 't',
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ message: 'not a zip file (magic bytes mismatch)' }), { status: 400 }),
+    }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(AttachmentUploadError)
+    expect((err as AttachmentUploadError).message).toContain('magic bytes')
+    expect((err as AttachmentUploadError).status).toBe(400)
+  })
+})
 
 describe('uploadAttachment', () => {
   it('POSTs a multipart file with the bearer and returns the url', async () => {

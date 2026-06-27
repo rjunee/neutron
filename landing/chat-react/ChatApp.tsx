@@ -28,7 +28,7 @@ import type { ChatViewModel, RenderMessage } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
-import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl } from './uploads.ts'
+import { fetchAttachmentObjectUrl, isAuthedAttachmentUrl, importHistoryZip, isExportZip } from './uploads.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -323,6 +323,14 @@ interface ButtonsCtx {
 }
 const ButtonsContext = createContext<ButtonsCtx | null>(null)
 
+/** The human-readable choice text for a button. BUG 3 — render `body` (the real
+ *  choice text, e.g. "Yes, ChatGPT export"), NOT `label` (the "A"/"B"/"C" letter
+ *  legend the server still ships for Telegram's text rendering). `body` defaults
+ *  to `label` in `parseOptions`, so this is safe for options without a body. */
+function optionText(opt: ChatMessageOption): string {
+  return opt.body.length > 0 ? opt.body : opt.label
+}
+
 /** One option button. Tap posts the option's `value` (NOT label) — the routing
  *  key the server's outstanding-prompt store maps back to a canonical choice. */
 function ChoiceButton({
@@ -338,14 +346,15 @@ function ChoiceButton({
       : opt.decoration?.style === 'primary'
         ? ' car-choice-primary'
         : ''
+  const text = optionText(opt)
   return (
     <button
       type="button"
       className={`car-choice${variant}`}
       onClick={() => onChoose(opt.value)}
-      aria-label={opt.label}
+      aria-label={text}
     >
-      {opt.label}
+      {text}
     </button>
   )
 }
@@ -372,7 +381,7 @@ function ButtonOptionRow({
     const chosen = options.find((o) => o.value === chosenValue)
     return (
       <div className="car-choices-chosen" aria-label="chosen option">
-        → {chosen?.label ?? chosenValue}
+        → {chosen !== undefined ? optionText(chosen) : chosenValue}
       </div>
     )
   }
@@ -391,10 +400,10 @@ function ButtonOptionRow({
                 type="button"
                 className="car-gallery-tile"
                 onClick={() => onChoose(o.value)}
-                aria-label={o.label}
+                aria-label={optionText(o)}
               >
-                <img src={o.image_url} alt={o.label} className="car-gallery-img" />
-                <span className="car-gallery-label">{o.label}</span>
+                <img src={o.image_url} alt={optionText(o)} className="car-gallery-img" />
+                <span className="car-gallery-label">{optionText(o)}</span>
               </button>
             ))}
           </div>
@@ -449,7 +458,20 @@ function UserMessage(): React.JSX.Element {
   )
 }
 
-function AssistantMessage(): React.JSX.Element {
+function AssistantMessage(): React.JSX.Element | null {
+  const message = useMessage()
+  // BUG 7 (non-streaming live-agent path) — assistant-ui's ExternalStoreRuntime
+  // synthesizes an EMPTY optimistic "upcoming" assistant bubble whenever it is
+  // running and the trailing message is the user's (`hasUpcomingMessage`). On the
+  // live-agent path the reply arrives as a SINGLE non-streamed `agent_message`
+  // (no `agent_message_partial` frames), so no streaming bubble exists while the
+  // turn is pending — the last message stays the user's and that empty bubble
+  // renders ABOVE our own typing-dots indicator. Suppress it: the
+  // `TypingIndicator` (keyed off `awaitingFirstToken`) is the sole pending
+  // affordance until the real `agent_message` lands. `isOptimistic` is set ONLY
+  // on this synthesized placeholder, so our real (incl. options-only, empty-body)
+  // agent messages are unaffected.
+  if (message.metadata?.isOptimistic === true) return null
   return (
     <MessagePrimitive.Root className="car-row car-row-agent">
       <div className="car-avatar" aria-hidden="true">
@@ -686,24 +708,75 @@ function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Eleme
   )
 }
 
+interface ImportState {
+  status: 'idle' | 'uploading' | 'done' | 'error'
+  message?: string
+}
+
 function Composer({
   draft,
   controller,
+  uploadAffordance,
+  token,
+  topicId,
 }: {
   draft: AttachmentDraft
   controller: NeutronChatController
+  /** BUG 4 — the active history-import affordance (null when onboarding isn't
+   *  asking for an export). Gates whether a dropped/picked `.zip` routes to the
+   *  import endpoint and whether the file picker advertises `.zip`. */
+  uploadAffordance: ChatMessageUploadAffordance | null
+  /** App-ws bearer token for the import upload. */
+  token: string
+  /** App-ws topic (`app:<user>`) so the post-import prompt routes back here. */
+  topicId: string
 }): React.JSX.Element {
   const composer = useComposer()
   const composerRuntime = useComposerRuntime()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [dragOver, setDragOver] = useState(false)
+  const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
 
   const text = composer.text
   const canSend = text.trim().length > 0 || draft.hasReady
+  const importActive = uploadAffordance !== null
+
+  // BUG 4 — route a ChatGPT/Claude export ZIP to the history-import endpoint
+  // (NOT the image-only attachment draft). Images still go to the draft. A ZIP
+  // dropped with no active import affordance is rejected with a clear note (the
+  // agent hasn't asked for one).
+  const handleFiles = (files: FileList | readonly File[]): void => {
+    const list = Array.from(files)
+    if (list.length === 0) return
+    const zips = list.filter(isExportZip)
+    const images = list.filter((f) => !isExportZip(f))
+    if (images.length > 0) draft.addFiles(images)
+    if (zips.length === 0) return
+    const zip = zips[0]
+    if (zip === undefined) return
+    if (!importActive || uploadAffordance === null) {
+      setImportState({
+        status: 'error',
+        message: 'No history import is in progress — Neutron will ask when it wants your export.',
+      })
+      return
+    }
+    setImportState({ status: 'uploading', message: `Importing ${zip.name}…` })
+    void importHistoryZip(zip, uploadAffordance.source, { token, topicId })
+      .then(() => {
+        setImportState({ status: 'done', message: 'Export received — reading through your history now.' })
+      })
+      .catch((err: unknown) => {
+        setImportState({
+          status: 'error',
+          message: err instanceof Error ? err.message : 'import failed',
+        })
+      })
+  }
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const files = e.target.files
-    if (files !== null && files.length > 0) draft.addFiles(files)
+    if (files !== null && files.length > 0) handleFiles(files)
     e.target.value = '' // allow re-picking the same file
   }
 
@@ -711,7 +784,7 @@ function Composer({
     e.preventDefault()
     setDragOver(false)
     const files = e.dataTransfer?.files
-    if (files !== undefined && files.length > 0) draft.addFiles(files)
+    if (files !== undefined && files.length > 0) handleFiles(files)
   }
 
   const send = (): void => {
@@ -747,11 +820,16 @@ function Composer({
       onDrop={onDrop}
     >
       <AttachmentChips draft={draft} />
+      {importState.status !== 'idle' ? (
+        <div className={`car-import-status car-import-${importState.status}`} role="status">
+          {importState.message}
+        </div>
+      ) : null}
       <ComposerPrimitive.Root className="car-composer">
         <button
           type="button"
           className="car-attach-btn"
-          aria-label="Attach image"
+          aria-label={importActive ? 'Attach image or export ZIP' : 'Attach image'}
           onClick={() => fileInputRef.current?.click()}
         >
           📎
@@ -759,7 +837,11 @@ function Composer({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
+          accept={
+            importActive
+              ? 'image/png,image/jpeg,image/gif,image/webp,application/zip,.zip'
+              : 'image/png,image/jpeg,image/gif,image/webp'
+          }
           multiple
           hidden
           className="car-file-input"
@@ -837,15 +919,31 @@ export function ChatApp({
         <ThreadPrimitive.Root className="car-thread">
           <ThreadPrimitive.Viewport className="car-viewport">
             <ThreadPrimitive.Empty>
-              <div className="car-empty">
-                <div className="car-empty-title">Neutron</div>
-                <div className="car-empty-sub">Send a message to begin.</div>
-              </div>
+              {config.onboardingActive ? (
+                // BUG 1 — a FRESH onboarding auto-starts: the server pushes the
+                // first prompt on connect. Show a loading indicator (matching
+                // the old vanilla chat's "Setting things up…") while it arrives,
+                // NOT the steady-state "Send a message to begin." empty state.
+                <div className="car-empty">
+                  <div className="car-empty-title">Neutron</div>
+                  <div className="car-empty-sub car-empty-loading" role="status" aria-live="polite">
+                    <span className="car-typing" aria-hidden="true">
+                      <span className="car-dot" />
+                      <span className="car-dot" />
+                      <span className="car-dot" />
+                    </span>
+                    Setting things up…
+                  </div>
+                </div>
+              ) : (
+                <div className="car-empty">
+                  <div className="car-empty-title">Neutron</div>
+                  <div className="car-empty-sub">Send a message to begin.</div>
+                </div>
+              )}
             </ThreadPrimitive.Empty>
             <ThreadPrimitive.Messages components={MESSAGE_COMPONENTS} />
-            <ThreadPrimitive.If running>
-              <TypingIndicator />
-            </ThreadPrimitive.If>
+            {vm.awaitingFirstToken ? <TypingIndicator /> : null}
           </ThreadPrimitive.Viewport>
           <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
             ↓
@@ -853,7 +951,13 @@ export function ChatApp({
           <PendingBadge pending={vm.pending} />
           <DeliveryStatus delivery={vm.latestUserDelivery} isRunning={vm.isRunning} />
           <UploadAffordanceHint affordance={uploadAffordance} />
-          <Composer draft={draft} controller={controller} />
+          <Composer
+            draft={draft}
+            controller={controller}
+            uploadAffordance={uploadAffordance}
+            token={config.token}
+            topicId={config.topicId}
+          />
         </ThreadPrimitive.Root>
       </main>
     </div>

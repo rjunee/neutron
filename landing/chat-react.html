@@ -222,9 +222,13 @@
     background: var(--agent-avatar-bg); color: var(--fg);
     display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600;
   }
+  /* BUG 2 — tight bubbles matching the old vanilla chat: a ~60ch readable cap,
+     a 4ch floor so a one-word reply doesn't collapse to a sliver, and snug
+     8px/13px padding. */
   .car-bubble {
     max-width: min(60ch, 80%);
-    padding: 9px 13px; border-radius: var(--bubble-radius);
+    min-width: 4ch;
+    padding: 8px 13px; border-radius: var(--bubble-radius);
     white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
   }
   .car-bubble-user { background: var(--user-bubble); color: var(--user-fg); border-bottom-right-radius: 4px; }
@@ -239,17 +243,24 @@
   /* Track B Phase 4 — delivery/read receipt status line for the latest send. */
   .car-receipt { text-align: right; font-size: 11px; color: var(--muted); padding: 2px 14px; }
   .car-receipt-read { color: var(--accent); }
-  /* Track B Phase 4 — per-message emoji reaction chips. */
-  .car-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; align-items: center; }
+  /* Track B Phase 4 — per-message emoji reaction chips.
+     BUG 5 (iMessage-style) — the resting bubble is CLEAN: existing reaction
+     chips stay visible, but the "＋" add affordance is hidden until the row is
+     hovered/focused (desktop) so there's no persistent "+" on every bubble.
+     The container carries no top margin of its own (it's empty at rest when a
+     message has no reactions); the chips supply their own spacing. */
+  .car-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 0; align-items: center; }
   .car-reaction {
-    font-size: 12px; line-height: 1; padding: 3px 8px; border-radius: 11px;
+    font-size: 12px; line-height: 1; margin-top: 6px; padding: 3px 8px; border-radius: 11px;
     border: 1px solid var(--border); background: var(--surface, rgba(255,255,255,0.04));
     color: inherit; cursor: pointer;
   }
   .car-reaction-self { border-color: var(--accent); color: var(--accent); }
+  /* The "＋" stays in the DOM + tab order (opacity, NOT display:none) so
+     keyboard focus can reach it; hover/focus reveals it on pointer devices. */
   .car-reaction-add { opacity: 0.6; padding: 3px 7px; }
   .car-reaction-add:hover { opacity: 1; }
-  .car-reaction-picker { display: inline-flex; gap: 2px; margin-left: 2px; }
+  .car-reaction-picker { display: inline-flex; gap: 2px; margin-left: 2px; margin-top: 6px; }
   .car-reaction-pick { font-size: 15px; background: none; border: none; cursor: pointer; padding: 1px 3px; }
   /* P1b — onboarding / quick-reply button rows + image gallery. */
   .car-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -278,9 +289,38 @@
     font-size: 12px; color: var(--muted); padding: 6px 14px;
     border-top: 1px solid var(--border); background: var(--surface);
   }
+  /* BUG 4 — history-import upload status, shown above the composer while a
+     ChatGPT/Claude export ZIP uploads + after it lands. */
+  .car-import-status {
+    font-size: 12px; padding: 6px 12px; margin: 6px 12px 0; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+  }
+  .car-import-uploading { color: #8cc6ff; border-color: rgba(140,198,255,.4); }
+  .car-import-done { color: #7ddf9b; border-color: rgba(125,223,155,.4); }
+  .car-import-error { color: #ff8a8a; border-color: rgba(255,138,138,.4); }
+  /* BUG 1 — fresh-onboarding auto-start loader (matches the old chat's
+     "Setting things up…"). The typing dots sit inline before the label. */
+  .car-empty-loading { display: inline-flex; align-items: center; gap: 8px; }
   /* Track B Phase 4 — message edit/delete: edited marker, actions, inline editor. */
   .car-edited { font-size: 11px; opacity: 0.55; margin-top: 2px; display: inline-block; }
+  /* BUG 5 — Edit/Delete + the reaction "＋" are NOT always-on clutter under
+     every bubble. On HOVER-CAPABLE pointer devices (desktop) they're invisible
+     at rest and revealed on row hover/focus, like iMessage's secondary actions.
+     We use opacity (NOT display:none) so the buttons stay in the tab order and
+     keyboard focus both reaches AND reveals them (`:focus-within`). On touch /
+     no-hover devices there is no hover to reveal them, so they stay visible —
+     never unreachable (a11y, per cross-model review). */
   .car-msg-actions { display: flex; gap: 8px; margin-top: 4px; }
+  @media (hover: hover) and (pointer: fine) {
+    .car-msg-actions,
+    .car-reaction-add { opacity: 0; pointer-events: none; transition: opacity 0.12s ease; }
+    .car-row:hover .car-msg-actions,
+    .car-row:focus-within .car-msg-actions { opacity: 1; pointer-events: auto; }
+    .car-row:hover .car-reaction-add,
+    .car-row:focus-within .car-reaction-add { opacity: 0.6; pointer-events: auto; }
+    .car-reaction-add:focus,
+    .car-msg-action:focus { opacity: 1; }
+  }
   .car-msg-action {
     font-size: 11px; background: none; border: none; cursor: pointer;
     color: var(--muted, #888); padding: 0; opacity: 0.7;

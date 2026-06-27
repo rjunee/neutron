@@ -50,6 +50,63 @@ replay rejected / garbage rejected), `open/__tests__/open-projects-changed-wirin
 no-hijack / malformed-frame). Root + chat-react `tsc`, leak-gate, and the open /
 chat-react / app-ws suites all green.
 
+## 2026-06-27 — React onboarding/chat regression fixes (6 bugs) + BUG 0 (CC-session) deferred-with-recommendation
+
+**Scope.** Fix the React chat-client regressions Ryan hit dogfooding the local
+fresh install (the #82/#84 React consolidation regressed onboarding vs the old
+vanilla chat). One PR, no feature flags, real-browser verified.
+
+**BUG 0 (rearchitect onboarding as a Claude Code session) — DEFERRED, with a
+documented blocker + recommendation.** The literal spec ("persist onboarding
+data + trigger import via TOOLS the session calls") is BLOCKED on unbuilt infra:
+a live CC session can only invoke *built-in* CC tools (Read/Glob/Grep). The CC
+adapter passes only `t.name` to `--tools` (`persistent-repl-substrate.ts:1483`,
+`build-repl-argv.ts:83`), the spawned REPL's `--mcp-config` wires only the
+dev-channel, and the gateway ToolRegistry MCP server is in-process-only with no
+stdio/socket transport (`mcp/server.ts:1-11`, deferred to "P1 S5+");
+`build-live-agent-turn.ts:84-94` says write-tools are deferred. Recommended path
+(no new infra): route onboarding through the same live CC session + a
+fire-and-forget post-turn extractor (reuse `extract-agent-name`/`extracted-fields`)
+replacing the per-turn router-LLM — kills the 6s router timeout without
+turn-gating. Full writeup: `docs/research/onboarding-cc-session-feasibility-2026-06-27.md`.
+
+**What shipped (the six React regressions — all in `landing/chat-react/`).**
+
+1. **BUG 1 (auto-start).** A fresh onboarding now shows a "Setting things up…"
+   loader (matching the old vanilla chat) instead of the steady-state "Send a
+   message to begin." empty state, while the server pushes the first onboarding
+   prompt on connect (`on_session_open`→`engine.start`, already wired). New
+   server flag `window.__neutron_onboarding_active` injected by an isolated
+   `onboardingBootstrapScript()` in `open/composer.ts` (kept separate from
+   `projectsBootstrapScript`/the `?start=` gate to avoid the in-flight
+   forge-p2-followups merge surface); read into `BootstrapConfig.onboardingActive`
+   (`config.ts`) and gated in `ChatApp.tsx`.
+2. **BUG 2 (tight bubbles).** `.car-bubble` gets `min-width: 4ch` + 8px/13px
+   padding to match the old layout (`chat-react.html`).
+3. **BUG 3 (A/B/C button labels).** `ChoiceButton`/gallery/chosen-summary now
+   render `opt.body` (the real choice text) via `optionText()`, NOT `opt.label`
+   (the A/B/C letter legend the server still ships for Telegram).
+4. **BUG 4 (history-import ZIP upload).** New `importHistoryZip()` + `isExportZip()`
+   (`uploads.ts`) POST the export ZIP to the existing `POST /api/upload/<source>`
+   (with the `x-neutron-topic-id` header so the post-import prompt routes back).
+   The Composer file picker advertises `.zip` + the drop handler routes ZIPs to
+   the import endpoint (images still go to the image-only draft) when an upload
+   affordance is active.
+5. **BUG 5 (reaction/edit/delete clutter).** iMessage-style: the resting bubble
+   is CLEAN — the reaction "＋" and Edit/Delete are hidden at rest and revealed on
+   `.car-row:hover`/`:focus-within` (`chat-react.html`); existing reaction chips
+   stay visible.
+6. **BUG 7 (spurious empty bubble above the typing indicator).** The controller
+   no longer materializes a streaming bubble for a leading empty-delta open frame
+   (`controller.ts`), and the typing indicator renders off a new
+   `awaitingFirstToken` (pending + nothing streamed) instead of `isRunning`, so
+   the dots and a (momentarily empty) streaming bubble never stack.
+
+**Tests.** `bun test landing/chat-react/` 114 pass / 0 fail (7 new: controller
+BUG 7 ×2, uploads BUG 4 ×4, config BUG 1 ×1, component BUG 3 guard). `tsc` (root
+deploy gate) + `tsc -p landing/chat-react/tsconfig.json` both clean. Real-browser
+Playwright: `tests/e2e-browser/onboarding_walkthrough.py` (see PR for run output).
+
 ## 2026-06-26 — P1b consolidate: ONE chat path (onboarding unified) + web admin panel + real-browser verification
 
 **Scope (Ryan-locked, final).** Finish the consolidation the prior P1b entry

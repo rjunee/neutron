@@ -47,6 +47,7 @@ import type * as fs from 'node:fs/promises'
 import type { ChannelKindForButton } from '../../channels/button-primitive.ts'
 import { parseAnyTopicId } from '../../channels/topic-id.ts'
 import type { InterviewEngine } from '../../onboarding/interview/engine.ts'
+import { listEntries } from '../../onboarding/history-import/zip-reader.ts'
 import { csrfForbiddenResponse, evaluateCsrfOrigin } from './csrf-origin-guard.ts'
 
 /**
@@ -78,6 +79,81 @@ const UPLOAD_SOURCES: ReadonlyArray<UploadSource> = ['chatgpt', 'claude']
 
 export function isUploadSource(value: string): value is UploadSource {
   return (UPLOAD_SOURCES as ReadonlyArray<string>).includes(value)
+}
+
+/**
+ * Safety cap on the byte buffer the source-sniffer (see {@link sniffZipSource})
+ * will materialize. The minimal zip reader (`listEntries`) needs the WHOLE
+ * archive in memory because the central directory lives at the end and its
+ * entries are addressed by absolute offset. Most Claude exports are small
+ * (text-only `conversations.json` + a few sidecar JSONs); a heavy ChatGPT
+ * export can be >1 GB, so the chunked path skips the sniff above this cap and
+ * keeps the URL source (defensive — a huge export posted to `/chatgpt` is
+ * already chatgpt). 256 MiB comfortably covers any realistic Claude export.
+ */
+export const SNIFF_MAX_BYTES = 256 * 1024 * 1024
+
+/**
+ * Sniff the REAL export source from a zip's central-directory entry list so a
+ * Claude export mis-posted to `/api/upload/chatgpt` (the web affordance
+ * hardcodes `source=chatgpt`) is still routed to the Claude parser. The two
+ * exports share `conversations.json`; they diverge on the sidecar files:
+ *
+ *   - Claude:  `users.json` (PLURAL) and/or `projects.json`.
+ *   - ChatGPT: `user.json` (singular) and/or `message_feedback.json` /
+ *              `model_comparisons.json`.
+ *
+ * Returns the confidently-detected source, or `null` when the signals are
+ * absent OR contradictory (a mixed bag) — the caller keeps the URL source in
+ * that case (back-compat). A malformed / unreadable zip also returns `null`:
+ * the sniff must NEVER break an upload, so any failure falls back to the URL
+ * source. Entry names are reduced to their basename so a nested layout
+ * (`export/conversations.json`) still matches.
+ */
+export function sniffZipSource(buffer: Buffer): UploadSource | null {
+  let basenames: Set<string>
+  try {
+    basenames = new Set(
+      listEntries(buffer).map((e) => {
+        const name = e.name
+        const slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'))
+        return slash >= 0 ? name.slice(slash + 1) : name
+      }),
+    )
+  } catch {
+    // Defensive: a corrupt / zip64 / encrypted archive must not break the
+    // upload — fall back to the URL source by reporting "no opinion".
+    return null
+  }
+  const claudeSignal = basenames.has('users.json') || basenames.has('projects.json')
+  const chatgptSignal =
+    basenames.has('user.json') ||
+    basenames.has('message_feedback.json') ||
+    basenames.has('model_comparisons.json')
+  if (claudeSignal && !chatgptSignal) return 'claude'
+  if (chatgptSignal && !claudeSignal) return 'chatgpt'
+  return null
+}
+
+/**
+ * Resolve the effective upload source: the sniffed source when the zip's entry
+ * list confidently disagrees with the URL source, else the URL source. Logs
+ * the override so an operator can see when a `/chatgpt` POST was re-routed to
+ * the Claude parser (and vice-versa). Never throws.
+ */
+export function resolveEffectiveSource(
+  urlSource: UploadSource,
+  buffer: Buffer,
+  log: (msg: string) => void = (msg): void => console.info(msg),
+): UploadSource {
+  const sniffed = sniffZipSource(buffer)
+  if (sniffed !== null && sniffed !== urlSource) {
+    log(
+      `[upload] source override: url=${urlSource} sniffed=${sniffed} (zip entry list disagrees; using sniffed)`,
+    )
+    return sniffed
+  }
+  return urlSource
 }
 
 /**
@@ -243,7 +319,11 @@ export async function handleImportUpload(
   if (!isUploadSource(sourceFromPath)) {
     return jsonError(400, `invalid source: expected chatgpt or claude, got ${JSON.stringify(sourceFromPath)}`)
   }
-  const source: UploadSource = sourceFromPath
+  // The URL source is the client's CLAIM; the real source is sniffed from the
+  // zip's entry list after the bytes land (see step 6.5). The web onboarding
+  // affordance hardcodes `/api/upload/chatgpt`, so a Claude export would
+  // otherwise be parsed by the ChatGPT parser and fail.
+  const urlSource: UploadSource = sourceFromPath
 
   // 2. Auth.
   if (deps.auth !== undefined) {
@@ -280,6 +360,14 @@ export async function handleImportUpload(
     return jsonError(400, 'not a zip file (magic bytes mismatch)')
   }
 
+  // 6.5. Sniff the REAL source from the zip's entry list. The web affordance
+  //      always posts onboarding history zips to `/chatgpt`, so a Claude
+  //      export needs to be re-routed to the Claude parser. Read the full bytes
+  //      once here (also reused for the disk write below). A sniff failure
+  //      keeps the URL source — it must never break the upload.
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const source: UploadSource = resolveEffectiveSource(urlSource, Buffer.from(bytes))
+
   // 7. Write to <owner_home>/imports/<source>.zip.
   const fsImpl = deps.fs ?? (await import('node:fs/promises'))
   const importDir = join(ctx.owner_home, 'imports')
@@ -292,7 +380,6 @@ export async function handleImportUpload(
     )
     return jsonError(500, 'could not create imports directory')
   }
-  const bytes = new Uint8Array(await file.arrayBuffer())
   try {
     await fsImpl.writeFile(destPath, bytes, { mode: 0o600 })
   } catch (err) {

@@ -96,6 +96,15 @@ export interface ChatViewModel {
   messages: RenderMessage[]
   /** Typing/streaming indicator — true while awaiting or streaming a reply. */
   isRunning: boolean
+  /**
+   * BUG 7 — true ONLY while a reply is pending and NOTHING has streamed yet
+   * (no live streaming bubble). The typing indicator renders off THIS, not
+   * `isRunning`: once a streaming bubble exists it IS the pending affordance,
+   * so co-rendering the dots would stack an (often momentarily empty) bubble
+   * above the typing dots. Distinct from `isRunning`, which also stays true
+   * during streaming so the composer shows Stop.
+   */
+  awaitingFirstToken: boolean
   status: ConnStatus
   /** Count of sends still queued/unacked (offline tail). */
   pending: number
@@ -258,12 +267,19 @@ export class NeutronChatController {
       const delta = f['body_delta']
       if (typeof messageId !== 'string' || messageId.length === 0) return
       if (typeof delta !== 'string') return
-      // Any agent activity clears the "awaiting" bracket — the reply has begun.
-      this.awaitingReply = false
       const existing = this.streaming.get(messageId)
       if (existing === undefined) {
+        // BUG 7 — some turns open the stream with a leading ZERO-LENGTH delta.
+        // Materializing a streaming bubble for it renders an EMPTY agent bubble
+        // above the typing indicator. Ignore the empty opener: keep the
+        // "awaiting" bracket (so the typing dots stay) until a real token lands,
+        // and only then create the bubble.
+        if (delta.length === 0) return
+        // A real token has begun — clear the "awaiting" bracket.
+        this.awaitingReply = false
         this.streaming.set(messageId, { text: delta, createdAt: this.nextSeq() })
       } else {
+        this.awaitingReply = false
         existing.text += delta
       }
       this.publish()
@@ -444,6 +460,10 @@ export class NeutronChatController {
     const liveStreams: RenderMessage[] = []
     for (const [messageId, entry] of this.streaming) {
       if (persistedIds.has(messageId)) continue
+      // BUG 7 — never render an empty streaming bubble (defensive: handleFrame
+      // already drops the leading empty-delta opener). An empty bubble would
+      // stack above the typing indicator.
+      if (entry.text.length === 0) continue
       liveStreams.push({
         id: `stream:${messageId}`,
         messageId,
@@ -479,6 +499,7 @@ export class NeutronChatController {
     return {
       messages,
       isRunning: this.awaitingReply || liveStreams.length > 0,
+      awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
       status: this.connStatus,
       pending: this.pending,
       projectId: this.projectId,

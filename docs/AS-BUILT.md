@@ -2,6 +2,62 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Onboarding runs as the live CC session + post-turn scribe (BUG 0, Path 1)
+
+**What shipped.** Onboarding was rearchitected off the per-turn phase-machine /
+LLM-router transport and onto the SAME live Claude Code chat session as
+steady-state chat. While the owner isn't onboarded, the live session's first turn
+carries an `<onboarding>` system preamble (persona stack + interview
+instructions); Claude itself conducts the interview conversationally. A
+fire-and-forget **post-turn extractor** (the scribe) pulls name / projects /
+interests / agent-personality / agent-name out of each exchange and persists them
+into the SAME `OnboardingStateStore.phase_state` the engine wrote to. The 6 s
+Haiku freeform router that produced "I didn't quite catch that" is gone **by
+construction** — the live session never calls `engine.advance`, and the scribe is
+non-blocking so an extraction timeout can never stall a reply. **No feature flag,
+no dual path.**
+
+**Flow.** `on_session_open` seeds the first onboarding turn (auto-start: loader →
+first question, no user message). Each turn → `appWsChatTurn` (live session) +
+scribe. When the 5 required fields (`required-fields-audit.ts`) are first
+complete, the scribe's `onComplete` fires `buildOnboardingFinalize`: composes +
+commits the owner persona (`SOUL/USER/priority-map.md`), materializes the named
+projects (DB rows + cli topic bindings + on-disk docs + MEMORY/gbrain page), marks
+the row `completed`, and fans a `projects_changed` frame. Next turn's system
+prompt is plain chat — same session/socket, no transport switch.
+
+**History import (full fidelity, auto-consumed).** The engine is retained ONLY as
+the import subsystem owner: an uploaded ChatGPT/Claude zip still flows through
+`notifyImportUpload` → synthesis (writes the project DOCUMENTS) → the 5 s
+`import-running-cron`, which stamps the full `ImportResult` + merged
+`primary_projects`/`non_work_interests` onto `phase_state`. Path 1 has no accept
+BUTTON: an import-completion watcher transitions the row off
+`import_analysis_presented` back to the conversational marker so the live session
+continues and the scribe's completion path materializes the imported projects
+(incl. MEMORY/gbrain — the gbrain syncHook is now threaded into the materializer
+indexer, previously unwired in Open). The successful accept prompt is suppressed;
+import failure / resume prompts still surface. Server-side zip sniffing routes a
+Claude export to the Claude parser even though the affordance posts to
+`/api/upload/chatgpt`.
+
+**Billing.** The scribe + project-doc synth ride the SAME warm Max-OAuth `cc-llm`
+substrate (`onboardingAnthropicClient`); NO new API-billed client.
+
+**Removed from the live path.** `engine.advance` conversational branches in the
+app-ws text receiver + `on_button_choice`; `engine.start` on connect; the
+`llm-router` (never consulted now); `NEUTRON_ONBOARDING_CONVERSATIONAL` collapsed
+to always-on in the Local adapter (one path, no flag). Supersedes
+`docs/research/p2-v3-conversational-onboarding-design.md`.
+
+**Files.** New `onboarding/interview/{post-turn-extractor,onboarding-preamble}.ts`,
+`gateway/realmode-composer/build-onboarding-finalize.ts` (+ tests); wired
+`open/composer.ts`, `gateway/realmode-composer/build-live-agent-turn.ts`,
+`gateway/http/chat-bridge.ts` (`seed_turn`), `runtime/platform-adapter-local.ts`,
+`gateway/upload/import-upload-handler.ts` (source sniff). E2E:
+`tests/e2e-browser/onboarding_walkthrough.py` asserts steps (0)–(5).
+**Verification:** tsc clean; onboarding + open suites pass; real-browser run (see
+PR #86 evidence).
+
 ## Skill Forge composed into the Open boot path (parity gap #5 — the LAST gap)
 
 **What shipped.** Skill Forge (`skill-forge/`, auto-skillify) now composes into the

@@ -250,14 +250,18 @@ export function buildLocalPlatformAdapter(
   const nowFn = input.now ?? ((): number => Date.now())
   /** Pending generated keys; per-project to allow concurrent flows. */
   const pendingKeypairs = new Map<string, PendingKeypair>()
-  // P2-v3 S2 — cache the parsed conversational flag at adapter
-  // construction. Re-reading `process.env` on every freeform inbound is
-  // fine functionally (the call-site is once per turn, not hot-path)
-  // but caching keeps the test surface deterministic across mutating
-  // tests + makes the answer cheap to query.
-  const conversational = resolveOnboardingConversational(
-    process.env['NEUTRON_ONBOARDING_CONVERSATIONAL'],
-  )
+  // Path 1 (onboarding-as-CC-session, 2026-06-27) — the conversational flag is
+  // COLLAPSED. Onboarding now runs entirely in the live CC session (see
+  // open/composer.ts + onboarding/interview/post-turn-extractor.ts); the engine
+  // no longer drives conversational turns, so its per-turn `shouldConsultRouter`
+  // gate is dead on the live path. We hard-pin the accessor to always-on (the
+  // pre-collapse default) and no longer read `NEUTRON_ONBOARDING_CONVERSATIONAL`
+  // — ONE path, no flag. `resolveOnboardingConversational` is retained only for
+  // back-compat callers/tests; nothing in production consults the env var now.
+  const conversational: ReturnType<typeof resolveOnboardingConversational> = {
+    enabled: true,
+    phases: 'all',
+  }
 
   const slugAvailability: SlugAvailabilityProbe = {
     /**

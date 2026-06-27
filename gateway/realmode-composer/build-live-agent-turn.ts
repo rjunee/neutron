@@ -166,6 +166,32 @@ export interface LiveAgentReflectionSeam {
   }): void
 }
 
+/**
+ * Path 1 onboarding seam (2026-06-27). When the owner is NOT yet onboarded, the
+ * SAME live session runs the onboarding interview: the first turn splices an
+ * `<onboarding>` preamble into the system prompt instructing Claude to conduct
+ * the interview conversationally, each onboarding `agent_message` carries the
+ * zip-import `upload_affordance`, and every completed turn is handed to the
+ * fire-and-forget scribe (`onTurnComplete`) that extracts + persists the
+ * profile WITHOUT blocking the reply. Omitted on the LLM-less / Managed path →
+ * the live agent behaves exactly as steady-state.
+ */
+export interface LiveAgentOnboardingSeam {
+  /** True while the owner is still onboarding (no terminal onboarding_state). */
+  isActive(user_id: string): Promise<boolean>
+  /** The onboarding interview preamble spliced into the first-turn system prompt. */
+  systemPreamble(): string
+  /** Upload affordance attached to onboarding agent_messages (zip import), or null. */
+  uploadAffordance(): { source: 'chatgpt' | 'claude' } | null
+  /** Fire-and-forget post-turn scribe — never blocks, never throws into the turn. */
+  onTurnComplete(input: {
+    user_id: string
+    user_text: string
+    agent_text: string
+    observed_at: number
+  }): void
+}
+
 export interface BuildLiveAgentTurnInput {
   /**
    * The DEDICATED conversational substrate (warm persistent CC REPL pool).
@@ -202,6 +228,12 @@ export interface BuildLiveAgentTurnInput {
    * detect + log a fresh correction. Omitted on the LLM-less path → no-op.
    */
   reflection?: LiveAgentReflectionSeam
+  /**
+   * Path 1 onboarding seam. When wired AND `isActive(user_id)` is true, the
+   * live session conducts the onboarding interview (preamble + upload affordance
+   * + post-turn scribe). Omitted → the live agent is steady-state only.
+   */
+  onboarding?: LiveAgentOnboardingSeam
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -316,24 +348,36 @@ export function buildLiveAgentTurn(
     turn: LiveAgentTurnRequest,
   ): Promise<LiveAgentTurnResult> {
     const observed_at = turn.observed_at ?? now()
+    // Path 1 — is the owner still onboarding? Consulted once per turn so the
+    // first-turn preamble, the upload affordance, and the post-turn scribe all
+    // agree. A throwing seam degrades to steady-state (never kills the turn).
+    let onboardingActive = false
+    if (input.onboarding !== undefined) {
+      try {
+        onboardingActive = await input.onboarding.isActive(turn.user_id)
+      } catch {
+        onboardingActive = false
+      }
+    }
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
     // Capture that previous agent reply: the owner's message THIS turn is a
     // response to the PRIOR reply, so correction detection must judge (prior
     // reply, user_text) — NOT (this turn's freshly generated reply, user_text).
-    const priorAgentReply = await resolvePreviousRowWithUserText(
-      input.buttonStore,
-      turn,
-      observed_at,
-      now(),
-    )
-    try {
-      input.transcript?.append({
-        role: 'user',
-        body: turn.user_text,
-        phase: 'completed',
-      })
-    } catch {
-      /* audit-trail only — never blocks the turn */
+    // A `seed_turn` carries a SYNTHETIC system instruction (auto-start), not a
+    // real user message — skip persistence so it never renders as a user bubble.
+    const priorAgentReply = turn.seed_turn === true
+      ? null
+      : await resolvePreviousRowWithUserText(input.buttonStore, turn, observed_at, now())
+    if (turn.seed_turn !== true) {
+      try {
+        input.transcript?.append({
+          role: 'user',
+          body: turn.user_text,
+          phase: 'completed',
+        })
+      } catch {
+        /* audit-trail only — never blocks the turn */
+      }
     }
 
     // ── 2. Compose the prompt.
@@ -343,7 +387,11 @@ export function buildLiveAgentTurn(
     if (!isColdFirstTurn) {
       prompt = turn.user_text
     } else {
-      prompt = await composeFirstTurnPrompt(input, turn, now())
+      // While onboarding, splice the interview preamble into the first-turn
+      // system prompt so the warm session conducts the interview conversationally.
+      const onboardingPreamble =
+        onboardingActive && input.onboarding !== undefined ? input.onboarding.systemPreamble() : null
+      prompt = await composeFirstTurnPrompt(input, turn, now(), onboardingPreamble)
     }
 
     // Item 12 — cold-start ack. On the first turn into this topic the warm
@@ -448,6 +496,12 @@ export function buildLiveAgentTurn(
       allow_freeform: true,
       ...(reply_prompt_id !== null ? { prompt_id: reply_prompt_id } : {}),
     }
+    // Path 1 — while onboarding, carry the zip-import affordance so the client
+    // shows the 📎 "attach your ChatGPT/Claude export" hint and accepts a .zip.
+    if (onboardingActive && input.onboarding !== undefined) {
+      const aff = input.onboarding.uploadAffordance()
+      if (aff !== null) envelope.upload_affordance = aff
+    }
     sendSafe(turn.send, envelope)
     try {
       input.transcript?.append({
@@ -482,6 +536,27 @@ export function buildLiveAgentTurn(
       } catch (err) {
         console.warn(
           `${LOG_TAG} event=reflection_on_turn_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
+    // Path 1 — fire-and-forget onboarding scribe. The exchange judged is the
+    // assistant's question this turn (`text`) + the user's answer that prompted
+    // it (`turn.user_text`). Skipped for the synthetic auto-start seed turn
+    // (nothing to extract) and once onboarding is complete. Non-blocking by
+    // construction, so it can NEVER cause an "I didn't quite catch that" stall.
+    if (onboardingActive && input.onboarding !== undefined && turn.seed_turn !== true) {
+      try {
+        input.onboarding.onTurnComplete({
+          user_id: turn.user_id,
+          user_text: turn.user_text,
+          agent_text: priorAgentReply ?? '',
+          observed_at,
+        })
+      } catch (err) {
+        console.warn(
+          `${LOG_TAG} event=onboarding_scribe_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
             err instanceof Error ? err.message : String(err)
           }`,
         )
@@ -575,6 +650,7 @@ async function composeFirstTurnPrompt(
   input: BuildLiveAgentTurnInput,
   turn: LiveAgentTurnRequest,
   wall_now: number,
+  onboardingPreamble?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -625,10 +701,21 @@ async function composeFirstTurnPrompt(
   const projectPersonaFragment = await composeProjectPersonaFragment(input, turn)
   // Order: doctrine (how you act) right after the SOUL persona, then the
   // project-voice refinement, then the this-turn scope block.
-  const instance_fragments =
-    projectPersonaFragment !== null
-      ? [doctrineFragment, projectPersonaFragment, scopeFragment]
-      : [doctrineFragment, scopeFragment]
+  // Path 1 — onboarding interview preamble. When the owner isn't onboarded yet,
+  // this fragment turns the live session into the conversational interviewer
+  // (get name / work / interests / agent personality + name, offer history
+  // import). It sits LAST in the system stack so it governs THIS first turn most
+  // strongly; the warm session keeps it for the rest of the interview.
+  const onboardingFragment =
+    typeof onboardingPreamble === 'string' && onboardingPreamble.trim().length > 0
+      ? onboardingPreamble
+      : null
+  const instance_fragments = [
+    doctrineFragment,
+    ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
+    scopeFragment,
+    ...(onboardingFragment !== null ? [onboardingFragment] : []),
+  ]
   let system: string
   try {
     system = await assembleSystemPrompt({

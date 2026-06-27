@@ -229,6 +229,38 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > `/chat-react.js` is the only served client bundle (`compose.ts` `LANDING_PATHS`).
 > A fresh single-owner Open install serves the tabbed React UI with no env var.
 
+> **Onboarding/chat parity fixes (2026-06-27).** Six React-client regressions vs
+> the old vanilla chat were fixed: (1) a fresh onboarding auto-starts — the
+> server pushes the first prompt on connect and the client shows a "Setting
+> things up…" loader (server flag `window.__neutron_onboarding_active` →
+> `BootstrapConfig.onboardingActive`) instead of "Send a message to begin.";
+> (2) tighter bubbles (`min-width:4ch`, 8/13 padding); (3) quick-reply buttons
+> render the real choice text (`opt.body`), not the A/B/C letter `label`;
+> (4) ChatGPT/Claude export ZIP upload wired to `POST /api/upload/<source>`
+> (`uploads.ts` `importHistoryZip`); (5) iMessage-style — reaction "＋" and
+> Edit/Delete are hover-revealed, not always-on; (7) no spurious empty agent
+> bubble above the typing indicator (`controller.ts` drops the empty-delta open
+> frame; the typing dots key off `awaitingFirstToken`).
+
+> **Onboarding runs AS the live CC session (BUG 0, Path 1, 2026-06-27).** The
+> deeper rearchitecture shipped: onboarding is no longer a per-turn phase machine
+> / LLM router — it runs in the SAME live Claude Code session as steady-state
+> chat. While the owner isn't onboarded the live session's first turn carries an
+> `<onboarding>` system preamble and Claude conducts the interview
+> conversationally; a fire-and-forget **post-turn extractor**
+> (`onboarding/interview/post-turn-extractor.ts`, substrate-backed) scribes
+> name/projects/interests/personality into `OnboardingStateStore.phase_state`.
+> When the 5 required fields complete, `build-onboarding-finalize.ts` composes +
+> commits the persona, materializes the named projects (rows + topics + docs +
+> MEMORY/gbrain), and marks the row completed → next turn is plain chat in the
+> SAME session. History import stays full-fidelity (engine-driven synthesis +
+> `import-running-cron` write the DOCUMENTS; an import-completion watcher
+> auto-consumes `import_analysis_presented` and the completion path materializes
+> MEMORY/gbrain — no accept button). The 6 s router that said "I didn't quite
+> catch that" is gone by construction; `NEUTRON_ONBOARDING_CONVERSATIONAL` is
+> collapsed (one path, no flag). Supersedes the deferred-BUG-0 note and
+> `docs/research/p2-v3-conversational-onboarding-design.md`.
+
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
 and renders the project's tab bar from the same resolver: on the active project
@@ -681,10 +713,13 @@ engine is NOT forked). Scope is receipts only.
 > (via a composer-filled holder) translates each engine `ButtonPrompt` into the
 > app-ws `agent_message` superset (which already carries
 > options/prompt_id/allow_freeform/kind/upload_affordance). The surface gains
-> `on_session_open` (fires the first onboarding prompt on connect when onboarding
-> is active) + `on_button_choice` (a new structured `button_choice` inbound); the
-> composer's `isOnboardingActive()` routes each turn to `engine.advance`
-> (onboarding) or `buildLiveAgentTurn` (steady-state). The React client
+> `on_session_open` + `on_button_choice` (a structured `button_choice` inbound).
+> **(Superseded by Path 1, 2026-06-27: every onboarding turn — typed or tapped —
+> now runs through `buildLiveAgentTurn` (the live CC session) with an onboarding
+> preamble + post-turn scribe; the `isOnboardingActive()→engine.advance` branches
+> were removed, `on_session_open` seeds the first live-session turn, and the
+> engine is retained only as the import subsystem. See the "Onboarding runs AS
+> the live CC session" note above.)** The React client
 > (`chat-core` + `chat-react`) preserves + renders the button metadata
 > (`ButtonOptionRow`/image-gallery) and posts the choice back — onboarding runs
 > inline in the same chat surface, no special client path. The **web admin panel**
