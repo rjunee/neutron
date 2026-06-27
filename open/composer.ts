@@ -121,6 +121,9 @@ import type { AppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
 import { DocStore } from '../gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
 import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
+import { createAppTasksSurface } from '../gateway/http/app-tasks-surface.ts'
+import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
+import { TaskStore } from '../tasks/store.ts'
 import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
 import { createAppWsSurface } from '../gateway/http/app-ws-surface.ts'
@@ -1228,6 +1231,19 @@ export function buildOpenGraphComposer(
     // cores+installations; the builtins cover the parity gate.)
     const appTabsSurface = createAppTabsSurface({ auth: appOwnerAuth })
 
+    // P1b — Tasks tab backend (`/api/app/projects/<id>/tasks*`) + chat upload
+    // surface (`/api/app/upload`), the remaining app-API endpoints the React UI
+    // calls. Codex r1 [P2]×2: the tabs resolver now SHOWS the Tasks tab and the
+    // composer SHOWS the attachment button, so their backends must exist or those
+    // controls 404. `new TaskStore(db)` reads the SAME canonical project task
+    // data the agent's `cores/free/tasks` backend writes. Same owner auth.
+    const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
+    const appUploadSurface = createAppUploadSurface({
+      auth: appOwnerAuth,
+      project_slug,
+      owner_home,
+    })
+
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
     // transport the served React client ACTUALLY uses
     // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). It was
@@ -1440,6 +1456,10 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
+      // P1b — Tasks tab backend + chat attachment upload, so every visible React
+      // control has a live backend (no 404s behind a shown tab/button).
+      app_tasks_surface: { handler: appTasksSurface.handler },
+      app_upload_surface: { handler: appUploadSurface.handler },
     }
   }
 }
