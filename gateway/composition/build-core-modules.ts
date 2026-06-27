@@ -15,7 +15,10 @@ import { CronJobRegistry } from '../../cron/jobs.ts'
 import { CronScheduler } from '../../cron/scheduler.ts'
 import { CronStateStore } from '../../cron/state.ts'
 import { McpServer } from '../../mcp/server.ts'
-import { setReplToolBridge } from '../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import {
+  setReplToolBridge,
+  clearReplToolBridgeIf,
+} from '../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
@@ -212,15 +215,19 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
   // point that singleton at the graph's `McpServer` (which structurally satisfies
   // `ReplToolBridge`: it has `listToolSchemas` + `dispatch`). Shutdown clears it
   // so a torn-down instance can't dispatch tool calls against a dead registry.
+  let wiredBridgeServer: McpServer | undefined
   const replToolBridgeModule: GatewayModule<{ wired: boolean }> = {
     name: 'repl-tool-bridge',
     deps: ['mcp'],
     init: (ctx) => {
-      setReplToolBridge(ctx.graph.get<McpServer>('mcp'))
+      wiredBridgeServer = ctx.graph.get<McpServer>('mcp')
+      setReplToolBridge(wiredBridgeServer)
       return { wired: true }
     },
     shutdown: () => {
-      setReplToolBridge(undefined)
+      // Identity-guarded so a second graph in the same process (tests) can't
+      // null out the live graph's bridge on an older graph's teardown.
+      if (wiredBridgeServer !== undefined) clearReplToolBridgeIf(wiredBridgeServer)
     },
   }
 

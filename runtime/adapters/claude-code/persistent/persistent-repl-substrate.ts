@@ -909,6 +909,18 @@ export function setReplToolBridge(bridge: ReplToolBridge | undefined): void {
   replToolBridge = bridge
 }
 
+/**
+ * Identity-guarded clear: drop the singleton ONLY if it still points at
+ * `bridge`. A graph's shutdown calls this with its own `McpServer` so that, in
+ * a process that composed a SECOND graph (the test suite), an older graph's
+ * teardown can't null out the live graph's bridge (mirrors
+ * `ReplSink.unregisterIf`). Production has one graph per process, so the guard
+ * is inert there.
+ */
+export function clearReplToolBridgeIf(bridge: ReplToolBridge): void {
+  if (replToolBridge === bridge) replToolBridge = undefined
+}
+
 // ---------------------------------------------------------------------------
 // Reply sink — one loopback HTTP server the dev-channels POST back to.
 // Module singleton so it is shared across every per-turn substrate instance.
