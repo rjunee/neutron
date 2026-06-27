@@ -41,6 +41,11 @@ import {
   resolveLandingStaticDir,
 } from '../gateway/realmode-composer/build-landing-stack.ts'
 import { buildLiveAgentTurn } from '../gateway/realmode-composer/build-live-agent-turn.ts'
+import type { LiveAgentOnboardingSeam } from '../gateway/realmode-composer/build-live-agent-turn.ts'
+import { buildProjectDocComposer } from '../gateway/realmode-composer/build-project-doc-composer.ts'
+import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
+import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
+import { buildOnboardingPreamble } from '../onboarding/interview/onboarding-preamble.ts'
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
@@ -561,21 +566,26 @@ export function buildOpenGraphComposer(
     // chat turn — it degrades with a clear log, exactly as the spec requires.
     // Built only when scribe can run (there is no point standing up a write
     // target with no extractor to feed it).
+    // GBrain wiring is hoisted out of the scribe closure so the SAME syncHook
+    // feeds three consumers: the chat-time scribe (below), the onboarding
+    // materializer's project-page indexer (threaded into `buildLandingStack` as
+    // `importGbrainSyncHook` so imported/onboarding projects land in MEMORY/
+    // gbrain — previously unwired in Open), and the Path 1 onboarding finalize.
+    // Lazy + fail-soft: building it never spawns `gbrain serve` until first use.
+    const gbrainMemory = buildGBrainMemory({ owner_home, project_slug, env })
+    realmodeCleanups.push(() => {
+      void gbrainMemory.close().catch(() => undefined)
+    })
+    const gbrainSyncHook = gbrainMemory.syncHook
     const scribe: Scribe | null =
       scribeSubstrate !== null
-        ? ((): Scribe => {
-            const gbrain = buildGBrainMemory({ owner_home, project_slug, env })
-            realmodeCleanups.push(() => {
-              void gbrain.close().catch(() => undefined)
-            })
-            return createScribe({
-              substrate: scribeSubstrate,
-              syncHook: gbrain.syncHook,
-              ownerDataDir: owner_home,
-              project_slug,
-              budget: createState(defaultStatePath(owner_home)),
-            })
-          })()
+        ? createScribe({
+            substrate: scribeSubstrate,
+            syncHook: gbrainSyncHook,
+            ownerDataDir: owner_home,
+            project_slug,
+            budget: createState(defaultStatePath(owner_home)),
+          })
         : null
 
     // ── Reflection: diary + corrections-log (P1 daily-driver, gap-audit §(c) #10) ──
@@ -913,6 +923,12 @@ export function buildOpenGraphComposer(
       // opts THIS single-owner composer onto the synthesis runner.
       ...(importSubstrate !== null ? { importSubstrate } : {}),
       importUseSynthesis: true,
+      // Path 1 (2026-06-27) — thread the SHARED GBrain syncHook into the
+      // onboarding/import project-page indexer so materialized projects fan out
+      // to MEMORY/gbrain (`entities/projects/<slug>.md` + gbrain put_page), not
+      // disk-only. Previously unwired in Open, so imported insights never
+      // reached the agent's memory recall (build-landing-stack.ts:1016).
+      importGbrainSyncHook: gbrainSyncHook,
       // Scribe chat-time extraction (P0 daily-driver, gap-audit cat 7). When the
       // box has LLM creds, a real user turn fans into scribe's extract→GBrain
       // path; LLM-less, this is omitted and the chat-bridge no-ops the hook.
@@ -1453,6 +1469,82 @@ export function buildOpenGraphComposer(
       appWsRegistry.send(appWsTopicId(user_id), frame)
     }
 
+    // ── Onboarding-as-CC-session → Path 1 (2026-06-27): ONE live-session path ─
+    // Onboarding is NOT a separate engine/socket and NO LONGER a per-turn phase
+    // machine. It is the INITIAL MODE of this same `/ws/app/chat` live agent:
+    // while the owner is not yet onboarded the live CC session conducts the
+    // interview (a system preamble) and a fire-and-forget post-turn extractor
+    // scribes the profile into the SAME `OnboardingStateStore` the engine used —
+    // no `engine.advance`, no 6 s Haiku freeform router (the "I didn't quite
+    // catch that" culprit), no flag, no dual path. The engine is retained ONLY
+    // as the import subsystem owner (notifyImportUpload + synthesis + cron).
+    // `isOnboardingActive` decides per-turn whether THIS turn carries the
+    // onboarding preamble/affordance or is plain steady-state chat.
+    const engine = landing.engine
+    const onboardingStateStore = landing.stateStore
+    // No state row = fresh install → onboarding. A row in a non-terminal phase =
+    // mid-onboarding. 'completed'/'failed' = steady-state chat.
+    const isOnboardingActive = async (user_id: string): Promise<boolean> => {
+      const st = await onboardingStateStore.get(project_slug, user_id)
+      if (st === null) return true
+      return st.phase !== 'completed' && st.phase !== 'failed'
+    }
+    // Project-doc LLM synth for materialized onboarding/import projects (same
+    // warm cc-llm path; null → deterministic template docs).
+    const projectDocComposer =
+      onboardingAnthropicClient !== null
+        ? buildProjectDocComposer({ client: onboardingAnthropicClient })
+        : null
+    // Path 1 finalize seam: persona compose+commit + project materialization
+    // (DB rows + topics + docs + gbrain) + mark completed + rail refresh. Wired
+    // only when the box has an LLM path (onboarding can't run LLM-less anyway).
+    const onboardingFinalizer =
+      onboardingAnthropicClient !== null
+        ? buildOnboardingFinalize({
+            owner_home,
+            project_slug,
+            db,
+            stateStore: onboardingStateStore,
+            personaLoader,
+            ...(projectDocComposer !== null ? { projectDocComposer } : {}),
+            gbrainSyncHook,
+            emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
+          })
+        : null
+    // The fire-and-forget post-turn scribe — replaces the per-turn llm-router.
+    const onboardingExtractor =
+      onboardingAnthropicClient !== null
+        ? buildPostTurnExtractor({
+            anthropicClient: onboardingAnthropicClient,
+            stateStore: onboardingStateStore,
+            project_slug,
+            onComplete: async ({ user_id, state }): Promise<void> => {
+              if (onboardingFinalizer === null) return
+              await onboardingFinalizer.finalize({
+                user_id,
+                topic_id: appWsTopicId(user_id),
+                state,
+              })
+            },
+          })
+        : null
+    // The onboarding interview preamble (offer history import only when a
+    // synthesis substrate exists to actually run it).
+    const onboardingPreambleText = buildOnboardingPreamble({
+      import_offered: importSubstrate !== null,
+    })
+    // The live-agent onboarding seam — active while the owner isn't onboarded.
+    const onboardingSeam: LiveAgentOnboardingSeam | undefined =
+      onboardingExtractor !== null
+        ? {
+            isActive: (user_id: string): Promise<boolean> => isOnboardingActive(user_id),
+            systemPreamble: (): string => onboardingPreambleText,
+            uploadAffordance: (): { source: 'chatgpt' | 'claude' } | null =>
+              importSubstrate !== null ? { source: 'chatgpt' } : null,
+            onTurnComplete: (turn): void => onboardingExtractor.onTurnComplete(turn),
+          }
+        : undefined
+
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
@@ -1460,6 +1552,7 @@ export function buildOpenGraphComposer(
             personaLoader,
             projectPersonaResolver,
             reflection,
+            ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
@@ -1470,23 +1563,10 @@ export function buildOpenGraphComposer(
     // hazard. The socket cannot dispatch an inbound until boot completes, long
     // after `holder.adapter` is assigned below.
     const appWsHolder: { adapter?: AppWsAdapter } = {}
-
-    // ── Onboarding consolidation (2026-06-26): ONE chat path ───────────────
-    // Onboarding is NOT a separate engine/socket — it is the INITIAL MODE of
-    // this same `/ws/app/chat` surface. The shared `landing.engine` keys its
-    // state on (project_slug, user_id), independent of transport, so the same
-    // InterviewEngine that drove the (now-removed) legacy onboarding socket runs
-    // here. `isOnboardingActive` decides per-turn whether the engine (onboarding) or
-    // the live agent (steady-state) handles the message.
-    const engine = landing.engine
-    const onboardingStateStore = landing.stateStore
-    // No state row = fresh install → start onboarding. A row in a non-terminal
-    // phase = mid-onboarding. 'completed'/'failed' = steady-state chat.
-    const isOnboardingActive = async (user_id: string): Promise<boolean> => {
-      const st = await onboardingStateStore.get(project_slug, user_id)
-      if (st === null) return true
-      return st.phase !== 'completed' && st.phase !== 'failed'
-    }
+    // Path 1 auto-start de-dupe: topics whose onboarding opener we've already
+    // seeded THIS process, so a quick reconnect doesn't double-open the
+    // interview. Mirrors the live runner's own per-process `contextSent` guard.
+    const seededOnboardingTopics = new Set<string>()
     // Reply factory: a live-agent turn emits `ChatOutbound`; translate the
     // user-facing `agent_message` into an app-ws `OutgoingMessage` and fan it
     // out via the adapter (which stamps message_id/ts + persists when a chat log
@@ -1555,52 +1635,11 @@ export function buildOpenGraphComposer(
       }
       return appWsRegistry.send(topic_id, env)
     }
-    // Drive one onboarding turn from a typed (freeform) answer.
-    const advanceOnboardingText = async (
-      user_id: string,
-      freeform_text: string,
-      observed_at: number,
-    ): Promise<void> => {
-      await engine.advance({
-        project_slug,
-        topic_id: appWsTopicId(user_id),
-        user_id,
-        channel_kind: 'app-socket',
-        freeform_text,
-        observed_at,
-      })
-      // FIX 1 — an onboarding turn may have created/changed projects; push a
-      // live rail refresh so the new project tabs appear without a reload.
-      emitProjectsChangedIfChanged(user_id)
-    }
-    // Drive one onboarding turn from a tapped button (structured choice).
-    const advanceOnboardingChoice = async (
-      user_id: string,
-      prompt_id: string,
-      choice_value: string,
-      freeform_text: string | undefined,
-      observed_at: number,
-    ): Promise<void> => {
-      const choice: ButtonChoice = {
-        prompt_id,
-        choice_value,
-        chosen_at: observed_at,
-        speaker_user_id: user_id,
-        channel_kind: 'app-socket',
-        ...(freeform_text !== undefined ? { freeform_text } : {}),
-      }
-      await engine.advance({
-        project_slug,
-        topic_id: appWsTopicId(user_id),
-        user_id,
-        channel_kind: 'app-socket',
-        choice,
-        observed_at,
-      })
-      // FIX 1 — see advanceOnboardingText: refresh the rail when a tapped choice
-      // (e.g. confirming the wow-moment project shells) created/changed projects.
-      emitProjectsChangedIfChanged(user_id)
-    }
+    // Path 1: onboarding conversational turns no longer go through
+    // `engine.advance` — they run on the live session (see `appWsReceiver` /
+    // `on_button_choice` below). The engine is retained ONLY for the import
+    // subsystem (`notifyImportUpload`), so its button-prompt router is still
+    // wired below for any import-side prompt it may emit.
     // Fill the late-bound onboarding button-prompt router NOW that the registry
     // exists. The engine's `sendButtonPrompt` reads this holder at call time
     // (see buildRoutedSendButtonPrompt) — `app:<user>` topics route here.
@@ -1631,16 +1670,11 @@ export function buildOpenGraphComposer(
           : []
         if (text.length === 0 && attachments.length === 0) return
         const userText = text.length > 0 ? text : 'Sent an attachment.'
-        const onboardingUserId = event.user.channel_user_id
-        // ONE path: while onboarding is active this typed answer advances the
-        // shared InterviewEngine (which emits the next prompt over THIS socket
-        // via the router above) instead of the steady-state live agent. The
-        // user's text was already echoed/persisted by the surface's
-        // ingestUserMessage, so it renders as a normal user bubble.
-        if (await isOnboardingActive(onboardingUserId)) {
-          await advanceOnboardingText(onboardingUserId, userText, event.received_at)
-          return
-        }
+        // Path 1: ONE path. Every typed turn — onboarding OR steady-state — runs
+        // through the SAME live CC session (`appWsChatTurn`). While the owner
+        // isn't onboarded the live agent's onboarding seam carries the interview
+        // preamble + zip affordance and the fire-and-forget post-turn extractor
+        // scribes the profile. No `engine.advance`, no freeform router gate.
         const project_id =
           typeof event.adapter_metadata?.['project_id'] === 'string'
             ? (event.adapter_metadata['project_id'] as string)
@@ -1665,6 +1699,9 @@ export function buildOpenGraphComposer(
             body:
               "I can't answer yet — this box has no AI credential configured. Add one in settings, then try again.",
           })
+          // FIX 1 (#85) — still surface any project-set change (e.g. an import
+          // that landed) so the rail refreshes even on the LLM-less path.
+          emitProjectsChangedIfChanged(event.user.channel_user_id)
           return
         }
         await appWsChatTurn({
@@ -1677,6 +1714,12 @@ export function buildOpenGraphComposer(
           send: sendReply,
           observed_at: event.received_at,
         })
+        // FIX 1 (#85) — re-wired into Path 1: after every turn, fan a
+        // projects_changed frame if the set changed. Onboarding completion +
+        // import materialize projects out-of-band (the fire-and-forget finalize
+        // also emits directly when it creates them), so this per-turn snapshot
+        // diff catches anything not already pushed — the rail refreshes live.
+        emitProjectsChangedIfChanged(event.user.channel_user_id)
       },
     }
     appWsHolder.adapter = new AppWsAdapter({ registry: appWsRegistry, receiver: appWsReceiver })
@@ -1688,45 +1731,50 @@ export function buildOpenGraphComposer(
       // Codex r1 [P2]: route slash commands (/note, /remind, /skills, …) through
       // the SAME chained filter the web chat uses — parity, not a second path.
       chat_command_filter: chatCommandFilter,
-      // Onboarding consolidation — fire the FIRST onboarding prompt over this
-      // socket on connect when the owner hasn't finished onboarding. Idempotent:
-      // engine.start re-emits the active prompt on a reconnect.
+      // Path 1 auto-start — when the owner hasn't finished onboarding, SEED the
+      // first onboarding turn through the live session on connect so Claude opens
+      // with the first question under the client's auto-start loader (no user
+      // message needed). The seed is a synthetic system-origin turn
+      // (`seed_turn: true`) — it is NOT persisted as a user bubble and is NOT
+      // scribed. The warm session is keyed per-process, so a reconnect within the
+      // same process won't re-seed a duplicate opener (`contextSent` guard in the
+      // live-agent runner); a fresh process re-seeds, which only repaints the
+      // opening question — acceptable and idempotent enough for the loader.
       on_session_open: async ({ user_id, channel_topic_id }) => {
-        // FIX 1 — seed the projects baseline BEFORE engine.start (the page
-        // already bootstrapped with the pre-start set, so the first call only
-        // records it). engine.start can ITSELF create projects on a resume —
-        // crash-resume into `wow_fired` or a `projects_proposed` auto-confirm —
-        // so seeding after it would take the FIRST snapshot post-mutation and
-        // swallow the change (Codex r1 [P2]). Bracketing start with a pre-seed +
-        // a post-emit makes a start()-driven project set land live.
+        // FIX 1 (#85) — seed the projects rail baseline on connect (only records
+        // the pre-existing set; the post-emit below catches a seed-driven change).
         emitProjectsChangedIfChanged(user_id)
         if (await isOnboardingActive(user_id)) {
-          await engine.start({
-            project_slug,
-            topic_id: channel_topic_id,
-            user_id,
-            signup_via: 'web',
-          })
+          if (appWsChatTurn !== null && !seededOnboardingTopics.has(channel_topic_id)) {
+            seededOnboardingTopics.add(channel_topic_id)
+            await appWsChatTurn({
+              project_slug,
+              user_id,
+              topic_id: channel_topic_id,
+              user_text:
+                '(The owner just opened the chat to begin onboarding. Greet them warmly by opening the conversation and asking your very first question now — start by asking what they would like you to call them. Do not wait for them to speak first.)',
+              send: buildAppWsSendReply(channel_topic_id),
+              observed_at: Date.now(),
+              seed_turn: true,
+            })
+          }
         }
-        // Emit if engine.start (or anything since the pre-seed) changed the set.
+        // Emit if the seed turn (or anything since the pre-seed) changed the set.
         emitProjectsChangedIfChanged(user_id)
       },
-      // Onboarding consolidation — a tapped quick-reply button. Onboarding →
-      // structured engine.advance; steady-state → feed the choice to the live
-      // agent as the user's selection (same single surface).
+      // Path 1: ONE path — a tapped quick-reply button feeds the live session as
+      // the owner's selection (its freeform text, else the choice value),
+      // onboarding OR steady-state. No `engine.advance` branch (the engine no
+      // longer drives conversational turns). `prompt_id` is unused now that taps
+      // don't resolve engine button rows; the live runner persists the turn.
       on_button_choice: async ({
         user_id,
         channel_topic_id,
         project_id,
-        prompt_id,
         choice_value,
         freeform_text,
       }) => {
         const now = Date.now()
-        if (await isOnboardingActive(user_id)) {
-          await advanceOnboardingChoice(user_id, prompt_id, choice_value, freeform_text, now)
-          return
-        }
         if (appWsChatTurn === null) return
         const turnTopicId =
           project_id !== undefined && project_id.length > 0
@@ -1743,6 +1791,8 @@ export function buildOpenGraphComposer(
           send: buildAppWsSendReply(channel_topic_id, project_id),
           observed_at: now,
         })
+        // FIX 1 (#85) — refresh the rail if this turn changed the project set.
+        emitProjectsChangedIfChanged(user_id)
       },
     })
 

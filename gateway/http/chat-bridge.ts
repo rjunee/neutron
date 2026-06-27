@@ -308,6 +308,14 @@ export interface LiveAgentTurnRequest {
   user_text: string
   send: (event: ChatOutbound) => void
   observed_at: number
+  /**
+   * Path 1 onboarding auto-start: a synthetic system-origin turn that seeds
+   * the FIRST onboarding question on connect (composer `on_session_open`).
+   * The `user_text` is a system instruction, not a real user message — the
+   * runner composes + dispatches it normally but does NOT persist it as a user
+   * bubble and does NOT run the post-turn scribe over it (nothing to extract).
+   */
+  seed_turn?: boolean
 }
 
 export type LiveAgentTurnRunner = (input: LiveAgentTurnRequest) => Promise<unknown>
