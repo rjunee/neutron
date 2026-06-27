@@ -26,9 +26,14 @@ const ctx: ToolCallContext = {
   speaker_user_id: null,
 }
 
-/** GBrain-shaped fake: `search` returns chunk rows, `list_pages` recency rows. */
+/**
+ * GBrain-shaped fake mirroring the REAL row shape (verified against a live
+ * PGLite brain in `agent-tool-real-brain.test.ts`): `search` rows carry
+ * `slug` / `chunk_text` / `score` / `title` / `type`; `list_pages` rows carry
+ * `slug` / `title` / `type`. NOTE: GBrain returns `type`, NOT `entity_kind`.
+ */
 function fakeGbrainClient(
-  rows: Array<{ slug: string; chunk_text: string; score: number; entity_kind?: string }>,
+  rows: Array<{ slug: string; chunk_text: string; score: number; type?: string; title?: string }>,
 ): McpClient {
   return {
     call: async (name, args) => {
@@ -41,12 +46,19 @@ function fakeGbrainClient(
               slug: r.slug,
               chunk_text: r.chunk_text,
               score: r.score,
-              ...(r.entity_kind !== undefined ? { entity_kind: r.entity_kind } : {}),
+              ...(r.title !== undefined ? { title: r.title } : {}),
+              ...(r.type !== undefined ? { type: r.type } : {}),
             })),
         }
       }
       if (name === 'list_pages') {
-        return { pages: rows.map((r) => ({ slug: r.slug, title: r.slug })) }
+        return {
+          pages: rows.map((r) => ({
+            slug: r.slug,
+            title: r.title ?? r.slug,
+            ...(r.type !== undefined ? { type: r.type } : {}),
+          })),
+        }
       }
       throw new Error(`unexpected gbrain call: ${name}`)
     },
@@ -78,9 +90,10 @@ describe('registerGBrainSearchToolSurface', () => {
         fakeGbrainClient([
           {
             slug: 'acme-corp',
+            title: 'Acme Corp',
             chunk_text: 'Acme Corp is the customer piloting the dashboard; CEO is Dana.',
             score: 0.91,
-            entity_kind: 'company',
+            type: 'company',
           },
           { slug: 'unrelated', chunk_text: 'nothing to see', score: 0.1 },
         ]),
@@ -88,13 +101,34 @@ describe('registerGBrainSearchToolSurface', () => {
     )
     const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
     const out = (await handler({ query: 'Acme' }, ctx)) as {
-      results: Array<{ id: string; content: string; score: number; kind?: string }>
+      results: Array<{ id: string; title?: string; content: string; score: number; kind?: string }>
     }
     expect(out.results.length).toBe(1)
     expect(out.results[0]!.id).toBe('acme-corp')
+    expect(out.results[0]!.title).toBe('Acme Corp')
     expect(out.results[0]!.content).toContain('Acme Corp is the customer')
     expect(out.results[0]!.score).toBeCloseTo(0.91, 4)
-    expect(out.results[0]!.kind).toBe('company')
+    expect(out.results[0]!.kind).toBe('company') // sourced from GBrain `type`
+  })
+
+  test('dedupes multiple chunks from the same page, keeping the best score', async () => {
+    const reg = new ToolRegistry()
+    registerGBrainSearchToolSurface(
+      reg,
+      storeOver(
+        fakeGbrainClient([
+          { slug: 'acme-corp', title: 'Acme Corp', chunk_text: 'Acme pilots the dashboard', score: 0.9 },
+          { slug: 'acme-corp', title: 'Acme Corp', chunk_text: 'Acme is in Lisbon', score: 0.4 },
+        ]),
+      ),
+    )
+    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    const out = (await handler({ query: 'Acme' }, ctx)) as {
+      results: Array<{ id: string; content: string; score: number }>
+    }
+    expect(out.results.length).toBe(1)
+    expect(out.results[0]!.id).toBe('acme-corp')
+    expect(out.results[0]!.score).toBeCloseTo(0.9, 4) // best (first, score-desc) chunk kept
   })
 
   test('empty query lists recent memory pages (list_pages path)', async () => {

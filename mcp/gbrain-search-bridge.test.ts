@@ -30,11 +30,12 @@ function recordingStore(seen: string[]): MemoryStore {
     add: async () => ({ id: 'x' }),
     query: async (input) => {
       seen.push(input.query)
+      // Mirrors a real GBrain `search` row: page type lands on `type`.
       return [
         {
           id: 'dana-okonkwo',
           content: 'Dana Okonkwo — CEO of Acme Corp, met at the 2026 offsite.',
-          metadata: { entity_kind: 'person' },
+          metadata: { type: 'person', title: 'Dana Okonkwo' },
           score: 0.88,
         },
       ]

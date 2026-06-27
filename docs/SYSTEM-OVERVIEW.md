@@ -525,8 +525,12 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   `memoryStore.query` the admin Memory tab uses — one index, no second client —
   so the write→read asymmetry is closed: anything the scribe remembered is
   recallable mid-turn. `read:memory`, read-only, `{ query, limit? }` →
-  `{ results: [{ id, content, score, kind? }] }`; empty query lists recent pages;
-  a host without the `gbrain` binary degrades to no results. This is the
+  `{ results: [{ id, title?, content, score, kind? }] }` (deduped by page; `title`
+  + `kind` from the real GBrain row fields `title` / `type`); empty query lists
+  recent pages; a host without the `gbrain` binary degrades to no results. A
+  committed real-PGLite-brain round-trip test
+  (`gbrain-memory/__tests__/agent-tool-real-brain.test.ts`) proves the full
+  write→native-recall loop. This is the
   vault-wide / fast-fact recall surface — a different corpus than `doc_search`
   (project files) + `message_search` (chat history): GBrain holds the entity
   pages (people/companies/projects/meetings/concepts/originals) + scribe facts.

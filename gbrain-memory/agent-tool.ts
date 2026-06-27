@@ -76,6 +76,7 @@ const gbrainSearchOutputSchema: JsonSchemaDocument = {
         type: 'object',
         properties: {
           id: { type: 'string', description: 'Page slug / id, e.g. "jane-doe".' },
+          title: { type: 'string', description: 'Page title (the entity / fact heading).' },
           content: {
             type: 'string',
             description: 'Matched memory excerpt (entity body or extracted fact).',
@@ -87,7 +88,7 @@ const gbrainSearchOutputSchema: JsonSchemaDocument = {
           kind: {
             type: 'string',
             description:
-              'Entity kind when GBrain carries it (person/company/project/meeting/concept/original).',
+              "GBrain page type (e.g. person / company / concept) when the brain classifies it.",
           },
         },
         required: ['id', 'content', 'score'],
@@ -141,21 +142,44 @@ export function registerGBrainSearchToolSurface(
         if (isGbrainBinaryMissingError(err)) return { results: [] }
         throw err
       }
-      return {
-        results: rows.map((r) => {
-          const meta = (r.metadata ?? {}) as Record<string, unknown>
-          const kind =
-            typeof meta['entity_kind'] === 'string' ? (meta['entity_kind'] as string) : undefined
-          const content =
-            r.content.length > PREVIEW_CAP ? `${r.content.slice(0, PREVIEW_CAP)}…` : r.content
-          return {
-            id: r.id,
-            content,
-            score: Number(r.score.toFixed(4)),
-            ...(kind !== undefined ? { kind } : {}),
-          }
-        }),
+      // GBrain `search` ranks CHUNKS, so one page can surface multiple rows.
+      // Rows arrive score-descending, so keeping the first per id yields the
+      // best chunk per page — the agent wants distinct memory entries, not
+      // repeated slugs.
+      const seen = new Set<string>()
+      const results: Array<{
+        id: string
+        title?: string
+        content: string
+        score: number
+        kind?: string
+      }> = []
+      for (const r of rows) {
+        if (seen.has(r.id)) continue
+        seen.add(r.id)
+        const meta = (r.metadata ?? {}) as Record<string, unknown>
+        // GBrain returns the page type as `type` on both `search` + `list_pages`
+        // rows (verified against a real PGLite brain). The scribe's own
+        // `entity_kind` is dropped at `put_page` (GBrainMemoryStore.add persists
+        // only slug+content), so prefer the real `type` field and keep
+        // `entity_kind` only as a defensive fallback for future write paths.
+        const kindRaw = meta['type'] ?? meta['entity_kind']
+        const kind = typeof kindRaw === 'string' && kindRaw.length > 0 ? kindRaw : undefined
+        const title =
+          typeof meta['title'] === 'string' && (meta['title'] as string).length > 0
+            ? (meta['title'] as string)
+            : undefined
+        const content =
+          r.content.length > PREVIEW_CAP ? `${r.content.slice(0, PREVIEW_CAP)}…` : r.content
+        results.push({
+          id: r.id,
+          ...(title !== undefined ? { title } : {}),
+          content,
+          score: Number(r.score.toFixed(4)),
+          ...(kind !== undefined ? { kind } : {}),
+        })
       }
+      return { results }
     },
   })
 

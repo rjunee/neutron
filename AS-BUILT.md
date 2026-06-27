@@ -23,12 +23,16 @@ this with native `mcp__qmd__query` / `mcp__mempalace__search` recall
   store)` registers **`gbrain_search`**, mirroring `doc-search/tool.ts`. Backed by
   the **same** `GBrainMemoryStore.query` the admin Memory tab uses, so the write
   path (scribe) and read path (this tool) share one index. Gates on `read:memory`,
-  `approval_policy: 'auto'`, read-only. Input `{ query, limit? }`; empty query →
-  GBrain `list_pages` recency listing. Each result `{ id, content, score, kind? }`
-  with `content` capped at 600 chars and `kind` surfaced from `metadata.entity_kind`
-  when GBrain carries it. A host without the `gbrain` binary degrades to
-  `{ results: [] }` (`isGbrainBinaryMissingError`) instead of a broken tool —
-  mirrors the admin tab's best-effort read.
+  `approval_policy: 'auto'`, read-only. Input `{ query, limit? }` (limit clamped
+  1–50, default 10); empty query → GBrain `list_pages` recency listing. Each
+  result `{ id, title?, content, score, kind? }`: `content` capped at 600 chars,
+  `title` + `kind` read from the **real GBrain row fields** (`title` / `type` —
+  verified against a real PGLite brain; GBrain returns `type`, NOT the scribe's
+  `entity_kind`, which is dropped at `put_page`), and rows are **deduped by page**
+  (GBrain ranks chunks, so one page can match twice — keep the best-scored chunk).
+  A host without the `gbrain` binary degrades to `{ results: [] }`
+  (`isGbrainBinaryMissingError`) instead of a broken tool — mirrors the admin
+  tab's best-effort read.
 - **Widening "beyond project docs to a vault-wide search"** is the corpus itself:
   GBrain holds the entity pages (people/companies/projects/meetings/concepts/
   originals — `runtime/entity-writer.ts` `KIND_TO_DIR`) + scribe-extracted facts,
@@ -42,14 +46,25 @@ this with native `mcp__qmd__query` / `mcp__mempalace__search` recall
   for the scribe write path. The live WARM REPL (opted into the bridge via
   `enableToolBridge: true`) reaches it as **`mcp__neutron__gbrain_search`**.
 
-**Tests.** `gbrain-memory/__tests__/agent-tool.test.ts` (real `GBrainMemoryStore`
-over an in-process GBrain-shaped fake client: recall a written fact, empty-query
-recency listing, limit clamp, excerpt truncation, gbrain-missing degrade).
+**Tests.** `gbrain-memory/__tests__/agent-tool-real-brain.test.ts` — the
+acceptance proof in committed form (mirrors the #87 real-turn shape): boots a
+**real in-process PGLite GBrain brain**, WRITES a fact via `MemoryStore.add` →
+gbrain `put_page` (exactly what the scribe does), then DISPATCHES `gbrain_search`
+through `McpServer` and asserts the fact is recalled — the full write→native-recall
+loop with NO fakes in the read path. `gbrain-memory/__tests__/agent-tool.test.ts`
+(fakes mirroring the real row shape: recall, dedup-by-page, empty-query recency,
+limit clamp, excerpt truncation, gbrain-missing degrade).
 `mcp/gbrain-search-bridge.test.ts` mirrors the #87 tools-bridge shape at the
 `McpServer` seam: `listToolSchemas()` advertises `gbrain_search` to the agent
 (Hermes stubs stay `agent_hidden`), and `dispatch()` routes a native call into
 the `MemoryStore` and returns the recall — the discovery + invocation halves the
 spawned `claude` reaches as `mcp__neutron__gbrain_search`.
+
+**Live verification (real brain).** A real-brain dispatch of `gbrain_search`
+for "Acme Corp CEO" after writing the Dana Okonkwo entity returned
+`{"results":[{"id":"dana-okonkwo","title":"Dana Okonkwo","content":"Dana Okonkwo
+is the CEO of Acme Corp; …","score":0.78,"kind":"concept"}]}` — the written fact
+recalled through the exact `mcp__neutron__gbrain_search` invocation path.
 
 **Deferred (cheap-if follow-up, not done here):** a read-before-turn entity
 pre-load (audit Design Principle #4). The native pull tool is the enabling move
