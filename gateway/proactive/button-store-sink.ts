@@ -18,9 +18,16 @@
  *     active prompt that the next user message attaches to — exactly what
  *     `persistInertAgentTurn` exists to avoid (same primitive the wow-moment
  *     passive posts use).
- *   • LIVE — best-effort push the `agent_message` envelope through the
+ *   • LIVE — best-effort push the `agent_message` envelope through the supplied
  *     `WebChatSenderRegistry` so an open client paints it immediately. A
  *     missing / stale sender is swallowed — the durable row is the guarantee.
+ *
+ * This mirrors the fired-reminder outbound exactly (same registry, same web
+ * topic), so the proactive brief has delivery PARITY with reminders. The live
+ * push reaches the web (`web:`) chat registry; the durable row is what the Expo
+ * app-ws (`app:`) client picks up on its next history hydration. Full live
+ * parity across both client namespaces is a platform-wide concern shared with
+ * reminders, not specific to this sink.
  *
  * Persist-before-send: a live-push failure never costs the durable record.
  */

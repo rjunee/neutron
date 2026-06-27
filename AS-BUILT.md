@@ -154,8 +154,13 @@ dormant).
   already-resolved agent history turn via `ButtonStore.persistInertAgentTurn`
   (NOT `emit`, which would leave an active unresolved prompt the next user
   message attaches to) + best-effort live-push — the same durable path fired
-  reminders use. `tasks.proactive.sink` overrides the router; absent → router
-  (Telegram instances). [Codex P1 + P2.]
+  reminders use (same General `web:` topic + `landing.registry`), so the brief
+  has delivery PARITY with reminders. `tasks.proactive.sink` overrides the
+  router; absent → router (Telegram instances). [Codex P1 + P2.] Full live
+  parity with the Expo app-ws (`app:`) client is a platform-wide concern shared
+  with reminders (both use the web-registry path); the durable row is read on
+  the app-ws client's next hydration. Tracked as follow-up — out of scope for
+  reviving the proactive modules.
 - **LLM brief composition (Vajra parity):** `buildLlmBriefComposer` routes the
   resolved `BriefContext` through the warm LLM (grounded in exactly the resolved
   sources, no fabrication); the pure `composeMorningBrief` template is the

@@ -1391,11 +1391,16 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
         : null
+    // The brief posts to the General topic on the SAME durable path fired
+    // reminders use (`reminderGeneralTopic = webTopicId(OWNER_USER_ID)` +
+    // `landing.registry`, just above): persist a durable history row + best-
+    // effort live-push via the web chat registry. Deliberate PARITY with
+    // reminders — the durable row is the guarantee (read on the next hydration);
+    // the live push reaches the web (`web:`) chat registry. Full live parity
+    // with the Expo app-ws (`app:`) client is a platform-wide concern shared
+    // with reminders (both use this web-registry path), tracked as follow-up —
+    // out of scope for reviving the proactive modules.
     const proactiveGeneralTopic = webTopicId(OWNER_USER_ID)
-    // DURABLE web sink — Open's topics are `app_socket` and proactive posts
-    // fire from a timer, so route through the ButtonStore (history row) +
-    // best-effort live push, NOT the live-only AppWsAdapter (which would drop a
-    // post with no open socket). The SAME durable path fired reminders use.
     const proactiveSink = buildButtonStoreProactiveSink({
       buttonStore: landing.buttonStore,
       registry: landing.registry,
