@@ -19,7 +19,7 @@ interface EmitCall {
 interface PushCall {
   topic_id: string
   body: string
-  prompt_id?: string
+  prompt_id: string | undefined
 }
 
 function fakeButtonStore(over: { throwOnEmit?: boolean } = {}): {
