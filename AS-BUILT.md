@@ -104,6 +104,90 @@ satisfies `ReplToolBridge`). Real-turn: a live `claude` REPL spawned with the
 real 2-server mcp.json emits `mcp__neutron__doc_search` mid-reasoning, the bridge
 round-trips it through the sink to the registry, and the model uses the
 structured result — no user `/cmd`. (Evidence in the PR.)
+## 2026-06-27 — P1 ACTIVATION BUNDLE: fleet prompts load from disk + proactive brief/nudge go live
+
+Revives two Vajra-lifted subsystems that were present but DEAD. No feature flags
+— both ship ON once wired. (Audit: `vajra-neutron-architecture-lift-audit-2026-06-27.md`
+§ P1-3 + § P1-4.)
+
+**P1-3 — Forge/Argus contract is now a SINGLE on-disk source (drift landmine
+killed).** The lifted `prompts/forge.md` / `prompts/argus.md` were dead code: the
+REAL Forge/Argus build-loop template was an inline string in `trident/prompts.ts`,
+so editing the `.md` files the team reads changed nothing — guaranteed drift.
+- Rewrote `prompts/forge.md` + `prompts/argus.md` from the legacy Nova
+  `/forge/delivered` model to the NATIVE substrate contract (the exact text that
+  was inline), so loading them SATISFIES `parseForgeOutput` / `parseArgusVerdict`
+  instead of fighting them (the PR #14 regression risk is gone — the files no
+  longer carry the cross-runtime operating model).
+- `trident/prompts.ts` `loadForgeTemplate()` / `loadArgusTemplate()` read the
+  files fresh per render via `@neutronai/prompts` `loadPrompt` (the same runtime
+  file-read the Atlas/Sentinel personas already use). Lowercase `{{repo_path}}`-
+  style render tokens pass through `loadPrompt`'s UPPERCASE-only substitution and
+  are resolved by `fill()`. A terse `_FALLBACK` covers a missing file (degraded,
+  not a second full copy). `FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT` stay
+  exported for back-compat.
+- All FOUR dispatchable roles now resolve their prompt from disk BY TYPE:
+  forge/argus (user-message contract via `trident/prompts.ts`) + atlas/sentinel
+  (system persona via `trident/agent-prompts.ts`). The stale "forge/argus.md
+  would FIGHT the parse contract / are never loaded" note in `agent-prompts.ts`
+  is reconciled. **Judgment call:** the orchestrator's `spawnForPhase` stays
+  forge/argus (the build loop has no atlas/sentinel *phase*); atlas/sentinel are
+  first-class via the existing typed `dispatchAgent` path — the "all four roles
+  by type" lift is the unified disk-prompt mechanism, not forcing personas into
+  PR phases.
+- VERIFY: `trident/prompts-disk-source.test.ts` proves an edited marker line in
+  `forge.md` flows through to the rendered Forge prompt (live single source) +
+  all four roles resolve a non-empty prompt by type.
+
+**P1-4 — proactive daily brief ACTIVATED; idle-nudge ≥7 gate ported + ready.**
+The `gateway/proactive/*` modules were built + tested but registered only behind
+`tasks.proactive`, which the Open composer never set (whole tasks subsystem was
+dormant).
+- **Morning brief — LIVE.** `open/composer.ts` sets `tasks.proactive`:
+  `resolveGeneralTopic` → owner's General web topic, posting through a **durable
+  web sink** (below). LLM seams ride the same warm `cc-llm` substrate
+  (`buildAnthropicLlmCall`); LLM-less boots degrade cleanly (template brief).
+- **Durable web sink (`buildButtonStoreProactiveSink`).** Open's topics are
+  `app_socket` and proactive posts fire from a TIMER, so a post via the core
+  `ChannelRouter`'s live-only `AppWsAdapter` would fail ("no channel adapter
+  registered") / drop with no open socket. The sink instead persists an INERT,
+  already-resolved agent history turn via `ButtonStore.persistInertAgentTurn`
+  (NOT `emit`, which would leave an active unresolved prompt the next user
+  message attaches to) + best-effort live-push — the same durable path fired
+  reminders use (same General `web:` topic + `landing.registry`), so the brief
+  has delivery PARITY with reminders. `tasks.proactive.sink` overrides the
+  router; absent → router (Telegram instances). [Codex P1 + P2.] Full live
+  parity with the Expo app-ws (`app:`) client is a platform-wide concern shared
+  with reminders (both use the web-registry path); the durable row is read on
+  the app-ws client's next hydration. Tracked as follow-up — out of scope for
+  reviving the proactive modules.
+- **LLM brief composition (Vajra parity):** `buildLlmBriefComposer` routes the
+  resolved `BriefContext` through the warm LLM (grounded in exactly the resolved
+  sources, no fabrication); the pure `composeMorningBrief` template is the
+  deterministic fallback when the LLM throws/empties — the brief is never lost.
+- **Dual-rating ≥7 quality gate (Vajra parity) — ported + tested + wired.**
+  `idle-nudge-sweep.ts` gains `evaluateQualityGate` + the `rateNudge` LLM seam
+  (`buildLlmNudgeRater`) + a new `low_quality` skip reason. A candidate that
+  clears idle/dedupe is ALSO rated 1–10 on leverage + gratitude and only posts
+  when BOTH ≥7; a null/abstain rating skips. The composer supplies `rateNudge`
+  so the sweep enforces it the moment it runs.
+- **Idle-nudge SWEEP — deliberately NOT auto-enabled (judgment call, noted).**
+  The composer does not set `listIdleTopics`, so the sweep cron does not
+  register. The sweep code + gate are complete and tested; what is NOT yet a
+  clean seam is a CORRECT production enumeration, which needs (1) BOTH the
+  `web:<owner>` (React web) and `app:<owner>` (Expo app-ws) topic namespaces —
+  `ButtonStore.listTopicsByUser` is single-prefix — and (2) a USER-TURN-ONLY
+  activity watermark for dedupe: `last_created_at` counts agent rows (incl. the
+  nudge's own durable row), so the sweep would treat its own post as "the user
+  returned" and re-nudge every idle cycle (Codex P1/P2). Shipping on the
+  agent-polluted, web-only watermark would mis-target + spam — worse than
+  deferring. **Follow-up:** add a user-activity ButtonStore query + dual-
+  namespace enumeration, then wire `listIdleTopics`.
+- VERIFY: `gateway/proactive/__tests__/*` — a real brief composes over real
+  sources + posts the LLM body via the durable sink (persist + live push +
+  persist-before-send); the nudge gate rejects a <7 (and a null) candidate.
+  `open/__tests__/open-proactive-activation.test.ts` pins the composer wiring
+  (credentialed + LLM-less boots; brief active, sweep deferred).
 
 ## 2026-06-27 — P2 follow-ups to #84: live project rail + one-shot start-token
 

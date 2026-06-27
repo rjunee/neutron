@@ -4,17 +4,26 @@
  * Bridges the dispatch layer to the lifted `prompts/{atlas,sentinel}.md`
  * persona contracts — and ONLY those two.
  *
- * SCOPE — atlas/sentinel only, deliberately. Forge and Argus are the
- * build-loop agents and their execution contract is the NATIVE one in
- * `trident/prompts.ts` (`FORGE_SYSTEM_PROMPT` / `ARGUS_SYSTEM_PROMPT`,
- * rendered into the dispatch's `user_message`). That native contract is
- * what `parseForgeOutput` / `parseArgusVerdict` depend on: Forge emits
+ * SCOPE — atlas/sentinel only, deliberately. This module loads a persona
+ * as the dispatched agent's SYSTEM prompt. Forge and Argus do NOT take a
+ * persona system prompt: their parser-locked execution contract rides the
+ * dispatch's `user_message`, rendered by `trident/prompts.ts`
+ * (`renderForgePrompt` / `renderArgusPrompt`) and depended on by
+ * `parseForgeOutput` / `parseArgusVerdict` — Forge emits
  * `PR_NUMBER=`/`BRANCH=`/`WORKTREE=`; Argus emits `APPROVE` / `REQUEST
- * CHANGES`. The on-disk `prompts/{forge,argus}.md` files target a DIFFERENT
- * runtime (a `/forge/delivered` + `/argus/delivered` + inline-button model)
- * and would FIGHT that parse contract, so they are never loaded here —
- * loading them as the build loop's system prompt is a regression (see the
- * orchestrator: forge/argus keep their bare native label).
+ * CHANGES`. So a build-loop agent is never handed a *system* persona here.
+ *
+ * NOTE (P1-3 reconciliation): all four roles now read their prompt from the
+ * SAME on-disk source — `prompts/{forge,argus,atlas,sentinel}.md` via
+ * `@neutronai/prompts` `loadPrompt`. The earlier drift landmine (the on-disk
+ * `forge.md`/`argus.md` being dead code that "would FIGHT the parse contract")
+ * is closed: those two files were rewritten from the legacy Nova
+ * `/forge/delivered` model to the NATIVE substrate contract, and
+ * `trident/prompts.ts` `loadForgeTemplate()` / `loadArgusTemplate()` load them
+ * as the build agents' user-message body. The forge/argus disk read therefore
+ * happens in `trident/prompts.ts` (user-message template), while THIS module
+ * stays scoped to the atlas/sentinel SYSTEM personas — a real role split, not
+ * the old "never loaded" claim.
  *
  * Atlas (research / analysis / ops / strategy / writing) and Sentinel
  * (review of NON-code work) have NO pre-existing parse contract — they are

@@ -21,11 +21,16 @@ import { TaskStore } from '../../../tasks/store.ts'
 import type { OutgoingMessage } from '../sink.ts'
 import { ProactiveStateStore } from '../state-store.ts'
 import {
+  buildLlmNudgeRater,
   composeNudge,
   evaluateNudgeGate,
+  evaluateQualityGate,
+  NUDGE_QUALITY_FLOOR,
+  parseNudgeRating,
   readTodayPick,
   runIdleNudgeSweep,
   type IdleNudgeSweepDeps,
+  type NudgeRater,
   type ProactiveTopicCandidate,
   type TodayPick,
 } from '../idle-nudge-sweep.ts'
@@ -257,5 +262,124 @@ describe('runIdleNudgeSweep (gate + POST)', () => {
     expect(r.skip_reasons.deliver_failed).toBe(1)
     // Ledger not written → the next sweep retries.
     expect(h.store.getTopicState('-100:1')).toBeNull()
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// P1-4 — dual-rating ≥7 quality gate (Vajra parity). Without it the sweep
+// nudges every idle topic with a pick; with it a candidate must ALSO clear a
+// leverage + gratitude floor of 7 (a null rating abstains).
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('evaluateQualityGate (pure ≥7 dual-rating)', () => {
+  it('posts only when BOTH dimensions clear the floor', () => {
+    expect(evaluateQualityGate({ leverage: 7, gratitude: 7 })).toEqual({ post: true })
+    expect(evaluateQualityGate({ leverage: 10, gratitude: 8 })).toEqual({ post: true })
+  })
+  it('rejects when EITHER dimension is below the floor', () => {
+    expect(evaluateQualityGate({ leverage: 6, gratitude: 9 })).toEqual({
+      post: false,
+      reason: 'low_quality',
+    })
+    expect(evaluateQualityGate({ leverage: 9, gratitude: 6 })).toEqual({
+      post: false,
+      reason: 'low_quality',
+    })
+  })
+  it('rejects a null rating (the LLM abstained → output NONE)', () => {
+    expect(evaluateQualityGate(null)).toEqual({ post: false, reason: 'low_quality' })
+  })
+  it('the floor is 7 (Vajra parity)', () => {
+    expect(NUDGE_QUALITY_FLOOR).toBe(7)
+  })
+})
+
+describe('parseNudgeRating', () => {
+  it('parses the strict LEVERAGE=/GRATITUDE= lines', () => {
+    expect(parseNudgeRating('LEVERAGE=9\nGRATITUDE=8')).toEqual({ leverage: 9, gratitude: 8 })
+    expect(parseNudgeRating('leverage = 7\ngratitude = 10')).toEqual({ leverage: 7, gratitude: 10 })
+  })
+  it('returns null on missing / out-of-range / garbled output', () => {
+    expect(parseNudgeRating('LEVERAGE=9')).toBeNull()
+    expect(parseNudgeRating('LEVERAGE=0\nGRATITUDE=8')).toBeNull()
+    expect(parseNudgeRating('LEVERAGE=11\nGRATITUDE=8')).toBeNull()
+    expect(parseNudgeRating('no rating here')).toBeNull()
+  })
+})
+
+describe('buildLlmNudgeRater', () => {
+  it('rates via the LLM and parses the verdict', async () => {
+    const rater = buildLlmNudgeRater(async () => 'LEVERAGE=8\nGRATITUDE=9')
+    const rating = await rater({
+      project_slug: 'neutron',
+      pick: { task_id: 't1', title: 'Ship it', rationale: 'Top priority.' },
+      candidate: { topic_id: '-100:1', project_slug: 'neutron', last_activity_ms: null },
+    })
+    expect(rating).toEqual({ leverage: 8, gratitude: 9 })
+  })
+  it('abstains (null) when the LLM throws', async () => {
+    const rater = buildLlmNudgeRater(async () => {
+      throw new Error('llm down')
+    })
+    const rating = await rater({
+      project_slug: 'neutron',
+      pick: { task_id: 't1', title: 'Ship it', rationale: 'Top priority.' },
+      candidate: { topic_id: '-100:1', project_slug: 'neutron', last_activity_ms: null },
+    })
+    expect(rating).toBeNull()
+  })
+})
+
+describe('runIdleNudgeSweep — ≥7 quality gate gates the POST', () => {
+  const idleTopic: ProactiveTopicCandidate = {
+    topic_id: '-100:1',
+    project_slug: 'neutron',
+    last_activity_ms: NOW_MS - IDLE_MS - 1000,
+  }
+  // A rater that always returns a fixed rating.
+  const fixedRater = (r: { leverage: number; gratitude: number } | null): NudgeRater =>
+    async () => r
+
+  it('REJECTS a <7 candidate (does not post, counts low_quality)', async () => {
+    await seedPick(h, 'neutron', 't1', 'Wire the sweep')
+    const r = await runIdleNudgeSweep(
+      deps([idleTopic], { rateNudge: fixedRater({ leverage: 5, gratitude: 9 }) }),
+    )
+    expect(r.posted).toBe(0)
+    expect(r.skip_reasons.low_quality).toBe(1)
+    expect(h.sent).toHaveLength(0)
+    // Not recorded → no dedupe pollution; a later high-quality pick can post.
+    expect(h.store.getTopicState('-100:1')).toBeNull()
+  })
+
+  it('REJECTS when the rater abstains (null)', async () => {
+    await seedPick(h, 'neutron', 't1', 'Wire the sweep')
+    const r = await runIdleNudgeSweep(deps([idleTopic], { rateNudge: fixedRater(null) }))
+    expect(r.posted).toBe(0)
+    expect(r.skip_reasons.low_quality).toBe(1)
+    expect(h.sent).toHaveLength(0)
+  })
+
+  it('POSTS a ≥7 candidate that also clears idle + dedupe', async () => {
+    await seedPick(h, 'neutron', 't1', 'Wire the sweep')
+    const r = await runIdleNudgeSweep(
+      deps([idleTopic], { rateNudge: fixedRater({ leverage: 8, gratitude: 8 }) }),
+    )
+    expect(r.posted).toBe(1)
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]!.text).toContain('One thing for neutron: Wire the sweep')
+  })
+
+  it('a rater that throws is treated as abstain (skip, sweep continues)', async () => {
+    await seedPick(h, 'neutron', 't1', 'Wire the sweep')
+    const r = await runIdleNudgeSweep(
+      deps([idleTopic], {
+        rateNudge: async () => {
+          throw new Error('rater boom')
+        },
+      }),
+    )
+    expect(r.posted).toBe(0)
+    expect(r.skip_reasons.low_quality).toBe(1)
   })
 })

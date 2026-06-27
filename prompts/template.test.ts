@@ -104,16 +104,28 @@ describe('loadPrompt', () => {
     expect(() => loadPrompt('atlas.md', {})).toThrow(TemplateError)
   })
 
+  // The Forge/Argus build-loop contracts are repo-relative SUBSTRATE prompts
+  // (P1-3): they were rewritten from the legacy Nova `/forge/delivered` model
+  // to the native contract `trident/prompts.ts` loads, and they carry NO
+  // owner-home path (only repo paths + lowercase `{{branch}}`-style render
+  // tokens resolved later by `fill()`). So they legitimately do not reference
+  // `{{OWNER_HOME}}`; every OTHER prompt still does.
+  const REPO_RELATIVE_CONTRACTS = new Set(['forge.md', 'argus.md'])
+
   test('every prompt in KNOWN_PROMPTS resolves cleanly with the owner-config vars', () => {
     expect(KNOWN_PROMPTS.length).toBeGreaterThan(0)
     for (const name of KNOWN_PROMPTS) {
       const out = loadPrompt(name, SYNTHETIC_VARS)
-      // No template syntax leaks.
+      // No UPPERCASE template syntax leaks (lowercase render tokens in the
+      // substrate contracts are resolved downstream by `fill()`, not here).
       expect(out).not.toMatch(/\{\{[A-Z_][A-Z0-9_]*\}\}/)
-      // The synthetic home must appear at least once: every prompt references
-      // the {{OWNER_HOME}} token in its source, so the substitution should
-      // have produced at least one occurrence.
-      expect(out).toContain(SYNTHETIC_OWNER_HOME)
+      // The synthetic home must appear at least once for owner-scoped prompts:
+      // they reference the {{OWNER_HOME}} token in their source, so the
+      // substitution should have produced at least one occurrence. The
+      // repo-relative substrate contracts carry no owner-home path.
+      if (!REPO_RELATIVE_CONTRACTS.has(name)) {
+        expect(out).toContain(SYNTHETIC_OWNER_HOME)
+      }
     }
   })
 

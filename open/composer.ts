@@ -102,6 +102,9 @@ import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '../gateway/realmode-composer/persona-loader.ts'
 import type { GraphComposer } from '../gateway/boot-helpers.ts'
 import type { CompositionInput } from '../gateway/composition.ts'
+import { buildLlmBriefComposer } from '../gateway/proactive/morning-brief.ts'
+import { buildLlmNudgeRater } from '../gateway/proactive/idle-nudge-sweep.ts'
+import { buildButtonStoreProactiveSink } from '../gateway/proactive/button-store-sink.ts'
 import { readSessionCookie, signSessionCookie } from '../landing/session-cookie.ts'
 
 import {
@@ -1376,6 +1379,63 @@ export function buildOpenGraphComposer(
       },
     })
 
+    // ── P1-4 — proactive messaging ACTIVATION (morning brief + idle nudge) ──
+    // The proactive modules (`gateway/proactive/*`) were built + tested but
+    // DEAD: they register only when `tasks.proactive` is set, and the Open
+    // composer never set it. Wire it now so the daily brief + idle-nudge sweep
+    // ship ON (no feature flag). Both post through the production ChannelRouter
+    // (resolved post-boot inside `build-core-modules`), reuse the shared cron
+    // registry, and route LLM work through the SAME warm `cc-llm` substrate the
+    // nudge engine / wow picker use (`buildAnthropicLlmCall`).
+    const proactiveLlm =
+      llmCallSubstrate !== null
+        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
+        : null
+    // The brief posts to the General topic on the SAME durable path fired
+    // reminders use (`reminderGeneralTopic = webTopicId(OWNER_USER_ID)` +
+    // `landing.registry`, just above): persist a durable history row + best-
+    // effort live-push via the web chat registry. Deliberate PARITY with
+    // reminders — the durable row is the guarantee (read on the next hydration);
+    // the live push reaches the web (`web:`) chat registry. Full live parity
+    // with the Expo app-ws (`app:`) client is a platform-wide concern shared
+    // with reminders (both use this web-registry path), tracked as follow-up —
+    // out of scope for reviving the proactive modules.
+    const proactiveGeneralTopic = webTopicId(OWNER_USER_ID)
+    const proactiveSink = buildButtonStoreProactiveSink({
+      buttonStore: landing.buttonStore,
+      registry: landing.registry,
+    })
+    const tasksConfig: NonNullable<CompositionInput['tasks']> = {
+      proactive: {
+        // Morning brief — ACTIVE. Posts the daily brief to the owner's General
+        // topic through the durable web sink.
+        sink: proactiveSink,
+        resolveGeneralTopic: (): string => proactiveGeneralTopic,
+        // Idle-nudge SWEEP — DELIBERATELY NOT auto-enabled here (no
+        // `listIdleTopics`), so the sweep cron does not register. The sweep
+        // CODE + the ≥7 dual-rating quality gate (`rateNudge`) are complete and
+        // unit-tested; what is NOT yet a clean seam is a CORRECT production
+        // enumeration, which needs (1) BOTH the `web:<owner>` (React web) AND
+        // `app:<owner>` (Expo app-ws) topic namespaces — `ButtonStore.list-
+        // TopicsByUser` is single-prefix — and (2) a USER-TURN-ONLY activity
+        // watermark for dedupe: `last_created_at` counts agent rows (incl. the
+        // nudge's own durable row), so the sweep would see its own post as
+        // "the user returned" and re-nudge every idle cycle (Codex P1/P2,
+        // 2026-06-27). Enabling it on the agent-polluted, web-only watermark
+        // would mis-target + spam — worse than deferring. The `rateNudge` gate
+        // is still supplied so the sweep enforces ≥7 the moment a correct
+        // `listIdleTopics` lands. See AS-BUILT for the follow-up.
+        ...(proactiveLlm !== null
+          ? {
+              // LLM brief over real sources (Vajra parity) + the dual-rating
+              // ≥7 nudge quality gate (ready for the sweep). Degrade safely.
+              composeBrief: buildLlmBriefComposer(proactiveLlm),
+              rateNudge: buildLlmNudgeRater(proactiveLlm),
+            }
+          : {}),
+      },
+    }
+
     // P1b — single-owner localhost-trust auth resolver (Path A, Ryan-locked
     // 2026-06-26). The owner is the sole user, the server binds 127.0.0.1, and
     // the HTTP layer already authenticates them via the start-token/cookie, so
@@ -1914,6 +1974,8 @@ export function buildOpenGraphComposer(
       approval_notifier: { notify: async () => undefined },
       watchdog_notifier: { notify: async () => undefined },
       reminder_dispatcher,
+      // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
+      tasks: tasksConfig,
       heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
       platform,
       cron_jobs: cronJobs,

@@ -780,6 +780,10 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       const proactiveCfg = tasksCfg.proactive
       if (proactiveCfg !== undefined) {
         const channelRouter = ctx.graph.get<ChannelRouter>('channels')
+        // Override sink (Open's durable web sink) wins; else the core router
+        // (Telegram instances). The router's live-only app_socket adapter would
+        // drop a timer-fired web post with no open socket — hence the override.
+        const proactiveSink = proactiveCfg.sink ?? channelRouter
         const proactiveStore = new ProactiveStateStore(input.db)
 
         // Morning brief — gated on a resolvable General topic.
@@ -809,12 +813,15 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           const briefDeps: MorningBriefDeps = {
             store: proactiveStore,
             sources,
-            sink: channelRouter,
+            sink: proactiveSink,
             general_topic_id: generalTopic,
             now: () => Date.now(),
           }
           if (proactiveCfg.timezone !== undefined) briefDeps.tz = proactiveCfg.timezone
           if (proactiveCfg.brief_hour !== undefined) briefDeps.brief_hour = proactiveCfg.brief_hour
+          if (proactiveCfg.composeBrief !== undefined) {
+            briefDeps.composeWithLlm = proactiveCfg.composeBrief
+          }
           const briefHandler = buildMorningBriefHandler(briefDeps)
           const briefRegister: Parameters<typeof registerMorningBriefCron>[0] = {
             project_slug: input.project_slug,
@@ -834,7 +841,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           const sweepDeps: IdleNudgeSweepDeps = {
             db: input.db,
             store: proactiveStore,
-            sink: channelRouter,
+            sink: proactiveSink,
             listTopics: (): Promise<ProactiveTopicCandidate[]> | ProactiveTopicCandidate[] =>
               listIdleTopics(),
             now: () => Date.now(),
@@ -842,6 +849,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           if (proactiveCfg.timezone !== undefined) sweepDeps.tz = proactiveCfg.timezone
           if (proactiveCfg.idle_threshold_ms !== undefined) {
             sweepDeps.idle_threshold_ms = proactiveCfg.idle_threshold_ms
+          }
+          if (proactiveCfg.rateNudge !== undefined) {
+            sweepDeps.rateNudge = proactiveCfg.rateNudge
           }
           const sweepHandler = buildIdleNudgeSweepHandler(sweepDeps)
           const sweepRegister: Parameters<typeof registerIdleNudgeSweepCron>[0] = {
