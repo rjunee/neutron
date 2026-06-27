@@ -123,7 +123,7 @@ no auth resolver. So the React UI rendered but didn't function (chat especially 
 `chat-react/config.ts` chats over `/ws/app/chat`, which was unmounted).
 
 **What shipped (Path A, single-owner localhost trust — Ryan-locked; no flags, one
-code path; Managed layers tenant auth as the wrapper).** All in `open/composer.ts`:
+code path; Managed layers its own auth as the wrapper).** All in `open/composer.ts`:
 - **App-ws CHAT** (`/ws/app/chat` + `/api/app/chat/send`): `InMemoryAppWsSession`
   `Registry` + `AppWsAdapter` with a hand-rolled `IncomingEventReceiver` that runs
   a real `buildLiveAgentTurn` (the SAME engine the web `/ws/chat` bridge uses) per

@@ -670,7 +670,7 @@ engine is NOT forked). Scope is receipts only.
 > admin endpoints — all behind ONE single-owner localhost-trust `AppWsAuthResolver`
 > (`bypass:true`; the owner is the sole 127.0.0.1 user, already HTTP-authed). No
 > `chat_log`/`receipt_log` wired yet in Open (live fan-out works; resume/seq is a
-> follow-up). Managed layers tenant auth as the thin wrapper.
+> follow-up). Managed layers its own auth as the thin wrapper.
 
 > **P1b consolidate (2026-06-26) — `/ws/app/chat` is now the SINGLE chat WS
 > endpoint; onboarding is its INITIAL MODE.** The legacy `/ws/chat` onboarding

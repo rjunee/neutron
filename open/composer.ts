@@ -1262,7 +1262,7 @@ export function buildOpenGraphComposer(
     // the HTTP layer already authenticates them via the start-token/cookie, so
     // the app-bearer (`dev:<owner_user_id>`, the chat-react client's default
     // token) is accepted directly — no cryptographic mint needed for a
-    // single-owner box. Managed layers its own tenant auth as the thin wrapper.
+    // single-owner box. Managed layers its own auth as the thin wrapper.
     // ONE resolver feeds BOTH the per-project docs surface AND the cores
     // integrations/api-keys surface (no flag, single code path).
     //
@@ -1339,7 +1339,7 @@ export function buildOpenGraphComposer(
     // message runs the onboarding engine while onboarding is active, else a real
     // `buildLiveAgentTurn`, and the reply fans back out over the app-ws registry.
     // Same Path A localhost-trust auth resolver as docs/admin. Single code path;
-    // Managed layers tenant auth as the wrapper.
+    // Managed layers its own auth as the wrapper.
     const appWsRegistry = new InMemoryAppWsSessionRegistry()
     const appWsChatTurn =
       liveAgentSubstrate !== null
