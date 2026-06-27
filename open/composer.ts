@@ -119,6 +119,11 @@ import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './ow
 import { createAppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
 import { DocStore } from '../gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
+import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
+import { createAppWsSurface } from '../gateway/http/app-ws-surface.ts'
+import type { IncomingEvent, OutgoingMessage } from '../channels/types.ts'
+import type { ChatOutbound } from '../landing/server.ts'
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
@@ -1184,6 +1189,90 @@ export function buildOpenGraphComposer(
       project_slug,
     })
 
+    // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
+    // transport the served React client ACTUALLY uses
+    // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). It was
+    // never mounted in Open, so React chat 404'd (the shell rendered but the
+    // socket failed). Wire it into the SAME single-owner live-agent engine the
+    // web `/ws/chat` bridge uses: an inbound app-ws user message runs a real
+    // `buildLiveAgentTurn` and the reply fans back out over the app-ws registry.
+    // No reusable channel→turn bridge exists (the web path embeds dispatch in
+    // chat-bridge), so the receiver is hand-rolled here. Same Path A localhost-
+    // trust auth resolver as docs/admin. Single code path; Managed layers tenant
+    // auth as the wrapper.
+    const appWsRegistry = new InMemoryAppWsSessionRegistry()
+    const appWsChatTurn =
+      liveAgentSubstrate !== null
+        ? buildLiveAgentTurn({
+            substrate: liveAgentSubstrate,
+            personaLoader,
+            projectPersonaResolver,
+            reflection,
+            buttonStore: landing.buttonStore,
+            project_slug,
+            owner_home,
+          })
+        : null
+    // adapter ↔ receiver are mutually referential (the receiver replies via
+    // `adapter.send`); a holder breaks the cycle without a `used-before-assigned`
+    // hazard. The socket cannot dispatch an inbound until boot completes, long
+    // after `holder.adapter` is assigned below.
+    const appWsHolder: { adapter?: AppWsAdapter } = {}
+    const appWsReceiver = {
+      receive: async (event: IncomingEvent): Promise<void> => {
+        if (event.channel_kind !== 'app_socket') return
+        const text = event.body.text.trim()
+        if (text.length === 0) return
+        const project_id =
+          typeof event.adapter_metadata?.['project_id'] === 'string'
+            ? (event.adapter_metadata['project_id'] as string)
+            : undefined
+        // Reply path: the live-agent turn emits `ChatOutbound`; translate the
+        // user-facing `agent_message` into an app-ws `OutgoingMessage` and fan it
+        // out via the adapter (which stamps message_id/ts + persists when a chat
+        // log is wired). Typing/ack/status frames are web-shaped and dropped.
+        const sendReply = (out: ChatOutbound): void => {
+          if (out.type !== 'agent_message') return
+          const msg: OutgoingMessage = {
+            topic: {
+              topic_id: '',
+              channel_kind: 'app_socket',
+              channel_topic_id: event.channel_topic_id,
+              project_id: project_id ?? null,
+              privacy_mode: 'regular',
+            },
+            text: out.body,
+          }
+          if (project_id !== undefined) msg.adapter_options = { project_id }
+          void appWsHolder.adapter?.send(msg)
+        }
+        if (appWsChatTurn === null) {
+          sendReply({
+            type: 'agent_message',
+            body:
+              "I can't answer yet — this box has no AI credential configured. Add one in settings, then try again.",
+          })
+          return
+        }
+        await appWsChatTurn({
+          project_slug,
+          user_id: event.user.channel_user_id,
+          topic_id: event.channel_topic_id,
+          ...(project_id !== undefined ? { project_id } : {}),
+          user_text: text,
+          send: sendReply,
+          observed_at: event.received_at,
+        })
+      },
+    }
+    appWsHolder.adapter = new AppWsAdapter({ registry: appWsRegistry, receiver: appWsReceiver })
+    const appWsSurface = createAppWsSurface({
+      adapter: appWsHolder.adapter,
+      registry: appWsRegistry,
+      auth: appOwnerAuth,
+      project_slug,
+    })
+
     return {
       db,
       project_slug,
@@ -1286,9 +1375,14 @@ export function buildOpenGraphComposer(
         fetch: openFetch,
         websocket: landing.websocket,
       },
-      // P1b — mount the per-project Documents backend so the chat-react
-      // Documents tab resolves real docs instead of 404. `gateway/composition.ts`
-      // forwards this into the compose.ts route chain.
+      // P1b — mount the app-ws chat surface (the React client's real transport)
+      // + the per-project Documents backend so the chat-react UI works
+      // end-to-end. `gateway/composition.ts` forwards both into the compose.ts
+      // route chain (app_ws also contributes the `/ws/app/chat` websocket).
+      app_ws_surface: {
+        handler: appWsSurface.handler,
+        websocket: appWsSurface.websocket,
+      },
       app_docs_surface: { handler: appDocsSurface.handler },
     }
   }
