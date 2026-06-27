@@ -358,7 +358,7 @@ export function buildLiveAgentTurn(
     let ackTimer: ReturnType<typeof setTimeout> | null = null
     if (isColdFirstTurn) {
       ackTimer = setTimeout(() => {
-        sendSafe(turn.send, { type: 'agent_message', body: COLD_START_ACK_BODY })
+        sendSafe(turn.send, { type: 'agent_message', body: COLD_START_ACK_BODY, topic_id: turn.topic_id })
       }, ack_delay_ms)
     }
     const clearAckTimer = (): void => {
@@ -401,14 +401,14 @@ export function buildLiveAgentTurn(
           err instanceof Error ? err.message : String(err)
         }`,
       )
-      sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY })
+      sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
       return { outcome: 'failed', reply_prompt_id: null }
     }
     if (text.trim().length === 0) {
       console.warn(
         `${LOG_TAG} event=empty_reply project=${turn.project_slug} topic=${turn.topic_id} scope=${scope}`,
       )
-      sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY })
+      sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
       return { outcome: 'failed', reply_prompt_id: null }
     }
     // Only mark the context as delivered once a turn actually completed on

@@ -410,7 +410,9 @@ export function buildWowChannelAdapter(deps: WowChannelAdapterDeps): WowChannelA
       const emit = await deps.buttonStore.emit(opts.prompt, { topic_id: opts.topic_id })
       const delivered = deps.webRegistry.send(
         opts.topic_id,
-        renderButtonPromptForWeb(emit.prompt),
+        // P1a — stamp topic_id so the client routes this wow prompt to its own
+        // topic (a wow-moment can fire while the user is on a different topic).
+        renderButtonPromptForWeb(emit.prompt, opts.topic_id),
       )
       if (!delivered) {
         // Race: WS dropped between `has()` and `send()`. Throw so this
@@ -441,6 +443,9 @@ export function buildWowChannelAdapter(deps: WowChannelAdapterDeps): WowChannelA
       const ok = deps.webRegistry.send(opts.topic_id, {
         type: 'agent_message',
         body: opts.body,
+        // P1a — stamp topic_id so the client routes this wow text to its own
+        // topic, not whatever is focused when the wow-moment fires.
+        topic_id: opts.topic_id,
       })
       if (!ok) {
         throw new Error(
