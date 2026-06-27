@@ -65,6 +65,9 @@ async function boot(): Promise<void> {
   const store = await createWebStore()
   const controller = new NeutronChatController({
     projectId: config.projectId,
+    // FIX 1 — seed the rail from the bootstrap, then keep it reactive so
+    // projects created mid-onboarding appear live (a `projects_changed` frame).
+    projects: config.projects,
     createSession: (sinks) =>
       new WebChatSession({
         url: config.wsUrl,

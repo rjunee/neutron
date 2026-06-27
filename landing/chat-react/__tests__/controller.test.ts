@@ -337,3 +337,114 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(msg?.edited).toBe(false)
   })
 })
+
+describe('NeutronChatController — live projects_changed (FIX 1)', () => {
+  const projectsChanged = (
+    projects: Array<{ id: string; label: string }>,
+    active_project_id: string | null,
+  ) => ({ v: 1, type: 'projects_changed', projects, active_project_id, ts: 1 })
+
+  it('seeds the rail from the bootstrap projects', () => {
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      projects: [{ id: 'seed', label: 'Seed' }],
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    expect(controller.getViewModel().projects).toEqual([{ id: 'seed', label: 'Seed' }])
+  })
+
+  it('refreshes the rail AND auto-selects the first project on a 0→N transition', async () => {
+    const { controller, sockets } = setup(null)
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // Brand-new owner: empty rail, General (no active project) — the bug's
+    // starting state.
+    expect(controller.getViewModel().projects).toEqual([])
+    expect(controller.getViewModel().projectId).toBeNull()
+
+    // Onboarding creates a project → the server fans projects_changed.
+    sockets[0]!.deliver(projectsChanged([{ id: 'p1', label: 'Acme' }], 'p1'))
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.projects).toEqual([{ id: 'p1', label: 'Acme' }])
+    // Auto-selected so the per-project Documents/Tasks/Admin tabs render live
+    // (mirrors the page bootstrap's active_project_id — no reload needed).
+    expect(vm.projectId).toBe('p1')
+  })
+
+  it('does NOT hijack a user already viewing General once projects exist', async () => {
+    // Returning user: projects already exist (seeded from the bootstrap) and one
+    // is active — the realistic shape for "projects exist".
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      projectId: 'p1',
+      projects: [{ id: 'p1', label: 'Acme' }],
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // User is on an active project; deliberately switch to General.
+    controller.setProject(null)
+    expect(controller.getViewModel().projectId).toBeNull()
+
+    // A later refresh updates the list but must NOT auto-select (no 0→N: the
+    // user chose General on purpose).
+    sockets[0]!.deliver(
+      projectsChanged(
+        [
+          { id: 'p1', label: 'Acme' },
+          { id: 'p2', label: 'Globex' },
+        ],
+        'p1',
+      ),
+    )
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.projects.map((p) => p.id)).toEqual(['p1', 'p2'])
+    expect(vm.projectId).toBeNull()
+  })
+
+  it('ignores a malformed projects_changed frame (no rows, keeps state)', async () => {
+    const { controller, sockets } = setup(null)
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver({ v: 1, type: 'projects_changed', projects: 'nope', active_project_id: 5, ts: 1 })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.projects).toEqual([])
+    expect(vm.projectId).toBeNull()
+  })
+})

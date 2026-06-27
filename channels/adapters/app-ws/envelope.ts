@@ -303,6 +303,36 @@ export interface AppWsOutboundError {
 }
 
 /**
+ * Single-owner Open — a live project-list refresh.
+ *
+ * THE BUG (P2 follow-up to #84): the served `/chat` HTML injects the owner's
+ * project list ONCE at page-load (`open/composer.ts` projectsBootstrapScript).
+ * A brand-new owner bootstraps with `__neutron_projects=[]`; when onboarding
+ * then CREATES projects in the SAME session there was no signal to refresh, so
+ * the Documents/Tasks/Admin tabs only appeared after a manual reload. The
+ * server fans this frame out over the app-ws topic the moment the project set
+ * changes; the client refreshes its rail + (when transitioning General→a first
+ * project) auto-selects it so the per-project tabs render live, no reload.
+ *
+ * Carries the full canonical list (not a delta) so the client apply is
+ * idempotent + order-independent — the same shape the page bootstrap injects.
+ */
+export interface AppWsOutboundProjectsChanged {
+  v: 1
+  type: 'projects_changed'
+  /** Fresh canonical project list (id + label), mirroring the boot bootstrap. */
+  projects: ReadonlyArray<{ id: string; label: string }>
+  /**
+   * The project the client should make active when it currently has none — the
+   * first project, mirroring the page bootstrap's `active_project_id`. Null when
+   * the list is empty. The client only auto-selects on a 0→N transition so it
+   * never hijacks a user who deliberately navigated to General.
+   */
+  active_project_id: string | null
+  ts: number
+}
+
+/**
  * Track B Phase 4 — a receipt-state update for one already-delivered message.
  * Fanned out to EVERY device on the topic whenever a device reads a message
  * (or the agent reads an inbound user message). Carries the FULL current
@@ -382,6 +412,7 @@ export type AppWsOutbound =
   | AppWsOutboundReceiptUpdate
   | AppWsOutboundReactionUpdate
   | AppWsOutboundEditUpdate
+  | AppWsOutboundProjectsChanged
   | AppWsOutboundError
 
 /**

@@ -129,7 +129,9 @@ import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/sessio
 import {
   appWsTopicId,
   type AppWsOutboundAgentMessage,
+  type AppWsOutboundProjectsChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
+import { InMemoryConsumedTokens } from '../runtime/consumed-tokens-in-memory.ts'
 import type { ButtonChoice, ButtonPrompt } from '../channels/button-primitive.ts'
 import type {
   AppSocketButtonPromptRouter,
@@ -805,6 +807,16 @@ export function buildOpenGraphComposer(
       env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] ?? `open-ephemeral-${internal_handle}`
     const startTokenAuth = buildLocalStartTokenAuth(cookieSecret)
 
+    // FIX 2 (P2 follow-up to #84) — ONE shared single-use store for start-token
+    // JTIs. With the legacy `/ws/chat` onboarding socket deleted, the start
+    // token is now consumed ONLY at the HTTP `/chat?start=` cookie-mint gate
+    // (`openFetch` below); nothing claimed its JTI, so a leaked `?start=` URL
+    // could re-mint the owner cookie repeatedly within its 15-min TTL. This
+    // store is threaded into BOTH `buildLandingStack` (so any bridge-side claim
+    // shares the same namespace) AND the HTTP gate, where the JTI is claimed
+    // before the cookie is minted — making a given token single-use again.
+    const consumedTokens = new InMemoryConsumedTokens()
+
     // The LocalPlatformAdapter is the single-owner platform seam. We attach
     // the local start-token verify/claim so the chat-bridge's startSession
     // path (engine.start → first onboarding prompt) accepts our minted token
@@ -867,6 +879,10 @@ export function buildOpenGraphComposer(
       platform,
       cookieToUserClaim,
       cronJobs,
+      // FIX 2 — share the single-use JTI store so the HTTP cookie-mint gate and
+      // any bridge-side claim consume the SAME token namespace (a token claimed
+      // at one gate can never be replayed at the other).
+      consumedTokens,
       // ISSUES #318 — app-level Claude-auth gate (defense in depth for the
       // installer gate). When the box boots with NO substrate credential,
       // `GET /chat` renders an "Authenticate Claude" page instead of a chat
@@ -1077,18 +1093,25 @@ export function buildOpenGraphComposer(
     // with their backends mounted (Codex r1). Inject the canonical project list
     // (from the `projects` table — the source of truth onboarding writes) into
     // the served `/chat` HTML so the shell opens on a real project with its tabs.
-    const projectsBootstrapScript = (): string => {
-      let rows: { id: string; name: string }[] = []
+    // The canonical project list (id + label) from the `projects` table — the
+    // source of truth onboarding writes. Shared by the page-load bootstrap
+    // injection AND the live `projects_changed` app-ws emit (FIX 1) so both
+    // surface the IDENTICAL shape/order. Best-effort: a transient read failure
+    // degrades to an empty list rather than sinking the request.
+    const readProjectRows = (): { id: string; label: string }[] => {
       try {
-        rows = db
+        return db
           .prepare<{ id: string; name: string }, []>(
             `SELECT id, name FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC, id ASC`,
           )
           .all()
+          .map((r) => ({ id: r.id, label: r.name }))
       } catch {
-        rows = []
+        return []
       }
-      const projects = rows.map((r) => ({ id: r.id, label: r.name }))
+    }
+    const projectsBootstrapScript = (): string => {
+      const projects = readProjectRows()
       // Escape `<` so a project name can never break out of the <script> context.
       const enc = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
       const active = projects.length > 0 ? enc(projects[0]!.id) : 'null'
@@ -1121,6 +1144,29 @@ export function buildOpenGraphComposer(
       const headers = new Headers(r.headers)
       headers.delete('content-length')
       return new Response(injected, { status: r.status, headers })
+    }
+
+    // FIX 2 — verify + atomically claim a one-shot `?start=` token at the HTTP
+    // cookie-mint gate. Returns true ONLY for the FIRST presentation of a
+    // valid, unexpired, unclaimed token; every replay (bad signature, expired,
+    // or already-claimed JTI) returns false so the gate refuses to mint a fresh
+    // owner cookie. The `resolveKey` arg satisfies the DI verifier shape — the
+    // local HMAC verifier never calls it (single owner, one shared secret).
+    const claimStartToken = async (token: string): Promise<boolean> => {
+      try {
+        const payload = await startTokenAuth.verifyStartToken({
+          token,
+          resolveKey: async () => null,
+        })
+        await startTokenAuth.claimStartTokenJti({
+          jti: payload.jti,
+          expires_at_ms: payload.expires_at_ms,
+          consumedTokens,
+        })
+        return true
+      } catch {
+        return false
+      }
     }
 
     const openFetch = (
@@ -1163,12 +1209,23 @@ export function buildOpenGraphComposer(
       // Otherwise serve via the landing server, ensuring the owner cookie is
       // set on the /chat page load so the WS reconnect path works.
       const res = landing.fetch(req, server)
+      // Cookie-mint gate: a `/chat` load WITHOUT a valid cookie reaches here only
+      // with a `?start=` token (the no-cookie/no-token case cold-starts above).
+      // FIX 2 — make that token single-use: verify + claim its JTI and mint the
+      // owner cookie ONLY on the first claim. A replayed/invalid token still
+      // serves the page but mints NO cookie, so a leaked `?start=` URL can grant
+      // the owner session at most once within its TTL.
       if (isGet && url.pathname === '/chat' && !hasValidCookie) {
-        return withReactBootstrap(res).then((r) => {
+        const startToken = url.searchParams.get('start')
+        return (async (): Promise<Response> => {
+          const minted = startToken !== null ? await claimStartToken(startToken) : false
+          const r = await withReactBootstrap(res)
           const headers = new Headers(r.headers)
-          headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
+          if (minted) {
+            headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
+          }
           return new Response(r.body, { status: r.status, headers })
-        })
+        })()
       }
       // A /chat load WITH a valid cookie (e.g. arriving with a fresh `?start=`)
       // still needs the project bootstrap injected.
@@ -1341,6 +1398,37 @@ export function buildOpenGraphComposer(
     // Same Path A localhost-trust auth resolver as docs/admin. Single code path;
     // Managed layers its own auth as the wrapper.
     const appWsRegistry = new InMemoryAppWsSessionRegistry()
+
+    // FIX 1 (P2 follow-up to #84) — live project-rail refresh. The served
+    // `/chat` HTML injects the project list ONCE at page-load; a brand-new owner
+    // bootstraps with NONE, and when onboarding CREATES projects in the SAME
+    // session there was no signal to refresh — the Documents/Tasks/Admin tabs
+    // only appeared after a manual reload. We snapshot the project set and, after
+    // each onboarding turn, fan a `projects_changed` frame over the owner's
+    // app-ws topic whenever the set changed. `lastProjectsSnapshot` starts null;
+    // the FIRST observation (taken at session open, after the page already
+    // bootstrapped with the then-current set) only seeds the baseline so we emit
+    // on real CHANGES, never on the initial load.
+    let lastProjectsSnapshot: string | null = null
+    const emitProjectsChangedIfChanged = (user_id: string): void => {
+      const projects = readProjectRows()
+      const snapshot = JSON.stringify(projects)
+      if (lastProjectsSnapshot === null) {
+        lastProjectsSnapshot = snapshot
+        return
+      }
+      if (snapshot === lastProjectsSnapshot) return
+      lastProjectsSnapshot = snapshot
+      const frame: AppWsOutboundProjectsChanged = {
+        v: 1,
+        type: 'projects_changed',
+        projects,
+        active_project_id: projects.length > 0 ? projects[0]!.id : null,
+        ts: Date.now(),
+      }
+      appWsRegistry.send(appWsTopicId(user_id), frame)
+    }
+
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
@@ -1457,6 +1545,9 @@ export function buildOpenGraphComposer(
         freeform_text,
         observed_at,
       })
+      // FIX 1 — an onboarding turn may have created/changed projects; push a
+      // live rail refresh so the new project tabs appear without a reload.
+      emitProjectsChangedIfChanged(user_id)
     }
     // Drive one onboarding turn from a tapped button (structured choice).
     const advanceOnboardingChoice = async (
@@ -1482,6 +1573,9 @@ export function buildOpenGraphComposer(
         choice,
         observed_at,
       })
+      // FIX 1 — see advanceOnboardingText: refresh the rail when a tapped choice
+      // (e.g. confirming the wow-moment project shells) created/changed projects.
+      emitProjectsChangedIfChanged(user_id)
     }
     // Fill the late-bound onboarding button-prompt router NOW that the registry
     // exists. The engine's `sendButtonPrompt` reads this holder at call time
@@ -1582,6 +1676,10 @@ export function buildOpenGraphComposer(
             signup_via: 'web',
           })
         }
+        // FIX 1 — seed the projects baseline at connect (the page already
+        // bootstrapped with the current set, so the first call only records it;
+        // later onboarding turns emit a `projects_changed` frame on real change).
+        emitProjectsChangedIfChanged(user_id)
       },
       // Onboarding consolidation — a tapped quick-reply button. Onboarding →
       // structured engine.advance; steady-state → feed the choice to the live
