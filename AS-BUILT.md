@@ -65,6 +65,25 @@ command-filter remains the user's typed-slash path; both share one underlying
 tool implementation. (Per the brief: "a user-typed /cmd may still route to the
 SAME underlying tool.")
 
+**Review hardening (Codex + multi-agent review).** Five fixes on top of the
+transport: (1) **stub tools hidden from the agent** — the `neutron-tools` Hermes
+surface (13 tools) registers handlers that all throw "lands in a later sprint", so
+a new `agent_hidden` flag on `ToolRegistration` keeps them registered for
+introspection/tests but `McpServer.listToolSchemas()` filters them out of the
+agent's manifest (the agent is never offered always-failing tools); (2) the
+`tools-bridge` `/tool-call` POST is **single-attempt, no retry** — tool calls are
+non-idempotent (a write like `reminder_create` must not double-execute if the
+loopback drops after the handler ran; a failure surfaces as an `isError`
+`tool_result` the model retries deliberately), the deliberate divergence from the
+dev-channel's idempotent retried `/reply`; (3) an `undefined` tool result
+coalesces to the literal `null` (never a `text: undefined` MCP content block);
+(4) the warm-REPL **reuse guard also checks bridge attachment**
+(`session.toolBridgeActive` vs the request) so a bridge-mismatched turn can never
+reuse a warm child — local defense-in-depth, not dependent on
+`substrate_instance_id` keying; (5) the singleton clear on graph shutdown is
+**identity-guarded** (`clearReplToolBridgeIf`, mirrors `ReplSink.unregisterIf`)
+so a second graph in one process (tests) can't null out the live graph's bridge.
+
 **Known follow-up (Codex r1 P2) — `message_search` topic scope.** The bridge
 dispatches against the in-process `McpServer`, which resolves `project_slug`
 correctly (every project/owner-scoped tool works) but binds `topic_id: null`
