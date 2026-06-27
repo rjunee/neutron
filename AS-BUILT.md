@@ -44,6 +44,43 @@ in the dev-channel `TurnIdEcho` path) that the poison→respawn already recovers
 from once the cred is not parked; deeper completion-detection work is tracked
 separately and needs a live repro.
 
+## 2026-06-26 — P0b: React/assistant-ui is the ONLY web chat client (delete the `NEUTRON_WEB_CHAT_CLIENT` flag + the entire vanilla path)
+
+**Context.** A fresh single-owner Open install served the OLD bare vanilla chat
+(no Documents/Tasks tabs) because `GET /chat` chose the client via
+`resolveWebChatClient({ envDefault: process.env.NEUTRON_WEB_CHAT_CLIENT, … })`
+which defaulted to `'vanilla'` (`landing/web-chat-flag.ts`,
+`landing/server.ts` `/chat` handler). The React tabbed surface only appeared with
+`NEUTRON_WEB_CHAT_CLIENT=react` set — so a real fresh install never saw it.
+
+**What shipped (no feature flags, no dual path — Ryan-locked).**
+- **Deleted** `landing/web-chat-flag.ts` (the flag + `resolveWebChatClient`),
+  `landing/chat.html` (vanilla shell, 41 KB), `landing/chat.ts` (vanilla client,
+  198 KB), and `landing/__tests__/web-chat-flag.test.ts`.
+- `landing/server.ts`: removed the flag import, the `webChatClientDefault`
+  option, the `web_chat_client_default`/`resolveWebChatClient` branch, the
+  `chat_html`/`chat_js`/`chat_ts` loading, and the `resolveChatJs` lazy bundler +
+  the `/chat.js` route. `GET /chat` now **unconditionally** serves the React shell
+  (`chat-react.html` → ProjectShell → ChatApp with the Documents/Tasks tabs);
+  `chat-react.html` is loaded + asserted at construction (throws on a packaging
+  error instead of falling back to a now-nonexistent vanilla client).
+- `landing/boot.ts`: the Open boot guard now requires `chat-react.html` (not
+  `chat.html`).
+- `gateway/http/compose.ts`: the `LANDING_PATHS` precedence allowlist swaps
+  `/chat.js` → `/chat-react.js` so the React bundle routes through the per-instance
+  gateway chain.
+- The React bundle (`/chat-react.js`, lazily built from `chat-react/main.tsx`,
+  ~690 KB minified) verified to build clean and is served by default; uses the
+  SAME `/ws/chat` protocol so the bridge is unchanged.
+- Test cleanup: deleted the vanilla-client DOM/behavior tests (they exercised the
+  deleted client; the React client keeps its own `landing/chat-react/__tests__/`),
+  repointed shared-utility tests to their canonical module, and updated
+  server/boot/compose tests to assert React is the only client.
+
+**Verify.** Fresh install (`~/neutron/core` on this branch, no env var) serves the
+React tabbed UI at `:7800/chat` and a real chat turn works — see the PR's
+VERIFIED IN REAL INSTALL section.
+
 ## 2026-06-26 — Deterministic "prior reply" lookup (fix a PRE-EXISTING reflection-test flake surfaced alongside the MCP-wedge PR)
 
 **Context.** While landing the dev-channel MCP-wedge fix (below), CI's `test` job

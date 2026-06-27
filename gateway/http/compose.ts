@@ -703,7 +703,7 @@ export interface ComposedHttpHandler {
  */
 const LANDING_PATHS: ReadonlySet<string> = new Set([
   '/chat',
-  '/chat.js',
+  '/chat-react.js',
   '/ws/chat',
   '/api/v1/sign-up',
   '/invite',

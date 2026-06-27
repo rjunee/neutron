@@ -32,7 +32,7 @@ function makeBridge(overrides: Partial<ChatBridge> = {}): ChatBridge {
 }
 
 describe('createLandingServer', () => {
-  test('GET /chat returns the chat.html', async () => {
+  test('GET /chat returns the React chat shell', async () => {
     const bridge = makeBridge()
     const handler = createLandingServer({ static_dir: dirname(HERE), bridge })
     // We don't actually boot Bun.serve; we just exercise fetch().
@@ -45,33 +45,21 @@ describe('createLandingServer', () => {
     expect(res.status).toBe(200)
     const text = await res.text()
     expect(text).toContain('Neutron')
-    expect(text).toContain('id="log"')
+    // React shell mounts into #root and loads the bundle.
+    expect(text).toContain('id="root"')
+    expect(text).toContain('/chat-react.js')
   })
 
-  test('GET /chat.js bundles chat.ts on first request (Codex r2 P1 fix)', async () => {
+  test('GET /chat-react.js serves the React/assistant-ui bundle', async () => {
     const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
-    const res = await handler.fetch(new Request('http://x.test/chat.js'), fakeServer)
+    const res = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('javascript')
     const body = await res.text()
-    // The bundled JS contains the bootstrap entry point + the ChatClient class.
-    expect(body).toContain('bootChatFromQueryString')
-    expect(body).toContain('ChatClient')
-    // Sprint 28 Codex r6 P1 — the bundled JS contains the image-gallery
-    // render branch so the web client can show portrait thumbnails.
-    expect(body).toContain('image-gallery')
-  })
-
-  test('GET /chat ships the image-gallery CSS for the portrait picker (Codex r6 P1)', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
-    const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
-    const res = await handler.fetch(new Request('http://x.test/chat'), fakeServer)
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('.buttons.image-gallery')
-    expect(body).toContain('.thumb')
-  })
+    // The bundle carries React + assistant-ui + chat-core — large + non-empty.
+    expect(body.length).toBeGreaterThan(100_000)
+  }, 30_000)
 
   test('GET /ws/chat without ?start returns 400', async () => {
     const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
@@ -170,7 +158,7 @@ describe('createLandingServer', () => {
     })
   })
 
-  test('throws when static_dir missing chat.html', () => {
+  test('throws when static_dir missing chat-react.html', () => {
     expect(() =>
       createLandingServer({ static_dir: '/no/such/path', bridge: makeBridge() }),
     ).toThrow()
@@ -889,9 +877,9 @@ describe('createLandingServer', () => {
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-landing-'))
-    // Provide chat.html (required by createLandingServer) but NO
+    // Provide chat-react.html (required by createLandingServer) but NO
     // onboarding-telegram.html.
-    writeFileSync(join(tmp, 'chat.html'), '<html></html>')
+    writeFileSync(join(tmp, 'chat-react.html'), '<html><div id="root"></div></html>')
     try {
       const handler = createLandingServer({ static_dir: tmp, bridge: makeBridge() })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>

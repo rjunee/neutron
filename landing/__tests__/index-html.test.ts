@@ -19,61 +19,22 @@ import { join } from 'node:path'
 
 const indexHtml = readFileSync(join(import.meta.dir, '..', 'index.html'), 'utf8')
 
-describe('landing/chat.html (Codex r4 P1)', () => {
-  const chatHtml = readFileSync(join(import.meta.dir, '..', 'chat.html'), 'utf8')
+describe('landing/chat-react.html (Codex r4 P1)', () => {
+  const chatHtml = readFileSync(join(import.meta.dir, '..', 'chat-react.html'), 'utf8')
 
-  test('contains the URL-scrub bootstrap before chat.js loads', () => {
+  test('contains the URL-scrub bootstrap before the React bundle loads', () => {
     expect(chatHtml).toContain('history.replaceState')
     expect(chatHtml).toContain('__neutron_start_token')
-    // The scrub script MUST appear before the `<script type="module" src="/chat.js"`
-    // loader so the chat.js fetch's same-origin Referer does not leak the token.
+    // The scrub script MUST appear before the `<script type="module" src="/chat-react.js"`
+    // loader so the bundle fetch's same-origin Referer does not leak the token.
     const scrubIdx = chatHtml.indexOf('history.replaceState')
-    const moduleIdx = chatHtml.indexOf('type="module" src="/chat.js"')
+    const moduleIdx = chatHtml.indexOf('type="module" src="/chat-react.js"')
     expect(scrubIdx).toBeGreaterThan(0)
     expect(moduleIdx).toBeGreaterThan(scrubIdx)
   })
 
-  test('declares the iMessage palette CSS variables', () => {
-    // Sprint redesign: the iMessage / Telegram / WhatsApp-Web layout
-    // pins these tokens. If a refactor accidentally drops one, the
-    // bubbles fall back to the browser default and the visual rhythm
-    // breaks. These names are the contract between chat.html and any
-    // theme-variant work that lands later.
-    expect(chatHtml).toContain('--user-bubble:')
-    expect(chatHtml).toContain('--agent-bubble:')
-    expect(chatHtml).toContain('--bubble-radius:')
-    expect(chatHtml).toContain('--bubble-tail:')
-  })
-
-  test('uses a multi-line auto-grow textarea (NOT a plain <input>)', () => {
-    expect(chatHtml).toContain('<textarea id="input"')
-    expect(chatHtml).not.toMatch(/<input id="input"/)
-  })
-
-  test('renders the bottom-anchor scroll wrapper + new-pill', () => {
-    expect(chatHtml).toContain('id="log-wrap"')
-    expect(chatHtml).toContain('id="new-pill"')
-    // Pin-to-bottom is now achieved via `margin-top: auto` on the first
-    // child rather than `justify-content: flex-end` on the container —
-    // the flex-end approach broke scroll-up on overflow (Sam, 2026-05-22).
-    // The `#log > :first-child { margin-top: auto }` rule is the new
-    // mechanic. We assert the rule shape — both selector AND declaration
-    // must be present in the stylesheet to guarantee short-conversation
-    // pin-to-bottom still works.
-    expect(chatHtml).toMatch(/#log\s*>\s*:first-child\s*\{[^}]*margin-top:\s*auto/)
-    // Belt-and-braces: ensure the buggy declaration didn't sneak back
-    // in. Strip CSS comments first so the explanatory comment in
-    // chat.html (which mentions `justify-content: flex-end` to explain
-    // why it was removed) doesn't false-positive.
-    const styleStart = chatHtml.indexOf('<style>')
-    const styleEnd = chatHtml.indexOf('</style>')
-    const stylesheet = chatHtml.slice(styleStart, styleEnd).replace(/\/\*[\s\S]*?\*\//g, '')
-    expect(stylesheet).not.toMatch(/justify-content:\s*flex-end/)
-  })
-
-  test('preserves Sprint-28 image-gallery CSS surface', () => {
-    expect(chatHtml).toContain('.buttons.image-gallery')
-    expect(chatHtml).toContain('.thumb')
+  test('mounts the React app into #root', () => {
+    expect(chatHtml).toContain('id="root"')
   })
 })
 

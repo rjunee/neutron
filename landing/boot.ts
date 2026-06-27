@@ -164,12 +164,13 @@ export async function bootSignup(options: BootSignupOptions = {}): Promise<BootS
   const identityOauthUrl = options.identityOauthUrl ?? resolveIdentityOauthUrl(process.env)
   const staticDir = options.staticDir ?? HERE
 
-  // Defensive: the static dir MUST contain chat.html (createLandingServer
-  // throws if it's missing). Surface a clearer error here pointing at the
+  // Defensive: the static dir MUST contain the React chat shell
+  // (createLandingServer throws if `chat-react.html` is missing — P0b made
+  // React the only client). Surface a clearer error here pointing at the
   // resolved path so a misconfigured deploy is easy to diagnose.
-  const chatHtmlPath = join(staticDir, 'chat.html')
+  const chatHtmlPath = join(staticDir, 'chat-react.html')
   if (!existsSync(chatHtmlPath)) {
-    throw new Error(`landing static dir missing chat.html: ${chatHtmlPath}`)
+    throw new Error(`landing static dir missing chat-react.html: ${chatHtmlPath}`)
   }
 
   // C2 (OSS split) — the install-token surface is injected pre-built by

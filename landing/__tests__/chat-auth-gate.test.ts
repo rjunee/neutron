@@ -23,7 +23,7 @@ import {
 } from '../server.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const STATIC_DIR = dirname(HERE) // landing/ — contains chat.html + assets
+const STATIC_DIR = dirname(HERE) // landing/ — contains chat-react.html + assets
 
 function makeBridge(overrides: Partial<ChatBridge> = {}): ChatBridge {
   return {
@@ -68,7 +68,7 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
     expect(body).toContain('CLAUDE_CODE_OAUTH_TOKEN')
     expect(body).toContain('ANTHROPIC_API_KEY')
     // Crucially: the interactive chat shell is NOT served.
-    expect(body).not.toContain('/chat.js')
+    expect(body).not.toContain('/chat-react.js')
     expect(body).not.toContain('id="log"')
   })
 
@@ -83,7 +83,7 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
     expect(res.headers.get('content-type')).toContain('text/html')
     const body = await res.text()
     // The real chat shell, not the gate.
-    expect(body).toContain('/chat.js')
+    expect(body).toContain('/chat-react.js')
     expect(body).not.toContain('Authenticate Claude to continue')
   })
 
@@ -95,7 +95,7 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
     const res = await getChat(handler)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('/chat.js')
+    expect(body).toContain('/chat-react.js')
     expect(body).not.toContain('Authenticate Claude to continue')
   })
 

@@ -102,8 +102,8 @@ afterEach(() => {
 })
 
 function ensureChatHtml(staticDir: string): void {
-  const target = join(staticDir, 'chat.html')
-  if (!existsSync(target)) writeFileSync(target, '<html></html>')
+  const target = join(staticDir, 'chat-react.html')
+  if (!existsSync(target)) writeFileSync(target, '<html><div id="root"></div></html>')
 }
 
 async function makeKeysAndJwks(kid: string): Promise<{
