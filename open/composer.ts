@@ -1723,16 +1723,28 @@ export function buildOpenGraphComposer(
     // exists. The engine's `sendButtonPrompt` reads this holder at call time
     // (see buildRoutedSendButtonPrompt) — `app:<user>` topics route here.
     //
-    // Path 1: the engine no longer drives the conversation, so its ONLY prompt
-    // on this socket would be the import `import_analysis_presented` accept
-    // button — which we deliberately auto-consume (the import-completion watcher
-    // materializes without a tap). We therefore SUPPRESS the emission (ack it so
-    // the engine's delivery bookkeeping is satisfied, but do not surface a stray
-    // button into the live conversation). `emitOnboardingPrompt` is retained for
-    // the durable button_prompts trail the engine writes independently.
-    void emitOnboardingPrompt
-    appWsButtonPromptRouter.send = async ({ prompt }) => {
-      return { message_id: prompt.prompt_id, was_new: true }
+    // Path 1: the engine no longer drives the conversation. Its prompts on this
+    // socket are import-side only. We SUPPRESS exactly one: the SUCCESSFUL
+    // `import_analysis_presented` accept button — that flow is auto-consumed by
+    // the import-completion watcher (materialize without a tap), so a stray
+    // "accept these projects" button would dangle (its tap routes to the live
+    // session, not the engine). Every OTHER engine prompt — an import
+    // parse-failure / rate-limit / resume prompt the user genuinely needs to see
+    // — is emitted normally (Codex r1 [P1]). Single-owner Open has exactly one
+    // onboarding user, so we key the phase lookup on the owner.
+    appWsButtonPromptRouter.send = async ({ topic_id, prompt }) => {
+      try {
+        const st = await onboardingStateStore.get(project_slug, OWNER_USER_ID)
+        const importFailed = st?.phase_state?.['import_failed'] === true
+        if (st !== null && st.phase === 'import_analysis_presented' && !importFailed) {
+          // Suppress the successful analysis-accept prompt (auto-consumed).
+          return { message_id: prompt.prompt_id, was_new: true }
+        }
+      } catch {
+        // Any lookup failure → fall through and emit (fail open, user sees it).
+      }
+      const ok = emitOnboardingPrompt(topic_id, prompt)
+      return { message_id: prompt.prompt_id, was_new: ok }
     }
     // Import-progress over app-ws: dropped for now (the terminal-state prompt
     // still lands via the button-prompt path). Left as an explicit no-op holder
