@@ -46,6 +46,7 @@ import { buildProjectDocComposer } from '../gateway/realmode-composer/build-proj
 import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
 import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
 import { buildOnboardingPreamble } from '../onboarding/interview/onboarding-preamble.ts'
+import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
@@ -956,7 +957,21 @@ export function buildOpenGraphComposer(
     // impossible during a self-hosted onboarding.
     // (`realmodeCleanups` is declared earlier — the scribe GBrain child
     // registers its close hook there before `buildLandingStack` runs.)
-    const engineForUpload = landing.engine
+    // Path 1 — the upload handler still drives the engine's import pipeline
+    // (synthesis + cron write the project DOCUMENTS), but Path 1 has no accept
+    // BUTTON: when the import lands at `import_analysis_presented` an
+    // import-completion watcher transitions the row back to the conversational
+    // marker so the live session continues + the post-turn extractor can finish
+    // onboarding (which materializes the imported projects). The watcher is
+    // late-bound (it needs onboarding state wired further below) via this holder.
+    const importWatchHolder: { watch?: (user_id: string) => void } = {}
+    const engineForUpload: Pick<typeof landing.engine, 'notifyImportUpload'> = {
+      notifyImportUpload: async (input) => {
+        const result = await landing.engine.notifyImportUpload(input)
+        importWatchHolder.watch?.(input.user_id)
+        return result
+      },
+    }
     // Single-owner POSIX identity — the process uid/gid the owner runs as.
     const uploadUid = process.getuid?.() ?? 0
     const uploadGid = process.getgid?.() ?? 0
@@ -1520,14 +1535,78 @@ export function buildOpenGraphComposer(
             project_slug,
             onComplete: async ({ user_id, state }): Promise<void> => {
               if (onboardingFinalizer === null) return
+              // Pass the import analysis through to materialization when an
+              // import ran this onboarding — the engine stamps the full
+              // `ImportResult` onto phase_state at import_analysis_presented, so
+              // the materialized project docs carry the imported transcript
+              // slices, not just deterministic templates.
+              const importResult =
+                state.phase_state['import_result'] !== null &&
+                typeof state.phase_state['import_result'] === 'object'
+                  ? (state.phase_state['import_result'] as ImportResult)
+                  : null
               await onboardingFinalizer.finalize({
                 user_id,
                 topic_id: appWsTopicId(user_id),
                 state,
+                import_result: importResult,
               })
             },
           })
         : null
+    // Path 1 import-completion watcher (late-bound into `importWatchHolder`
+    // above). Polls the onboarding row after an upload; the moment the engine's
+    // import pipeline lands at `import_analysis_presented` (ImportResult +
+    // merged primary_projects/non_work_interests already stamped onto
+    // phase_state by the engine), it transitions the row back to the
+    // conversational marker so the live interview continues and the extractor's
+    // completion path can materialize the imported projects. There is no accept
+    // button — the import is auto-consumed. Best-effort; self-cancels on
+    // terminal/timeout and unregisters its timer via realmode cleanup.
+    const IMPORT_WATCH_INTERVAL_MS = 3_000
+    const IMPORT_WATCH_MAX_MS = 30 * 60 * 1_000
+    const importWatchActive = new Set<string>()
+    const watchImportCompletion = (user_id: string): void => {
+      if (importWatchActive.has(user_id)) return
+      importWatchActive.add(user_id)
+      const startedAt = Date.now()
+      const tick = async (): Promise<void> => {
+        let reschedule = false
+        try {
+          const st = await onboardingStateStore.get(project_slug, user_id)
+          if (st === null || st.phase === 'completed' || st.phase === 'failed') {
+            // Onboarding finished (or the row vanished) — nothing to consume.
+          } else if (st.phase === 'import_analysis_presented') {
+            // Consume the import: the store does not validate transitions, so we
+            // move straight back to the conversational marker. The empty patch
+            // (plus a consumed stamp) shallow-merges, preserving the engine's
+            // merged primary_projects / non_work_interests / import_result.
+            await onboardingStateStore.upsert({
+              project_slug,
+              user_id,
+              phase: 'work_interview_gap_fill',
+              phase_state_patch: { active_prompt_id: null, import_consumed_at: Date.now() },
+            })
+            emitProjectsChangedIfChanged(user_id)
+          } else if (Date.now() - startedAt <= IMPORT_WATCH_MAX_MS) {
+            reschedule = true
+          }
+        } catch {
+          // Transient read/write failure — retry next tick (still bounded).
+          reschedule = Date.now() - startedAt <= IMPORT_WATCH_MAX_MS
+        }
+        if (!reschedule) {
+          importWatchActive.delete(user_id)
+          return
+        }
+        const t = setTimeout(() => {
+          void tick()
+        }, IMPORT_WATCH_INTERVAL_MS)
+        realmodeCleanups.push(() => clearTimeout(t))
+      }
+      void tick()
+    }
+    importWatchHolder.watch = watchImportCompletion
     // The onboarding interview preamble (offer history import only when a
     // synthesis substrate exists to actually run it).
     const onboardingPreambleText = buildOnboardingPreamble({
@@ -1643,9 +1722,17 @@ export function buildOpenGraphComposer(
     // Fill the late-bound onboarding button-prompt router NOW that the registry
     // exists. The engine's `sendButtonPrompt` reads this holder at call time
     // (see buildRoutedSendButtonPrompt) — `app:<user>` topics route here.
-    appWsButtonPromptRouter.send = async ({ topic_id, prompt }) => {
-      const ok = emitOnboardingPrompt(topic_id, prompt)
-      return { message_id: prompt.prompt_id, was_new: ok }
+    //
+    // Path 1: the engine no longer drives the conversation, so its ONLY prompt
+    // on this socket would be the import `import_analysis_presented` accept
+    // button — which we deliberately auto-consume (the import-completion watcher
+    // materializes without a tap). We therefore SUPPRESS the emission (ack it so
+    // the engine's delivery bookkeeping is satisfied, but do not surface a stray
+    // button into the live conversation). `emitOnboardingPrompt` is retained for
+    // the durable button_prompts trail the engine writes independently.
+    void emitOnboardingPrompt
+    appWsButtonPromptRouter.send = async ({ prompt }) => {
+      return { message_id: prompt.prompt_id, was_new: true }
     }
     // Import-progress over app-ws: dropped for now (the terminal-state prompt
     // still lands via the button-prompt path). Left as an explicit no-op holder
