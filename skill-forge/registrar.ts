@@ -1,23 +1,29 @@
 /**
  * @neutronai/skill-forge — registrar.
  *
- * "Registering" an approved skill = writing its convention markdown under
- * `<owner_data_dir>/skills/conventions/<name>.md`. That is the EXACT directory
- * the realmode composer's skills-loader reads at every LLM turn
- * (`gateway/realmode-composer/skills-loader.ts` →
- * `build-phase-spec-resolver.ts:resolveSkillsDir`), so a written skill is
- * immediately agent-discoverable and — being on disk — survives a fresh
- * session with ZERO additional wiring.
+ * P1-5 (lift audit § P1-5): "registering" an approved skill = writing a native
+ * Claude Code `SKILL.md` PACK at `<skillsDir>/<name>/SKILL.md`, where `skillsDir`
+ * is the live agent's project skills dir (`<owner_home>/.claude/skills`,
+ * `runtime/adapters/claude-code/persistent/agent-skills.ts`
+ * `resolveAgentSkillsDir`). The spawned REPL discovers that directory NATIVELY,
+ * so an approved skill is immediately invokable via the built-in `Skill`
+ * mechanism (not merely injected as system-prompt prose) and — being on disk —
+ * survives a fresh session with ZERO additional wiring. This closes the loop from
+ * skill-forge's "proposal lifecycle" to an actually-loadable native skill.
  *
- * We never overwrite an existing convention file: if `<name>.md` is taken, we
- * pick `<name>-2.md`, `<name>-3.md`, … so an auto-distilled skill can never
- * clobber a hand-authored one.
+ * (Previously this wrote `<skillsDir>/conventions/<name>.md`, consumed by the
+ * system-prompt convention-injection loader. That loader still exists for
+ * hand-authored conventions; skill-forge OUTPUT now targets the native pack form.)
+ *
+ * We never overwrite an existing pack: if `<name>/` is taken, we pick `<name>-2/`,
+ * `<name>-3/`, … so an auto-distilled skill can never clobber a hand-authored or
+ * bundled one.
  */
 
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 
-import { renderSkillMarkdown } from './distiller.ts'
+import { renderSkillPack } from './distiller.ts'
 import type { SkillDraft } from './types.ts'
 
 /** Mirror of `build-phase-spec-resolver.ts:resolveSkillsDir` (owner_data_dir form). */
@@ -27,36 +33,38 @@ export function resolveSkillsDir(ownerDataDir: string): string {
 }
 
 export interface RegisterSkillResult {
-  /** Absolute path of the written skill markdown. */
+  /** Absolute path of the written `SKILL.md`. */
   path: string
   /** The markdown that was written. */
   markdown: string
 }
 
 /**
- * Write the distilled skill into the conventions dir. Creates the dir tree if
- * absent. Returns the path written (collision-suffixed if needed).
+ * Write the distilled skill as a native `SKILL.md` pack under `skillsDir`.
+ * Creates the dir tree if absent. Returns the path written (collision-suffixed
+ * at the pack-directory level if needed).
  */
 export async function registerSkillFile(opts: {
   skillsDir: string
   draft: SkillDraft
 }): Promise<RegisterSkillResult> {
-  const conventionsDir = join(opts.skillsDir, 'conventions')
-  await fs.mkdir(conventionsDir, { recursive: true })
-  const markdown = renderSkillMarkdown(opts.draft)
-  const path = await uniquePath(conventionsDir, opts.draft.name)
+  await fs.mkdir(opts.skillsDir, { recursive: true })
+  const packDir = await uniquePackDir(opts.skillsDir, opts.draft.name)
+  await fs.mkdir(packDir, { recursive: true })
+  const markdown = renderSkillPack(opts.draft)
+  const path = join(packDir, 'SKILL.md')
   await fs.writeFile(path, markdown, 'utf8')
   return { path, markdown }
 }
 
-async function uniquePath(dir: string, name: string): Promise<string> {
-  const base = join(dir, `${name}.md`)
+async function uniquePackDir(dir: string, name: string): Promise<string> {
+  const base = join(dir, name)
   if (!(await exists(base))) return base
   for (let i = 2; i < 1000; i += 1) {
-    const candidate = join(dir, `${name}-${i}.md`)
+    const candidate = join(dir, `${name}-${i}`)
     if (!(await exists(candidate))) return candidate
   }
-  throw new Error(`registerSkillFile: could not find a free filename for ${name} in ${dir}`)
+  throw new Error(`registerSkillFile: could not find a free pack directory for ${name} in ${dir}`)
 }
 
 async function exists(p: string): Promise<boolean> {

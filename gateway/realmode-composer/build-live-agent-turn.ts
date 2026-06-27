@@ -81,17 +81,26 @@ const DEFAULT_TIMEOUT_MS = 240_000
 const REPLY_ROW_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1_000
 
 /**
- * Built-in CC tool surface for the live agent. Read-only file access over
- * the REPL's cwd / `--add-dir` (the owner home: persona/, entities/,
- * Projects/) — the agent can RECALL and SUMMARIZE everything onboarding
- * materialized. Constant across turns (the persistent substrate's reuse
- * guard refuses to serve a turn whose `--tools` surface differs from the
- * warm REPL's, so a varying surface would thrash the pool). Write tools +
- * the Cores MCP surface land in the follow-up sprint once the external
- * MCP transport for the per-instance ToolRegistry exists (mcp/server.ts is
- * in-process-only today; spec § 1.6 explicitly defers write-tools).
+ * Built-in CC tool surface for the live agent. Read access over the REPL's cwd /
+ * `--add-dir` (the owner home: persona/, entities/, Projects/) — the agent can
+ * RECALL and SUMMARIZE everything onboarding materialized — PLUS the native
+ * `Skill` mechanism and the file/exec tools the bundled skills need to run.
+ *
+ * P1-5 (lift audit § P1-5): `Skill` is what lets the spawned REPL invoke the
+ * natively-discovered `SKILL.md` packs (`impeccable`, `agent-browser`, `remind`,
+ * forged skills — provisioned into `<cwd>/.claude/skills/` by `agent-skills.ts`).
+ * The design skills (`impeccable`) author code, so `Write`/`Edit` are required;
+ * `agent-browser` and other skill scripts shell out, so `Bash` is required. This
+ * tool grant is the OWNER's trusted live-chat agent ONLY — the untrusted import
+ * (`cc-import-*`) and disposable Trident (`cc-trident-*`) substrates keep their
+ * `tools: []` default-deny (`--tools ""`), so neither gets `Skill` nor exec
+ * access (the prompt-injection gate from Codex-r1-P1 is untouched).
+ *
+ * Constant across turns (the persistent substrate's reuse guard refuses to serve
+ * a turn whose `--tools` surface differs from the warm REPL's, so a varying
+ * surface would thrash the pool).
  */
-const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep'] as const
+const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash', 'Skill'] as const
 
 /**
  * Fallback persona when the owner's persona files are missing (persona-gen

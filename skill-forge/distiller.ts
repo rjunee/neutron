@@ -126,3 +126,35 @@ export function renderSkillMarkdown(draft: SkillDraft): string {
   lines.push('')
   return lines.join('\n')
 }
+
+/**
+ * Render a native Claude Code `SKILL.md` pack: YAML frontmatter (`name` +
+ * `description`) followed by the {@link renderSkillMarkdown} body. P1-5 — this is
+ * what makes a forged skill NATIVELY discoverable by the spawned REPL (the
+ * `description` is what Claude Code's skill loader matches on to decide when to
+ * surface the skill), as opposed to the legacy convention-injection markdown.
+ *
+ * The `description` folds in the what-it-does summary plus the trigger phrases so
+ * the native loader's relevance match mirrors the old "ALWAYS use when…"
+ * resolver. Emitted as a YAML block scalar (`|`) so commas / colons / quotes in
+ * triggers never break the frontmatter.
+ */
+export function renderSkillPack(draft: SkillDraft): string {
+  const descLines: string[] = []
+  descLines.push(draft.whatItDoes.trim())
+  if (draft.triggers.length > 0) {
+    descLines.push(
+      `Use this skill whenever the user says any of: ${draft.triggers
+        .map((t) => `"${t.replace(/"/g, "'")}"`)
+        .join(', ')}.`,
+    )
+  }
+  const front: string[] = []
+  front.push('---')
+  front.push(`name: ${draft.name}`)
+  front.push('description: |')
+  for (const line of descLines) front.push(`  ${line}`)
+  front.push('---')
+  front.push('')
+  return `${front.join('\n')}\n${renderSkillMarkdown(draft)}`
+}

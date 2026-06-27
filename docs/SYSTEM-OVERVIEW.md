@@ -204,8 +204,27 @@ a slash-command.
   history-import REPL (`cc-import-*`) and the disposable Trident build REPLs
   (`cc-trident-*`) leave it off, so a prompt-injection in untrusted content can
   never reach a Core tool. The bridge's MCP namespace is permitted via
-  `--allowedTools mcp__neutron`; the built-in `--tools ""` default-deny (which
-  gates Bash/Read/etc.) is untouched.
+  `--allowedTools mcp__neutron`. The built-in `--tools` surface is per-substrate:
+  the untrusted import/Trident REPLs keep `--tools ""` default-deny (no Bash/
+  Read/Skill); the live agent declares `Read,Glob,Grep,Write,Edit,Bash,Skill`
+  (the read tools + the native skill mechanism + the file/exec tools skills need).
+
+### Native SKILL.md discovery for the agent (P1-5)
+
+The live agent discovers + invokes Claude Code **skills** natively — the same
+built-in mechanism Vajra's `~/.claude/skills` rides on. At composer build,
+`provisionAgentSkills()` (`runtime/adapters/claude-code/persistent/agent-skills.ts`)
+materializes the bundled `SKILL.md` packs from the repo-root `skills/` dir
+(`impeccable` + design sub-skills, `agent-browser`, `remind`) into the live
+agent's **project** skills dir (`<owner_home>/.claude/skills/`, which the spawned
+REPL — cwd = `owner_home` — discovers natively). The `Skill` built-in tool is in
+the live agent's `--tools` allow-list, so the agent loads + invokes a pack
+mid-turn. Project-scope (not a custom `CLAUDE_CONFIG_DIR`) is deliberate: the
+default config dir holds the REPL's credentials, so a custom config dir would
+break auth. Skill-forge's approved-skill **output** writes native packs into this
+same dir (`registrar.ts` → `<skillsDir>/<name>/SKILL.md`), so a forged skill is
+immediately discoverable + invokable too. Provisioning is idempotent and never
+deletes a forged pack.
 - **The command-filter's role.** `buildChainedChatCommandFilter`
   (`open/composer.ts`) is the **user's** slash-command path: it intercepts a
   user-typed `/cal` `/remind` `/note` etc. BEFORE the LLM and routes to the SAME
@@ -2179,12 +2198,12 @@ silently.
   injected `ProposalNotifier`. Nothing is written to disk yet. A stable
   `workflowSignature` dedupes, so a workflow run repeatedly does not re-nag.
 - **Approve → register (`distiller.ts` + `registrar.ts`).** On approve (optionally
-  with edits), the workflow is **distilled** deterministically into a convention
-  markdown and written to `<owner_data_dir>/skills/conventions/<name>.md` — the
-  exact directory the realmode skills-loader (see the system-prompt assembly)
-  splices into **every** LLM turn. So the new skill is immediately
-  agent-discoverable and, being on disk, **survives a fresh session**. Decline
-  marks the row declined and creates nothing.
+  with edits), the workflow is **distilled** deterministically into a native
+  `SKILL.md` pack (`renderSkillPack` — YAML frontmatter + body) and written to
+  `<owner_home>/.claude/skills/<name>/SKILL.md` — the SAME project skills dir the
+  spawned REPL discovers natively (P1-5). So the new skill is immediately
+  discoverable + invokable via the built-in `Skill` mechanism and, being on disk,
+  **survives a fresh session**. Decline marks the row declined and creates nothing.
 - **Trigger source (`trident-adapter.ts`).** `completedWorkflowFromTridentRun`
   maps a terminal `done` Trident run into the generic `CompletedWorkflow`.
 
