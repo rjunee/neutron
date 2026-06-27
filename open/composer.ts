@@ -107,6 +107,7 @@ import {
   buildLlmNudgeRater,
   type ProactiveTopicCandidate,
 } from '../gateway/proactive/idle-nudge-sweep.ts'
+import { buildButtonStoreProactiveSink } from '../gateway/proactive/button-store-sink.ts'
 import { readSessionCookie, signSessionCookie } from '../landing/session-cookie.ts'
 
 import {
@@ -1394,12 +1395,21 @@ export function buildOpenGraphComposer(
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
         : null
     const proactiveGeneralTopic = webTopicId(OWNER_USER_ID)
+    // DURABLE web sink — Open's topics are `app_socket` and proactive posts
+    // fire from a timer, so route through the ButtonStore (history row) +
+    // best-effort live push, NOT the live-only AppWsAdapter (which would drop a
+    // post with no open socket). The SAME durable path fired reminders use.
+    const proactiveSink = buildButtonStoreProactiveSink({
+      buttonStore: landing.buttonStore,
+      registry: landing.registry,
+    })
     const tasksConfig: NonNullable<CompositionInput['tasks']> = {
       // The nudge sweep posts the ranker's "do this next" pick; enable the
       // ranker so the sweep has fresh picks (no-op every tick when LLM-less).
       enable_nudge_engine_cron: true,
       ...(proactiveLlm !== null ? { nudge_engine: { llm: proactiveLlm } } : {}),
       proactive: {
+        sink: proactiveSink,
         resolveGeneralTopic: (): string => proactiveGeneralTopic,
         // Enumerate the owner's web topics + their last-activity watermark from
         // the durable ButtonStore history (the General + per-project rows). The

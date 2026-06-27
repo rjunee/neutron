@@ -780,6 +780,10 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       const proactiveCfg = tasksCfg.proactive
       if (proactiveCfg !== undefined) {
         const channelRouter = ctx.graph.get<ChannelRouter>('channels')
+        // Override sink (Open's durable web sink) wins; else the core router
+        // (Telegram instances). The router's live-only app_socket adapter would
+        // drop a timer-fired web post with no open socket — hence the override.
+        const proactiveSink = proactiveCfg.sink ?? channelRouter
         const proactiveStore = new ProactiveStateStore(input.db)
 
         // Morning brief — gated on a resolvable General topic.
@@ -809,7 +813,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           const briefDeps: MorningBriefDeps = {
             store: proactiveStore,
             sources,
-            sink: channelRouter,
+            sink: proactiveSink,
             general_topic_id: generalTopic,
             now: () => Date.now(),
           }
@@ -837,7 +841,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           const sweepDeps: IdleNudgeSweepDeps = {
             db: input.db,
             store: proactiveStore,
-            sink: channelRouter,
+            sink: proactiveSink,
             listTopics: (): Promise<ProactiveTopicCandidate[]> | ProactiveTopicCandidate[] =>
               listIdleTopics(),
             now: () => Date.now(),

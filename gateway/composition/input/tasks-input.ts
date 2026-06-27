@@ -3,6 +3,7 @@ import type { LlmCallFn } from '../../../onboarding/interview/phase-spec-resolve
 import type { PersonaPromptLoader } from '../../realmode-composer/persona-loader.ts'
 import type { BriefComposer, ProactiveContextSources } from '../../proactive/morning-brief.ts'
 import type { NudgeRater, ProactiveTopicCandidate } from '../../proactive/idle-nudge-sweep.ts'
+import type { OutboundSink } from '../../proactive/sink.ts'
 
 export interface TasksCompositionInput {
   /**
@@ -140,6 +141,14 @@ export interface TasksCompositionInput {
        * watermark for the idle sweep. Required to enable the sweep.
        */
       listIdleTopics?: () => ProactiveTopicCandidate[] | Promise<ProactiveTopicCandidate[]>
+      /**
+       * Override the outbound sink the brief + sweep post through. Absent →
+       * the core `ChannelRouter` (Telegram instances). Open supplies a DURABLE
+       * web sink (`buildButtonStoreProactiveSink`) because its `app_socket`
+       * topics fire from a timer with no guaranteed live socket — a router
+       * post via the live-only `AppWsAdapter` would silently drop the message.
+       */
+      sink?: OutboundSink
       /**
        * Optional LLM brief composer (Vajra parity). When supplied, the brief
        * body is written by the warm LLM over the resolved context; on failure

@@ -78,6 +78,10 @@ describe('Open proactive activation wiring', () => {
     // The brief posts to the owner's General web topic.
     expect(proactive!.resolveGeneralTopic?.()).toBe(webTopicId(OWNER_USER_ID))
 
+    // A DURABLE web sink is wired (NOT the live-only ChannelRouter) so a
+    // timer-fired post survives a disconnected socket.
+    expect(typeof proactive!.sink?.send).toBe('function')
+
     // The sweep can enumerate idle topics (empty history → empty list, no throw).
     const topics = await proactive!.listIdleTopics?.()
     expect(Array.isArray(topics)).toBe(true)
