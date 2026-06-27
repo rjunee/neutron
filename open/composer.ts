@@ -821,6 +821,16 @@ export function buildOpenGraphComposer(
       return { project_slug, user_id: OWNER_USER_ID }
     }
 
+    // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
+    // `/research` + skill-forge `/skills`), chained. Defined ONCE here so BOTH
+    // the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route slash
+    // commands through the IDENTICAL handlers (Codex r1 [P2] — without this the
+    // React app-ws path lost slash commands, sending `/note` etc. to the LLM).
+    const chatCommandFilter = buildChainedChatCommandFilter([
+      coresWiring.chatCommandFilter,
+      buildSkillForgeChatCommandFilter(skillForgeBackend),
+    ])
+
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────
     const landing = buildLandingStack({
       db,
@@ -878,10 +888,7 @@ export function buildOpenGraphComposer(
       //     tools (agent-native parity).
       // Each filter returns null for a non-match, so the chain falls through to
       // the LLM exactly as a single filter would.
-      chatCommandFilter: buildChainedChatCommandFilter([
-        coresWiring.chatCommandFilter,
-        buildSkillForgeChatCommandFilter(skillForgeBackend),
-      ]),
+      chatCommandFilter,
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────
@@ -1340,6 +1347,9 @@ export function buildOpenGraphComposer(
       registry: appWsRegistry,
       auth: appOwnerAuth,
       project_slug,
+      // Codex r1 [P2]: route slash commands (/note, /remind, /skills, …) through
+      // the SAME chained filter the web chat uses — parity, not a second path.
+      chat_command_filter: chatCommandFilter,
     })
 
     return {
