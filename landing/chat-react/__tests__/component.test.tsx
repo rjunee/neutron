@@ -211,6 +211,122 @@ describe('ChatApp render (happy-dom)', () => {
     })
   })
 
+  it('BUG 7 — non-streamed pending reply shows ONLY typing dots, no empty agent bubble', async () => {
+    // The live-agent reply arrives as a SINGLE `agent_message` (no
+    // `agent_message_partial` frames). While it is pending, assistant-ui would
+    // synthesize an empty optimistic assistant bubble (isRunning + last message
+    // is the user's). Assert ONLY the typing indicator renders — no empty,
+    // non-typing `.car-bubble-agent` stacked above it — until the real message
+    // lands.
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{
+      open: () => void
+      deliver: (o: unknown) => void
+      onopen: (() => void) | null
+      onmessage: ((ev: { data: unknown }) => void) | null
+      onclose: (() => void) | null
+      onerror: (() => void) | null
+      send: (d: string) => void
+      close: () => void
+    }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+        </AssistantRuntimeProvider>
+      )
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+    // User sends; the reply is now pending with NO partials streamed.
+    await act(async () => {
+      await controller.send('are you there?')
+      await tick()
+    })
+    expect(container.textContent).toContain('are you there?')
+    // The typing indicator is up …
+    const typing = container.querySelectorAll('.car-bubble-agent.car-typing')
+    expect(typing.length).toBe(1)
+    // … and there is NO empty (non-typing) agent bubble stacked above it.
+    const nonTypingAgentBubbles = Array.from(
+      container.querySelectorAll('.car-bubble-agent'),
+    ).filter((b) => !b.classList.contains('car-typing'))
+    expect(nonTypingAgentBubbles.length).toBe(0)
+
+    // The real single-frame agent_message lands → its bubble renders, typing clears.
+    await act(async () => {
+      sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm9', seq: 1, body: 'Yes, here!', ts: 9 })
+      await tick()
+    })
+    expect(container.textContent).toContain('Yes, here!')
+    expect(container.querySelectorAll('.car-bubble-agent.car-typing').length).toBe(0)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
   it('renders agent button options and posts a button_choice on click (P1b)', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')

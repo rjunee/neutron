@@ -458,7 +458,20 @@ function UserMessage(): React.JSX.Element {
   )
 }
 
-function AssistantMessage(): React.JSX.Element {
+function AssistantMessage(): React.JSX.Element | null {
+  const message = useMessage()
+  // BUG 7 (non-streaming live-agent path) — assistant-ui's ExternalStoreRuntime
+  // synthesizes an EMPTY optimistic "upcoming" assistant bubble whenever it is
+  // running and the trailing message is the user's (`hasUpcomingMessage`). On the
+  // live-agent path the reply arrives as a SINGLE non-streamed `agent_message`
+  // (no `agent_message_partial` frames), so no streaming bubble exists while the
+  // turn is pending — the last message stays the user's and that empty bubble
+  // renders ABOVE our own typing-dots indicator. Suppress it: the
+  // `TypingIndicator` (keyed off `awaitingFirstToken`) is the sole pending
+  // affordance until the real `agent_message` lands. `isOptimistic` is set ONLY
+  // on this synthesized placeholder, so our real (incl. options-only, empty-body)
+  // agent messages are unaffected.
+  if (message.metadata?.isOptimistic === true) return null
   return (
     <MessagePrimitive.Root className="car-row car-row-agent">
       <div className="car-avatar" aria-hidden="true">

@@ -343,8 +343,9 @@ def run() -> int:
         # NEW agent bubble after each, none of them a re-prompt.
         freeform_answers = [
             "Call me Sam",
-            "I'm building Topline, an AI sales tool, plus a side project on "
-            "running, and a book about focus",
+            "I'm building Topline (an AI sales tool), Acme infra, and a book "
+            "about focus",
+            "Outside work I'm really into rock climbing and cooking",
             "Make you warm but direct, and call you Atlas",
         ]
         step1_browser_ok = True
@@ -452,19 +453,50 @@ def run() -> int:
             comp = page.locator(".car-input")
             if comp.count() > 0 and agent_count > last_agent_count:
                 last_agent_count = agent_count
-                log("step2", f"iter {i}: typing freeform answer")
+                # Cycle through varied, realistic answers that re-supply each of
+                # the five required fields (name / ≥3 projects / a non-work
+                # interest / personality / agent name) — spamming one identical
+                # answer just makes the live session loop "got it, what next?".
+                cycle = [
+                    "My name's Sam.",
+                    "Main projects: Topline, Acme infra, and a book about focus.",
+                    "Outside work I love rock climbing and cooking.",
+                    "I want you warm but direct — no fluff.",
+                    "Let's call you Atlas.",
+                    "That's everything — I think you've got what you need.",
+                ]
+                ans = cycle[i % len(cycle)]
+                log("step2", f"iter {i}: typing freeform answer {ans!r}")
                 comp.first.click()
-                comp.first.fill("Acme — building an AI productivity app for small teams.")
+                comp.first.fill(ans)
                 page.locator("button.car-send").first.click()
                 page.wait_for_timeout(2500)
                 stable_polls = 0
                 continue
-            # Nothing actionable changed this poll.
+            # Nothing actionable changed this poll. Stay patient: once the 5th
+            # field is collected the agent goes quiet while the fire-and-forget
+            # finalize (persona compose+commit + project materialize) runs, then
+            # the projects_changed frame paints the tab bar. Allow ~30s idle.
             stable_polls += 1
             page.wait_for_timeout(1500)
-            if stable_polls >= 6:
+            if stable_polls >= 20:
                 log("step2", "no further onboarding prompts — treating as settled")
                 break
+        # Finalize may still be materializing — wait a bit longer for the tab bar
+        # (the deterministic completion signal) before giving up.
+        if not completed:
+            try:
+                page.wait_for_selector(
+                    'nav.car-tabs button[role="tab"]', timeout=45_000
+                )
+                tabs = page.locator('nav.car-tabs button[role="tab"]')
+                labels = [tabs.nth(j).inner_text().strip().lower()
+                          for j in range(tabs.count())]
+                if any(t in ("documents", "admin", "tasks") for t in labels):
+                    completed = True
+                    log("step2", f"tab bar appeared after finalize {labels}")
+            except Exception:
+                log("step2", "tab bar did not appear within finalize grace window")
         results["onboarding_completed"] = completed
         shot(page, "02-onboarding-end.png")
 
