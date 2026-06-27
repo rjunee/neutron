@@ -1071,7 +1071,17 @@ export function buildOpenGraphComposer(
       // Escape `<` so a project name can never break out of the <script> context.
       const enc = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
       const active = projects.length > 0 ? enc(projects[0]!.id) : 'null'
-      return `<script>window.__neutron_projects=${enc(projects)};window.__neutron_active_project_id=${active};</script>`
+      // Codex r1 [P1] — Open's `?start=` token is a local HMAC payload, NOT a JWT
+      // with a `sub` claim, so `chat-react/config.ts:decodeJwtSub` returns null
+      // and the client throws `ChatBootstrapError` before it can open
+      // `/ws/app/chat`. Inject the owner identity explicitly so the client
+      // derives `userId` (→ its default `dev:<owner>` app-ws bearer, the one our
+      // owner-restricted resolver accepts) and connects.
+      return (
+        `<script>window.__neutron_user_id=${enc(OWNER_USER_ID)};` +
+        `window.__neutron_projects=${enc(projects)};` +
+        `window.__neutron_active_project_id=${active};</script>`
+      )
     }
     const withReactBootstrap = async (res: Response | Promise<Response>): Promise<Response> => {
       const r = await res
@@ -1333,7 +1343,19 @@ export function buildOpenGraphComposer(
       receive: async (event: IncomingEvent): Promise<void> => {
         if (event.channel_kind !== 'app_socket') return
         const text = event.body.text.trim()
-        if (text.length === 0) return
+        // Codex r1 [P2]: an attachment-only send arrives with empty text but
+        // non-empty `adapter_metadata.attachments`; dropping on empty text alone
+        // would swallow the turn after the echo/read-receipt (user sees no
+        // reply). Only drop a TRULY empty inbound (no text AND no attachments);
+        // for attachment-only, run the turn with a minimal placeholder so the
+        // agent responds. (Full attachment content isn't yet threaded into
+        // `LiveAgentTurnRequest` — its interface carries only `user_text`; that
+        // deeper wiring is a separate follow-up, but we no longer silently drop.)
+        const attachments = Array.isArray(event.adapter_metadata?.['attachments'])
+          ? (event.adapter_metadata!['attachments'] as unknown[])
+          : []
+        if (text.length === 0 && attachments.length === 0) return
+        const userText = text.length > 0 ? text : 'Sent an attachment.'
         const project_id =
           typeof event.adapter_metadata?.['project_id'] === 'string'
             ? (event.adapter_metadata['project_id'] as string)
@@ -1384,7 +1406,7 @@ export function buildOpenGraphComposer(
           // Project-scoped for warm-session/persona/history keying (Codex [P2]).
           topic_id: turnTopicId,
           ...(project_id !== undefined ? { project_id } : {}),
-          user_text: text,
+          user_text: userText,
           send: sendReply,
           observed_at: event.received_at,
         })
