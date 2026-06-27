@@ -1048,6 +1048,50 @@ export function buildOpenGraphComposer(
       }
     }
 
+    // P1b — React shell project bootstrap. `chat-react/config.ts` reads the
+    // owner's project list + active project from `window.__neutron_projects` /
+    // `window.__neutron_active_project_id`; nothing set them, so the React
+    // ProjectShell had `projectId === null` forever and never fetched
+    // `/api/app/projects/<id>/tabs` — the Documents/Tasks tabs stayed hidden even
+    // with their backends mounted (Codex r1). Inject the canonical project list
+    // (from the `projects` table — the source of truth onboarding writes) into
+    // the served `/chat` HTML so the shell opens on a real project with its tabs.
+    const projectsBootstrapScript = (): string => {
+      let rows: { id: string; name: string }[] = []
+      try {
+        rows = db
+          .prepare<{ id: string; name: string }, []>(
+            `SELECT id, name FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC, id ASC`,
+          )
+          .all()
+      } catch {
+        rows = []
+      }
+      const projects = rows.map((r) => ({ id: r.id, label: r.name }))
+      // Escape `<` so a project name can never break out of the <script> context.
+      const enc = (v: unknown): string => JSON.stringify(v).replace(/</g, '\\u003c')
+      const active = projects.length > 0 ? enc(projects[0]!.id) : 'null'
+      return `<script>window.__neutron_projects=${enc(projects)};window.__neutron_active_project_id=${active};</script>`
+    }
+    const withReactBootstrap = async (res: Response | Promise<Response>): Promise<Response> => {
+      const r = await res
+      const ct = r.headers.get('content-type') ?? ''
+      if (!ct.includes('text/html')) return r
+      const html = await r.text()
+      // No-op if the React shell marker isn't present (e.g. the auth-gate page).
+      if (!html.includes('/chat-react.js')) {
+        const headers = new Headers(r.headers)
+        return new Response(html, { status: r.status, headers })
+      }
+      const injected = html.replace(
+        '<script type="module" src="/chat-react.js"></script>',
+        `${projectsBootstrapScript()}\n<script type="module" src="/chat-react.js"></script>`,
+      )
+      const headers = new Headers(r.headers)
+      headers.delete('content-length')
+      return new Response(injected, { status: r.status, headers })
+    }
+
     const openFetch = (
       req: Request,
       server: import('bun').Server<unknown>,
@@ -1081,7 +1125,7 @@ export function buildOpenGraphComposer(
       // serves chat.html and resumes via the cookie-only WS path unchanged.
       if (isGet && url.pathname === '/chat' && !hasStart && hasValidCookie) {
         return hasResumableState().then((resumable) =>
-          resumable ? landing.fetch(req, server) : coldStartRedirect(url),
+          resumable ? withReactBootstrap(landing.fetch(req, server)) : coldStartRedirect(url),
         )
       }
 
@@ -1089,11 +1133,16 @@ export function buildOpenGraphComposer(
       // set on the /chat page load so the WS reconnect path works.
       const res = landing.fetch(req, server)
       if (isGet && url.pathname === '/chat' && !hasValidCookie) {
-        return Promise.resolve(res).then((r) => {
+        return withReactBootstrap(res).then((r) => {
           const headers = new Headers(r.headers)
           headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
           return new Response(r.body, { status: r.status, headers })
         })
+      }
+      // A /chat load WITH a valid cookie (e.g. arriving with a fresh `?start=`)
+      // still needs the project bootstrap injected.
+      if (isGet && url.pathname === '/chat') {
+        return withReactBootstrap(res)
       }
       return res
     }
