@@ -2,6 +2,80 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — P1b consolidate: ONE chat path (onboarding unified) + web admin panel + real-browser verification
+
+**Scope (Ryan-locked, final).** Finish the consolidation the prior P1b entry
+deferred: "One code path. No feature flags. I do NOT want two chat endpoints. I
+do NOT want onboarding being on some special custom code different to the main
+chat." + a WEB admin panel + "test it with playwright in a real browser."
+
+**What shipped.**
+
+1. **ONE chat WS endpoint.** Onboarding is no longer a separate engine/socket —
+   it is the INITIAL MODE of the single `/ws/app/chat` surface. The shared
+   `InterviewEngine` keys its state on `(project_slug, user_id)` independent of
+   transport, so the same engine that drove the legacy `/ws/chat` bridge now runs
+   over app-ws:
+   - `chat-bridge.ts`: `buildRoutedSendButtonPrompt` + `buildRoutedSendImportProgress`
+     route a new `app:` topic prefix through a late-bound holder
+     (`AppSocketButtonPromptRouter` / `AppSocketImportProgressRouter`). One routed
+     sender, three prefixes (web/tg/app) — no second engine.
+   - `app-ws/envelope.ts`: new `button_choice` inbound (`decodeAppWsButtonChoice`)
+     — a tapped quick-reply is a structured choice, not a freeform message.
+   - `app-ws-surface.ts`: `on_session_open` (fires the first onboarding prompt on
+     connect when onboarding is active) + `on_button_choice` hooks.
+   - `open/composer.ts`: fills the holders (engine `ButtonPrompt` → the app-ws
+     `agent_message` superset that already carries options/prompt_id/allow_freeform/
+     kind/upload_affordance); `isOnboardingActive()` routes each turn to
+     `engine.advance` (onboarding) or the live agent (steady-state); `sendReply`
+     now carries button options for steady-state parity (one renderer, one path).
+
+2. **`/ws/chat` deleted.** The legacy onboarding HTTP-upgrade + chat-bridge
+   websocket handler are removed (`landing/server.ts` now serves the SPA + HTTP
+   routes only; the websocket is a defensive close-stub); `/ws/chat` dropped from
+   `compose.ts` `LANDING_PATHS` and the signup-host 503 stub. grep proves no
+   `/ws/chat` route mount remains (only removal comments + 404-assertion tests).
+   Obsolete `/ws/chat`-onboarding walkthroughs deleted; landing/compose tests now
+   assert `/ws/chat` 404s.
+
+3. **React renders onboarding inline.** `chat-core` now preserves the button
+   metadata (`normalizeInbound`/`applyInbound`/store merge); `controller` exposes
+   it on `RenderMessage` + `onChoose` (sends the `button_choice` frame); `ChatApp`
+   renders `ButtonOptionRow` / image-gallery under the agent message and an
+   upload-affordance hint — mirroring the Expo client. Onboarding buttons + typed
+   answers drive the same chat surface.
+
+4. **Web admin panel.** `landing/chat-react/IntegrationsTab` + `integrations-client`
+   over the wired `GET /api/cores/integrations` + `POST/DELETE
+   /api/cores/api-keys/<label>`; the existing global `admin` tab is surfaced in the
+   web ProjectShell (`listGlobalTabs` + merge). Owner sees + manages connected
+   accounts and API keys in the browser. Route: the **Admin** tab in the project
+   tab bar.
+
+**Real-browser verification (system Playwright, headless Chromium, against a live
+Open branch build).** A regression guard is committed at
+`tests/e2e-browser/onboarding_walkthrough.py` (CI-skippable: prints `E2E SKIP`
+when no server is reachable). Verified in a real browser:
+- `/chat` cold-start-redirects to the React client; it connects to the SINGLE
+  `/ws/app/chat`; the fresh onboarding welcome renders inline ("Hey, what should I
+  call you?") — emitted by the engine via the `app:` router (no `/ws/chat`).
+- Typing the answer echoes the user bubble and advances the engine over app-ws
+  (the next onboarding turn fires) — the onboarding turn round-trips on the one
+  socket.
+- The **Documents** tab lists a real doc (`welcome.md`).
+- The **Admin** tab renders the integrations panel — connected accounts
+  (gmail/calendar/workspace) + API-key slots (apify/tavily) with Save/Clear.
+
+**Known limitations / follow-ups.**
+- A page reload during the very first `signup` prompt does not re-emit it (the
+  engine excludes `signup` from reconnect re-emit). Pre-existing engine behavior
+  (the old `/ws/chat` path used the same engine), not introduced here.
+- Onboarding import-progress over app-ws is dropped for now (the terminal-state
+  prompt still lands); a future pass can translate it to an incremental update.
+- Scribe-on-user-turn + import-progress hooks were wired to the removed `/ws/chat`
+  bridge; the app-ws steady-state path (pre-existing from the earlier P1b) does not
+  re-establish them — a separate follow-up if those are wanted on app-ws.
+
 ## 2026-06-26 — P1b: wire the FULL app-ws/app-api surface stack into Open (React UI works end-to-end)
 
 **Scope note (final).** Beyond the initial chat/docs/admin wiring, cross-model

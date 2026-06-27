@@ -672,6 +672,29 @@ engine is NOT forked). Scope is receipts only.
 > `chat_log`/`receipt_log` wired yet in Open (live fan-out works; resume/seq is a
 > follow-up). Managed layers tenant auth as the thin wrapper.
 
+> **P1b consolidate (2026-06-26) — `/ws/app/chat` is now the SINGLE chat WS
+> endpoint; onboarding is its INITIAL MODE.** The legacy `/ws/chat` onboarding
+> socket + its chat-bridge websocket handler are deleted (`landing/server.ts`
+> serves the SPA + HTTP only). The shared `InterviewEngine` (keyed on
+> `(project_slug, user_id)`, transport-agnostic) now emits over app-ws: a new
+> `app:` prefix in `buildRoutedSendButtonPrompt`/`buildRoutedSendImportProgress`
+> (via a composer-filled holder) translates each engine `ButtonPrompt` into the
+> app-ws `agent_message` superset (which already carries
+> options/prompt_id/allow_freeform/kind/upload_affordance). The surface gains
+> `on_session_open` (fires the first onboarding prompt on connect when onboarding
+> is active) + `on_button_choice` (a new structured `button_choice` inbound); the
+> composer's `isOnboardingActive()` routes each turn to `engine.advance`
+> (onboarding) or `buildLiveAgentTurn` (steady-state). The React client
+> (`chat-core` + `chat-react`) preserves + renders the button metadata
+> (`ButtonOptionRow`/image-gallery) and posts the choice back — onboarding runs
+> inline in the same chat surface, no special client path. The **web admin panel**
+> (`IntegrationsTab` + `integrations-client` over `/api/cores/integrations` +
+> `/api/cores/api-keys/<label>`) surfaces the global `admin` tab in the web
+> ProjectShell. Verified in a real headless Chromium (system Playwright):
+> `tests/e2e-browser/onboarding_walkthrough.py` (CI-skippable) — `/chat` → React →
+> fresh onboarding renders + advances over the single socket; Documents + Admin
+> tabs render.
+
 ## Message reactions (Track B Phase 4, slice 3) — `@neutron/chat-core` + app-ws
 
 Per-message emoji reactions across the web + mobile chat stack, MIRRORING the
