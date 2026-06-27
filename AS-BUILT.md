@@ -139,29 +139,50 @@ so editing the `.md` files the team reads changed nothing — guaranteed drift.
   `forge.md` flows through to the rendered Forge prompt (live single source) +
   all four roles resolve a non-empty prompt by type.
 
-**P1-4 — proactive morning brief + idle-nudge sweep ACTIVATED.** The
-`gateway/proactive/*` modules were built + tested but registered only behind
+**P1-4 — proactive daily brief ACTIVATED; idle-nudge ≥7 gate ported + ready.**
+The `gateway/proactive/*` modules were built + tested but registered only behind
 `tasks.proactive`, which the Open composer never set (whole tasks subsystem was
 dormant).
-- `open/composer.ts` now sets `tasks.proactive` (+ `enable_nudge_engine_cron`):
-  `resolveGeneralTopic` → the owner's General web topic; `listIdleTopics` →
-  the durable ButtonStore per-topic last-activity watermark; LLM seams over the
-  same warm `cc-llm` substrate (`buildAnthropicLlmCall`). LLM-less boots degrade
-  cleanly (template brief, no quality gate).
+- **Morning brief — LIVE.** `open/composer.ts` sets `tasks.proactive`:
+  `resolveGeneralTopic` → owner's General web topic, posting through a **durable
+  web sink** (below). LLM seams ride the same warm `cc-llm` substrate
+  (`buildAnthropicLlmCall`); LLM-less boots degrade cleanly (template brief).
+- **Durable web sink (`buildButtonStoreProactiveSink`).** Open's topics are
+  `app_socket` and proactive posts fire from a TIMER, so a post via the core
+  `ChannelRouter`'s live-only `AppWsAdapter` would fail ("no channel adapter
+  registered") / drop with no open socket. The sink instead persists an INERT,
+  already-resolved agent history turn via `ButtonStore.persistInertAgentTurn`
+  (NOT `emit`, which would leave an active unresolved prompt the next user
+  message attaches to) + best-effort live-push — the same durable path fired
+  reminders use. `tasks.proactive.sink` overrides the router; absent → router
+  (Telegram instances). [Codex P1 + P2.]
 - **LLM brief composition (Vajra parity):** `buildLlmBriefComposer` routes the
   resolved `BriefContext` through the warm LLM (grounded in exactly the resolved
   sources, no fabrication); the pure `composeMorningBrief` template is the
   deterministic fallback when the LLM throws/empties — the brief is never lost.
-- **Dual-rating ≥7 quality gate (Vajra parity):** ported into
-  `idle-nudge-sweep.ts` as `evaluateQualityGate` + the `rateNudge` LLM seam
+- **Dual-rating ≥7 quality gate (Vajra parity) — ported + tested + wired.**
+  `idle-nudge-sweep.ts` gains `evaluateQualityGate` + the `rateNudge` LLM seam
   (`buildLlmNudgeRater`) + a new `low_quality` skip reason. A candidate that
   clears idle/dedupe is ALSO rated 1–10 on leverage + gratitude and only posts
-  when BOTH ≥7; a null/abstain rating skips. Without it the sweep would nudge
-  every idle topic.
+  when BOTH ≥7; a null/abstain rating skips. The composer supplies `rateNudge`
+  so the sweep enforces it the moment it runs.
+- **Idle-nudge SWEEP — deliberately NOT auto-enabled (judgment call, noted).**
+  The composer does not set `listIdleTopics`, so the sweep cron does not
+  register. The sweep code + gate are complete and tested; what is NOT yet a
+  clean seam is a CORRECT production enumeration, which needs (1) BOTH the
+  `web:<owner>` (React web) and `app:<owner>` (Expo app-ws) topic namespaces —
+  `ButtonStore.listTopicsByUser` is single-prefix — and (2) a USER-TURN-ONLY
+  activity watermark for dedupe: `last_created_at` counts agent rows (incl. the
+  nudge's own durable row), so the sweep would treat its own post as "the user
+  returned" and re-nudge every idle cycle (Codex P1/P2). Shipping on the
+  agent-polluted, web-only watermark would mis-target + spam — worse than
+  deferring. **Follow-up:** add a user-activity ButtonStore query + dual-
+  namespace enumeration, then wire `listIdleTopics`.
 - VERIFY: `gateway/proactive/__tests__/*` — a real brief composes over real
-  sources + posts the LLM body via the sink; the nudge gate rejects a <7 (and a
-  null) candidate. `open/__tests__/open-proactive-activation.test.ts` pins the
-  composer wiring (credentialed + LLM-less boots).
+  sources + posts the LLM body via the durable sink (persist + live push +
+  persist-before-send); the nudge gate rejects a <7 (and a null) candidate.
+  `open/__tests__/open-proactive-activation.test.ts` pins the composer wiring
+  (credentialed + LLM-less boots; brief active, sweep deferred).
 
 ## 2026-06-27 — P2 follow-ups to #84: live project rail + one-shot start-token
 

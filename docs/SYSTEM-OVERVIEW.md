@@ -478,31 +478,41 @@ handler runs the deterministic fallback until a credential exists.
 
 The owner-facing proactive layer (Vajra parity). Both halves were built + tested
 early but stayed DEAD until P1-4 because they register only when
-`tasks.proactive` is set — and the Open composer never set it. They now ship ON
-(no feature flag); `open/composer.ts` wires `tasks.proactive` and both crons
-register in `build-core-modules.ts`, posting through the production
-`ChannelRouter` (`OutboundSink`).
+`tasks.proactive` is set — and the Open composer never set it. The daily brief
+now ships ON (no feature flag); `open/composer.ts` wires `tasks.proactive`.
 
-- **Daily morning brief** (`morning-brief.ts`). Once per owner-local day at/after
-  `brief_hour`, composes from live context (focus/task queue, optional calendar /
-  entity / project sources — each gathered behind its own try/catch) and posts to
-  the owner's General topic. **LLM composition (Vajra parity):**
-  `buildLlmBriefComposer` routes the resolved `BriefContext` through the warm
-  `cc-llm` substrate (grounded in exactly the resolved evidence, no fabrication);
-  the pure `composeMorningBrief` template is the deterministic fallback when the
-  LLM throws/empties, so the brief is never lost. Same-day idempotency lives in
-  `proactive_brief_log`.
-- **Idle-nudge sweep** (`idle-nudge-sweep.ts`). Hourly, for each idle
-  project-bound topic with a fresh ranker pick (`current_focus_pick`, from the
-  P6 nudge engine — also enabled in the Open composer), posts ONE
-  highest-leverage next action. Three gates, in order: idle threshold (default
+- **Daily morning brief** (`morning-brief.ts`) — **ACTIVE.** Once per owner-local
+  day at/after `brief_hour`, composes from live context (focus/task queue,
+  optional calendar / entity / project sources — each gathered behind its own
+  try/catch) and posts to the owner's General topic. **LLM composition (Vajra
+  parity):** `buildLlmBriefComposer` routes the resolved `BriefContext` through
+  the warm `cc-llm` substrate (grounded in exactly the resolved evidence, no
+  fabrication); the pure `composeMorningBrief` template is the deterministic
+  fallback when the LLM throws/empties, so the brief is never lost. Same-day
+  idempotency lives in `proactive_brief_log`.
+- **Durable web sink** (`button-store-sink.ts`). Open's topics are `app_socket`
+  and proactive posts fire from a timer, so they route through
+  `buildButtonStoreProactiveSink` — an `OutboundSink` that persists an INERT,
+  already-resolved agent history turn (`ButtonStore.persistInertAgentTurn`, so a
+  passive scheduled post never becomes the topic's active prompt) + best-effort
+  live-push, the same durable path fired reminders use — NOT the core
+  `ChannelRouter`'s live-only `AppWsAdapter` (which would drop a post with no
+  open socket). `tasks.proactive.sink` overrides the router; absent → router
+  (Telegram instances).
+- **Idle-nudge sweep** (`idle-nudge-sweep.ts`) — code + gate complete; sweep cron
+  **not yet auto-enabled** in Open. Per tick it would consider each idle
+  project-bound topic with a fresh ranker pick (`current_focus_pick`) and post
+  ONE highest-leverage next action through three gates: idle threshold (default
   4h) → dedupe (never re-nudge the same task until the owner returns) → the
   **dual-rating ≥7 quality gate** (`evaluateQualityGate` + the `rateNudge` LLM
   seam, `buildLlmNudgeRater`): a candidate is rated 1–10 on leverage + gratitude
   and only posts when BOTH ≥7; a null/abstain rating skips (`low_quality`).
-  Without the gate the sweep would nudge every idle topic. `listIdleTopics` in
-  the Open composer enumerates the owner's web topics + their last-activity
-  watermark from the durable ButtonStore.
+  Without the gate the sweep would nudge every idle topic. The composer does NOT
+  yet set `listIdleTopics` (so the sweep cron does not register): a correct
+  enumeration needs a user-turn-only activity watermark (`last_created_at` counts
+  agent rows, incl. the nudge's own, which would defeat dedupe) + both the
+  `web:` and `app:` topic namespaces. The `rateNudge` gate is wired and ready for
+  when that enumeration lands.
 
 ## Doc search (QMD-equivalent) — `@neutronai/doc-search`
 

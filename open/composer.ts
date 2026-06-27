@@ -103,10 +103,7 @@ import { PersonaPromptLoader } from '../gateway/realmode-composer/persona-loader
 import type { GraphComposer } from '../gateway/boot-helpers.ts'
 import type { CompositionInput } from '../gateway/composition.ts'
 import { buildLlmBriefComposer } from '../gateway/proactive/morning-brief.ts'
-import {
-  buildLlmNudgeRater,
-  type ProactiveTopicCandidate,
-} from '../gateway/proactive/idle-nudge-sweep.ts'
+import { buildLlmNudgeRater } from '../gateway/proactive/idle-nudge-sweep.ts'
 import { buildButtonStoreProactiveSink } from '../gateway/proactive/button-store-sink.ts'
 import { readSessionCookie, signSessionCookie } from '../landing/session-cookie.ts'
 
@@ -1404,31 +1401,29 @@ export function buildOpenGraphComposer(
       registry: landing.registry,
     })
     const tasksConfig: NonNullable<CompositionInput['tasks']> = {
-      // The nudge sweep posts the ranker's "do this next" pick; enable the
-      // ranker so the sweep has fresh picks (no-op every tick when LLM-less).
-      enable_nudge_engine_cron: true,
-      ...(proactiveLlm !== null ? { nudge_engine: { llm: proactiveLlm } } : {}),
       proactive: {
+        // Morning brief — ACTIVE. Posts the daily brief to the owner's General
+        // topic through the durable web sink.
         sink: proactiveSink,
         resolveGeneralTopic: (): string => proactiveGeneralTopic,
-        // Enumerate the owner's web topics + their last-activity watermark from
-        // the durable ButtonStore history (the General + per-project rows). The
-        // sweep's idle threshold + dedupe + ≥7 gate decide what actually posts.
-        listIdleTopics: async (): Promise<ProactiveTopicCandidate[]> => {
-          const rows = await landing.buttonStore.listTopicsByUser({
-            user_id_prefix: proactiveGeneralTopic,
-            now: Date.now(),
-          })
-          return rows.map((row) => ({
-            topic_id: row.topic_id,
-            project_slug,
-            last_activity_ms: row.last_created_at,
-          }))
-        },
+        // Idle-nudge SWEEP — DELIBERATELY NOT auto-enabled here (no
+        // `listIdleTopics`), so the sweep cron does not register. The sweep
+        // CODE + the ≥7 dual-rating quality gate (`rateNudge`) are complete and
+        // unit-tested; what is NOT yet a clean seam is a CORRECT production
+        // enumeration, which needs (1) BOTH the `web:<owner>` (React web) AND
+        // `app:<owner>` (Expo app-ws) topic namespaces — `ButtonStore.list-
+        // TopicsByUser` is single-prefix — and (2) a USER-TURN-ONLY activity
+        // watermark for dedupe: `last_created_at` counts agent rows (incl. the
+        // nudge's own durable row), so the sweep would see its own post as
+        // "the user returned" and re-nudge every idle cycle (Codex P1/P2,
+        // 2026-06-27). Enabling it on the agent-polluted, web-only watermark
+        // would mis-target + spam — worse than deferring. The `rateNudge` gate
+        // is still supplied so the sweep enforces ≥7 the moment a correct
+        // `listIdleTopics` lands. See AS-BUILT for the follow-up.
         ...(proactiveLlm !== null
           ? {
               // LLM brief over real sources (Vajra parity) + the dual-rating
-              // ≥7 nudge quality gate. Both degrade safely without an LLM.
+              // ≥7 nudge quality gate (ready for the sweep). Degrade safely.
               composeBrief: buildLlmBriefComposer(proactiveLlm),
               rateNudge: buildLlmNudgeRater(proactiveLlm),
             }
