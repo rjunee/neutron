@@ -2,6 +2,43 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-26 — P1b: wire the app-ws/app-api surfaces into Open (React chat + Documents + admin work end-to-end)
+
+**Context.** The React client became the only web client (#82), but in a fresh
+single-owner Open install it had **no backends mounted**: the chat socket
+(`/ws/app/chat`), the Documents tab API (`/api/app/projects/<id>/docs/*`), and the
+admin/api-key endpoints (`/api/cores/*`) all 404'd. Root cause: `open/composer.ts`
+never constructed the app-ws / app-docs / cores-integrations surfaces and provided
+no auth resolver. So the React UI rendered but didn't function (chat especially —
+`chat-react/config.ts` chats over `/ws/app/chat`, which was unmounted).
+
+**What shipped (Path A, single-owner localhost trust — Ryan-locked; no flags, one
+code path; Managed layers tenant auth as the wrapper).** All in `open/composer.ts`:
+- **App-ws CHAT** (`/ws/app/chat` + `/api/app/chat/send`): `InMemoryAppWsSession`
+  `Registry` + `AppWsAdapter` with a hand-rolled `IncomingEventReceiver` that runs
+  a real `buildLiveAgentTurn` (the SAME engine the web `/ws/chat` bridge uses) per
+  inbound app-ws message and fans the reply back via `adapter.send` (translating
+  `ChatOutbound` → app-ws `OutgoingMessage`, echoing `project_id`). No reusable
+  channel→turn bridge exists (the web path embeds dispatch in chat-bridge), so the
+  receiver is hand-rolled. LLM-less boxes mount the surface but reply with a clear
+  "no AI credential" notice.
+- **Per-project Documents** (`/api/app/projects/<id>/docs/*`): `DocStore({owner_
+  home})` + `createAppDocsSurface`, served off the real on-disk tree
+  (`<owner_home>/Projects/<id>/docs`).
+- **Admin/integrations** (`/api/cores/integrations`, `/api/cores/api-keys/*`):
+  adding `cores.auth` makes `wireCoresSurfaces` auto-build them. (The api-key
+  endpoints are reachable; the admin *panel UI* is Expo-mobile-only — a web panel
+  is net-new UI, out of scope.)
+- All three share `createAppWsAuthResolver({ project_slug, bypass: true })`: the
+  owner is the sole user, the box binds 127.0.0.1, and the HTTP start-token/cookie
+  already authenticates them, so the app-bearer (`dev:<owner>`, the React client's
+  default token) is accepted directly.
+
+**Verified in the REAL install over the REAL React path** (`/ws/app/chat`, not the
+bridge): a real turn round-trips (`[live-agent-turn] event=replied topic=app:owner
+scope=ostro elapsed_ms=6678`, reply "PONG"); the docs tree returns real content
+(`history.md`); `/api/cores/integrations` → 200. See PR #84.
+
 ## 2026-06-26 — P1a: stamp `topic_id` on every outbound web envelope (notification misrouting fix)
 
 **Context.** The web client multiplexes every topic over ONE socket and uses a

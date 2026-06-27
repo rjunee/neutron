@@ -660,6 +660,18 @@ engine is NOT forked). Scope is receipts only.
   adapter option — wired in tests + composers, not yet in the live gateway
   composition (the app-ws surface itself isn't productionised there yet).
 
+> **P1b (2026-06-26) — the app-ws surface IS now wired into the single-owner Open
+> boot.** `open/composer.ts` constructs `InMemoryAppWsSessionRegistry` +
+> `AppWsAdapter` (with a hand-rolled receiver that runs `buildLiveAgentTurn` and
+> fans the reply via `adapter.send`) + `createAppWsSurface`, and returns
+> `app_ws_surface` + `app_docs_surface` in the CompositionInput, plus `cores.auth`
+> for the `/api/cores/*` admin endpoints. So a fresh Open install serves working
+> React chat (`/ws/app/chat`), Documents (`/api/app/projects/<id>/docs`), and
+> admin endpoints — all behind ONE single-owner localhost-trust `AppWsAuthResolver`
+> (`bypass:true`; the owner is the sole 127.0.0.1 user, already HTTP-authed). No
+> `chat_log`/`receipt_log` wired yet in Open (live fan-out works; resume/seq is a
+> follow-up). Managed layers tenant auth as the thin wrapper.
+
 ## Message reactions (Track B Phase 4, slice 3) — `@neutron/chat-core` + app-ws
 
 Per-message emoji reactions across the web + mobile chat stack, MIRRORING the
