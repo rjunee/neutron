@@ -65,6 +65,18 @@ command-filter remains the user's typed-slash path; both share one underlying
 tool implementation. (Per the brief: "a user-typed /cmd may still route to the
 SAME underlying tool.")
 
+**Known follow-up (Codex r1 P2) — `message_search` topic scope.** The bridge
+dispatches against the in-process `McpServer`, which resolves `project_slug`
+correctly (every project/owner-scoped tool works) but binds `topic_id: null`
+because the warm substrate is topic-agnostic by design (the locked `AgentSpec`
+carries no per-turn topic). So `message_search`'s current-conversation default
+has no topic to anchor on, and Open's per-topic `HistorySource` runtime can't
+search globally either — an agent-initiated `message_search` returns `[]`.
+`doc_search` (proven in the real-turn) and all other tools are unaffected.
+Binding the live turn's topic into the tool dispatch is a follow-up requiring
+per-turn topic threading through the turn lifecycle (out of P0-1's transport
+scope).
+
 **Verification.** `bun test` — `build-repl-argv.test.ts` (the `--allowedTools`
 grant + `--tools ""` untouched), `tool-bridge.test.ts` (2nd mcpServers entry +
 manifest only when opted-in; opted-OUT import REPL gets neither; sink

@@ -972,6 +972,21 @@ class ReplSink {
       // process-global `ReplToolBridge` (the gateway's in-process `McpServer`),
       // NOT a per-session driver, so they are handled BEFORE the session lookup
       // (a tool call carries no in-flight turn). Token-gated like every sink POST.
+      //
+      // TOPIC CONTEXT (Codex r1 [P2]): `McpServer.dispatch` resolves `project_slug`
+      // from its own instance slug (correct for every project/owner-scoped tool —
+      // doc_search, reminders, cal, email, note, research, skill_forge,
+      // dispatch_agent, project_*), but binds `topic_id: null` because the warm
+      // substrate is topic-AGNOSTIC by design (one REPL multiplexes topics over
+      // the dev-channel; the locked `AgentSpec` carries no per-turn topic). The
+      // ONLY tool that wants the originating topic is `message_search`'s
+      // current-conversation default — and Open's per-topic `HistorySource`
+      // runtime can't search globally anyway, so an agent-initiated
+      // `message_search` returns []. Binding the live turn's topic into this
+      // dispatch (so `message_search` scopes to the active conversation) needs
+      // per-turn topic threading through the turn lifecycle — a follow-up beyond
+      // P0-1's transport. The agent can still recall via `doc_search`. See
+      // AS-BUILT "P0-1 known follow-up".
       if (url.pathname === '/tools') {
         return Response.json({ tools: replToolBridge?.listToolSchemas() ?? [] })
       }
