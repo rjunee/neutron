@@ -66,10 +66,14 @@ export type DocLinkChannel = 'app' | 'web' | 'telegram'
  * trailing `/`. Matches the normalization in
  * `onboarding/interview/final-handoff-config.ts`.
  */
-export const WEB_APP_BASE = (process.env.NEUTRON_WEB_APP_BASE ?? '').replace(
-  /\/+$/,
-  '',
-)
+export function webAppBase(): string {
+  return (process.env.NEUTRON_WEB_APP_BASE ?? '').replace(/\/+$/, '')
+}
+// Back-compat const (boot-time snapshot). `buildDocLink`/`parseDocLink` read
+// `webAppBase()` at CALL time so the env is honored if set after import and so
+// tests are not order-fragile (the boot-frozen const silently ignored a later
+// env set — the 2026-06-27 doc-links-parity cross-test-pollution incident).
+export const WEB_APP_BASE = webAppBase()
 
 /**
  * Vault read-redirector base for legacy (non-project-scoped) doc
@@ -270,7 +274,7 @@ export function buildDocLink(input: BuildDocLinkInput): string {
       // appends as `&line=<n>` (or `&range=<n>-<m>`) instead of `?…`.
       // `appendToWebQuery` rewrites the leading `?` of the anchor
       // string accordingly so the multi-key URL is well-formed.
-      return `${WEB_APP_BASE}/projects/${project_id}/docs?path=${encodeURIComponent(normalised)}${appendToWebQuery(anchor)}`
+      return `${webAppBase()}/projects/${project_id}/docs?path=${encodeURIComponent(normalised)}${appendToWebQuery(anchor)}`
     case 'telegram':
       // Per sprint roadmap § 5 architectural decision: ADD `neutron://…`
       // links for project-scoped docs on Telegram.
@@ -386,7 +390,7 @@ export function parseDocLink(url: string): ParsedDocLink | null {
   // query string (`?path=<encoded>`). Match it before the global
   // `?`/`#` rejection so the rejection can still guard the other
   // shapes against query-string smuggling.
-  const webPrefix = `${WEB_APP_BASE}/projects/`
+  const webPrefix = `${webAppBase()}/projects/`
   if (url.startsWith(webPrefix)) {
     return parseWebShape(url.slice(webPrefix.length))
   }
