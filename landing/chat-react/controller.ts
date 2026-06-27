@@ -27,6 +27,8 @@
  */
 
 import { groupReactions } from '@neutron/chat-core'
+
+import type { ProjectTab } from './config.ts'
 import type {
   ChatMessage,
   ChatMessageOption,
@@ -98,6 +100,13 @@ export interface ChatViewModel {
   /** Count of sends still queued/unacked (offline tail). */
   pending: number
   projectId: string | null
+  /**
+   * The owner's project list for the rail. Seeded from the page bootstrap and
+   * refreshed LIVE when the server fans a `projects_changed` frame (FIX 1) — so
+   * projects created mid-onboarding appear without a reload. Reactive (on the
+   * VM) rather than read from the static bootstrap config.
+   */
+  projects: ProjectTab[]
   /** Track B Phase 4 — delivery state of the most recent user message, for a
    *  Telegram-style status line under the thread. Null when none sent. */
   latestUserDelivery: DeliveryState | null
@@ -142,6 +151,8 @@ export interface ControllerSinks {
 export interface NeutronChatControllerOptions {
   createSession: (sinks: ControllerSinks) => ControllerSession
   projectId?: string | null
+  /** Initial project list from the page bootstrap (FIX 1 — kept reactive). */
+  projects?: ProjectTab[]
 }
 
 interface StreamEntry {
@@ -158,6 +169,8 @@ export class NeutronChatController {
   private awaitingReply = false
   private pending = 0
   private projectId: string | null
+  /** FIX 1 — reactive project list (seeded from bootstrap, updated on frame). */
+  private projects: ProjectTab[]
   private readonly listeners = new Set<(vm: ChatViewModel) => void>()
   private vm: ChatViewModel
   private seq = 0
@@ -168,6 +181,7 @@ export class NeutronChatController {
 
   constructor(opts: NeutronChatControllerOptions) {
     this.projectId = opts.projectId ?? null
+    this.projects = opts.projects ?? []
     this.session = opts.createSession({
       onChange: () => {
         void this.handleChange()
@@ -266,6 +280,41 @@ export class NeutronChatController {
     }
     if (type === 'error') {
       this.awaitingReply = false
+      this.publish()
+      return
+    }
+    // FIX 1 — a live project-list refresh (projects created/changed mid-session,
+    // e.g. during onboarding). Replace the rail's list. When we currently have
+    // NO active project (General) and projects just appeared, auto-select the
+    // server's suggested first project — mirroring the page bootstrap's
+    // `active_project_id` so the per-project Documents/Tasks/Admin tabs render
+    // live without a reload. We only auto-select on this 0→active transition, so
+    // a user who deliberately navigated to General after having projects isn't
+    // hijacked.
+    if (type === 'projects_changed') {
+      const raw = Array.isArray(f['projects']) ? (f['projects'] as unknown[]) : []
+      const projects: ProjectTab[] = []
+      for (const p of raw) {
+        if (typeof p !== 'object' || p === null) continue
+        const rec = p as Record<string, unknown>
+        const id = rec['id']
+        const label = rec['label']
+        if (typeof id === 'string' && id.length > 0 && typeof label === 'string') {
+          projects.push({ id, label })
+        }
+      }
+      // Auto-select ONLY on a genuine 0→N transition (the list was empty and a
+      // first project just appeared) — the brand-new-owner case the bug
+      // describes. A user who deliberately navigated to General while projects
+      // already existed is left in General.
+      const hadNoProjects = this.projects.length === 0
+      this.projects = projects
+      if (hadNoProjects && this.projectId === null && projects.length > 0) {
+        const suggested = f['active_project_id']
+        const activeId =
+          typeof suggested === 'string' && suggested.length > 0 ? suggested : projects[0]!.id
+        this.projectId = activeId
+      }
       this.publish()
     }
   }
@@ -433,6 +482,7 @@ export class NeutronChatController {
       status: this.connStatus,
       pending: this.pending,
       projectId: this.projectId,
+      projects: this.projects,
       latestUserDelivery,
     }
   }

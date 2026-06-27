@@ -825,9 +825,9 @@ export function ChatApp({
     <EditsContext.Provider value={editsCtx}>
     <ButtonsContext.Provider value={buttonsCtx}>
     <div className="car-shell">
-      {config.projects.length > 0 && (
+      {vm.projects.length > 0 && (
         <TopicRail
-          projects={config.projects}
+          projects={vm.projects}
           activeId={vm.projectId}
           onSelect={(id) => controller.setProject(id)}
         />

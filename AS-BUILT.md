@@ -2,6 +2,54 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-27 — P2 follow-ups to #84: live project rail + one-shot start-token
+
+Two P2 follow-ups from the #84 chat-path consolidation, both rooted in
+`open/composer.ts`. No feature flags; single path; all functionality in Open.
+
+**FIX 1 (user-visible) — project rail/tabs now refresh LIVE after onboarding
+creates projects.** The served `/chat` HTML injects the owner's project list
+ONCE at page-load (`projectsBootstrapScript`); a brand-new owner bootstrapped
+with `__neutron_projects=[]`, and when onboarding CREATED projects in the SAME
+session nothing told the React client, so the Documents/Tasks/Admin tabs only
+appeared after a manual reload.
+- `channels/adapters/app-ws/envelope.ts`: new `AppWsOutboundProjectsChanged`
+  (`type:'projects_changed'`) outbound frame carrying the fresh canonical project
+  list + a suggested `active_project_id`.
+- `open/composer.ts`: factored the project-list read into `readProjectRows()`
+  (shared by the bootstrap injection + the new emit). After each onboarding turn
+  (`advanceOnboardingText` / `advanceOnboardingChoice`) — and seeded at
+  `on_session_open` — the composer snapshot-diffs the `projects` table and fans a
+  `projects_changed` frame over the owner's app-ws topic when the set changed.
+- `landing/chat-react/{controller,main,ChatApp}.tsx`: the controller seeds its
+  project list from the bootstrap and keeps it REACTIVE — on a `projects_changed`
+  frame it replaces the rail list and, ONLY on a genuine 0→N transition (was
+  empty, first project just appeared), auto-selects the first project (mirroring
+  the bootstrap's `active_project_id`) so the per-project tabs render. `ChatApp`'s
+  rail now reads `vm.projects` instead of the static `config.projects`.
+- **Real-browser verified** (headless Chromium, system Playwright): a fresh
+  `/chat` mounts with 0 project tabs (General); after a project is created
+  server-side the rail shows `General + Acme` and the `Chat/Documents/Tasks/Admin`
+  tabs render WITHOUT a reload.
+
+**FIX 2 (security hygiene) — the one-shot `?start=` token is single-use again.**
+With the legacy `/ws/chat` socket deleted (#82/#84), the token is now consumed
+ONLY at the HTTP `/chat?start=` cookie-mint gate, which signature-trusted it but
+never `claimStartTokenJti`'d it — so the same `?start=` URL could re-mint the
+owner cookie repeatedly within its 15-min TTL.
+- `open/composer.ts`: a shared `InMemoryConsumedTokens` store is threaded into
+  BOTH `buildLandingStack` and the `openFetch` gate; the gate now verifies AND
+  atomically claims the token's JTI before minting the owner cookie, so a given
+  token mints the cookie at most once. A replayed/invalid token still serves the
+  page but mints no cookie.
+
+**Tests.** `open/__tests__/open-start-token-single-use.test.ts` (first use mints /
+replay rejected / garbage rejected), `open/__tests__/open-projects-changed-wiring.test.ts`
+(live `projects_changed` emit over `/ws/app/chat`), and new
+`landing/chat-react/__tests__/controller.test.ts` cases (seed / 0→N auto-select /
+no-hijack / malformed-frame). Root + chat-react `tsc`, leak-gate, and the open /
+chat-react / app-ws suites all green.
+
 ## 2026-06-26 — P1b consolidate: ONE chat path (onboarding unified) + web admin panel + real-browser verification
 
 **Scope (Ryan-locked, final).** Finish the consolidation the prior P1b entry
