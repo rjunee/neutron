@@ -120,6 +120,7 @@ import { createAppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
 import type { AppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
 import { DocStore } from '../gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
+import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
 import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
 import { createAppWsSurface } from '../gateway/http/app-ws-surface.ts'
@@ -1217,6 +1218,16 @@ export function buildOpenGraphComposer(
       project_slug,
     })
 
+    // P1b — app TABS resolver (`/api/app/projects/<id>/tabs` + `/api/app/tabs`).
+    // The React `ProjectShell` fetches this BEFORE rendering non-chat tabs; when
+    // it 404s the shell falls back to a Chat-only view and the Documents/Tasks
+    // tabs stay HIDDEN even though `/docs/*` is mounted (Codex r1 [P2]). A
+    // builtin-only surface (auth only) returns the per-project Chat/Documents/
+    // Tasks + global Admin descriptors from `tabs/registry.ts`, so the Documents
+    // tab actually renders. (Core-contributed project tabs would need
+    // cores+installations; the builtins cover the parity gate.)
+    const appTabsSurface = createAppTabsSurface({ auth: appOwnerAuth })
+
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
     // transport the served React client ACTUALLY uses
     // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). It was
@@ -1426,6 +1437,9 @@ export function buildOpenGraphComposer(
         websocket: appWsSurface.websocket,
       },
       app_docs_surface: { handler: appDocsSurface.handler },
+      // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
+      // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
+      app_tabs_surface: { handler: appTabsSurface.handler },
     }
   }
 }
