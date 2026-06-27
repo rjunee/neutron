@@ -174,6 +174,59 @@ test('finalize is idempotent: a second call on a completed row is a no-op', asyn
   h.db.close()
 })
 
+test('finalize reuses a pre-existing project whose name slugifies to the same id (no duplicate row)', async () => {
+  const h = makeHarness()
+
+  // A project row ALREADY exists under id 'x' whose name 'Acme' slugifies to
+  // 'acme' (the slug finalize would otherwise mint a NEW row at). Pre-#fix
+  // INSERT OR IGNORE de-duped only on the PK, so this would land a SECOND
+  // 'acme' row → two Acme projects in the rail.
+  const iso = new Date(0).toISOString()
+  await h.db.run(
+    `INSERT INTO projects
+       (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
+    ['x', 'Acme', 'pre-existing context', iso, iso],
+  )
+  expect(slugifyProjectId('Acme')).toBe('acme') // guards the premise: id 'x' ≠ slug 'acme'
+
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { primary_projects: ['Acme'] },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // EXACTLY ONE Acme row — the pre-existing 'x' row was reused, not duplicated.
+  const acmeRows = h.db
+    .prepare<{ id: string; name: string }, []>(
+      `SELECT id, name FROM projects WHERE name = 'Acme' AND deleted_at IS NULL`,
+    )
+    .all()
+  expect(acmeRows.length).toBe(1)
+  expect(acmeRows[0]?.id).toBe('x')
+  // No second row was minted at the slug id.
+  const slugRow = h.db
+    .prepare<{ id: string }, [string]>(
+      `SELECT id FROM projects WHERE id = ?`,
+    )
+    .get('acme')
+  expect(slugRow ?? null).toBeNull()
+
+  // The cli wow-shell topic binds to the EXISTING id 'x' (materialized against it).
+  const topic = h.db
+    .prepare<{ one: number }, [string]>(
+      `SELECT 1 AS one FROM topics WHERE channel_kind = 'cli' AND channel_topic_id = ?`,
+    )
+    .get('wow-shell-x')
+  expect(topic ?? null).not.toBeNull()
+
+  h.db.close()
+})
+
 test('finalize materializes from import_result.proposed_projects when supplied', async () => {
   const h = makeHarness()
   const seeded = await h.stateStore.upsert({

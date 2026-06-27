@@ -292,7 +292,13 @@ async function materializeProjects(
     if (seenSlugs.has(slug)) continue
     seenSlugs.add(slug)
     try {
-      const outcome = await ensureProjectRow(deps, project, slug, import_result, now())
+      const { outcome, bind_id } = await ensureProjectRow(
+        deps,
+        project,
+        slug,
+        import_result,
+        now(),
+      )
       if (outcome === 'skipped') {
         // A soft-deleted row holds this slug — the user deleted the project.
         // Honor that: never resurrect it, never materialize, never report it.
@@ -300,9 +306,12 @@ async function materializeProjects(
       }
       // On-disk materialization is best-effort + non-throwing per the
       // materializer's own contract; a failure lands in its outcome only.
+      // Materialize against the RESOLVED bind id (which may be a pre-existing
+      // row's id, not the freshly-computed slug) so the on-disk repo + memory
+      // page index against the same project the DB row binds to.
       await materializer.materialize({
         project,
-        slug,
+        slug: bind_id,
         import_result,
       })
     } catch (err) {
@@ -351,18 +360,59 @@ function resolveProjects(
 }
 
 /**
- * Create one real `projects` row + its cli wow-shell `topics` binding in a
- * single transaction, keyed on the deterministic `slugifyProjectId(name)` so
- * the rail's `SELECT id,name FROM projects WHERE deleted_at IS NULL` returns
- * it. Replicates the minimal write `03-project-shells.ts`'s (module-private)
- * `reconcileProject` performs — matching its exact column set, the
- * `INSERT OR IGNORE` idempotency, the NULL `projects.topic_id` (migration 0053
- * reserves it for the Telegram thread id; cli shells have none), and the
- * soft-deleted-row skip (never resurrect a project the user deleted).
+ * Resolve which existing `projects` row this onboarding project should bind
+ * to, BEFORE we mint a new slug-keyed row. Mirrors `03-project-shells.ts`'s
+ * `resolveBindTarget` (the old wow-shell path) so finalize never creates a
+ * SECOND row for a project that already exists under a different id. Two-step:
  *
- * Returns 'created' when a new row landed this run, 'existing' when one was
- * already present (idempotent re-run), 'skipped' when a soft-deleted row holds
- * the slug.
+ *   1. The deterministic slug row (`id = slugifyProjectId(name)`).
+ *   2. Failing that, a live row whose NAME normalizes (via the SAME
+ *      `slugifyProjectId`) to this slug but was persisted under a DIFFERENT id.
+ *      Example: a pre-existing row `id='x'`, `name='Acme'` — `slugifyProjectId
+ *      ('Acme') === 'acme'`, NOT `'x'`. Keying only on the slug missed it, so a
+ *      re-onboard minted a SECOND live "Acme" (id `acme`) while the original
+ *      `x` row lingered → the rail showed TWO. This name-normalized fallback
+ *      resolves the existing row instead.
+ *
+ * Both lookups filter `deleted_at IS NULL` so a soft-deleted row is never
+ * resolved as a bind target — `ensureProjectRow` separately detects a
+ * soft-deleted row sitting on the resolved id and returns `'skipped'`.
+ */
+function resolveBindTarget(db: ProjectDb, slug: string): string {
+  const byId = db
+    .prepare<{ id: string }, [string]>(
+      `SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .get(slug)
+  if (byId != null) return byId.id
+  const live = db
+    .prepare<{ id: string; name: string }, []>(
+      `SELECT id, name FROM projects WHERE deleted_at IS NULL`,
+    )
+    .all()
+  for (const row of live) {
+    if (slugifyProjectId(row.name) === slug) return row.id
+  }
+  return slug
+}
+
+/**
+ * Create one real `projects` row + its cli wow-shell `topics` binding in a
+ * single transaction. The project id is the deterministic
+ * `slugifyProjectId(name)` OR — when a row already exists whose id matches the
+ * slug or whose name slugifies to it — the existing row's id (see
+ * `resolveBindTarget`). Replicates the minimal write `03-project-shells.ts`'s
+ * (module-private) `reconcileProject` performs — matching its exact column
+ * set, the `INSERT OR IGNORE` idempotency, the NULL `projects.topic_id`
+ * (migration 0053 reserves it for the Telegram thread id; cli shells have
+ * none), and the soft-deleted-row skip (never resurrect a project the user
+ * deleted).
+ *
+ * Returns `bind_id` (the id the row/topic/materializer key off) plus an
+ * outcome: 'created' when a new row landed this run, 'existing' when one was
+ * already present (idempotent re-run / pre-existing project), 'skipped' when a
+ * soft-deleted row holds the resolved id. When the resolved id is a
+ * pre-existing live row, we REUSE it — no second row, no duplicate binding.
  */
 async function ensureProjectRow(
   deps: OnboardingFinalizeDeps,
@@ -370,26 +420,31 @@ async function ensureProjectRow(
   slug: string,
   import_result: ImportResult | null,
   nowMs: number,
-): Promise<'created' | 'existing' | 'skipped'> {
+): Promise<{ outcome: 'created' | 'existing' | 'skipped'; bind_id: string }> {
   const name = project.name.trim()
   const description = synthesizeProjectContext(project, import_result)
   const iso = new Date(nowMs).toISOString() // projects.created_at/updated_at are TEXT ISO
   const topicTs = nowMs / 1000 // topics.created_at/updated_at are REAL epoch-seconds
   return deps.db.transaction(async (tx) => {
+    // Resolve the row to bind: the slug row, OR an existing live row whose
+    // name normalizes to the same slug under a different id. Reusing it is
+    // what kills the duplicate-row class this fix targets.
+    const bind_id = resolveBindTarget(deps.db, slug)
+
     // A soft-deleted row occupying this id is intentional user state (they
     // deleted the project). Never resurrect/bind/report it.
     const deletedRow = deps.db
       .prepare<{ id: string }, [string]>(
         `SELECT id FROM projects WHERE id = ? AND deleted_at IS NOT NULL`,
       )
-      .get(slug)
-    if (deletedRow != null) return 'skipped'
+      .get(bind_id)
+    if (deletedRow != null) return { outcome: 'skipped' as const, bind_id }
 
     const existingRow = deps.db
       .prepare<{ id: string }, [string]>(
         `SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL`,
       )
-      .get(slug)
+      .get(bind_id)
     const exists = existingRow != null
 
     if (!exists) {
@@ -400,19 +455,20 @@ async function ensureProjectRow(
            (id, name, description, persona, privacy_mode, billing_mode,
             created_at, updated_at)
          VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
-        [slug, name, description, iso, iso],
+        [bind_id, name, description, iso, iso],
       )
     }
     // The wow-shell topic IS the durable binding marker; INSERT OR IGNORE on
-    // its (channel_kind, channel_topic_id) keeps re-fires idempotent.
+    // its (channel_kind, channel_topic_id) keeps re-fires idempotent AND a
+    // reuse of a pre-existing row from minting a duplicate binding.
     await tx.run(
       `INSERT OR IGNORE INTO topics
          (id, project_slug, project_id, channel_kind, channel_topic_id,
           privacy_mode, status, created_at, updated_at)
        VALUES (?, ?, ?, 'cli', ?, 'regular', 'active', ?, ?)`,
-      [randomUUID(), deps.project_slug, slug, `wow-shell-${slug}`, topicTs, topicTs],
+      [randomUUID(), deps.project_slug, bind_id, `wow-shell-${bind_id}`, topicTs, topicTs],
     )
-    return exists ? 'existing' : 'created'
+    return { outcome: exists ? ('existing' as const) : ('created' as const), bind_id }
   })
 }
 
