@@ -111,6 +111,14 @@ import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
 import { createChatHistorySurface } from '../gateway/http/chat-history-surface.ts'
 import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './owner-identity.ts'
+// P1b (2026-06-26) — wire the per-project Documents backend + the cores
+// integrations/api-keys surface into the single-owner Open boot. Both authorize
+// against ONE single-owner localhost-trust resolver (Path A): the owner is the
+// only user and is already authed at the HTTP start-token/cookie layer, so the
+// app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
+import { createAppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
+import { DocStore } from '../gateway/http/doc-store.ts'
+import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
@@ -1152,6 +1160,30 @@ export function buildOpenGraphComposer(
       },
     })
 
+    // P1b — single-owner localhost-trust auth resolver (Path A, Ryan-locked
+    // 2026-06-26). The owner is the sole user, the server binds 127.0.0.1, and
+    // the HTTP layer already authenticates them via the start-token/cookie, so
+    // the app-bearer (`dev:<owner_user_id>`, the chat-react client's default
+    // token) is accepted directly — no cryptographic mint needed for a
+    // single-owner box. Managed layers its own tenant auth as the thin wrapper.
+    // ONE resolver feeds BOTH the per-project docs surface AND the cores
+    // integrations/api-keys surface (no flag, single code path).
+    const appOwnerAuth = createAppWsAuthResolver({ project_slug, bypass: true })
+
+    // P1b — per-project Documents backend. The chat-react Documents tab
+    // (`landing/chat-react/docs-client.ts`) calls
+    // `/api/app/projects/<id>/docs/*`; `createAppDocsSurface` serves it off the
+    // real on-disk docs tree (`DocStore` → `<owner_home>/Projects/<id>/docs`),
+    // which the project setup already populates. Mounted via
+    // `composition.app_docs_surface` (gateway/composition.ts) → compose.ts route
+    // chain. Previously unmounted in Open, so the tab 404'd.
+    const docStore = new DocStore({ owner_home })
+    const appDocsSurface = createAppDocsSurface({
+      store: docStore,
+      auth: appOwnerAuth,
+      project_slug,
+    })
+
     return {
       db,
       project_slug,
@@ -1184,6 +1216,11 @@ export function buildOpenGraphComposer(
         // Google-backed Core installs LIVE the moment its grant exists, and
         // fail-soft/hidden until then (optional-until-credentialed at install).
         prompter: coresWiring.prompter,
+        // P1b — supplying `auth` triggers `wireCoresSurfaces` to auto-build the
+        // `/api/cores/integrations` + `/api/cores/api-keys/*` admin endpoints
+        // (API-key collection). Without it the surface was never mounted in Open
+        // → the admin/integrations routes 404'd. Single-owner localhost trust.
+        auth: appOwnerAuth,
       },
       // Doc-search agent tools (doc_search / doc_read) — registered by the
       // `tools` module when a runtime is present. Omitted if the index
@@ -1249,6 +1286,10 @@ export function buildOpenGraphComposer(
         fetch: openFetch,
         websocket: landing.websocket,
       },
+      // P1b — mount the per-project Documents backend so the chat-react
+      // Documents tab resolves real docs instead of 404. `gateway/composition.ts`
+      // forwards this into the compose.ts route chain.
+      app_docs_surface: { handler: appDocsSurface.handler },
     }
   }
 }
