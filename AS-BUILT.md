@@ -2,6 +2,109 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-27 — P0-1: native-MCP tool transport — the spawned agent calls Cores/tools as native MCP tool-calls
+
+**The gap (lift, not reinvention).** Neutron lifted Vajra's spawn argv verbatim
+(`--mcp-config` + `--dangerously-load-development-channels`) but the per-session
+mcp.json carried **only the dev-channel reply sink** — the in-process
+`ToolRegistry`/`McpServer` (`mcp/server.ts`, whose stdio transport was deferred
+to "P1 S5+") was unreachable by the spawned `claude`. So the agent could not
+decide to call a Core mid-reasoning, chain (search → reason → act → reply), or
+receive a structured `tool_result`; capabilities reached the user only via the
+pre-LLM command-filter (`open/composer.ts` `buildChainedChatCommandFilter`),
+which short-circuits the user's `/cmd` BEFORE the model runs. This ports Vajra's
+multi-server `generateMcpConfig` pattern (`~/vajra/gateway/index.ts:949-968`):
+add a SECOND `mcpServers` entry — a thin stdio bridge fronting the in-process
+registry — so the agent makes native, structured, self-initiated tool calls.
+
+**What shipped (no flags; one path for the agent):**
+- `runtime/adapters/claude-code/persistent/tools-bridge.ts` (NEW) — a stdio MCP
+  server (sibling of `dev-channel.ts`, same orphan-exit hardening) that fronts
+  the in-process registry. It advertises tools from a per-session manifest the
+  substrate writes at spawn time, and forwards each `CallTool` to the substrate's
+  reply-sink HTTP server (`POST /tool-call`) — the same loopback the dev-channel
+  uses for `/reply`. Tools surface to the model as `mcp__neutron__<toolname>`
+  with their real `input_schema`, so the model emits a structured `tool_use` and
+  gets a structured `tool_result` it can act on in the same turn.
+- `persistent-repl-substrate.ts` — the per-session mcp.json now carries the
+  dev-channel **plus** (when opted in) the `neutron` tools-bridge entry + a
+  written tools manifest; the `ReplSink` gained session-independent `/tools` +
+  `/tool-call` routes that dispatch against a late-bound `ReplToolBridge`. The
+  bridge is wired LATE (`setReplToolBridge`) because the substrate is built in
+  the composer BEFORE `composeProductionGraph` builds the `McpServer` + registers
+  the Cores/doc-search/etc.
+- `mcp/server.ts` — `McpServer.listToolSchemas()` (the discovery half;
+  `dispatch()` is the invocation half). `McpServer` structurally satisfies
+  `ReplToolBridge`.
+- `gateway/composition/build-core-modules.ts` + `gateway/composition.ts` — a new
+  `repl-tool-bridge` module (deps `['mcp']`) points the substrate's late-bound
+  singleton at the graph's `McpServer` once every Core has registered; shutdown
+  clears it.
+- `build-repl-argv.ts` — new `allowedMcpTools` → `--allowedTools mcp__neutron`,
+  permitting the MCP namespace WITHOUT relaxing the security-critical `--tools ""`
+  built-in default-deny (`--tools` only gates the built-in set; MCP tools are
+  governed by the permission system).
+- `open/composer.ts` — the owner's WARM conversational substrate (`cc-agent-*`)
+  is the ONE substrate that sets `enableToolBridge: true`.
+
+**SECURITY — default-off, opt-in per substrate.** `enableToolBridge` is threaded
+through `buildLlmCallSubstrate` → `createClaudeCodeSubstrateAuto` →
+`createPersistentReplSubstrate` and defaults false. The untrusted history-import
+REPL (`cc-import-*`, processes raw ChatGPT exports under
+`--dangerously-skip-permissions`) and the disposable Trident build REPLs
+(`cc-trident-*`) leave it false, so a prompt-injection in untrusted content can
+never reach a Core tool. The bridge also no-ops on an LLM-less box (no graph, no
+`McpServer` → the singleton stays unset → no second server).
+
+**Command-filter: kept, NOT collapsed — and why.** The pre-LLM command-filter is
+the USER's slash-command path (it matches the user's typed `/cal` `/remind`
+`/note` etc. and routes to the SAME registry tool backend). It was never an
+*agent*-invocation path — the agent had NONE. So there are no two competing
+agent paths to collapse: the bridge is the agent's single native path; the
+command-filter remains the user's typed-slash path; both share one underlying
+tool implementation. (Per the brief: "a user-typed /cmd may still route to the
+SAME underlying tool.")
+
+**Review hardening (Codex + multi-agent review).** Five fixes on top of the
+transport: (1) **stub tools hidden from the agent** — the `neutron-tools` Hermes
+surface (13 tools) registers handlers that all throw "lands in a later sprint", so
+a new `agent_hidden` flag on `ToolRegistration` keeps them registered for
+introspection/tests but `McpServer.listToolSchemas()` filters them out of the
+agent's manifest (the agent is never offered always-failing tools); (2) the
+`tools-bridge` `/tool-call` POST is **single-attempt, no retry** — tool calls are
+non-idempotent (a write like `reminder_create` must not double-execute if the
+loopback drops after the handler ran; a failure surfaces as an `isError`
+`tool_result` the model retries deliberately), the deliberate divergence from the
+dev-channel's idempotent retried `/reply`; (3) an `undefined` tool result
+coalesces to the literal `null` (never a `text: undefined` MCP content block);
+(4) the warm-REPL **reuse guard also checks bridge attachment**
+(`session.toolBridgeActive` vs the request) so a bridge-mismatched turn can never
+reuse a warm child — local defense-in-depth, not dependent on
+`substrate_instance_id` keying; (5) the singleton clear on graph shutdown is
+**identity-guarded** (`clearReplToolBridgeIf`, mirrors `ReplSink.unregisterIf`)
+so a second graph in one process (tests) can't null out the live graph's bridge.
+
+**Known follow-up (Codex r1 P2) — `message_search` topic scope.** The bridge
+dispatches against the in-process `McpServer`, which resolves `project_slug`
+correctly (every project/owner-scoped tool works) but binds `topic_id: null`
+because the warm substrate is topic-agnostic by design (the locked `AgentSpec`
+carries no per-turn topic). So `message_search`'s current-conversation default
+has no topic to anchor on, and Open's per-topic `HistorySource` runtime can't
+search globally either — an agent-initiated `message_search` returns `[]`.
+`doc_search` (proven in the real-turn) and all other tools are unaffected.
+Binding the live turn's topic into the tool dispatch is a follow-up requiring
+per-turn topic threading through the turn lifecycle (out of P0-1's transport
+scope).
+
+**Verification.** `bun test` — `build-repl-argv.test.ts` (the `--allowedTools`
+grant + `--tools ""` untouched), `tool-bridge.test.ts` (2nd mcpServers entry +
+manifest only when opted-in; opted-OUT import REPL gets neither; sink
+`/tools` + `/tool-call` dispatch incl. error/no-bridge paths; `McpServer`
+satisfies `ReplToolBridge`). Real-turn: a live `claude` REPL spawned with the
+real 2-server mcp.json emits `mcp__neutron__doc_search` mid-reasoning, the bridge
+round-trips it through the sink to the registry, and the model uses the
+structured result — no user `/cmd`. (Evidence in the PR.)
+
 ## 2026-06-27 — P2 follow-ups to #84: live project rail + one-shot start-token
 
 Two P2 follow-ups from the #84 chat-path consolidation, both rooted in

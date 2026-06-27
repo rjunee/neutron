@@ -172,6 +172,46 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
   surfaces' bearer-token contract — is a documented follow-up; the token-present
   install path is already wired and tested.)
 
+## Native-MCP tool transport (P0-1) — how the spawned agent invokes tools
+
+The live chat agent is a spawned interactive `claude` REPL driven over the
+dev-channel (`runtime/adapters/claude-code/persistent/`). It reaches the
+gateway's in-process tool surface — Cores (`/cal` `/email` `/note` `/remind`
+`/research`), `doc_search` / `doc_read`, `message_search`, `dispatch_agent`,
+`skill_forge_*`, and the `neutron-tools` surface — as **native MCP tool calls**,
+not via the user typing a slash-command.
+
+- **The transport.** At spawn the substrate writes a per-session `--mcp-config`
+  with TWO `mcpServers`: the dev-channel (the reply sink) **and** a `neutron`
+  tools-bridge (`tools-bridge.ts`). The bridge is a stdio MCP server that
+  advertises the registry's tools (from a manifest the substrate snapshots at
+  spawn time) and forwards each `CallTool` to the substrate's reply-sink HTTP
+  server (`POST /tool-call`), which dispatches against the in-process
+  `McpServer`. Tools surface to the model as `mcp__neutron__<toolname>` with
+  their real `input_schema`, so the agent emits a structured `tool_use`
+  mid-reasoning and gets a structured `tool_result` it can chain on. The
+  in-process registry's stdio transport (`mcp/server.ts`, once "deferred to P1
+  S5+") IS this bridge.
+- **Late binding.** The substrate is built in the composer before
+  `composeProductionGraph` builds the `McpServer` + registers all Cores, so the
+  bridge dispatcher is wired late: the `repl-tool-bridge` module (deps `['mcp']`)
+  calls `setReplToolBridge(graph.get('mcp'))` once the registry is populated;
+  shutdown clears it. LLM-less boxes (no graph) leave it unset → no second
+  server.
+- **Security (opt-in per substrate).** Only the owner's WARM conversational
+  substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
+  history-import REPL (`cc-import-*`) and the disposable Trident build REPLs
+  (`cc-trident-*`) leave it off, so a prompt-injection in untrusted content can
+  never reach a Core tool. The bridge's MCP namespace is permitted via
+  `--allowedTools mcp__neutron`; the built-in `--tools ""` default-deny (which
+  gates Bash/Read/etc.) is untouched.
+- **The command-filter's role.** `buildChainedChatCommandFilter`
+  (`open/composer.ts`) is the **user's** slash-command path: it intercepts a
+  user-typed `/cal` `/remind` `/note` etc. BEFORE the LLM and routes to the SAME
+  registry tool backend. It is NOT an agent-invocation path — the bridge is the
+  agent's single native path. One underlying tool implementation, two entry
+  surfaces (user-typed slash vs. agent-native MCP).
+
 ## Tab resolver (WAVE 3 tabbed shell) — `tabs/` + `gateway/http/app-tabs-surface.ts`
 
 The project (and global) tab set is resolved **engine-side** so both clients

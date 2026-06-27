@@ -362,6 +362,15 @@ export interface BuildLlmCallSubstrateInput {
    * Leave unset on the conversational / router / shared one-shot substrates.
    */
   reset_context_per_turn?: boolean
+  /**
+   * P0-1 — opt the spawned REPL into the native-MCP tool bridge so the agent
+   * can make structured, self-initiated Core/tool calls mid-reasoning. Set ONLY
+   * on the owner's WARM conversational substrate (`cc-agent-*`); left unset on
+   * the untrusted history-import (`cc-import-*`) and disposable Trident
+   * (`cc-trident-*`) substrates so a prompt-injection in imported/untrusted
+   * content can never reach a Core tool.
+   */
+  enableToolBridge?: boolean
 }
 
 /**
@@ -473,6 +482,10 @@ export function buildLlmCallSubstrate(
         // each chunk runs on a fresh context (ONE warm process, isolated turns).
         if (input.reset_context_per_turn !== undefined) {
           opts.reset_context_per_turn = input.reset_context_per_turn
+        }
+        // P0-1 — native-MCP tool bridge opt-in (conversational substrate only).
+        if (input.enableToolBridge !== undefined) {
+          opts.enableToolBridge = input.enableToolBridge
         }
         // `createClaudeCodeSubstrateAuto` UNCONDITIONALLY builds the persistent
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).

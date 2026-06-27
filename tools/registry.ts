@@ -57,6 +57,15 @@ export interface ToolRegistration {
   capability_required: NeutronCapability
   approval_policy: ApprovalPolicy
   handler: ToolHandler
+  /**
+   * P0-1 — hide this tool from the spawned agent's native-MCP tool manifest
+   * (`McpServer.listToolSchemas`). The tool stays registered (introspection,
+   * tests, the in-process resolver), but is NOT advertised to the live agent —
+   * used for surfaces whose handlers are still stubs (e.g. the `neutron-tools`
+   * Hermes surface deferred to P3), so the agent isn't offered tools that always
+   * throw "not implemented yet". Defaults to visible (`undefined`/`false`).
+   */
+  agent_hidden?: boolean
 }
 
 /**

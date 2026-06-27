@@ -65,6 +65,11 @@ export function registerNeutronToolsSurface(registry: ToolRegistry): string[] {
       capability_required: def.capability_required,
       approval_policy: 'auto',
       handler: stub(def.name),
+      // P0-1 — every handler here is a stub that throws "lands in a later
+      // sprint" (P3). Keep them registered for introspection/tests, but HIDE
+      // them from the spawned agent's native-MCP tool manifest so the live
+      // agent isn't offered always-failing tools to call mid-turn.
+      agent_hidden: true,
     }
     registry.register(reg)
     registered.push(def.name)

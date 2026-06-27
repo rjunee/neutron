@@ -157,6 +157,13 @@ export interface ClaudeCodeSubstrateOptions {
    * `PersistentReplSubstrateOptions.reset_context_per_turn`.
    */
   reset_context_per_turn?: boolean
+  /**
+   * P0-1 — opt this REPL into the native-MCP tool bridge (the owner's WARM
+   * conversational substrate only). Default-off so the untrusted history-import
+   * (`cc-import-*`) and disposable Trident (`cc-trident-*`) REPLs stay sandboxed.
+   * See `PersistentReplSubstrateOptions.enableToolBridge`.
+   */
+  enableToolBridge?: boolean
 }
 
 /**
@@ -230,6 +237,8 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   if (options.reset_context_per_turn !== undefined) {
     p.reset_context_per_turn = options.reset_context_per_turn
   }
+  // P0-1 — native-MCP tool bridge opt-in (owner's warm conversational REPL only).
+  if (options.enableToolBridge !== undefined) p.enableToolBridge = options.enableToolBridge
 
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →

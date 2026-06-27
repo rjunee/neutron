@@ -15,6 +15,10 @@ import { CronJobRegistry } from '../../cron/jobs.ts'
 import { CronScheduler } from '../../cron/scheduler.ts'
 import { CronStateStore } from '../../cron/state.ts'
 import { McpServer } from '../../mcp/server.ts'
+import {
+  setReplToolBridge,
+  clearReplToolBridgeIf,
+} from '../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
@@ -115,6 +119,7 @@ export interface CoreModules {
   approvalModule: GatewayModule<ApprovalManager>
   channelsModule: GatewayModule<ChannelRouter>
   mcpModule: GatewayModule<McpServer>
+  replToolBridgeModule: GatewayModule<{ wired: boolean }>
   remindersModule: GatewayModule<{ store: ReminderStore; loop: ReminderTickLoop }>
   tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop }>
   cronModule: GatewayModule<{
@@ -200,6 +205,29 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
     init: (ctx) => {
       const tools = ctx.graph.get<ToolRegistry>('tools')
       return new McpServer({ project_slug: input.project_slug, registry: tools })
+    },
+  }
+
+  // P0-1 — native-MCP tool bridge wiring. The persistent REPL substrate is built
+  // in the composer BEFORE this graph composes, so it reaches the in-process
+  // registry through a late-bound module singleton. Here — once `mcp` exists and
+  // every Core / doc-search / etc. has registered into the shared registry — we
+  // point that singleton at the graph's `McpServer` (which structurally satisfies
+  // `ReplToolBridge`: it has `listToolSchemas` + `dispatch`). Shutdown clears it
+  // so a torn-down instance can't dispatch tool calls against a dead registry.
+  let wiredBridgeServer: McpServer | undefined
+  const replToolBridgeModule: GatewayModule<{ wired: boolean }> = {
+    name: 'repl-tool-bridge',
+    deps: ['mcp'],
+    init: (ctx) => {
+      wiredBridgeServer = ctx.graph.get<McpServer>('mcp')
+      setReplToolBridge(wiredBridgeServer)
+      return { wired: true }
+    },
+    shutdown: () => {
+      // Identity-guarded so a second graph in the same process (tests) can't
+      // null out the live graph's bridge on an older graph's teardown.
+      if (wiredBridgeServer !== undefined) clearReplToolBridgeIf(wiredBridgeServer)
     },
   }
 
@@ -858,6 +886,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
     approvalModule,
     channelsModule,
     mcpModule,
+    replToolBridgeModule,
     remindersModule,
     tridentModule,
     cronModule,
