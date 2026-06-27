@@ -28,9 +28,9 @@ function fakeButtonStore(over: { throwOnEmit?: boolean } = {}): {
 } {
   const emits: EmitCall[] = []
   const store = {
-    async emit(prompt: { body: string }, opts: { topic_id: string }) {
+    async persistInertAgentTurn(input: { topic_id: string; body: string }) {
       if (over.throwOnEmit === true) throw new Error('db locked')
-      emits.push({ body: prompt.body, topic_id: opts.topic_id })
+      emits.push({ body: input.body, topic_id: input.topic_id })
       return { prompt_id: 'prompt-123' }
     },
   } as unknown as ButtonStore
