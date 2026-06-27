@@ -604,7 +604,7 @@ export interface BuildLandingStackInput {
   recoverHandler?: (req: Request) => Promise<Response>
   /**
    * 2026-05-27 persistent-session-cookie sprint (Part B) — resolve the
-   * cookie-authenticated user's identity for a `/ws/chat` upgrade that
+   * cookie-authenticated user's identity for a `/ws/app/chat` upgrade that
    * arrives with only a session cookie (no `?start=` token). Threaded
    * straight through to `createLandingServer({cookieToUserClaim: …})`
    * without modification.
@@ -616,7 +616,7 @@ export interface BuildLandingStackInput {
    *
    * Optional — dev / smoke deploys that don't co-locate identity (or
    * that haven't set `NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET`) leave
-   * this unset and cookie-only `/ws/chat` upgrades 400 the same way a
+   * this unset and cookie-only `/ws/app/chat` upgrades 400 the same way a
    * tokenless pre-sprint upgrade did.
    */
   cookieToUserClaim?: (req: Request) => Promise<{

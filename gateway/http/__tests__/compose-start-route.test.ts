@@ -9,7 +9,7 @@
  * `signup/deep-link-builder.ts:buildPerOwnerDeepLink`). The browser
  * showed "Not Found". Root cause: the per-instance gateway's
  * `LANDING_PATHS` allowlist in `gateway/http/compose.ts` admitted
- * `/chat`, `/chat.js`, `/ws/chat`, `/api/v1/sign-up`, `/invite[.js]`,
+ * `/chat`, `/chat.js`, `/api/v1/sign-up`, `/invite[.js]`,
  * `/onboarding/invite-accept`, and `/recover` — but NOT `/start`. The
  * 2026-05-22 sprint that added the `/start?token=` 302 handler at
  * `landing/server.ts:674-689` wired both ends of the contract

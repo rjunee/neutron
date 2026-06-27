@@ -258,7 +258,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // composer output wins over the default healthz stub. The chained-fetch
   // path (Sprint 18) is wired below inside the Bun.serve `fetch` arrow so
   // the live `server` reference is in scope for `server.upgrade(...)` on
-  // /ws/chat.
+  // the unified `/ws/app/chat` chat socket.
   const handler: HttpHandler =
     options.httpHandler ??
     composedHttpHandler ??

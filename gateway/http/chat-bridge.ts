@@ -3,10 +3,12 @@
  *
  * Sprint 18 — per-instance gateway HTTP route composition.
  *
- * `landing/server.ts:createLandingServer` accepts a `ChatBridge` interface
- * for the `/chat` GET + `/ws/chat` upgrade path. P2 S2 shipped a mock
- * bridge for the unit tests; this module ships the production bridge that
- * wires through the locked primitives:
+ * `landing/server.ts:createLandingServer` once accepted a `ChatBridge`
+ * interface for the legacy `/ws/chat` onboarding socket (now removed —
+ * onboarding + chat are unified on `/ws/app/chat`). The bridge + its
+ * routed senders below are still the production path that the engine uses
+ * to emit onboarding over the app-ws surface, wiring through the locked
+ * primitives:
  *
  *   - `signup/start-token.ts:verifyStartToken` — JWT signature + aud + exp.
  *   - `signup/start-token.ts:claimStartTokenJti` — atomic single-use claim
@@ -398,8 +400,9 @@ function emitTypingBracket(
 
 /**
  * Convert a channel-agnostic ButtonPrompt into the locked web envelope
- * (Sprint 16 P2 S5 § 2.5). Adapters that emit on /ws/chat use this
- * shape so the cross-channel parity test stays satisfied:
+ * (Sprint 16 P2 S5 § 2.5). Adapters that emit on the web chat surface
+ * (`/ws/app/chat`) use this shape so the cross-channel parity test stays
+ * satisfied:
  *
  *   { v:1, type:'agent_message', body, prompt_id?, options[]?, allow_freeform? }
  *

@@ -2,10 +2,9 @@
  * Sprint D — Open single-owner boot shell integration test.
  *
  * The HEADLINE acceptance for the boot shell: a fresh boot of the Open
- * server SERVES THE ONBOARDING FLOW — not just /healthz. This test boots the
- * real composer (`buildOpenGraphComposer`) through the real `boot()` shell —
- * real Bun.serve, real Bun WebSocket client, real onboarding engine, real
- * landing chat-bridge — with NO mocks for the HTTP / WS surface, and asserts:
+ * server stands up the real HTTP surface — /healthz + the gated `/chat`
+ * entry — through the real `boot()` shell (real Bun.serve, real composer),
+ * with NO mocks for the HTTP surface, and asserts:
  *
  *   1. /healthz answers (liveness preserved).
  *   2. A fresh GET /chat (no session) mints the owner cookie + a local
@@ -13,20 +12,17 @@
  *   3. ISSUES #318 — with NO Claude substrate credential, GET /chat renders the
  *      "Authenticate Claude to continue" gate (503) INSTEAD of the chat shell,
  *      so a fresh box never presents an interactive-looking chat that can't run.
- *   4. Opening /ws/chat?start=<token> serves the FIRST onboarding interview
- *      prompt on connect (engine.start → static signup spec, no LLM creds): the
- *      onboarding engine mechanics stay intact under the page gate, so the flow
- *      works the moment a credential is added.
- *   5. The chat WS ACCEPTS A TURN — a user_message advances the engine and a
- *      follow-up agent envelope arrives.
- *   6. The cookie-only resume path works — a returning visit with the owner
- *      session cookie upgrades /ws/chat WITHOUT a token and the session goes
- *      live (session_ready).
+ *   4. A returning visit with a resumable session still gates the page on
+ *      auth (the gate is credential-, not session-, scoped).
+ *   5. A valid-but-stale cookie over an empty DB cold-starts onboarding
+ *      (302 to a fresh start-token) rather than wedging.
  *
- * No ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN is set, so (a) the chat PAGE is
- * gated on auth per ISSUES #318, and (b) the engine walks its static phase
- * prompts (the documented LLM-less fallback) at the WS layer — the first prompt
- * is deterministic.
+ * The chat WebSocket itself is exercised by the app-ws onboarding suite —
+ * onboarding + chat are unified on `/ws/app/chat`; the landing server's
+ * legacy `/ws/chat` socket was removed.
+ *
+ * No ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN is set, so the chat PAGE is
+ * gated on auth per ISSUES #318.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -37,14 +33,12 @@ import { fileURLToPath } from 'node:url'
 
 import { boot } from '../../gateway/index.ts'
 import type { BootHandle } from '../../gateway/index.ts'
-import { STATIC_PHASE_SPECS } from '../../onboarding/interview/phase-prompts.ts'
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
-const SIGNUP_PROMPT_BODY = STATIC_PHASE_SPECS['signup']!.body
 
 const SAVED_ENV_KEYS = [
   'NEUTRON_HOME',
@@ -126,57 +120,6 @@ async function seedOnboardingState(): Promise<void> {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-interface Envelope {
-  type: string
-  body?: string
-  prompt_id?: string
-  user_id?: string
-  options?: unknown[]
-}
-
-/** Collect WS envelopes; resolve `firstReal` on the first non-typing frame. */
-function wireSocket(ws: WebSocket): {
-  opened: Promise<void>
-  received: Envelope[]
-  nextReal: (afterIdx: number, timeoutMs: number, extraSkip?: string[]) => Promise<Envelope>
-} {
-  const received: Envelope[] = []
-  const TYPING = new Set(['agent_typing_start', 'agent_typing_stop', 'agent_typing_end'])
-  const opened = new Promise<void>((resolve, reject) => {
-    ws.addEventListener('open', () => resolve())
-    ws.addEventListener('error', (ev) => reject(new Error(`ws error: ${String(ev)}`)))
-  })
-  ws.addEventListener('message', (ev) => {
-    const data = typeof ev.data === 'string' ? ev.data : String(ev.data)
-    try {
-      received.push(JSON.parse(data) as Envelope)
-    } catch {
-      /* ignore non-JSON frames */
-    }
-  })
-  const nextReal = async (
-    afterIdx: number,
-    timeoutMs: number,
-    extraSkip: string[] = [],
-  ): Promise<Envelope> => {
-    const skip = new Set([...TYPING, ...extraSkip])
-    const start = Date.now()
-    while (Date.now() - start < timeoutMs) {
-      for (let i = afterIdx; i < received.length; i++) {
-        const e = received[i]!
-        if (!skip.has(e.type)) return e
-      }
-      await sleep(20)
-    }
-    throw new Error(`nextReal: no real envelope after idx ${afterIdx} within ${timeoutMs}ms`)
-  }
-  return { opened, received, nextReal }
-}
-
 describe('Sprint D — Open single-owner boot shell', () => {
   test('a fresh boot serves /healthz', async () => {
     const h = await bootOpen()
@@ -199,7 +142,7 @@ describe('Sprint D — Open single-owner boot shell', () => {
     expect(setCookie!).toContain('__neutron_chat_session=')
   }, 30_000)
 
-  test('no-credential GET /chat gates on auth; the onboarding WS still serves the first prompt AND accepts a turn', async () => {
+  test('no-credential GET /chat?start gates on auth (renders the Authenticate-Claude page, not the chat shell)', async () => {
     const h = await bootOpen()
     const base = `http://127.0.0.1:${h.server.port}`
 
@@ -218,34 +161,9 @@ describe('Sprint D — Open single-owner boot shell', () => {
     expect(html).toContain('Authenticate Claude to continue')
     expect(html).toContain('claude setup-token')
     expect(html).not.toContain('id="log"')
-
-    // 3. The onboarding engine itself is intact under the page gate — open the
-    //    chat WS with the start-token → engine.start fires the first
-    //    onboarding prompt on connect.
-    const ws = new WebSocket(
-      `ws://127.0.0.1:${h.server.port}/ws/chat?start=${encodeURIComponent(token!)}`,
-    )
-    const sock = wireSocket(ws)
-    await sock.opened
-    const first = await sock.nextReal(0, 10_000)
-    expect(first.type).toBe('agent_message')
-    expect(first.body).toBe(SIGNUP_PROMPT_BODY)
-    expect(first.prompt_id).toBeDefined()
-
-    // 4. The WS ACCEPTS A TURN — a user_message advances the engine and a
-    //    follow-up agent envelope arrives.
-    const beforeIdx = sock.received.length
-    ws.send(JSON.stringify({ type: 'user_message', body: 'Casey' }))
-    // Skip the session_ready lifecycle envelope (it lands just after the
-    // opening prompt on the token path) — we want the engine's next turn.
-    const followUp = await sock.nextReal(beforeIdx, 10_000, ['session_ready'])
-    expect(['agent_message', 'button_prompt']).toContain(followUp.type)
-
-    ws.close()
-    await sleep(50)
   }, 30_000)
 
-  test('returning visit WITH a real resumable session still gates the page on auth; resume WS mechanics intact (ISSUES #318)', async () => {
+  test('returning visit WITH a real resumable session still gates the page on auth (ISSUES #318)', async () => {
     const h = await bootOpen()
     const base = `http://127.0.0.1:${h.server.port}`
 
@@ -272,20 +190,6 @@ describe('Sprint D — Open single-owner boot shell', () => {
     const html = await chatRes.text()
     expect(html).toContain('Authenticate Claude to continue')
     expect(html).not.toContain('id="log"')
-
-    // The resume MECHANICS are unaffected by the page gate: a cookie-only WS
-    // upgrade (no ?start) still goes live (session_ready).
-    const ws = new WebSocket(`ws://127.0.0.1:${h.server.port}/ws/chat`, {
-      headers: { cookie },
-    } as unknown as string)
-    const sock = wireSocket(ws)
-    await sock.opened
-    const ready = await sock.nextReal(0, 10_000)
-    expect(ready.type).toBe('session_ready')
-    expect(ready.user_id).toBe('owner')
-
-    ws.close()
-    await sleep(50)
   }, 30_000)
 
   test('valid-but-stale cookie over an empty DB cold-starts onboarding (does NOT wedge)', async () => {

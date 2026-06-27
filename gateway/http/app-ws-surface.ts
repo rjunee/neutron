@@ -21,12 +21,11 @@
  *     and forwards the inbound through `AppWsAdapter.dispatchInbound`
  *     so the gateway's existing `ChannelRouter.receive` pipeline runs.
  *
- * The path `/ws/app/chat` is deliberately distinct from the landing
- * server's existing `/ws/chat` (which is owned by the onboarding chat
- * bridge). Mounting on a separate path means the landing surface's
- * tests, the M2 onboarding flow, and this new surface stay
- * independently composable; no behaviour change to either path when
- * the other is unwired.
+ * `/ws/app/chat` is now the SINGLE chat WebSocket endpoint (2026-06-26
+ * consolidation): onboarding runs as the initial MODE of this surface
+ * (see open/composer.ts on_session_open / on_button_choice), and the
+ * legacy landing onboarding socket has been removed. Steady-state and
+ * onboarding share this one path, one engine, one renderer.
  */
 
 import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'

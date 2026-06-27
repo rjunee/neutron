@@ -2,11 +2,11 @@
  * landing/chat-react — bootstrap config for the React/assistant-ui web chat
  * client (Track B Phase 3).
  *
- * The React surface is a NEW client that talks to the **app-ws** WebSocket
+ * The React surface is the web client that talks to the **app-ws** WebSocket
  * surface (`/ws/app/chat`) through `@neutron/chat-core`'s `WebChatSession` —
- * the Phase-1 transport with a monotonic per-topic `seq` + resume replay. That
- * is a different surface from the legacy vanilla client's `/ws/chat`, so the
- * two run side by side behind the flag with no shared connection.
+ * the Phase-1 transport with a monotonic per-topic `seq` + resume replay. This
+ * is now the single unified chat socket (the legacy vanilla client's
+ * `/ws/chat` onboarding socket was removed).
  *
  * Identity is derived CLIENT-SIDE from the same one-shot start token the
  * vanilla `chat.html` already stashes on `window.__neutron_start_token` (its

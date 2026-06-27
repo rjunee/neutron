@@ -18,8 +18,9 @@
  *   2. `?start=<token>` query param valid cryptographically + instance
  *      claim matches THIS gateway's instance → ALLOW + emit a fresh
  *      session cookie. The token is NOT consumed (jti claim happens
- *      later in /ws/chat upgrade); we just verify the signature so the
- *      gate doesn't burn the one-time-use token on a stale GET.
+ *      later in the `/ws/app/chat` chat upgrade); we just verify the
+ *      signature so the gate doesn't burn the one-time-use token on a
+ *      stale GET.
  *   3. Otherwise → 302 to identity service's `/oauth/google/start` with
  *      `return_url=<original full URL>`. The identity service threads
  *      the return_url through OAuth state, callback 302s back with a
@@ -30,7 +31,7 @@
  * paths route here vs around):
  *   - `GET /healthz` — liveness probe
  *   - Static assets (favicon, logo, OG image, etc.)
- *   - `/ws/chat` upgrade — already gates via `?start=<jwt>` internally
+ *   - `/ws/app/chat` chat upgrade — already gates via `?start=<jwt>` internally
  *   - `POST /onboarding/invite-accept` — owner-side invite handler with
  *     its own JWT
  *   - `/api/internal/*` — token-gated (operator-only)
@@ -106,7 +107,7 @@ export interface AuthGateOptions {
    * THIS gateway's instance. Wired by the production composer using the
    * same `KeyManager` + instance registry lookup as `/recover`. Used when
    * a cookie-authenticated browser hits `GET /chat` without `?start=` so
-   * the inevitable `/ws/chat` upgrade has a usable token.
+   * the inevitable `/ws/app/chat` upgrade has a usable token.
    *
    * Without this hook, a cookie-only `/chat` GET serves chat.html with
    * no token; the WS upgrade 400s on missing-start-token, chat.ts's
@@ -362,8 +363,8 @@ export async function evaluateAuthGate(
       }
     }
     // Argus r1 BLOCKER #1 (2026-05-27): cookie-only GET /chat used to
-    // ALLOW and serve chat.html, but chat.ts's WS upgrade fires
-    // `/ws/chat?start=` (empty) → 400 missing-start-token, which trips
+    // ALLOW and serve chat.html, but the chat WS upgrade fires
+    // `/ws/app/chat?start=` (empty) → 400 missing-start-token, which trips
     // the new onClose path that navigates back to `/chat` → cookie
     // still valid → ALLOW again → hot redirect loop. Mint a fresh
     // start_token here (same KeyManager + instance lookup as /recover)
@@ -448,7 +449,7 @@ export async function evaluateAuthGate(
       // on GET / with a valid token but no /chat handler exists. 302
       // to `/chat?start=<token>` so the destination boots cleanly +
       // the WS upgrade has the same JWT (jti claim happens at
-      // /ws/chat — verifying here does NOT consume the token, the
+      // /ws/app/chat — verifying here does NOT consume the token, the
       // atomic consume is downstream).
       if (pathname === '/' && method === 'GET') {
         return {

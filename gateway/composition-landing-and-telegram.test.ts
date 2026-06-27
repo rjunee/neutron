@@ -85,9 +85,6 @@ function makeLandingHandler(rec: LandingRecorder): {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })
       }
-      if (url.pathname === '/ws/chat') {
-        return new Response(null, { status: 101 })
-      }
       return new Response('landing-404', { status: 404 })
     },
     websocket: {

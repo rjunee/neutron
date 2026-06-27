@@ -23,7 +23,6 @@ function makeLanding(routeBody: string): LandingHandler {
       const url = new URL(req.url)
       if (url.pathname === '/chat') return new Response(routeBody, { status: 200 })
       if (url.pathname === '/chat-react.js') return new Response('js', { status: 200 })
-      if (url.pathname === '/ws/chat') return new Response(null, { status: 101 })
       if (url.pathname === '/api/v1/sign-up') return new Response(null, { status: 302 })
       if (url.pathname === '/invite' || url.pathname === '/') return new Response('invite', { status: 200 })
       if (url.pathname === '/onboarding/invite-accept') return new Response('{"ok":true}', { status: 200 })
@@ -93,13 +92,14 @@ describe('composeHttpHandler — precedence chain', () => {
     expect(res.status).toBe(302)
   })
 
-  test('routes /ws/chat to landing handler (WebSocket upgrade)', async () => {
+  test('/ws/chat is no longer a landing route — falls through to default 404 (legacy onboarding socket removed)', async () => {
     const composed = composeHttpHandler({
       landing: makeLanding(''),
-      defaultHandler: makeDefault(),
+      defaultHandler: makeDefault('def-404'),
     })
     const res = await composed.fetch(new Request('http://x/ws/chat?start=tok'), fakeServer())
-    expect(res.status).toBe(101)
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe('def-404')
   })
 
   test('routes / with ?invite= to landing (invite short-circuit)', async () => {
@@ -296,7 +296,9 @@ describe('LANDING_ROUTE_PATHS', () => {
   test('is the locked set of landing-owned exact paths', () => {
     expect(LANDING_ROUTE_PATHS.has('/chat')).toBe(true)
     expect(LANDING_ROUTE_PATHS.has('/chat-react.js')).toBe(true)
-    expect(LANDING_ROUTE_PATHS.has('/ws/chat')).toBe(true)
+    // /ws/chat was removed — the legacy onboarding socket no longer exists
+    // (chat is unified on /ws/app/chat), so it is NOT a landing route.
+    expect(LANDING_ROUTE_PATHS.has('/ws/chat')).toBe(false)
     expect(LANDING_ROUTE_PATHS.has('/api/v1/sign-up')).toBe(true)
     expect(LANDING_ROUTE_PATHS.has('/invite')).toBe(true)
     expect(LANDING_ROUTE_PATHS.has('/invite.js')).toBe(true)

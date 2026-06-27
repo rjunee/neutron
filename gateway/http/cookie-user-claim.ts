@@ -8,7 +8,7 @@
  *
  * Resolves the HMAC session cookie (see `landing/session-cookie.ts`)
  * into `{ project_slug, user_id, set_cookie? }` for every cookie-authed
- * surface: the `/ws/chat` upgrade, `GET /api/v1/chat/history`,
+ * surface: the `/ws/app/chat` upgrade, `GET /api/v1/chat/history`,
  * `GET /api/v1/chat/topics`, and the M2.5 cross-instance auth routes.
  *
  * Instance binding (2026-06-10 fix): the cookie's slug is matched against

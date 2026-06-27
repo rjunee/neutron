@@ -847,7 +847,7 @@ export function buildOpenGraphComposer(
     // are built AFTER. These mutable holders let the SAME engine route
     // onboarding emits over the unified `/ws/app/chat` socket: the routed sender
     // reads `.send` at call time; we fill it once the registry exists (below).
-    // This is what makes onboarding a MODE of the single chat — no /ws/chat, no
+    // This is what makes onboarding a MODE of the single chat — one socket, no
     // second engine, no flag.
     const appWsButtonPromptRouter: AppSocketButtonPromptRouter = {}
     const appWsImportProgressRouter: AppSocketImportProgressRouter = {}
@@ -1332,16 +1332,14 @@ export function buildOpenGraphComposer(
     })
 
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
-    // transport the served React client ACTUALLY uses
-    // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). It was
-    // never mounted in Open, so React chat 404'd (the shell rendered but the
-    // socket failed). Wire it into the SAME single-owner live-agent engine the
-    // web `/ws/chat` bridge uses: an inbound app-ws user message runs a real
-    // `buildLiveAgentTurn` and the reply fans back out over the app-ws registry.
-    // No reusable channel→turn bridge exists (the web path embeds dispatch in
-    // chat-bridge), so the receiver is hand-rolled here. Same Path A localhost-
-    // trust auth resolver as docs/admin. Single code path; Managed layers tenant
-    // auth as the wrapper.
+    // SINGLE chat transport the served React client uses
+    // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). Both
+    // onboarding (engine) and steady-state (live agent) turns flow through this
+    // one surface — there is no second chat socket. An inbound app-ws user
+    // message runs the onboarding engine while onboarding is active, else a real
+    // `buildLiveAgentTurn`, and the reply fans back out over the app-ws registry.
+    // Same Path A localhost-trust auth resolver as docs/admin. Single code path;
+    // Managed layers tenant auth as the wrapper.
     const appWsRegistry = new InMemoryAppWsSessionRegistry()
     const appWsChatTurn =
       liveAgentSubstrate !== null
@@ -1365,8 +1363,8 @@ export function buildOpenGraphComposer(
     // Onboarding is NOT a separate engine/socket — it is the INITIAL MODE of
     // this same `/ws/app/chat` surface. The shared `landing.engine` keys its
     // state on (project_slug, user_id), independent of transport, so the same
-    // InterviewEngine that drove the (now-deleted) `/ws/chat` bridge runs here.
-    // `isOnboardingActive` decides per-turn whether the engine (onboarding) or
+    // InterviewEngine that drove the (now-removed) legacy onboarding socket runs
+    // here. `isOnboardingActive` decides per-turn whether the engine (onboarding) or
     // the live agent (steady-state) handles the message.
     const engine = landing.engine
     const onboardingStateStore = landing.stateStore

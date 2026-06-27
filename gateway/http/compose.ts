@@ -3,14 +3,14 @@
  *
  * Sprint 18 — per-instance gateway HTTP route composition.
  *
- * Composes the four production routes (`/chat`, `/ws/chat`,
- * `/webhook/telegram`, plus the existing cross-instance API) into a single
- * `{ fetch, websocket }` pair the boot shell hands to `Bun.serve`. The
- * landing routes (`/chat` GET, `/chat.js` GET, `/ws/chat` WebSocket
- * upgrade, `/api/v1/sign-up` GET, `/invite*`, `/onboarding/invite-accept`
- * POST) are delegated to `createLandingServer` from `@neutronai/landing`,
- * which already encapsulates the per-route logic + the WebSocket
- * lifecycle.
+ * Composes the production routes (`/chat`, `/webhook/telegram`, the
+ * unified `/ws/app/chat` Expo-app socket, plus the existing cross-instance
+ * API) into a single `{ fetch, websocket }` pair the boot shell hands to
+ * `Bun.serve`. The landing routes (`/chat` GET, `/chat.js` GET,
+ * `/api/v1/sign-up` GET, `/invite*`, `/onboarding/invite-accept` POST) are
+ * delegated to `createLandingServer` from `@neutronai/landing`, which
+ * encapsulates the per-route HTTP logic. (Chat itself moved off the
+ * landing server's old `/ws/chat` onboarding socket onto `/ws/app/chat`.)
  *
  * Precedence (first match wins):
  *   1. Telegram webhook    `/webhook/telegram` POST
@@ -675,7 +675,6 @@ export interface ComposedHttpHandler {
  * Matches the routes implemented in `landing/server.ts:222-315`:
  *   - `GET  /chat`                       static HTML
  *   - `GET  /chat.js`                    bundled client
- *   - `GET  /ws/chat`                    WebSocket upgrade
  *   - `GET  /api/v1/sign-up`             OAuth redirect trampoline
  *   - `GET  /invite[?invite=…]`          static HTML (when invite_html present)
  *   - `GET  /invite.js`                  bundled client
@@ -704,7 +703,6 @@ export interface ComposedHttpHandler {
 const LANDING_PATHS: ReadonlySet<string> = new Set([
   '/chat',
   '/chat-react.js',
-  '/ws/chat',
   '/api/v1/sign-up',
   '/invite',
   '/invite.js',
@@ -776,7 +774,6 @@ function isLandingRoute(pathname: string, method: string, hasInviteQuery: boolea
  *   - `/start`                   — the `/start?token=` 302 trampoline
  *                                  already cookies + bounces to /chat
  *   - `/chat.js`                 — public JS bundle, same bytes per instance
- *   - `/ws/chat`                 — already gates via `?start=` internally
  *   - `/invite*`                 — owner-side invite landing
  *   - `/onboarding/invite-accept`— invite-accept handler with own JWT
  */
@@ -1038,12 +1035,11 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       ) {
         return await importUploadHandler(req)
       }
-      // 0e. Expo-app WebSocket surface — P5.1. Mounted ahead of landing
-      //     routes so `/ws/app/chat` is unambiguously owned and never
-      //     collides with `/ws/chat` (landing onboarding chat). The
-      //     surface handler returns `null` when the path is not its
-      //     concern so unrelated `/api/...` paths still reach the
-      //     downstream chain.
+      // 0e. Expo-app WebSocket surface — P5.1. The single unified chat
+      //     socket: `/ws/app/chat` carries both onboarding and chat (the
+      //     legacy landing `/ws/chat` socket was removed). The surface
+      //     handler returns `null` when the path is not its concern so
+      //     unrelated `/api/...` paths still reach the downstream chain.
       if (appWs !== undefined) {
         const appRes = await appWs.handler(req, server)
         if (appRes !== null) return appRes
@@ -1247,12 +1243,13 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
 }
 
 /**
- * Multiplex the optional landing chat (`/ws/chat`) + Expo app
+ * Multiplex the landing websocket close-stub + Expo app
  * (`/ws/app/chat`) websocket handlers behind the single websocket
  * option that `Bun.serve` accepts. The discriminator is
  * `ws.data.surface === 'app_ws'` set by the app-ws surface during
  * upgrade. Landing's SocketState shape does NOT set that field, so
- * any non-app-ws upgrade falls through to the landing handler.
+ * any non-app-ws upgrade falls through to the landing handler (which,
+ * since `/ws/chat` was removed, is now just a defensive close-stub).
  *
  * When neither is wired the returned handler is a no-op cold stub
  * (matches the prior `NOOP_WEBSOCKET` behaviour for the legacy P1

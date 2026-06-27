@@ -11,7 +11,8 @@
  *   - GET /api/v1/sign-up?via=tg  → 302 to the identity URL with via=tg
  *   - GET / serves index.html when present
  *   - GET /chat serves the static chat.html
- *   - GET /ws/chat with any token gets 401 (platform bridge rejects all auth)
+ *   - GET /ws/chat 404s (the legacy onboarding socket was removed; chat
+ *     is unified on the per-instance `/ws/app/chat`)
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -120,11 +121,11 @@ describe('bootSignup — live listener', () => {
     }
   })
 
-  test('GET /ws/chat?start=anything → 401 (platform bridge rejects all auth)', async () => {
+  test('GET /ws/chat?start=anything → 404 (legacy onboarding socket removed; chat is on /ws/app/chat)', async () => {
     const handle = await bootSignup({ port: 0 })
     try {
       const res = await fetch(`http://127.0.0.1:${handle.port}/ws/chat?start=any-token`)
-      expect(res.status).toBe(401)
+      expect(res.status).toBe(404)
     } finally {
       await handle.stop()
     }

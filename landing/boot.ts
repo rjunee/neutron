@@ -32,11 +32,11 @@
  *                                          instance context; the instance
  *                                          gateway accepts invites instead)
  *
- * The `/ws/chat` WebSocket upgrade route exists in `createLandingServer`
- * but the platform-level boot script wires a stub bridge that always
- * returns null on `validateStartToken` — sockets opened against the
- * signup host's `/ws/chat` get a clean 401. Real chat sockets
- * land on the instance gateway at `<slug>.<base-domain>/ws/chat`.
+ * The landing server no longer serves a chat WebSocket: the legacy
+ * `/ws/chat` onboarding socket was removed once onboarding + chat were
+ * unified on the per-instance gateway's `/ws/app/chat` Expo-app socket.
+ * The signup host therefore 404s any `/ws/chat` request; real chat lives
+ * on the instance gateway at `<slug>.<base-domain>/ws/app/chat`.
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -102,10 +102,11 @@ export function resolveIdentityOauthUrl(env: NodeJS.ProcessEnv): string | null {
 }
 
 /**
- * The platform-level bridge: rejects every WebSocket auth attempt by
- * design. The signup host's `/ws/chat` is not where the real chat
- * lives; that's per-instance. Returning null on every validate makes the
- * landing server reply with a 401 cleanly.
+ * The platform-level bridge: rejects every auth attempt by design.
+ * Vestigial since the landing `/ws/chat` socket was removed (chat is
+ * now per-instance on `/ws/app/chat`); the landing server no longer
+ * consumes a bridge, but the field is still accepted (optional) so this
+ * stays a harmless no-op for back-compat.
  */
 export function buildPlatformLandingBridge(): ChatBridge {
   return {
