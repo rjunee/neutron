@@ -17,6 +17,12 @@ function msg(over: Partial<RenderMessage> = {}): RenderMessage {
     reactions: [],
     edited: false,
     deleted: false,
+    options: null,
+    promptId: null,
+    allowFreeform: null,
+    kind: null,
+    uploadAffordance: null,
+    chosenValue: null,
     ...over,
   }
 }

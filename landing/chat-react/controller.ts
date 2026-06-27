@@ -29,7 +29,10 @@
 import { groupReactions } from '@neutron/chat-core'
 import type {
   ChatMessage,
+  ChatMessageOption,
+  ChatMessageUploadAffordance,
   ConnStatus,
+  PromptKind,
   ReactionAction,
   ReactionChip,
   SendStatus,
@@ -71,6 +74,20 @@ export interface RenderMessage {
   /** Track B Phase 4 (edit/delete) — true when this message is tombstoned;
    *  the UI renders a "message deleted" placeholder instead of the body. */
   deleted: boolean
+  /** P1b (onboarding / quick-reply buttons) — selectable options below an agent
+   *  message's body (empty/null when none). */
+  options: readonly ChatMessageOption[] | null
+  /** P1b — outstanding-prompt id a chosen option is posted back against. */
+  promptId: string | null
+  /** P1b — whether a free-text reply is allowed alongside the buttons. */
+  allowFreeform: boolean | null
+  /** P1b — render mode for {@link options} (`buttons` default vs gallery). */
+  kind: PromptKind | null
+  /** P1b — upload affordance for an onboarding import phase (null when none). */
+  uploadAffordance: ChatMessageUploadAffordance | null
+  /** P1b — the option `value` this client has tapped (optimistic): the row
+   *  collapses/greys once set. Local-only UI state, never persisted. */
+  chosenValue: string | null
 }
 
 export interface ChatViewModel {
@@ -108,6 +125,9 @@ export interface ControllerSession {
    *  authored (optional so legacy fakes still satisfy the interface). */
   editMessage?(messageId: string, body: string): boolean
   deleteMessage?(messageId: string): boolean
+  /** P1b (onboarding / quick-reply buttons) — post a tapped option back to the
+   *  server (optional so legacy fakes still satisfy the interface). */
+  sendButtonChoice?(promptId: string, choiceValue: string, freeformText?: string): boolean
   /** This client's device id, for read-tick self-exclusion (optional). */
   readonly device_id?: string
 }
@@ -141,6 +161,8 @@ export class NeutronChatController {
   private readonly listeners = new Set<(vm: ChatViewModel) => void>()
   private vm: ChatViewModel
   private seq = 0
+  /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
+  private readonly chosen = new Map<string, string>()
   /** This client's device id (for read-tick self-exclusion). */
   private readonly deviceId: string
 
@@ -319,26 +341,54 @@ export class NeutronChatController {
     this.session.deleteMessage?.(messageId)
   }
 
+  /**
+   * P1b (onboarding / quick-reply buttons) — handle a tapped option. Posts the
+   * choice back to the server via {@link ControllerSession.sendButtonChoice}
+   * (when a prompt id is present — the wire frame needs it to route), then
+   * records the chosen `value` locally keyed by the render id so the option row
+   * collapses/greys optimistically on the next render. Mirrors the Expo app's
+   * `record_choice` reducer action. A no-op for an empty value.
+   */
+  onChoose(messageId: string, promptId: string | null, value: string): void {
+    if (messageId.length === 0 || value.length === 0) return
+    if (promptId !== null && promptId.length > 0) {
+      this.session.sendButtonChoice?.(promptId, value)
+    }
+    this.chosen.set(messageId, value)
+    this.publish()
+  }
+
   private publish(): void {
     this.vm = this.computeVm()
     for (const fn of this.listeners) fn(this.vm)
   }
 
   private computeVm(): ChatViewModel {
-    const rendered: RenderMessage[] = this.msgs.map((m) => ({
-      id: m.client_msg_id.length > 0 ? m.client_msg_id : (m.message_id ?? `seq:${m.seq ?? 0}`),
-      messageId: m.message_id,
-      role: m.role,
-      text: m.body,
-      status: m.status,
-      streaming: false,
-      attachments: m.attachments,
-      createdAt: m.created_at,
-      delivery: deliveryFor(m, this.deviceId),
-      reactions: groupReactions(m.reactions, this.deviceId),
-      edited: m.deleted !== true && m.edited_at !== null && m.edited_at !== undefined,
-      deleted: m.deleted === true,
-    }))
+    const rendered: RenderMessage[] = this.msgs.map((m) => {
+      const id = m.client_msg_id.length > 0 ? m.client_msg_id : (m.message_id ?? `seq:${m.seq ?? 0}`)
+      return {
+        id,
+        messageId: m.message_id,
+        role: m.role,
+        text: m.body,
+        status: m.status,
+        streaming: false,
+        attachments: m.attachments,
+        createdAt: m.created_at,
+        delivery: deliveryFor(m, this.deviceId),
+        reactions: groupReactions(m.reactions, this.deviceId),
+        edited: m.deleted !== true && m.edited_at !== null && m.edited_at !== undefined,
+        deleted: m.deleted === true,
+        // P1b (onboarding / quick-reply buttons) — surface the agent-message
+        // option metadata + this client's optimistic choice onto the VM.
+        options: m.options ?? null,
+        promptId: m.prompt_id ?? null,
+        allowFreeform: m.allow_freeform ?? null,
+        kind: m.kind ?? null,
+        uploadAffordance: m.upload_affordance ?? null,
+        chosenValue: this.chosen.get(id) ?? null,
+      }
+    })
     // Append live streaming bubbles whose final message hasn't persisted yet.
     const persistedIds = new Set<string>()
     for (const m of this.msgs) if (m.message_id !== null) persistedIds.add(m.message_id)
@@ -358,6 +408,12 @@ export class NeutronChatController {
         reactions: [],
         edited: false,
         deleted: false,
+        options: null,
+        promptId: null,
+        allowFreeform: null,
+        kind: null,
+        uploadAffordance: null,
+        chosenValue: null,
       })
     }
     liveStreams.sort((a, b) => a.createdAt - b.createdAt)

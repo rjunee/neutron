@@ -12,6 +12,38 @@
 export type MessageRole = 'user' | 'agent'
 
 /**
+ * P1b (onboarding / quick-reply buttons) — one selectable option attached to an
+ * agent message. Mirrors the app-ws wire shape
+ * (`AppWsOutboundAgentMessageOption`): `label` is the visible face, `value` is
+ * the routing key the client posts back (NOT `label`), `body` is the canonical
+ * text, and `image_url` drives image-gallery thumbnails. Transport-agnostic so
+ * the web (React) and mobile (RN) surfaces render from one shape.
+ */
+export interface ChatMessageOption {
+  label: string
+  body: string
+  value: string
+  image_url?: string
+  decoration?: {
+    style?: 'default' | 'destructive' | 'primary'
+    icon_custom_emoji_id?: string
+  }
+}
+
+/** P1b — the render mode for an agent message's option set. */
+export type PromptKind = 'buttons' | 'image-gallery'
+
+/**
+ * P1b — upload affordance carried by an onboarding agent message: the client
+ * should surface a hint + accept the named export ZIP source. Absence on a
+ * later agent message clears the affordance. Mirrors
+ * `AppWsOutboundAgentMessageUploadAffordance`.
+ */
+export interface ChatMessageUploadAffordance {
+  source: 'chatgpt' | 'claude'
+}
+
+/**
  * A per-message acknowledgement (Track B Phase 4 — delivery + read receipts).
  * `delivered` means a device received the message over the socket (the server
  * records this for every connected device at fan-out time); `read` means a
@@ -143,6 +175,21 @@ export interface ChatMessage {
    * {@link pickEditState}.
    */
   edit_rev?: number | null
+  /**
+   * P1b (onboarding / quick-reply buttons) — selectable options the client
+   * renders below an agent message's body. Optional + additive; absent on user
+   * messages and on agent messages with no prompt. Immutable wire data (no
+   * rev): a re-delivery / resume carries the same set.
+   */
+  options?: readonly ChatMessageOption[] | null
+  /** P1b — the outstanding-prompt id the chosen option is posted back against. */
+  prompt_id?: string | null
+  /** P1b — whether the user may also reply with free text (not just a button). */
+  allow_freeform?: boolean | null
+  /** P1b — render mode for {@link options} (`buttons` default vs gallery). */
+  kind?: PromptKind | null
+  /** P1b — upload affordance for an onboarding import phase (clears on absence). */
+  upload_affordance?: ChatMessageUploadAffordance | null
 }
 
 /**
@@ -166,6 +213,16 @@ export interface InboundChatMessage {
    *  aggregate on replay). Null/absent when no receipts apply. */
   delivered_to?: readonly string[] | null
   read_by?: readonly string[] | null
+  /**
+   * P1b (onboarding / quick-reply buttons) — agent-message metadata carried
+   * through from the `agent_message` envelope. All optional + absent on user
+   * messages, so the back-compat path (no buttons) is byte-identical.
+   */
+  options?: readonly ChatMessageOption[] | null
+  prompt_id?: string | null
+  allow_freeform?: boolean | null
+  kind?: PromptKind | null
+  upload_affordance?: ChatMessageUploadAffordance | null
 }
 
 /**
@@ -284,6 +341,21 @@ export interface OutboundEdit {
 }
 
 /**
+ * P1b (onboarding / quick-reply buttons) — wire envelope a client sends when the
+ * user taps an option. `choice_value` is the option's `value` (the routing key,
+ * NOT the visible `label`); `prompt_id` correlates it to the server's
+ * outstanding-prompt store. `freeform_text` carries an optional free-text reply
+ * when the prompt allowed it. Mirrors the Expo app's post-back shape.
+ */
+export interface OutboundButtonChoice {
+  v: 1
+  type: 'button_choice'
+  prompt_id: string
+  choice_value: string
+  freeform_text?: string
+}
+
+/**
  * Normalize a parsed server frame into an {@link InboundChatMessage}, or
  * `null` when the frame is not a renderable message (control frame, wrong
  * shape, missing required fields). Defensive by design: a malformed field
@@ -344,7 +416,63 @@ export function normalizeInbound(raw: unknown): InboundChatMessage | null {
   }
   if (delivered_to !== null) out.delivered_to = delivered_to
   if (read_by !== null) out.read_by = read_by
+
+  // P1b (onboarding / quick-reply buttons) — preserve agent-message metadata.
+  // Only ever present on `agent_message` envelopes; absent fields stay absent so
+  // a plain user message (or a button-less agent message) normalizes identically
+  // to before.
+  const options = parseOptions(e['options'])
+  if (options !== null) out.options = options
+  const rawPromptId = e['prompt_id']
+  if (typeof rawPromptId === 'string' && rawPromptId.length > 0) out.prompt_id = rawPromptId
+  if (typeof e['allow_freeform'] === 'boolean') out.allow_freeform = e['allow_freeform']
+  const rawKind = e['kind']
+  if (rawKind === 'buttons' || rawKind === 'image-gallery') out.kind = rawKind
+  const upload = parseUploadAffordance(e['upload_affordance'])
+  if (upload !== null) out.upload_affordance = upload
   return out
+}
+
+/** Parse an untrusted value into a clean `ChatMessageOption[]` (drops malformed
+ *  entries; defaults `body` to `label`), or `null` when empty/not an array. */
+export function parseOptions(raw: unknown): readonly ChatMessageOption[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: ChatMessageOption[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const o = entry as Record<string, unknown>
+    const label = o['label']
+    const value = o['value']
+    if (typeof label !== 'string' || label.length === 0) continue
+    if (typeof value !== 'string' || value.length === 0) continue
+    const body = typeof o['body'] === 'string' ? (o['body'] as string) : label
+    const opt: ChatMessageOption = { label, body, value }
+    if (typeof o['image_url'] === 'string' && (o['image_url'] as string).length > 0) {
+      opt.image_url = o['image_url'] as string
+    }
+    const dec = o['decoration']
+    if (dec !== null && typeof dec === 'object') {
+      const d = dec as Record<string, unknown>
+      const decoration: NonNullable<ChatMessageOption['decoration']> = {}
+      const style = d['style']
+      if (style === 'default' || style === 'destructive' || style === 'primary') decoration.style = style
+      if (typeof d['icon_custom_emoji_id'] === 'string') {
+        decoration.icon_custom_emoji_id = d['icon_custom_emoji_id'] as string
+      }
+      if (Object.keys(decoration).length > 0) opt.decoration = decoration
+    }
+    out.push(opt)
+  }
+  return out.length > 0 ? out : null
+}
+
+/** Parse an untrusted value into a {@link ChatMessageUploadAffordance}, or
+ *  `null` when the source isn't one of the recognised export sources. */
+export function parseUploadAffordance(raw: unknown): ChatMessageUploadAffordance | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const u = raw as Record<string, unknown>
+  if (u['source'] === 'chatgpt' || u['source'] === 'claude') return { source: u['source'] }
+  return null
 }
 
 /**

@@ -252,6 +252,47 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(agent?.reactions).toEqual([])
   })
 
+  it('renders an agent message with button options and posts a button_choice on choose (P1b)', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'agent_message',
+      message_id: 'm1',
+      seq: 1,
+      ts: 1,
+      body: 'Want to import your history?',
+      prompt_id: 'p1',
+      allow_freeform: false,
+      kind: 'buttons',
+      options: [
+        { label: 'Yes, import', body: 'Yes, import', value: 'yes' },
+        { label: 'Skip', body: 'Skip', value: 'skip', decoration: { style: 'destructive' } },
+      ],
+    })
+    await tick()
+
+    // The option metadata reaches the RenderMessage.
+    const msg = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
+    expect(msg?.options?.map((o) => o.value)).toEqual(['yes', 'skip'])
+    expect(msg?.promptId).toBe('p1')
+    expect(msg?.kind).toBe('buttons')
+    expect(msg?.allowFreeform).toBe(false)
+    expect(msg?.chosenValue).toBeNull()
+
+    // Choosing posts a button_choice frame (value, NOT label) + records the
+    // choice locally so the row collapses optimistically.
+    controller.onChoose(msg!.id, msg!.promptId, 'yes')
+    const choiceFrames = sockets[0]!.sent
+      .map((s) => JSON.parse(s) as Record<string, unknown>)
+      .filter((e) => e['type'] === 'button_choice')
+    expect(choiceFrames).toContainEqual({ v: 1, type: 'button_choice', prompt_id: 'p1', choice_value: 'yes' })
+    const after = controller.getViewModel().messages.find((m) => m.messageId === 'm1')
+    expect(after?.chosenValue).toBe('yes')
+  })
+
   it('reflects an edit_update + delete on the VM and sends edit/delete frames (Track B Phase 4)', async () => {
     const { controller, sockets } = setup()
     controller.start()

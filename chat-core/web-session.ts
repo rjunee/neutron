@@ -30,6 +30,7 @@ import {
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
   type ChatMessage,
+  type OutboundButtonChoice,
   type OutboundEdit,
   type OutboundReaction,
   type OutboundReceipt,
@@ -275,6 +276,24 @@ export class WebChatSession {
   deleteMessage(message_id: string): boolean {
     if (message_id.length === 0) return false
     const env: OutboundEdit = { v: 1, type: 'edit', message_id, action: 'delete' }
+    return this.ws.send(env)
+  }
+
+  /**
+   * P1b (onboarding / quick-reply buttons) — post the user's option choice back
+   * to the server. Sends a `button_choice` frame carrying the option's `value`
+   * (the routing key, NOT its label) + the `prompt_id` so the server's
+   * outstanding-prompt store resolves the canonical choice; an optional
+   * `freeform_text` rides along when the prompt allowed a free reply. Mirrors how
+   * a user message is sent, but best-effort over the open socket (a tap is not on
+   * the lossless message critical path): a choice tapped while offline returns
+   * `false` and the UI can re-issue. Returns whether the frame reached the
+   * socket.
+   */
+  sendButtonChoice(prompt_id: string, choice_value: string, freeform_text?: string): boolean {
+    if (prompt_id.length === 0 || choice_value.length === 0) return false
+    const env: OutboundButtonChoice = { v: 1, type: 'button_choice', prompt_id, choice_value }
+    if (freeform_text !== undefined && freeform_text.length > 0) env.freeform_text = freeform_text
     return this.ws.send(env)
   }
 

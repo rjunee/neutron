@@ -72,6 +72,18 @@ export class SyncEngine {
     if (env.read_by !== undefined && env.read_by !== null) {
       msg.read_by = env.read_by
     }
+    // P1b (onboarding / quick-reply buttons) — carry the agent-message metadata
+    // through to the store so the render layer can show the option row. Only set
+    // when present (agent messages) so a user message's row stays unchanged.
+    if (env.options !== undefined && env.options !== null) msg.options = env.options
+    if (env.prompt_id !== undefined && env.prompt_id !== null) msg.prompt_id = env.prompt_id
+    if (env.allow_freeform !== undefined && env.allow_freeform !== null) {
+      msg.allow_freeform = env.allow_freeform
+    }
+    if (env.kind !== undefined && env.kind !== null) msg.kind = env.kind
+    if (env.upload_affordance !== undefined && env.upload_affordance !== null) {
+      msg.upload_affordance = env.upload_affordance
+    }
     await this.store.upsert(msg)
     return { seq: env.seq, applied: !deduped, reconciled }
   }
