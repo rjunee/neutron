@@ -168,6 +168,16 @@ const HERE = dirname(fileURLToPath(import.meta.url))
  *  construction and the pending-respawns drain so the two can never drift. */
 const SESSION_KEY_SEP = '\0'
 const DEFAULT_DEV_CHANNEL_PATH = join(HERE, 'dev-channel.ts')
+// P0-1 native-MCP tool bridge — the SECOND `mcpServers` entry (alongside the
+// dev-channel) that fronts the gateway's in-process `ToolRegistry` to the
+// spawned `claude` over stdio. Attached ONLY when a spawn opts in via
+// `enableToolBridge` AND a `ReplToolBridge` has been wired (see
+// `setReplToolBridge`).
+const DEFAULT_TOOLS_BRIDGE_PATH = join(HERE, 'tools-bridge.ts')
+/** The MCP server name the tools-bridge registers under; tools surface to the
+ *  agent as `mcp__<this>__<toolname>`. Also the `--allowedTools` namespace the
+ *  argv permits so the agent can invoke them without a per-call approval. */
+const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
 // Co-located with the substrate (NOT in the P0 `prompts/` package, whose
 // KNOWN_PROMPTS registry strictly enumerates the instance-substituted gateway
 // prompts). This is a static substrate asset read by absolute path.
@@ -705,11 +715,24 @@ export interface PersistentReplSubstrateOptions {
   /** Auth/env overlay. `undefined` values delete from `process.env` (scrub). */
   env?: Record<string, string | undefined>
 
+  /**
+   * P0-1 — opt this REPL into the native-MCP tool bridge: a SECOND `mcpServers`
+   * entry (alongside the dev-channel) that fronts the gateway's in-process
+   * `ToolRegistry` so the spawned `claude` can make structured, self-initiated
+   * Core/tool calls mid-reasoning. SECURITY-CRITICAL default-off: only the
+   * owner's WARM conversational REPL sets this. The untrusted history-import
+   * REPL and the disposable Trident build REPLs leave it false so a
+   * prompt-injection in imported data can never reach a Core tool. No-op unless
+   * a `ReplToolBridge` was also wired via `setReplToolBridge`.
+   */
+  enableToolBridge?: boolean
   // --- host / test injection (all optional; production uses defaults) ---
   /** PTY backend. Default: Bun-native terminal host. Tests inject a fake. */
   ptyHost?: PtyHost
   /** Path to the dev-channel MCP server script. Default: the shipped one. */
   devChannelPath?: string
+  /** Path to the tools-bridge MCP server script. Default: the shipped one. */
+  toolsBridgePath?: string
   /** Path to the agent-base system prompt. Default: the shipped one. */
   appendSystemPromptFile?: string
   /** Per-instance `~/.claude/projects` root for the JSONL ghost-gate AND the
@@ -855,6 +878,38 @@ interface ActiveTurn {
 }
 
 // ---------------------------------------------------------------------------
+// P0-1 native-MCP tool bridge — late-bound dispatcher.
+//
+// The spawned `claude`'s tools-bridge POSTs tool calls to the reply sink, which
+// forwards them to this `ReplToolBridge`. The bridge IS the gateway's in-process
+// `McpServer` (it satisfies `listToolSchemas` + `dispatch`). It is set LATE —
+// the substrate is built in the composer BEFORE `composeProductionGraph` builds
+// the `McpServer` + registers the Cores/doc-search/etc. — so the module holds a
+// mutable singleton wired by `composeProductionGraph` once the graph exists. A
+// turn dispatched before it is set (or on an LLM-less box that never composes
+// the graph) simply sees no Neutron tools (fail-soft).
+// ---------------------------------------------------------------------------
+
+export interface ReplToolBridge {
+  /** Discovery half — the per-session tools manifest the bridge advertises. */
+  listToolSchemas(): { name: string; description: string; input_schema: unknown }[]
+  /** Invocation half — dispatch a tool call against the in-process registry. */
+  dispatch(input: { tool_name: string; args: unknown; call_id: string }): Promise<unknown>
+}
+
+let replToolBridge: ReplToolBridge | undefined
+
+/**
+ * Wire (or clear) the in-process tool dispatcher the spawned agent reaches over
+ * the native-MCP stdio bridge. Called once by `composeProductionGraph` with the
+ * graph's `McpServer`; called with `undefined` on graph shutdown so a torn-down
+ * instance can't serve tool calls against a dead registry.
+ */
+export function setReplToolBridge(bridge: ReplToolBridge | undefined): void {
+  replToolBridge = bridge
+}
+
+// ---------------------------------------------------------------------------
 // Reply sink — one loopback HTTP server the dev-channels POST back to.
 // Module singleton so it is shared across every per-turn substrate instance.
 // ---------------------------------------------------------------------------
@@ -912,6 +967,38 @@ class ReplSink {
       const sessionId = typeof body['session_id'] === 'string' ? (body['session_id'] as string) : ''
       if (REPL_DEBUG) {
         process.stderr.write(`[repl-sink] ${url.pathname} session=${sessionId.slice(0, 8)} active=${this.sessions.get(sessionId)?.activeTurn !== undefined}\n`)
+      }
+      // P0-1 native-MCP tool bridge — these two routes are dispatched against the
+      // process-global `ReplToolBridge` (the gateway's in-process `McpServer`),
+      // NOT a per-session driver, so they are handled BEFORE the session lookup
+      // (a tool call carries no in-flight turn). Token-gated like every sink POST.
+      if (url.pathname === '/tools') {
+        return Response.json({ tools: replToolBridge?.listToolSchemas() ?? [] })
+      }
+      if (url.pathname === '/tool-call') {
+        if (replToolBridge === undefined) {
+          return Response.json({ ok: false, error: 'no tool bridge wired' }, { status: 503 })
+        }
+        const toolName = typeof body['tool_name'] === 'string' ? (body['tool_name'] as string) : ''
+        const callId =
+          typeof body['call_id'] === 'string' ? (body['call_id'] as string) : sessionId || 'tool'
+        if (toolName === '') {
+          return Response.json({ ok: false, error: 'tool_name required' }, { status: 400 })
+        }
+        try {
+          const result = await replToolBridge.dispatch({
+            tool_name: toolName,
+            args: body['args'] ?? {},
+            call_id: callId,
+          })
+          return Response.json({ ok: true, result })
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          // A tool error is a NORMAL outcome the agent should see + recover from
+          // (unknown tool, capability denied, handler threw) — 200 with ok:false
+          // so the bridge returns it as a `tool_result` isError, not an HTTP fault.
+          return Response.json({ ok: false, error: msg })
+        }
       }
       const session = this.sessions.get(sessionId)
       if (session === undefined) {
@@ -1441,6 +1528,7 @@ async function spawnSession(
   const channelName = `neutron-${randomBytes(4).toString('hex')}`
   const ptyHost = options.ptyHost ?? bunTerminalHost
   const devChannelPath = options.devChannelPath ?? DEFAULT_DEV_CHANNEL_PATH
+  const toolsBridgePath = options.toolsBridgePath ?? DEFAULT_TOOLS_BRIDGE_PATH
   const appendSystemPromptFile = options.appendSystemPromptFile ?? DEFAULT_AGENT_BASE_PROMPT
 
   // Per-session config files (mcp-config wires the dev-channel; settings wires
@@ -1448,28 +1536,48 @@ async function spawnSession(
   const cfgBase = join(tmpdir(), `neutron-repl-${channelName}`)
   const mcpConfigPath = `${cfgBase}-mcp.json`
   const settingsPath = `${cfgBase}-settings.json`
+  const toolsManifestPath = `${cfgBase}-tools.json`
 
-  writeFileSync(
-    mcpConfigPath,
-    JSON.stringify(
-      {
-        mcpServers: {
-          [channelName]: {
-            command: 'bun',
-            args: [devChannelPath],
-            env: {
-              SINK_PORT: String(sink.port),
-              SINK_TOKEN: sink.token,
-              SESSION_ID: sessionId,
-              CHANNEL_NAME: channelName,
-            },
-          },
-        },
+  // P0-1 — the dev-channel reply sink is ALWAYS present (`server:<name>`). When
+  // this REPL opted into the tool bridge AND a `ReplToolBridge` is wired AND the
+  // registry exposes ≥1 tool, add a SECOND `mcpServers` entry: a stdio bridge
+  // fronting the in-process `ToolRegistry`. We SNAPSHOT the tool schemas to a
+  // manifest file NOW (the registry is fully populated post-compose) so the
+  // bridge's discovery is deterministic + race-free. `toolBridgeActive` gates the
+  // `--allowedTools` namespace below.
+  const mcpServers: Record<string, unknown> = {
+    [channelName]: {
+      command: 'bun',
+      args: [devChannelPath],
+      env: {
+        SINK_PORT: String(sink.port),
+        SINK_TOKEN: sink.token,
+        SESSION_ID: sessionId,
+        CHANNEL_NAME: channelName,
       },
-      null,
-      2,
-    ),
-  )
+    },
+  }
+  let toolBridgeActive = false
+  if (options.enableToolBridge === true && replToolBridge !== undefined) {
+    const schemas = replToolBridge.listToolSchemas()
+    if (schemas.length > 0) {
+      writeFileSync(toolsManifestPath, JSON.stringify(schemas, null, 2))
+      mcpServers[TOOLS_BRIDGE_SERVER_NAME] = {
+        command: 'bun',
+        args: [toolsBridgePath],
+        env: {
+          SINK_PORT: String(sink.port),
+          SINK_TOKEN: sink.token,
+          SESSION_ID: sessionId,
+          TOOLS_MANIFEST_PATH: toolsManifestPath,
+          BRIDGE_SERVER_NAME: TOOLS_BRIDGE_SERVER_NAME,
+        },
+      }
+      toolBridgeActive = true
+    }
+  }
+
+  writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2))
   buildSettings({ settingsPath })
 
   // SECURITY-CRITICAL (Codex-r1-P1): thread the spec's declared tool surface into
@@ -1492,6 +1600,12 @@ async function spawnSession(
     model,
     addDir: cwd,
     tools: toolSurface,
+    // P0-1 — when the tool bridge is attached, permit its MCP namespace so the
+    // agent can invoke the Neutron tools without a per-call approval prompt.
+    // `--tools` only gates the BUILT-IN set, so the security-critical
+    // `--tools ""` for untrusted-content REPLs is untouched; this allow-list is
+    // the MCP-tool permission grant (`mcp__neutron`), added ONLY here.
+    ...(toolBridgeActive ? { allowedMcpTools: [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] } : {}),
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
   })
 
@@ -1500,8 +1614,11 @@ async function spawnSession(
   const session = new ReplSession(sessionKey, sessionId, channelName)
   session.toolSurface = toolSurface.join(',')
   // Stash the temp config paths so teardown can unlink them (Argus r5 IMPORTANT —
-  // ephemeral one-shots write a fresh pair per call; leaked otherwise).
-  session.configPaths = [mcpConfigPath, settingsPath]
+  // ephemeral one-shots write a fresh pair per call; leaked otherwise). The tools
+  // manifest is only written when the bridge is active; include it when so.
+  session.configPaths = toolBridgeActive
+    ? [mcpConfigPath, settingsPath, toolsManifestPath]
+    : [mcpConfigPath, settingsPath]
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env)

@@ -60,6 +60,18 @@ export interface BuildReplArgvInput {
    * does not restrict the surface; only `--tools` gates the built-in set.
    */
   tools?: ReadonlyArray<string>
+  /**
+   * P0-1 — MCP tool namespaces to PERMIT via `--allowedTools` (e.g.
+   * `['mcp__neutron']`). This is ORTHOGONAL to `tools`: `--tools` gates the
+   * BUILT-IN set, while `--allowedTools` grants permission for MCP-server tools
+   * so the agent invokes the native-MCP tool bridge without a per-call approval
+   * prompt. Emitted ONLY when the substrate attached the tools bridge — the
+   * security-critical `--tools ""` for untrusted-content REPLs is untouched (an
+   * import/Trident REPL never sets this, so it gets no MCP tool grant). Omitted /
+   * empty → no `--allowedTools` flag (unchanged behaviour; the dev-channel
+   * `reply` tool is a development-channel tool, exempt from the permission gate).
+   */
+  allowedMcpTools?: ReadonlyArray<string>
 }
 
 /** Build the interactive `claude` argv as a plain string array (no shell, no
@@ -84,6 +96,12 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
     argv.push('--tools', '')
   } else {
     argv.push('--tools', input.tools.join(','))
+  }
+  // P0-1 — permit the native-MCP tool bridge's namespace (additive to `--tools`,
+  // which only governs built-ins). Present only when the substrate attached the
+  // bridge, so untrusted-content REPLs never get an MCP-tool grant.
+  if (input.allowedMcpTools !== undefined && input.allowedMcpTools.length > 0) {
+    argv.push('--allowedTools', input.allowedMcpTools.join(','))
   }
   if (input.skipPermissions === true) {
     argv.push('--dangerously-skip-permissions')

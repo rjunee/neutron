@@ -307,6 +307,7 @@ export async function composeProductionGraph(
     approvalModule,
     channelsModule,
     mcpModule,
+    replToolBridgeModule,
     remindersModule,
     tridentModule,
     cronModule,
@@ -322,6 +323,9 @@ export async function composeProductionGraph(
   graph.register(approvalModule)
   graph.register(channelsModule)
   graph.register(mcpModule)
+  // P0-1 — registered AFTER `mcp` (deps:['mcp']); points the substrate's
+  // late-bound tool-bridge singleton at the graph's McpServer.
+  graph.register(replToolBridgeModule)
   graph.register(remindersModule)
   graph.register(tridentModule)
   graph.register(cronModule)

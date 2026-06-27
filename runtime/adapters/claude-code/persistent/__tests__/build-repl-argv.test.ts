@@ -96,4 +96,34 @@ describe('buildReplArgv', () => {
       expect(argv[i + 1]).toBe('Read,Grep')
     })
   })
+
+  // P0-1 — the native-MCP tool bridge permission grant. ORTHOGONAL to --tools:
+  // --allowedTools grants the MCP namespace WITHOUT re-enabling any built-in.
+  describe('--allowedTools (P0-1 native-MCP tool bridge grant)', () => {
+    it('omits --allowedTools by default (unchanged behaviour)', () => {
+      const argv = buildReplArgv({ ...base, resume: false })
+      expect(argv).not.toContain('--allowedTools')
+    })
+
+    it('omits --allowedTools for an empty grant', () => {
+      const argv = buildReplArgv({ ...base, resume: false, allowedMcpTools: [] })
+      expect(argv).not.toContain('--allowedTools')
+    })
+
+    it('emits --allowedTools <namespace> when the bridge is attached, leaving --tools "" intact', () => {
+      const argv = buildReplArgv({
+        ...base,
+        resume: false,
+        tools: [], // untrusted/default-deny built-ins
+        allowedMcpTools: ['mcp__neutron'],
+      })
+      const a = argv.indexOf('--allowedTools')
+      expect(a).toBeGreaterThanOrEqual(0)
+      expect(argv[a + 1]).toBe('mcp__neutron')
+      // The built-in default-deny is NOT relaxed by the MCP grant.
+      const t = argv.indexOf('--tools')
+      expect(argv[t + 1]).toBe('')
+      expect(argv).not.toContain('Bash')
+    })
+  })
 })

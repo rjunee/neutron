@@ -88,6 +88,20 @@ export class McpServer {
     return this.registry.list().map((r) => ({ name: r.name, description: r.description }))
   }
 
+  /**
+   * Full tool schemas for the native-MCP stdio bridge (P0-1). The persistent
+   * REPL substrate enumerates these to write the per-session tools manifest the
+   * `tools-bridge` advertises to the spawned `claude`, so the model emits a
+   * structured `tool_use` whose args validate against the registered
+   * `input_schema`. Mirrors `listTools()` but carries the input schema — this is
+   * the discovery half; `dispatch()` is the invocation half.
+   */
+  listToolSchemas(): { name: string; description: string; input_schema: unknown }[] {
+    return this.registry
+      .list()
+      .map((r) => ({ name: r.name, description: r.description, input_schema: r.input_schema }))
+  }
+
   ownerSlug(): string {
     return this.project_slug
   }

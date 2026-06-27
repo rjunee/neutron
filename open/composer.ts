@@ -334,6 +334,13 @@ export function buildOpenGraphComposer(
             user_id: OWNER_USER_ID,
             project_slug,
             skip_permissions: true,
+            // P0-1 — the owner's WARM conversational REPL is the ONE substrate
+            // that opts into the native-MCP tool bridge, so the live chat agent
+            // can call Cores/doc-search/memory/reminders mid-reasoning over a
+            // structured stdio-MCP transport (the in-process registry, fronted by
+            // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
+            // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
+            enableToolBridge: true,
             ...(substrateFactory !== undefined ? { substrateFactory } : {}),
           })
         : null
