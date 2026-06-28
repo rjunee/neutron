@@ -120,6 +120,18 @@ already-fetched event/inbox rows to a `scribeFanOut` hook
 (`scribeOnUserTurn` → `scribe.handleUserTurn`): chat captures what the owner
 *says*; the fan-out captures what their *calendar and inbox* contain.
 
+> **Chat-turn extractor wiring (2026-06-28 fix).** `scribeOnUserTurn` must be
+> fired by EVERY chat surface, or chat-time memory is silently dead. It is wired
+> in the legacy web `chat-bridge.handleInbound` AND — as of the fullpipe-e2e fix —
+> in the unified `/ws/app/chat` receiver (`open/composer.ts` `appWsReceiver.receive`,
+> after `appWsChatTurn`). The React client uses `/ws/app/chat` exclusively, so
+> before the fix NO post-onboarding chat turn extracted facts to GBrain (the store
+> stayed empty; "recall" only worked from in-session CC context). Note this is a
+> DISTINCT layer from the onboarding seam's `onTurnComplete` (which extracts the 5
+> onboarding PROFILE fields, not general people/companies/concepts). Fire-and-forget
+> + guarded, omitted on LLM-less boxes. Regression guard:
+> `open/__tests__/open-app-ws-scribe-wiring.test.ts`.
+
 **Wired into the Open boot path** (`open/composer.ts`, gated on scribe being
 live) via `mountCoresScribeFanOut(...)`, which composes both schedulers using the
 built factories, threads the binding, starts them, and registers a drain+teardown
