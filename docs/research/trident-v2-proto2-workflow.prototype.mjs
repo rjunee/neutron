@@ -52,6 +52,10 @@ export const meta = {
 const { repoPath, task, baseBranch = 'main', slug = 'trident-run', maxRounds = 3 } =
   (args || {})
 
+// Deterministic branch name — the cleanup step finds the worktree by this name
+// even if Forge fails before returning a result (see the finally block).
+const forgeBranch = `trident/${slug}`
+
 const VERDICT_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['verdict', 'findings'],
@@ -101,7 +105,7 @@ let forge = null
 try {
   forge = await agent(
     `You are FORGE. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
-Repo: ${repoPath}. You are in a fresh isolated git worktree (your cwd). Build this task on a NEW branch derived from '${slug}':
+Repo: ${repoPath}. You are in a fresh isolated git worktree (your cwd). Build this task on the DETERMINISTIC branch '${forgeBranch}' (run \`git switch -c ${forgeBranch}\` as your FIRST step — the cleanup step relies on this exact name to find your worktree even if you fail later):
 
 TASK:
 ${task}
@@ -145,20 +149,30 @@ Verdict B: ${JSON.stringify(verdicts[1])}`,
 
   // Inner workflow RETURNS {PR#, verdict}; the OUTER/human layer does the
   // irreversible merge (merge.ts stays outer — defense in depth).
+  // NOTE: top-level `return` is the Workflow runtime's result API (it wraps the
+  // body in an async context). `node --check` flags it as an illegal top-level
+  // return — that's expected; this is a Workflow script, NOT a plain-node module.
   return { ok: true, prNumber: forge.prNumber, branch: forge.branch, verdict: synthesis, budget: { total: budget.total, spent: budget.spent() } }
 } finally {
   // (A) MANDATORY WORKTREE CLEANUP — runs on success, REQUEST_CHANGES, throw,
-  // or abort. The harness will NOT remove a changed worktree for us. The branch
-  // is already pushed (above), so removing the local worktree+branch loses
-  // nothing. This is the D-1 cruft-prevention guarantee.
-  if (forge && forge.worktreePath && forge.branch) {
-    await agent(
-      `Cleanup step. Run, from ${repoPath}, ignoring individual failures:
-  git worktree remove --force ${forge.worktreePath}
-  git branch -D ${forge.branch}
-  git worktree prune
-Then run \`git worktree list\` and confirm ${forge.worktreePath} is GONE. Report the final worktree count.`,
-      { label: 'cleanup:worktree', phase: 'Synthesis' }
-    )
-  }
+  // or abort. The harness removes a worktree ONLY IF UNCHANGED, and a Forge build
+  // always changes its worktree, so trident must remove it explicitly.
+  //
+  // CRITICAL (proto-2 codex review): the cleanup CANNOT depend on `forge` being a
+  // valid result. If Forge mutates its worktree then fails before returning JSON
+  // (tests fail, `gh pr create` fails, the agent throws -> agent() returns null),
+  // `forge` is null yet the changed worktree exists. So we clean up by SCANNING
+  // git state for any worktree on the deterministic '${forgeBranch}' branch —
+  // independent of Forge's return value. This is what makes the guarantee hold on
+  // ALL paths. (The branch is pushed on the success path, so deleting the local
+  // worktree+branch loses nothing.)
+  await agent(
+    `Cleanup step (must succeed on every path). From ${repoPath}, ignoring individual failures:
+1. Find the worktree for branch '${forgeBranch}':  git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch /{ if ($2=="refs/heads/${forgeBranch}") print w }'
+2. For that path (if any):  git worktree remove --force <path>
+3. git branch -D ${forgeBranch}   (ignore "not found")
+4. git worktree prune
+5. Verify: git worktree list — confirm NO worktree remains on '${forgeBranch}'. Report the final worktree count and whether any orphan remained.`,
+    { label: 'cleanup:worktree', phase: 'Synthesis' }
+  )
 }

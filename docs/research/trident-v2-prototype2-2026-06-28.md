@@ -270,6 +270,20 @@ the plan can drop the "two agents disagree" hedge; (c) D-1 cleanup is not just
 "ensure bulletproof" — it is *mandatory on the success path too*, because the
 harness never cleans a changed worktree. No NO-GO blockers found.
 
+## Cross-model review (Codex) — applied
+
+A Codex (GPT) review of this PR caught **one real design flaw in the seed script**
+(and it's a good dogfood signal for the Phase 5 panel): the original `finally`
+cleanup read `forge.worktreePath`/`forge.branch`, so if Forge mutated its worktree
+then **failed before returning** (tests fail, `gh pr create` fails, agent throws →
+`agent()` returns null), cleanup was skipped — leaving exactly the orphan the
+prototype prevents, breaking the "all paths" guarantee. **Fixed:** Forge now builds
+on a deterministic branch `trident/<slug>`, and the cleanup step scans
+`git worktree list` for that branch and removes it independent of Forge's return
+value. Codex also noted top-level `return` fails `node --check`; that is the
+Workflow runtime's documented result API (the real proto-2 runs used it
+successfully) — annotated in the script rather than changed.
+
 ## Reproduce
 
 The reference seed workflow is `docs/research/trident-v2-proto2-workflow.prototype.mjs`
