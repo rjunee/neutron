@@ -2,6 +2,40 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Install GUARANTEES GBrain memory — retry + abort-on-failure (no silent degrade)
+
+**What shipped.** `install.sh#ensure_gbrain` was upgraded from best-effort to a
+REQUIRED dependency, closing the last gap in parity gap #1: the step installed
+GBrain by default but was NON-FATAL — a network/build hiccup (or an
+installed-but-not-on-PATH binary) just `warn`ed and `return 0`d, so memory
+silently degraded (entity pages on disk, NO knowledge-graph / semantic recall)
+and the user was left to notice and fix it. Per Ryan's lock ("shouldn't be a
+binary left up to the user to install"), a successful `neutron` install now
+GUARANTEES `gbrain` on PATH.
+
+- **Retry transient failures.** The install command (`bun install -g
+  $GBRAIN_REF`, or the `NEUTRON_GBRAIN_INSTALL_CMD` test seam) is retried up to 3
+  attempts with a short backoff before giving up — github/network/native-build
+  blips no longer doom the install. Tunable via `NEUTRON_GBRAIN_ATTEMPTS` /
+  `NEUTRON_GBRAIN_RETRY_DELAY` (test/override seams).
+- **Guarantee or abort.** After retries, the bun global-bin dir is re-probed; if
+  `gbrain` is STILL unresolvable on PATH, the install `die()`s with an actionable
+  error (manual `bun install -g …` recovery + the `--no-gbrain` escape hatch)
+  instead of silently shipping degraded memory.
+- **Opt-out stays graceful.** `--no-gbrain` / `NEUTRON_SKIP_GBRAIN=1` is the ONLY
+  way to install without memory; it warns and continues (exit 0) exactly as
+  before. The idempotent already-installed pre-check and the
+  `NEUTRON_GBRAIN_INSTALL_CMD` seam are unchanged; both call sites (the
+  `NEUTRON_INSTALL_PRINT_GBRAIN` seam + the real Dependencies-phase call) stay
+  correct and don't double-install.
+- **No feature flags.** Pure installer + docs + test change; the memory runtime
+  is untouched.
+- **Tests** — `tests/integration/install-gbrain.test.ts` extended to 9 cases:
+  abort-on-failure (non-zero exit, not silent-degrade), retry-then-abort (proves
+  the loop fires), retry-then-SUCCEED, PATH-gap → abort, `--no-gbrain` /
+  `NEUTRON_SKIP_GBRAIN` graceful skip, success path confirms gbrain on PATH.
+  9 pass / 0 fail. `sh -n` + `shellcheck -s sh install.sh` clean.
+
 ## Onboarding runs as the live CC session + post-turn scribe (BUG 0, Path 1)
 
 **What shipped.** Onboarding was rearchitected off the per-turn phase-machine /

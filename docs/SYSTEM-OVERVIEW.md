@@ -628,14 +628,20 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   self-host gets REAL memory out of the box, `install.sh` installs GBrain by
   default in the Dependencies phase via `bun install -g github:garrytan/gbrain`
   (source ref overridable with `NEUTRON_GBRAIN_REF`). The step is **idempotent**
-  (an already-present `gbrain` is detected, not reinstalled) and **non-fatal**:
-  if the install fails or the binary can't be resolved on PATH, the installer
-  DETECTS it and reports the gap LOUDLY (a `DEGRADED` line in the final banner +
-  the exact `bun install -g …` recovery command) rather than aborting — the
-  runtime's graceful-degradation path stays intact. Opt out with `--no-gbrain`
-  / `NEUTRON_SKIP_GBRAIN=1` (memory then degrades to disk-only, reported the
-  same way). Covered by `tests/integration/install-gbrain.test.ts` via the
-  `NEUTRON_INSTALL_PRINT_GBRAIN` seam.
+  (an already-present `gbrain` is detected, not reinstalled) and treats GBrain as
+  a **REQUIRED dependency, not best-effort**: a successful `neutron` install
+  GUARANTEES `gbrain` on PATH. Transient failures (network / github rate-limit /
+  native-build blips) are **retried** up to 3 attempts with a short backoff
+  (`NEUTRON_GBRAIN_ATTEMPTS` / `NEUTRON_GBRAIN_RETRY_DELAY`); if after retries the
+  binary is STILL unresolvable on PATH the installer **ABORTS** (`die`) with an
+  actionable error — the manual `bun install -g …` recovery command plus the
+  `--no-gbrain` escape hatch — rather than silently shipping degraded memory. The
+  ONLY way to install without it is the explicit `--no-gbrain` /
+  `NEUTRON_SKIP_GBRAIN=1` opt-out, which stays graceful (warns and continues;
+  memory degrades to disk-only). Covered by
+  `tests/integration/install-gbrain.test.ts` (9 cases — abort-on-failure,
+  retry-then-abort, retry-then-succeed, PATH-gap abort, graceful opt-out, success
+  path) via the `NEUTRON_INSTALL_PRINT_GBRAIN` seam.
 
 - **Auto-upgrade + doctor (`gbrain-memory/gbrain-doctor.ts`).** `ensure_gbrain`
   pins a point-in-time snapshot of an UNPINNED default branch with no upgrade

@@ -10,10 +10,12 @@
  * step `install.sh` had ZERO gbrain references, so every fresh install ran
  * without the memory that is core to the Vajra-parity experience.
  *
- * `install.sh` now installs GBrain by default (`bun install -g
- * github:garrytan/gbrain`) and DETECTS + clearly reports the gap when it can't,
- * without ever aborting the install (the runtime's graceful degradation stays
- * intact). `--no-gbrain` / `NEUTRON_SKIP_GBRAIN` opt out.
+ * `install.sh` now treats GBrain as a REQUIRED dependency: it installs it by
+ * default (`bun install -g github:garrytan/gbrain`), RETRIES transient failures,
+ * and if `gbrain` is still not resolvable on PATH it ABORTS the install with an
+ * actionable error instead of silently shipping degraded memory. The ONLY way
+ * to install without it is the explicit `--no-gbrain` / `NEUTRON_SKIP_GBRAIN`
+ * opt-out, which stays graceful.
  *
  * This suite drives the script's `NEUTRON_INSTALL_PRINT_GBRAIN` seam (runs the
  * GBrain install/detect step in isolation, before any bun install / migration)
@@ -39,6 +41,8 @@ interface GbrainSeamResult {
   combined: string
   /** Parsed `KEY=value` lines the seam prints on stdout. */
   vars: Record<string, string>
+  /** Process exit status — 0 on success/opt-out, non-zero when `die()` aborts. */
+  status: number | null
 }
 
 interface RunOpts {
@@ -79,6 +83,8 @@ function runGbrainSeam(
       HOME: cwd,
       BUN_INSTALL: bunInstall,
       NEUTRON_INSTALL_PRINT_GBRAIN: '1',
+      // Keep retry-path tests fast — no real backoff. Callers can override.
+      NEUTRON_GBRAIN_RETRY_DELAY: '0',
       ...env,
     },
   })
@@ -89,7 +95,7 @@ function runGbrainSeam(
     const m = /^([A-Z_]+)=(.*)$/.exec(line.trim())
     if (m !== null) vars[m[1] as string] = m[2] as string
   }
-  return { stdout, stderr, combined: `${stdout}\n${stderr}`, vars }
+  return { stdout, stderr, combined: `${stdout}\n${stderr}`, vars, status: res.status }
 }
 
 describe('install.sh — GBrain memory self-install (parity gap #1)', () => {
@@ -115,24 +121,59 @@ describe('install.sh — GBrain memory self-install (parity gap #1)', () => {
     expect(combined).toContain('already installed')
   })
 
-  test('install FAILS → DEGRADED, reported clearly, install NOT aborted', () => {
-    const { vars, stderr } = runGbrainSeam({
+  test('install FAILS after retries → install ABORTS loudly (non-zero), NOT silent-degrade', () => {
+    const { vars, stderr, status } = runGbrainSeam({
       NEUTRON_GBRAIN_INSTALL_CMD: 'exit 3',
     })
-    // The gap is the whole point: it must NOT silently degrade.
-    expect(vars['GBRAIN_INSTALLED']).toBe('0')
-    expect(stderr).toContain('DEGRADED')
-    // And it must hand back the exact manual recovery command.
+    // GBrain is REQUIRED: the install must abort, not silently degrade.
+    expect(status).not.toBe(0)
+    // `die()` exits before the seam prints GBRAIN_INSTALLED=1.
+    expect(vars['GBRAIN_INSTALLED']).not.toBe('1')
+    expect(stderr).toContain('REQUIRED')
+    // And it must hand back the exact manual recovery command + the opt-out.
     expect(stderr).toContain('bun install -g')
+    expect(stderr).toContain('--no-gbrain')
   })
 
-  test('install ran but binary not on PATH → DEGRADED with a PATH hint', () => {
+  test('retries transient failures, then aborts after exhausting all attempts', () => {
+    // A command that fails every time should be retried the full N times — the
+    // attempt counter in the warning proves the retry loop actually fired.
+    const { stderr, status } = runGbrainSeam({
+      NEUTRON_GBRAIN_INSTALL_CMD: 'exit 3',
+      NEUTRON_GBRAIN_ATTEMPTS: '3',
+    })
+    expect(status).not.toBe(0)
+    expect(stderr).toContain('attempt 1/3')
+    expect(stderr).toContain('attempt 2/3')
+    expect(stderr).toContain('failed after 3 attempt')
+  })
+
+  test('retry fires on a transient failure, then SUCCEEDS → real memory enabled', () => {
+    // Fail the first attempt, then drop a real `gbrain` binary on the second —
+    // the seam must recover and confirm gbrain on PATH (no abort).
+    const { vars, combined, status } = runGbrainSeam({
+      NEUTRON_GBRAIN_ATTEMPTS: '3',
+      NEUTRON_GBRAIN_INSTALL_CMD:
+        'c="$BUN_INSTALL/attempts"; n=$(cat "$c" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$c"; ' +
+        'if [ "$n" -lt 2 ]; then exit 1; fi; ' +
+        'mkdir -p "$BUN_INSTALL/bin" && printf "#!/bin/sh\\nexit 0\\n" > "$BUN_INSTALL/bin/gbrain" && chmod +x "$BUN_INSTALL/bin/gbrain"',
+    })
+    expect(status).toBe(0)
+    expect(vars['GBRAIN_INSTALLED']).toBe('1')
+    expect(combined).toContain('attempt 1/3') // first try failed → retry warning
+    expect(combined).toContain('real KG/semantic memory enabled')
+  })
+
+  test('install ran but binary not on PATH → ABORTS with a PATH hint (REQUIRED)', () => {
     // Command "succeeds" but produces no binary — the real-world PATH-gap case.
-    const { vars, stderr } = runGbrainSeam({
+    // GBrain is REQUIRED, so this aborts rather than shipping degraded memory.
+    const { vars, stderr, status } = runGbrainSeam({
       NEUTRON_GBRAIN_INSTALL_CMD: 'true',
     })
-    expect(vars['GBRAIN_INSTALLED']).toBe('0')
+    expect(status).not.toBe(0)
+    expect(vars['GBRAIN_INSTALLED']).not.toBe('1')
     expect(stderr).toContain('not on PATH')
+    expect(stderr).toContain('--no-gbrain')
   })
 
   test('--no-gbrain opts out → skipped, degradation reported, never installed', () => {
@@ -153,11 +194,12 @@ describe('install.sh — GBrain memory self-install (parity gap #1)', () => {
     expect(stderr).toContain('skipping GBrain memory install')
   })
 
-  test('NEUTRON_GBRAIN_REF overrides the source ref in the reported command', () => {
-    const { stderr } = runGbrainSeam({
+  test('NEUTRON_GBRAIN_REF overrides the source ref in the abort recovery command', () => {
+    const { stderr, status } = runGbrainSeam({
       NEUTRON_GBRAIN_REF: 'github:rjunee/gbrain#pinned',
       NEUTRON_GBRAIN_INSTALL_CMD: 'exit 3',
     })
+    expect(status).not.toBe(0)
     expect(stderr).toContain('github:rjunee/gbrain#pinned')
   })
 })
