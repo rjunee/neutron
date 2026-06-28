@@ -51,7 +51,29 @@ export const meta = {
   phases: [{ title: 'Build' }, { title: 'Review' }, { title: 'Synthesis' }],
 }
 
-// `args` is supplied by the OUTER loop's launcher (`trident/inner-loop.ts`).
+// `args` is supplied by the OUTER loop's launcher (`trident/inner-loop.ts`),
+// which invokes the `Workflow` tool from a spawned substrate claude. The tool
+// passes `args` through VERBATIM, and the launcher MODEL sometimes serializes the
+// JSON as a STRING rather than a structured object (a real headless launcher run,
+// 2026-06-28, did exactly this). Destructuring a raw string yields ALL-undefined:
+// slug→default (every run collides on `trident/trident-run`), dbPath/runId→
+// undefined (checkpoints silently no-op → crash-resume C1/C2 is dead), mergeMode→
+// 'pr' (a local run's Forge gets told to `gh pr create` and FAILS), task→undefined
+// (Forge builds the wrong thing). So NORMALIZE the value before destructuring —
+// tolerate both the object form and a JSON-string form. CI's unit tests passed
+// `args` as an object and never exercised this serialization path.
+function normalizeWorkflowArgs(raw) {
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return parsed !== null && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return raw || {}
+}
+
 const {
   repoPath,
   task,
@@ -67,7 +89,7 @@ const {
   dbPath,
   runId,
   resumeCheckpoint = null,
-} = args || {}
+} = normalizeWorkflowArgs(args)
 
 // `pr` mode → push to origin + open/reuse a GitHub PR. `local` mode (the store
 // default when there is no GitHub origin or `gh` is unavailable) → commit on the

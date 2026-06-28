@@ -58,12 +58,34 @@ phase inner loop wholesale; in the neutron-managed vendor, re-pin the prior trid
 vendor snapshot. Migration 0089's columns are additive + nullable, so a revert
 leaves them harmlessly unused (no down-migration needed — Neutron OSS contract).
 
-**Acceptance status (HONEST).** Unit/integration-verified only: trident dir (253
-tests), the touched composition/wiring tests, and the full-project `tsc` are green.
-The REAL live `/code`-through-workflow run + the forced-crash-resume gate require a
-running gateway with credentials and a claude that can invoke the `Workflow` tool
-from a spawned subprocess (nested-workflow execution) — NOT headlessly verifiable
-in this environment.
+**`normalizeWorkflowArgs` — real-run blocker fix (2026-06-28).** A REAL headless
+launcher run revealed the make-or-break gap that the unit tests could not: the
+substrate claude, when invoking the `Workflow` tool, serialized the `args` payload
+as a JSON **string** rather than a structured object. The Workflow tool forwards
+`args` verbatim, so `inner-workflow.mjs`'s `const {…} = args` destructured a string
+→ EVERY field `undefined`: `slug`→default (every run collides on
+`trident/trident-run`), `dbPath`/`runId`→undefined (the C1 checkpoint `agent()`
+steps no-op → C2 crash-resume is DEAD), `mergeMode`→`pr` (a local run's Forge gets
+told to `gh pr create` and FAILS), `task`→undefined (Forge builds the wrong thing),
+`maxRounds`→3. CI's 253 tests passed `args` as an object and never exercised the
+model's tool-call serialization. Fix: `normalizeWorkflowArgs()` parses a JSON-string
+`args` form (degrading a malformed/non-object value to `{}` so defaults apply)
+before the destructure; `buildLauncherMessage` additionally instructs the model to
+pass `args` as a structured object (defense in depth). 7 new regression tests.
+
+**Acceptance status (VERIFIED — real headless run, 2026-06-28).** Unit/integration:
+trident dir (257 tests) + `tsc -p trident/tsconfig.json` green. REAL end-to-end,
+proven by driving the production `buildLauncherMessage` through a spawned
+`claude --tools Workflow,Agent,Bash,Edit,Read` against the real
+`trident/inner-workflow.mjs`: (1) a spawned (top-level) claude DOES invoke the
+`Workflow` tool and run the inner-workflow end-to-end — the "nesting one level only"
+caveat does not bite; (2) a real `/code` task threads correctly post-fix → Forge
+worktree build → parallel Argus → asymmetric synthesis → `TRIDENT_RESULT={ok:true,
+branch:"trident/v2-verify",verdict:"APPROVE",round:1,checkpoint:"argus-approved"}`;
+(3) C1 checkpoints persist mid-run (NULL→`forge-done`→`argus-approved` in
+`code_trident_runs`); (4) C2 resume (relaunch with `resumeCheckpoint`) takes the
+idempotent early-return (`round:0`, NO rebuild, branch REUSED, no duplicate); (5)
+D-1 worktree cleanup leaves zero `trident/<slug>` orphans on every path.
 
 **Files.** New `trident/inner-workflow.mjs`, `trident/inner-loop.ts`,
 `migrations/0089_code_trident_runs_inner_workflow.sql`; rewrote

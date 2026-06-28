@@ -175,6 +175,10 @@ describe('buildWorkflowInnerLoop — launcher mechanics', () => {
     expect(spec.prompt).toContain('/abs/inner-workflow.mjs')
     expect(spec.prompt).toContain('do the thing')
     expect(spec.prompt).toContain('TRIDENT_RESULT=')
+    // Defense-in-depth: the launcher must tell the model to pass `args` as a
+    // structured JSON object, not a JSON-encoded string (a real run showed the
+    // model stringifying it, which zeroes out every workflow field).
+    expect(spec.prompt).toContain('STRUCTURED JSON OBJECT')
     // Built rooted at the run's worktree.
     expect(fake.cwds).toEqual(['/wt/run-1'])
   })

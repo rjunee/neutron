@@ -137,6 +137,7 @@ Do EXACTLY this, nothing else:
 1. Invoke the \`Workflow\` tool with:
    scriptPath = ${scriptPath}
    args = ${argsJson}
+   Pass \`args\` as a STRUCTURED JSON OBJECT (the parsed value), NOT as a JSON-encoded string — a stringified value reaches the workflow as one string and breaks every \`args.*\` field.
 2. The workflow drives Forge build → parallel Argus review → synthesis → bounded fix loop and RETURNS an object like {ok, prNumber, branch, verdict, round, checkpoint}. Wait for it to return.
 3. Emit EXACTLY ONE final line, UNFENCED, with NO trailing text after it:
    TRIDENT_RESULT=<the workflow's returned object as compact one-line JSON>

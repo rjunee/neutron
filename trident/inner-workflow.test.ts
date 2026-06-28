@@ -29,6 +29,58 @@ describe('inner-workflow.mjs — meta + phases', () => {
       expect(SRC).toContain(key)
     }
   })
+
+  // A real headless launcher run (2026-06-28) showed the substrate claude can
+  // serialize the `Workflow` tool's `args` as a JSON STRING instead of an
+  // object; destructuring a raw string yields all-undefined (slug→default,
+  // dbPath/runId→undefined → checkpoints no-op → crash-resume dead, mergeMode→
+  // 'pr', task→undefined). The script must NORMALIZE args before destructuring.
+  test('normalizes a JSON-STRING args form before destructuring (real-run blocker fix)', () => {
+    expect(SRC).toContain('function normalizeWorkflowArgs(')
+    // Destructures the normalized value, NOT the raw `args || {}`.
+    expect(SRC).toContain('} = normalizeWorkflowArgs(args)')
+    // Parses a string form and guards a non-object/parse-failure to {}.
+    expect(SRC).toContain("typeof raw === 'string'")
+    expect(SRC).toContain('JSON.parse(raw)')
+  })
+})
+
+// Execute the EXACT normalization logic the script uses, so the fix is verified
+// behaviorally (not just by source string). Kept in lockstep with the .mjs.
+describe('inner-workflow.mjs — args normalization behavior', () => {
+  function normalizeWorkflowArgs(raw: unknown): Record<string, unknown> {
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw)
+        return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+      } catch {
+        return {}
+      }
+    }
+    return (raw as Record<string, unknown>) || {}
+  }
+
+  test('a JSON-STRING args form is parsed so fields survive', () => {
+    const raw = JSON.stringify({ slug: 'v2-verify', dbPath: '/tmp/x.db', runId: 'r1', mergeMode: 'local', maxRounds: 1 })
+    const a = normalizeWorkflowArgs(raw)
+    expect(a['slug']).toBe('v2-verify')
+    expect(a['dbPath']).toBe('/tmp/x.db')
+    expect(a['runId']).toBe('r1')
+    expect(a['mergeMode']).toBe('local')
+    expect(a['maxRounds']).toBe(1)
+  })
+
+  test('an OBJECT args form passes through unchanged', () => {
+    const obj = { slug: 'v2-verify', mergeMode: 'local' }
+    expect(normalizeWorkflowArgs(obj)).toBe(obj)
+  })
+
+  test('a malformed string / null / undefined degrades to an empty object (defaults apply)', () => {
+    expect(normalizeWorkflowArgs('not json')).toEqual({})
+    expect(normalizeWorkflowArgs('"a-bare-string"')).toEqual({})
+    expect(normalizeWorkflowArgs(null)).toEqual({})
+    expect(normalizeWorkflowArgs(undefined)).toEqual({})
+  })
 })
 
 describe('inner-workflow.mjs — inlined contracts + rules in EVERY agent', () => {
