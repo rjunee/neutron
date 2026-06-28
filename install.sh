@@ -617,11 +617,15 @@ ensure_bun() {
 # isGbrainBinaryMissingError). Before this step install.sh had ZERO gbrain
 # references, so every fresh install ran without real memory. This closes that.
 #
-# CONTRACT: non-fatal. GBrain is an external dependency (github.com/garrytan/
-# gbrain, MIT, installed onto PATH via `bun install -g`); if it can't be
-# installed we DETECT it and report the gap LOUDLY, but never abort the install
-# — the runtime's graceful-degradation path stays intact (entity pages on disk).
-# Opt out entirely with --no-gbrain / NEUTRON_SKIP_GBRAIN=1.
+# CONTRACT: GBrain is REQUIRED, not best-effort. GBrain is an external
+# dependency (github.com/garrytan/gbrain, MIT, installed onto PATH via
+# `bun install -g`). A successful `neutron` install GUARANTEES `gbrain` on PATH:
+# transient install failures (network/github/build hiccups) are RETRIED, and if
+# the binary is STILL unresolvable afterwards we ABORT the install with a clear,
+# actionable error rather than silently shipping degraded memory. The ONLY way
+# to install without it is the explicit --no-gbrain / NEUTRON_SKIP_GBRAIN=1
+# opt-out, which stays graceful (the runtime degrades to on-disk entity pages,
+# no knowledge-graph / semantic recall).
 ensure_gbrain() {
   if [ "$DO_GBRAIN" != 1 ] || [ "${NEUTRON_SKIP_GBRAIN:-}" = 1 ]; then
     warn "skipping GBrain memory install (--no-gbrain / NEUTRON_SKIP_GBRAIN)."
@@ -654,7 +658,28 @@ ensure_gbrain() {
 
   spin_start "installing GBrain memory ($GBRAIN_REF)"
   _gb_log=$(mktemp 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/neutron-gbrain.$$")
-  if sh -c "$_gb_cmd" >"$_gb_log" 2>&1; then
+
+  # Retry transient failures (network blips, github rate limits, flaky native
+  # builds) — a hiccup shouldn't doom a REQUIRED dependency. NEUTRON_GBRAIN_ATTEMPTS
+  # / NEUTRON_GBRAIN_RETRY_DELAY are test/override seams; defaults are 3 attempts
+  # with a 2s backoff between them.
+  _gb_attempts=${NEUTRON_GBRAIN_ATTEMPTS:-3}
+  _gb_delay=${NEUTRON_GBRAIN_RETRY_DELAY:-2}
+  _gb_ok=0
+  _gb_n=1
+  while [ "$_gb_n" -le "$_gb_attempts" ]; do
+    if sh -c "$_gb_cmd" >"$_gb_log" 2>&1; then
+      _gb_ok=1
+      break
+    fi
+    if [ "$_gb_n" -lt "$_gb_attempts" ]; then
+      warn "GBrain install attempt $_gb_n/$_gb_attempts failed — retrying in ${_gb_delay}s…"
+      [ "$_gb_delay" = 0 ] || sleep "$_gb_delay"
+    fi
+    _gb_n=$((_gb_n + 1))
+  done
+
+  if [ "$_gb_ok" = 1 ]; then
     # The global bin dir may have just been created — re-probe PATH before lookup.
     case ":$PATH:" in *":$_bun_bin:"*) : ;; *) PATH="$_bun_bin:$PATH"; export PATH ;; esac
     if command -v gbrain >/dev/null 2>&1; then
@@ -664,28 +689,30 @@ ensure_gbrain() {
       # visible there too (mirrors the migrations step).
       [ "$FANCY" = 1 ] || info "GBrain memory installed ($(command -v gbrain)) — real KG/semantic memory enabled"
       rm -f "$_gb_log"
-    else
-      # Installed without error but not resolvable — almost always a PATH gap.
-      # Report it; do NOT die (memory degrades, the rest of Neutron is fine).
-      spin_end 1
-      warn "GBrain installed but 'gbrain' is not on PATH (expected in $_bun_bin)."
-      warn "  Memory will run DEGRADED (entity pages on disk; no KG/semantic recall)."
-      warn "  Fix: ensure $_bun_bin is on your PATH, then restart Neutron."
-      cat "$_gb_log" >&2
-      rm -f "$_gb_log"
+      return 0
     fi
-  else
-    # Install failed (offline, ref unreachable, build error). Non-fatal: the
-    # runtime degrades gracefully. Report the gap + the exact manual recovery.
+    # Installed without error but not resolvable — almost always a PATH gap.
+    # GBrain is REQUIRED, so this is fatal: ABORT with the exact fix (and the
+    # --no-gbrain escape hatch) rather than silently shipping degraded memory.
     spin_end 1
-    warn "GBrain memory install failed — Neutron will run with DEGRADED memory"
-    warn "  (entity pages stay on disk; knowledge-graph / semantic recall DISABLED)."
-    warn "  This is non-fatal; the install continues. Enable memory later with:"
-    warn "    bun install -g $GBRAIN_REF   # then restart Neutron"
     cat "$_gb_log" >&2
     rm -f "$_gb_log"
+    die "GBrain installed but 'gbrain' is not on PATH (expected in $_bun_bin).
+  GBrain is REQUIRED for Neutron memory (knowledge-graph + semantic recall).
+  Fix: ensure $_bun_bin is on your PATH, then re-run the installer.
+  Or re-run with --no-gbrain to install WITHOUT memory (degrades to on-disk entity pages)."
   fi
-  return 0
+
+  # Every attempt failed (offline, ref unreachable, build error). GBrain is
+  # REQUIRED — ABORT loudly with the manual-recovery command and the opt-out,
+  # instead of leaving the user with silently degraded memory.
+  spin_end 1
+  cat "$_gb_log" >&2
+  rm -f "$_gb_log"
+  die "GBrain memory install failed after $_gb_attempts attempt(s) — GBrain is REQUIRED.
+  Install it manually, then re-run the installer:
+    bun install -g $GBRAIN_REF
+  Or re-run with --no-gbrain to install WITHOUT memory (degrades to on-disk entity pages; no KG/semantic recall)."
 }
 
 # Run `claude setup-token` and capture the long-lived `sk-ant-oat…` token it
