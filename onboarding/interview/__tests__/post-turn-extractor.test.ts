@@ -153,6 +153,161 @@ test('extractor is a no-op once onboarding is completed (terminal phase)', async
   expect(called).toBe(false)
 })
 
+// ── Premature-finalize import race (2026-06-28 reset-gate E2E) ──────────────
+// A Path-1 export upload starts an import job OUTSIDE the extractor's per-user
+// chain. If the extractor finalizes onboarding on top of a live import, the
+// import completes orphaned (seeds on disk, but no `projects` DB rows / gbrain
+// pages, because the wow-materializer already ran with no `import_result`).
+
+const ALL_FIVE = JSON.stringify({
+  user_first_name: 'Sam',
+  agent_name: 'Atlas',
+  agent_personality: 'warm and direct',
+  primary_projects: ['Topline', 'Acme', 'a book on focus'],
+  non_work_interests: ['climbing'],
+})
+
+test('in-flight import DEFERS completion even when all 5 fields are present', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  let completed = false
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: stubClient([ALL_FIVE]),
+    stateStore: store,
+    project_slug: SLUG,
+    // A real import job is live → must NOT finalize on top of it.
+    hasInFlightImport: async () => true,
+    onComplete: () => {
+      completed = true
+    },
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Tell me about yourself.',
+    user_text: "I'm Sam, I build Topline/Acme/a focus book, I climb, call you Atlas.",
+    observed_at: 1000,
+  })
+  // Fields persisted, but completion deferred while the import runs.
+  expect(auditRequiredFields(state!.phase_state).next_to_collect).toBeNull()
+  expect(state!.phase).not.toBe('completed')
+  expect(state!.completed_at ?? null).toBeNull()
+  expect(completed).toBe(false)
+})
+
+test('completion proceeds once the import is no longer in flight', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  let completed = false
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: stubClient([ALL_FIVE]),
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => false, // import terminal/absent → safe to finish
+    onComplete: () => {
+      completed = true
+    },
+  })
+  await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Tell me about yourself.',
+    user_text: "I'm Sam, I build Topline/Acme/a focus book, I climb, call you Atlas.",
+    observed_at: 1000,
+  })
+  expect(completed).toBe(true)
+})
+
+test('a concurrent upload that advances the row to import_running mid-extraction is NOT clobbered or finalized', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  // Seed a row at the interview marker with 4/5 fields already collected.
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      agent_personality: 'warm and direct',
+      primary_projects: ['Topline', 'Acme', 'a book on focus'],
+    },
+    advanced_at: 500,
+  })
+  let completed = false
+  // The LLM call simulates a concurrent `notifyImportUpload` landing DURING the
+  // multi-second extraction: it flips the row to `import_running` (as the engine
+  // does) before returning the field that completes all 5. No `hasInFlightImport`
+  // is wired here — the fix's FRESH re-read of the row must catch it on its own.
+  const racingClient: AnthropicMessagesClient = {
+    messages: {
+      create: async () => {
+        await store.upsert({
+          project_slug: SLUG,
+          user_id: USER,
+          phase: 'import_running',
+          phase_state_patch: { import_job_id: 'synth-xyz' },
+          advanced_at: 900,
+        })
+        return { content: [{ text: JSON.stringify({ non_work_interests: ['climbing'] }) }] }
+      },
+    },
+  }
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: racingClient,
+    stateStore: store,
+    project_slug: SLUG,
+    onComplete: () => {
+      completed = true
+    },
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Anything outside work?',
+    user_text: 'I climb',
+    observed_at: 1000,
+  })
+  // The fresh re-read must preserve `import_running` (no downgrade) and defer
+  // completion — even though all 5 fields are now present.
+  expect(state!.phase).toBe('import_running')
+  expect(auditRequiredFields(state!.phase_state).next_to_collect).toBeNull()
+  expect(completed).toBe(false)
+})
+
+test('a terse no-op turn AFTER an import is consumed still finalizes (no stall)', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  // Post-consume state: all 5 fields present (incl. the import-merged projects),
+  // import_result stamped, phase back at the interview marker, import terminal.
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      agent_personality: 'warm and direct',
+      primary_projects: ['Topline', 'Acme', 'tabs'],
+      non_work_interests: ['climbing'],
+      import_result: { user_model: { projects: [] } },
+    },
+    advanced_at: 500,
+  })
+  let completed = false
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: stubClient(['{}']), // terse turn → empty patch
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => false, // import already terminal
+    onComplete: () => {
+      completed = true
+    },
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'I pulled 4 projects from your history — all set?',
+    user_text: 'looks good, thanks',
+    observed_at: 1000,
+  })
+  // Empty patch wrote nothing, but completion still fires off the present fields.
+  expect(auditRequiredFields(state!.phase_state).next_to_collect).toBeNull()
+  expect(completed).toBe(true)
+})
+
 test('extractor swallows LLM failure (never throws) — fire-and-forget safety', async () => {
   const store = new InMemoryOnboardingStateStore()
   const throwingClient: AnthropicMessagesClient = {

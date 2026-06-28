@@ -1662,6 +1662,29 @@ export function buildOpenGraphComposer(
             anthropicClient: onboardingAnthropicClient,
             stateStore: onboardingStateStore,
             project_slug,
+            // Authoritative in-flight-import probe — gates the extractor's
+            // completion against the premature-finalize race (a Path-1 export
+            // upload starts an import job OUTSIDE this extractor's per-user
+            // chain, so the stale onboarding phase alone can't be trusted). A
+            // non-terminal `import_jobs` row for this owner means "an import is
+            // live; do not finalize on top of it."
+            hasInFlightImport: async (): Promise<boolean> => {
+              try {
+                const row = db
+                  .raw()
+                  .query<{ one: number }, [string]>(
+                    `SELECT 1 AS one FROM import_jobs
+                       WHERE project_slug = ?
+                         AND status NOT IN ('completed', 'failed', 'cancelled')
+                       LIMIT 1`,
+                  )
+                  .get(project_slug)
+                return row !== null && row !== undefined
+              } catch {
+                // Probe failure must never block a legitimate completion.
+                return false
+              }
+            },
             onComplete: async ({ user_id, state }): Promise<void> => {
               if (onboardingFinalizer === null) return
               // Pass the import analysis through to materialization when an
