@@ -1942,6 +1942,38 @@ export function buildOpenGraphComposer(
           send: sendReply,
           observed_at: event.received_at,
         })
+        // Entity scribe → GBrain (Vajra parity) — fan the user's turn into the
+        // extract→memory path, fire-and-forget + guarded, EXACTLY like the legacy
+        // web chat-bridge does (chat-bridge.ts §scribe-phase-1). This was the ONLY
+        // surface missing it: `/ws/app/chat` (the sole chat surface the React owner
+        // UI uses) dispatches here, so without this call NO post-onboarding chat
+        // turn ever extracted facts to gbrain — the store stayed empty and "recall"
+        // silently fell back to in-session CC context only (fullpipe-e2e 2026-06-28
+        // Stage 2 root-cause). NOTE: the onboarding seam's `onTurnComplete` (inside
+        // `appWsChatTurn`) extracts the 5 PROFILE fields; this is the GENERAL entity
+        // scribe (people/companies/concepts → gbrain), a distinct layer. Short turns
+        // and slash commands are dropped by the scribe's own `shouldExtract` filter,
+        // so seed/utility turns cost nothing. `scribeOnUserTurn` is omitted on
+        // LLM-less boxes (no extractor) → this no-ops, chat path unaffected.
+        if (scribeOnUserTurn !== undefined) {
+          try {
+            scribeOnUserTurn({
+              project_slug,
+              user_id: event.user.channel_user_id,
+              topic_id: turnTopicId,
+              text: userText,
+              observed_at: event.received_at,
+              // Owner-native web-chat turn → author #0 (connect-spec §4.1).
+              author: { id: 'owner', display: 'owner' },
+            })
+          } catch (err) {
+            console.warn(
+              `[open] event=scribe_hook_threw project=${project_slug} topic=${turnTopicId} err=${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          }
+        }
         // FIX 1 (#85) — re-wired into Path 1: after every turn, fan a
         // projects_changed frame if the set changed. Onboarding completion +
         // import materialize projects out-of-band (the fire-and-forget finalize
@@ -2019,6 +2051,30 @@ export function buildOpenGraphComposer(
           send: buildAppWsSendReply(channel_topic_id, project_id),
           observed_at: now,
         })
+        // Entity scribe → GBrain (parity with the typed-message receiver above):
+        // a freeform quick-reply answer is owner text worth extracting too, so a
+        // long freeform reply doesn't silently skip memory just because it arrived
+        // via a button prompt instead of the composer. Short choice values are
+        // dropped by the scribe's own `shouldExtract` floor, so a bare tap costs
+        // nothing. Fire-and-forget + guarded; omitted on LLM-less boxes.
+        if (scribeOnUserTurn !== undefined) {
+          try {
+            scribeOnUserTurn({
+              project_slug,
+              user_id,
+              topic_id: turnTopicId,
+              text: replyText,
+              observed_at: now,
+              author: { id: 'owner', display: 'owner' },
+            })
+          } catch (err) {
+            console.warn(
+              `[open] event=scribe_hook_threw project=${project_slug} topic=${turnTopicId} err=${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          }
+        }
         // FIX 1 (#85) — refresh the rail if this turn changed the project set.
         emitProjectsChangedIfChanged(user_id)
       },

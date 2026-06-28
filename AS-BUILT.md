@@ -6197,3 +6197,42 @@ the never-read `NEUTRON_LISTEN_PORT`); `tests/e2e-browser/onboarding_walkthrough
 
 **Agent-native parity gap noted:** no web Reminders list and no admin Memory
 section in Open's React client (agent can create reminders; user has no list UI).
+
+---
+
+## Full-pipeline E2E + scribe→gbrain fix (2026-06-28, PR forge/fullpipe-e2e)
+
+Adversarial, evidence-gated E2E of the COMPLETE memory pipeline on a fresh
+isolated instance (Open `main` `05619fe`, post-#96), real Max LLM via the `claude`
+substrate, Ryan's live install untouched. Report: `docs/research/fullpipe-e2e-2026-06-28.md`.
+
+**Stage 1 — onboarding COMPLETES:** VERIFIED. Fresh onboarding driven through the
+real React UI → `onboarding_state.completed_at` SET, `phase=completed`, drops to
+plain chat. (Ryan's live stall = 1/5 required fields ever collected, not a finalize bug.)
+
+**Stage 2 — post-onboarding scribe→gbrain memory: P1 BUG FOUND + FIXED.** The
+chat-time entity scribe (`scribeOnUserTurn` → extract → GBrain) was wired ONLY into
+the legacy `chat-bridge.handleInbound` (`/ws/chat`). The React client uses the unified
+`/ws/app/chat` socket → `AppWsAdapter.dispatchInbound` → `appWsReceiver.receive`
+(`open/composer.ts`), which ran the live-agent turn but NEVER called the entity scribe.
+So NO post-onboarding chat turn extracted facts to gbrain: the store stayed empty and
+"recall" silently fell back to in-session CC context (very likely why the live install's
+memory feels dead). FIX: `appWsReceiver.receive` now fans every real user turn into
+`scribeOnUserTurn` (fire-and-forget + guarded, parity with chat-bridge; no flag).
+VERIFIED on the isolated instance: scribe wrote `entities/people/alex-petrov.md` + gbrain
+(`gbrain search "Alex Petrov"` = 0.9932); a recall turn AFTER a full server restart (CC
+sessions wiped) returned "Alex Petrov — pulled straight from memory" → durable gbrain
+recall proven. Regression guard: `open/__tests__/open-app-ws-scribe-wiring.test.ts`
+(drives a real `/ws/app/chat` turn, asserts the scribe prompt reaches the substrate;
+FAILS without the fix). `tsc` clean, leak-gate silent.
+
+**Stage 3 — real-export import MATERIALIZES:** VERIFIED (real button-driven flow). The
+real 14MB / 184-conversation Claude export → 8-chunk Max synthesis → 9 real projects
+materialized as on-disk repos (193 files, genuine `history.md` + transcript slices) +
+`projects` DB rows (Documents tab) + 12 memory entities / 9 gbrain pages. One latent
+robustness gap → NEEDS-DECISION: `pollImportRunningTick` (`engine.ts:2219`) strands
+onboarding at `import_running` forever when `phase_state.signup_via` is absent (Open Path-1
+never sets it). Does NOT hit the normal button-driven flow (which sets `signup_via='web'` —
+confirmed by injecting it: import advanced + materialized in ~20s), but in single-owner Open
+the channel is always app-socket so a missing `signup_via` should never strand a user.
+Rec: default `channel_kind='app-socket'` when `signup_via` missing + `topic_id` present.
