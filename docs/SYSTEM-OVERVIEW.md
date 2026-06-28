@@ -316,7 +316,18 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > SAME session. History import stays full-fidelity (engine-driven synthesis +
 > `import-running-cron` write the DOCUMENTS; an import-completion watcher
 > auto-consumes `import_analysis_presented` and the completion path materializes
-> MEMORY/gbrain — no accept button). The 6 s router that said "I didn't quite
+> MEMORY/gbrain — no accept button). **The import RUNS in Path-1 (ND2, 2026-06-28):**
+> the live-agent onboarding seam shows the 📎 zip-import affordance on every
+> conversational turn (whenever an import substrate is wired), so the engine sits
+> at a conversational phase (`work_interview_gap_fill`, …), never the legacy
+> `import_upload_pending`. `notifyImportUpload` therefore treats a zip uploaded
+> through that affordance as SOLICITED — in `open` mode with `importJobRunner`
+> wired (the exact condition under which the affordance is offered) and no job
+> already in flight, it calls `startImportAndAdvanceToRunning` instead of the old
+> `no_active_prompt` 200-OK no-op that orphaned the upload. The web client
+> (`ChatApp.tsx`) only renders "reading your history now" when the upload
+> response carries a real `job_id`; a `job_id:null` no-op surfaces an honest
+> "couldn't start the import" notice (kills the banned silent-false-success). The 6 s router that said "I didn't quite
 > catch that" is gone by construction; `NEUTRON_ONBOARDING_CONVERSATIONAL` is
 > collapsed (one path, no flag). Supersedes the deferred-BUG-0 note and
 > `docs/research/p2-v3-conversational-onboarding-design.md`.

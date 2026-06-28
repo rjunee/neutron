@@ -78,8 +78,25 @@ export interface ImportZipOptions {
 }
 
 /**
+ * The server's `POST /api/upload/<source>` success body. The fields we care
+ * about for honest client status are `outcome` (the engine's routing verdict)
+ * and `job_id` — non-null ONLY when the engine actually started an import job.
+ * A 200 with `job_id: null` is a no-op (e.g. a stray upload the engine
+ * declined), and the client MUST NOT claim "reading your history now" for it
+ * (ND2, dogfood 2026-06-27 — the banned silent-false-success).
+ */
+export interface ImportHistoryResult {
+  ok: boolean
+  source?: string
+  outcome?: string
+  /** Non-null ⇒ a real import job started; null ⇒ no-op, surface an honest notice. */
+  job_id: string | null
+}
+
+/**
  * BUG 4 — upload a history-import export ZIP to `POST /api/upload/<source>`.
- * Resolves once the server has accepted the bytes + kicked the import (the
+ * Resolves with the server's parsed result so the caller can tell a real
+ * job-started from a 200-OK no-op via {@link ImportHistoryResult.job_id} (the
  * engine then drives the rest of onboarding over the WebSocket); rejects with
  * an {@link AttachmentUploadError} on a client/network/HTTP failure. The
  * server re-validates magic bytes + size, so this is a thin multipart POST.
@@ -88,7 +105,7 @@ export async function importHistoryZip(
   file: File,
   source: ImportSource,
   opts: ImportZipOptions,
-): Promise<void> {
+): Promise<ImportHistoryResult> {
   const base = opts.endpoint ?? IMPORT_UPLOAD_ENDPOINT
   const endpoint = `${base}/${source}`
   const doFetch = resolveFetch(opts.fetchImpl)
@@ -117,6 +134,22 @@ export async function importHistoryZip(
       /* non-JSON error body — keep the status-based message */
     }
     throw new AttachmentUploadError(`http_${res.status}`, message, res.status)
+  }
+  // Parse the success body so the caller can distinguish a real job-started
+  // (job_id present) from a 200-OK no-op (job_id: null). A malformed/empty body
+  // degrades to job_id: null → the caller shows the honest "couldn't start"
+  // notice rather than a false success.
+  let parsed: { ok?: unknown; source?: unknown; outcome?: unknown; job_id?: unknown } = {}
+  try {
+    parsed = (await res.json()) as typeof parsed
+  } catch {
+    /* non-JSON success body — treat as a no-op (job_id: null) below */
+  }
+  return {
+    ok: parsed.ok === true,
+    ...(typeof parsed.source === 'string' ? { source: parsed.source } : {}),
+    ...(typeof parsed.outcome === 'string' ? { outcome: parsed.outcome } : {}),
+    job_id: typeof parsed.job_id === 'string' && parsed.job_id.length > 0 ? parsed.job_id : null,
   }
 }
 

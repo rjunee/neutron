@@ -2383,9 +2383,63 @@ export class InterviewEngine implements EngineInternals {
         })
         return { outcome: 'no_active_prompt', state }
       }
-      // Upload landed when we're at some other phase. Don't drive a
-      // sideways transition; let the caller log + surface a non-fatal
-      // notice.
+      // ND2 (dogfood 2026-06-27) — Path-1 (open-mode conversational onboarding)
+      // solicited-upload routing. In open mode the live-agent onboarding seam
+      // attaches the zip-import upload affordance to EVERY onboarding
+      // agent_message whenever an import substrate is wired (see
+      // `LiveAgentOnboardingSeam.uploadAffordance()` in open/composer.ts — it
+      // returns non-null iff `importSubstrate !== null`, the SAME substrate that
+      // wires `importJobRunner` on this engine). The engine therefore never
+      // enters the legacy `import_upload_pending` phase: it sits at a
+      // conversational phase (`work_interview_gap_fill`, etc.) while the client
+      // renders the 📎 "attach your export" affordance. A zip the user uploads
+      // THROUGH that affordance is genuinely SOLICITED and must start the
+      // import — pre-fix it fell through to a 200-OK no-op and the file was
+      // orphaned (`import_jobs` empty forever) behind a false "reading your
+      // history now" banner: the banned silent-no-op-that-looks-like-success.
+      //
+      // Solicited signal we key on (so a STRAY / unsolicited upload still
+      // no-ops safely — NOT a blanket "import from any phase"):
+      //   1. `deploymentMode === 'open'` — Path-1 conversational onboarding,
+      //      where the affordance is offered on every turn. Managed mode only
+      //      offers it at `import_upload_pending` / `ai_substrate_offered` (both
+      //      handled above), so we never honor a sideways upload there.
+      //   2. `importJobRunner` wired — the EXACT condition under which
+      //      `uploadAffordance()` returns non-null and the client shows the
+      //      affordance. Unwired ⇒ the affordance was never offered ⇒ the
+      //      upload is stray ⇒ no-op.
+      //   3. non-terminal state — already enforced above via TERMINAL_PHASES
+      //      (`noop_terminal`), so a post-onboarding upload never reaches here.
+      //   4. no import job already started (`import_job_id` null AND phase is
+      //      not already `import_running`) — a re-upload mid/post-import must
+      //      not spawn a duplicate job over a live one.
+      //
+      // `startImportAndAdvanceToRunning` upserts to `import_running` regardless
+      // of the current phase (it reads `state.phase` only for transcript
+      // context), so the conversational → import_running hop is safe.
+      const alreadyHasImportJob =
+        readString(state.phase_state, 'import_job_id') !== null ||
+        state.phase === 'import_running'
+      if (
+        this.deploymentMode === 'open' &&
+        this.deps.importJobRunner !== undefined &&
+        !alreadyHasImportJob
+      ) {
+        this.deps.transcript.append({
+          role: 'system',
+          body: `import: solicited Path-1 upload source=${input.source} landed at conversational phase=${state.phase}; starting import (open-mode upload affordance is offered on every onboarding turn)`,
+          phase: state.phase,
+        })
+        return await this.startImportAndAdvanceToRunning(
+          advanceInput,
+          state,
+          observed_at,
+          input.source,
+        )
+      }
+      // Upload landed when we're at some other phase with no active affordance
+      // (managed mode, runner unwired, or a job already running). Don't drive a
+      // sideways transition; let the caller log + surface a non-fatal notice.
       return { outcome: 'no_active_prompt', state }
     }
 
