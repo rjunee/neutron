@@ -117,6 +117,66 @@ interface ApiKeySlot {
   core_slugs: string[]
   required: boolean
   install_prompt: string
+  /**
+   * The `byo_api_key` secrets label this slot reads/writes under, when it
+   * DIFFERS from the slot's public id (the map key + URL segment). Core slots
+   * store under their own id, so they leave this undefined. The system OpenAI
+   * slot presents a colon-free id (`openai_api_key`, URL-safe) but persists
+   * under the ApiKeyStore label `openai:onboarding` — the SAME secret the
+   * onboarding optional-key offer captures — so both surfaces share one key.
+   */
+  storage_label?: string
+}
+
+/**
+ * The public id for the system OpenAI key slot (colon-free so it survives
+ * `encodeURIComponent` in the `/api/cores/api-keys/<id>` path) and the secrets
+ * label it actually persists under. The label mirrors `ApiKeyStore`'s
+ * `${provider}:${label}` convention for the onboarding offer (provider
+ * `openai`, label `onboarding`), so a key set in onboarding OR here is the one
+ * `resolveSecret({provider:'openai',label:'onboarding'})` reads to flip GBrain
+ * into semantic-embeddings mode (ND1) and to run cross-model GPT-5 reviews.
+ */
+export const SYSTEM_OPENAI_SLOT_ID = 'openai_api_key'
+export const SYSTEM_OPENAI_STORAGE_LABEL = 'openai:onboarding'
+
+/**
+ * System-declared API-key slots — manageable in the same Integrations panel but
+ * NOT owned by any bundled Core. Today: the OpenAI key that upgrades memory
+ * recall from keyword+graph to semantic-search embeddings.
+ */
+export function systemApiKeySlots(): Map<string, ApiKeySlot> {
+  return new Map<string, ApiKeySlot>([
+    [
+      SYSTEM_OPENAI_SLOT_ID,
+      {
+        name: 'OpenAI (semantic memory + GPT-5 reviews)',
+        core_slugs: [],
+        required: false,
+        install_prompt:
+          'Paste an OpenAI API key to switch memory recall from keyword + graph ' +
+          'to semantic-search embeddings (sharper recall); also powers cross-model ' +
+          'GPT-5 reviews. Get one at platform.openai.com/api-keys. ' +
+          "(OpenAI sign-in/OAuth doesn't authorize embeddings — a real key is required.)",
+        storage_label: SYSTEM_OPENAI_STORAGE_LABEL,
+      },
+    ],
+  ])
+}
+
+/**
+ * All api-key slots the Integrations panel manages: bundled-Core `byo_api_key`
+ * declarations plus the system slots. A Core that declares the same id wins
+ * (system slots only fill gaps), so this never masks a Core's own slot.
+ */
+export function collectAllApiKeySlots(
+  registry: IntegrationsRegistryView,
+): Map<string, ApiKeySlot> {
+  const map = collectApiKeySlots(registry)
+  for (const [id, slot] of systemApiKeySlots()) {
+    if (!map.has(id)) map.set(id, slot)
+  }
+  return map
 }
 
 /**
@@ -189,7 +249,7 @@ export async function buildIntegrationsStatus(
   input: BuildIntegrationsStatusInput,
 ): Promise<IntegrationsStatus> {
   const oauthSlots = collectOAuthSlots(input.registry)
-  const apiKeySlots = collectApiKeySlots(input.registry)
+  const apiKeySlots = collectAllApiKeySlots(input.registry)
 
   const oauth: OAuthAccountIntegration[] = []
   for (const [label, slot] of oauthSlots) {
@@ -210,15 +270,18 @@ export async function buildIntegrationsStatus(
   const present = new Set(rows.map((r) => r.label))
 
   const api_keys: ApiKeyIntegration[] = []
-  for (const [label, slot] of apiKeySlots) {
+  for (const [id, slot] of apiKeySlots) {
     api_keys.push({
       kind: 'api_key',
-      label,
+      label: id,
       name: slot.name,
       core_slugs: slot.core_slugs,
       required: slot.required,
       install_prompt: slot.install_prompt,
-      connected: present.has(label),
+      // Presence is checked against the SECRETS label (which may differ from
+      // the public id for system slots), so an onboarding-set OpenAI key shows
+      // as connected here too.
+      connected: present.has(slot.storage_label ?? id),
     })
   }
 
@@ -245,11 +308,12 @@ export interface SetApiKeyInput {
 export async function setApiKey(
   input: SetApiKeyInput,
 ): Promise<{ stored: true }> {
-  const slots = collectApiKeySlots(input.registry)
-  if (!slots.has(input.label)) {
+  const slots = collectAllApiKeySlots(input.registry)
+  const slot = slots.get(input.label)
+  if (slot === undefined) {
     throw new IntegrationsError(
       'unknown_label',
-      `label='${input.label}' is not a byo_api_key slot declared by any bundled Core`,
+      `label='${input.label}' is not a managed api-key slot (no bundled Core or system slot declares it)`,
     )
   }
   const value = input.value.trim()
@@ -260,7 +324,7 @@ export async function setApiKey(
     {
       internal_handle: input.project_slug,
       kind: 'byo_api_key',
-      label: input.label,
+      label: slot.storage_label ?? input.label,
       plaintext: value,
     },
   ])
@@ -281,18 +345,20 @@ export interface DeleteApiKeyInput {
 export async function deleteApiKey(
   input: DeleteApiKeyInput,
 ): Promise<{ deleted: boolean }> {
-  const slots = collectApiKeySlots(input.registry)
-  if (!slots.has(input.label)) {
+  const slots = collectAllApiKeySlots(input.registry)
+  const slot = slots.get(input.label)
+  if (slot === undefined) {
     throw new IntegrationsError(
       'unknown_label',
-      `label='${input.label}' is not a byo_api_key slot declared by any bundled Core`,
+      `label='${input.label}' is not a managed api-key slot (no bundled Core or system slot declares it)`,
     )
   }
+  const storageLabel = slot.storage_label ?? input.label
   const rows = await input.secretsStore.list({
     internal_handle: input.project_slug,
     kind: 'byo_api_key',
   })
-  const match = rows.find((r) => r.label === input.label)
+  const match = rows.find((r) => r.label === storageLabel)
   if (match === undefined) return { deleted: false }
   await input.secretsStore.delete(match.id)
   return { deleted: true }

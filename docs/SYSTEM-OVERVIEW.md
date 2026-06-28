@@ -596,29 +596,54 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   Wired when `open/composer.ts` supplies `MiscCompositionInput.gbrain_search.store`
   (always, since `buildGBrainMemory` always builds the store).
 
+- **Init guard — the brain is `gbrain init`'d before the first `serve` (ND1).**
+  `gbrain serve` exits with "No brain configured" against an uninitialized
+  brain, so before the dogfood fix prod served an un-init'd brain → every MCP op
+  failed `Connection closed` → `gbrain_search` / scribe-write / admin Memory
+  silently no-op'd (recall was masked by Claude Code file-memory). The fix:
+  `gbrain-memory/ensure-brain-init.ts#ensureBrainInitialized` runs an idempotent
+  `gbrain init --pglite --non-interactive` (skip-embed-check) the FIRST time the
+  `GBrainStdioMcpClient` connects (`opts.ensureInitialized`, wired by
+  `buildGBrainMemory`). Idempotent (no-op once `<GBRAIN_HOME>/.gbrain/config.json`
+  exists) and fail-soft (a missing binary / failed init returns a status, never
+  throws → the existing latched degrade-path). The brain is created
+  **embeddings-ready** (an OpenAI `text-embedding-3-large` 3072-dim column) even
+  with no key — so the default still computes NO embeddings (verified: `serve`
+  answers `put_page` + keyword `search` with no key) yet a later key upgrades in
+  place with no schema rebuild (a `--no-embedding` 1280-dim column can't — OpenAI
+  rejects 1280-dim vectors).
 - **Default — keyword + graph, NO embeddings.** Memory search runs on GBrain's
-  BM25 keyword index + the typed-edge graph. No embedding/vector store
-  initializes; provisioning and search need no external embedder. This is the
-  shipped default and is unchanged.
-- **Conditional embedding store (OPT-IN) — `gbrain-memory/embedder-config.ts`.**
-  `resolveEmbedderConfig(env)` returns an embedder config **only** when the
-  operator opts in via `NEUTRON_EMBEDDINGS`:
-  - `openai` → cloud `text-embedding-3-large` (3072d); key from
-    `NEUTRON_EMBEDDINGS_OPENAI_API_KEY`, else `OPENAI_API_KEY`.
-  - `ollama` → local/free `nomic-embed-text` (768d) over `OLLAMA_BASE_URL`
-    (default `http://localhost:11434/v1`).
-  - `auto` → OpenAI when a key is present, else Ollama when `OLLAMA_BASE_URL`
-    is set.
-  - `off` / unset → `null` (the default — no store).
+  BM25 keyword index + the typed-edge graph. No embeddings are computed without a
+  key; provisioning and search need no external embedder. This is the shipped
+  default.
+- **Embeddings flip on with an OpenAI key — `gbrain-memory/embedder-config.ts`.**
+  Two triggers resolve an embedder (`resolveEffectiveEmbedder` in
+  `build-gbrain-memory.ts`):
+  1. **The onboarding-captured OpenAI key (the product path, ND1).** The
+     onboarding optional-key offer (`onboarding/optional-keys.ts#OPENAI_OFFER`,
+     "paste a key to unlock cloud embeddings") stores the key in the per-owner
+     `ApiKeyStore` (`provider=openai`, label `onboarding`). The composer resolves
+     it and passes it to `buildGBrainMemory({ openaiApiKey })`; a stored key alone
+     flips GBrain to semantic embeddings on the next turn/boot — no env flag — and
+     `ensureBrainInitialized` backfills pre-key pages once via `gbrain embed
+     --stale`. The same key is manageable post-onboarding in the admin
+     Integrations panel as the `openai_api_key` slot (a system slot in
+     `gateway/cores/integrations.ts`, persisting under the SAME secrets label so
+     onboarding ↔ admin share one key). Because that capture is explicit + purpose
+     -stated, using it for (billable) embeddings is consensual, not a surprise.
+  2. **The operator env opt-in (`NEUTRON_EMBEDDINGS`) — unchanged.**
+     `resolveEmbedderConfig(env)`: `openai` (3072d), `ollama` (768d,
+     `OLLAMA_BASE_URL`), `auto`, or `off`/unset. A bare `OPENAI_API_KEY` (consumed
+     by the GPT LLM adapter) does **not** enable embeddings on its own.
 
-  A non-null result is the child env (`GBRAIN_EMBEDDING_MODEL` =
-  `provider:model`, `GBRAIN_EMBEDDING_DIMENSIONS`, provider auth/base-url),
-  which `resolveGbrainClientOptions` merges into the `gbrain serve` child so
-  GBrain initializes its embedding store and hybridSearch goes semantic. A
-  `null` result leaves the child env untouched — keyword + graph exactly as
-  today. A bare `OPENAI_API_KEY` (consumed by the GPT LLM adapter) does **not**
-  enable embeddings; the explicit `NEUTRON_EMBEDDINGS` opt-in keeps cloud
-  embedding cost from ever being a surprise.
+  A non-null embedder is the child env (`GBRAIN_EMBEDDING_MODEL` =
+  `provider:model`, `GBRAIN_EMBEDDING_DIMENSIONS`, provider auth/base-url) that
+  `resolveGbrainClientOptions` merges into the `gbrain serve` child so GBrain
+  embeds-on-write and hybridSearch goes semantic. **NOTE:** OpenAI sign-in /
+  OAuth (`codex login`, the separate `codex_auth` offer for cross-model GPT-5
+  reviews) does NOT authorize the embeddings API — gbrain's embedder requires a
+  platform key (`gbrain/src/core/ai/gateway.ts`: "OpenAI embedding requires
+  OPENAI_API_KEY"), which is why the embeddings offer is a guided key paste.
 
 - **Installer provisions the binary (`install.sh#ensure_gbrain`).** The runtime
   above spawns `gbrain serve`; without the `gbrain` binary on PATH that spawn

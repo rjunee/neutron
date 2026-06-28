@@ -126,16 +126,19 @@ export function looksLikeOpenAiKey(plaintext: string): boolean {
 
 const OPENAI_OFFER: OptionalKeyOffer = {
   id: 'openai_api_key',
-  title: 'Add an OpenAI key',
+  title: 'Add an OpenAI key (sharper memory)',
   question:
-    'Optional: paste an OpenAI API key to unlock cloud embeddings (richer ' +
-    'memory search) and cross-model GPT-5 reviews. Skip to stay on Claude alone.',
-  capability: 'Cloud embeddings + cross-model GPT-5 reviews',
+    'Do you have an OpenAI API key? Paste it for semantic-search embeddings — ' +
+    'sharper memory recall — plus cross-model GPT-5 reviews. Optional; memory ' +
+    'works without it (keyword + graph). Key: platform.openai.com/api-keys ' +
+    "(OpenAI sign-in/OAuth doesn't cover embeddings).",
+  capability: 'Semantic-search embeddings (sharper memory recall) + cross-model GPT-5 reviews',
   activation:
-    'Stored immediately; cross-model GPT-5 reviews activate on next boot. ' +
-    'Embeddings additionally need NEUTRON_EMBEDDINGS=openai (or auto) — an ' +
-    'explicit opt-in so cloud embedding cost is never a surprise.',
-  skip_note: 'No key → memory search stays keyword + graph; reviews stay single-model. Fully working.',
+    'Stored now; memory flips to semantic embeddings on your next turn — the ' +
+    'key alone enables it (no extra flag) and existing pages embed in the ' +
+    'background. OpenAI bills per embedding (explicit opt-in). GPT-5 reviews ' +
+    'activate next boot.',
+  skip_note: 'No key → recall stays keyword + graph (works, just not semantic).',
   storage: 'api_key_store',
   provider: 'openai',
   default_label: ONBOARDING_OPENAI_LABEL,

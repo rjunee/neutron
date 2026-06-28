@@ -245,3 +245,57 @@ test('setApiKey rejects unknown label + empty value', async () => {
     }),
   ).rejects.toThrow(/non-empty/)
 })
+
+test('system openai_api_key slot shares storage with the onboarding key (ND1)', async () => {
+  const b = await makeBench()
+
+  // The system slot is surfaced in the panel (colon-free public id), starts
+  // disconnected.
+  const before = await buildIntegrationsStatus({
+    registry: b.registry,
+    tokens: b.tokens,
+    secretsStore: b.secrets,
+    project_slug: OWNER,
+  })
+  const slotBefore = before.api_keys.find((k) => k.label === 'openai_api_key')
+  expect(slotBefore).toBeDefined()
+  expect(slotBefore!.connected).toBe(false)
+
+  // Setting it via the admin path persists under the SAME secrets label the
+  // onboarding ApiKeyStore uses (`openai:onboarding`), so the embeddings /
+  // GPT-5-review read path (`resolveSecret`/`secrets.get`) sees it.
+  await setApiKey({
+    registry: b.registry,
+    secretsStore: b.secrets,
+    project_slug: OWNER,
+    label: 'openai_api_key',
+    value: 'sk-from-admin-panel',
+  })
+  const shared = await b.secrets.get({
+    internal_handle: OWNER,
+    kind: 'byo_api_key',
+    label: 'openai:onboarding',
+  })
+  expect(shared).toBe('sk-from-admin-panel')
+
+  // Now reads connected.
+  const after = await buildIntegrationsStatus({
+    registry: b.registry,
+    tokens: b.tokens,
+    secretsStore: b.secrets,
+    project_slug: OWNER,
+  })
+  expect(after.api_keys.find((k) => k.label === 'openai_api_key')!.connected).toBe(true)
+
+  // Delete clears the shared secret.
+  const del = await deleteApiKey({
+    registry: b.registry,
+    secretsStore: b.secrets,
+    project_slug: OWNER,
+    label: 'openai_api_key',
+  })
+  expect(del.deleted).toBe(true)
+  expect(
+    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'openai:onboarding' }),
+  ).toBeNull()
+})

@@ -121,9 +121,10 @@ test('integrations_list returns OAuth + API-key slots', async () => {
     'google_calendar',
     'google_workspace',
   ])
-  // `apify` (Scraping Core, parity gap #6) joins `tavily` (Research Core)
-  // as an agent-manageable byo_api_key slot.
-  expect(out.api_keys.map((k) => k.label).sort()).toEqual(['apify', 'tavily'])
+  // `apify` (Scraping Core, parity gap #6) joins `tavily` (Research Core) as an
+  // agent-manageable byo_api_key slot, plus the system `openai_api_key` slot
+  // (ND1 — manages the OpenAI key that flips memory to semantic embeddings).
+  expect(out.api_keys.map((k) => k.label).sort()).toEqual(['apify', 'openai_api_key', 'tavily'])
 })
 
 test('integrations_connect on an API-key slot stores the key (state mutation)', async () => {

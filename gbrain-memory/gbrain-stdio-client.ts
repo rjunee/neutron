@@ -52,6 +52,16 @@ export interface GBrainStdioMcpClientOptions {
   upgradeMode?: GBrainUpgradeMode
   clientName?: string
   clientVersion?: string
+  /**
+   * Idempotent init guard, awaited ONCE before the first `gbrain serve` spawn
+   * so serve never hits an uninitialized brain ("No brain configured. Run:
+   * gbrain init" → exit → `MCP error -32000: Connection closed`). Provided by
+   * `buildGBrainMemory`, which closes over the resolved `GBRAIN_HOME` +
+   * embedder. Best-effort by contract: it must never throw (it returns/logs a
+   * status), so a failed init degrades to the existing lazy/fail-soft path
+   * rather than blocking the connect.
+   */
+  ensureInitialized?: () => Promise<void>
 }
 
 export class GBrainStdioMcpClient implements McpClient {
@@ -68,6 +78,12 @@ export class GBrainStdioMcpClient implements McpClient {
    * binary requires an instance restart anyway).
    */
   private unavailableDetail: string | null = null
+  /**
+   * Latched once the init guard (`opts.ensureInitialized`) has run, so the
+   * idempotent `gbrain init` is attempted at most once per client even if the
+   * child is closed + reconnected later.
+   */
+  private initGuardDone = false
   /** The latest GBrain upstream upgrade notice, fed from the child's stderr. */
   readonly versionNotice: GBrainVersionNotice
 
@@ -83,6 +99,21 @@ export class GBrainStdioMcpClient implements McpClient {
     if (this.client !== null) return this.client
     if (this.connecting !== null) return this.connecting
     this.connecting = (async () => {
+      // Init guard: ensure the brain exists BEFORE spawning `gbrain serve`.
+      // Idempotent + best-effort (never throws), so a fresh brain is created
+      // exactly once and a failed init degrades to the fail-soft path below
+      // rather than blocking the connect. Runs at most once per client.
+      if (this.opts.ensureInitialized !== undefined && !this.initGuardDone) {
+        this.initGuardDone = true
+        try {
+          await this.opts.ensureInitialized()
+        } catch (err) {
+          console.warn(
+            '[gbrain-stdio-client] init guard threw (continuing fail-soft): ' +
+              (err instanceof Error ? err.message : String(err)),
+          )
+        }
+      }
       const env: Record<string, string> = { ...getDefaultEnvironment() }
       if (this.opts.env !== undefined) Object.assign(env, this.opts.env)
       if (this.opts.brainId !== undefined) env['GBRAIN_BRAIN_ID'] = this.opts.brainId

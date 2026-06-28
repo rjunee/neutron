@@ -77,7 +77,16 @@ function resolveOpenAiKey(env: NodeJS.ProcessEnv): string | undefined {
   )
 }
 
-function buildOpenAiConfig(apiKey: string): EmbedderConfig {
+/**
+ * Build the OpenAI embedder config for a resolved key. Exported so the GBrain
+ * provisioning seam can opt into embeddings from a key the OWNER captured
+ * consensually through the onboarding optional-key offer ("paste an OpenAI key
+ * to unlock cloud embeddings") — that explicit, purpose-stated capture is the
+ * sanctioned trigger, distinct from a bare env `OPENAI_API_KEY` (which the GPT
+ * BYO adapter consumes and which must NOT silently switch on cloud embeddings;
+ * see `resolveEmbedderConfig`'s `NEUTRON_EMBEDDINGS` gate).
+ */
+export function buildOpenAiEmbedderConfig(apiKey: string): EmbedderConfig {
   return {
     provider: 'openai',
     model: OPENAI_EMBED_MODEL,
@@ -127,7 +136,7 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
       )
       return null
     }
-    return buildOpenAiConfig(apiKey)
+    return buildOpenAiEmbedderConfig(apiKey)
   }
 
   if (raw === 'ollama') {
@@ -137,7 +146,7 @@ export function resolveEmbedderConfig(env: NodeJS.ProcessEnv = process.env): Emb
   // auto / on / 1 / true → pick the best available provider.
   if (raw === 'auto' || raw === 'on' || raw === '1' || raw === 'true') {
     const apiKey = resolveOpenAiKey(env)
-    if (apiKey !== undefined) return buildOpenAiConfig(apiKey)
+    if (apiKey !== undefined) return buildOpenAiEmbedderConfig(apiKey)
     if (readNonEmpty(env, 'OLLAMA_BASE_URL') !== undefined) return buildOllamaConfig(env)
     console.warn(
       `[gbrain-memory] NEUTRON_EMBEDDINGS=${raw} but no embedder is available ` +

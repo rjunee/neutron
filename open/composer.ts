@@ -98,6 +98,8 @@ import {
 } from '../runtime/adapters/claude-code/persistent/agent-skills.ts'
 import type { TridentRun } from '../trident/store.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
+import { ApiKeyStore } from '../auth/api-key-store.ts'
+import { ONBOARDING_OPENAI_LABEL } from '../onboarding/optional-keys.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
@@ -614,7 +616,36 @@ export function buildOpenGraphComposer(
     // `importGbrainSyncHook` so imported/onboarding projects land in MEMORY/
     // gbrain — previously unwired in Open), and the Path 1 onboarding finalize.
     // Lazy + fail-soft: building it never spawns `gbrain serve` until first use.
-    const gbrainMemory = buildGBrainMemory({ owner_home, project_slug, env })
+    //
+    // ND1: resolve the owner's onboarding-captured OpenAI key (ApiKeyStore,
+    // provider=openai label=onboarding; internal_handle == project_slug). When
+    // present, GBrain initializes + serves with semantic embeddings; absent →
+    // keyword + graph default. Best-effort: a missing key / store error
+    // degrades to the default and never blocks the turn.
+    let onboardingOpenAiKey: string | undefined
+    try {
+      const apiKeys = new ApiKeyStore({
+        db,
+        secrets: new SecretsStore({ data_dir: owner_home, db }),
+      })
+      onboardingOpenAiKey =
+        (await apiKeys.resolveSecret({
+          internal_handle,
+          provider: 'openai',
+          label: ONBOARDING_OPENAI_LABEL,
+        })) ?? undefined
+    } catch (err) {
+      console.warn(
+        `[gbrain-memory] project=${project_slug} could not resolve onboarding OpenAI key ` +
+          `(continuing keyword+graph): ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+    const gbrainMemory = buildGBrainMemory({
+      owner_home,
+      project_slug,
+      env,
+      ...(onboardingOpenAiKey !== undefined ? { openaiApiKey: onboardingOpenAiKey } : {}),
+    })
     realmodeCleanups.push(() => {
       void gbrainMemory.close().catch(() => undefined)
     })
