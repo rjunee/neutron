@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
 import { SecretsStore } from '../../../auth/secrets-store.ts'
+import { ApiKeyStore } from '../../../auth/api-key-store.ts'
 import { ToolRegistry } from '../../../tools/registry.ts'
 import { installBundledCores } from '../install-bundled.ts'
 import {
@@ -261,22 +262,25 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
   expect(slotBefore).toBeDefined()
   expect(slotBefore!.connected).toBe(false)
 
-  // Setting it via the admin path persists under the SAME secrets label the
-  // onboarding ApiKeyStore uses (`openai:onboarding`), so the embeddings /
-  // GPT-5-review read path (`resolveSecret`/`secrets.get`) sees it.
+  // Setting it via the admin path (with db) routes through ApiKeyStore, so it
+  // persists BOTH the secret under the SAME label the onboarding offer uses
+  // (`openai:onboarding`) AND the `api_keys` metadata row the BYO credential
+  // read path (resolveLlmCredentials → ApiKeyStore.list) needs.
+  const apiKeys = new ApiKeyStore({ db: b.db, secrets: b.secrets })
   await setApiKey({
     registry: b.registry,
     secretsStore: b.secrets,
+    db: b.db,
     project_slug: OWNER,
     label: 'openai_api_key',
     value: 'sk-from-admin-panel',
   })
-  const shared = await b.secrets.get({
-    internal_handle: OWNER,
-    kind: 'byo_api_key',
-    label: 'openai:onboarding',
-  })
-  expect(shared).toBe('sk-from-admin-panel')
+  // Shared secret — readable as the onboarding embeddings key.
+  expect(
+    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+  ).toBe('sk-from-admin-panel')
+  // Metadata row exists → credential resolution (GPT-5 reviews) sees it.
+  expect((await apiKeys.list({ internal_handle: OWNER, provider: 'openai' })).length).toBe(1)
 
   // Now reads connected.
   const after = await buildIntegrationsStatus({
@@ -287,15 +291,37 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
   })
   expect(after.api_keys.find((k) => k.label === 'openai_api_key')!.connected).toBe(true)
 
-  // Delete clears the shared secret.
+  // Re-paste over an existing key (rotate) must succeed, not trip duplicate-label.
+  await setApiKey({
+    registry: b.registry,
+    secretsStore: b.secrets,
+    db: b.db,
+    project_slug: OWNER,
+    label: 'openai_api_key',
+    value: 'sk-rotated',
+  })
+  expect(
+    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+  ).toBe('sk-rotated')
+
+  // Delete clears BOTH the secret AND the metadata row (no orphan → a later
+  // onboarding re-paste won't hit a stale duplicate row).
   const del = await deleteApiKey({
     registry: b.registry,
     secretsStore: b.secrets,
+    db: b.db,
     project_slug: OWNER,
     label: 'openai_api_key',
   })
   expect(del.deleted).toBe(true)
   expect(
-    await b.secrets.get({ internal_handle: OWNER, kind: 'byo_api_key', label: 'openai:onboarding' }),
+    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
   ).toBeNull()
+  expect((await apiKeys.list({ internal_handle: OWNER, provider: 'openai' })).length).toBe(0)
+
+  // Idempotent re-add after delete (proves no orphan metadata row blocks it).
+  await apiKeys.add({ internal_handle: OWNER, provider: 'openai', label: 'onboarding', plaintext: 'sk-reonboard' })
+  expect(
+    await apiKeys.resolveSecret({ internal_handle: OWNER, provider: 'openai', label: 'onboarding' }),
+  ).toBe('sk-reonboard')
 })

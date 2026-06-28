@@ -30,6 +30,7 @@
 
 import type { SecretsStore } from '../../auth/secrets-store.ts'
 import type { ProjectDb } from '../../persistence/index.ts'
+import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '../../auth/api-key-store.ts'
 import { metaLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,
@@ -118,27 +119,40 @@ interface ApiKeySlot {
   required: boolean
   install_prompt: string
   /**
-   * The `byo_api_key` secrets label this slot reads/writes under, when it
-   * DIFFERS from the slot's public id (the map key + URL segment). Core slots
-   * store under their own id, so they leave this undefined. The system OpenAI
-   * slot presents a colon-free id (`openai_api_key`, URL-safe) but persists
-   * under the ApiKeyStore label `openai:onboarding` — the SAME secret the
-   * onboarding optional-key offer captures — so both surfaces share one key.
+   * System slots backed by the per-owner `ApiKeyStore` (provider keys that
+   * carry an `api_keys` metadata row alongside the secret). Core slots leave
+   * this undefined and store the secret directly under their own id. When set,
+   * set/delete route through `ApiKeyStore.add`/`delete` so the metadata row AND
+   * the secret stay consistent (exactly as onboarding writes it) — this matters
+   * because the BYO credential read path (`resolveLlmCredentials` →
+   * `ApiKeyStore.list`) keys off the metadata row, and so an admin-pasted key
+   * must create it too. The secret persists under `${provider}:${label}`, the
+   * SAME label the onboarding optional-key offer uses, so both surfaces manage
+   * one shared key.
    */
-  storage_label?: string
+  api_key_store?: { provider: ApiKeyProvider; label: string }
 }
 
 /**
- * The public id for the system OpenAI key slot (colon-free so it survives
- * `encodeURIComponent` in the `/api/cores/api-keys/<id>` path) and the secrets
- * label it actually persists under. The label mirrors `ApiKeyStore`'s
- * `${provider}:${label}` convention for the onboarding offer (provider
- * `openai`, label `onboarding`), so a key set in onboarding OR here is the one
- * `resolveSecret({provider:'openai',label:'onboarding'})` reads to flip GBrain
- * into semantic-embeddings mode (ND1) and to run cross-model GPT-5 reviews.
+ * The public id for the system OpenAI key slot — colon-free so it survives
+ * `encodeURIComponent` in the `/api/cores/api-keys/<id>` path — and the
+ * onboarding ApiKeyStore (provider, label) it persists under. A key set in
+ * onboarding OR here is the one `resolveSecret({provider:'openai',
+ * label:'onboarding'})` reads to flip GBrain into semantic-embeddings mode
+ * (ND1), and the one `ApiKeyStore.list` advertises for cross-model GPT-5 reviews.
  */
 export const SYSTEM_OPENAI_SLOT_ID = 'openai_api_key'
-export const SYSTEM_OPENAI_STORAGE_LABEL = 'openai:onboarding'
+const SYSTEM_OPENAI_PROVIDER: ApiKeyProvider = 'openai'
+const SYSTEM_OPENAI_LABEL = 'onboarding'
+/** Derived secrets label (`${provider}:${label}`) for presence checks. */
+export const SYSTEM_OPENAI_STORAGE_LABEL = `${SYSTEM_OPENAI_PROVIDER}:${SYSTEM_OPENAI_LABEL}`
+
+/** The `byo_api_key` secrets label a slot reads/writes under. */
+function slotSecretsLabel(id: string, slot: ApiKeySlot): string {
+  return slot.api_key_store !== undefined
+    ? `${slot.api_key_store.provider}:${slot.api_key_store.label}`
+    : id
+}
 
 /**
  * System-declared API-key slots — manageable in the same Integrations panel but
@@ -158,7 +172,7 @@ export function systemApiKeySlots(): Map<string, ApiKeySlot> {
           'to semantic-search embeddings (sharper recall); also powers cross-model ' +
           'GPT-5 reviews. Get one at platform.openai.com/api-keys. ' +
           "(OpenAI sign-in/OAuth doesn't authorize embeddings — a real key is required.)",
-        storage_label: SYSTEM_OPENAI_STORAGE_LABEL,
+        api_key_store: { provider: SYSTEM_OPENAI_PROVIDER, label: SYSTEM_OPENAI_LABEL },
       },
     ],
   ])
@@ -281,7 +295,7 @@ export async function buildIntegrationsStatus(
       // Presence is checked against the SECRETS label (which may differ from
       // the public id for system slots), so an onboarding-set OpenAI key shows
       // as connected here too.
-      connected: present.has(slot.storage_label ?? id),
+      connected: present.has(slotSecretsLabel(id, slot)),
     })
   }
 
@@ -297,13 +311,24 @@ export interface SetApiKeyInput {
   project_slug: string
   label: string
   value: string
+  /**
+   * Project DB — REQUIRED for `api_key_store`-backed system slots so set/delete
+   * route through `ApiKeyStore` (secret + metadata row together). Optional for
+   * Core slots (secret-only). Both real call sites (the HTTP surface + the
+   * agent-native chat tools) supply it.
+   */
+  db?: ProjectDb
 }
 
 /**
- * Store (or rotate) an API key for a manifest-declared `byo_api_key` slot.
- * `replaceAtomic` makes set-or-rotate a single transaction — paste a new
- * key over an existing one without a delete/insert race. Rejects labels no
- * bundled Core declares and empty values.
+ * Store (or rotate) an API key for a managed slot.
+ *
+ * Core slots store the secret directly (`replaceAtomic` — set-or-rotate in one
+ * transaction). `api_key_store`-backed system slots (the OpenAI key) route
+ * through `ApiKeyStore` so the `api_keys` metadata row is created alongside the
+ * secret — otherwise `ApiKeyStore.list`-based credential resolution
+ * (`resolveLlmCredentials`) wouldn't see an admin-pasted key. Rejects unknown
+ * labels + empty values.
  */
 export async function setApiKey(
   input: SetApiKeyInput,
@@ -320,11 +345,25 @@ export async function setApiKey(
   if (value.length === 0) {
     throw new IntegrationsError('empty_value', 'api key value must be non-empty')
   }
+  if (slot.api_key_store !== undefined && input.db !== undefined) {
+    // Route through ApiKeyStore (secret + api_keys metadata row). Rotate =
+    // delete-if-exists then add, so a re-paste over an existing key succeeds
+    // instead of tripping the duplicate-label guard.
+    const apiKeys = new ApiKeyStore({ db: input.db, secrets: input.secretsStore })
+    const { provider, label } = slot.api_key_store
+    try {
+      await apiKeys.delete({ internal_handle: input.project_slug, provider, label })
+    } catch (err) {
+      if (!(err instanceof ApiKeyStoreError && err.code === 'not_found')) throw err
+    }
+    await apiKeys.add({ internal_handle: input.project_slug, provider, label, plaintext: value })
+    return { stored: true }
+  }
   await input.secretsStore.replaceAtomic([
     {
       internal_handle: input.project_slug,
       kind: 'byo_api_key',
-      label: slot.storage_label ?? input.label,
+      label: slotSecretsLabel(input.label, slot),
       plaintext: value,
     },
   ])
@@ -336,11 +375,16 @@ export interface DeleteApiKeyInput {
   secretsStore: SecretsStore
   project_slug: string
   label: string
+  /** Project DB — REQUIRED for `api_key_store`-backed slots (see SetApiKeyInput.db). */
+  db?: ProjectDb
 }
 
 /**
- * Clear a stored API key. Returns `{deleted:false}` when the slot is
- * known but no key was stored (idempotent). Rejects unknown labels.
+ * Clear a stored API key. Returns `{deleted:false}` when the slot is known but
+ * no key was stored (idempotent). `api_key_store`-backed system slots route
+ * through `ApiKeyStore.delete` so the secret AND the `api_keys` metadata row are
+ * removed together — leaving an orphan metadata row would make a later
+ * onboarding re-paste trip the duplicate-label guard. Rejects unknown labels.
  */
 export async function deleteApiKey(
   input: DeleteApiKeyInput,
@@ -353,7 +397,18 @@ export async function deleteApiKey(
       `label='${input.label}' is not a managed api-key slot (no bundled Core or system slot declares it)`,
     )
   }
-  const storageLabel = slot.storage_label ?? input.label
+  if (slot.api_key_store !== undefined && input.db !== undefined) {
+    const apiKeys = new ApiKeyStore({ db: input.db, secrets: input.secretsStore })
+    const { provider, label } = slot.api_key_store
+    try {
+      await apiKeys.delete({ internal_handle: input.project_slug, provider, label })
+      return { deleted: true }
+    } catch (err) {
+      if (err instanceof ApiKeyStoreError && err.code === 'not_found') return { deleted: false }
+      throw err
+    }
+  }
+  const storageLabel = slotSecretsLabel(input.label, slot)
   const rows = await input.secretsStore.list({
     internal_handle: input.project_slug,
     kind: 'byo_api_key',

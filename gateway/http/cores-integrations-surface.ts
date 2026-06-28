@@ -47,6 +47,12 @@ export interface CoresIntegrationsSurfaceOptions {
   tokens: OAuthTokenManager
   /** Per-project SecretsStore — api-key set/clear + presence checks. */
   secretsStore: SecretsStore
+  /**
+   * Per-project DB — lets `api_key_store`-backed system slots (the OpenAI key)
+   * route set/delete through `ApiKeyStore` so the secret + metadata row stay
+   * consistent. Optional: Core slots are secret-only.
+   */
+  db?: ProjectDb
   /** Frozen internal_handle for this instance. */
   project_slug: string
   /** App bearer resolver. */
@@ -71,7 +77,7 @@ function ownsPath(pathname: string): boolean {
 export function createCoresIntegrationsSurface(
   opts: CoresIntegrationsSurfaceOptions,
 ): CoresIntegrationsSurface {
-  const { registry, tokens, secretsStore, project_slug, auth } = opts
+  const { registry, tokens, secretsStore, db, project_slug, auth } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -117,11 +123,12 @@ export function createCoresIntegrationsSurface(
       )
       if (apiKeyMatch !== null) {
         const label = apiKeyMatch[1] ?? ''
+        const dbOpt = db !== undefined ? { db } : {}
         if (req.method === 'POST') {
-          return await handleSetApiKey({ req, label, registry, secretsStore, project_slug })
+          return await handleSetApiKey({ req, label, registry, secretsStore, ...dbOpt, project_slug })
         }
         if (req.method === 'DELETE') {
-          return await handleDeleteApiKey({ label, registry, secretsStore, project_slug })
+          return await handleDeleteApiKey({ label, registry, secretsStore, ...dbOpt, project_slug })
         }
         return jsonResponse(405, {
           ok: false,
@@ -145,6 +152,7 @@ async function handleSetApiKey(input: {
   label: string
   registry: IntegrationsRegistryView
   secretsStore: SecretsStore
+  db?: ProjectDb
   project_slug: string
 }): Promise<Response> {
   let body: { value?: unknown }
@@ -162,6 +170,7 @@ async function handleSetApiKey(input: {
     await setApiKey({
       registry: input.registry,
       secretsStore: input.secretsStore,
+      ...(input.db !== undefined ? { db: input.db } : {}),
       project_slug: input.project_slug,
       label: input.label,
       value,
@@ -176,12 +185,14 @@ async function handleDeleteApiKey(input: {
   label: string
   registry: IntegrationsRegistryView
   secretsStore: SecretsStore
+  db?: ProjectDb
   project_slug: string
 }): Promise<Response> {
   try {
     const { deleted } = await deleteApiKey({
       registry: input.registry,
       secretsStore: input.secretsStore,
+      ...(input.db !== undefined ? { db: input.db } : {}),
       project_slug: input.project_slug,
       label: input.label,
     })
