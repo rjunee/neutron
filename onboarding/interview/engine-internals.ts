@@ -1178,6 +1178,25 @@ export interface InterviewEngineDeps {
    * pre-existing managed caller/test is byte-identical.
    */
   deploymentMode?: OnboardingDeploymentMode
+  /**
+   * ND2 (2026-06-28) — true when the Path-1 conversational onboarding upload
+   * affordance is actually being offered to the user. The live-agent onboarding
+   * seam attaches the zip-import affordance to every onboarding agent_message
+   * iff an import SUBSTRATE exists (`LiveAgentOnboardingSeam.uploadAffordance()`
+   * returns non-null ⟺ `importSubstrate !== null`; see open/composer.ts). This
+   * is the signal `notifyImportUpload` keys on to honor a SOLICITED upload that
+   * lands at a conversational phase (`work_interview_gap_fill`, …) instead of
+   * no-op'ing it.
+   *
+   * It must NOT be inferred from `importJobRunner` presence: the Open composer
+   * always wires a synthesis `importJobRunner` (built over `importSubstrate ??
+   * null`), so the runner is present even when NO substrate exists and the
+   * affordance is hidden — keying on the runner would start (then fail) a job
+   * for a genuinely stray upload (Codex review, PR #94). Production wires this
+   * from `importSubstrate !== null` in `build-landing-stack.ts`; unset → false
+   * so managed callers / tests without an affordance never take the path.
+   */
+  importAffordanceOffered?: boolean
 }
 
 /**

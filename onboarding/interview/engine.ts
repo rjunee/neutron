@@ -2404,10 +2404,14 @@ export class InterviewEngine implements EngineInternals {
       //      where the affordance is offered on every turn. Managed mode only
       //      offers it at `import_upload_pending` / `ai_substrate_offered` (both
       //      handled above), so we never honor a sideways upload there.
-      //   2. `importJobRunner` wired — the EXACT condition under which
-      //      `uploadAffordance()` returns non-null and the client shows the
-      //      affordance. Unwired ⇒ the affordance was never offered ⇒ the
-      //      upload is stray ⇒ no-op.
+      //   2. `importAffordanceOffered` — the EXACT condition under which the
+      //      live-agent seam's `uploadAffordance()` returns non-null and the
+      //      client renders the affordance (`importSubstrate !== null`, wired in
+      //      build-landing-stack.ts). We must NOT key on `importJobRunner`
+      //      presence: the Open composer ALWAYS wires a synthesis runner (over
+      //      `importSubstrate ?? null`), so the runner exists even when no
+      //      substrate exists and the affordance is HIDDEN — keying on it would
+      //      start (then fail) a job for a stray upload (Codex review, PR #94).
       //   3. non-terminal state — already enforced above via TERMINAL_PHASES
       //      (`noop_terminal`), so a post-onboarding upload never reaches here.
       //   4. no import job already started (`import_job_id` null AND phase is
@@ -2422,7 +2426,7 @@ export class InterviewEngine implements EngineInternals {
         state.phase === 'import_running'
       if (
         this.deploymentMode === 'open' &&
-        this.deps.importJobRunner !== undefined &&
+        this.deps.importAffordanceOffered === true &&
         !alreadyHasImportJob
       ) {
         this.deps.transcript.append({

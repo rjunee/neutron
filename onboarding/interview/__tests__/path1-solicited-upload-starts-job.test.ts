@@ -85,6 +85,9 @@ function stubImportStack(): {
 
 function buildEngine(opts: {
   deploymentMode: OnboardingDeploymentMode
+  /** Mirrors build-landing-stack's `importSubstrate !== undefined` — the live
+   *  Path-1 upload affordance is offered iff this is true. */
+  importAffordanceOffered?: boolean
   importJobRunner?: ImportJobRunnerHook
   importPayloadResolver?: ImportPayloadResolver
 }): InterviewEngine {
@@ -98,6 +101,8 @@ function buildEngine(opts: {
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
   }
+  if (opts.importAffordanceOffered !== undefined)
+    deps.importAffordanceOffered = opts.importAffordanceOffered
   if (opts.importJobRunner !== undefined) deps.importJobRunner = opts.importJobRunner
   if (opts.importPayloadResolver !== undefined) deps.importPayloadResolver = opts.importPayloadResolver
   return new InterviewEngine(deps)
@@ -143,7 +148,7 @@ afterEach(() => {
 describe('ND2 — solicited Path-1 upload at a conversational phase starts a job', () => {
   test('open mode, work_interview_gap_fill: upload STARTS an import (not no_active_prompt)', async () => {
     const stack = stubImportStack()
-    const engine = buildEngine({ deploymentMode: 'open', ...stack })
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
 
     // Live Path-1: the engine sits at a conversational phase with NO import job.
     await seedPhase('work_interview_gap_fill')
@@ -170,7 +175,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
 
   test('open mode honors the SNIFFED source (chatgpt affordance, claude zip)', async () => {
     const stack = stubImportStack()
-    const engine = buildEngine({ deploymentMode: 'open', ...stack })
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
     await seedPhase('work_interview_gap_fill')
 
     // The web affordance hardcodes source=chatgpt; the handler sniffs the real
@@ -189,7 +194,8 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
 
   test('managed mode at a conversational phase still no-ops (not a blanket any-phase import)', async () => {
     const stack = stubImportStack()
-    const engine = buildEngine({ deploymentMode: 'managed', ...stack })
+    // Even with the affordance flag set, the open-mode guard blocks managed.
+    const engine = buildEngine({ deploymentMode: 'managed', importAffordanceOffered: true, ...stack })
     await seedPhase('work_interview_gap_fill')
 
     const out = await engine.notifyImportUpload({
@@ -209,11 +215,15 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     expect(next?.phase).toBe('work_interview_gap_fill')
   })
 
-  test('open mode but importJobRunner UNWIRED → no-op (affordance was never offered)', async () => {
-    // No import substrate ⇒ the live-agent seam returns null from
-    // uploadAffordance() ⇒ the client never shows the affordance ⇒ an upload
-    // reaching here is stray.
-    const engine = buildEngine({ deploymentMode: 'open' })
+  test('open mode, runner WIRED but affordance NOT offered (no substrate) → no-op (Codex PR #94)', async () => {
+    // The exact case Codex flagged: in Open, build-landing-stack ALWAYS wires a
+    // synthesis importJobRunner (over `importSubstrate ?? null`), so the runner
+    // is present even when no substrate exists and the affordance is HIDDEN
+    // (`uploadAffordance()` → null). Keying on runner-presence would (wrongly)
+    // start + fail a job for a stray upload. Keying on `importAffordanceOffered`
+    // (false here) correctly no-ops.
+    const stack = stubImportStack()
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: false, ...stack })
     await seedPhase('work_interview_gap_fill')
 
     const out = await engine.notifyImportUpload({
@@ -225,13 +235,14 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
       observed_at: NOW_MS + 1_000,
     })
     expect(out.outcome).toBe('no_active_prompt')
+    expect(stack.startedSources).toEqual([])
     const next = await stateStore.get(OWNER, USER)
     expect(next?.phase).toBe('work_interview_gap_fill')
   })
 
   test('open mode but a job is already in flight → no duplicate job', async () => {
     const stack = stubImportStack()
-    const engine = buildEngine({ deploymentMode: 'open', ...stack })
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
     // A conversational phase that already carries an import_job_id (a prior
     // upload started a job). A second upload must NOT spawn a duplicate.
     await seedPhase('work_interview_gap_fill', { import_job_id: 'pre-existing-job' })
@@ -250,7 +261,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
 
   test('terminal onboarding upload no-ops (noop_terminal), never reaching the solicited path', async () => {
     const stack = stubImportStack()
-    const engine = buildEngine({ deploymentMode: 'open', ...stack })
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
     await seedPhase('completed')
 
     const out = await engine.notifyImportUpload({
