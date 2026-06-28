@@ -382,6 +382,52 @@ test('a terse no-op turn AFTER an import is consumed still finalizes (no stall)'
   expect(completed).toBe(true)
 })
 
+test('a turn that extracts an array does NOT clobber import-merged array values (Codex r3 P2)', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  // Pre-LLM row: just the one interview project.
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Topline'] },
+    advanced_at: 400,
+  })
+  // The LLM call simulates the import CONSUME landing mid-extraction: it merges
+  // the imported projects into phase_state, THEN returns a freshly-extracted
+  // project. The patch must merge against the FRESH (import-merged) array.
+  const racingClient: AnthropicMessagesClient = {
+    messages: {
+      create: async () => {
+        await store.upsert({
+          project_slug: SLUG,
+          user_id: USER,
+          phase: 'work_interview_gap_fill',
+          phase_state_patch: { primary_projects: ['Topline', 'ImportedA', 'ImportedB'] },
+          advanced_at: 800,
+        })
+        return { content: [{ text: JSON.stringify({ primary_projects: ['Pristine'] }) }] }
+      },
+    },
+  }
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: racingClient,
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => false,
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Any other projects?',
+    user_text: 'also Pristine',
+    observed_at: 1000,
+  })
+  const projects = state!.phase_state['primary_projects'] as string[]
+  // The import-merged values survive AND the new one is appended.
+  expect(projects).toContain('ImportedA')
+  expect(projects).toContain('ImportedB')
+  expect(projects).toContain('Pristine')
+})
+
 test('extractor swallows LLM failure (never throws) — fire-and-forget safety', async () => {
   const store = new InMemoryOnboardingStateStore()
   const throwingClient: AnthropicMessagesClient = {

@@ -156,7 +156,34 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
       priorPhaseState,
       log,
     )
-    const patch = buildPhaseStatePatch(priorPhaseState, fields, turn.user_text)
+    // ── Premature-finalize import race + stale-snapshot guard (2026-06-28) ──
+    // Re-read the CURRENT row AFTER the multi-second `extractFields` LLM call.
+    // `prior`/`priorPhaseState` were read BEFORE it, and during that window a
+    // concurrent Path-1 export upload (`engine.notifyImportUpload` — synchronous,
+    // NOT serialized through this extractor's per-user chain) can start an import
+    // job, advance the row to `import_running`, and (on consume) MERGE the
+    // imported projects into `phase_state`. EVERYTHING below — the field patch,
+    // the phase decision, and the completion gate — therefore keys off this fresh
+    // read, never the stale snapshot, so we neither: (a) downgrade an
+    // `import_running` phase on the upsert; (b) fire `onComplete` on top of a live
+    // import, orphaning it (seeds land on disk but the wow-moment materializer —
+    // which registers `projects` DB rows + gbrain memory at finalize, keyed off
+    // `phase_state.import_result` — already ran with no result: observed 4 real
+    // projects on disk, 0 DB rows, 0 gbrain pages); nor (c) clobber the
+    // import-merged `primary_projects`/`non_work_interests` arrays with a patch
+    // built from the pre-merge snapshot (Codex r3 P2 — the store shallow-merges,
+    // so a stale array REPLACES the fresh one).
+    const fresh = (await deps.stateStore.get(deps.project_slug, turn.user_id)) ?? prior
+    if (fresh !== null && (fresh.phase === 'completed' || fresh.phase === 'failed')) {
+      // A sibling turn (or the import pipeline) finalized while we extracted —
+      // never resurrect a terminal row.
+      return fresh
+    }
+    const freshPhaseState: Record<string, unknown> = fresh?.phase_state ?? {}
+
+    // Build the field patch against the FRESH phase_state so array merges extend
+    // (rather than overwrite) any import-merged values.
+    const patch = buildPhaseStatePatch(freshPhaseState, fields, turn.user_text)
     const hasPatch = Object.keys(patch).length > 0
 
     // ND-A (2026-06-28) — belt-and-suspenders to the engine's app-socket
@@ -168,32 +195,10 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     // only channel in single-owner Open; we never overwrite an existing
     // telegram/web value (the engine-driven button flows set it themselves).
     // (Only meaningful when we're about to write — an empty patch writes nothing.)
-    if (hasPatch && readString(priorPhaseState, 'signup_via') === null) {
+    if (hasPatch && readString(freshPhaseState, 'signup_via') === null) {
       patch['signup_via'] = 'web'
     }
 
-    // ── Premature-finalize import race (2026-06-28 reset-gate E2E) ──────────
-    // The import-active check must NOT be computed from `prior` — that row was
-    // read BEFORE the multi-second `extractFields` LLM call. During that window
-    // a concurrent Path-1 export upload (`engine.notifyImportUpload`, synchronous
-    // and NOT serialized through this extractor's per-user chain) can start an
-    // import job and advance the row to `import_running`. Trusting a stale read
-    // would (a) DOWNGRADE the phase back to the interview marker on the upsert
-    // and (b) — when all 5 fields are already collected — fire `onComplete`,
-    // finalizing onboarding ON TOP OF the live import. The import then completes
-    // ORPHANED: its synthesized seeds land on disk, but the wow-moment
-    // materializer (which registers `projects` DB rows + gbrain memory at
-    // finalize, keyed off `phase_state.import_result`) already ran with no
-    // result, so the imported projects never register and never reach memory
-    // (observed: 4 real projects on disk, 0 DB rows, 0 gbrain pages). Re-read the
-    // CURRENT row and consult the authoritative in-flight-import probe so neither
-    // the downgrade nor the finalize can race ahead of a live import.
-    const fresh = (await deps.stateStore.get(deps.project_slug, turn.user_id)) ?? prior
-    if (fresh !== null && (fresh.phase === 'completed' || fresh.phase === 'failed')) {
-      // A sibling turn (or the import pipeline) finalized while we extracted —
-      // never resurrect a terminal row.
-      return fresh
-    }
     const importInFlight =
       deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
     const importActiveNow =
