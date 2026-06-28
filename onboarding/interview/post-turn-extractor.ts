@@ -150,6 +150,18 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
       return prior
     }
 
+    // ND-A (2026-06-28) — belt-and-suspenders to the engine's app-socket
+    // default: single-owner Open Path-1 has no `engine.start` to stamp
+    // `signup_via`, and `pollImportRunningTick` historically stranded
+    // `import_running` forever without it. Stamp `signup_via='web'` onto the
+    // FIRST real extraction write (when absent) so the import-running cron's
+    // channel-context invariant always holds on disk too. app-socket/web is the
+    // only channel in single-owner Open; we never overwrite an existing
+    // telegram/web value (the engine-driven button flows set it themselves).
+    if (readString(priorPhaseState, 'signup_via') === null) {
+      patch['signup_via'] = 'web'
+    }
+
     // While an import owns the phase, only patch fields — don't move the phase.
     const next_phase = importActive ? prior!.phase : INTERVIEW_PHASE
     const updated = await deps.stateStore.upsert({
