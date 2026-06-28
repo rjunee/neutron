@@ -10,8 +10,18 @@ export {
 export { GBrainMemoryStore } from './gbrain-memory-store.ts'
 export {
   resolveEmbedderConfig,
+  buildOpenAiEmbedderConfig,
   type EmbedderConfig,
 } from './embedder-config.ts'
+export {
+  ensureBrainInitialized,
+  isBrainInitialized,
+  brainConfigPath,
+  resolveInitEmbeddingTarget,
+  type EnsureBrainInitInput,
+  type EnsureBrainInitResult,
+  type EnsureBrainInitStatus,
+} from './ensure-brain-init.ts'
 export {
   GBrainStdioMcpClient,
   type GBrainStdioMcpClientOptions,

@@ -26,7 +26,7 @@ import type { StartOAuthResult } from '../http/cores-oauth-surface.ts'
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
 import {
   buildIntegrationsStatus,
-  collectApiKeySlots,
+  collectAllApiKeySlots,
   collectOAuthSlots,
   deleteApiKey,
   disconnectOAuth,
@@ -119,7 +119,7 @@ export function buildIntegrationsTools(
     handler: async (args) => {
       const label = requireLabel(args)
       const oauthSlots = collectOAuthSlots(deps.registry)
-      const apiKeySlots = collectApiKeySlots(deps.registry)
+      const apiKeySlots = collectAllApiKeySlots(deps.registry)
       if (oauthSlots.has(label)) {
         // Run the SAME server-side start the UI runs and hand back the
         // PUBLIC Google consent URL — never a bearer-gated /start link
@@ -150,6 +150,7 @@ export function buildIntegrationsTools(
           registry: deps.registry,
           secretsStore: deps.secretsStore,
           project_slug: deps.project_slug,
+          db: deps.db,
           label,
           value,
         })
@@ -183,7 +184,7 @@ export function buildIntegrationsTools(
     handler: async (args) => {
       const label = requireLabel(args)
       const oauthSlots = collectOAuthSlots(deps.registry)
-      const apiKeySlots = collectApiKeySlots(deps.registry)
+      const apiKeySlots = collectAllApiKeySlots(deps.registry)
       if (oauthSlots.has(label)) {
         // Route through the SHARED disconnect brain — revoke + delete tokens
         // AND flag every affected Core dependency-missing — so a chat-
@@ -203,6 +204,7 @@ export function buildIntegrationsTools(
           registry: deps.registry,
           secretsStore: deps.secretsStore,
           project_slug: deps.project_slug,
+          db: deps.db,
           label,
         })
         return { kind: 'api_key', label, disconnected: deleted }

@@ -2,6 +2,70 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — ND1: GBrain memory works by default + OpenAI-key embeddings upgrade
+
+**The bug (dogfood 2026-06-27 §2 / ND1).** Production memory was DEAD. The
+realmode composer spawns the external `gbrain serve` binary, but NO code path
+ever ran `gbrain init`. `gbrain serve` against an uninitialized brain prints
+"No brain configured. Run: gbrain init" and exits → every MCP op fails
+`MCP error -32000: Connection closed` → `mcp__neutron__gbrain_search`,
+scribe-write, and the admin "Memory" tab all silently no-op'd. Recall only
+*appeared* to work because the agent fell back to Claude Code file-memory. The
+LIVE install was affected too (`GBRAIN_HOME=~/neutron/data/gbrain gbrain list`
+→ "No brain configured"). CI missed it because its "real GBrain" test boots an
+in-process PGLite engine that never exercises the `init`→`serve` seam.
+
+**Root cause, verified with the real binary (not guessed).** `gbrain serve`
+needs a brain that `gbrain init` created; `gbrain init --pglite
+--non-interactive --skip-embed-check` creates one with NO embedder; the real
+`gbrain serve` stdio MCP child then round-trips `put_page` → keyword `search`
+against it (proven via the repo's own `GBrainStdioMcpClient`). The ONLY missing
+piece was the init step.
+
+**Part A — works by default (keyword + graph, no embedder).** New
+`gbrain-memory/ensure-brain-init.ts#ensureBrainInitialized`: an idempotent,
+fail-soft init guard run the FIRST time `GBrainStdioMcpClient` connects (new
+`opts.ensureInitialized`, wired by `buildGBrainMemory`). It runs `gbrain init`
+once (no-op once `<GBRAIN_HOME>/.gbrain/config.json` exists) and never throws —
+a missing binary / failed init returns a status and degrades to the existing
+latched no-op. **Key design call:** the brain is created **embeddings-ready** (a
+3072-dim OpenAI column) even with no key, so the default still computes zero
+embeddings (verified: `serve` answers `put_page` + keyword `search` with no key)
+while a later key upgrades in place with NO schema rebuild — a `--no-embedding`
+1280-dim column could never (OpenAI rejects 1280-dim vectors; allowed
+256/512/768/1024/1536/3072).
+
+**Part B — OpenAI-key onboarding capture → embeddings upgrade.** The onboarding
+capture already existed (`onboarding/optional-keys.ts#OPENAI_OFFER`, surfaced at
+`phase-spec-resolver.ts:1044`); the gap was wiring the stored key to embeddings.
+`build-gbrain-memory.ts#resolveEffectiveEmbedder` now treats the
+onboarding-captured key (ApiKeyStore `provider=openai` label `onboarding`,
+resolved by the composer) as a FIRST-CLASS embeddings trigger — a stored key
+alone flips GBrain semantic on the next turn/boot (no `NEUTRON_EMBEDDINGS` env
+needed), and `ensureBrainInitialized` backfills pre-key pages once via
+`gbrain embed --stale`. The `NEUTRON_EMBEDDINGS` env opt-in path is unchanged.
+The key is also manageable post-onboarding in the admin Integrations panel as a
+new system `openai_api_key` slot (`gateway/cores/integrations.ts`), persisting
+under the SAME secrets label so onboarding ↔ admin share one key. Offer copy
+updated to give the WHY (semantic recall for sharper memory; optional, keyword
++graph otherwise) and to note OpenAI OAuth does NOT authorize embeddings.
+
+**OAuth-vs-embeddings (Ryan's steer, verified).** OpenAI browser OAuth
+(`codex login`) does NOT authorize the embeddings API: gbrain's embedder
+requires a platform key (`gbrain/src/core/ai/gateway.ts` → "OpenAI embedding
+requires OPENAI_API_KEY"); the OAuth token (consumed by
+`runtime/adapters/gpt-5-5-codex-cli/auth.ts` against the ChatGPT/Codex backend)
+is the separate `codex_auth` offer for cross-model GPT-5 reviews. So the
+embeddings step stays a guided API-key paste.
+
+**Tests.** `gbrain-memory/__tests__/ensure-brain-init.test.ts` (init-guard
+policy, injected runner — idempotency, embeddings-ready default, explicit
+embedder, backfill marker-gating, fail-soft); `real-serve-roundtrip.test.ts` —
+the ND1 regression guard that boots the REAL `gbrain serve` (gated on the binary
+being installed) and asserts init-guard → serve → `put_page` → `search` recall;
+plus a `gateway/cores/__tests__/integrations.test.ts` case proving the admin
+`openai_api_key` slot shares storage with the onboarding key. No feature flags.
+
 ## 2026-06-28 — Time-rot test-class hardening sweep (proactive)
 
 **The class.** #90's CI surfaced a silent time-rot bug: `reflection/index.ts`'s

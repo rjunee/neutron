@@ -165,6 +165,7 @@ export async function wireCoresSurfaces(
           registry: coresState.registry,
           tokens,
           secretsStore,
+          db: input.db,
           project_slug: input.project_slug,
           auth,
         })

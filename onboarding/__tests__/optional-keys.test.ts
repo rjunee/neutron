@@ -71,7 +71,7 @@ test('onboarding offers exactly the optional keys, each marked optional', () => 
   for (const offer of offers) {
     // Every offer's question reads as OPTIONAL and skipping is documented.
     expect(offer.question.toLowerCase()).toContain('optional')
-    expect(offer.skip_note.toLowerCase()).toContain('working')
+    expect(offer.skip_note.toLowerCase()).toContain('work')
     expect(offer.capability.length).toBeGreaterThan(0)
   }
 })

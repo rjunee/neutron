@@ -39,7 +39,10 @@ import {
   GBrainMemoryStore,
   GBrainSyncHook,
   type MemoryStore,
+  type EmbedderConfig,
   resolveEmbedderConfig,
+  buildOpenAiEmbedderConfig,
+  ensureBrainInitialized,
 } from '../../gbrain-memory/index.ts'
 import type { SyncHook } from '../../runtime/entity-writer.ts'
 
@@ -68,9 +71,33 @@ export interface GBrainMemoryWiring {
  * configured (the default), the child env is byte-for-byte today's
  * keyword-+-graph wiring — provisioning and search are unaffected.
  */
+/**
+ * Resolve the effective embedder, preferring an OpenAI key the owner captured
+ * through the onboarding optional-key offer ("paste a key to unlock cloud
+ * embeddings"). That purpose-stated capture is the sanctioned embeddings
+ * trigger — so a stored key alone flips on semantic memory, no
+ * `NEUTRON_EMBEDDINGS` env required (ND1: "wire it so gbrain flips to
+ * semantic-embeddings mode when present"). With no stored key we fall back to
+ * the env `NEUTRON_EMBEDDINGS` opt-in path (`resolveEmbedderConfig`), which
+ * stays byte-for-byte unchanged so a bare env `OPENAI_API_KEY` (the GPT BYO
+ * adapter's key) never silently bills for embeddings.
+ */
+export function resolveEffectiveEmbedder(input: {
+  env: NodeJS.ProcessEnv
+  openaiApiKey?: string | undefined
+}): EmbedderConfig | null {
+  const stored = input.openaiApiKey?.trim()
+  if (stored !== undefined && stored.length > 0) {
+    return buildOpenAiEmbedderConfig(stored)
+  }
+  return resolveEmbedderConfig(input.env)
+}
+
 export function resolveGbrainClientOptions(input: {
   owner_home: string
   env?: NodeJS.ProcessEnv
+  /** The owner's onboarding-captured OpenAI key (from the ApiKeyStore), if any. */
+  openaiApiKey?: string | undefined
 }): GBrainStdioMcpClientOptions {
   const env = input.env ?? process.env
   const gbrainHome = join(input.owner_home, 'gbrain')
@@ -80,9 +107,10 @@ export function resolveGbrainClientOptions(input: {
   const childEnv: Record<string, string> = { GBRAIN_HOME: gbrainHome }
 
   // Conditional embedding-store init: merge the embedder's child env ONLY when
-  // an embedder is opted in. `null` (the default) leaves childEnv untouched, so
-  // gbrain serve starts no embedding store — keyword + graph exactly as today.
-  const embedder = resolveEmbedderConfig(env)
+  // an embedder is opted in (stored onboarding key, or the env opt-in). `null`
+  // (the default) leaves childEnv untouched, so gbrain serve computes no
+  // embeddings — keyword + graph exactly as the default requires.
+  const embedder = resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey })
   if (embedder !== null) {
     Object.assign(childEnv, embedder.childEnv)
   }
@@ -103,11 +131,32 @@ export function buildGBrainMemory(input: {
   owner_home: string
   project_slug: string
   env?: NodeJS.ProcessEnv
+  /**
+   * The owner's onboarding-captured OpenAI key (resolved from the ApiKeyStore
+   * by the composer). Present → GBrain initializes + serves with semantic
+   * embeddings; absent → keyword + graph default. Threading the key (not the
+   * store) keeps this builder pure-ish + unit-testable.
+   */
+  openaiApiKey?: string | undefined
 }): GBrainMemoryWiring {
+  const env = input.env ?? process.env
   const opts = resolveGbrainClientOptions({
     owner_home: input.owner_home,
-    ...(input.env !== undefined ? { env: input.env } : {}),
+    env,
+    ...(input.openaiApiKey !== undefined ? { openaiApiKey: input.openaiApiKey } : {}),
   })
+
+  // Init guard: ensure the brain at GBRAIN_HOME is `gbrain init`'d BEFORE the
+  // first `gbrain serve` spawn (ND1 root cause: serve hit an uninitialized
+  // brain → "No brain configured" → Connection closed → every memory op
+  // silently no-op'd). Idempotent + best-effort; runs once, lazily, at the
+  // client's first connect. The embedder it inits against is the SAME effective
+  // embedder the serve child uses, so the vector column matches the runtime.
+  const gbrainHome = join(input.owner_home, 'gbrain')
+  const embedder = resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey })
+  opts.ensureInitialized = async () => {
+    await ensureBrainInitialized({ gbrainHome, embedder, env })
+  }
 
   // 2026-06-10 (wow-hang-resilience) — loud startup probe. The client
   // connects lazily, so without this the first signal that gbrain is
