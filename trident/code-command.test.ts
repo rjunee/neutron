@@ -22,8 +22,8 @@ import {
   type TridentCodeContext,
 } from './code-command.ts'
 import type { HostCommandResult } from './git-mode.ts'
+import type { TridentInnerLoop } from './inner-loop.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
-import { TridentSessionManager, type TridentDispatch } from './session.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
@@ -151,29 +151,35 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     const res = await parseAndExecuteCodeCommand('/code wire the widget', ctx({ resolveMergeMode: async () => 'pr' }))
     const run_id = (res!.data as { run_id: string }).run_id
 
-    // 2. The foundational tick loop (the SAME one the gateway runs) sweeps
-    //    the row and drives it with a mocked Forge/Argus substrate.
-    const dispatch: TridentDispatch = async (input) => {
-      if (input.kind === 'argus') return { result: 'APPROVE', status: 'completed' }
-      return { result: 'PR_NUMBER=101\nBRANCH=trident/wire-the-widget\nWORKTREE=/repo', status: 'completed' }
-    }
-    const session = new TridentSessionManager({ dispatch })
+    // 2. The foundational tick loop (the SAME one the gateway runs) sweeps the
+    //    row and drives it with a mocked inner loop (the CC Dynamic Workflow that
+    //    the launcher invokes in production), which returns an APPROVE verdict.
+    const inner_loop: TridentInnerLoop = async () => ({
+      status: 'completed',
+      verdict: 'APPROVE',
+      pr_number: 101,
+      branch: 'trident/wire-the-widget',
+      round: 1,
+      checkpoint: 'argus-approved',
+      raw: '',
+    })
     const hostCalls: string[][] = []
-    const { step } = buildTridentOrchestrator({
-      session,
+    const orch = buildTridentOrchestrator({
+      inner_loop,
+      db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
-        return cmd.includes('--numstat') ? ok('5\t2\tf') : ok()
+        return ok()
       },
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
-    const loop = new TridentTickLoop({ store, step })
+    const loop = new TridentTickLoop({ store, step: orch.step })
 
     let final = store.get(run_id)!
     for (let i = 0; i < 40 && !isTerminalPhase(final.phase); i++) {
       await loop.runOnce()
-      await session.drain()
+      await orch.drain()
       final = store.get(run_id)!
     }
 

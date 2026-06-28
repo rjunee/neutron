@@ -8,18 +8,19 @@
  * trident tick loop fell back to `stubAdvanceDeps()` (advances nothing) and
  * `/code` could not dispatch a real build.
  *
- * THE FIX: `open/composer.ts` builds a dedicated `cc-trident-*` substrate and
- * threads `trident: { dispatch: buildSubstrateTridentDispatch(...) }` onto the
- * returned `CompositionInput`, so `build-core-modules.ts` wires the REAL
- * `buildTridentOrchestrator` step.
+ * THE FIX (Trident v2): `open/composer.ts` builds a dedicated per-worktree
+ * `cc-trident-*` substrate FACTORY and threads
+ * `trident: { build_substrate }` onto the returned `CompositionInput`, so
+ * `build-core-modules.ts` wires the REAL `buildWorkflowInnerLoop` +
+ * `buildTridentOrchestrator` step (the inner loop is now a CC Dynamic Workflow).
  *
  * Per CLAUDE.md (the 2026-05-13 "built but never invoked" incident class) this
  * asserts the wiring ACTUALLY produces a working runner — it boots the REAL Open
  * composer with a SYNTHETIC credential (so the substrates are built) + a MOCKED
  * substrate (no real `claude`, no api.anthropic.com), then:
- *   1. `composition.trident.dispatch` is a wired function (not skeleton/stub).
- *   2. Invoking it runs a REAL turn on the substrate and returns the terminal
- *      text + 'completed' — i.e. a dispatch, NOT a `CodegenNotConfiguredError`.
+ *   1. `composition.trident.build_substrate` is a wired function (not skeleton/stub).
+ *   2. Invoking it builds a FRESH substrate rooted at the given worktree cwd and
+ *      a turn on it runs (the launcher would invoke the Workflow tool here).
  *   3. With NO credential the runner degrades cleanly: `composition.trident` is
  *      unset (the loop stays on its restart-safe no-op).
  */
@@ -109,12 +110,12 @@ function recordingSubstrate(prompts: string[]): Substrate {
 }
 
 describe('Open foundational-Trident prod-boot wiring', () => {
-  test('a credentialed boot wires composition.trident.dispatch to a REAL substrate runner', async () => {
+  test('a credentialed boot wires composition.trident.build_substrate to a REAL per-worktree substrate factory', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
     const prompts: string[] = []
     // Capture the cwd the composer threads into each substrate build — the
     // `ClaudeCodeSubstrateOptions.cwd` `buildLlmCallSubstrate` composes from the
-    // per-dispatch `build_substrate(cwd)` factory.
+    // per-call `build_substrate(cwd)` factory.
     const builtCwds: string[] = []
     const composer = buildOpenGraphComposer({
       env: process.env,
@@ -126,48 +127,33 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     })
     const composition = await composer({ db, project_slug: 'owner' })
 
-    // 1) The runner is wired — not the skeleton/stub.
+    // 1) The runner is wired — not the skeleton/stub. v2 threads a per-worktree
+    //    substrate FACTORY (the launcher invokes the Workflow tool on it).
     expect(composition.trident).toBeDefined()
-    expect(typeof composition.trident!.dispatch).toBe('function')
+    expect(typeof composition.trident!.build_substrate).toBe('function')
 
-    // 2) Invoking it dispatches a REAL turn on the substrate (NOT a
-    //    CodegenNotConfiguredError) and returns the terminal text — AND the
-    //    substrate for the turn was rooted at the run's worktree, not owner_home.
+    // 2) Invoking the factory + running a turn builds a FRESH substrate rooted at
+    //    the given worktree cwd (the underlying `buildLlmCallSubstrate` invokes the
+    //    backing factory lazily at start()), and the turn runs against the mocked
+    //    backend (NOT a CodegenNotConfiguredError).
     const builtBefore = builtCwds.length
     const worktreeA = join(tmpDir, 'worktrees', 'run-a')
-    const out = await composition.trident!.dispatch({
-      kind: 'forge',
-      phase: 'forge-init',
-      system: 'forge',
-      user_message: 'BUILD: add a feature flag',
-      repo_path: worktreeA,
-      trident_run_id: 'run-1',
-      model: 'claude-sonnet-4-6',
-      timeout_ms: 30_000,
-    })
-    expect(out.status).toBe('completed')
-    expect(out.result).toContain('PR_NUMBER=11')
-    expect(prompts.some((p) => p.includes('BUILD: add a feature flag'))).toBe(true)
-    // A FRESH substrate was built for the dispatch, rooted at the run's worktree
-    // (`repo_path`) — the per-worktree cwd fix. Earlier substrate builds (the
-    // conversational / scribe / synthesis boxes) used owner_home (tmpDir), so we
-    // only assert on the build triggered by THIS dispatch.
+    const subA = composition.trident!.build_substrate(worktreeA)
+    let saw = ''
+    for await (const ev of subA.start({ prompt: 'LAUNCH: drive the workflow', tools: [], model_preference: [] }).events) {
+      if (ev.kind === 'token') saw += ev.text
+    }
+    expect(saw).toContain('PR_NUMBER=11')
+    expect(prompts.some((p) => p.includes('LAUNCH: drive the workflow'))).toBe(true)
     expect(builtCwds.length).toBeGreaterThan(builtBefore)
     expect(builtCwds.slice(builtBefore)).toContain(worktreeA)
 
-    // A second dispatch in a DIFFERENT worktree re-roots again (per-build
-    // isolation) — never collapses onto one fixed cwd.
+    // A second worktree re-roots again (per-build isolation, never a fixed cwd).
     const worktreeB = join(tmpDir, 'worktrees', 'run-b')
-    await composition.trident!.dispatch({
-      kind: 'argus',
-      phase: 'argus',
-      system: 'argus',
-      user_message: 'REVIEW: the diff',
-      repo_path: worktreeB,
-      trident_run_id: 'run-2',
-      model: 'claude-sonnet-4-6',
-      timeout_ms: 30_000,
-    })
+    const subB = composition.trident!.build_substrate(worktreeB)
+    for await (const ev of subB.start({ prompt: 'LAUNCH: another run', tools: [], model_preference: [] }).events) {
+      void ev
+    }
     expect(builtCwds).toContain(worktreeB)
 
     for (const cleanup of composition.realmode_cleanups ?? []) {

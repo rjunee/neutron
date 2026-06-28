@@ -500,7 +500,8 @@ CREATE TABLE code_trident_runs (
     started_at          TEXT NOT NULL,                  -- ISO-8601 UTC
     last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
 , channel_kind TEXT NOT NULL DEFAULT 'telegram'
-        CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli'))) STRICT
+        CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')), workflow_run_id TEXT, inner_checkpoint TEXT, inner_verdict TEXT
+        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES'))) STRICT
 
 [table] connect_guest_invites (tbl=connect_guest_invites)
 CREATE TABLE connect_guest_invites (

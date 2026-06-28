@@ -12,10 +12,17 @@
  *   • `'local'` → merge the feature branch into the base locally, then
  *                 delete the local branch.
  *
- * Ryan-locked: NO `git worktree remove`. Open uses plain branches, not
- * Vajra's per-run worktrees, so there is nothing to tear down — deleting
- * a worktree the operator may still have checked out is the exact
- * data-loss footgun the spec forbids.
+ * WORKTREE CLEANUP — ENFORCED (Trident v2, D-1/C3). The prior "Ryan-locked: NO
+ * `git worktree remove`" rule held while Open ran plain branches. Trident v2's
+ * inner workflow builds in `isolation:'worktree'` worktrees, and the harness
+ * removes a worktree ONLY IF UNCHANGED — a Forge build always commits, so the
+ * worktree is orphaned unless trident removes it (the June fseventsd CPU-peg
+ * wedge driver). The inner workflow's `finally{}` cleans up on every inner path;
+ * this is the OUTER backstop: after the merge + branch teardown, if `run.worktree`
+ * is set, best-effort `git worktree remove --force` + `git worktree prune` so
+ * `git worktree list` is clean after EVERY merge. Best-effort + non-fatal: the
+ * merge has already landed, so a failed worktree removal is logged, never thrown
+ * (it must not undo a completed merge).
  */
 
 import type { HostCommandResult } from './git-mode.ts'
@@ -101,6 +108,7 @@ export function buildMergeCleanupDeps(
         await run_host(['git', '-C', repo, 'push', 'origin', '--delete', branch], repo)
         await run_host(['git', '-C', repo, 'branch', '-D', branch], repo)
       }
+      await removeWorktree(run_host, run)
     },
 
     async mergeLocal(run: TridentRun): Promise<void> {
@@ -122,6 +130,26 @@ export function buildMergeCleanupDeps(
       )
       // Branch teardown after a successful merge (best-effort).
       await run_host(['git', '-C', repo, 'branch', '-D', branch], repo)
+      await removeWorktree(run_host, run)
     },
+  }
+}
+
+/**
+ * D-1/C3 — best-effort worktree cleanup after a merge has LANDED. The inner
+ * workflow's `finally{}` already removes its build worktree on every inner path;
+ * this is the OUTER backstop for a `run.worktree` the run row still carries.
+ * Non-fatal: the merge is irreversible by this point, so any failure is
+ * swallowed (a thrown removal must never undo a completed merge). Goal: `git
+ * worktree list` is clean after every merge.
+ */
+async function removeWorktree(run_host: RunHostCommand, run: TridentRun): Promise<void> {
+  if (run.worktree === null) return
+  const repo = run.repo_path
+  try {
+    await run_host(['git', '-C', repo, 'worktree', 'remove', '--force', run.worktree], repo)
+    await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+  } catch {
+    // Swallow — the merge already landed; a cleanup miss is cosmetic, not fatal.
   }
 }

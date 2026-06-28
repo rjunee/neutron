@@ -2,6 +2,80 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Trident v2 — inner Forge→Argus→fix loop is now a native CC Dynamic Workflow (Phase 2 hard cutover)
+
+**What shipped.** The trident INNER loop (Forge build → Argus review → fix loop)
+is converted into ONE native CC Dynamic Workflow. A **hard cutover** — NO feature
+flags, NO v1/v2 dual path — landing as one atomic, cleanly-revertible commit.
+KEPT: the durable OUTER loop (`trident/tick.ts` + the `code_trident_runs` SQLite
+table, migration 0077), the Ralph spec-drift docs, and merge as the OUTER / human
+gate (`trident/merge.ts`). REPLACED in place: the v1 substrate-per-phase inner
+dispatch.
+
+- **`trident/inner-workflow.mjs` (NEW).** The CC Dynamic Workflow (run by the
+  `Workflow` tool): Forge build in an `isolation:'worktree'` worktree → parallel
+  adversarial Argus review (`argus:claude` rubric + `argus:adversarial` refuter,
+  each `schema: VERDICT_SCHEMA`) → asymmetric-gated synthesis (one credible
+  evidence-backed BLOCKER vetoes APPROVE; single-reviewer non-blockers labelled
+  `unverified`) → bounded fix loop (`while REQUEST_CHANGES && round < maxRounds`).
+  The Forge build contract + Argus rubric are INLINED into the bare `agent()`
+  workers, each carrying `NO_INTERACTIVE_RULE` + `REDIRECT_RULE`. A `finally{}`
+  scans `git worktree list` for the deterministic `trident/<slug>` branch and
+  removes it on EVERY path (the harness only auto-cleans an UNCHANGED worktree;
+  Forge always commits → D-1).
+- **`trident/inner-loop.ts` (NEW).** `buildWorkflowInnerLoop` — runs ONE substrate
+  turn (per-worktree disposable REPL) that invokes the `Workflow` tool and reports
+  `TRIDENT_RESULT=<json>`. Copies the proven single-turn dispatch mechanics
+  (token coalesce, resolve on `completion`, timeout, false-completion discipline).
+  The launcher `AgentSpec.tools` declares `Workflow,Agent,Bash,Edit,Read` — the
+  v1 trident REPL ran `--tools ""` (untrusted-import gate); the v2 launcher is a
+  TRUSTED build path and the tool surface is per-turn, so this needs no substrate
+  surgery and leaves the import/conversational REPLs locked.
+- **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2).**
+  Migration `0089` adds `workflow_run_id` / `inner_checkpoint` / `inner_verdict`.
+  The workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
+  (`forge-done` / `argus-approved` / `argus-request-changes` / `fix-round-N`;
+  timestamps via `date -u +%FT%TZ`). A workflow is session-bound, so a crash
+  relaunches a FRESH workflow that reads the checkpoint, skips finished phases,
+  and REUSES the existing PR (`gh pr list --head` — never a duplicate).
+- **Orchestrator rewrite (`trident/orchestrator.ts`).** `buildTridentOrchestrator`
+  now takes `inner_loop` + `db_path` (the per-phase `session.spawn`/`spawnForPhase`
+  is removed). `step` launches the inner loop per run (background, tracked by a
+  minted `subagent_run_id`), recovers orphans per `on_orphaned_session`
+  (redispatch resumes from the checkpoint), and on settle merges on APPROVE / fails
+  loudly on REQUEST_CHANGES (maxRounds) or a crashed/timed-out dispatch.
+  `state-machine.ts` is kept intact (tests + revertibility).
+- **Worktree cleanup ENFORCED (D-1/C3) in `merge.ts`.** Flipped the "NO `git
+  worktree remove`" lock: both `mergePr` and `mergeLocal` add a best-effort,
+  non-fatal `git worktree remove --force` + `prune` after the landed merge.
+- **Composer wiring.** `open/composer.ts` threads `trident: { build_substrate:
+  makeEphemeralSubstrate('cc-trident') }`; `build-core-modules.ts` builds
+  `buildWorkflowInnerLoop` + passes `db_path` (`input.db.path`) into the
+  orchestrator. The `cc-trident` MCP tool bridge stays OFF.
+
+**One-commit revert runbook.** `git revert <sha>` restores the v1 substrate-per-
+phase inner loop wholesale; in the neutron-managed vendor, re-pin the prior trident
+vendor snapshot. Migration 0089's columns are additive + nullable, so a revert
+leaves them harmlessly unused (no down-migration needed — Neutron OSS contract).
+
+**Acceptance status (HONEST).** Unit/integration-verified only: trident dir (253
+tests), the touched composition/wiring tests, and the full-project `tsc` are green.
+The REAL live `/code`-through-workflow run + the forced-crash-resume gate require a
+running gateway with credentials and a claude that can invoke the `Workflow` tool
+from a spawned subprocess (nested-workflow execution) — NOT headlessly verifiable
+in this environment.
+
+**Files.** New `trident/inner-workflow.mjs`, `trident/inner-loop.ts`,
+`migrations/0089_code_trident_runs_inner_workflow.sql`; rewrote
+`trident/orchestrator.ts`; modified `trident/store.ts`, `trident/merge.ts`,
+`trident/index.ts`, `gateway/composition/input/misc-input.ts`,
+`gateway/composition/build-core-modules.ts`, `open/composer.ts`. New tests
+`trident/inner-loop.test.ts` + `trident/inner-workflow.test.ts`; rewrote
+`trident/orchestrator.test.ts`, `trident/restart-resume.test.ts`,
+`trident/ralph.test.ts`; updated `trident/{store,vajra-fixes,substrate-dispatch,
+code-command}.test.ts` + the open/migration wiring tests; removed
+`trident/orchestrator-native-prompt.test.ts`.
+
 ## Install GUARANTEES GBrain memory — retry + abort-on-failure (no silent degrade)
 
 **What shipped.** `install.sh#ensure_gbrain` was upgraded from best-effort to a

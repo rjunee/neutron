@@ -33,28 +33,27 @@ export interface MiscCompositionInput {
    */
   realmode_cleanups?: Array<() => void>
   /**
-   * Trident-port PR-5 — drive the foundational Forge→Argus→merge loop
-   * live. When `dispatch` is supplied, the `trident` module wires the
-   * REAL orchestrator `step` (`buildTridentOrchestrator`) so every
+   * Trident v2 (Phase 2 hard cutover) — drive the foundational
+   * Forge→Argus→merge loop live. When `build_substrate` is supplied, the
+   * `trident` module wires the REAL orchestrator `step`
+   * (`buildTridentOrchestrator` + `buildWorkflowInnerLoop`) so every
    * non-terminal `code_trident_runs` row (created by `/code <task>` or a
-   * governed Ralph run) is advanced end-to-end by the tick loop:
-   * forge-init → argus → fix loop → merge (per git-mode) → done. When
-   * omitted, the module falls back to `stubAdvanceDeps` (classify always
-   * "running") so the loop is live + restart-safe but advances nothing —
-   * the unchanged Open dev/default behaviour.
+   * governed Ralph run) is advanced end-to-end by the tick loop: launch the
+   * inner CC Dynamic Workflow (Forge build → parallel Argus review → synthesis
+   * → bounded fix loop) → on APPROVE merge (per git-mode) → done. When omitted,
+   * the module falls back to `stubAdvanceDeps` (classify always "running") so
+   * the loop is live + restart-safe but advances nothing — the unchanged Open
+   * dev/default behaviour.
    *
-   * `dispatch` runs one Forge/Argus turn to terminal text (the production
-   * composer builds it from the per-instance Anthropic substrate — the
-   * same credential closure the Code-Gen Core's sub-agent dispatch
-   * consumed before Trident superseded the wrapper). `run_host` runs the
-   * git/gh/numstat host commands (defaults to a `Bun.spawn` runner).
+   * `build_substrate(cwd)` builds a FRESH disposable substrate rooted at the
+   * run's worktree; the inner-loop launcher runs ONE turn on it that invokes the
+   * `Workflow` tool on `trident/inner-workflow.mjs` (the production composer
+   * passes the per-instance Anthropic `cc-trident-*` factory). `run_host` runs
+   * the git/gh host commands (defaults to a `Bun.spawn` runner).
    */
   trident?: {
-    dispatch: import('../../../trident/session.ts').TridentDispatch
+    build_substrate: (cwd: string) => import('../../../runtime/substrate.ts').Substrate
     run_host?: import('../../../trident/merge.ts').RunHostCommand
-    forge_model?: string
-    argus_model?: string
-    subagent_timeout_ms?: number
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**
      * Skill-forge trigger (parity gap #5) — an OPTIONAL observer the trident
