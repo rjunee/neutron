@@ -343,6 +343,22 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > catch that" is gone by construction; `NEUTRON_ONBOARDING_CONVERSATIONAL` is
 > collapsed (one path, no flag). Supersedes the deferred-BUG-0 note and
 > `docs/research/p2-v3-conversational-onboarding-design.md`.
+>
+> **Import advances out of `import_running` on the app-socket (ND-A, 2026-06-28).**
+> Because Path-1 onboarding runs AS the live session it never calls `engine.start`,
+> so it never stamps `phase_state.signup_via`. The 5 s `import-running-cron`'s
+> `pollImportRunningTick` (`engine.ts`) previously HARD-REQUIRED
+> `signup_via ∈ {telegram,web}` to resolve the channel; absent it returned
+> `missing_channel_context` every tick and the instance was **stranded at
+> `import_running` forever** — projects never registered, memory never
+> materialized. In single-owner Open the channel is ALWAYS the app-socket, so the
+> tick now only requires `topic_id` + `user_id`; `channel_kind` routes every
+> non-`telegram` value (incl. absent / `web`) to `app-socket` (an explicit
+> `telegram` signup still routes to telegram, so the engine-driven button flows
+> are unchanged). Belt-and-suspenders: the Path-1 post-turn extractor also stamps
+> `signup_via='web'` onto its first real extraction write when absent, so the
+> invariant holds on disk too. Root-caused in
+> `docs/research/fullpipe-e2e-2026-06-28.md` § Stage 3.
 
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab

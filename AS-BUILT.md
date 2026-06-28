@@ -2,6 +2,55 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — Import no longer STRANDS onboarding at `import_running` on Open Path-1 (ND-A, missing `signup_via`)
+
+**The bug (E2E `docs/research/fullpipe-e2e-2026-06-28.md` § Stage 3 ND-A).** On
+the rearchitected Open Path-1 (freeform onboarding that runs AS the live CC
+session — no buttons), uploading a Claude export DURING onboarding started the
+import job, but onboarding NEVER advanced out of `import_running` → it hung
+forever → projects never registered, memory never materialized. This is the
+exact disappointment that gates Ryan's fresh reinstall + import.
+
+**Root cause (verified `engine.ts:2214-2233`).** The 5 s `import-running-cron`
+calls `pollImportRunningTick`, which resolves the channel context to advance the
+import. It HARD-REQUIRED `phase_state.signup_via ∈ {telegram,web}`; if absent it
+returned `missing_channel_context` on EVERY tick and never advanced. `signup_via`
+is stamped ONLY on the engine-driven onboarding path (`engine.start`,
+`engine.ts:1257,1314`). Path-1 never runs `engine.start` (its
+`on_session_open` hook drives a live-agent turn, `open/composer.ts:2003`), so
+the Open onboarding_state row is created by the post-turn extractor WITHOUT
+`signup_via` → the invariant the tick expected never held → permanent strand.
+The E2E reproduced it on a freeform-only drive; injecting `signup_via='web'`
+unblocked it (cron advanced in ~20 s, materialized in ~8 min).
+
+**The fix (no flags, all Open, one PR — both for robustness).**
+
+- **PRIMARY — make the tick robust (`engine.ts pollImportRunningTick`).** In
+single-owner Open the channel is ALWAYS the app-socket, so a missing/garbled
+`signup_via` must NEVER strand the user. The guard now requires only `topic_id`
++ `user_id`; the existing `channel_kind` ternary already routes every
+non-`telegram` value (incl. absent / `web`) to `app-socket`. An explicit
+`telegram` signup still routes to telegram, so the engine-driven button-driven
+web/telegram flows are byte-for-byte unchanged.
+
+- **Belt-and-suspenders — stamp on creation (`post-turn-extractor.ts`).** The
+Path-1 post-turn extractor (the Open onboarding state-writer) now stamps
+`signup_via='web'` onto its FIRST real extraction write when absent (never
+overwriting an existing value), so the invariant the tick expects also holds on
+disk. Placed after the lazy-creation empty-patch guard, so it never forces a
+pointless empty marker write.
+
+**Tests.** `onboarding/interview/__tests__/pollimport-signup-via-absent-app-socket.test.ts`
+seeds `import_running` the Path-1 way (topic_id + user_id, NO `signup_via`) and
+asserts the tick (a) does NOT return `missing_channel_context` and (b) ADVANCES
+to `import_analysis_presented` on completion — failing on the pre-fix engine.
+No hardcoded dates. The 10 existing `import-timeout-progress-aware` ticks
+(seeded WITH `signup_via='web'`) still pass — the telegram/web flows are intact.
+
+**REAL re-verification.** Fresh isolated instance, real Path-1 freeform
+onboarding, real export imported during onboarding — proved it advances past
+`import_running`, completes, and registers projects (see PR body / STATUS).
+
 ## 2026-06-28 — GBrain reachable from the SERVICE (memory was silently disabled on every install)
 
 **The bug (dogfood 2026-06-28 §gbrain).** Memory was STILL dead on the live

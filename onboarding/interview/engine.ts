@@ -2217,11 +2217,20 @@ export class InterviewEngine implements EngineInternals {
     // stays as a one-release compat shim per the brief § 4.6.
     const user_id = state.user_id
     const signup_via = readString(state.phase_state, 'signup_via')
-    if (
-      topic_id === null ||
-      user_id === null ||
-      (signup_via !== 'telegram' && signup_via !== 'web')
-    ) {
+    // ND-A (2026-06-28) — single-owner Open Path-1 (the freeform app-ws
+    // onboarding drive) never runs `engine.start`, so it never stamps
+    // `signup_via` into phase_state. The old guard ALSO required
+    // `signup_via ∈ {telegram,web}` here, so an Open import was stranded at
+    // `import_running` forever: every 5s cron tick returned
+    // `missing_channel_context` and the engine never advanced → projects never
+    // registered, memory never materialized (docs/research/fullpipe-e2e-2026-06-28.md
+    // § Stage 3). In single-owner Open the channel is ALWAYS the app-socket, so
+    // a missing/garbled `signup_via` must NEVER strand the user: we only need
+    // `topic_id` + `user_id` to advance. `channel_kind` below already routes
+    // every non-`telegram` value (including absent/`web`) to `app-socket`, so an
+    // explicit telegram signup still routes to telegram and the existing
+    // button-driven web flow is unchanged.
+    if (topic_id === null || user_id === null) {
       return { outcome: 'missing_channel_context', state }
     }
     const advanceInput: AdvanceInput = {
