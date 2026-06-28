@@ -33,6 +33,7 @@
 
 import { JwksCache } from '../jwt-validator/validator.ts'
 import { newCredentialPool, type CredentialPool } from '../runtime/credential-pool.ts'
+import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildLocalPlatformAdapter } from '../runtime/platform-adapter-local.ts'
 import type { PlatformAdapter } from '../runtime/platform-adapter.ts'
 import { CronJobRegistry } from '../cron/jobs.ts'
@@ -191,6 +192,18 @@ export interface BuildOpenGraphComposerOptions {
  *     subprocess as a `Authorization: Bearer …` token by
  *     `build-llm-call-substrate`.
  *   - else `ANTHROPIC_API_KEY` (API-billing) → `kind: 'api_key'`.
+ *   - else, if `claude` is already AMBIENT/Keychain-authed (the owner ran
+ *     `claude` login on this Mac; creds live in the macOS "Claude Code-credentials"
+ *     Keychain item, NOT in env) → `kind: 'ambient'`. The substrate spawns
+ *     `claude` threading NO token, so the child auths via its own Keychain. This
+ *     closes the fresh-install 503: a Mac self-hoster with `claude` already
+ *     logged in no longer hits a Day-1 "Authenticate Claude" wall even though
+ *     `claude -p` works headlessly. The probe is fast + cached + never-hanging
+ *     (`detectAmbientClaudeAuthCached`); a timeout/failure → not-authed → the
+ *     gate stays up. SINGLE-OWNER ONLY: this resolver runs only on the Open
+ *     composer, where an ambient Keychain login is the box owner's own. It is
+ *     the sole credential resolver in this tree, so accepting ambient auth here
+ *     cannot widen any shared/multi-user credential path (there is none here).
  *   - else `null` → the box boots LLM-less and onboarding walks its static
  *     phase prompts.
  *
@@ -201,8 +214,15 @@ export interface BuildOpenGraphComposerOptions {
  * Consuming the OAuth token here is what makes the install.sh "✓ Claude auth
  * detected" honest: install.sh's notion of "authed" now matches what the
  * Open server actually consumes.
+ *
+ * `opts.probeAmbientAuth` is a test seam — production defaults to the cached
+ * Keychain/creds-file probe. It is consulted ONLY on the no-explicit-token
+ * branch, so a configured token short-circuits with zero subprocess cost.
  */
-export function resolveOpenLlmPool(env: NodeJS.ProcessEnv): CredentialPool | null {
+export function resolveOpenLlmPool(
+  env: NodeJS.ProcessEnv,
+  opts?: { probeAmbientAuth?: () => boolean },
+): CredentialPool | null {
   const oauthToken = env['CLAUDE_CODE_OAUTH_TOKEN']
   if (typeof oauthToken === 'string' && oauthToken.length > 0) {
     return newCredentialPool({
@@ -215,6 +235,16 @@ export function resolveOpenLlmPool(env: NodeJS.ProcessEnv): CredentialPool | nul
     return newCredentialPool({
       strategy: 'fill_first',
       credentials: [{ id: 'anthropic:env_api_key', kind: 'api_key', secret: apiKey }],
+    })
+  }
+  // No explicit credential in env — accept an ambient/Keychain-authed `claude`
+  // (single-owner only). The `ambient` cred carries no secret; the substrate
+  // threads nothing and the spawned `claude` child uses its own Keychain auth.
+  const probeAmbientAuth = opts?.probeAmbientAuth ?? (() => detectAmbientClaudeAuthCached(env))
+  if (probeAmbientAuth()) {
+    return newCredentialPool({
+      strategy: 'fill_first',
+      credentials: [{ id: 'anthropic:ambient_keychain', kind: 'ambient', secret: '' }],
     })
   }
   return null

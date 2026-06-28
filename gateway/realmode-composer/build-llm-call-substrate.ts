@@ -191,7 +191,15 @@ export async function resolveScrubbedAuthEnv(
     ANTHROPIC_AUTH_TOKEN: undefined,
     CLAUDE_CODE_OAUTH_TOKEN: undefined,
   }
-  if (isOauthLike) {
+  if (cred.kind === 'ambient') {
+    // Ambient/Keychain credential (single-owner Open): we hold NO secret of our
+    // own. Thread NEITHER token — the three Anthropic env vars stay scrubbed to
+    // `undefined` so the spawned `claude` child cannot inherit a stale gateway
+    // token and instead authenticates via its OWN ambient/Keychain creds (the
+    // macOS "Claude Code-credentials" item, the same path `claude -p` uses). The
+    // oauth-refresh block above is guarded by `isOauthLike` (false here), so it
+    // never runs for an ambient cred that has nothing to refresh.
+  } else if (isOauthLike) {
     env['CLAUDE_CODE_OAUTH_TOKEN'] = activeSecret
   } else {
     env['ANTHROPIC_API_KEY'] = activeSecret

@@ -2,6 +2,53 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — Chat auth-gate accepts an ambient/Keychain-authed `claude` (fresh-install 503 fix)
+
+**The bug (P1, hit live on a fresh reset).** On a Mac where the owner already
+has `claude` logged in (OAuth creds in the macOS Keychain item "Claude
+Code-credentials"), a FRESH install served `GET /chat` as a **503 "Authenticate
+Claude" page** instead of the chat/onboarding app — EVEN THOUGH `claude -p
+"..."` works headlessly via the Keychain (verified: returns output, exit 0).
+Reproduced live: `GET /chat` → 302 `/chat?start=<jwt>` → **503**. Every Mac
+self-hoster with `claude` already logged in hit a Day-1 wall.
+
+**Root cause (`open/composer.ts:resolveOpenLlmPool`).** The chat auth-gate
+(`landing/server.ts` `GET /chat` → `chatAuthGate.isUnauthenticated()`) is wired
+in the Open composer to `resolveOpenLlmPool(env) === null`. That resolver only
+recognised an EXPLICIT `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` in env —
+a Keychain-only box has neither → `null` → the gate 503s. Worse, the SAME
+`llmPool` drives EVERY substrate (onboarding, chat, scribe, trident, import), so
+`null` also booted the whole box LLM-less: flipping the gate alone would not let
+a real turn run.
+
+**Fix (no flags, all Open, single-owner only).** `resolveOpenLlmPool` now, when
+no explicit env token is set, accepts an ambient/Keychain-authed `claude` via a
+cheap, cached, never-hanging probe (`open/ambient-claude-auth.ts`): macOS checks
+the "Claude Code-credentials" Keychain item (`security find-generic-password`,
+short spawn timeout); other platforms check a non-empty
+`~/.claude/.credentials.json`; any error/timeout → not-authed → the 503 gate
+stays up. A hit yields a new `ambient`-kind credential (`runtime/credential-pool.ts`).
+Because BOTH the gate predicate AND the substrate wiring derive from
+`resolveOpenLlmPool`, one ambient credential makes the gate inert AND wires the
+substrate. `resolveScrubbedAuthEnv` (`gateway/realmode-composer/build-llm-call-substrate.ts`)
+threads NO token for the `ambient` kind — it scrubs all three Anthropic auth env
+vars and sets neither, so the spawned `claude` child auths via its own Keychain
+(the same path `claude -p` uses). The import per-chunk runner treats `ambient`
+like `oauth` (4096-token chunks) since it is a Keychain Max-OAuth under the hood.
+
+**Scope.** Explicit tokens still win and short-circuit BEFORE the probe (zero
+subprocess cost). The probe is consulted ONLY on the no-explicit-token branch.
+`resolveOpenLlmPool` is the single-owner Open resolver — the only credential
+resolver in this tree — so the ambient-accept cannot widen any shared/multi-user
+credential path. A truly-unauthed box (no env token, no Keychain) still 503s.
+
+**Tests.** `open/__tests__/resolve-open-llm-pool.test.ts` (ambient branch +
+gate-predicate semantics: Keychain → serves, no-auth → 503, explicit token
+wins), `open/__tests__/ambient-claude-auth.test.ts` (platform routing,
+fail-closed, caching — all via an injected probe seam, hermetic),
+`gateway/realmode-composer/__tests__/build-llm-call-substrate.test.ts` (ambient
+threads neither token; oauth/api_key regression guard).
+
 ## 2026-06-28 — Import no longer ORPHANED by a premature onboarding finalize (reset-gate E2E)
 
 **The bug (E2E `docs/research/reset-gate-e2e-2026-06-28.md`).** With #98's

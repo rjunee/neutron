@@ -27,7 +27,13 @@
 
 export type CredentialStrategy = 'fill_first' | 'round_robin' | 'random' | 'least_used'
 
-export type CredentialKind = 'api_key' | 'oauth' | 'codex_oauth'
+// `ambient` — no secret material of our own; the downstream substrate spawns
+// `claude` and lets the child authenticate via its OWN ambient/Keychain auth
+// (the macOS "Claude Code-credentials" item, or `~/.claude/.credentials.json`).
+// Only ever produced by the single-owner Open path (`resolveOpenLlmPool`); the
+// substrate's auth-env resolver threads NO token for this kind (see
+// `resolveScrubbedAuthEnv`). Only the single-owner Open path produces it.
+export type CredentialKind = 'api_key' | 'oauth' | 'codex_oauth' | 'ambient'
 
 export type CooldownReason = 'rate_limit_429' | 'billing_402' | 'auth_401' | 'consecutive_failures' | 'manual'
 
