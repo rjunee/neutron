@@ -241,13 +241,33 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     if (!importActiveNow && current !== null) {
       const audit = auditRequiredFields(current.phase_state)
       if (audit.next_to_collect === null && deps.onComplete !== undefined) {
-        try {
-          await deps.onComplete({ user_id: turn.user_id, state: current })
-        } catch (err) {
-          log('warn', 'onComplete hook threw (non-fatal)', {
-            err: err instanceof Error ? err.message : String(err),
-          })
+        // Final guard immediately before the (heavy, non-atomic) finalize: an
+        // upload can start a job AFTER the earlier probe/upsert but BEFORE we get
+        // here (Codex r2 P2). Re-probe + re-read the row one last time so an
+        // import that landed in that window still blocks completion — otherwise
+        // we'd finalize with no `import_result` and re-orphan it. This shrinks
+        // (does not mathematically eliminate) the window: a truly atomic
+        // finalize-vs-upload guard would need the upload path and finalize to
+        // share a per-owner lock / transaction — deferred (see E2E report).
+        const lateInFlight =
+          deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
+        const latest = await deps.stateStore.get(deps.project_slug, turn.user_id)
+        if (latest !== null && (latest.phase === 'completed' || latest.phase === 'failed')) {
+          // A racing path already finalized — don't double-fire.
+          return latest
         }
+        const lateImportActive =
+          lateInFlight || (latest !== null && IMPORT_ACTIVE_PHASES.has(latest.phase))
+        if (!lateImportActive) {
+          try {
+            await deps.onComplete({ user_id: turn.user_id, state: latest ?? current })
+          } catch (err) {
+            log('warn', 'onComplete hook threw (non-fatal)', {
+              err: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+        return latest ?? current
       }
     }
     return current

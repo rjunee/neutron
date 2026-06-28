@@ -247,6 +247,47 @@ test('completion proceeds once the import is no longer in flight', async () => {
   expect(completed).toBe(true)
 })
 
+test('an upload that lands AFTER the first probe but before finalize still blocks completion (Codex r2 P2)', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      agent_personality: 'warm and direct',
+      primary_projects: ['Topline', 'Acme', 'tabs'],
+    },
+    advanced_at: 500,
+  })
+  // Probe returns false on the FIRST call (no import when we computed
+  // importActiveNow) but true on the SECOND (an upload's job landed in the
+  // window right before the completion gate's final re-probe).
+  let probes = 0
+  let completed = false
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: stubClient([JSON.stringify({ non_work_interests: ['climbing'] })]),
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => {
+      probes += 1
+      return probes >= 2
+    },
+    onComplete: () => {
+      completed = true
+    },
+  })
+  await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Anything outside work?',
+    user_text: 'I climb',
+    observed_at: 1000,
+  })
+  expect(probes).toBeGreaterThanOrEqual(2) // the final re-probe ran
+  expect(completed).toBe(false) // and it blocked the finalize
+})
+
 test('a concurrent upload that advances the row to import_running mid-extraction is NOT clobbered or finalized', async () => {
   const store = new InMemoryOnboardingStateStore()
   // Seed a row at the interview marker with 4/5 fields already collected.
