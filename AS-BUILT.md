@@ -2,6 +2,48 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — Import no longer ORPHANED by a premature onboarding finalize (reset-gate E2E)
+
+**The bug (E2E `docs/research/reset-gate-e2e-2026-06-28.md`).** With #98's
+strand fixed, a fresh freeform Path-1 run that answered all 5 interview fields
+and THEN uploaded the real Claude export (14 MB / 184 conversations) hit the
+OPPOSITE failure: onboarding `completed` ~47 s into the import (at 0–2/8 chunks),
+NEVER entering `import_running`. The import ran to completion ORPHANED — its 4
+synthesized project repos landed on disk, but the `projects` DB table held only
+the 3 interview projects and `gbrain search "<import project>"` returned **No
+results**. Exactly the "I uploaded my history and nothing showed up"
+disappointment.
+
+**Root cause (`onboarding/interview/post-turn-extractor.ts`).** A Path-1 export
+upload (`engine.notifyImportUpload` → `startImportAndAdvanceToRunning`, which
+upserts `import_running`) runs OUTSIDE the extractor's per-user serialization
+chain. The extractor computed `importActive` from `prior` — the row it read
+BEFORE its multi-second `extractFields` LLM call. A concurrent upload that
+started a job + advanced the row to `import_running` during that window was
+invisible: the extractor (a) DOWNGRADED the phase back to the interview marker on
+its `upsert` (the store's `upsert` blindly writes `input.phase`) and (b), with
+all 5 fields already present, fired `onComplete` → finalize ON TOP OF the live
+import. The wow-moment materializer (which registers `projects` DB rows + gbrain
+memory at finalize, keyed off `phase_state.import_result`) ran with no result, so
+the imported projects never registered and never reached memory.
+
+**Fix (no flags, all Open).** The extractor now RE-READS the current onboarding
+row immediately before its write/finalize decision and consults an authoritative
+in-flight-import probe (`hasInFlightImport` — a non-terminal `import_jobs` row for
+the owner, wired in `open/composer.ts`). `importActiveNow` is true if the FRESH
+phase is import-active OR a job is genuinely in flight → it never downgrades an
+`import_running` phase and never finalizes on top of a live import. Once the
+import completes (cron → `import_analysis_presented` stamps `import_result` → the
+Path-1 watcher returns to the interview marker), the next turn finalizes WITH the
+import_result and materializes the imported projects (DB rows + docs + gbrain).
+
+**Test:** `onboarding/interview/__tests__/post-turn-extractor.test.ts` adds 3
+guards — in-flight import DEFERS completion; completion proceeds once the import
+is terminal; and a concurrent upload that flips the row to `import_running`
+mid-extraction is neither clobbered nor finalized. The latter two FAIL pre-fix.
+Re-verified end-to-end on a fresh isolated instance built from this worktree with
+the real export + real Max LLM (see the E2E report).
+
 ## 2026-06-28 — Import no longer STRANDS onboarding at `import_running` on Open Path-1 (ND-A, missing `signup_via`)
 
 **The bug (E2E `docs/research/fullpipe-e2e-2026-06-28.md` § Stage 3 ND-A).** On

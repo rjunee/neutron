@@ -62,6 +62,11 @@ const IMPORT_ACTIVE_PHASES: ReadonlySet<string> = new Set([
   'import_analysis_presented',
 ])
 
+// The phase the extractor ADOPTS when a job is in flight but the row still reads
+// as an interview marker (see the next_phase decision in runOnce) — the only
+// import-active phase the import-running cron advances from.
+const IMPORT_RUNNING_PHASE = 'import_running'
+
 export type ExtractorLog = (
   level: 'info' | 'warn' | 'error',
   msg: string,
@@ -81,6 +86,17 @@ export interface PostTurnExtractorDeps {
    * live in the landing stack, not this leaf module.
    */
   onComplete?: (input: { user_id: string; state: OnboardingState }) => Promise<void> | void
+  /**
+   * Authoritative "is a history import genuinely in flight?" probe (a non-
+   * terminal `import_jobs` row for this owner). Used to gate completion against
+   * the premature-finalize race (2026-06-28 reset-gate E2E): a Path-1 export
+   * upload runs OUTSIDE this extractor's per-user serialization, so an import
+   * job can start while we're mid-`extractFields`. Without this probe the
+   * finalize gate keyed only on the (possibly stale) phase and could complete
+   * onboarding on top of a live import, orphaning the synthesized projects.
+   * Undefined on LLM-less / test boxes → treated as "no import in flight".
+   */
+  hasInFlightImport?: () => Promise<boolean>
   model?: string
   timeout_ms?: number
   max_tokens?: number
@@ -129,7 +145,6 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
       return null
     }
     const priorPhaseState: Record<string, unknown> = prior?.phase_state ?? {}
-    const importActive = prior !== null && IMPORT_ACTIVE_PHASES.has(prior.phase)
 
     // Extract newly-revealed fields from this exchange.
     const fields = await extractFields(
@@ -141,14 +156,35 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
       priorPhaseState,
       log,
     )
-    const patch = buildPhaseStatePatch(priorPhaseState, fields, turn.user_text)
-    if (Object.keys(patch).length === 0) {
-      // Nothing new extracted this turn — no write. The onboarding_state row is
-      // created lazily by the first turn that DOES extract a field; until then,
-      // a null row already reads as "onboarding active" (isOnboardingActive),
-      // so an empty marker row would be a pointless write.
-      return prior
+    // ── Premature-finalize import race + stale-snapshot guard (2026-06-28) ──
+    // Re-read the CURRENT row AFTER the multi-second `extractFields` LLM call.
+    // `prior`/`priorPhaseState` were read BEFORE it, and during that window a
+    // concurrent Path-1 export upload (`engine.notifyImportUpload` — synchronous,
+    // NOT serialized through this extractor's per-user chain) can start an import
+    // job, advance the row to `import_running`, and (on consume) MERGE the
+    // imported projects into `phase_state`. EVERYTHING below — the field patch,
+    // the phase decision, and the completion gate — therefore keys off this fresh
+    // read, never the stale snapshot, so we neither: (a) downgrade an
+    // `import_running` phase on the upsert; (b) fire `onComplete` on top of a live
+    // import, orphaning it (seeds land on disk but the wow-moment materializer —
+    // which registers `projects` DB rows + gbrain memory at finalize, keyed off
+    // `phase_state.import_result` — already ran with no result: observed 4 real
+    // projects on disk, 0 DB rows, 0 gbrain pages); nor (c) clobber the
+    // import-merged `primary_projects`/`non_work_interests` arrays with a patch
+    // built from the pre-merge snapshot (Codex r3 P2 — the store shallow-merges,
+    // so a stale array REPLACES the fresh one).
+    const fresh = (await deps.stateStore.get(deps.project_slug, turn.user_id)) ?? prior
+    if (fresh !== null && (fresh.phase === 'completed' || fresh.phase === 'failed')) {
+      // A sibling turn (or the import pipeline) finalized while we extracted —
+      // never resurrect a terminal row.
+      return fresh
     }
+    const freshPhaseState: Record<string, unknown> = fresh?.phase_state ?? {}
+
+    // Build the field patch against the FRESH phase_state so array merges extend
+    // (rather than overwrite) any import-merged values.
+    const patch = buildPhaseStatePatch(freshPhaseState, fields, turn.user_text)
+    const hasPatch = Object.keys(patch).length > 0
 
     // ND-A (2026-06-28) — belt-and-suspenders to the engine's app-socket
     // default: single-owner Open Path-1 has no `engine.start` to stamp
@@ -158,34 +194,88 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     // channel-context invariant always holds on disk too. app-socket/web is the
     // only channel in single-owner Open; we never overwrite an existing
     // telegram/web value (the engine-driven button flows set it themselves).
-    if (readString(priorPhaseState, 'signup_via') === null) {
+    // (Only meaningful when we're about to write — an empty patch writes nothing.)
+    if (hasPatch && readString(freshPhaseState, 'signup_via') === null) {
       patch['signup_via'] = 'web'
     }
 
-    // While an import owns the phase, only patch fields — don't move the phase.
-    const next_phase = importActive ? prior!.phase : INTERVIEW_PHASE
-    const updated = await deps.stateStore.upsert({
-      project_slug: deps.project_slug,
-      user_id: turn.user_id,
-      phase: next_phase,
-      phase_state_patch: patch,
-      advanced_at: observed_at,
-    })
+    const importInFlight =
+      deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
+    const importActiveNow =
+      (fresh !== null && IMPORT_ACTIVE_PHASES.has(fresh.phase)) || importInFlight
 
-    // Completion: all 5 required fields present AND no import mid-flight.
-    if (!importActive) {
-      const audit = auditRequiredFields(updated.phase_state)
+    // Persist newly-extracted fields. An EMPTY patch writes nothing — the
+    // onboarding_state row is created lazily by the first turn that DOES extract
+    // a field — but we STILL fall through to the completion check below. After an
+    // import is consumed the 5 required fields may already be present, so a
+    // subsequent no-op turn ("looks good") MUST be able to finalize rather than
+    // strand the user at the interview marker (the field-completing turn was
+    // blocked from finalizing while the import was mid-flight).
+    let current: OnboardingState | null = fresh
+    if (hasPatch) {
+      // Choose the phase to write. Never downgrade out of an import:
+      //   - fresh phase already import-active → preserve it verbatim.
+      //   - a job is genuinely IN FLIGHT but the fresh phase still reads as an
+      //     interview marker → ADOPT `import_running` rather than writing the
+      //     interview phase back. The upload's `notifyImportUpload` inserts the
+      //     `import_jobs` row BEFORE it upserts `phase='import_running'` (Codex
+      //     r1 P1), so an extractor can observe the live job, then race the
+      //     upload's phase upsert and clobber `import_running` back to the
+      //     interview marker here — which would re-strand the cron (it advances
+      //     only from `import_running`) and re-orphan the import. Writing
+      //     `import_running` ourselves converges the row to the correct phase
+      //     regardless of interleaving (the upload always (re)stamps
+      //     `import_job_id`, which the cron also requires).
+      //   - no import in flight → the normal interview marker.
+      const next_phase = !importActiveNow
+        ? INTERVIEW_PHASE
+        : fresh !== null && IMPORT_ACTIVE_PHASES.has(fresh.phase)
+          ? fresh.phase
+          : IMPORT_RUNNING_PHASE
+      current = await deps.stateStore.upsert({
+        project_slug: deps.project_slug,
+        user_id: turn.user_id,
+        phase: next_phase,
+        phase_state_patch: patch,
+        advanced_at: observed_at,
+      })
+    }
+
+    // Completion: all 5 required fields present AND no import mid-flight. Runs
+    // even on an empty-patch turn so a terse post-import confirmation finalizes.
+    if (!importActiveNow && current !== null) {
+      const audit = auditRequiredFields(current.phase_state)
       if (audit.next_to_collect === null && deps.onComplete !== undefined) {
-        try {
-          await deps.onComplete({ user_id: turn.user_id, state: updated })
-        } catch (err) {
-          log('warn', 'onComplete hook threw (non-fatal)', {
-            err: err instanceof Error ? err.message : String(err),
-          })
+        // Final guard immediately before the (heavy, non-atomic) finalize: an
+        // upload can start a job AFTER the earlier probe/upsert but BEFORE we get
+        // here (Codex r2 P2). Re-probe + re-read the row one last time so an
+        // import that landed in that window still blocks completion — otherwise
+        // we'd finalize with no `import_result` and re-orphan it. This shrinks
+        // (does not mathematically eliminate) the window: a truly atomic
+        // finalize-vs-upload guard would need the upload path and finalize to
+        // share a per-owner lock / transaction — deferred (see E2E report).
+        const lateInFlight =
+          deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
+        const latest = await deps.stateStore.get(deps.project_slug, turn.user_id)
+        if (latest !== null && (latest.phase === 'completed' || latest.phase === 'failed')) {
+          // A racing path already finalized — don't double-fire.
+          return latest
         }
+        const lateImportActive =
+          lateInFlight || (latest !== null && IMPORT_ACTIVE_PHASES.has(latest.phase))
+        if (!lateImportActive) {
+          try {
+            await deps.onComplete({ user_id: turn.user_id, state: latest ?? current })
+          } catch (err) {
+            log('warn', 'onComplete hook threw (non-fatal)', {
+              err: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+        return latest ?? current
       }
     }
-    return updated
+    return current
   }
 
   function onTurnComplete(turn: OnboardingTurn): void {
