@@ -65,6 +65,46 @@ the ND1 regression guard that boots the REAL `gbrain serve` (gated on the binary
 being installed) and asserts init-guard → serve → `put_page` → `search` recall;
 plus a `gateway/cores/__tests__/integrations.test.ts` case proving the admin
 `openai_api_key` slot shares storage with the onboarding key. No feature flags.
+## 2026-06-28 — ND2: history import actually RUNS in Path-1 onboarding
+
+**The disappointment.** Dogfood QA (`docs/research/proactive-dogfood-qa-2026-06-27.md`
+§ ND2) found that uploading a real Claude/ChatGPT export during live Path-1
+(conversational) onboarding was silently orphaned: the UI showed "Export
+received — reading through your history now" but **no import job ever ran**
+(`import_jobs` empty, `in_flight_imports=0` forever). #86's "import works" was a
+false positive — those projects came from the onboarding *conversation*, not
+synthesis.
+
+**Root cause.** `notifyImportUpload` (`onboarding/interview/engine.ts`) only
+started a job at the legacy `import_upload_pending` phase (or recovered from
+`ai_substrate_offered`). In Path-1 the engine sits at a *conversational* phase
+(`work_interview_gap_fill`, `import_job_id=NULL`) while the live-agent onboarding
+seam shows the 📎 upload affordance on every turn — so every solicited upload
+fell through to `{ outcome:'no_active_prompt' }` (HTTP 200, no job). The web
+client (`ChatApp.tsx`) claimed success on any 200, ignoring `job_id:null`.
+
+**Fix (no flags).**
+1. **Routing — make it run.** `notifyImportUpload`'s non-import-phase
+   fall-through now honors a SOLICITED upload: in `open` mode (Path-1) with
+   `importJobRunner` wired and no job already in flight, it calls
+   `startImportAndAdvanceToRunning` (which upserts to `import_running`
+   regardless of phase). **Solicited signal:** `deploymentMode==='open'` +
+   `importJobRunner` wired — the EXACT pair under which
+   `LiveAgentOnboardingSeam.uploadAffordance()` (`open/composer.ts`) returns
+   non-null and the client renders the affordance. A stray upload still no-ops:
+   managed mode (affordance only at the legacy phases), runner unwired
+   (affordance never shown), terminal onboarding (`noop_terminal`), or a job
+   already running (no duplicate).
+2. **Honest client status.** `importHistoryZip` now returns the parsed
+   `{ outcome, job_id }`; `ChatApp.tsx` renders "reading your history now" ONLY
+   when `job_id` is present, else an honest "couldn't start the import" notice.
+3. Rest of the pipeline (import-running-cron → pass1-triage → synthesis →
+   materialize DOCUMENTS + MEMORY) is unchanged — only the trigger was broken.
+
+**Tests.** `onboarding/interview/__tests__/path1-solicited-upload-starts-job.test.ts`
+(solicited upload at `work_interview_gap_fill` STARTS a job; managed/unwired/
+terminal/duplicate all no-op) + `landing/chat-react/__tests__/uploads.test.ts`
+(returns job_id; job_id:null is not a false success).
 
 ## 2026-06-28 — Time-rot test-class hardening sweep (proactive)
 

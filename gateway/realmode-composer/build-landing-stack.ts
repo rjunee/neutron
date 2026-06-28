@@ -1261,6 +1261,13 @@ export function buildOnboardingEnginePieces(
         }),
     ...(importJobRunner !== null ? { importJobRunner } : {}),
     ...(importPayloadResolver !== null ? { importPayloadResolver } : {}),
+    // ND2 (2026-06-28) — the Path-1 conversational upload affordance is offered
+    // iff an import SUBSTRATE exists (the same `importSubstrate !== null` gate
+    // that drives `LiveAgentOnboardingSeam.uploadAffordance()` in open/composer.ts).
+    // `notifyImportUpload` keys on THIS to honor a solicited upload at a
+    // conversational phase — NOT on `importJobRunner` presence, which is always
+    // wired in Open even with a null substrate (Codex review, PR #94).
+    importAffordanceOffered: input.importSubstrate !== undefined,
     // 2026-05-25 (Part G.2 + Argus r1 BLOCKER #3) — `importResumeReadiness`
     // probe so the engine renders the `resume_import` button on
     // analysis-presented when prior import is genuinely resumable.

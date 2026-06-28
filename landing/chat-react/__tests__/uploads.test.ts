@@ -66,6 +66,41 @@ describe('BUG 4 — history-import ZIP upload', () => {
     expect(seenUrl).toBe('/api/upload/claude')
   })
 
+  it('ND2 — returns the server job_id so the caller can tell a real start from a no-op', async () => {
+    const started = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'claude', {
+      token: 't',
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true, source: 'claude', outcome: 'advanced', job_id: 'job-42' }), {
+          status: 200,
+        }),
+    })
+    expect(started.job_id).toBe('job-42')
+    expect(started.outcome).toBe('advanced')
+  })
+
+  it('ND2 — a 200 no-op (job_id null / absent) resolves with job_id:null, NOT a false success', async () => {
+    // The engine declined to route the upload (e.g. stray / no affordance):
+    // HTTP 200 with `job_id: null`. The caller MUST be able to see this so it
+    // surfaces an honest "couldn't start" notice instead of "reading your
+    // history now" (the banned silent-false-success).
+    const noop = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+      token: 't',
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true, source: 'chatgpt', outcome: 'no_active_prompt', job_id: null }), {
+          status: 200,
+        }),
+    })
+    expect(noop.job_id).toBeNull()
+    expect(noop.outcome).toBe('no_active_prompt')
+
+    // An empty / job_id-absent body also degrades to job_id:null (no false success).
+    const bare = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+      token: 't',
+      fetchImpl: async () => new Response('{}', { status: 200 }),
+    })
+    expect(bare.job_id).toBeNull()
+  })
+
   it('surfaces the server error message on a non-ok response', async () => {
     const err = await importHistoryZip(new File(['PK'], 'x.zip', { type: 'application/zip' }), 'chatgpt', {
       token: 't',

@@ -763,8 +763,22 @@ function Composer({
     }
     setImportState({ status: 'uploading', message: `Importing ${zip.name}…` })
     void importHistoryZip(zip, uploadAffordance.source, { token, topicId })
-      .then(() => {
-        setImportState({ status: 'done', message: 'Export received — reading through your history now.' })
+      .then((result) => {
+        // ND2 (dogfood 2026-06-27) — only claim "reading your history now" when
+        // the engine actually STARTED an import job (`job_id` present). A 200
+        // with `job_id: null` is a no-op (engine declined to route the upload);
+        // showing success there is the banned silent-false-success that left a
+        // user staring at a "reading your history" banner while `import_jobs`
+        // stayed empty forever. Surface an honest "couldn't start" notice so the
+        // failure is visible (and the user can retry) instead of masked.
+        if (result.job_id !== null) {
+          setImportState({ status: 'done', message: 'Export received — reading through your history now.' })
+        } else {
+          setImportState({
+            status: 'error',
+            message: "Couldn't start the import — your export was received but no import job started. Try uploading again.",
+          })
+        }
       })
       .catch((err: unknown) => {
         setImportState({
