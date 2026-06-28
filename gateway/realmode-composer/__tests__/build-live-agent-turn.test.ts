@@ -238,12 +238,22 @@ describe('build-live-agent-turn — reply path', () => {
     expect(specs[1]!.prompt).toContain('minas-tirith')
   })
 
-  test('declares the read-only built-in tool surface on every spec', async () => {
+  test('declares the built-in tool surface (read + native Skill mechanism) on every spec', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
     await run(makeTurn({ sent }))
-    expect(specs[0]!.tools.map((t) => t.name)).toEqual(['Read', 'Glob', 'Grep'])
+    // P1-5: the live agent surface now includes `Skill` (native skill discovery +
+    // invocation) plus the file/exec tools the bundled skills need to run.
+    expect(specs[0]!.tools.map((t) => t.name)).toEqual([
+      'Read',
+      'Glob',
+      'Grep',
+      'Write',
+      'Edit',
+      'Bash',
+      'Skill',
+    ])
   })
 })
 

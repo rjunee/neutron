@@ -90,9 +90,12 @@ import {
   SkillForgeProposalsStore,
   buildSkillForgeBackend,
   buildSkillForgeChatCommandFilter,
-  resolveSkillsDir,
   completedWorkflowFromTridentRun,
 } from '../skill-forge/index.ts'
+import {
+  provisionAgentSkills,
+  resolveAgentSkillsDir,
+} from '../runtime/adapters/claude-code/persistent/agent-skills.ts'
 import type { TridentRun } from '../trident/store.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
@@ -232,6 +235,29 @@ export function buildOpenGraphComposer(
     // Single-owner: the frozen instance handle IS the boot slug.
     const internal_handle = project_slug
     const instanceInfo = resolveOpenInstanceInfo({ project_slug, owner_home, env })
+
+    // P1-5 (lift audit § P1-5) — native Claude Code SKILL.md discovery. Materialize
+    // the bundled skill packs (`impeccable` + design sub-skills, `agent-browser`,
+    // `remind`) into the live agent's PROJECT skills dir (`<owner_home>/.claude/skills`)
+    // so the spawned interactive REPL (cwd = owner_home) discovers + invokes them
+    // NATIVELY via the built-in `Skill` mechanism — the same loader Vajra's
+    // `~/.claude/skills` rides on. Idempotent + best-effort: refreshes bundled packs
+    // on every boot, never deletes a forged pack. Skill-forge re-points its approved
+    // output at this SAME dir (below), so a forged skill lands here as a loadable
+    // `SKILL.md` pack too.
+    const agentSkillsDir = resolveAgentSkillsDir(owner_home)
+    try {
+      const provisioned = provisionAgentSkills({ skillsDir: agentSkillsDir })
+      console.log(
+        `[skills] provisioned ${provisioned.bundled.length} bundled skill pack(s) into ${agentSkillsDir} ` +
+          `(${provisioned.present.length} total discoverable)`,
+      )
+    } catch (err) {
+      // Never block boot on skill provisioning — the agent just lacks the packs.
+      console.warn(
+        `[skills] provisioning failed for ${agentSkillsDir}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
 
     // Shared per-owner persona loader — splices <owner_home>/persona/*.md
     // into every onboarding + chat system prompt.
@@ -461,7 +487,12 @@ export function buildOpenGraphComposer(
           )
         },
       },
-      skillsDir: resolveSkillsDir(owner_home),
+      // P1-5 — write approved skills as native `SKILL.md` packs into the SAME
+      // project skills dir the live REPL discovers natively (`<owner_home>/.claude/
+      // skills/<name>/SKILL.md`), instead of the legacy convention-injection path
+      // (`<owner_home>/skills/conventions/*.md`). Closes the loop: a forged skill
+      // becomes an actually-loadable native skill, not just injected prose.
+      skillsDir: agentSkillsDir,
     })
     const skillForgeBackend = buildSkillForgeBackend(skillForge, skillForgeStore)
     // The Trident-terminal trigger: on every terminal run, audit a `done`

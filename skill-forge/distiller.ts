@@ -126,3 +126,40 @@ export function renderSkillMarkdown(draft: SkillDraft): string {
   lines.push('')
   return lines.join('\n')
 }
+
+/**
+ * Render a native Claude Code `SKILL.md` pack: YAML frontmatter (`name` +
+ * `description`) followed by the {@link renderSkillMarkdown} body. P1-5 — this is
+ * what makes a forged skill NATIVELY discoverable by the spawned REPL (the
+ * `description` is what Claude Code's skill loader matches on to decide when to
+ * surface the skill), as opposed to the legacy convention-injection markdown.
+ *
+ * The `description` folds in the what-it-does summary plus the trigger phrases so
+ * the native loader's relevance match mirrors the old "ALWAYS use when…"
+ * resolver. Emitted as a YAML block scalar (`|`) so commas / colons / quotes in
+ * triggers never break the frontmatter.
+ */
+export function renderSkillPack(draft: SkillDraft): string {
+  const descLines: string[] = []
+  descLines.push(draft.whatItDoes.trim())
+  if (draft.triggers.length > 0) {
+    descLines.push(
+      `Use this skill whenever the user says any of: ${draft.triggers
+        .map((t) => `"${t.replace(/"/g, "'")}"`)
+        .join(', ')}.`,
+    )
+  }
+  const front: string[] = []
+  front.push('---')
+  front.push(`name: ${draft.name}`)
+  front.push('description: |')
+  // Indent EVERY physical line of the block scalar — a `whatItDoes` paragraph or
+  // a trigger may itself contain embedded newlines, so split before indenting or
+  // the frontmatter mis-parses and Claude Code won't load the skill (Codex P2).
+  for (const entry of descLines) {
+    for (const physical of entry.split('\n')) front.push(`  ${physical}`.trimEnd())
+  }
+  front.push('---')
+  front.push('')
+  return `${front.join('\n')}\n${renderSkillMarkdown(draft)}`
+}

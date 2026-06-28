@@ -2,6 +2,67 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-27 — P1-5: native Claude Code SKILL.md discovery for the spawned agent
+
+**The gap (lift, not reinvention).** Vajra exposes real Claude Code skills under
+`~/.claude/skills/` (`impeccable` + design sub-skills, `agent-browser`, `remind`,
+…) that the spawned REPL discovers **natively** and the agent invokes mid-turn
+via the built-in `Skill` mechanism. Neutron had **no** native skill-discovery
+path for the spawned agent: the live REPL ran `--tools ""`-default-deny extended
+(post #87) only to `mcp__neutron`, so the `Skill` tool was never granted, and the
+only "skills" surfaces were (a) the system-prompt convention-injection loader
+(`gateway/realmode-composer/skills-loader.ts`, injects prose, not native packs)
+and (b) skill-forge's *proposal* lifecycle (`skill-forge/` — authoring, not a
+loader). Result: `impeccable` (the CLAUDE.md-mandated design path) and
+`agent-browser` were wholly unreachable, and `cores/free/reminders/src/chat-commands.ts`
+had copied the Nova `remind` skill's time-parser **data** into a host-side
+pre-LLM filter while dropping the **mechanism**.
+
+**What shipped (no flags; rides the #87 bridge):**
+- `skills/` (NEW, repo root) — bundled, version-controlled native `SKILL.md`
+  packs lifted from Vajra `~/.claude/skills/`: `impeccable` + its design
+  sub-skills (`adapt`, `animate`, `audit`, `bolder`, `clarify`, `colorize`,
+  `critique`, `delight`, `distill`, `harden`, `layout`, `optimize`, `overdrive`,
+  `polish`, `quieter`, `shape`, `typeset`), `agent-browser`, and a Neutron-native
+  `remind` pack (routes the agent to the bridged `mcp__neutron__reminders_*`
+  tools — the lifted mechanism, replacing the host-side data-copy for the AGENT
+  path; the `/remind` chat-command filter stays as the USER-typed path).
+- `runtime/adapters/claude-code/persistent/agent-skills.ts` (NEW) —
+  `provisionAgentSkills()` materializes the bundled packs into the live agent's
+  **project** skills dir (`<owner_home>/.claude/skills/`, `resolveAgentSkillsDir`),
+  which Claude Code discovers natively for the spawned REPL (cwd = `owner_home`).
+  Idempotent (refreshes bundled packs each boot) and never deletes a forged pack.
+- `open/composer.ts` — provisions skills at composer build (best-effort, never
+  blocks boot) before wiring the live agent substrate.
+- `gateway/realmode-composer/build-live-agent-turn.ts` — the live agent's built-in
+  tool surface gains `Skill` (native discovery + invocation) plus `Write`/`Edit`/
+  `Bash` (the file/exec tools the bundled skills need to run). This grant is the
+  OWNER's trusted live-chat agent ONLY — the untrusted import (`cc-import-*`) and
+  disposable Trident (`cc-trident-*`) substrates keep their `tools: []` default-deny
+  (`--tools ""`), so the prompt-injection gate (Codex-r1-P1) is untouched.
+- skill-forge re-point — `registrar.ts` now writes an approved skill as a native
+  `<skillsDir>/<name>/SKILL.md` pack (with frontmatter via `distiller.renderSkillPack`)
+  into the SAME project skills dir, instead of the legacy `conventions/<name>.md`.
+  A forged skill is now an actually-loadable native skill, closing the loop from
+  "proposal lifecycle" to "discoverable + invokable pack."
+
+**Why project-scope, NOT a custom `CLAUDE_CONFIG_DIR`.** The substrate's
+`claudeConfigDir` plumbing is dormant (no live caller threads it — the live agent
+authenticates via the default config dir's credentials). Verified live: pointing
+a real `claude` REPL at a fresh `CLAUDE_CONFIG_DIR` returns *"Not logged in"*, so
+hijacking it would break the warm REPL's auth. The project `.claude/skills/` dir
+is the SAME native loader + `SKILL.md` frontmatter + `Skill` tool Vajra's
+`~/.claude/skills` rides on, scoped to the agent's own home — zero auth/first-run
+blast radius.
+
+**Real-turn verification.** A faithful isolated reproduction of the live-agent
+spawn (cwd = a provisioned `owner_home`, `--tools Read,Glob,Grep,Write,Edit,Bash,Skill`,
+real `claude` model turn): the agent natively invoked `Skill{"skill":"remind"}`
+(loaded the pack, quoted its rules) and `Skill{"skill":"neutron-native-skill-probe"}`
+— a pack present ONLY in the provisioned project dir — emitting its sentinel.
+Proves native discovery + invocation of project-level packs end-to-end. Regression
+test: `runtime/adapters/claude-code/persistent/__tests__/agent-skills.test.ts`.
+
 ## 2026-06-27 — P0-2: native memory RECALL — the spawned agent reads back what the scribe wrote (`gbrain_search`)
 
 **The gap (lift, not reinvention).** P0-1 gave the spawned agent a native-MCP

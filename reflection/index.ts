@@ -162,6 +162,11 @@ export function createReflection(deps: CreateReflectionDeps): Reflection {
     readDiary(input): DiaryEntry[] {
       return readRecentDiary({
         ownerDataDir,
+        // Thread the injected clock so the read window matches the write clock.
+        // Without this, reads always used real Date.now() while writes honored
+        // the injected `now` — so a test/override clock more than `days` behind
+        // wall-clock read an empty window (the 2026-06-21 hardcoded-`now` rot).
+        now: now(),
         ...(input?.days !== undefined ? { days: input.days } : {}),
         ...(input?.limit !== undefined ? { limit: input.limit } : {}),
       })

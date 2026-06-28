@@ -1,7 +1,13 @@
 import { expect, test } from 'bun:test'
 
-import { deriveTriggers, distillSkill, renderSkillMarkdown, slugify } from '../distiller.ts'
-import type { CompletedWorkflow } from '../types.ts'
+import {
+  deriveTriggers,
+  distillSkill,
+  renderSkillMarkdown,
+  renderSkillPack,
+  slugify,
+} from '../distiller.ts'
+import type { CompletedWorkflow, SkillDraft } from '../types.ts'
 
 const workflow: CompletedWorkflow = {
   project_slug: 'p',
@@ -70,4 +76,38 @@ test('rendered markdown carries name, triggers, procedure and artifacts', () => 
   expect(md).toContain('tx-scrape')
   expect(md).toContain('## Artifacts')
   expect(md).toContain('Projects/x/brief.md')
+})
+
+test('renderSkillPack emits valid frontmatter (name + description block scalar)', () => {
+  const pack = renderSkillPack(distillSkill(workflow))
+  expect(pack.startsWith('---\n')).toBe(true)
+  expect(pack).toContain('name: scrape-a-tweet-and-file-it-to-the-brief')
+  expect(pack).toContain('description: |')
+  // The body follows the frontmatter.
+  expect(pack).toContain('# scrape-a-tweet-and-file-it-to-the-brief')
+})
+
+test('renderSkillPack indents EVERY physical line of a multiline description (Codex P2)', () => {
+  // A user-approved proposal may carry an embedded-newline whatItDoes / trigger.
+  const draft: SkillDraft = {
+    name: 'multi-line-skill',
+    triggers: ['line one\nline two'],
+    whatItDoes: 'First paragraph.\nSecond paragraph.',
+    artifacts: [],
+    steps: [{ action: 'do_thing' }],
+  }
+  const pack = renderSkillPack(draft)
+  const lines = pack.split('\n')
+  const start = lines.indexOf('description: |')
+  expect(start).toBeGreaterThan(-1)
+  // Every line of the block scalar (until the closing `---`) is indented ≥2 spaces.
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i]!
+    if (line === '---') break
+    if (line.length === 0) continue // blank lines are valid inside a block scalar
+    expect(line.startsWith('  ')).toBe(true)
+  }
+  // Both physical lines of the multiline content survived, indented.
+  expect(pack).toContain('  Second paragraph.')
+  expect(pack).toContain('  line two')
 })

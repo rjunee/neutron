@@ -1,15 +1,11 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
-import {
-  _resetSkillsLoaderCache,
-  loadSkills,
-} from '../../gateway/realmode-composer/skills-loader.ts'
 
 import { SkillForge, type ProposalNotifier } from '../forge.ts'
 import { SkillForgeProposalsStore } from '../proposals-store.ts'
@@ -26,7 +22,6 @@ let tmp: string
 let dbPath: string
 let db: ProjectDb
 let skillsDir: string
-let conventionsDir: string
 let notifier: CapturingNotifier
 let forge: SkillForge
 
@@ -42,8 +37,15 @@ const workflow: CompletedWorkflow = {
   succeeded: true,
 }
 
-function listConventions(): string[] {
-  return existsSync(conventionsDir) ? readdirSync(conventionsDir) : []
+/** Native skill packs present = subdirectories of skillsDir that hold a SKILL.md. */
+function listPacks(): string[] {
+  if (!existsSync(skillsDir)) return []
+  return readdirSync(skillsDir)
+    .filter((n) => {
+      const p = join(skillsDir, n)
+      return statSync(p).isDirectory() && existsSync(join(p, 'SKILL.md'))
+    })
+    .sort()
 }
 
 beforeEach(() => {
@@ -54,14 +56,12 @@ beforeEach(() => {
   raw.close()
   db = ProjectDb.open(dbPath)
   skillsDir = join(tmp, 'owner-data', 'skills')
-  conventionsDir = join(skillsDir, 'conventions')
   notifier = new CapturingNotifier()
   forge = new SkillForge({
     store: new SkillForgeProposalsStore({ db, now: () => 1000 }),
     notifier,
     skillsDir,
   })
-  _resetSkillsLoaderCache()
 })
 
 afterEach(() => {
@@ -83,7 +83,7 @@ test('a completed multi-step workflow fires a proposal — name, triggers, what,
   expect(message.toLowerCase()).toContain('approve')
 
   // GATED: nothing written to disk until approval.
-  expect(listConventions()).toEqual([])
+  expect(listPacks()).toEqual([])
   expect(proposal!.status).toBe('pending')
 })
 
@@ -100,24 +100,27 @@ test('the same workflow is not re-proposed while a proposal is pending', async (
   expect(notifier.calls.length).toBe(1)
 })
 
-test('approve distills + registers an agent-discoverable skill that survives a fresh session', async () => {
+test('approve distills + registers a native SKILL.md pack that survives a fresh session', async () => {
   const proposal = await forge.onWorkflowCompleted(workflow)
   const { skill_path } = await forge.approve(proposal!.id)
 
-  // A real skill file landed in the conventions dir.
+  // A native SKILL.md pack landed: <skillsDir>/<name>/SKILL.md.
   expect(existsSync(skill_path)).toBe(true)
-  expect(listConventions()).toEqual(['scrape-a-tweet-and-file-it-to-the-brief.md'])
+  expect(skill_path).toBe(
+    join(skillsDir, 'scrape-a-tweet-and-file-it-to-the-brief', 'SKILL.md'),
+  )
+  expect(listPacks()).toEqual(['scrape-a-tweet-and-file-it-to-the-brief'])
 
-  // Agent-discoverable: the REAL realmode skills-loader picks it up.
-  const loaded = await loadSkills({ skillsDir })
-  expect(loaded.body).toContain('scrape-a-tweet-and-file-it-to-the-brief')
-  expect(loaded.body).toContain('ALWAYS use this skill')
-  expect(loaded.files).toContain('conventions/scrape-a-tweet-and-file-it-to-the-brief.md')
+  // Natively discoverable: the SKILL.md carries the frontmatter Claude Code's
+  // skill loader matches on (name + description) plus the procedure body.
+  const body = readFileSync(skill_path, 'utf8')
+  expect(body.startsWith('---\n')).toBe(true)
+  expect(body).toContain('name: scrape-a-tweet-and-file-it-to-the-brief')
+  expect(body).toContain('description: |')
+  expect(body).toContain('ALWAYS use this skill')
 
-  // Survives a fresh session: drop the loader cache (new process) — still there.
-  _resetSkillsLoaderCache()
-  const reloaded = await loadSkills({ skillsDir })
-  expect(reloaded.body).toContain('scrape-a-tweet-and-file-it-to-the-brief')
+  // Survives a fresh session: it's a plain on-disk file, still there on re-read.
+  expect(readFileSync(skill_path, 'utf8')).toBe(body)
 
   // Proposal row reflects approval.
   const approved = await new SkillForgeProposalsStore({ db }).get(proposal!.id)
@@ -131,9 +134,8 @@ test('approve with edits overrides the distilled name + triggers', async () => {
     name: 'Tweet Filer',
     triggers: ['file this tweet'],
   })
-  expect(skill_path.endsWith('tweet-filer.md')).toBe(true)
-  const loaded = await loadSkills({ skillsDir })
-  expect(loaded.body).toContain('file this tweet')
+  expect(skill_path).toBe(join(skillsDir, 'tweet-filer', 'SKILL.md'))
+  expect(readFileSync(skill_path, 'utf8')).toContain('file this tweet')
 })
 
 test('decline creates nothing and marks the proposal declined', async () => {
@@ -141,10 +143,8 @@ test('decline creates nothing and marks the proposal declined', async () => {
   const declined = await forge.decline(proposal!.id)
   expect(declined.status).toBe('declined')
 
-  // Nothing written; the loader sees an empty skill set.
-  expect(listConventions()).toEqual([])
-  const loaded = await loadSkills({ skillsDir })
-  expect(loaded.body).toBe('')
+  // Nothing written; no native skill pack exists.
+  expect(listPacks()).toEqual([])
 
   // A declined workflow CAN be re-proposed on a later run (user may reconsider).
   const reproposed = await forge.onWorkflowCompleted(workflow)

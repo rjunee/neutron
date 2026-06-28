@@ -60,7 +60,7 @@ const decideInputSchema: JsonSchemaDocument = {
       type: 'string',
       enum: ['approve', 'decline'],
       description:
-        'Approve the proposal (distill + write its skill file under skills/conventions/), or decline it (creates nothing).',
+        'Approve the proposal (distill + write its native SKILL.md pack into the agent skills dir), or decline it (creates nothing).',
     },
     proposal_id: {
       type: 'string',
@@ -154,8 +154,9 @@ export function registerSkillForgeToolSurface(
     name: SKILL_FORGE_DECIDE_TOOL,
     description:
       'Approve or decline a pending Skill Forge proposal. Approving distills the workflow into a ' +
-      'saved skill under skills/conventions/ (immediately agent-discoverable, survives a fresh ' +
-      'session); declining creates nothing. Use skill_forge_list first to get the proposal_id.',
+      'native SKILL.md pack in the agent skills dir (immediately discoverable + invokable via the ' +
+      'Skill mechanism, survives a fresh session); declining creates nothing. Use skill_forge_list ' +
+      'first to get the proposal_id.',
     input_schema: decideInputSchema,
     output_schema: decideOutputSchema,
     capability_required: 'write:project_data',
