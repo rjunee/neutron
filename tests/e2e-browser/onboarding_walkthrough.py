@@ -563,8 +563,15 @@ def run() -> int:
                     page.locator(".car-tabpanel").count() > 0
                     and page.locator("text=/document/i").count() >= 0
                 )
-                # Stronger: a real doc row if present.
-                results["documents_doc_visible"] = page.locator(".cdoc-row, .cdoc-item, [data-doc-id]").count() > 0
+                # Stronger: a real doc entry if present. The React Documents tab
+                # renders the per-project doc tree as `.cdoc-list-name` leaves
+                # (file names) / `.cdoc-list-dir` folders under `.cdoc-list` — the
+                # older `.cdoc-row` / `[data-doc-id]` selectors never matched, so
+                # this guard silently under-reported even when docs DID render
+                # (verified in a real browser, QA 2026-06-27).
+                results["documents_doc_visible"] = (
+                    page.locator(".cdoc-list-name, .cdoc-list-dir").count() > 0
+                )
                 break
         results["documents_tab_renders"] = docs_ok
         shot(page, "04-documents-tab.png")

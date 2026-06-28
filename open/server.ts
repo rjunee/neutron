@@ -11,7 +11,8 @@
  *      `bun start` works out of the box.
  *   2. Builds the single-owner GraphComposer (`open/composer.ts`).
  *   3. Calls the shared `boot()` shell, which opens the HTTP listener (port
- *      from --port / NEUTRON_LISTEN_PORT / a free port), binds the composed
+ *      from `--port` / the `NEUTRON_PORT` env var / a free port — see
+ *      `gateway/boot-helpers.ts` `resolveListenPort`), binds the composed
  *      onboarding + chat + WebSocket routes, seeds `/healthz`, and starts the
  *      watchdog.
  *   4. Prints a clear boot banner pointing at /chat.
