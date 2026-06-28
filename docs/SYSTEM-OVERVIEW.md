@@ -679,6 +679,42 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   retry-then-abort, retry-then-succeed, PATH-gap abort, graceful opt-out, success
   path) via the `NEUTRON_INSTALL_PRINT_GBRAIN` seam.
 
+- **Service-PATH reachability — the binary the install GUARANTEES must be
+  reachable by the running SERVICE (dogfood 2026-06-28).** `install.sh` lands
+  `gbrain` at `~/.bun/bin/gbrain`, but that dir is on the install script's own
+  shell PATH — NOT the curated PATH launchd/systemd give the long-running
+  server. So `Bun.which('gbrain')` returned `null` inside the service even
+  though the binary existed → the init guard above could never spawn `gbrain
+  init` (the brain's `.gbrain/config.json` stayed ABSENT) → memory silently
+  DISABLED on every install, masked by Claude-Code file-memory. ND1 fixed the
+  init *logic* but not *reachability*. The fix is two complementary parts:
+  1. **Runtime absolute-path resolver (`gbrain-memory/resolve-gbrain-command.ts`)
+     — repairs EXISTING installs on a code-update + restart, no plist regen.**
+     `resolveGbrainCommand(env)` returns an ABSOLUTE gbrain path: `Bun.which`
+     first (honor a working PATH), else probe `$BUN_INSTALL/bin`, `~/.bun/bin`,
+     `/usr/local/bin`, `/opt/homebrew/bin`, `~/.local/bin` — first executable
+     wins, else `null` (preserving the fail-soft disabled path; never throws).
+     `buildGBrainMemory` passes that absolute path as the stdio client's
+     `command` (and to `ensureBrainInitialized`), and uses the SAME resolver for
+     the boot-time "DISABLED" warning decision (not a bare `Bun.which`). Because
+     `gbrain` is a `#!/usr/bin/env bun` script, the resolver also builds the
+     child's PATH (`resolveGbrainChildPath`) so it carries the gbrain dir AND a
+     `bun` dir (`process.execPath`) — the shebang re-resolves even under the
+     narrow service PATH. The doctor (`realProbes`) uses the same resolver for
+     detection + spawns, so one resolver backs both serve-spawn and doctor; its
+     `memoryRoundtrip` probe also wires the production `ensureInitialized` guard
+     so it `init`s its ephemeral brain before `serve` (previously it hit "No
+     brain configured" → `Connection closed` once the binary became reachable,
+     falsely reporting DEGRADED on healthy installs).
+  2. **Service-PATH correctness (`neutron-service.sh#_service_path`) — fresh
+     installs' plist/unit.** The generated launchd plist / systemd unit PATH now
+     includes `${BUN_INSTALL:-$HOME/.bun}/bin` (the bun global-bin dir, distinct
+     from the bun *binary* dir), so a freshly generated unit already resolves
+     gbrain. Pure addition to the existing curated list, dedup-safe.
+  Covered by `gbrain-memory/__tests__/resolve-gbrain-command.test.ts`,
+  `tests/integration/service-gbrain-path.test.ts`, and the disabled-warning
+  cases in `gateway/realmode-composer/__tests__/build-gbrain-memory.test.ts`.
+
 - **Auto-upgrade + doctor (`gbrain-memory/gbrain-doctor.ts`).** `ensure_gbrain`
   pins a point-in-time snapshot of an UNPINNED default branch with no upgrade
   path and no health verification. The doctor — modeled on Vajra's

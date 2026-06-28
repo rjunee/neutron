@@ -43,6 +43,8 @@ import {
   resolveEmbedderConfig,
   buildOpenAiEmbedderConfig,
   ensureBrainInitialized,
+  resolveGbrainCommand,
+  resolveGbrainChildPath,
 } from '../../gbrain-memory/index.ts'
 import type { SyncHook } from '../../runtime/entity-writer.ts'
 
@@ -146,6 +148,22 @@ export function buildGBrainMemory(input: {
     ...(input.openaiApiKey !== undefined ? { openaiApiKey: input.openaiApiKey } : {}),
   })
 
+  // Reachability fix (dogfood 2026-06-28): the launchd/systemd SERVICE runs with
+  // a narrow curated PATH that omits the bun global-bin dir where `gbrain` lives,
+  // so a bare `gbrain` spawn fails → memory silently DISABLED. Resolve gbrain to
+  // an ABSOLUTE path here (PATH-first, then probe `$BUN_INSTALL/bin` etc.) and
+  // hand the stdio client that absolute command + a child PATH that carries the
+  // gbrain dir AND a bun dir so the binary's `#!/usr/bin/env bun` shebang
+  // re-resolves. This repairs ALREADY-INSTALLED services on a code-update +
+  // restart with NO plist regeneration. `null` (gbrain genuinely absent) leaves
+  // the bare-`gbrain` default in place so the existing fail-soft disabled path
+  // (one-time warning + logged no-op) is preserved unchanged.
+  const command = resolveGbrainCommand(env)
+  if (command !== null) {
+    opts.command = command
+    opts.env = { ...(opts.env ?? {}), PATH: resolveGbrainChildPath({ command, env }) }
+  }
+
   // Init guard: ensure the brain at GBRAIN_HOME is `gbrain init`'d BEFORE the
   // first `gbrain serve` spawn (ND1 root cause: serve hit an uninitialized
   // brain → "No brain configured" → Connection closed → every memory op
@@ -155,7 +173,14 @@ export function buildGBrainMemory(input: {
   const gbrainHome = join(input.owner_home, 'gbrain')
   const embedder = resolveEffectiveEmbedder({ env, openaiApiKey: input.openaiApiKey })
   opts.ensureInitialized = async () => {
-    await ensureBrainInitialized({ gbrainHome, embedder, env })
+    await ensureBrainInitialized({
+      gbrainHome,
+      embedder,
+      env,
+      // Pass the resolved ABSOLUTE command so init spawns the same binary the
+      // serve path does (init also carries the bun-resolvable child PATH).
+      ...(command !== null ? { command } : {}),
+    })
   }
 
   // 2026-06-10 (wow-hang-resilience) — loud startup probe. The client
@@ -165,11 +190,13 @@ export function buildGBrainMemory(input: {
   // $PATH: gbrain"). One clear boot-time warning beats N runtime ones;
   // the lazy/fail-soft behaviour below is unchanged (now with a
   // latched one-time runtime failure instead of a per-op storm).
-  if (Bun.which('gbrain') === null) {
+  if (command === null) {
     console.warn(
-      `[gbrain-memory] project=${input.project_slug} WARNING: 'gbrain' executable not found on PATH — ` +
-        'entity-page memory sync will be DISABLED (pages remain on disk; sync degrades to a one-time ' +
-        'logged failure on first use). Install with: bun install -g github:garrytan/gbrain',
+      `[gbrain-memory] project=${input.project_slug} WARNING: 'gbrain' executable not found ` +
+        'on PATH or in any known install dir ($BUN_INSTALL/bin, ~/.bun/bin, /usr/local/bin, ' +
+        '/opt/homebrew/bin, ~/.local/bin) — entity-page memory sync will be DISABLED (pages remain ' +
+        'on disk; sync degrades to a one-time logged failure on first use). Install with: ' +
+        'bun install -g github:garrytan/gbrain',
     )
   }
 

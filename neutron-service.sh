@@ -97,8 +97,14 @@ CLAUDE_BIN=${NEUTRON_SERVICE_CLAUDE_BIN:-}
 #      install (Homebrew / vendored) is honored;
 #   2. `$HOME/.local/bin` — the GUARANTEED fallback the official installer
 #      (curl … claude.ai/install.sh) symlinks `claude` into;
-#   3. the bun dir;
-#   4. the standard system dirs (incl. Homebrew).
+#   3. the bun GLOBAL-BIN dir (`$BUN_INSTALL/bin`, default `$HOME/.bun/bin`) —
+#      where `bun install -g github:garrytan/gbrain` lands the `gbrain` binary
+#      the memory layer spawns. Without this the SERVICE can't resolve gbrain
+#      (the install script's own shell can), so entity-page memory is silently
+#      DISABLED on every install (dogfood 2026-06-28). NOT the same as the bun
+#      BINARY dir (#4) — e.g. bun at /opt/homebrew/bin, gbrain at ~/.bun/bin.
+#   4. the bun BINARY dir (dirname of BUN_BIN) — so the server can exec `bun`;
+#   5. the standard system dirs (incl. Homebrew).
 # Deduped (first occurrence wins) so re-running the installer regenerates a
 # correct PATH without ever appending duplicates. Emitted via `_service_path`.
 _service_path() {
@@ -106,8 +112,10 @@ _service_path() {
   [ -n "$CLAUDE_BIN" ] && _claude_dir=$(dirname "$CLAUDE_BIN" 2>/dev/null || true)
   _bun_dir=""
   [ -n "$BUN_BIN" ] && _bun_dir=$(dirname "$BUN_BIN" 2>/dev/null || true)
+  # Bun global-bin dir: honor BUN_INSTALL, else the documented default ~/.bun.
+  _bun_global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
   _out=""
-  for _d in "$_claude_dir" "$HOME/.local/bin" "$_bun_dir" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
+  for _d in "$_claude_dir" "$HOME/.local/bin" "$_bun_global_bin" "$_bun_dir" /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
     [ -n "$_d" ] || continue
     case ":$_out:" in
       *":$_d:"*) ;;                                # already present — dedup

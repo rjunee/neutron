@@ -2,6 +2,81 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — GBrain reachable from the SERVICE (memory was silently disabled on every install)
+
+**The bug (dogfood 2026-06-28 §gbrain).** Memory was STILL dead on the live
+install after #91 (install GUARANTEES gbrain) and ND1/#95 (init logic).
+`server.log` printed `[gbrain-memory] … WARNING: 'gbrain' executable not found on
+PATH — entity-page memory sync will be DISABLED`, and `<GBRAIN_HOME>/.gbrain/
+config.json` was ABSENT (the brain was never init'd — the lazy init guard can't
+run because the binary can't be spawned). Recall silently fell back to
+Claude-Code file-memory.
+
+**Root cause.** `install.sh#ensure_gbrain` lands `gbrain` at `~/.bun/bin/gbrain`,
+but that dir is on the install script's own shell PATH — NOT the curated PATH
+launchd/systemd give the long-running server. The generated plist/unit set a
+narrow PATH that OMITS the bun global-bin dir, so the running server's
+`Bun.which('gbrain')` returned `null` → memory DISABLED → the init guard never
+spawned `gbrain init`. ND1 fixed the init *logic* but not *reachability*. The
+exact "built but not actually working in the real env" trap.
+
+**The fix (no flags, one PR, two complementary parts).**
+
+- **Runtime absolute-path resolver — PRIMARY; repairs EXISTING installs on a
+  code-update + restart, no plist regen.** New
+  `gbrain-memory/resolve-gbrain-command.ts`. `resolveGbrainCommand(env)` returns
+  an ABSOLUTE gbrain path: `Bun.which` first (honor a working PATH), else probe
+  `$BUN_INSTALL/bin`, `~/.bun/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
+  `~/.local/bin`; first executable wins, else `null` (preserves the fail-soft
+  one-time-warning + disabled path — never throws).
+  `gateway/realmode-composer/build-gbrain-memory.ts` now (i) passes the resolved
+  absolute path as the stdio client's `command` AND into `ensureBrainInitialized`,
+  and (ii) uses the SAME resolver (not a bare `Bun.which`) for the boot-time
+  disabled-warning decision. Because `gbrain` is a `#!/usr/bin/env bun` script,
+  `resolveGbrainChildPath` builds the spawned child's PATH so it carries the
+  gbrain dir AND a `bun` dir (from `process.execPath`, the running server's own
+  bun) — the shebang re-resolves even under the narrow service PATH (applied at
+  BOTH the `serve` spawn and the `gbrain init` spawn).
+  `gbrain-memory/gbrain-doctor.ts#realProbes` uses the same resolver for detection
+  + spawns. ONE resolver, both serve-spawn and doctor — no dual logic.
+- **Service-PATH correctness — fresh installs' plist/unit.**
+  `neutron-service.sh#_service_path` now includes `${BUN_INSTALL:-$HOME/.bun}/bin`
+  (the bun global-bin dir — distinct from the bun *binary* dir already on the
+  list), so a freshly generated launchd plist / systemd unit already resolves
+  gbrain. Pure addition to the curated list, dedup-safe.
+- **Doctor round-trip now inits its ephemeral brain (exposed by the resolver).**
+  `gbrain-doctor.ts#realProbes().memoryRoundtrip` connected `gbrain serve` to a
+  fresh temp `GBRAIN_HOME` it never `gbrain init`'d → "No brain configured" →
+  `MCP error -32000: Connection closed` → `neutron doctor` falsely reported
+  DEGRADED on healthy installs (latent before, since the binary first had to be
+  reachable; the resolver surfaces it). Wired the same `ensureInitialized` guard
+  production uses (keyword+graph, no embedder) so the probe runs a true
+  `init`→`serve`→`put_page`→`list_pages` round-trip.
+
+**Live acceptance (real-turn gate, on `~/neutron/core`).** Checked out the branch
+on Ryan's live install, `bun install`, `launchctl kickstart -k …neutron-server`
+(the plist was NOT regenerated — so this exercises the runtime resolver alone),
+then drove real chat turns on :7800. Evidence: (1) `~/neutron/data/gbrain/.gbrain/
+config.json` now EXISTS (`[gbrain-memory] initialized brain at GBRAIN_HOME=…` in
+server.log) — it was ABSENT before; (2) ZERO "executable not found on PATH" /
+DISABLED warnings since restart; (3) `mcp__neutron__gbrain_search` now EXECUTES
+end-to-end through the agent (returns clean results, no "Connection closed"), and
+the doctor's real `put_page`→`list_pages` round-trip passes under a narrow
+service-like PATH. (Recall of a *scribed* fact is gated on the steady-state entity
+scribe, which is inactive while the live owner is mid-onboarding — a separate
+scribe-fan-out concern, not reachability.)
+
+**Tests (committed).** `gbrain-memory/__tests__/resolve-gbrain-command.test.ts`
+(PATH-hit → which result; PATH-miss → first existing probe with `$BUN_INSTALL/bin`
+first; none → null; non-executable rejected; child-PATH prepend + dedup + no bogus
+`.`), `tests/integration/service-gbrain-path.test.ts` (rendered plist + systemd
+unit PATH contains the bun global-bin dir; BUN_INSTALL honored; dedup), and two
+disabled-warning cases in
+`gateway/realmode-composer/__tests__/build-gbrain-memory.test.ts` (gbrain reachable
+ONLY via `$BUN_INSTALL/bin` → NO warning; truly absent → warning). No hardcoded
+dates (time-rot rule). `tsc -p gbrain-memory` + `tsc -p gateway` clean;
+`sh -n neutron-service.sh` clean.
+
 ## 2026-06-28 — ND1: GBrain memory works by default + OpenAI-key embeddings upgrade
 
 **The bug (dogfood 2026-06-27 §2 / ND1).** Production memory was DEAD. The

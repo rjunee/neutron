@@ -39,6 +39,7 @@ import { join } from 'node:path'
 import type { EmbedderConfig } from './embedder-config.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
 import { type CommandRunner, bunCommandRunner } from './gbrain-doctor.ts'
+import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
 
 /** OpenAI default the latent column is sized for (upgrade-without-rebuild). */
 const DEFAULT_EMBEDDING_MODEL = 'openai:text-embedding-3-large'
@@ -126,6 +127,15 @@ export async function ensureBrainInitialized(
   // Provider auth (e.g. OPENAI_API_KEY) the embed backfill needs lives in the
   // embedder's childEnv; merge it so `gbrain embed` can reach the provider.
   if (input.embedder !== null) Object.assign(childEnv, input.embedder.childEnv)
+  // Carry a bun-resolvable PATH into the init child so `gbrain`'s
+  // `#!/usr/bin/env bun` shebang re-resolves even under the service's narrow
+  // PATH (the same reachability fix the serve spawn uses). Without this, the
+  // absolute `command` execs but its shebang can't find `bun` and init fails →
+  // brain never created → memory silently disabled.
+  childEnv['PATH'] = resolveGbrainChildPath({
+    command: command === 'gbrain' ? null : command,
+    env: input.env ?? process.env,
+  })
 
   const target = resolveInitEmbeddingTarget(input.embedder)
 

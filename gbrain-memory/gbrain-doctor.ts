@@ -43,6 +43,7 @@ import { dirname, join } from 'node:path'
 import { GBrainStdioMcpClient } from './gbrain-stdio-client.ts'
 import { GBrainMemoryStore } from './gbrain-memory-store.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
+import { resolveGbrainCommand, resolveGbrainChildPath } from './resolve-gbrain-command.ts'
 
 /**
  * Canonical upstream source. Matches `install.sh`'s `GBRAIN_REF` default
@@ -502,14 +503,33 @@ export function realProbes(env: NodeJS.ProcessEnv = process.env): DoctorProbes {
   const SENTINEL_SLUG = 'neutron-gbrain-doctor-probe'
   return {
     async binaryOnPath() {
-      const resolved = Bun.which('gbrain')
+      // Use the SAME absolute-path resolver the serve spawn uses (PATH-first,
+      // then probe the bun global-bin + system dirs), so the doctor reflects the
+      // runtime's real reachability — not just whether the doctor's own PATH
+      // happens to resolve gbrain.
+      const resolved = resolveGbrainCommand(env)
       return resolved === null
-        ? { ok: false, detail: "'gbrain' not found on PATH (install: bun install -g github:garrytan/gbrain)" }
-        : { ok: true, detail: `on PATH (${resolved})` }
+        ? {
+            ok: false,
+            detail:
+              "'gbrain' not found on PATH or in any known install dir " +
+              '($BUN_INSTALL/bin, ~/.bun/bin, /usr/local/bin, /opt/homebrew/bin, ~/.local/bin) ' +
+              '(install: bun install -g github:garrytan/gbrain)',
+          }
+        : { ok: true, detail: `resolved (${resolved})` }
     },
     async binaryResponds() {
+      const command = resolveGbrainCommand(env)
+      if (command === null) {
+        return { ok: false, detail: "'gbrain' not resolvable (skipping --version)" }
+      }
       try {
-        const res = await bunCommandRunner().run('gbrain', ['--version'], { timeoutMs: 15_000 })
+        // Spawn the absolute command with a bun-resolvable child PATH so the
+        // `#!/usr/bin/env bun` shebang works under a narrow PATH.
+        const res = await bunCommandRunner().run(command, ['--version'], {
+          timeoutMs: 15_000,
+          env: { PATH: resolveGbrainChildPath({ command, env }) },
+        })
         if (res.code === 0) {
           return { ok: true, detail: `responds: ${res.stdout.trim().split('\n')[0] ?? 'ok'}` }
         }
@@ -523,10 +543,33 @@ export function realProbes(env: NodeJS.ProcessEnv = process.env): DoctorProbes {
       let client: GBrainStdioMcpClient | null = null
       try {
         dir = await mkdtemp(join(tmpdir(), 'neutron-gbrain-doctor-'))
+        const command = resolveGbrainCommand(env)
+        const childPath = resolveGbrainChildPath({ command, env })
         client = new GBrainStdioMcpClient({
           brainId: 'neutron-doctor-probe',
           source: 'default',
-          env: { GBRAIN_HOME: dir, PATH: env['PATH'] ?? process.env['PATH'] ?? '' },
+          // Exercise the EXACT runtime spawn shape: absolute command (when
+          // resolvable) + a bun-resolvable child PATH, so the round-trip proves
+          // the service path works, not just the doctor's own PATH.
+          ...(command !== null ? { command } : {}),
+          env: { GBRAIN_HOME: dir, PATH: childPath },
+          // Mirror production: init the ephemeral brain BEFORE the first `serve`
+          // spawn. Without this, `serve` hits an uninitialized brain ("No brain
+          // configured") → `MCP error -32000: Connection closed` → the probe
+          // falsely reports DEGRADED on a perfectly healthy install (the
+          // round-trip is otherwise the SAME `init`→`serve`→`put_page` seal the
+          // runtime uses; the canonical real-serve-roundtrip test inits too).
+          // Dynamic import avoids the static gbrain-doctor ↔ ensure-brain-init
+          // import cycle; keyword+graph (no embedder), same temp GBRAIN_HOME.
+          ensureInitialized: async () => {
+            const { ensureBrainInitialized } = await import('./ensure-brain-init.ts')
+            await ensureBrainInitialized({
+              gbrainHome: dir!,
+              embedder: null,
+              ...(command !== null ? { command } : {}),
+              env: { ...env, PATH: childPath },
+            })
+          },
         })
         const store = new GBrainMemoryStore(client)
         await withTimeout(
