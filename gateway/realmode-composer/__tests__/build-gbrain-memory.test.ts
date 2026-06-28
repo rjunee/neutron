@@ -8,6 +8,9 @@
  */
 
 import { describe, test, expect } from 'bun:test'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   buildGBrainMemory,
   resolveGbrainClientOptions,
@@ -105,5 +108,65 @@ describe('buildGBrainMemory', () => {
     expect(typeof wiring.syncHook.onEntityWrite).toBe('function')
     // close() never spawned a child (lazy connect), so it resolves cleanly.
     await expect(wiring.close()).resolves.toBeUndefined()
+  })
+
+  // --- gbrain reachability (dogfood 2026-06-28) ------------------------------
+  // The boot-time disabled-warning must reflect the SAME absolute-path resolver
+  // the serve spawn uses — not a bare `Bun.which` against the (narrow) service
+  // PATH — so a gbrain reachable only via $BUN_INSTALL/bin no longer trips the
+  // "memory DISABLED" warning.
+  describe('disabled-warning uses the absolute-path resolver', () => {
+    function captureWarn(run: () => void): string[] {
+      const warnings: string[] = []
+      const orig = console.warn
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map(String).join(' '))
+      }
+      try {
+        run()
+      } finally {
+        console.warn = orig
+      }
+      return warnings
+    }
+
+    test('gbrain reachable ONLY via $BUN_INSTALL/bin (not PATH) → NO disabled warning', () => {
+      const home = mkdtempSync(join(tmpdir(), 'bgm-home-'))
+      try {
+        const bunBin = join(home, '.bun', 'bin')
+        mkdirSync(bunBin, { recursive: true })
+        const g = join(bunBin, 'gbrain')
+        writeFileSync(g, '#!/bin/sh\necho ok\n')
+        chmodSync(g, 0o755)
+        // PATH is EMPTY — gbrain is only findable via the probe list. The old
+        // `Bun.which('gbrain')` check would have warned here.
+        const warnings = captureWarn(() =>
+          buildGBrainMemory({
+            owner_home: join(home, 'data'),
+            project_slug: 'acme',
+            env: { PATH: '', HOME: home, BUN_INSTALL: join(home, '.bun') },
+          }),
+        )
+        expect(warnings.some((w) => w.includes('DISABLED'))).toBe(false)
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
+    })
+
+    test('gbrain truly absent everywhere → emits the DISABLED warning (fail-soft)', () => {
+      const home = mkdtempSync(join(tmpdir(), 'bgm-nohome-'))
+      try {
+        const warnings = captureWarn(() =>
+          buildGBrainMemory({
+            owner_home: join(home, 'data'),
+            project_slug: 'acme',
+            env: { PATH: join(home, 'empty'), HOME: join(home, 'noinstall') },
+          }),
+        )
+        expect(warnings.some((w) => w.includes('DISABLED'))).toBe(true)
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
+    })
   })
 })

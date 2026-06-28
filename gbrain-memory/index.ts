@@ -27,6 +27,12 @@ export {
   type GBrainStdioMcpClientOptions,
 } from './gbrain-stdio-client.ts'
 export {
+  resolveGbrainCommand,
+  resolveGbrainChildPath,
+  resolveBunDir,
+  gbrainProbePaths,
+} from './resolve-gbrain-command.ts'
+export {
   GBrainVersionNotice,
   parseUpgradeMarker,
   type GBrainUpgradeMode,
