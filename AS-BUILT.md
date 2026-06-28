@@ -2,6 +2,61 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — Time-rot test-class hardening sweep (proactive)
+
+**The class.** #90's CI surfaced a silent time-rot bug: `reflection/index.ts`'s
+`readDiary` defaulted its day-file read window to real `Date.now()` while
+`appendDiary` honored the injected `now`. A test pinned to a hardcoded
+`now: 2026-06-21` passed only while wall-clock stayed within the 7-day window —
+once wall-clock crossed 2026-06-28 the read window no longer covered the written
+day-file, the read came back empty, and **every Open PR was blocked**. Fixed in
+#90 (commit `939c057`) by threading the injected clock into `readDiary`. Per
+CLAUDE.md: *time-dependent tests MUST use `Date.now()`-relative timestamps, never
+hardcoded ISO strings.* This sweep hunts the same class across the suite before it
+blocks future merges.
+
+**Method (classify, don't mass-edit).** For each candidate test, traced the
+actual read path of the code-under-test:
+- **SAFE** — the test injects a fixed clock AND the code-under-test honors that
+  *same* clock on BOTH the write and the read/window path (internally consistent
+  → never rots), or the hardcoded dates feed no real-`Date.now()`-relative window
+  at all.
+- **ROT-PRONE** — the code-under-test windows/decides relative to real
+  `Date.now()`/`new Date()` while the test supplies a hardcoded date (the #90 bug).
+
+**Result — all 11 candidates SAFE; the #90 fix was the sole instance.** Every
+sibling already threads an injected clock through both read and write (the
+correct post-#90 pattern), or compares against fixed hour/minute constants / a
+relative sort rather than a wall-clock window. No production code needed changing.
+Read-path evidence per file is recorded in
+`docs/research/time-rot-test-class-audit-2026-06-28.md`.
+
+| # | Test file | Verdict | Read-path evidence |
+|---|-----------|---------|--------------------|
+| 1 | `tasks/__tests__/focus-score-cron.test.ts` | SAFE | `tasks/focus-score.ts:86,93,107` urgency/staleness use injected `input.now`; cron threads it at `focus-score-cron.ts:77,103` |
+| 2 | `onboarding/synthesis/__tests__/synthesis-session.test.ts` | SAFE | `prepass.ts:117,135` is a relative recency *sort* (`b−a`), no `Date.now()` cutoff; dates elsewhere are formatting only |
+| 3 | `onboarding/overnight/dispatcher.test.ts` | SAFE | `dispatcher.ts:247` `nowMs = this.deps.now()`; window helpers (`:90,103,124`) take `nowMs`, never global clock |
+| 4 | `onboarding/overnight/morning-brief.test.ts` | SAFE | `morning-brief.ts:145` window from `deps.now()`; `dispatcher.ts:90` wraps the *passed* ts; selection is string-equality |
+| 5 | `cores/free/calendar/__tests__/pre-meeting-brief-scheduler.test.ts` | SAFE | `pre-meeting-brief-scheduler.ts:120,272,305-322` window + skip + fire all off injected `opts.now`/`scheduleTimer` |
+| 6 | `cores/free/email/__tests__/triage-scheduler.test.ts` | SAFE | `triage-scheduler.ts:112-121` fire-window matches fixed hour/minute consts vs the passed `now`, not a `Date.now()` window |
+| 7 | `gateway/__tests__/app-focus-surface.test.ts` | SAFE | `app-focus-surface.ts:158,204,257-260` every horizon/bucket bound derived from injected `nowMs` |
+| 8 | `gateway/__tests__/calendar-core-production-composer.test.ts` | SAFE | `calendar-wiring.ts:87,99,106` + `chat-commands.ts:153-198,442-548` window from injected `now()`; no `Date.now()` in read path |
+| 9 | `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts` | SAFE | `triage-scheduler.ts:164` fire check off passed `now`; watermark dedup vs stored mark (`email-managed-wiring.ts:184-192`), not wall-clock |
+| 10 | `reflection/__tests__/diary-store.test.ts` | SAFE | store window defaults to `Date.now()` (`diary-store.ts:149`) but every data-bearing read passes `now` matching its writes; the one no-`now` read hits the empty-dir guard (`:146`) |
+| 11 | `reflection/__tests__/index.test.ts` | SAFE (fixed #90) | `reflection/index.ts:169` threads `now: now()` into `readRecentDiary` |
+
+**Proactive guard added (the only code change in this PR).**
+`reflection/__tests__/index.test.ts` gains an **always-on** regression guard for
+the #90 class: it writes+reads the diary under an injected clock set *years*
+before wall-clock (2020), so the written day-file is always outside the default
+7-day window computed from real `Date.now()` regardless of which wall-clock the
+suite runs on. The entry is only found if `readDiary` honors the injected clock —
+so the test fails **the instant** `readDiary` regresses to `Date.now()`, rather
+than only once wall-clock drifts past a hardcoded date (the silent-rot mode the
+original bug shipped in). Verified with teeth: temporarily reverting the #90 fix
+flips this guard (and the existing round-trip/correction tests) red; restoring it
+returns the file to 6 pass / 0 fail.
+
 ## 2026-06-27 — P1-5: native Claude Code SKILL.md discovery for the spawned agent
 
 **The gap (lift, not reinvention).** Vajra exposes real Claude Code skills under

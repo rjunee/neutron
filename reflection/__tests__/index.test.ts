@@ -53,6 +53,27 @@ describe('createReflection — diary read/write', () => {
     expect(back).toHaveLength(1)
     expect(back[0]?.text).toBe('Investigated the memory subsystems before building.')
   })
+
+  // Time-rot regression guard for #90 (commit 939c057). readDiary MUST thread the
+  // injected clock into the read window; if it falls back to real Date.now(), a
+  // write+read at an injected clock far from wall-clock reads an empty window.
+  //
+  // The injected clock here is set deliberately FAR in the past (2020) so the
+  // day-file written for that date is always outside the default 7-day window
+  // computed from real Date.now() — regardless of the wall-clock the suite runs
+  // on. That makes this an ALWAYS-ON guard: it fails the instant readDiary stops
+  // honoring the injected clock, rather than only once wall-clock drifts past the
+  // hardcoded date (the silent-rot mode the original bug shipped in).
+  test('readDiary honors the injected clock even far from wall-clock (no Date.now() read-window rot)', () => {
+    const farPast = () => Date.parse('2020-06-21T08:00:00.000Z')
+    const r = createReflection({ ownerDataDir: tmp, now: farPast })
+    r.appendDiary({ text: 'Journaled under a clock years before wall-clock.' })
+    // With the read window anchored to the injected clock the entry is found;
+    // a Date.now()-defaulted read window would be empty here.
+    const back = r.readDiary()
+    expect(back).toHaveLength(1)
+    expect(back[0]?.text).toBe('Journaled under a clock years before wall-clock.')
+  })
 })
 
 describe('createReflection — correction detected → logged → retrievable → applied', () => {
