@@ -44,6 +44,27 @@ exact "built but not actually working in the real env" trap.
   (the bun global-bin dir — distinct from the bun *binary* dir already on the
   list), so a freshly generated launchd plist / systemd unit already resolves
   gbrain. Pure addition to the curated list, dedup-safe.
+- **Doctor round-trip now inits its ephemeral brain (exposed by the resolver).**
+  `gbrain-doctor.ts#realProbes().memoryRoundtrip` connected `gbrain serve` to a
+  fresh temp `GBRAIN_HOME` it never `gbrain init`'d → "No brain configured" →
+  `MCP error -32000: Connection closed` → `neutron doctor` falsely reported
+  DEGRADED on healthy installs (latent before, since the binary first had to be
+  reachable; the resolver surfaces it). Wired the same `ensureInitialized` guard
+  production uses (keyword+graph, no embedder) so the probe runs a true
+  `init`→`serve`→`put_page`→`list_pages` round-trip.
+
+**Live acceptance (real-turn gate, on `~/neutron/core`).** Checked out the branch
+on Ryan's live install, `bun install`, `launchctl kickstart -k …neutron-server`
+(the plist was NOT regenerated — so this exercises the runtime resolver alone),
+then drove real chat turns on :7800. Evidence: (1) `~/neutron/data/gbrain/.gbrain/
+config.json` now EXISTS (`[gbrain-memory] initialized brain at GBRAIN_HOME=…` in
+server.log) — it was ABSENT before; (2) ZERO "executable not found on PATH" /
+DISABLED warnings since restart; (3) `mcp__neutron__gbrain_search` now EXECUTES
+end-to-end through the agent (returns clean results, no "Connection closed"), and
+the doctor's real `put_page`→`list_pages` round-trip passes under a narrow
+service-like PATH. (Recall of a *scribed* fact is gated on the steady-state entity
+scribe, which is inactive while the live owner is mid-onboarding — a separate
+scribe-fan-out concern, not reachability.)
 
 **Tests (committed).** `gbrain-memory/__tests__/resolve-gbrain-command.test.ts`
 (PATH-hit → which result; PATH-miss → first existing probe with `$BUN_INSTALL/bin`

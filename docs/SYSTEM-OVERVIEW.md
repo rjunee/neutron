@@ -701,7 +701,11 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
      child's PATH (`resolveGbrainChildPath`) so it carries the gbrain dir AND a
      `bun` dir (`process.execPath`) — the shebang re-resolves even under the
      narrow service PATH. The doctor (`realProbes`) uses the same resolver for
-     detection + spawns, so one resolver backs both serve-spawn and doctor.
+     detection + spawns, so one resolver backs both serve-spawn and doctor; its
+     `memoryRoundtrip` probe also wires the production `ensureInitialized` guard
+     so it `init`s its ephemeral brain before `serve` (previously it hit "No
+     brain configured" → `Connection closed` once the binary became reachable,
+     falsely reporting DEGRADED on healthy installs).
   2. **Service-PATH correctness (`neutron-service.sh#_service_path`) — fresh
      installs' plist/unit.** The generated launchd plist / systemd unit PATH now
      includes `${BUN_INSTALL:-$HOME/.bun}/bin` (the bun global-bin dir, distinct

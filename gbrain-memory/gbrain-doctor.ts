@@ -544,6 +544,7 @@ export function realProbes(env: NodeJS.ProcessEnv = process.env): DoctorProbes {
       try {
         dir = await mkdtemp(join(tmpdir(), 'neutron-gbrain-doctor-'))
         const command = resolveGbrainCommand(env)
+        const childPath = resolveGbrainChildPath({ command, env })
         client = new GBrainStdioMcpClient({
           brainId: 'neutron-doctor-probe',
           source: 'default',
@@ -551,7 +552,24 @@ export function realProbes(env: NodeJS.ProcessEnv = process.env): DoctorProbes {
           // resolvable) + a bun-resolvable child PATH, so the round-trip proves
           // the service path works, not just the doctor's own PATH.
           ...(command !== null ? { command } : {}),
-          env: { GBRAIN_HOME: dir, PATH: resolveGbrainChildPath({ command, env }) },
+          env: { GBRAIN_HOME: dir, PATH: childPath },
+          // Mirror production: init the ephemeral brain BEFORE the first `serve`
+          // spawn. Without this, `serve` hits an uninitialized brain ("No brain
+          // configured") → `MCP error -32000: Connection closed` → the probe
+          // falsely reports DEGRADED on a perfectly healthy install (the
+          // round-trip is otherwise the SAME `init`→`serve`→`put_page` seal the
+          // runtime uses; the canonical real-serve-roundtrip test inits too).
+          // Dynamic import avoids the static gbrain-doctor ↔ ensure-brain-init
+          // import cycle; keyword+graph (no embedder), same temp GBRAIN_HOME.
+          ensureInitialized: async () => {
+            const { ensureBrainInitialized } = await import('./ensure-brain-init.ts')
+            await ensureBrainInitialized({
+              gbrainHome: dir!,
+              embedder: null,
+              ...(command !== null ? { command } : {}),
+              env: { ...env, PATH: childPath },
+            })
+          },
         })
         const store = new GBrainMemoryStore(client)
         await withTimeout(
