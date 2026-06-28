@@ -153,7 +153,12 @@ export function renderSkillPack(draft: SkillDraft): string {
   front.push('---')
   front.push(`name: ${draft.name}`)
   front.push('description: |')
-  for (const line of descLines) front.push(`  ${line}`)
+  // Indent EVERY physical line of the block scalar — a `whatItDoes` paragraph or
+  // a trigger may itself contain embedded newlines, so split before indenting or
+  // the frontmatter mis-parses and Claude Code won't load the skill (Codex P2).
+  for (const entry of descLines) {
+    for (const physical of entry.split('\n')) front.push(`  ${physical}`.trimEnd())
+  }
   front.push('---')
   front.push('')
   return `${front.join('\n')}\n${renderSkillMarkdown(draft)}`
