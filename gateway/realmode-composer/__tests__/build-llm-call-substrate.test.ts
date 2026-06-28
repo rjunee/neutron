@@ -151,6 +151,38 @@ test('eager pool + api_key credential dispatches successfully and threads ANTHRO
   expect(pool.credentials[0]!.consecutive_failures).toBe(0)
 })
 
+test('ambient credential threads NEITHER token — child claude uses its own Keychain auth (fresh-install 503 fix)', async () => {
+  // Single-owner Open: an ambient/Keychain-authed `claude` resolves to an
+  // `ambient`-kind pool with no secret. The substrate must scrub ALL three
+  // Anthropic auth vars and set NEITHER, so the spawned child falls back to its
+  // own ambient/Keychain auth (the same path `claude -p` uses headlessly).
+  const pool = newCredentialPool({
+    strategy: 'fill_first',
+    credentials: [{ id: 'anthropic:ambient_keychain', kind: 'ambient', secret: '' }],
+  })
+  const { substrateFactory, seen } = captureFactory()
+  const sub = buildLlmCallSubstrate({
+    pool,
+    substrate_instance_id: 'inst-ambient',
+    cwd: workdir,
+    substrateFactory,
+  })
+  // A one-credential ambient pool still builds (only an EMPTY pool → null).
+  expect(sub).not.toBeNull()
+  const handle = sub!.start(runSpec())
+  for await (const _ev of handle.events) {
+    // drain
+  }
+  expect(seen.length).toBe(1)
+  const env = seen[0]!.opts.env
+  // All three Anthropic auth vars scrubbed to undefined; NEITHER token threaded.
+  expect(env?.['ANTHROPIC_API_KEY']).toBeUndefined()
+  expect(env?.['ANTHROPIC_AUTH_TOKEN']).toBeUndefined()
+  expect(env?.['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined()
+  // The pool key still folds in the selected credential id (never a secret).
+  expect(seen[0]!.opts.credential_identity).toBe('anthropic:ambient_keychain')
+})
+
 test('import warm-session (2026-06-17) — the Open composer cc-import substrate is built WARM (not ephemeral) with reset_context_per_turn', async () => {
   // GUARD for `open/composer.ts`: the history-import substrate must reuse ONE
   // warm `claude` process across chunks (NOT `ephemeral: true`, which respawns a

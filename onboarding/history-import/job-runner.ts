@@ -1682,7 +1682,10 @@ export class ImportJobRunner {
       enable_skip_llm?: boolean
       min_user_content_chars?: number
     } = { ...this.chunkOptions }
-    if (credentialKind === 'oauth') {
+    // `ambient` is a Keychain-resolved Max-OAuth under the hood (no env secret;
+    // the child `claude` auths via its own Keychain), so it shares Max OAuth's
+    // predictive rate-limit profile and needs the SAME smaller 4096 target.
+    if (credentialKind === 'oauth' || credentialKind === 'ambient') {
       effective.target_tokens = MAX_OAUTH_CHUNK_TARGET_TOKENS
     } else if (effective.target_tokens === undefined) {
       effective.target_tokens = CHUNK_TARGET_TOKENS

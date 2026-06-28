@@ -828,6 +828,18 @@ ADDITIVELY activates a capability.
   affordance on the credential step) and the per-tier intake closure (managed:
   an `ApiKeyStore`-backed hook; open: an env-file writer) are the explicit
   next slice — the primitive is deliberately landed and proven first.
+- **Open also accepts an ambient/Keychain-authed `claude` (single-owner).**
+  Beyond explicit env tokens, `resolveOpenLlmPool` accepts a `claude` that is
+  already authenticated via ambient/Keychain auth (the macOS "Claude
+  Code-credentials" item, or `~/.claude/.credentials.json` elsewhere) — detected
+  by a cheap, cached, never-hanging probe (`open/ambient-claude-auth.ts`). This
+  is what un-bricks a fresh Mac install whose owner already ran `claude` login:
+  before it, `GET /chat` 503'd ("Authenticate Claude") and the box booted
+  LLM-less even though `claude -p` worked headlessly. A hit yields a new
+  `ambient`-kind credential whose substrate threads NO token, so the spawned
+  `claude` child auths via its own Keychain. Resolution order is env OAuth → env
+  API key → ambient probe → `null` (the 503 gate). Explicit tokens win and the
+  probe never runs when one is set; a truly-unauthed box still 503s.
 
 ## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
 
