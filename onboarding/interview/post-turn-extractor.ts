@@ -62,6 +62,11 @@ const IMPORT_ACTIVE_PHASES: ReadonlySet<string> = new Set([
   'import_analysis_presented',
 ])
 
+// The phase the extractor ADOPTS when a job is in flight but the row still reads
+// as an interview marker (see the next_phase decision in runOnce) — the only
+// import-active phase the import-running cron advances from.
+const IMPORT_RUNNING_PHASE = 'import_running'
+
 export type ExtractorLog = (
   level: 'info' | 'warn' | 'error',
   msg: string,
@@ -203,9 +208,25 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     // blocked from finalizing while the import was mid-flight).
     let current: OnboardingState | null = fresh
     if (hasPatch) {
-      // While an import owns the phase (or a job is genuinely in flight), only
-      // patch fields — never downgrade the phase.
-      const next_phase = importActiveNow ? (fresh?.phase ?? INTERVIEW_PHASE) : INTERVIEW_PHASE
+      // Choose the phase to write. Never downgrade out of an import:
+      //   - fresh phase already import-active → preserve it verbatim.
+      //   - a job is genuinely IN FLIGHT but the fresh phase still reads as an
+      //     interview marker → ADOPT `import_running` rather than writing the
+      //     interview phase back. The upload's `notifyImportUpload` inserts the
+      //     `import_jobs` row BEFORE it upserts `phase='import_running'` (Codex
+      //     r1 P1), so an extractor can observe the live job, then race the
+      //     upload's phase upsert and clobber `import_running` back to the
+      //     interview marker here — which would re-strand the cron (it advances
+      //     only from `import_running`) and re-orphan the import. Writing
+      //     `import_running` ourselves converges the row to the correct phase
+      //     regardless of interleaving (the upload always (re)stamps
+      //     `import_job_id`, which the cron also requires).
+      //   - no import in flight → the normal interview marker.
+      const next_phase = !importActiveNow
+        ? INTERVIEW_PHASE
+        : fresh !== null && IMPORT_ACTIVE_PHASES.has(fresh.phase)
+          ? fresh.phase
+          : IMPORT_RUNNING_PHASE
       current = await deps.stateStore.upsert({
         project_slug: deps.project_slug,
         user_id: turn.user_id,

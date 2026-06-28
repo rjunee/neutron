@@ -193,6 +193,39 @@ test('in-flight import DEFERS completion even when all 5 fields are present', as
   expect(completed).toBe(false)
 })
 
+test('an in-flight job at an interview phase ADOPTS import_running (no downgrade) — Codex r1 P1', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  // Fresh row reads as the interview marker (the upload inserted the job row but
+  // its phase='import_running' upsert hasn't landed / is racing this turn).
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'work_interview_gap_fill',
+    phase_state_patch: { user_first_name: 'Sam', import_job_id: 'synth-live' },
+    advanced_at: 500,
+  })
+  let completed = false
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: stubClient([JSON.stringify({ agent_name: 'Atlas' })]),
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => true, // a job is genuinely live
+    onComplete: () => {
+      completed = true
+    },
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'What should I call you?',
+    user_text: 'Atlas',
+    observed_at: 1000,
+  })
+  // Must NOT write the interview marker back (that would re-strand the cron and
+  // re-orphan the import); it adopts import_running so the cron keeps driving.
+  expect(state!.phase).toBe('import_running')
+  expect(completed).toBe(false)
+})
+
 test('completion proceeds once the import is no longer in flight', async () => {
   const store = new InMemoryOnboardingStateStore()
   let completed = false
