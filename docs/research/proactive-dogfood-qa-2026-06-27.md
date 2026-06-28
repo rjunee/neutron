@@ -148,17 +148,49 @@ content.
   web UI. Agent-native parity gap (agent can create; user has no list/manage UI).
 - ⏳ project rail refresh / morning-brief wiring.
 
-### Real Claude-export import (Ryan's steer) — ✅ STARTS on the real 14MB export
-Fresh isolated instance (:7812, fresh home). Drove onboarding in real Chromium;
-the import affordance appeared ("📎 Attach or drop your ChatGPT export ZIP…"),
-uploaded Ryan's REAL `~/Downloads/Claude Data Batch (1).zip` (14MB
-conversations.json + projects/ + memories.json + users.json + design_chats/).
-Status advanced to **"Export received — reading through your history now."** ✅
-- 🟡 **Observation:** the agent offered a **`chatgpt`-source** affordance (hint
-  read "ChatGPT export ZIP") even though the user has a **Claude** export. Upload
-  was accepted against `/api/upload/chatgpt`. **Verifying** whether synthesis
-  correctly parses the Claude format and materializes REAL content
-  (docs + memory) — result pending (synthesis over 14MB is slow).
+### ❌ Real Claude-export import — BROKEN (P1): upload accepted, **no import ever runs**
+Ryan's steer. Fresh instance (:7812, fresh home). Real Chromium: import
+affordance appeared, uploaded his REAL `~/Downloads/Claude Data Batch (1).zip`
+(14MB conversations.json + projects/ + memories.json + users.json +
+design_chats/). UI showed **"Export received — reading through your history
+now."** — **but nothing was ever processed.**
+
+**Effect check (the disappointment, fully reproduced):**
+- `imports/claude.zip` saved (14MB, intact) — and the format **sniffer worked**:
+  server logged `[upload] source override: url=chatgpt sniffed=claude` (a Claude
+  export mis-posted to `/chatgpt` is correctly re-routed to the Claude parser).
+- **BUT `import_jobs` is EMPTY**, `import_results=0`, `import_pass1_chunks=0`,
+  `raw-transcripts/` empty, and `[import-running-cron] … in_flight_imports=0`
+  forever. **No synthesis, no insights, no materialized docs/memory from history.**
+- **Same on the synthetic e2e (iso1):** its "import success" was a FALSE POSITIVE
+  — the 3 projects came from the **onboarding conversation** (user *stated* them),
+  not from import synthesis (iso1 also has empty `import_jobs`).
+
+**Root cause (verified in code + DB, not guessed):**
+1. Upload handler (`gateway/upload/import-upload-handler.ts`) saves the zip then
+   calls `engine.notifyImportUpload(...)`.
+2. `notifyImportUpload` (`onboarding/interview/engine.ts:2296`) only starts a job
+   when the InterviewEngine phase is `import_upload_pending` (or recovers from
+   `ai_substrate_offered`). For any other phase it falls through to
+   `return { outcome: 'no_active_prompt', state }` — **HTTP 200 ok, no job**.
+3. In live **Path-1 (onboarding-as-CC-session)** the engine state sits at a
+   conversational phase — observed `onboarding_state.phase =
+   work_interview_gap_fill`, `import_job_id = NULL`. The conversational agent
+   shows the upload affordance, but the engine never enters
+   `import_upload_pending`, so every solicited upload is silently orphaned.
+   (State WAS found — outcome was `no_active_prompt`, not `noop_no_state` — so the
+   user_id matched; it is purely the phase gate.)
+4. The client (`landing/chat-react/ChatApp.tsx:766`) renders "Export received —
+   reading through your history now." on any HTTP 200, **ignoring** the response's
+   `outcome`/`job_id: null` — so a no-op reads as success. This is exactly the
+   "banned silent-no-op-that-looks-like-success" the engine's own comments warn
+   against, slipping through for the Path-1 phase.
+
+**Classification: 🟡 NEEDS-DECISION (P1)** — the fix touches onboarding routing /
+the Path-1↔import integration (hard to reverse; a naive "import from any phase"
+change risks mis-firing on stray uploads). See ND2 for the recommended targeted
+fix. (The format sniffer, zip storage, and parser routing are all fine — the gap
+is purely that Path-1 never drives the engine into the import-accepting phase.)
 
 ---
 
@@ -169,10 +201,14 @@ Status advanced to **"Export received — reading through your history now."** �
 | B1 chat-core boot | ✅ not a bug | verified `bun run` resolves post-install |
 | B2 port env doc | ❌ P2 | `open/server.ts` hdr vs `boot-helpers.ts:240` |
 | 1 native tool call | ✅ WORKS | real reminder row in project.db from plain English |
-| 2 memory recall (gbrain) | ❌ P1 / 🟡 needs-decision | gbrain brain never init'd → `gbrain_search`→`{results:[]}`; masked by file-memory; live install affected too |
-| 3 skills | ⏳ (discoverable ✅) | invocation pending |
-| 4 onboarding (synthetic) | ✅ WORKS | e2e all gates pass; real-export pending |
-| 5 other surfaces | ⏳ | docs-tab 0-rows flag; admin/chat render |
+| 2 memory recall (gbrain) | ❌ P1 / 🟡 ND1 | gbrain brain never init'd → `gbrain_search`→`{results:[]}`; masked by file-memory; live install affected too |
+| 3 skills | ✅ WORKS (behavioral) | design ask → production HTML+CSS; packs discoverable |
+| 4 onboarding (synthetic) | ✅ WORKS | e2e all gates pass |
+| 4b real export import | ❌ P1 / 🟡 ND2 | upload accepted + "reading your history now" but NO job ever runs (Path-1 phase gate); reproduced synthetic + real |
+| 5 documents tab | ✅ WORKS | seed-context.md renders (e2e selector was stale — fixed) |
+| 5 admin/integrations | ✅ WORKS | 5 rows incl gmail/calendar/workspace + apify/tavily key slots |
+| 5 reminders/memory UI | 🟡 parity gap | no web reminders-list, no admin Memory section in Open client |
+| B2 port env doc | ✅ FIXED | `open/server.ts` docstring → `NEUTRON_PORT` |
 
 ## NEEDS-DECISION (do not guess — owner call)
 
@@ -186,3 +222,18 @@ backend, removing the external-binary + `gbrain init` + embedder dependency for
 the default keyword+graph mode. This is a production-backend change (hard to
 reverse) → owner decision. Interim unambiguous fix shippable now: a loud,
 user-visible "memory is not initialized" signal instead of silent empty recall.
+
+### ND2 (P1). History import never runs in Path-1 onboarding
+Uploads during the live conversational onboarding are silently orphaned (no
+import job) because `notifyImportUpload` gates on the legacy
+`import_upload_pending` phase that Path-1 never enters.
+**Recommendation (targeted, low-risk):** since the engine's own comment notes
+`startImportAndAdvanceToRunning` "upserts phase to `import_running` regardless of
+the current phase," extend `notifyImportUpload`'s non-import-phase fall-through to
+**honor a solicited upload** — i.e. when an upload affordance was genuinely
+offered in the active onboarding session, call `startImportAndAdvanceToRunning`
+instead of returning `no_active_prompt`. Pair it with a client fix so
+`ChatApp.tsx` only shows "reading your history now" when the response carries a
+real `job_id` (otherwise surface an honest "couldn't start the import" notice) —
+that half is safe to ship immediately and kills the false-success message. Owner
+decision needed on the routing change so it can't mis-fire on stray uploads.
