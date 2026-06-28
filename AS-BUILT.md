@@ -5924,3 +5924,42 @@ in <50ms (the old regex would backtrack for seconds / hang):
 `bun test` green for skill-forge (31), reflection (36), gateway/comments (115),
 onboarding/interview (965 pass / 35 skip), composition-projection (9). Race +
 flaky tests looped 20–30× (incl. under CPU contention) → 0 failures.
+
+---
+
+## 2026-06-27 — Proactive dogfood QA pass (Forge)
+
+Adversarial real-browser / real-turn QA of the live Open product against a fresh
+isolated instance (temp `NEUTRON_HOME`, port 7811/7812, owner Max-OAuth, real
+Max LLM, `gbrain` on PATH). Full findings: `docs/research/proactive-dogfood-qa-2026-06-27.md`.
+
+**Verified working (real browser/turn):** native tool-call (plain-English
+"set a reminder" → real `project.db.reminders` row), conversational onboarding
+(auto-start, freeform advance, persona persisted, real button labels), Claude
+Code file-memory write+recall, Documents tab (renders `cdoc-list-*` tree),
+Admin/Integrations (gmail/calendar/workspace + apify/tavily key slots), skills
+(design ask → production HTML+CSS; packs discoverable), steady-state chat,
+project rail, proactive morning-brief cron wired+ticking.
+
+**Shipped fixes:** `open/server.ts` docstring corrected to `NEUTRON_PORT` (was
+the never-read `NEUTRON_LISTEN_PORT`); `tests/e2e-browser/onboarding_walkthrough.py`
+`documents_doc_visible` selector fixed to the real `.cdoc-list-name` (the old
+`.cdoc-row` never matched → silent false negative).
+
+**Two P1 disappointments found, both masked as "working" → NEEDS-DECISION:**
+- **ND1 — gbrain memory layer dead in production.** Open spawns external
+  `gbrain serve` against a brain that's never `gbrain init`'d (and `init` needs
+  an embedder Open doesn't set) → `gbrain_search` (#89) silently returns
+  `{results:[]}`; scribe→gbrain writes nothing. Affects the live install too.
+  Recall only survives via Claude Code file-memory. Recommend wiring the
+  in-process PGLite engine (already used by the test suite) as the prod backend.
+- **ND2 — history import never runs in Path-1 onboarding.** Upload accepted +
+  "reading your history now" shown, but `notifyImportUpload` only starts a job at
+  the `import_upload_pending` phase, which Path-1 (onboarding-as-CC-session)
+  never enters (sits at `work_interview_gap_fill`) → `no_active_prompt`, zip
+  orphaned, no synthesis. Reproduced with Ryan's real 14MB Claude export.
+  Recommend honoring a solicited upload (call the phase-agnostic
+  `startImportAndAdvanceToRunning`) + client only claims success on a real `job_id`.
+
+**Agent-native parity gap noted:** no web Reminders list and no admin Memory
+section in Open's React client (agent can create reminders; user has no list UI).

@@ -146,7 +146,19 @@ content.
   Reminders are **create-only** via the agent (create verified). The
   `/api/app/projects/<id>/reminders` REST route exists but isn't surfaced in the
   web UI. Agent-native parity gap (agent can create; user has no list/manage UI).
-- ⏳ project rail refresh / morning-brief wiring.
+- ✅ **Project rail** shows all onboarding-created projects (General + the 3
+  materialized projects rendered in the rail in real browser).
+- ✅ **Proactive morning-brief (#88 P1-4) WIRED + scheduled** — boot log:
+  `[cron-scheduler] … 2 job(s) ticking: [onboarding-import-running-dev,
+  proactive-brief-dev]`. The daily brief cron is registered and ticking (fires
+  `sink.send` at its scheduled time; `proactive_brief_log` empty only because the
+  schedule hasn't elapsed in the test window). **Idle-nudge sweep is wired but
+  DELIBERATELY not auto-enabled** (documented in composer.ts:1445 to avoid the
+  self-nudge loop) — so proactive idle nudges won't actually fire in Open today
+  (by design, noted for awareness).
+- ✅ **Reminder fire path** — reminder row persisted with `status=pending`,
+  `fire_at` tomorrow; the reminder cron + reminder-agent are wired (live fire not
+  testable inside the window).
 
 ### ❌ Real Claude-export import — BROKEN (P1): upload accepted, **no import ever runs**
 Ryan's steer. Fresh instance (:7812, fresh home). Real Chromium: import
