@@ -123,14 +123,42 @@ ChatGPT-export zip imported → 3 real projects materialized
 content.
 
 ### PRIORITY 3 — every other surface
-- ✅ Steady-state chat reply renders (real turn). ✅ Admin tab renders. ✅
-  Documents tab renders.
-- 🟡 **Documents tab showed 0 doc rows** (`documents_doc_visible=false`) though
-  `docs/overnight/seed-context.md` exists on disk under the tree root
-  (`<home>/Projects/<id>/docs/`). Chasing whether this is a stale test selector
-  or a real wiring gap (the `/docs/tree` REST surface needs a Bearer token, not
-  just the owner cookie).
-- ⏳ project rail refresh / reminders list surface / morning-brief wiring.
+- ✅ **Steady-state chat** — real turn round-trips, streaming, reply renders.
+- ✅ **Documents tab WORKS** — real-browser DOM shows the materialized doc tree:
+  `overnight/seed-context.md` + "Select a document to read." The e2e's
+  `documents_doc_visible=false` was a **stale selector** (`.cdoc-row` /
+  `[data-doc-id]`); the real rows render under `.cdoc*` classes. **NOT a bug**;
+  the e2e guard should be updated (fix below).
+- ✅ **Admin / Integrations tab WORKS** — 5 real rows in real browser:
+  `gmail_compose`, `google_calendar`, `google_workspace` (all "Not connected"
+  with a connect affordance) + `apify_api_token`, `tavily_api_key` (API-key
+  paste slots with free-tier hints). Integrations **and** key slots present.
+- ✅ **Skills** — design ask ("design a clean modern CTA button, give me
+  production-ready HTML+CSS") returned semantic, accessible, dependency-free
+  HTML+CSS with CSS custom props / hover states — behaviorally consistent with
+  the `impeccable`/design skill. Skill packs (`impeccable`, `agent-browser`,
+  `remind`, …) all discoverable under `<home>/.claude/skills/`. (Native
+  invocation can't be transcript-proven — the persistent-REPL substrate doesn't
+  persist a findable CC session JSONL — so this is behavioral + discovery
+  evidence, not a `Skill` tool_use capture.)
+- 🟡 **No web Reminders list surface** and **no admin Memory section** in Open's
+  React client (`landing/chat-react/` has zero `reminder`-UI and no Memory tab).
+  Reminders are **create-only** via the agent (create verified). The
+  `/api/app/projects/<id>/reminders` REST route exists but isn't surfaced in the
+  web UI. Agent-native parity gap (agent can create; user has no list/manage UI).
+- ⏳ project rail refresh / morning-brief wiring.
+
+### Real Claude-export import (Ryan's steer) — ✅ STARTS on the real 14MB export
+Fresh isolated instance (:7812, fresh home). Drove onboarding in real Chromium;
+the import affordance appeared ("📎 Attach or drop your ChatGPT export ZIP…"),
+uploaded Ryan's REAL `~/Downloads/Claude Data Batch (1).zip` (14MB
+conversations.json + projects/ + memories.json + users.json + design_chats/).
+Status advanced to **"Export received — reading through your history now."** ✅
+- 🟡 **Observation:** the agent offered a **`chatgpt`-source** affordance (hint
+  read "ChatGPT export ZIP") even though the user has a **Claude** export. Upload
+  was accepted against `/api/upload/chatgpt`. **Verifying** whether synthesis
+  correctly parses the Claude format and materializes REAL content
+  (docs + memory) — result pending (synthesis over 14MB is slow).
 
 ---
 
