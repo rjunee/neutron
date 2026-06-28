@@ -202,6 +202,37 @@ the real 14 MB / 184-conversation export + real Max LLM:
 uploading the export during onboarding materializes his projects + memory
 regardless of when in the interview he uploads.
 
+## RUN 4 addendum — combined build, TERSE-USER path (benign confirmations only)
+
+Re-ran the run-1 ordering on a 4th fresh isolated instance (`:7819`,
+`/tmp/neutron-resetgate-home4`) built from the branch AFTER the empty-patch
+finalize hardening — but this time the driver only ever sends benign
+confirmations ("keep setting things up"), NEVER a field-bearing turn. This is the
+realistic terse user who answers the interview, uploads, then just nods along.
+
+- Onboarding HELD at `import_running` across the full 8/8 synthesis (same as run 3).
+- After the import consumed, a **benign confirmation finalized onboarding on its
+  own** (the empty-patch completion path) — no field-bearing turn needed.
+- `onboarding_state.phase=completed`, `completed_at` set; `projects` table = **10
+  rows** (3 interview + 7 imported: `info-product-initiative, junee,
+  mystical-design-object-brand, personal-ops-learning, quintessential,
+  quintessential-ventures, tabs`); import job `completed`.
+
+So both the explicit (run 3) and the terse (run 4) post-import flows now complete
+WITH the import materialized. The Codex r1 P1 (adopt `import_running`) and r2 P2
+(re-probe before finalize) hardenings are additionally unit-guarded
+(`post-turn-extractor.test.ts`).
+
+### Known residual (documented, deferred)
+The finalize is not mathematically atomic with the in-flight-import probe: an
+upload that starts a job in the sub-millisecond window between the final re-probe
+and `onComplete`'s internal `completed` write could still slip through. The two
+fixes shrink this to a vanishing window (and re-read + re-probe right before
+`onComplete`), but a fully atomic guard would require the upload path
+(`notifyImportUpload`) and finalize to share a per-owner lock or DB transaction —
+a deeper change deferred to a focused follow-up. In single-owner onboarding (one
+upload, one finalize) the residual probability is negligible.
+
 ### Open follow-ups (non-blocking, separate PRs)
 - **Early-upload race (run 2):** an upload on the very first turn (before the
   onboarding_state row / `importAffordanceOffered` settles) returns
