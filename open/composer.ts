@@ -2051,6 +2051,30 @@ export function buildOpenGraphComposer(
           send: buildAppWsSendReply(channel_topic_id, project_id),
           observed_at: now,
         })
+        // Entity scribe → GBrain (parity with the typed-message receiver above):
+        // a freeform quick-reply answer is owner text worth extracting too, so a
+        // long freeform reply doesn't silently skip memory just because it arrived
+        // via a button prompt instead of the composer. Short choice values are
+        // dropped by the scribe's own `shouldExtract` floor, so a bare tap costs
+        // nothing. Fire-and-forget + guarded; omitted on LLM-less boxes.
+        if (scribeOnUserTurn !== undefined) {
+          try {
+            scribeOnUserTurn({
+              project_slug,
+              user_id,
+              topic_id: turnTopicId,
+              text: replyText,
+              observed_at: now,
+              author: { id: 'owner', display: 'owner' },
+            })
+          } catch (err) {
+            console.warn(
+              `[open] event=scribe_hook_threw project=${project_slug} topic=${turnTopicId} err=${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          }
+        }
         // FIX 1 (#85) — refresh the rail if this turn changed the project set.
         emitProjectsChangedIfChanged(user_id)
       },
