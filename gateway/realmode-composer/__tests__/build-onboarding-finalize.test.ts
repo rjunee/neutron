@@ -265,3 +265,50 @@ test('finalize materializes from import_result.proposed_projects when supplied',
 
   h.db.close()
 })
+
+test('finalize unions interview-named projects with import_result.proposed_projects (no silent drop)', async () => {
+  const h = makeHarness()
+  // The owner named three projects conversationally; the import proposed a
+  // partially-overlapping set ('Acme' overlaps; 'Infra' is import-only).
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      primary_projects: ['Topline Revenue', 'Acme', 'Book'],
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      entities: [],
+      topics: [],
+      proposed_projects: [
+        { name: 'Acme', rationale: 'Seen across the export.', suggested_topics: [] },
+        { name: 'Infra', rationale: 'Seen across the export.', suggested_topics: [] },
+      ],
+      proposed_tasks: [],
+      proposed_reminders: [],
+    } as never,
+  })
+
+  const rows = h.db
+    .prepare<{ id: string; name: string }, []>(
+      `SELECT id, name FROM projects WHERE deleted_at IS NULL ORDER BY name`,
+    )
+    .all()
+  const names = rows.map((r) => r.name).sort()
+  // Pre-fix this returned only ['Acme', 'Infra'] — 'Topline Revenue' and 'Book',
+  // named in the chat but absent from the export, were silently dropped.
+  expect(names).toEqual(['Acme', 'Book', 'Infra', 'Topline Revenue'])
+  // 'Acme' (in both) is materialized exactly once — the import entry wins the
+  // slug dedup (so it carries the import rationale), not duplicated.
+  expect(rows.filter((r) => r.id === slugifyProjectId('Acme')).length).toBe(1)
+
+  h.db.close()
+})

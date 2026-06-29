@@ -2,6 +2,35 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — Path-1 finalize unions chat-named projects with the import (no silent drop)
+
+**What shipped (M1 adversarial E2E Round 2).** A history-import during onboarding
+no longer silently drops the projects the owner named in conversation.
+
+**The bug.** `resolveProjects` in `build-onboarding-finalize.ts` returned ONLY
+`import_result.proposed_projects` whenever an import ran, ignoring
+`phase_state.primary_projects`. But the Path-1 preamble asks the owner to name ≥3
+projects in chat, and `primary_projects` is the union of those chat-named projects
+plus any the import merged in; `proposed_projects` only ever holds projects
+derived from the ChatGPT/Claude *export*. So any project the owner typed into the
+Neutron chat that wasn't also in their export got silently DROPPED — no `projects`
+row, no topic, no on-disk repo, no gbrain page — while persona-gen (which reads
+`primary_projects`) still referenced it, leaving the rail and the persona
+disagreeing. This is the exact defect the legacy engine already documents + fixed
+(`engine.ts` ~5180); the Path-1 finalizer reverted to the broken behavior.
+
+**The fix (no feature flag).** `resolveProjects` materializes the UNION: the
+import-proposed entries first (so they win the slug dedup and carry the import
+`rationale`), then every interview-named project whose slug isn't already covered.
+With no import this is unchanged (interview-only). The caller's `seenSlugs` dedup
++ `resolveBindTarget` already make a superset safe (overlapping names collapse to
+one row).
+
+**Regression gate** adds a case to
+`gateway/realmode-composer/__tests__/build-onboarding-finalize.test.ts`: owner
+names `[Topline Revenue, Acme, Book]`, import proposes `[Acme, Infra]`; asserts
+all four projects materialize (`Acme` once) instead of the pre-fix `[Acme, Infra]`.
+FAILS pre-fix, PASSES with the fix; the four pre-existing finalize tests stay green.
 ## 2026-06-29 — Restart resilience: re-arm the import-completion watcher on reconnect
 
 **What shipped (M1 adversarial E2E Round 2).** A server restart mid-import no
