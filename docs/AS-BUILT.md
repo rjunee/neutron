@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Trident v2 — auto mode (Phase 3): autonomous permissioning replaces `--dangerously-skip-permissions`
+
+**What shipped.** The inner-loop `claude -p` launcher no longer runs under the
+reckless `--dangerously-skip-permissions` (`bypassPermissions`). It now runs under
+**auto mode** — `--permission-mode dontAsk` + a per-launch `--settings` allowlist
++ deny list + a PreToolUse deny-guard hook — so a headless run can NEVER hang on a
+permission prompt (non-allowlisted ops are DENIED, not asked) yet dangerous ops
+are blocked. NO feature flag — auto mode IS the single path (the dangerous skip is
+removed). Spec: `docs/specs/trident-auto-mode.md`; plan Phase 3.
+
+- **`trident/auto-mode.ts` (NEW).** Pure module: `buildTridentAutoModeSettings()`
+  (dontAsk + `permissions.allow` for the trident op-set [Read/Edit/Write/Agent/
+  Workflow + git/gh/bun/sqlite/coreutils Bash prefixes] + `permissions.deny` for
+  force-push/reset-hard/`.git`+`.claude` writes + a PreToolUse Bash deny-guard
+  hook), `evaluateBashDenyGuard()` (denies push-to-main/master, `rm -rf` of a
+  system/home root, history rewrites/ref-surgery, force-deleting a protected
+  branch, `curl|bash` — while ALLOWING legit ops like `git push origin
+  trident/<slug>`, `git branch -D trident/<slug>`, `bun test`, the piped
+  `git worktree list | awk …`), and `assertAutoModeModelFloor()` (Opus 4.6+/
+  Sonnet 4.6+ floor — a below-floor launcher model fails the launch loudly).
+- **`trident/hooks/auto-mode-deny-guard.ts` (NEW).** The thin PreToolUse hook
+  (`bun`): reads the Bash tool JSON on stdin, delegates to `evaluateBashDenyGuard`,
+  emits `{permissionDecision:"deny", …}` for a dangerous shape, else `exit 0`
+  (defer to the allowlist). Fails OPEN on a malformed payload so it never wedges a
+  build (the deny list + dontAsk stay in force regardless). A deny here is HARD —
+  deny beats a hook `allow` and the allowlist.
+- **`trident/inner-loop.ts` (MODIFIED).** `buildClaudePrintArgs` emits
+  `-p <prompt> --permission-mode dontAsk --settings <auto-mode> … --model <model>`
+  (the `--dangerously-skip-permissions` token is GONE). `buildClaudePrintLauncher`
+  now: (1) asserts the model floor (→ `spawn_error`, never spawned, if below);
+  (2) writes the per-launch auto-mode settings to a tmp file (injectable
+  `write_auto_mode_settings` seam for tests); (3) passes the settings path to the
+  argv. Workflow `agent()` workers INHERIT the launcher mode (proto-2 Q2), so
+  Forge/Argus run under the same dontAsk + allowlist + deny-guard. MERGE stays the
+  OUTER/human gate (`merge.ts`) — unchanged.
+- **Tests.** `trident/auto-mode.test.ts` (NEW, 30+ assertions): the deny-guard
+  BLOCKS force-push/main-push/reset-hard/clean-f/history-rewrite/protected-branch-
+  delete/rm-rf-root/curl|bash and ALLOWS the legit build op-set; the settings
+  builder wires dontAsk + allow + deny + the hook; the model floor passes aliases
+  and fails haiku/4.5-and-below. `trident/inner-loop.test.ts` updated: the argv
+  asserts `--permission-mode dontAsk` + `--settings` and the ABSENCE of
+  `--dangerously-skip-permissions`; a regression test asserts a below-floor model
+  → `spawn_error`, never spawned.
+- **Docs.** `docs/SYSTEM-OVERVIEW.md` gains a named "Auto mode (Phase 3)"
+  subsection in the trident section.
+
+**Out of scope (per the plan / Ryan 2026-06-28):** budget enforcement (descoped);
+the OUTER durable loop; the merge gate (stays human/outer). **Revert:** `git
+revert <sha>` restores the prior `--dangerously-skip-permissions` launcher; the
+new files are additive.
+
 ## Trident v2 — inner Forge→Argus→fix loop is now a native CC Dynamic Workflow (Phase 2 hard cutover)
 
 **What shipped.** The trident INNER loop (Forge build → Argus review → fix loop)

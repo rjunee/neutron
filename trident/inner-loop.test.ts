@@ -289,20 +289,34 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 5; i++) await Promise.resolve()
 }
 
-describe('buildClaudePrintArgs — print-mode argv', () => {
-  test('uses -p (print mode), skip-permissions, and pins --model LAST', () => {
-    const args = buildClaudePrintArgs('the prompt', 'opus')
+describe('buildClaudePrintArgs — print-mode argv (auto mode)', () => {
+  test('uses -p, AUTO MODE (--permission-mode dontAsk, NOT skip-permissions), and pins --model LAST', () => {
+    const args = buildClaudePrintArgs('the prompt', 'opus', { settingsPath: '/tmp/auto.json' })
     expect(args[0]).toBe('-p')
     expect(args[1]).toBe('the prompt')
-    expect(args).toContain('--dangerously-skip-permissions')
+    // Phase 3: the reckless blanket skip is GONE — replaced by dontAsk auto mode
+    // (non-allowlisted ops are DENIED, never prompted → never hangs headlessly).
+    expect(args).not.toContain('--dangerously-skip-permissions')
+    const pmi = args.indexOf('--permission-mode')
+    expect(pmi).toBeGreaterThanOrEqual(0)
+    expect(args[pmi + 1]).toBe('dontAsk')
+    // The allowlist + deny-guard settings are wired.
+    const si = args.indexOf('--settings')
+    expect(si).toBeGreaterThanOrEqual(0)
+    expect(args[si + 1]).toBe('/tmp/auto.json')
     const mi = args.indexOf('--model')
     expect(mi).toBeGreaterThanOrEqual(0)
     expect(args[mi + 1]).toBe('opus')
     // No --tools restriction (trusted build path — full surface incl. Workflow).
     expect(args).not.toContain('--tools')
   })
-  test('appends extra_args before --model', () => {
-    const args = buildClaudePrintArgs('p', 'opus', ['--add-dir', '/repo'])
+  test('omits --settings when no settingsPath given (dontAsk still applies)', () => {
+    const args = buildClaudePrintArgs('p', 'opus')
+    expect(args).not.toContain('--settings')
+    expect(args.indexOf('--permission-mode')).toBeGreaterThanOrEqual(0)
+  })
+  test('appends extra before --model', () => {
+    const args = buildClaudePrintArgs('p', 'opus', { extra: ['--add-dir', '/repo'] })
     expect(args.join(' ')).toContain('--add-dir /repo')
     expect(args.indexOf('--add-dir')).toBeLessThan(args.indexOf('--model'))
   })
@@ -355,6 +369,8 @@ describe('buildClaudePrintLauncher — blocking spawn that drains to close', () 
       model: 'opus',
       base_env: { PATH: '/usr/bin', ANTHROPIC_API_KEY: 'inherited-should-be-scrubbed' },
       spawn: fs.spawn as never,
+      // Fake the settings writer so the test never touches disk.
+      write_auto_mode_settings: () => '/fake/auto-mode.settings.json',
     })
     const p = launch({ prompt: 'go', cwd: '/work/tree', timeout_ms: 60_000 })
     await flush()
@@ -362,6 +378,12 @@ describe('buildClaudePrintLauncher — blocking spawn that drains to close', () 
     expect(call.bin).toBe('/opt/claude')
     expect(call.args[0]).toBe('-p')
     expect(call.opts.cwd).toBe('/work/tree')
+    // AUTO MODE wired: dontAsk + the per-launch allowlist/deny-guard settings.
+    expect(call.args).toContain('--permission-mode')
+    expect(call.args).not.toContain('--dangerously-skip-permissions')
+    const si = call.args.indexOf('--settings')
+    expect(si).toBeGreaterThanOrEqual(0)
+    expect(call.args[si + 1]).toBe('/fake/auto-mode.settings.json')
     // Auth overlay applied: the live secret is set…
     expect(call.opts.env!['CLAUDE_CODE_OAUTH_TOKEN']).toBe('sekret')
     // …and the inherited API key is scrubbed to undefined (ISSUES #49).
@@ -425,11 +447,27 @@ describe('buildClaudePrintLauncher — blocking spawn that drains to close', () 
     const launch = buildClaudePrintLauncher({
       resolve_auth_env: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }),
       spawn: fs.spawn as never,
+      write_auto_mode_settings: () => '/fake/auto.json',
     })
     const p = launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
     await flush()
     fs.child().emit('error', new Error('broken pipe'))
     const res = await p
     expect(res.spawn_error).toContain('broken pipe')
+  })
+
+  test('AUTO MODE: a below-floor launcher model → spawn_error, NEVER spawned', async () => {
+    const fs = fakeSpawn()
+    const launch = buildClaudePrintLauncher({
+      resolve_auth_env: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }),
+      model: 'haiku', // unsupported for auto mode (below Opus 4.6/Sonnet 4.6 floor)
+      spawn: fs.spawn as never,
+      write_auto_mode_settings: () => '/fake/auto.json',
+    })
+    const res = await launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
+    expect(res.spawn_error).toContain('floor')
+    expect(res.exit_code).toBeNull()
+    // No process spawned for an under-floor model (loud fail, never a silent run).
+    expect(fs.calls).toHaveLength(0)
   })
 })

@@ -1061,10 +1061,11 @@ atomic, revertible commit):
   (coalesce tokens, resolve on `completion`, timeout, **false-completion
   discipline** — a stream that ends with no terminal event is `failed`, never a
   silent success). **Tool surface:** the v1 trident REPL ran `--tools ""`
-  (untrusted-import gate); the v2 launcher is a TRUSTED build path and declares
-  `Workflow,Agent,Bash,Edit,Read` on its own `AgentSpec.tools` (the surface is a
-  per-turn property, so this is a spec-level change — no substrate surgery, and
-  the import/conversational REPLs stay locked).
+  (untrusted-import gate); the v2 `claude -p` launcher is a TRUSTED build path
+  with NO `--tools` restriction — the full built-in surface (`Workflow`/`Agent`/
+  `Bash`/`Edit`/`Read`/`Write`) is instead GOVERNED by the auto-mode allowlist +
+  deny-guard (next bullet), not denied wholesale. The import/conversational REPLs
+  (a separate substrate path) stay locked on `--tools ""`.
 - **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
   workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
@@ -1080,6 +1081,41 @@ atomic, revertible commit):
   an UNCHANGED worktree, and a Forge build always commits). `merge.ts` adds the
   OUTER backstop (best-effort `git worktree remove --force` + `prune` after a
   landed merge), flipping the old "NO `git worktree remove`" lock.
+
+#### Auto mode (Phase 3) — autonomous permissioning (the permission model)
+
+The inner-loop `claude -p` launcher runs under **auto mode** (`trident/auto-mode.ts`),
+NOT the old reckless `--dangerously-skip-permissions`/`bypassPermissions`. A
+headless trident run has no human to answer a permission prompt, but a blanket
+skip removes every guardrail; auto mode is the middle path (spec
+`docs/specs/trident-auto-mode.md`):
+
+- **`--permission-mode dontAsk`** — any op NOT on the allowlist is IMMEDIATELY
+  DENIED (no prompt → a headless run can never hang on one; the denial returns to
+  the agent, which adapts/reports under the inlined no-interactive rule). Unlike
+  `auto`, dontAsk has no model gate — but the launcher still asserts an Opus
+  4.6+/Sonnet 4.6+ **model floor** (`assertAutoModeModelFloor`) and fails the
+  launch LOUDLY below it (never a silent bad run).
+- **Per-launch `--settings`** (written to a tmp file by `buildClaudePrintLauncher`)
+  carries: an `permissions.allow` ALLOWLIST of the trident op-set
+  (Read/Edit/Write/Agent/Workflow + the git/gh/bun/sqlite/coreutils Bash prefixes
+  the inner-workflow's piped commands actually invoke — CC checks each
+  sub-command of a pipe, so the coreutils are listed explicitly); a
+  `permissions.deny` list for the shapes a glob CAN express (force-push, reset
+  --hard, `.git`/`.claude` writes — deny always beats allow); and a **PreToolUse
+  Bash deny-guard hook** (`trident/hooks/auto-mode-deny-guard.ts` →
+  `evaluateBashDenyGuard`) for the nuanced shapes a glob CANNOT: **push-to-main/
+  master**, `rm -rf` of a system/home root (outside the worktree), history
+  rewrites/ref-surgery, force-deleting a protected branch, and `curl|bash`.
+- **Subagent inheritance:** a CC Dynamic Workflow's `agent()` workers INHERIT the
+  launcher's permission mode (proto-2 Q2, verified on a real run) — a subagent's
+  own frontmatter is ignored — so every Forge/Argus worker runs under the SAME
+  dontAsk + allowlist + deny-guard. The mode is set ONCE at the launcher.
+- **Merge stays the OUTER/human gate** (`merge.ts`) — the one irreversible action
+  is never taken inside the autonomous inner loop, regardless of permissions.
+- **Never-stuck:** dontAsk denies (never asks), the deny-guard returns a deny the
+  agent can act on, and a below-floor model fails fast — there is no path where a
+  headless run waits indefinitely on a prompt.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
