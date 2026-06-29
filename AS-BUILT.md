@@ -40,6 +40,43 @@ is still `import_running`, the in-memory `ImportJobRunner.inflight` map is lost 
 nothing re-drives the persisted job, so the import-running cron waits up to the
 15-min hard-timeout before advancing — degraded but self-recovering (vs. this PR's
 PERMANENT wedge). Flagged for a boot-time job reaper/resumer.
+## 2026-06-29 — Project-scoped reminders now live-deliver (the residual #105 missed)
+
+**What shipped (M1 adversarial E2E Round 2).** Fired reminders (and the morning
+brief) that are scoped to a PROJECT now actually reach the connected
+`/ws/app/chat` client, instead of silently vanishing. #105 fixed this for the
+GENERAL case but the project-scoped case stayed broken.
+
+**The bug.** `resolveAppWsReminderTopic` (`open/composer.ts`) mapped a project
+reminder (`topic_id = app-project:<id>`, the shape `app-reminders-surface` stamps
+at create time) to the app-ws topic `app:<user>:<projectId>`, porting the LEGACY
+web path's per-project topic suffixing (`web:<user>:<project>`). But the app-ws
+client opens ONE socket and registers its live sender + replays history on the
+BARE `app:<user>` topic only (`app-ws-surface.ts` registers
+`appWsTopicId(user_id)`; `config.topicId = appWsTopicId(userId)`); project context
+is a per-FRAME field, not a topic suffix. So a project reminder's live push hit
+`registry.send('app:<user>:<projectId>', …)` — no registered sender → dropped —
+AND its durable `button_prompts` row landed under a topic the client NEVER
+replays. A project-scoped reminder therefore disappeared entirely, live and on
+reload, and a RECURRING project reminder no-op'd on every occurrence. #105's
+regression test only exercised the General topic, which is why this slipped.
+
+**The fix (no feature flag).** `resolveAppWsReminderTopic` now resolves EVERY
+fired reminder/brief to the owner's bare `app:<user>` topic — the one surface the
+client binds + hydrates, exactly the General-reminder path #105 made work.
+Project grouping is unaffected: it lives on the reminder row's stored `topic_id`
+(`app-project:<id>`) which the reminders tab filters on and
+`deriveReminderProjectId` keys context/metering off — neither reads this delivery
+topic. The fired message now simply surfaces in the owner's chat (the single
+surface the app reads) instead of being lost.
+
+**Regression gate** `open/__tests__/open-project-reminder-appws-live-delivery.test.ts`
+boots the real Open composition over a live `Bun.serve`, opens `/ws/app/chat` with
+a project context, fires a `topic_id = app-project:<id>` reminder via the real
+tick loop, and asserts the composed body (a) live-pushes to the connected socket
+and (b) persists under the bare `app:owner` topic. FAILS pre-fix (no frame; durable
+row under `app:owner:<id>`), PASSES with the fix. The existing
+`open-reminder-appws-live-delivery.test.ts` (General) stays green.
 
 ## 2026-06-28 — Claude-Max OAuth handoff is the DEFAULT first auth screen (functional, not a dead 503)
 
