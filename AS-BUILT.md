@@ -2,6 +2,47 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — A sent image attachment no longer renders as a broken thumbnail in the native app
+
+**What shipped (M1 adversarial E2E Round 5).** In the Expo/React-Native chat
+surface, an image the owner attaches and sends now renders correctly in their own
+message bubble (and on history replay), instead of showing a broken/blank
+thumbnail.
+
+**The bug.** The gateway echoes a sent attachment back as a RELATIVE,
+bearer-authed URL — `/api/app/upload/<user>/<hash>.<ext>`
+(`gateway/http/app-upload-surface.ts:283`). `reconcileEcho`
+(`app/lib/chat-streaming.ts:237`) swaps the optimistic local `file://` uri for
+that URL, and `MessageItem` rendered it via `<Image source={{ uri }}>` with no
+host and no `Authorization` header (`app/components/MessageItem.tsx`). The GET
+handler requires `Authorization: Bearer` and honors no query/cookie token
+(`app-upload-surface.ts:358`), so RN `<Image>` — which neither resolves a
+host-less path nor sends a bearer — 401s and shows a broken thumbnail. The web
+client already handled this via `AttachmentImage`/`fetchAttachmentObjectUrl`
+(`landing/chat-react/ChatApp.tsx`); native had no equivalent — a both-surfaces
+parity gap, reachable in M1 (the paperclip→`DocumentPicker` flow is wired in the
+project chat, `app/app/projects/[id]/chat.tsx:263,480`).
+
+**The fix.** A pure `resolveAttachmentSource(uri, ctx)` in
+`app/lib/attachment-url.ts` resolves our own authed attachment URLs against the
+gateway `base_url` and attaches the bearer header; everything else (`data:`,
+`blob:`, external `https:`, cross-origin) passes through untouched with no
+header (fail-closed same-origin check mirrors the web client's
+`isAuthedAttachmentUrl`). A new `AuthedAttachmentImage`
+(`app/components/AuthedAttachmentImage.tsx`) renders it: native honors
+`source.headers` directly; RN-web fetches the blob WITH the bearer and renders
+the object URL (revoked on unmount), exactly like the web client. `MessageItem`
+routes both `attachments` and `image_urls` through it; the chat screen threads
+`{ base_url, token }` down (memoized for FlatList identity stability).
+
+**Tests.** `app/__tests__/attachment-authed-source.test.ts` (12 tests) pins the
+resolver + predicate: the relative URL gains an absolute URI + bearer (the fix),
+a CONTROL showing the pre-fix raw relative URL is host-less, trailing-slash
+tolerance, same-origin absolute, data:/external passthrough, cross-origin bearer
+refusal, and null-session passthrough. `tsc --noEmit` clean; the chat-related app
+suites (`chat-streaming`, `command-result-body`, `chat-core-render-model`, both
+attachment suites) green (54 tests); `expo lint` clean on the changed files.
+
 ## 2026-06-29 — An OpenAI key pasted at the setup-token step is no longer silently mis-stored as a Claude credential
 
 **What shipped (M1 adversarial E2E Round 3).** In Open onboarding, pasting an

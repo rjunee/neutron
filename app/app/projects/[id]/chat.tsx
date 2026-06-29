@@ -125,6 +125,14 @@ function ChatBody({
   const config = useMemo(() => loadAppConfig(), []);
   const listRef = useRef<FlatList<ChatMessage> | null>(null);
 
+  // Bearer + gateway origin so MessageItem can render our own
+  // bearer-authed attachment images (`/api/app/upload/…`). Memoized so the
+  // FlatList renderItem identity stays stable across re-renders.
+  const attachmentAuth = useMemo(
+    () => (user !== null ? { base_url: config.base_url, token: user.token } : null),
+    [user, config.base_url],
+  );
+
   const uploadAffordance = useLatestUploadAffordance(messages);
   const isWeb = Platform.OS === 'web';
 
@@ -450,6 +458,7 @@ function ChatBody({
             onChoose={makeChoose(item.id)}
             onDocRef={handleDocRef}
             onRetry={retry}
+            auth={attachmentAuth}
           />
         )}
         maintainVisibleContentPosition={{
