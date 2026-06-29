@@ -324,22 +324,9 @@ async function materializeProjects(
   }
 }
 
-/**
- * Resolve the project list finalize should materialize. An `import_result`
- * (history-import completion path) is authoritative: its `proposed_projects`
- * are the projects. Otherwise the conversational interview path reads the
- * names the user gave from `phase_state.primary_projects` (a string array;
- * object entries with a `name` are tolerated defensively).
- */
-function resolveProjects(
-  state: OnboardingState,
-  import_result: ImportResult | null,
-): CapturedProject[] {
-  if (import_result !== null) {
-    return import_result.proposed_projects
-      .map((p) => ({ name: p.name.trim(), rationale: p.rationale }))
-      .filter((p) => p.name.length > 0)
-  }
+/** The names the user gave conversationally — `phase_state.primary_projects`
+ *  (a string array; object entries with a `name` are tolerated defensively). */
+function interviewProjects(state: OnboardingState): CapturedProject[] {
   const raw = state.phase_state['primary_projects']
   if (!Array.isArray(raw)) return []
   const out: CapturedProject[] = []
@@ -355,6 +342,51 @@ function resolveProjects(
       const name = ((item as { name: string }).name ?? '').trim()
       if (name.length > 0) out.push({ name })
     }
+  }
+  return out
+}
+
+/**
+ * Resolve the project list finalize should materialize.
+ *
+ * THE BUG (M1 E2E Round 2, 2026-06-29): when an `import_result` was present this
+ * returned ONLY `import_result.proposed_projects` and ignored
+ * `phase_state.primary_projects`. But in Path-1 the conversational preamble asks
+ * the owner to name ≥3 projects, and `primary_projects` is the union of the
+ * projects they typed into the Neutron chat PLUS any the import merged in;
+ * `proposed_projects` only ever contains projects derived from the ChatGPT/Claude
+ * *export*. So any project the owner named in conversation that wasn't also in
+ * their export got silently DROPPED — no `projects` row, no topic, no on-disk
+ * repo, no gbrain page — even though persona-gen (which reads `primary_projects`)
+ * still referenced it, leaving the rail and the persona disagreeing. This is the
+ * exact defect the legacy engine already documents + fixed (`engine.ts` ~5180:
+ * "fell through to merging `import_result.proposed_projects` only — silently
+ * dropping any project the user added via freeform"); the Path-1 finalizer
+ * reverted to the broken behavior.
+ *
+ * THE FIX: materialize the UNION. The import-proposed entries come first so they
+ * win the slug dedup (they carry the import `rationale`); every interview-named
+ * project whose slug isn't already covered is appended. With `import_result` null
+ * this is unchanged (interview-only). The caller's `seenSlugs` dedup +
+ * `resolveBindTarget` already make a superset safe.
+ */
+function resolveProjects(
+  state: OnboardingState,
+  import_result: ImportResult | null,
+): CapturedProject[] {
+  const fromImport =
+    import_result !== null
+      ? import_result.proposed_projects
+          .map((p) => ({ name: p.name.trim(), rationale: p.rationale }))
+          .filter((p) => p.name.length > 0)
+      : []
+  const out: CapturedProject[] = [...fromImport]
+  const seen = new Set(fromImport.map((p) => slugifyProjectId(p.name)))
+  for (const p of interviewProjects(state)) {
+    const slug = slugifyProjectId(p.name)
+    if (seen.has(slug)) continue
+    seen.add(slug)
+    out.push(p)
   }
   return out
 }
