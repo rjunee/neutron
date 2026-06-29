@@ -17,8 +17,10 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { Animated, Image, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
+import { Animated, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
+import type { AttachmentAuthCtx } from '../lib/attachment-url';
+import { AuthedAttachmentImage } from './AuthedAttachmentImage';
 import { ButtonOptionRow, ImageGalleryRow } from '../lib/button-primitives';
 import { CitationChipRow } from '../lib/citation-chip-row';
 import type { ChatMessage } from '../lib/chat-streaming';
@@ -31,9 +33,13 @@ export interface MessageItemProps {
   onChoose: (value: string, prompt_id?: string) => void;
   onDocRef: (ref: AppWsOutboundAgentMessageDocRef) => void;
   onRetry: (client_msg_id: string) => void;
+  /** Bearer + gateway origin used to fetch our own bearer-authed
+   *  attachments (`/api/app/upload/…`). `null`/omitted when there is no
+   *  session — non-authed URLs still render. */
+  auth?: AttachmentAuthCtx | null;
 }
 
-export function MessageItem({ msg, onChoose, onDocRef, onRetry }: MessageItemProps) {
+export function MessageItem({ msg, onChoose, onDocRef, onRetry, auth = null }: MessageItemProps) {
   if (msg.kind === 'system') {
     return (
       <View style={styles.systemRow}>
@@ -65,24 +71,14 @@ export function MessageItem({ msg, onChoose, onDocRef, onRetry }: MessageItemPro
         {msg.attachments !== undefined && msg.attachments.length > 0 ? (
           <View style={styles.attachments}>
             {msg.attachments.map((url) => (
-              <Image
-                key={url}
-                source={{ uri: url }}
-                style={styles.attachment}
-                accessibilityIgnoresInvertColors
-              />
+              <AuthedAttachmentImage key={url} url={url} auth={auth} style={styles.attachment} />
             ))}
           </View>
         ) : null}
         {msg.image_urls !== undefined && msg.image_urls.length > 0 ? (
           <View style={styles.attachments}>
             {msg.image_urls.map((url) => (
-              <Image
-                key={url}
-                source={{ uri: url }}
-                style={styles.attachment}
-                accessibilityIgnoresInvertColors
-              />
+              <AuthedAttachmentImage key={url} url={url} auth={auth} style={styles.attachment} />
             ))}
           </View>
         ) : null}
