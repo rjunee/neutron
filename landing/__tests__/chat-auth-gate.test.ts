@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 import {
   createLandingServer,
   renderChatAuthGateHtml,
+  chatAuthGateCsp,
   type ChatBridge,
   type PendingChatClaim,
 } from '../server.ts'
@@ -61,9 +62,15 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
     expect(res.status).toBe(503)
     expect(res.headers.get('content-type')).toContain('text/html')
     expect(res.headers.get('cache-control')).toContain('no-store')
+    // The functional handoff carries a hashed-script CSP (no 'unsafe-inline').
+    const csp = res.headers.get('content-security-policy') ?? ''
+    expect(csp).toContain('script-src')
+    expect(csp).toContain('sha256-')
     const body = await res.text()
-    // The gate copy mirrors the installer's setup-token guidance.
+    // The functional handoff drives the install-token routes…
     expect(body).toContain('Authenticate Claude to continue')
+    expect(body).toContain('/oauth/max/install-token')
+    // …and keeps the manual setup-token guidance as the secondary/fallback path.
     expect(body).toContain('claude setup-token')
     expect(body).toContain('CLAUDE_CODE_OAUTH_TOKEN')
     expect(body).toContain('ANTHROPIC_API_KEY')
@@ -115,14 +122,22 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
   })
 })
 
-describe('renderChatAuthGateHtml — self-contained, CSP-safe page', () => {
-  test('no inline <script> and no external asset dependency', () => {
+describe('renderChatAuthGateHtml — functional handoff, CSP-safe', () => {
+  test('one inline <script>, no external asset dependency, hash matches CSP', () => {
     const html = renderChatAuthGateHtml()
-    // The gate must not itself depend on the unauthenticated substrate or any
-    // external asset; a single inline <style> is allowed, scripts are not.
-    expect(html).not.toContain('<script')
-    expect(html).not.toContain('src=')
+    // The handoff needs ONE inline script to drive the install-token routes,
+    // but must not pull any EXTERNAL asset (no <script src> / <link>/<img src>)
+    // so it never depends on the unauthenticated substrate.
     expect(html).toContain('<!DOCTYPE html>')
     expect(html).toContain('noindex')
+    expect(html).toContain('<script>')
+    expect(html).not.toContain('src=')
+    expect((html.match(/<script/g) ?? []).length).toBe(1)
+    // The CSP's sha256 must match the actual inline script bytes, or browsers
+    // would refuse to run it.
+    const scriptBody = html.slice(html.indexOf('<script>') + '<script>'.length, html.lastIndexOf('</script>'))
+    const { createHash } = require('node:crypto') as typeof import('node:crypto')
+    const hash = createHash('sha256').update(scriptBody, 'utf8').digest('base64')
+    expect(chatAuthGateCsp()).toContain(`sha256-${hash}`)
   })
 })

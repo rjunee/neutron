@@ -734,6 +734,13 @@ const LANDING_PATHS: ReadonlySet<string> = new Set([
 
 function isLandingRoute(pathname: string, method: string, hasInviteQuery: boolean): boolean {
   if (LANDING_PATHS.has(pathname)) return true
+  // AUTH-CORRECTION (2026-06-28) — the Claude-Max OAuth install-token handoff
+  // routes (`/oauth/max/install-token/{initiate,<signup_id>.sh,complete,state}`)
+  // are served by landing's `installTokenHandler`. They carry a variable
+  // `<signup_id>.sh` segment so a path-Set match won't do — prefix-match the
+  // whole surface. None are auth-gated (the gate only covers `/`, `/chat`,
+  // `/api/app/*`), which is correct: the handoff is the PRE-auth step.
+  if (pathname.startsWith('/oauth/max/install-token')) return true
   // Root path with `?invite=` is the invite landing short-circuit.
   if (pathname === '/' && method === 'GET' && hasInviteQuery) return true
   return false

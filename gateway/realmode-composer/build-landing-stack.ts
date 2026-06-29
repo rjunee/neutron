@@ -635,6 +635,14 @@ export interface BuildLandingStackInput {
     isUnauthenticated: () => boolean
   }
   /**
+   * AUTH-CORRECTION (2026-06-28) — Claude-Max OAuth install-token handoff
+   * routes, threaded straight through to
+   * `createLandingServer({installTokenHandler: …})`. The Open composer wires the
+   * single-owner handler (`buildOpenInstallTokenHandler`); Managed wires its own
+   * HMAC-gated handler at the same paths. When unset the surface is unmounted.
+   */
+  installTokenHandler?: (req: Request) => Promise<Response | null>
+  /**
    * Sprint B (2026-05-17) — PlatformAdapter seam. When supplied, the
    * landing stack threads `platform.slugAvailability` into the
    * InterviewEngine so `computeSlugSuggestionsForPhase` runs through
@@ -1491,6 +1499,9 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
   }
   if (input.chatAuthGate !== undefined) {
     landingOpts.chatAuthGate = input.chatAuthGate
+  }
+  if (input.installTokenHandler !== undefined) {
+    landingOpts.installTokenHandler = input.installTokenHandler
   }
   const landing = createLandingServer(landingOpts)
   // Trident 6 (2026-05-13) — expose the engine instance so the boot

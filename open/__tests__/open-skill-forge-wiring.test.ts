@@ -53,6 +53,7 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
 ] as const
 
@@ -71,6 +72,7 @@ beforeEach(() => {
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-skillforge-test-secret-0123456789'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
+  process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1' // force handoff default: ignore any host `claude` login (#101 Keychain probe)
   delete process.env['NOTIFY_SOCKET']
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
   applyMigrations(db.raw())
