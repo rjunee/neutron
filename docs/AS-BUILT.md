@@ -2,6 +2,66 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Chat — collapsed the two native chat surfaces into ONE Telegram-grade surface
+
+**What shipped.** The Expo app had TWO chat surfaces under `app/projects/[id]/`:
+the locked 5-tab `chat.tsx` (legacy streaming surface on `chat-state`/`ws-client`,
+NO durable store) and a parked non-tab `chat-sync` sub-route rendering
+`ChatSyncSurface` (the Telegram-grade chat-core surface: durable op-sqlite store,
+offline send, gap-free resume, receipts/reactions/edits, typing). They were
+complementary halves. This collapses them into **one** surface — `ChatSyncSurface`
+IS the single Chat tab — and deletes the legacy path entirely (no dual path, no flag).
+
+- **Data model (`chat-core`).** The durable `SqliteChatStore` silently dropped agent
+  metadata — `options`/`prompt_id`/`allow_freeform`/`kind`/`upload_affordance` were on
+  the `ChatMessage` type + parsed by `normalizeInbound` but had NO store columns, so
+  onboarding option buttons + the ZIP upload affordance never survived to render on
+  native (even live, since render reads back through the store). Added columns +
+  idempotent `ensureColumn` migrations + write/read for those, and extended the model
+  with `image_urls`/`citations`/`doc_refs`/`deep_link` (`types.ts` `normalizeInbound`
+  + `parseCitations`/`parseDocRefs`, `store.ts` `pickAgentMeta`, `sqlite-store.ts`).
+  `InMemoryStore`/OPFS persist the whole object so they needed no change.
+- **Session (`mobile-session.ts` / `use-mobile-chat.ts`).** Added `chooseOption`
+  (sends the `button_choice` frame) and `chat_command_result` handling (slash-command
+  answers like `/note`,`/remind` render as an agent message, tagged with the view's
+  project). Relaxed `send()` so an image-only send (empty body + attachment) isn't
+  dropped.
+- **Surface (`ChatSyncSurface.tsx`).** Now renders the full agent surface — markdown
+  bodies, attached + inline images (`AuthedAttachmentImage`), citations
+  (`CitationChipRow`), doc-ref deep-link chips, option buttons / image-gallery
+  (`button-primitives`) — and carries the ported input/upload pipeline: `InputComposer`
+  (📎 picker, paste, web file-input, hint, Cmd-Enter), `UploadModal`, web drag-drop
+  (`DropZoneOverlay`), phase-aware upload-affordance gating, ISSUE #17 prefill/autosend,
+  and ISSUE #18 deep-link navigation (`chat-core/deep-link-dispatch.ts`). Retains the
+  delivery ladder / receipts / reactions / edit-delete / typing it already had.
+- **Route + tab.** `chat.tsx` is now a thin route rendering `ChatSyncSurface`;
+  `chat-sync.tsx` deleted and dropped from `NON_TAB_SUBROUTES`.
+- **Deleted (legacy, no remaining importers):** `chat-state.tsx`, `chat-streaming.ts`,
+  `ws-client.ts` (legacy `AppWsClient`), `components/MessageItem.tsx`,
+  `components/ConnectionBanner.tsx`, `lib/chat-deep-link-navigator.tsx`,
+  `lib/chat-deep-link-dispatch.ts`, the `chat-sync` route, and their 6 tests.
+  `useUploadState` was extracted to `lib/use-upload-state.ts`.
+
+**Codex cross-model review fixes (same PR).** (P1) `SyncEngine.applyInbound` copied
+the old agent-meta but not the new `image_urls`/`citations`/`doc_refs`/`deep_link`, so
+the real socket + resume path dropped them despite the store columns — added them
+(regression test delivers a rich `agent_message` over the fake socket and asserts the
+fields survive to `messages()`). (P2) Tapping an option row only sent `button_choice`
+and the rows un-latched after `MOTION.base`, so a historical prompt could re-fire —
+the surface now records the chosen value per prompt and passes `chosen_value` so the
+row collapses immediately (parity with the legacy `recordChoice`).
+
+**Tests.** chat-core 97 pass; app 602 pass (+7 new: agent-metadata round-trip +
+cold-open durability in `chat-core-sqlite-store`; `chat_command_result` + empty/error
+fallback + `button_choice` wire + the rich-metadata inbound-path regression in
+`chat-core-mobile-session`; the new `chat-core-deep-link-dispatch`). `tsc --noEmit`
+clean (app + chat-core). leak-gate SILENT. No dangling import of any deleted module.
+
+**Parity note.** chat-core auto-retries unacked sends on reconnect, so the legacy
+manual "tap to retry" affordance has no equivalent failure state (the queue handles
+it). The legacy `auth_failed` → sign-out banner has no `ConnStatus` equivalent; the
+status strip shows "Disconnected" on auth failure. Both flagged, not silently dropped.
+
 ## Chat — retrying a failed image send now re-uploads (no more lost/broken image on retry)
 
 **What shipped.** Fix for the M1 round-6 adversarial-E2E bug: in the Expo native

@@ -30,12 +30,17 @@ import {
   mergeMessage,
   messageIdentity,
   minMaxNormalise,
+  parseCitations,
+  parseDocRefs,
+  parseOptions,
+  parseUploadAffordance,
   sanitizeFtsQuery,
   toHit,
   type ChatMessage,
   type MessageReaction,
   type MessageSearchHit,
   type MessageSearchOptions,
+  type PromptKind,
   type Store,
 } from '@neutron/chat-core';
 
@@ -83,6 +88,15 @@ const SCHEMA = [
      edited_at     INTEGER,
      deleted       INTEGER,
      edit_rev      INTEGER,
+     options           TEXT,
+     prompt_id         TEXT,
+     allow_freeform    INTEGER,
+     prompt_kind       TEXT,
+     upload_affordance TEXT,
+     image_urls        TEXT,
+     citations         TEXT,
+     doc_refs          TEXT,
+     deep_link         TEXT,
      PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
@@ -163,6 +177,20 @@ export class SqliteChatStore implements Store {
     await ensureColumn(db, TABLE, 'edited_at', 'INTEGER');
     await ensureColumn(db, TABLE, 'deleted', 'INTEGER');
     await ensureColumn(db, TABLE, 'edit_rev', 'INTEGER');
+    // P1b / P7.3 — agent-message metadata columns (options / quick-reply buttons,
+    // upload affordance, inline images, citations, doc refs, deep-link). Immutable
+    // wire data; same idempotent ADD COLUMN migration as the receipt/edit columns.
+    // Without these the durable store silently dropped option buttons + affordances
+    // on cold-open/resume — they never reached the renderer on native.
+    await ensureColumn(db, TABLE, 'options');
+    await ensureColumn(db, TABLE, 'prompt_id');
+    await ensureColumn(db, TABLE, 'allow_freeform', 'INTEGER');
+    await ensureColumn(db, TABLE, 'prompt_kind');
+    await ensureColumn(db, TABLE, 'upload_affordance');
+    await ensureColumn(db, TABLE, 'image_urls');
+    await ensureColumn(db, TABLE, 'citations');
+    await ensureColumn(db, TABLE, 'doc_refs');
+    await ensureColumn(db, TABLE, 'deep_link');
     if (!ftsPreexisted) {
       await backfillFts(db);
     }
@@ -332,8 +360,8 @@ export class SqliteChatStore implements Store {
   private async write(identity: string, msg: ChatMessage): Promise<void> {
     await this.db.execute(
       `INSERT OR REPLACE INTO ${TABLE}
-         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev, options, prompt_id, allow_freeform, prompt_kind, upload_affordance, image_urls, citations, doc_refs, deep_link)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         identity,
         msg.topic_id,
@@ -353,6 +381,15 @@ export class SqliteChatStore implements Store {
         msg.edited_at ?? null,
         msg.deleted === true ? 1 : msg.deleted === false ? 0 : null,
         msg.edit_rev ?? null,
+        encodeJson(msg.options),
+        msg.prompt_id ?? null,
+        msg.allow_freeform === true ? 1 : msg.allow_freeform === false ? 0 : null,
+        msg.kind ?? null,
+        encodeJson(msg.upload_affordance),
+        encodeJson(msg.image_urls),
+        encodeJson(msg.citations),
+        encodeJson(msg.doc_refs),
+        msg.deep_link ?? null,
       ],
     );
   }
@@ -382,7 +419,42 @@ function rowToMessage(row: SqlRow): ChatMessage {
     edited_at: typeof row['edited_at'] === 'number' ? row['edited_at'] : null,
     deleted: row['deleted'] === 1 ? true : row['deleted'] === 0 ? false : null,
     edit_rev: typeof row['edit_rev'] === 'number' ? row['edit_rev'] : null,
+    // P1b / P7.3 — agent-message metadata. Re-validated through the same chat-core
+    // parsers the wire decoder uses, so a malformed column degrades to null rather
+    // than throwing into a list() / cold-open read.
+    options: parseJsonWith(row['options'], parseOptions),
+    prompt_id: row['prompt_id'] === null || row['prompt_id'] === undefined ? null : String(row['prompt_id']),
+    allow_freeform: row['allow_freeform'] === 1 ? true : row['allow_freeform'] === 0 ? false : null,
+    kind: parsePromptKind(row['prompt_kind']),
+    upload_affordance: parseJsonWith(row['upload_affordance'], parseUploadAffordance),
+    image_urls: parseAttachments(row['image_urls']),
+    citations: parseJsonWith(row['citations'], parseCitations),
+    doc_refs: parseJsonWith(row['doc_refs'], parseDocRefs),
+    deep_link: row['deep_link'] === null || row['deep_link'] === undefined ? null : String(row['deep_link']),
   };
+}
+
+/** Encode an array/object column as JSON, or NULL when empty/absent. */
+function encodeJson(value: unknown): SqlValue {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value) && value.length === 0) return null;
+  return JSON.stringify(value);
+}
+
+/** JSON-parse a TEXT column then hand it to a chat-core parser (which re-validates
+ *  + drops malformed entries). Returns null on absent/invalid JSON. */
+function parseJsonWith<T>(raw: SqlValue | undefined, parse: (v: unknown) => T | null): T | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try {
+    return parse(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+/** Map a TEXT column back to the `PromptKind` union (or null). */
+function parsePromptKind(raw: SqlValue | undefined): PromptKind | null {
+  return raw === 'buttons' || raw === 'image-gallery' ? raw : null;
 }
 
 /** Encode a reaction list as a JSON column value, or NULL when empty. */

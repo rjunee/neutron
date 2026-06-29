@@ -126,13 +126,22 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
  * (e.g. a receipt/reaction/edit re-upsert). Returns only the keys that are set
  * so a message with no buttons doesn't grow null fields.
  */
+type AgentMetaKeys =
+  | 'options'
+  | 'prompt_id'
+  | 'allow_freeform'
+  | 'kind'
+  | 'upload_affordance'
+  | 'image_urls'
+  | 'citations'
+  | 'doc_refs'
+  | 'deep_link'
+
 export function pickAgentMeta(
-  existing: Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>,
-  incoming: Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>,
-): Partial<Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>> {
-  const out: Partial<
-    Pick<ChatMessage, 'options' | 'prompt_id' | 'allow_freeform' | 'kind' | 'upload_affordance'>
-  > = {}
+  existing: Pick<ChatMessage, AgentMetaKeys>,
+  incoming: Pick<ChatMessage, AgentMetaKeys>,
+): Partial<Pick<ChatMessage, AgentMetaKeys>> {
+  const out: Partial<Pick<ChatMessage, AgentMetaKeys>> = {}
   const options = incoming.options ?? existing.options
   if (options !== null && options !== undefined) out.options = options
   const promptId = incoming.prompt_id ?? existing.prompt_id
@@ -143,6 +152,14 @@ export function pickAgentMeta(
   if (kind !== null && kind !== undefined) out.kind = kind
   const upload = incoming.upload_affordance ?? existing.upload_affordance
   if (upload !== null && upload !== undefined) out.upload_affordance = upload
+  const imageUrls = incoming.image_urls ?? existing.image_urls
+  if (imageUrls !== null && imageUrls !== undefined) out.image_urls = imageUrls
+  const citations = incoming.citations ?? existing.citations
+  if (citations !== null && citations !== undefined) out.citations = citations
+  const docRefs = incoming.doc_refs ?? existing.doc_refs
+  if (docRefs !== null && docRefs !== undefined) out.doc_refs = docRefs
+  const deepLink = incoming.deep_link ?? existing.deep_link
+  if (deepLink !== null && deepLink !== undefined) out.deep_link = deepLink
   return out
 }
 

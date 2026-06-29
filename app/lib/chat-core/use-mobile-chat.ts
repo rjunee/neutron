@@ -64,6 +64,8 @@ export interface UseMobileChatResult {
   editMessage: (messageId: string, body: string) => void;
   /** Delete (tombstone) a message (Track B Phase 4 — author-only). */
   deleteMessage: (messageId: string) => void;
+  /** P1b — answer an agent prompt by tapping an option (or a freeform reply). */
+  chooseOption: (promptId: string, choiceValue: string, freeform?: string) => void;
   /** This device's id — passed to `deliveryState` so a message's read tick
    *  excludes the sender's own device. Empty until the session constructs. */
   selfDeviceId: string;
@@ -137,6 +139,7 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
       session = new MobileChatSession({
         url: buildWsUrl(config.base_url, user.token, projectId, deviceId),
         topic_id: `app:${user.id}`,
+        ...(projectId.length > 0 ? { project_id: projectId } : {}),
         store,
         device_id: deviceId,
         onChange: () => refresh(session as MobileChatSession),
@@ -210,10 +213,13 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
 
   const send = useCallback((body: string, attachments?: readonly string[]): void => {
     const trimmed = body.trim();
-    if (trimmed.length === 0) return;
+    const hasAttachments = attachments !== undefined && attachments.length > 0;
+    // An image attachment send carries an empty body (the attachment URL is the
+    // payload), so only bail when there's neither text NOR an attachment.
+    if (trimmed.length === 0 && !hasAttachments) return;
     const opts: { project_id?: string; attachments?: readonly string[] } = {};
     if (projectId.length > 0) opts.project_id = projectId;
-    if (attachments !== undefined && attachments.length > 0) opts.attachments = attachments;
+    if (hasAttachments) opts.attachments = attachments;
     void sessionRef.current?.send(trimmed, opts);
   }, [projectId]);
 
@@ -240,6 +246,14 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     sessionRef.current?.deleteMessage(messageId);
   }, []);
 
+  const chooseOption = useCallback(
+    (promptId: string, choiceValue: string, freeform?: string): void => {
+      if (promptId.length === 0 || choiceValue.length === 0) return;
+      sessionRef.current?.chooseOption(promptId, choiceValue, freeform);
+    },
+    [],
+  );
+
   const rows = useMemo(() => buildRenderRows(messages, stream), [messages, stream]);
 
   return {
@@ -253,6 +267,7 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     react,
     editMessage,
     deleteMessage,
+    chooseOption,
     selfDeviceId,
   };
 }

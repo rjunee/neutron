@@ -140,6 +140,50 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect(row?.client_msg_id).toBe('');
   });
 
+  it('round-trips agent metadata (options / affordance / citations / doc_refs / image_urls / deep_link) and survives reopen', async () => {
+    const db = freshDb();
+    const store = await SqliteChatStore.open(bunExecutor(db));
+    await store.upsert(
+      msg({
+        client_msg_id: '',
+        message_id: 'agent-meta',
+        seq: 7,
+        role: 'agent',
+        body: 'pick one',
+        status: 'acked',
+        options: [
+          { label: 'ChatGPT', body: 'ChatGPT', value: 'chatgpt' },
+          { label: 'Claude', body: 'Claude', value: 'claude', image_url: 'https://x/c.png' },
+        ],
+        prompt_id: 'p-1',
+        allow_freeform: true,
+        kind: 'buttons',
+        upload_affordance: { source: 'chatgpt' },
+        image_urls: ['https://x/i1.png', 'https://x/i2.png'],
+        citations: [{ title: 'Doc', url: 'https://x/doc' }],
+        doc_refs: [{ label: 'Spec', url: 'neutron://docs/spec', project_id: 'proj-1', path: 'spec.md' }],
+        deep_link: 'neutron://docs/spec',
+      }),
+    );
+    // Re-open the SAME db file: the agent metadata must survive cold-open — this
+    // is the bug the chat-collapse fixed (the store used to drop these columns,
+    // so option buttons / affordances never reached the renderer on native).
+    const reopened = await SqliteChatStore.open(bunExecutor(db));
+    const [row] = await reopened.list(TOPIC);
+    expect(row?.options?.length).toBe(2);
+    expect(row?.options?.[1]).toEqual({ label: 'Claude', body: 'Claude', value: 'claude', image_url: 'https://x/c.png' });
+    expect(row?.prompt_id).toBe('p-1');
+    expect(row?.allow_freeform).toBe(true);
+    expect(row?.kind).toBe('buttons');
+    expect(row?.upload_affordance).toEqual({ source: 'chatgpt' });
+    expect(row?.image_urls).toEqual(['https://x/i1.png', 'https://x/i2.png']);
+    expect(row?.citations).toEqual([{ title: 'Doc', url: 'https://x/doc' }]);
+    expect(row?.doc_refs).toEqual([
+      { label: 'Spec', url: 'neutron://docs/spec', project_id: 'proj-1', path: 'spec.md' },
+    ]);
+    expect(row?.deep_link).toBe('neutron://docs/spec');
+  });
+
   it('round-trips + set-unions receipt fields (Track B Phase 4)', async () => {
     const store = await SqliteChatStore.open(bunExecutor(freshDb()));
     await store.upsert(

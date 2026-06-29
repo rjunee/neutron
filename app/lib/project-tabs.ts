@@ -66,7 +66,6 @@ export interface ResolvedTab {
  * too — only a concrete `cores/<slug>` is a tab. Ported from `active-tab.ts`.
  */
 const NON_TAB_SUBROUTES: ReadonlySet<string> = new Set([
-  'chat-sync',
   'notes',
   'cores',
   'backups',
