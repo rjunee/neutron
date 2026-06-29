@@ -46,6 +46,7 @@ import {
 } from '../boot-helpers.ts'
 import type { CoreBackendFactoryMap } from './install-bundled.ts'
 import { SecretsStorePrompter } from './install-bundled.ts'
+import { buildOpenAgentProfileBackend } from '../../open/agent-profile-backend.ts'
 import type { ChatCommandFilter } from '../http/app-ws-surface.ts'
 import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
@@ -101,6 +102,15 @@ export interface MountOpenCoresInput {
   substrate?: Substrate | null
   /** Default project_id for filters whose inbound omits one. */
   default_project_id?: string
+  /**
+   * Invalidate the `PersonaPromptLoader` cache for a persona file after an
+   * in-chat profile edit (`update_agent_name` / `update_personality`). Wired by
+   * the composer to `personaLoader.invalidate` so the rewritten SOUL.md lands on
+   * the very next agent turn without waiting for the mtime-cache path. Optional
+   * (tests omit it; the atomic write still bumps mtime so the change is picked
+   * up regardless).
+   */
+  onPersonaReload?: (filename: 'SOUL.md') => void
 }
 
 export interface MountedOpenCores {
@@ -258,6 +268,18 @@ export async function mountOpenCores(
     googleOAuthAccessToken,
     calendarClient,
     researchProjectBackend: researchWiring.project_backend,
+    // Settings Core (M1) — thread the Open-appropriate agent-profile writer so
+    // `update_agent_name` / `update_personality` actually persist (to
+    // `<owner_home>/persona/{agent-profile.json,SOUL.md}`) and reflect on the
+    // next agent turn, instead of falling back to the `available:false` no-op
+    // that returned SETTINGS_BACKEND_UNAVAILABLE_ERROR on every Open box.
+    agentSettingsProfile: buildOpenAgentProfileBackend({
+      owner_home: input.owner_home,
+      env,
+      ...(input.onPersonaReload !== undefined
+        ? { onProfileChange: (): void => input.onPersonaReload?.('SOUL.md') }
+        : {}),
+    }),
   })
 
   // ── Chained chat-command filter (the repo-wide gap — chain ALL free filters) ─

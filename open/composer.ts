@@ -822,6 +822,12 @@ export function buildOpenGraphComposer(
       secretsStore,
       env,
       substrate: coresSubstrate,
+      // Settings Core (M1) — when `update_agent_name` / `update_personality`
+      // rewrites SOUL.md, drop the persona-loader cache entry so the change is
+      // spliced into the system prompt on the very next turn (the atomic write
+      // also bumps mtime as a backstop). Same loader instance the live agent
+      // turns read through.
+      onPersonaReload: (filename) => personaLoader.invalidate(filename),
     })
     realmodeCleanups.push(() => {
       coresWiring.cleanup()

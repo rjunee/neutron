@@ -2,6 +2,34 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+<<<<<<< HEAD
+## 2026-06-29 — `update_agent_name` / `update_personality` actually work on Open (no more "Settings backend unavailable")
+
+**What shipped (M1 adversarial E2E Round 4 § Settings).** On an Open box, the
+owner can now say "call yourself Nova" / "make your personality a calm
+strategist" in chat and have it persist and take effect — the long-promised
+"switch personality / update my name later — just ask" handoff. Subsequent turns
+address the agent by the new name and adopt the new disposition.
+
+**The bug.** The `agent-settings` Core's `update_agent_name` / `update_personality`
+route through an injected `AgentProfileBackend`. The hosting layer threads
+an RW-registry-backed impl; Open has no registry, and `mount-open-cores.ts`
+threaded **nothing**, so `buildCoresBackendFactories` fell back to the
+`available:false` no-op (`gateway/boot-helpers.ts:1168`). Both tools then
+short-circuited (`cores/free/agent-settings/src/backend.ts:439,473`) and returned
+`SETTINGS_BACKEND_UNAVAILABLE_ERROR` ("Settings backend unavailable — please
+report this") on **every** Open box — telling the owner to file a bug for expected
+behavior, contradicting onboarding's explicit promise.
+
+**The fix (real persistence, no flags, no copy-only band-aid).**
+- New `open/agent-profile-backend.ts` → `buildOpenAgentProfileBackend({ owner_home, env, onProfileChange })`, an `available:true` `AgentProfileBackend` that persists to the **only** surface that feeds the live agent's identity in Open: the persona files under `<owner_home>/persona/`.
+  - **`persona/agent-profile.json`** — canonical scalar store `{ agent_name, agent_personality }` mirroring the registry's two columns; the `get()` source so a partial `update_personality` recovers the untouched side. Falls back to `NEUTRON_AGENT_NAME` when absent.
+  - **`persona/SOUL.md`** — a delimited managed block at the top of the file (authoritative "You are <name>." + "Your personality: …", with an explicit override line). This is the exact file `PersonaPromptLoader` (`gateway/realmode-composer/persona-loader.ts`) reads every agent turn. Idempotently replaced; onboarding-authored body preserved byte-for-byte. Writes are atomic (tmp + `rename`, `O_NOFOLLOW`) — mirrors `admin-personality-surface.ts`.
+- Threaded in `gateway/cores/mount-open-cores.ts` as `agentSettingsProfile`, plus a new optional `onPersonaReload` input the composer (`open/composer.ts`) wires to `personaLoader.invalidate('SOUL.md')` so the rewrite lands on the very next turn (the mtime bump is a backstop).
+- Why not `NEUTRON_AGENT_NAME`: it is read once at boot (`owner-identity.ts:resolveOpenInstanceInfo`) but never composed into the prompt, so persisting a name there would not change what the agent calls itself. SOUL.md is the live identity surface.
+
+**Tests / evidence.** `open/__tests__/agent-profile-backend.test.ts` (13) — render/splice purity, JSON+SOUL persistence, get() round-trip, onboarding-body preservation, a CONTROL reproducing the old `available:false` unavailable-error, and the FIX driving the **real** agent-settings Core backend + a real `PersonaPromptLoader` to prove a renamed agent is reflected on a subsequent `load()`. `gateway/cores/__tests__/mount-open-cores.test.ts` adds the wiring gate (the factory map now yields a LIVE profile; `update_agent_name` persists to SOUL.md + fires the reload hook). A real-tool-path evidence run drove `buildTools().update_agent_name`/`update_personality` (the exact MCP handlers the live agent calls) across three consecutive turns: Nova → personality → rename to Sage, with the loader output reflecting each change. `tsc --noEmit` clean. (A full LLM-driven turn against a live isolated server was not run — credential/live-server-isolation risk — but the deterministic tool→backend→SOUL.md→PersonaPromptLoader chain a real turn traverses is exercised end-to-end.)
+=======
 ## 2026-06-29 — Durable, Telegram-class chat transport wired live in Open (chat_log + idempotent retry + reconnect replay + receipts/reactions/edits + real typing)
 
 **What shipped (Ryan-directed "build the proper full chat log solution").** The
@@ -56,6 +84,7 @@ gateway/persistence; 1256 tests green across the affected surfaces. No feature
 flags — one live path. (Full reaction/edit UI on native rides the already-built
 `ChatSyncSurface` chat-core tab, whose cutover from the legacy tab remains the
 tracked follow-up; the server now backs it.)
+>>>>>>> origin/main
 
 ## 2026-06-29 — A sent image attachment no longer renders as a broken thumbnail in the native app
 

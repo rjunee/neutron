@@ -65,9 +65,56 @@ test('composes the bundled free-Core backend factory map (Calendar/Email/Google 
     'notes',
     'reminders_core',
     'research_core',
+    'agent_settings',
   ]) {
     expect(typeof mounted.backends[key]).toBe('function')
   }
+})
+
+test('agent_settings is threaded with a LIVE profile (update_agent_name persists, no unavailable error)', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { SETTINGS_BACKEND_UNAVAILABLE_ERROR } = await import(
+    '../../../cores/free/agent-settings/index.ts'
+  )
+  const { db, owner_home, secretsStore, env } = makeBench()
+  const reloads: string[] = []
+  const mounted = await mountOpenCores({
+    projectDb: db,
+    owner_home,
+    project_slug: OWNER,
+    secretsStore,
+    env,
+    substrate: null,
+    onPersonaReload: (filename) => reloads.push(filename),
+  })
+  cleanups.push(() => mounted.cleanup())
+
+  // Invoke the factory the way installBundledCores does, then drive the
+  // real `update_agent_name` / `update_personality` backend methods.
+  // The agent_settings factory ignores its context args; cast a minimal stub.
+  const factoryCtx = { project_slug: OWNER } as unknown as Parameters<
+    NonNullable<(typeof mounted.backends)['agent_settings']>
+  >[0]
+  const built = (await mounted.backends['agent_settings']!(factoryCtx)) as {
+    backend: import('../../../cores/free/agent-settings/index.ts').AgentSettingsBackend
+  }
+  const nameRes = await built.backend.updateAgentName('Nova')
+  expect(nameRes.success).toBe(true)
+  expect(nameRes.error).toBeUndefined()
+  expect(nameRes.error).not.toBe(SETTINGS_BACKEND_UNAVAILABLE_ERROR)
+
+  const persRes = await built.backend.updatePersonality({
+    new_archetype: 'calm strategist',
+    new_description: 'precise, warm',
+  })
+  expect(persRes.success).toBe(true)
+
+  // The change actually landed in the file the PersonaPromptLoader reads,
+  // and the composer's persona-reload hook fired.
+  const soul = readFileSync(join(owner_home, 'persona', 'SOUL.md'), 'utf8')
+  expect(soul).toContain('You are Nova.')
+  expect(soul).toContain('calm strategist')
+  expect(reloads).toContain('SOUL.md')
 })
 
 test('chains the free-Core chat-command filters — /cal and /email are ROUTED', async () => {
