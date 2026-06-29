@@ -29,6 +29,7 @@ import { AppWsClient, type AppWsClientState } from './ws-client';
 import type {
   AppWsOutboundAgentMessage,
   AppWsOutboundAgentMessagePartial,
+  AppWsOutboundAgentTyping,
   AppWsOutboundUserMessageEcho,
 } from './ws-envelope';
 import { isAlreadyUploadedAttachmentUrl, resolveSendableAttachments } from './attachment-url';
@@ -49,6 +50,12 @@ export interface ChatStateValue {
   state: ChatState;
   messages: ReadonlyArray<ChatMessage>;
   wsState: AppWsClientState;
+  /**
+   * Server-authoritative typing indicator. True between the gateway's
+   * `agent_typing` `start` and `end` frames; always cleared when an
+   * `agent_message` lands (a dropped `end` can't wedge it).
+   */
+  typing: boolean;
   topicInfo: { topic_id: string; project_slug: string } | null;
   /** Send a user message (with optional uploads). Returns true on transport success. */
   send: (opts: SendOptions) => Promise<boolean>;
@@ -160,6 +167,13 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
         dispatch({ type: 'apply_partial', partial });
       },
     );
+    // Server-authoritative typing indicator. `start` → typing on, `end` → off.
+    // The reducer also clears typing on every agent_message, so a dropped `end`
+    // frame can't wedge the indicator on.
+    const offTyping = client.on('agent_typing', (frame: AppWsOutboundAgentTyping) => {
+      if (frame.project_id !== undefined && frame.project_id !== project_id) return;
+      dispatch({ type: 'set_typing', typing: frame.state === 'start' });
+    });
     const offError = client.on('error', (err) => {
       dispatch({
         type: 'append_system',
@@ -181,6 +195,7 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
       offEcho();
       offAgent();
       offPartial();
+      offTyping();
       offError();
       offCommandResult();
       client.close();
@@ -410,6 +425,7 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
       state,
       messages: state.messages,
       wsState,
+      typing: state.typing,
       topicInfo,
       send,
       retry,

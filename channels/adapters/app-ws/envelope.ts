@@ -303,6 +303,37 @@ export interface AppWsOutboundError {
 }
 
 /**
+ * Chat transport — server-authoritative typing indicator (Ryan-directed
+ * "we have a typing indicator for this purpose"). Emitted on the app-ws path
+ * the moment the gateway begins working a live-agent turn (`state:'start'`)
+ * and again when the turn settles (`state:'end'`, on BOTH success and
+ * failure). Unlike a client-side optimistic guess, this is driven by the
+ * server actually picking up + finishing the turn, so warm turns (every turn
+ * after the cold first one) get a real "agent is replying…" affordance for
+ * their whole 5–240s duration.
+ *
+ * EPHEMERAL by design: typing frames are NOT persisted to the chat log and
+ * carry no `seq` — they're fanned directly to the topic's live devices and
+ * never replayed on `resume` (a stale "typing…" must never survive a
+ * reconnect). The client clears typing on the next `agent_message` regardless,
+ * so a dropped `end` frame can't wedge the indicator. Back-to-back `start`
+ * frames are idempotent for the client (it just stays in the typing state).
+ *
+ * Mirrors the legacy `web:` path's `agent_typing_start` / `agent_typing_end`
+ * `ChatOutbound` frames (`landing/server.ts`) collapsed into one envelope with
+ * a `state` discriminator so the Expo wire union stays compact.
+ */
+export interface AppWsOutboundAgentTyping {
+  v: 1
+  type: 'agent_typing'
+  /** `start` when the agent begins a turn; `end` when it settles. */
+  state: 'start' | 'end'
+  ts: number
+  /** P5.2 parity — project the in-flight turn belongs to. */
+  project_id?: string
+}
+
+/**
  * Single-owner Open — a live project-list refresh.
  *
  * THE BUG (P2 follow-up to #84): the served `/chat` HTML injects the owner's
@@ -413,6 +444,7 @@ export type AppWsOutbound =
   | AppWsOutboundReactionUpdate
   | AppWsOutboundEditUpdate
   | AppWsOutboundProjectsChanged
+  | AppWsOutboundAgentTyping
   | AppWsOutboundError
 
 /**

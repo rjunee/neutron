@@ -756,13 +756,32 @@ async function handleSend(
       command_result = await ctx.chat_command_filter.match(matchInput)
     }
     if (command_result === null) {
-      await ctx.adapter.dispatchInbound({
-        user_id: resolved.user_id,
-        channel_topic_id,
-        body: text,
-        ...(project_id !== null ? { project_id } : {}),
-        ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
-      })
+      // Chat transport — FIRE-AND-FORGET the agent turn; do NOT block the HTTP
+      // response on it. The user echo is already persisted (with seq) + fanned
+      // above; the agent reply fans over the WS as it completes and is
+      // replayable from the durable chat_log on reconnect. Awaiting the whole
+      // turn (up to 240s) before responding made the optimistic bubble
+      // un-confirmable — an RN/proxy read timeout flipped it to `failed` and the
+      // retry re-sent the same client_msg_id. (That re-send is now de-duped
+      // server-side by the durable log, but a phantom "failed → retrying" bubble
+      // is still bad UX.) Return the echo NOW; the turn runs in the background.
+      // Errors surface to the client as the agent's own FAILURE_BODY
+      // `agent_message` over the WS, so we only log here.
+      void ctx.adapter
+        .dispatchInbound({
+          user_id: resolved.user_id,
+          channel_topic_id,
+          body: text,
+          ...(project_id !== null ? { project_id } : {}),
+          ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[app-ws] topic=${channel_topic_id} HTTP-fallback dispatch failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        })
     }
   }
   // Return the canonical user_message envelope in the response so the
