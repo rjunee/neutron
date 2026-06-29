@@ -2,6 +2,7 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+<<<<<<< HEAD
 ## 2026-06-29 — `update_agent_name` / `update_personality` actually work on Open (no more "Settings backend unavailable")
 
 **What shipped (M1 adversarial E2E Round 4 § Settings).** On an Open box, the
@@ -28,6 +29,62 @@ behavior, contradicting onboarding's explicit promise.
 - Why not `NEUTRON_AGENT_NAME`: it is read once at boot (`owner-identity.ts:resolveOpenInstanceInfo`) but never composed into the prompt, so persisting a name there would not change what the agent calls itself. SOUL.md is the live identity surface.
 
 **Tests / evidence.** `open/__tests__/agent-profile-backend.test.ts` (13) — render/splice purity, JSON+SOUL persistence, get() round-trip, onboarding-body preservation, a CONTROL reproducing the old `available:false` unavailable-error, and the FIX driving the **real** agent-settings Core backend + a real `PersonaPromptLoader` to prove a renamed agent is reflected on a subsequent `load()`. `gateway/cores/__tests__/mount-open-cores.test.ts` adds the wiring gate (the factory map now yields a LIVE profile; `update_agent_name` persists to SOUL.md + fires the reload hook). A real-tool-path evidence run drove `buildTools().update_agent_name`/`update_personality` (the exact MCP handlers the live agent calls) across three consecutive turns: Nova → personality → rename to Sage, with the loader output reflecting each change. `tsc --noEmit` clean. (A full LLM-driven turn against a live isolated server was not run — credential/live-server-isolation risk — but the deterministic tool→backend→SOUL.md→PersonaPromptLoader chain a real turn traverses is exercised end-to-end.)
+=======
+## 2026-06-29 — Durable, Telegram-class chat transport wired live in Open (chat_log + idempotent retry + reconnect replay + receipts/reactions/edits + real typing)
+
+**What shipped (Ryan-directed "build the proper full chat log solution").** The
+app-ws chat surface now has a durable, server-side chat log with a monotonic
+per-topic sequence; an idempotent send that can't double-run the agent; gap-free
+reconnect catch-up; persisted delivery/read receipts, reactions, and edits; a
+fire-and-forget HTTP send; and a real, server-authoritative typing indicator —
+rendered on BOTH the web (React/assistant-ui) and the live Expo native tab.
+
+**The root cause.** Open's composer constructed the app-ws adapter with NO
+durable logs (`open/composer.ts` `new AppWsAdapter({ registry, receiver })`), so
+`hasChatLog === false` everywhere. The full seq / resume / idempotency / receipt
+/ reaction / edit machinery — already built + tested in the adapter
+(`channels/adapters/app-ws/adapter.ts`) and surface
+(`gateway/http/app-ws-surface.ts`), with migrations `0079/0082/0083/0087` — was
+INERT. Consequences: the retry button (re-sending the same `client_msg_id`) and
+the WS↔HTTP fallback race could RE-RUN the whole agent turn (dup replies, double
+LLM spend, double Bash/Write/Edit side-effects); a reply emitted during a socket
+blip was orphaned ("hung"); receipts/reactions/edits decoded but no-op'd; and
+warm turns showed no typing affordance (the server emitted typing only on the
+legacy `web:` path).
+
+**The fix.**
+- **Wire the four logs (`open/composer.ts`).** `new AppChatStore({ db })` +
+  `AppChatReceiptStore` + `AppChatReactionStore` + `AppChatEditStore` (all on the
+  single-owner `project.db`) → flips `hasChatLog`/`hasReceipts`/`hasReactions`/
+  `hasEdits` true and lights up the existing surface handlers: durable seq,
+  `client_msg_id` dedup (the `if (!was_new) return` double-dispatch guards now
+  trip), `session_ready.last_seen_seq` + `{type:'resume',after_seq}` replay, and
+  receipt/reaction/edit persistence + fan-out.
+- **Fire-and-forget HTTP send (`gateway/http/app-ws-surface.ts`).** The
+  `/api/app/chat/send` fallback returns the durable echo (with `seq`)
+  immediately instead of `await`-ing the whole (≤240s) turn — no more
+  proxy/RN-timeout → phantom `failed` bubble → retry.
+- **Real typing (`AppWsOutboundAgentTyping`).** A new ephemeral
+  `{type:'agent_typing',state:'start'|'end'}` frame is fanned (not persisted, no
+  seq, never replayed) around every app-ws live-agent turn (`emitAppWsTyping`
+  brackets each `appWsChatTurn`). Web drives its existing `car-typing` indicator
+  off it (`landing/chat-react/controller.ts`); the live native tab renders typing
+  dots + now also `resume`s on reconnect (`app/lib/ws-client.ts`,
+  `app/app/projects/[id]/chat.tsx`).
+
+**Verification.** New `open/__tests__/open-app-ws-durable-chatlog.test.ts` boots
+the REAL Open composition over `Bun.serve` and asserts #1–#6 on real
+(mocked-substrate) turns: echo+reply persist with `seq`; a re-sent
+`client_msg_id` does NOT re-run the turn; a 2nd socket resumes a gap-free
+transcript with `last_seen_seq`; the agent-read `receipt_update` fans; the HTTP
+send returns before the (delayed) turn finishes; and a real `agent_typing`
+start→end bracket arrives. Plus client unit tests (web controller, native
+ws-client/chat-streaming). `tsc --noEmit` clean across root/app/landing/channels/
+gateway/persistence; 1256 tests green across the affected surfaces. No feature
+flags — one live path. (Full reaction/edit UI on native rides the already-built
+`ChatSyncSurface` chat-core tab, whose cutover from the legacy tab remains the
+tracked follow-up; the server now backs it.)
+>>>>>>> origin/main
 
 ## 2026-06-29 — A sent image attachment no longer renders as a broken thumbnail in the native app
 

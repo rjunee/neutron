@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { GBrainStdioMcpClient } from '../gbrain-stdio-client.ts'
+import { GBrainStdioMcpClient, composeGbrainChildEnv } from '../gbrain-stdio-client.ts'
 import { GBrainUnavailableError } from '../memory-store.ts'
 
 describe('GBrainStdioMcpClient — binary-missing latch', () => {
@@ -41,5 +41,65 @@ describe('GBrainStdioMcpClient — binary-missing latch', () => {
     const elapsed = performance.now() - t0
     expect(second).toBeInstanceOf(GBrainUnavailableError)
     expect(elapsed).toBeLessThan(50)
+  })
+})
+
+// composeGbrainChildEnv — the boot-time-vs-spawn-time env merge that lets an
+// embedder opted in AFTER process boot still activate (the onboarding/admin
+// OpenAI key is captured over the already-running server). The lazy
+// `resolveDynamicEnv` is merged OVER the static `env` at each spawn.
+describe('composeGbrainChildEnv', () => {
+  test('static env only → passed through over the base (keyword + graph)', async () => {
+    const env = await composeGbrainChildEnv(
+      { env: { GBRAIN_HOME: '/h/gbrain' }, source: 'default' },
+      { PATH: '/usr/bin' },
+    )
+    expect(env).toMatchObject({ PATH: '/usr/bin', GBRAIN_HOME: '/h/gbrain', GBRAIN_SOURCE: 'default' })
+    expect(env['GBRAIN_EMBEDDING_MODEL']).toBeUndefined()
+  })
+
+  test('resolveDynamicEnv merges the embedding seam OVER the static env at spawn', async () => {
+    const env = await composeGbrainChildEnv(
+      {
+        env: { GBRAIN_HOME: '/h/gbrain' },
+        source: 'default',
+        brainId: 'acme-brain',
+        resolveDynamicEnv: async () => ({
+          GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+          GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+          OPENAI_API_KEY: 'sk-late',
+        }),
+      },
+      {},
+    )
+    expect(env).toEqual({
+      GBRAIN_HOME: '/h/gbrain',
+      GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+      GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+      OPENAI_API_KEY: 'sk-late',
+      GBRAIN_BRAIN_ID: 'acme-brain',
+      GBRAIN_SOURCE: 'default',
+    })
+  })
+
+  test('a throwing resolveDynamicEnv is fail-soft → keyword + graph, never blocks the spawn', async () => {
+    const env = await composeGbrainChildEnv(
+      {
+        env: { GBRAIN_HOME: '/h/gbrain' },
+        resolveDynamicEnv: async () => {
+          throw new Error('store unreachable')
+        },
+      },
+      {},
+    )
+    expect(env).toEqual({ GBRAIN_HOME: '/h/gbrain' })
+  })
+
+  test('an empty dynamic env (key absent) leaves the static keyword env intact', async () => {
+    const env = await composeGbrainChildEnv(
+      { env: { GBRAIN_HOME: '/h/gbrain' }, resolveDynamicEnv: async () => ({}) },
+      {},
+    )
+    expect(env).toEqual({ GBRAIN_HOME: '/h/gbrain' })
   })
 })

@@ -238,3 +238,50 @@ describe('chatReducer', () => {
     expect(state.messages).toHaveLength(0);
   });
 });
+
+describe('chatReducer — server-authoritative typing (TASK 1)', () => {
+  it('set_typing start sets typing true; end sets it false', () => {
+    let state: ChatState = EMPTY_CHAT_STATE;
+    expect(state.typing).toBe(false);
+    state = chatReducer(state, { type: 'set_typing', typing: true });
+    expect(state.typing).toBe(true);
+    state = chatReducer(state, { type: 'set_typing', typing: false });
+    expect(state.typing).toBe(false);
+  });
+
+  it('ALWAYS clears typing when an agent_message is applied (dropped `end` cannot wedge it)', () => {
+    let state: ChatState = EMPTY_CHAT_STATE;
+    state = chatReducer(state, { type: 'set_typing', typing: true });
+    expect(state.typing).toBe(true);
+    // No `end` frame arrives — the agent_message itself clears typing.
+    state = chatReducer(state, { type: 'apply_agent_message', agent: makeAgent('m1', 'hi') });
+    expect(state.typing).toBe(false);
+  });
+
+  it('preserves typing across partials + echoes (only start/end/agent_message move it)', () => {
+    let state: ChatState = EMPTY_CHAT_STATE;
+    state = chatReducer(state, { type: 'set_typing', typing: true });
+    state = chatReducer(state, { type: 'apply_partial', partial: makePartial('m1', 'a') });
+    state = chatReducer(state, { type: 'add_optimistic_user', id: 'c1', body: 'hi', ts: 1 });
+    state = chatReducer(state, { type: 'apply_user_echo', echo: makeEcho('canon', 'hi', 'c1') });
+    expect(state.typing).toBe(true);
+  });
+});
+
+describe('chatReducer — replayed message_id does not duplicate (TASK 2 resume safety)', () => {
+  it('re-applying the same agent_message upserts (no second bubble)', () => {
+    let state: ChatState = EMPTY_CHAT_STATE;
+    state = chatReducer(state, { type: 'apply_agent_message', agent: makeAgent('m1', 'hello') });
+    // Resume replays the same message_id — must update in place, not duplicate.
+    state = chatReducer(state, { type: 'apply_agent_message', agent: makeAgent('m1', 'hello') });
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]!.body).toBe('hello');
+  });
+
+  it('re-applying the same user echo (by message_id) does not duplicate', () => {
+    let state: ChatState = EMPTY_CHAT_STATE;
+    state = chatReducer(state, { type: 'apply_user_echo', echo: makeEcho('um1', 'hi') });
+    state = chatReducer(state, { type: 'apply_user_echo', echo: makeEcho('um1', 'hi') });
+    expect(state.messages).toHaveLength(1);
+  });
+});
