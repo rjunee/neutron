@@ -937,13 +937,103 @@ export interface LandingServer {
 }
 
 /**
- * ISSUES #318 — the Open Claude-auth gate page served at `GET /chat` when the
- * box has no working Claude substrate credential. Self-contained: a single
- * inline `<style>`, NO inline script and NO external assets, so it renders
- * under any CSP and never itself depends on the unauthenticated substrate. The
- * copy mirrors the installer's `claude setup-token` guidance so the web surface
- * and the CLI agree on the one step left.
+ * AUTH-CORRECTION (Ryan-locked 2026-06-28) — the Open Claude-Max OAuth handoff
+ * page served at `GET /chat` when the box has no working Claude credential AND
+ * no ambient Keychain login (`resolveOpenLlmPool(env) === null`). This is the
+ * DEFAULT first onboarding screen: a FUNCTIONAL handoff, not the dead 503 that
+ * only printed manual instructions.
+ *
+ * On load the inline script `POST`s `/oauth/max/install-token/initiate` to mint
+ * a one-liner (`curl … | bash`) that installs the `claude` CLI, runs
+ * `claude setup-token`, and POSTs the captured `sk-ant-oat…` token back to
+ * `/complete` — which persists it to `.env` and restarts Neutron so the
+ * substrate comes up LIVE. The page polls `GET /chat` for the
+ * 503 → (restart) → 200 transition and auto-advances into onboarding. A manual
+ * `claude setup-token` → paste box is the secondary path; the static "add to
+ * `.env` + restart" copy is the final fallback if the handoff routes are
+ * unmounted (e.g. a Managed deploy that hasn't wired its handler).
+ *
+ * The Keychain fast-path (#101) sits ABOVE this in `resolveOpenLlmPool`: when
+ * the owner already has an ambient `claude` login, the gate never renders.
+ *
+ * Self-contained: one inline `<style>` + one DETERMINISTIC inline `<script>`
+ * (no `signup_id` baked in — it's fetched at runtime), so `chatAuthGateCsp()`
+ * can pin the script with a `sha256-` hash and the page needs no external asset.
  */
+const CHAT_AUTH_GATE_SCRIPT = `(function(){
+  var PFX='/oauth/max/install-token';
+  var signupId=null,activating=false,activeTicks=0;
+  var MAX_ACTIVATING_TICKS=30; // ~60s at 2s/poll before we surface a manual fallback
+  function $(id){return document.getElementById(id)}
+  function setStatus(t){var s=$('ng-status');if(s)s.textContent=t}
+  function setManual(t){var m=$('ng-manual-status');if(m)m.textContent=t}
+  function show(id,on){var e=$(id);if(e)e.style.display=on?'':'none'}
+  function fail(msg){activating=false;setStatus(msg);var d=$('ng-manual-details');if(d)d.open=true}
+  // Primary navigation trigger: poll GET /chat for the 503 -> (restart) -> 200
+  // transition. This is robust across the restart that WIPES the in-memory
+  // store — we never rely on catching the brief 'completed' window before the
+  // process exits. /state is consulted only for nicer messaging.
+  function tick(){
+    fetch('/chat',{cache:'no-store',redirect:'manual'}).then(function(r){
+      if(r.status===200){location.href='/chat';return} // authed process is live
+      if(activating){
+        if(++activeTicks>MAX_ACTIVATING_TICKS){fail('Restart did not finish. Paste your token below, or run \\u0060neutron restart\\u0060 and reload.');return}
+        setStatus('Connected — restarting Neutron…');
+        setTimeout(tick,2000);return;
+      }
+      if(signupId){
+        fetch(PFX+'/state?signup_id='+encodeURIComponent(signupId),{cache:'no-store'})
+          .then(function(s){return s.ok?s.json():{status:(s.status===404?'gone':'err')}})
+          .then(function(j){
+            // 'gone' (404) for a signup_id WE hold means the store was wiped by
+            // the restart — treat it as completion and switch to the /chat watch.
+            if(j.status==='completed'||j.status==='gone'){activating=true;activeTicks=0;setStatus('Connected — restarting Neutron…')}
+            else if(j.status==='expired'){init()}
+            else setStatus('Run the command above in your terminal — this page advances automatically.')
+          }).catch(function(){}).then(function(){setTimeout(tick,2000)});
+        return;
+      }
+      setTimeout(tick,2000);
+    }).catch(function(){
+      // Connection refused: the server is mid-restart (or, un-supervised, gone).
+      activating=true;
+      if(++activeTicks>MAX_ACTIVATING_TICKS){fail('Neutron is not responding. If it does not come back, run \\u0060neutron restart\\u0060.');return}
+      setStatus('Almost there — Neutron is restarting…');
+      setTimeout(tick,2000);
+    });
+  }
+  function init(){
+    activating=false;activeTicks=0;
+    fetch(PFX+'/initiate',{method:'POST',cache:'no-store'})
+      .then(function(r){return r.ok?r.json():null})
+      .then(function(j){
+        if(!j||!j.signup_id){show('ng-auto',false);return}
+        signupId=j.signup_id;
+        var c=$('ng-cmd');if(c)c.textContent=j.command;
+        show('ng-auto',true);
+        setStatus('Run the command above in your terminal — this page advances automatically.');
+      }).catch(function(){show('ng-auto',false)});
+  }
+  var copy=$('ng-copy');
+  if(copy)copy.addEventListener('click',function(){
+    var t=($('ng-cmd')||{}).textContent||'';
+    if(navigator.clipboard)navigator.clipboard.writeText(t);
+    copy.textContent='Copied';setTimeout(function(){copy.textContent='Copy'},1500);
+  });
+  var man=$('ng-manual-submit');
+  if(man)man.addEventListener('click',function(){
+    var ta=$('ng-token'),tok=((ta&&ta.value)||'').trim();
+    if(!/^sk-ant-oat[0-9]{2}-/.test(tok)){setManual('That does not look like a setup-token (starts with sk-ant-oat…).');return}
+    if(!signupId){setManual('Still preparing — try again in a moment.');return}
+    setManual('Activating…');
+    fetch(PFX+'/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({signup_id:signupId,token:tok})})
+      .then(function(r){if(r.status===204||r.status===200){activating=true;activeTicks=0;setStatus('Connected — restarting Neutron…')}else{setManual('Token rejected (HTTP '+r.status+'). Check it and retry.')}})
+      .catch(function(){setManual('Could not reach Neutron. Retry.')});
+  });
+  init();
+  setTimeout(tick,1500);
+})();`
+
 export function renderChatAuthGateHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -969,14 +1059,31 @@ export function renderChatAuthGateHtml(): string {
   p.lead { margin: 0 0 20px; color: #a6a6c0; }
   ol { margin: 0 0 12px; padding-left: 20px; }
   li { margin: 0 0 14px; }
-  code {
+  code, .cmd {
     display: block; margin-top: 6px; padding: 10px 12px; border-radius: 8px;
     background: #0a0a12; border: 1px solid #2a2a3a; color: #7cf;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
     word-break: break-all; white-space: pre-wrap;
   }
-  .alt { color: #a6a6c0; font-size: 13px; margin: 0 0 18px; }
-  .foot { color: #6f6f88; font-size: 13px; border-top: 1px solid #2a2a3a; padding-top: 16px; }
+  .row { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+  .row .cmd { flex: 1; margin-top: 0; }
+  button {
+    cursor: pointer; border-radius: 8px; border: 1px solid #2a2a3a;
+    background: #23233a; color: #e6e6f0; padding: 9px 14px; font-size: 13px;
+  }
+  button:hover { background: #2c2c47; }
+  .status { margin: 14px 0 0; color: #8fd; font-size: 13px; min-height: 18px; }
+  textarea {
+    width: 100%; margin-top: 8px; padding: 10px 12px; border-radius: 8px;
+    background: #0a0a12; border: 1px solid #2a2a3a; color: #e6e6f0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    min-height: 64px; resize: vertical;
+  }
+  details { margin-top: 18px; border-top: 1px solid #2a2a3a; padding-top: 14px; }
+  summary { cursor: pointer; color: #a6a6c0; font-size: 14px; }
+  .alt { color: #a6a6c0; font-size: 13px; margin: 12px 0 0; }
+  .foot { color: #6f6f88; font-size: 13px; border-top: 1px solid #2a2a3a;
+          margin-top: 18px; padding-top: 16px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
          background: #f0a020; margin-right: 8px; vertical-align: middle; }
 </style>
@@ -984,25 +1091,57 @@ export function renderChatAuthGateHtml(): string {
 <body>
   <main class="card">
     <h1><span class="dot"></span>Authenticate Claude to continue</h1>
-    <p class="lead">This Neutron box has no Claude credential yet, so chat can't run.
-       Connect Claude, then restart Neutron.</p>
-    <ol>
-      <li>Run this where Neutron is installed — it opens a browser and prints a token:
-        <code>claude setup-token</code>
-      </li>
-      <li>Add the printed token to your <code>.env</code>:
-        <code>CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat…</code>
-      </li>
-      <li>Restart Neutron, then reload this page.</li>
-    </ol>
-    <p class="alt">Prefer API billing? Set <code>ANTHROPIC_API_KEY=sk-ant-…</code> in
-       <code>.env</code> instead, then restart.</p>
+    <p class="lead">Neutron runs on your Claude account. Connect it once to start —
+       this takes about a minute and stays on your machine.</p>
+
+    <div id="ng-auto" style="display:none">
+      <p>In a terminal on this machine, run:</p>
+      <div class="row">
+        <code class="cmd" id="ng-cmd">preparing…</code>
+        <button id="ng-copy" type="button">Copy</button>
+      </div>
+      <p class="status" id="ng-status">Preparing your install command…</p>
+    </div>
+
+    <details id="ng-manual-details">
+      <summary>Prefer to do it by hand?</summary>
+      <ol>
+        <li>Run <code>claude setup-token</code> — it opens a browser and prints a
+            token (<code>sk-ant-oat…</code>).</li>
+        <li>Paste the token here to activate without restarting by hand:
+          <textarea id="ng-token" placeholder="sk-ant-oat…" spellcheck="false"></textarea>
+          <div class="row"><button id="ng-manual-submit" type="button">Activate</button></div>
+          <p class="status" id="ng-manual-status"></p>
+        </li>
+      </ol>
+      <p class="alt">Or set <code>CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat…</code> (or
+         <code>ANTHROPIC_API_KEY=sk-ant-…</code> for API billing) in your
+         <code>.env</code> and restart Neutron.</p>
+    </details>
+
     <p class="foot">Neutron spawns the <code>claude</code> CLI as its LLM substrate —
-       it never calls api.anthropic.com directly. One of the two credentials above
-       is required before the first chat.</p>
+       it never calls api.anthropic.com directly.</p>
   </main>
+  <script>${CHAT_AUTH_GATE_SCRIPT}</script>
 </body>
 </html>`
+}
+
+/**
+ * CSP for the auth-gate page: pin the one deterministic inline `<script>` with a
+ * `sha256-` hash (no `'unsafe-inline'` for scripts), allow the inline `<style>`,
+ * and permit same-origin `fetch` to the install-token routes. Computed once.
+ */
+export function chatAuthGateCsp(): string {
+  const hash = createHash('sha256').update(CHAT_AUTH_GATE_SCRIPT, 'utf8').digest('base64')
+  return [
+    "default-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "style-src 'unsafe-inline'",
+    `script-src 'sha256-${hash}'`,
+    "connect-src 'self'",
+  ].join('; ')
 }
 
 /**
@@ -1205,10 +1344,14 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
             // 503: the chat surface is intentionally unavailable until a
             // credential is present (not a 200 "here's your chat" lie, not a
             // 404 "no such page"). Browsers render the HTML body regardless.
+            // The page is the FUNCTIONAL Claude-Max OAuth handoff — its inline
+            // script drives `/oauth/max/install-token/*` to capture a token and
+            // auto-advance; the CSP pins that script by hash.
             status: 503,
             headers: {
               'content-type': 'text/html; charset=utf-8',
               'cache-control': 'no-store',
+              'content-security-policy': chatAuthGateCsp(),
             },
           })
         }

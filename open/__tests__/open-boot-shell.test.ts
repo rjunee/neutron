@@ -36,6 +36,7 @@ import type { BootHandle } from '../../gateway/index.ts'
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -54,6 +55,11 @@ const SAVED_ENV_KEYS = [
   // and make the no-credential 503 assertions return the 200 shell. Save +
   // clear it alongside ANTHROPIC_API_KEY so these tests are env-independent.
   'CLAUDE_CODE_OAUTH_TOKEN',
+  // #101 added a macOS Keychain ambient-auth probe that reads the Keychain
+  // DIRECTLY (not env), so clearing the token above is not enough on a dev Mac
+  // with a real `claude` login — it would resolve a pool and disable the gate.
+  // Force the handoff default so these gate assertions are host-independent.
+  'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
   'NEUTRON_GRAPH_COMPOSER_MODULE',
 ] as const
@@ -74,6 +80,8 @@ beforeEach(() => {
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   delete process.env['ANTHROPIC_API_KEY'] // LLM-less → static onboarding prompts
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN'] // ISSUES #318 — keep the auth gate ACTIVE
+  process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1' // ignore any host `claude` login
+  __resetAmbientAuthCacheForTests() // drop a cached probe result from a prior test
   delete process.env['NOTIFY_SOCKET']
   delete process.env['NEUTRON_GRAPH_COMPOSER_MODULE']
 })

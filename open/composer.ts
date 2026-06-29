@@ -34,6 +34,8 @@
 import { JwksCache } from '../jwt-validator/validator.ts'
 import { newCredentialPool, type CredentialPool } from '../runtime/credential-pool.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
+import { buildOpenInstallTokenHandler } from './install-token-handoff.ts'
+import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
 import { buildLocalPlatformAdapter } from '../runtime/platform-adapter-local.ts'
 import type { PlatformAdapter } from '../runtime/platform-adapter.ts'
 import { CronJobRegistry } from '../cron/jobs.ts'
@@ -177,6 +179,14 @@ export interface BuildOpenGraphComposerOptions {
   substrateFactory?: (
     opts: import('../runtime/adapters/claude-code/index.ts').ClaudeCodeSubstrateOptions,
   ) => import('../runtime/substrate.ts').Substrate
+  /**
+   * Install-token handoff seam (E2E). Production leaves this undefined →
+   * `buildOpenInstallTokenHandler` with the real `.env`-persist + supervisor-
+   * restart side effects. The single-owner E2E injects a handler whose
+   * `persistToken`/`requestRestart` are spies so the no-token → handoff →
+   * activate flow can be walked without writing `.env` or exiting the runner.
+   */
+  installTokenHandler?: (req: Request) => Promise<Response | null>
 }
 
 /**
@@ -976,7 +986,21 @@ export function buildOpenGraphComposer(
     // second engine, no flag.
     const appWsButtonPromptRouter: AppSocketButtonPromptRouter = {}
     const appWsImportProgressRouter: AppSocketImportProgressRouter = {}
+    // AUTH-CORRECTION (2026-06-28) — Claude-Max OAuth install-token handoff.
+    // The DEFAULT first-screen auth path: when the box has no token AND no
+    // Keychain login (so `resolveOpenLlmPool` returns null and `chatAuthGate`
+    // gates `/chat`), the gate page drives this handler — a copy-paste one-liner
+    // that captures the owner's `sk-ant-oat…` token and POSTs it back here.
+    // `/complete` persists it to `.env` then exits so the supervisor respawns
+    // with a LIVE substrate (the composer resolves creds once at boot). The
+    // Keychain fast-path (#101) stays ABOVE this — when present, the gate never
+    // renders and this handler is never reached.
+    const installTokenHandler = options.installTokenHandler ?? buildOpenInstallTokenHandler({
+      persistToken: (token) => persistOauthTokenToEnv(token),
+      requestRestart: () => requestSupervisorRestart(),
+    }).handle
     const landing = buildLandingStack({
+      installTokenHandler,
       db,
       project_slug,
       owner_home,

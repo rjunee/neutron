@@ -82,10 +82,26 @@ function defaultHasCredentialsFile(env: NodeJS.ProcessEnv): boolean {
   }
 }
 
+/**
+ * AUTH-CORRECTION (2026-06-28) — opt OUT of the ambient/Keychain fast-path.
+ * The Claude-Max OAuth handoff is the DEFAULT first onboarding step; the
+ * Keychain branch (#101) is only a save-a-step optimisation for a box whose
+ * owner happens to already have a `claude` login. A headless deployment (or any box
+ * that must always present the handoff, e.g. a deterministic test) sets
+ * `NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH=1` so an INCIDENTAL host `claude` login
+ * can't silently satisfy auth and skip the handoff screen. Checked BEFORE the
+ * memo (in the cached wrapper) so the knob can't be masked by a warm cache.
+ */
+export function ambientClaudeAuthDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const optOut = env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH']
+  return typeof optOut === 'string' && optOut.length > 0 && optOut !== '0' && optOut !== 'false'
+}
+
 export function detectAmbientClaudeAuth(
   env: NodeJS.ProcessEnv = process.env,
   deps?: AmbientAuthProbeDeps,
 ): boolean {
+  if (ambientClaudeAuthDisabled(env)) return false
   const resolved: AmbientAuthProbeDeps = deps ?? {
     platform: process.platform,
     hasKeychainItem: defaultHasKeychainItem,
@@ -116,6 +132,9 @@ export function detectAmbientClaudeAuthCached(
   env: NodeJS.ProcessEnv = process.env,
   deps?: AmbientAuthProbeDeps,
 ): boolean {
+  // The opt-out wins over a warm memo: a box that forces the handoff must never
+  // be handed a stale `true` cached before the knob was read.
+  if (ambientClaudeAuthDisabled(env)) return false
   const now = Date.now()
   if (cache !== null && now - cache.at < CACHE_TTL_MS) return cache.value
   const value = detectAmbientClaudeAuth(env, deps)

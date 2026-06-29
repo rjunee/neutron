@@ -2,6 +2,76 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-28 — Claude-Max OAuth handoff is the DEFAULT first auth screen (functional, not a dead 503)
+
+**What shipped (AUTH-CORRECTION, Ryan-locked 2026-06-28).** A fresh Open
+install's FIRST chat screen is now a FUNCTIONAL Claude-Max-OAuth handoff instead
+of the dead 503 "Authenticate Claude" page that only printed manual steps. The
+resolution order is unchanged in spirit and maps 1:1 onto the existing
+`resolveOpenLlmPool(env)`:
+
+1. **Explicit env token** — `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`)
+   → use it (existing).
+2. **Keychain fast-path (#101)** — if `claude` is already ambient/Keychain-authed
+   → use it, skip the step. KEPT intact (`open/ambient-claude-auth.ts`), a
+   save-a-step optimisation, NOT deleted.
+3. **Handoff (the DEFAULT)** — no token AND no Keychain (the default case —
+   Linux/headless boxes, fresh installs) → the gate page renders a copy-paste one-liner
+   that installs the `claude` CLI, runs `claude setup-token`, captures the
+   `sk-ant-oat…` token, and POSTs it back. **No more dead 503.**
+
+**Mechanism (single-service Open port of the prior install-token handoff flow).**
+`open/install-token-handoff.ts` mounts four routes ahead of the `/chat` gate via
+the existing `installTokenHandler` extension point (previously unimplemented in
+Open; a hosted deployment can wire its own HMAC-guarded handler at the same paths):
+
+- `POST /oauth/max/install-token/initiate` — mint a `signup_id` (UUID, the
+  capability) + the one-liner for this origin.
+- `GET  /oauth/max/install-token/<signup_id>.sh` — the bash installer (no
+  node/npm/brew/sudo; installs from `claude.ai/install.sh`, captures the token,
+  POSTs the callback).
+- `POST /oauth/max/install-token/complete` — `{signup_id, token}`: validate the
+  token shape, persist it to `.env`, mark the handoff complete, restart.
+- `GET  /oauth/max/install-token/state?signup_id=` — poll status.
+
+No HMAC shared-secret needed: Open is single-owner on `127.0.0.1`, so
+the unguessable `signup_id` is a sufficient capability. The handler validates
+token SHAPE only — Open's substrate is the `claude` CLI, which validates the
+token itself at spawn, so the box never calls the Anthropic API directly.
+
+**Why a restart, not a live env mutation.** The Open composer resolves the LLM
+substrate ONCE at boot (`open/composer.ts:313`, gated on a non-null pool). A box
+that boots with no credential has NO substrate object, so mutating `process.env`
+live would clear the gate but leave chat LLM-less. So `/complete` persists the
+token to the code-dir `.env` (`open/install-token-env.ts`, mirroring install.sh's
+`persist_oauth_token_to_env`) then exits; the launchd `KeepAlive` / systemd
+`Restart=always` supervisor respawns the process, which re-reads `.env` and
+builds a LIVE substrate — exactly the documented `systemctl restart` step,
+and what the old dead page already told users to do by hand. The gate page polls
+`GET /chat` for the 503 → (restart window) → 200 transition, then auto-advances
+into onboarding. A manual `claude setup-token` → paste box is the secondary
+path; the static "add to `.env` + restart" copy is the final fallback if the
+routes are unmounted.
+
+**Force-handoff knob.** Added `NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH`
+(`open/ambient-claude-auth.ts`): when set, the Keychain fast-path is skipped so a
+box that must ALWAYS present the handoff (a headless deployment with no Keychain;
+a deterministic test) can't have an INCIDENTAL host `claude` login silently satisfy auth. This
+also makes the boot-shell gate tests host-independent (they failed on a dev Mac
+with a real `claude` login because #101's probe reads the Keychain directly, not
+env).
+
+**No flags, one PR, all Open.** The gate page (`landing/server.ts`
+`renderChatAuthGateHtml`) is now the functional handoff with one deterministic
+inline `<script>` pinned by a `sha256-` CSP (`chatAuthGateCsp`). Tests:
+`open/__tests__/install-token-handoff.test.ts`,
+`open/__tests__/install-token-env.test.ts`, updated
+`landing/__tests__/chat-auth-gate.test.ts` + `open/__tests__/open-boot-shell.test.ts`.
+
+(A hosted/multi-instance deployment's own HMAC-guarded handler + encrypted
+per-instance token store is tracked separately in that deployment's repo — out of
+scope for this Open PR; the shared gate page + route shapes are reused as-is.)
+
 ## 2026-06-28 — Chat auth-gate accepts an ambient/Keychain-authed `claude` (fresh-install 503 fix)
 
 **The bug (P1, hit live on a fresh reset).** On a Mac where the owner already
