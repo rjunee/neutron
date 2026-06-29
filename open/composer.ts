@@ -48,6 +48,7 @@ import type { LiveAgentOnboardingSeam } from '../gateway/realmode-composer/build
 import { buildProjectDocComposer } from '../gateway/realmode-composer/build-project-doc-composer.ts'
 import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
 import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
+import { auditRequiredFields } from '../onboarding/interview/required-fields-audit.ts'
 import { buildOnboardingPreamble } from '../onboarding/interview/onboarding-preamble.ts'
 import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
@@ -1779,6 +1780,68 @@ export function buildOpenGraphComposer(
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
           })
         : null
+    // Authoritative in-flight-import probe — gates onboarding completion against
+    // the premature-finalize race (a Path-1 export upload starts an import job
+    // OUTSIDE the extractor's per-user chain, so the stale onboarding phase
+    // alone can't be trusted). A non-terminal `import_jobs` row for this owner
+    // means "an import is live; do not finalize on top of it." Shared by the
+    // post-turn extractor, the import-completion watcher, and the reconnect
+    // recovery below.
+    const probeInFlightImport = async (): Promise<boolean> => {
+      try {
+        const row = db
+          .raw()
+          .query<{ one: number }, [string]>(
+            `SELECT 1 AS one FROM import_jobs
+               WHERE project_slug = ?
+                 AND status NOT IN ('completed', 'failed', 'cancelled')
+               LIMIT 1`,
+          )
+          .get(project_slug)
+        return row !== null && row !== undefined
+      } catch {
+        // Probe failure must never block a legitimate completion.
+        return false
+      }
+    }
+    // M1 E2E Round 4 (2026-06-29) — finalize an onboarding whose history import
+    // landed AFTER the owner had already answered every required field. The
+    // extractor only finalizes on a USER turn and is (correctly) gated from
+    // finalizing while an import is in flight, so the field-completing turn
+    // could not finalize. The import-completion watcher then consumes
+    // `import_analysis_presented` but historically did NOT finalize — it relied
+    // on "a subsequent no-op turn". A user who answered everything and went idle
+    // (very likely on a large multi-minute import) was therefore left WEDGED:
+    // generic persona, no project DB rows, no error — and reconnect didn't
+    // recover (on_session_open only re-armed the watcher). Make import
+    // completion an authoritative finalize trigger. Idempotent (finalize no-ops
+    // a `completed` row). Returns true iff it finalized.
+    const finalizeImportOnboardingIfReady = async (
+      user_id: string,
+      st: Awaited<ReturnType<typeof onboardingStateStore.get>>,
+    ): Promise<boolean> => {
+      if (onboardingFinalizer === null || st === null) return false
+      if (st.phase === 'completed' || st.phase === 'failed') return false
+      // Only AFTER the import has been consumed back into a conversational
+      // marker (the engine has by then stamped `import_result` + the merged
+      // primary_projects onto phase_state). Never finalize on top of a live or
+      // not-yet-consumed import phase.
+      if (st.phase === 'import_running' || st.phase === 'import_analysis_presented') return false
+      if (auditRequiredFields(st.phase_state).next_to_collect !== null) return false
+      if (await probeInFlightImport()) return false
+      const importResult =
+        st.phase_state['import_result'] !== null &&
+        typeof st.phase_state['import_result'] === 'object'
+          ? (st.phase_state['import_result'] as ImportResult)
+          : null
+      await onboardingFinalizer.finalize({
+        user_id,
+        topic_id: appWsTopicId(user_id),
+        state: st,
+        import_result: importResult,
+      })
+      return true
+    }
     // The fire-and-forget post-turn scribe — replaces the per-turn llm-router.
     const onboardingExtractor =
       onboardingAnthropicClient !== null
@@ -1786,29 +1849,7 @@ export function buildOpenGraphComposer(
             anthropicClient: onboardingAnthropicClient,
             stateStore: onboardingStateStore,
             project_slug,
-            // Authoritative in-flight-import probe — gates the extractor's
-            // completion against the premature-finalize race (a Path-1 export
-            // upload starts an import job OUTSIDE this extractor's per-user
-            // chain, so the stale onboarding phase alone can't be trusted). A
-            // non-terminal `import_jobs` row for this owner means "an import is
-            // live; do not finalize on top of it."
-            hasInFlightImport: async (): Promise<boolean> => {
-              try {
-                const row = db
-                  .raw()
-                  .query<{ one: number }, [string]>(
-                    `SELECT 1 AS one FROM import_jobs
-                       WHERE project_slug = ?
-                         AND status NOT IN ('completed', 'failed', 'cancelled')
-                       LIMIT 1`,
-                  )
-                  .get(project_slug)
-                return row !== null && row !== undefined
-              } catch {
-                // Probe failure must never block a legitimate completion.
-                return false
-              }
-            },
+            hasInFlightImport: probeInFlightImport,
             onComplete: async ({ user_id, state }): Promise<void> => {
               if (onboardingFinalizer === null) return
               // Pass the import analysis through to materialization when an
@@ -1857,13 +1898,19 @@ export function buildOpenGraphComposer(
             // move straight back to the conversational marker. The empty patch
             // (plus a consumed stamp) shallow-merges, preserving the engine's
             // merged primary_projects / non_work_interests / import_result.
-            await onboardingStateStore.upsert({
+            const consumed = await onboardingStateStore.upsert({
               project_slug,
               user_id,
               phase: 'work_interview_gap_fill',
               phase_state_patch: { active_prompt_id: null, import_consumed_at: Date.now() },
             })
             emitProjectsChangedIfChanged(user_id)
+            // If the owner had already answered every required field while the
+            // import was still synthesizing, there is NO further user turn to
+            // finalize on — do it now so onboarding can't strand at the
+            // conversational marker. Otherwise the interview simply continues
+            // and the field-completing turn finalizes as usual.
+            await finalizeImportOnboardingIfReady(user_id, consumed)
           } else if (Date.now() - startedAt <= IMPORT_WATCH_MAX_MS) {
             reschedule = true
           }
@@ -2152,6 +2199,18 @@ export function buildOpenGraphComposer(
         // the pre-existing set; the post-emit below catches a seed-driven change).
         emitProjectsChangedIfChanged(user_id)
         if (await isOnboardingActive(user_id)) {
+          // RECOVERY (M1 E2E Round 4, 2026-06-29) — finalize a post-import
+          // onboarding that was consumed back into the conversational marker but
+          // never finalized: the owner answered every field while the import was
+          // synthesizing, the import landed, and they went idle (or a restart
+          // landed between the watcher's consume and a finalize). On-reconnect is
+          // the natural recovery point. No-op unless every required field is
+          // present and no import is in flight; finalize is idempotent.
+          const recoverSt = await onboardingStateStore.get(project_slug, user_id)
+          if (await finalizeImportOnboardingIfReady(user_id, recoverSt)) {
+            emitProjectsChangedIfChanged(user_id)
+            return
+          }
           // RESTART RESILIENCE (M1 E2E Round 2, 2026-06-29) — re-arm the import-
           // completion watcher on reconnect. The watcher is a purely in-memory
           // `setTimeout` chain armed ONLY inside `notifyImportUpload` (the upload
