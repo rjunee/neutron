@@ -485,16 +485,37 @@ export function buildOpenGraphComposer(
     // API-BILLED off the Max subscription since 2026-06-15). The build-core trident
     // module wraps this launcher with `buildWorkflowInnerLoop`.
     //
-    // The launcher substrate is a FRESH ephemeral `cc-trident-*` REPL per launch,
-    // rooted at the run's worktree, configured for the inner loop:
+    // WHICH WARM POOL — the locked plan asks for "the same warm pooled session that
+    // serves this project's chat turns". The conversational REPL (`cc-agent-*`) can
+    // NOT literally host the Workflow: it is spawned with a restricted built-in
+    // surface (`--tools Read,Glob,Grep,Write,Edit,Bash,Skill` — see
+    // build-live-agent-turn.ts DEFAULT_TOOL_NAMES) that OMITS `Workflow` /
+    // `Task*` / `Monitor`, and the SECURITY-CRITICAL tool-surface reuse guard
+    // (persistent-repl-substrate.ts) EVICTS+RESPAWNS the warm child whenever a turn
+    // requests a different surface — so dispatching the unrestricted launcher onto
+    // the `cc-agent-*` key would kill the chat REPL and thrash the single pool slot
+    // (breaking chat AND aborting the held-open build). So the launcher lands on a
+    // SIBLING warm pool key, `cc-trident-${internal_handle}`, on the SAME credential
+    // pool and SAME (owner, project) dimensions as chat — a WARM, POOLED, REUSED
+    // interactive REPL (NOT ephemeral, NOT a fresh/disposed spawn, NOT `claude -p`).
+    // It is the billing-exempt interactive substrate the plan requires; it just
+    // can't share chat's exact child process (impossible given the surface guard).
+    //
+    // Config for the inner loop:
+    //   • NON-ephemeral → the `cc-trident-*` child stays WARM and is REUSED across
+    //     runs of this project (the acceptance bar: "lands on the warm pooled child,
+    //     reused, alive, not a fresh/disposed spawn"). `ephemeral:true` was the
+    //     prior-attempt bug — it disposed the child after the turn settled, the
+    //     #102 disposal class that aborts the still-draining Workflow on any early
+    //     settle. A warm child survives turn-settle.
     //   • `unrestrictedToolSurface` — the FULL built-in surface so `Workflow` (and
     //     the `Task*`/`Monitor` tools the launcher uses to poll the background run
     //     to terminal) are present (a restricted `--tools` list omits `Workflow`).
     //   • `turn_timeout_ms = DEFAULT_INNER_LOOP_TIMEOUT_MS` — the launcher HOLDS
     //     its turn open (polling) for the whole build, far past the 180s
-    //     conversational default; the held-open turn keeps the REPL alive so the
-    //     background Workflow drains (the interactive analogue of print-mode's
-    //     process-lifetime drain) — the real-run abort this replaces.
+    //     conversational default; the held-open turn keeps the REPL turn alive so
+    //     the background Workflow drains — the interactive analogue of print-mode's
+    //     process-lifetime drain, the real-run abort this replaces.
     //   • auto-mode (Phase 3): `--permission-mode dontAsk` + the trident allowlist
     //     / deny list + a PreToolUse Bash deny-guard (REPLACES the reckless
     //     `--dangerously-skip-permissions`); the Workflow `agent()` workers inherit
@@ -515,7 +536,9 @@ export function buildOpenGraphComposer(
               internal_handle,
               user_id: OWNER_USER_ID,
               project_slug,
-              ephemeral: true,
+              // NON-ephemeral (omit the flag) → warm, POOLED, reused across runs.
+              // The launcher cwd is the STABLE repo root (not a per-run worktree),
+              // so the reused warm child never sits in a removed worktree dir.
               // Full built-in surface (Workflow + Task*/Monitor) — trusted path.
               unrestrictedToolSurface: true,
               // Held-open launcher turn spans the whole inner loop.
@@ -2524,9 +2547,10 @@ export function buildOpenGraphComposer(
       // `build_substrate` here flips the trident tick loop (built in
       // `build-core-modules.ts`) from its `stubAdvanceDeps` no-op to the REAL
       // `buildWorkflowInnerLoop` + `buildTridentOrchestrator` step, so a
-      // `code_trident_runs` row is driven end-to-end: the launcher spawns a
-      // blocking `claude -p` print-mode process that invokes the `Workflow` tool
-      // and drains it to completion (see `tridentLaunchInnerWorkflow` above).
+      // `code_trident_runs` row is driven end-to-end: the launcher runs ONE
+      // held-open turn on the WARM, POOLED, billing-EXEMPT interactive
+      // `cc-trident-*` REPL that invokes the `Workflow` tool and drives it to
+      // completion — NO `claude -p` (see `tridentLaunchInnerWorkflow` above).
       // Omitted when no credential resolves (`tridentLaunchInnerWorkflow === null`)
       // → unchanged LLM-less behaviour (loop stays live + restart-safe but
       // advances nothing). The `on_run_terminal` observer fires Skill Forge's

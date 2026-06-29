@@ -149,10 +149,11 @@ dispatch.
   non-fatal `git worktree remove --force` + `prune` after the landed merge.
 - **Composer wiring.** `open/composer.ts` threads
   `trident: { launch_inner_workflow: buildSubstrateInnerLauncher({ build_substrate })
-  }`, where `build_substrate` is a per-launch factory that builds a FRESH ephemeral
-  `cc-trident-*` interactive REPL over the SAME single-owner `llmPool` the
-  conversational substrate uses (`buildLlmCallSubstrate`, never a direct
-  api.anthropic.com call), rooted at the run's worktree, with
+  }`, where `build_substrate` resolves a WARM, POOLED, NON-EPHEMERAL `cc-trident-*`
+  interactive REPL over the SAME single-owner `llmPool` the conversational substrate
+  uses (`buildLlmCallSubstrate`, never a direct api.anthropic.com call), keyed per
+  (owner, project, credential) and REUSED across runs, rooted at the STABLE repo
+  root (not a per-run worktree — see the warm-pool correction below), with
   `unrestrictedToolSurface` + `turn_timeout_ms = DEFAULT_INNER_LOOP_TIMEOUT_MS` +
   auto-mode `permissionMode: dontAsk` + the `buildTridentAutoModeSettings()`
   overlay. `build-core-modules.ts` wraps it with `buildWorkflowInnerLoop` + passes
@@ -325,6 +326,42 @@ through `runtime/adapters/claude-code/persistent/build-repl-argv.ts`,
 new `trident/auto-mode.test.ts`; updated `trident/vajra-fixes.test.ts`,
 `open/__tests__/open-trident-prod-boot-wiring.test.ts` (billing-exempt invocation
 proof), and the persistent `build-repl-argv` / `build-settings` test suites.
+
+**WARM-POOL correction (2026-06-29) — the locked-plan substrate target.** The BILLING
+fix above ran the launcher on the interactive substrate (correct, billing-exempt) but
+on a FRESH `cc-trident-*` REPL with `ephemeral: true` per launch, rooted at the run's
+worktree. The locked plan requires the launcher to land on the WARM, POOLED session —
+*"reused, alive, not a fresh/disposed spawn"* — and explicitly forbids an ephemeral
+session (the #102 disposal that aborted the Workflow). The literal *"same child that
+serves chat turns"* is IMPOSSIBLE: the warm chat REPL (`cc-agent-*`) is spawned with a
+restricted built-in surface (`--tools Read,Glob,Grep,Write,Edit,Bash,Skill` — see
+`build-live-agent-turn.ts` `DEFAULT_TOOL_NAMES`) that OMITS `Workflow`/`Task*`/`Monitor`,
+and the SECURITY-CRITICAL tool-surface reuse guard in `persistent-repl-substrate.ts`
+EVICTS+RESPAWNS the warm child on any surface change — so dispatching the unrestricted
+launcher onto chat's key would kill the chat REPL and thrash the single pool slot
+(breaking chat AND aborting the held-open build). Giving chat itself the full surface
+would expose `Workflow`/`Agent` to every chat turn (`skip_permissions`) — worse.
+
+**The correction:** the launcher lands on a SIBLING warm-pool key
+`cc-trident-${internal_handle}`, on the SAME credential pool and (owner, project)
+dimensions as chat, **NON-ephemeral** (the `ephemeral` flag removed) so the child is
+WARM and REUSED across runs (acceptance bar met), with `unrestrictedToolSurface` so
+`Workflow` + the poll tools are present. Two changes vs the prior cut: (1)
+`open/composer.ts` `makeTridentSubstrate` drops `ephemeral: true` → warm pooled; (2)
+`trident/inner-loop.ts` `buildWorkflowInnerLoop` roots the launcher turn at the STABLE
+`run.repo_path` (NOT the per-run worktree) — a warm child keeps its spawn cwd and the
+pool key excludes cwd, so a worktree cwd would leave a later run's reused child sitting
+in a removed dir; the Forge agent makes its OWN `isolation:'worktree'` worktree, so the
+repo root is the correct stable cwd. Non-ephemeral is also load-bearing for the drain:
+a warm child SURVIVES turn-settle, so an early/abnormal settle no longer hard-disposes
+the REPL mid-build (the #102 class). Docstrings in `inner-loop.ts` + the `composer.ts`
+comment + `SYSTEM-OVERVIEW.md` trident section updated; `inner-loop.test.ts` asserts the
+launcher cwd is the repo root. Acceptance: full `trident/` dir GREEN (289 tests);
+`tsc -p trident/tsconfig.json` clean; wiring + `build-repl-argv`/`build-settings` (24)
+GREEN; leak-gate SILENT; grep confirms NO `claude -p`/`--print` in the live launcher
+path. The full LIVE real-`/code` loop remains the orchestrator/owner end-to-end gate
+(needs a live LLM session), with the unit-level warm-pool-substrate proof standing in
+headlessly.
 
 ## Install GUARANTEES GBrain memory — retry + abort-on-failure (no silent degrade)
 

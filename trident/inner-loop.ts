@@ -24,26 +24,34 @@
  * THE DRAIN PROBLEM (and how the interactive path solves it): the CC `Workflow`
  * tool is BACKGROUND. Invoking it returns a runId IMMEDIATELY; the run completes
  * later. The persistent-REPL substrate settles a turn on the FIRST dev-channel
- * `reply()` and (ephemeral) disposes the REPL right after — so a naive launcher
- * turn that replies straight after invoking `Workflow` settles in ~30s, the REPL
- * is killed, and the background workflow is ABORTED before Argus / synthesis /
- * checkpoints / cleanup run (the original real-run bug). The fix is option (b):
- * the launcher holds its ONE interactive turn OPEN — after invoking `Workflow` it
- * POLLS the background run to terminal (the `Task*`/`Monitor` tools + `sleep`
- * cadence) and only emits its single `reply()` (carrying `TRIDENT_RESULT=`) once
- * the run has fully finished. The held-open turn keeps the REPL process alive so
- * the background workflow drains to completion — the interactive analogue of
- * print-mode's process-lifetime drain — WITHOUT any `claude -p`.
+ * `reply()` — so a naive launcher turn that replies straight after invoking
+ * `Workflow` settles in ~30s, ENDING the launcher's only turn before Argus /
+ * synthesis / checkpoints / cleanup run; the launcher then reports an incomplete
+ * (or empty) result and, on the prior EPHEMERAL substrate, the REPL was disposed
+ * right after settle, hard-ABORTING the still-running workflow (the original
+ * real-run bug). The fix is option (b): the launcher holds its ONE interactive
+ * turn OPEN — after invoking `Workflow` it POLLS the background run to terminal
+ * (the `Task*`/`Monitor` tools + `sleep` cadence) and only emits its single
+ * `reply()` (carrying `TRIDENT_RESULT=`) once the run has fully finished. The
+ * held-open turn keeps the launcher driving the run until it drains to completion
+ * — the interactive analogue of print-mode's process-lifetime drain — WITHOUT any
+ * `claude -p`.
  *
- * The substrate is supplied via an injectable `build_substrate(cwd)` factory
- * (production: the trident interactive REPL the Open composer builds over the
- * single-owner credential pool, with the FULL built-in tool surface incl.
- * `Workflow`, a raised `turnTimeoutMs` spanning the whole inner loop, and
- * auto-mode dontAsk + allowlist + deny-guard). The launcher seam
- * (`LaunchInnerWorkflow`) is unchanged in shape, so `buildWorkflowInnerLoop` and
- * the durable OUTER loop are untouched; production wires
- * `buildSubstrateInnerLauncher`. Tests inject a fake `launch` / `Substrate` and
- * never touch a live `claude`.
+ * WHICH SUBSTRATE — a WARM, POOLED, NON-EPHEMERAL interactive `cc-trident-*` REPL
+ * on the SAME credential pool and (owner, project) dimensions as this project's
+ * chat session, REUSED across runs (it just can't be chat's exact child: chat's
+ * restricted `--tools` surface omits `Workflow`, and the substrate's tool-surface
+ * reuse guard would evict+respawn chat's child if the unrestricted launcher landed
+ * on its key — see open/composer.ts). Non-ephemeral is load-bearing: a warm child
+ * SURVIVES turn-settle, so an early/abnormal settle no longer disposes the REPL
+ * mid-build (the #102 disposal class). The substrate is supplied via an injectable
+ * `build_substrate(cwd)` factory (production: that warm trident REPL, built with
+ * the FULL built-in tool surface incl. `Workflow`, a raised `turnTimeoutMs`
+ * spanning the whole inner loop, and auto-mode dontAsk + allowlist + deny-guard).
+ * The launcher seam (`LaunchInnerWorkflow`) is unchanged in shape, so
+ * `buildWorkflowInnerLoop` and the durable OUTER loop are untouched; production
+ * wires `buildSubstrateInnerLauncher`. Tests inject a fake `launch` / `Substrate`
+ * and never touch a live `claude`.
  *
  * FALSE-COMPLETION discipline (paused ≠ finished; Vajra fleet-premature-
  * completion reconciliation #160/#164) is preserved: a launcher is `completed`
@@ -181,17 +189,21 @@ function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown> {
  * the `TRIDENT_RESULT=<compact JSON>` line.
  *
  * Why the held-open turn matters: the substrate settles this turn the instant the
- * launcher calls `reply()`, then disposes the (ephemeral) REPL — which would KILL
- * the still-running background Workflow. So the cardinal rule is: do NOT reply
- * until the Workflow has fully finished. Holding the turn open (by polling) keeps
- * the REPL process alive so the workflow drains — the interactive analogue of the
- * old print-mode drain, with no `claude -p` and no API billing.
+ * launcher calls `reply()`, ENDING the launcher's only turn — after which it can
+ * no longer poll the background run to terminal, so it would report an INCOMPLETE
+ * (or empty) result before Argus / synthesis / checkpoints run. So the cardinal
+ * rule is: do NOT reply until the Workflow has fully finished. Holding the turn
+ * open (by polling) keeps the launcher driving the run until it drains — the
+ * interactive analogue of the old print-mode drain, with no `claude -p` and no API
+ * billing. (The warm `cc-trident-*` REPL is non-ephemeral, so an early settle no
+ * longer hard-disposes the process — but a premature reply still loses the result,
+ * so the rule stands.)
  */
 export function buildLauncherMessage(scriptPath: string, input: InnerLoopInput): string {
   const argsJson = JSON.stringify(buildWorkflowArgs(input))
   return `You are the trident-v2 inner-loop LAUNCHER, running as ONE unattended interactive session turn. NEVER ask for input; on any blocker, finish with the result line below carrying a REQUEST_CHANGES verdict rather than hanging.
 
-⚠️ CARDINAL RULE — DO NOT call the dev-channel \`reply()\` tool until the Workflow has FULLY FINISHED. Calling \`reply()\` ENDS this turn, and ending the turn KILLS the still-running background Workflow (no Argus review, no PR, no checkpoints). Hold this turn OPEN by polling (step 2) until the run is terminal, THEN reply exactly once (step 3).
+⚠️ CARDINAL RULE — DO NOT call the dev-channel \`reply()\` tool until the Workflow has FULLY FINISHED. Calling \`reply()\` ENDS this turn; once the turn ends you can no longer observe the background Workflow, so its result (Argus review, PR, checkpoints) is LOST — you'd report an incomplete run. Hold this turn OPEN by polling (step 2) until the run is terminal, THEN reply exactly once (step 3).
 
 Do EXACTLY this, nothing else:
 1. Invoke the \`Workflow\` tool with:
@@ -255,13 +267,15 @@ const FAILED = (raw: string): InnerLoopResult => ({
 export interface SubstrateInnerLauncherOptions {
   /**
    * PRODUCTION substrate factory — the billing-EXEMPT persistent interactive REPL
-   * (`buildLlmCallSubstrate` → `createClaudeCodeSubstrateAuto`). Built ONCE PER
-   * LAUNCH with the run's worktree as the cwd, so the launcher turn runs IN the
-   * run's worktree on a fresh `cc-trident-*` REPL — never the owner's warm
-   * conversational pool. Production wires the trident substrate with the FULL
-   * built-in tool surface (so `Workflow` + the `Task*`/`Monitor` poll tools are
-   * present), a `turnTimeoutMs` spanning the whole inner loop, and auto-mode
-   * dontAsk + allowlist + deny-guard. Tests inject a fake `Substrate`.
+   * (`buildLlmCallSubstrate` → `createClaudeCodeSubstrateAuto`). Resolves a WARM,
+   * POOLED, NON-EPHEMERAL `cc-trident-*` REPL keyed on the SAME (owner, project,
+   * credential) dimensions as chat (a SIBLING of the `cc-agent-*` chat pool, not
+   * its exact child — chat's restricted surface can't host `Workflow`). The
+   * passed `cwd` is the STABLE repo root, so the warm child a later run reuses is
+   * never sitting in a removed worktree. Production wires the trident substrate
+   * with the FULL built-in tool surface (so `Workflow` + the `Task*`/`Monitor`
+   * poll tools are present), a `turnTimeoutMs` spanning the whole inner loop, and
+   * auto-mode dontAsk + allowlist + deny-guard. Tests inject a fake `Substrate`.
    */
   build_substrate: (cwd: string) => Substrate
   /**
@@ -430,7 +444,16 @@ export function buildWorkflowInnerLoop(opts: BuildWorkflowInnerLoopOptions): Tri
   const timeoutMs = opts.timeout_ms ?? DEFAULT_TIMEOUT_MS
 
   return async function innerLoop(input: InnerLoopInput): Promise<InnerLoopResult> {
-    const cwd = input.run.worktree ?? input.run.repo_path
+    // STABLE cwd = the repo root, NOT the per-run worktree. The launcher runs on a
+    // WARM, POOLED `cc-trident-*` REPL that is reused across runs; a warm child
+    // keeps its spawn cwd, and the pool key does not include cwd — so handing a
+    // per-run worktree path would leave a later run's reused child sitting in a
+    // worktree the prior run already removed. The launcher itself only invokes the
+    // `Workflow` tool (absolute scriptPath + absolute repoPath in args) and polls;
+    // the Forge agent makes its OWN isolated worktree (`isolation:'worktree'`,
+    // resolved from the repo at this cwd), so the repo root is the correct, stable,
+    // always-present working dir.
+    const cwd = input.run.repo_path
     const prompt = buildLauncherMessage(scriptPath, input)
 
     let res: LaunchInnerWorkflowResult

@@ -142,7 +142,7 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over the launch seam)',
     expect(res.pr_number).toBe(9)
   })
 
-  test('the launcher prompt carries scriptPath + args + structured-JSON note + the held-open-turn discipline, rooted at the worktree cwd', async () => {
+  test('the launcher prompt carries scriptPath + args + structured-JSON note + the held-open-turn discipline, rooted at the STABLE repo-root cwd', async () => {
     const { launch, calls } = fakeLaunch(() => ({
       ...OK,
       stdout: 'TRIDENT_RESULT={"verdict":"APPROVE"}',
@@ -167,8 +167,11 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over the launch seam)',
     expect(call.prompt.toLowerCase()).toContain('background')
     expect(call.prompt.toLowerCase()).toContain('poll')
     expect(call.prompt).toContain('reply()')
-    // The launcher turn is rooted at the run's worktree.
-    expect(call.cwd).toBe('/wt/run-1')
+    // The launcher turn is rooted at the STABLE repo root (NOT the per-run
+    // worktree): the launcher runs on a WARM, POOLED `cc-trident-*` REPL reused
+    // across runs, so its cwd must be a dir that always exists (the worktree is
+    // created+removed per run). The Forge agent makes its own isolated worktree.
+    expect(call.cwd).toBe('/repo')
   })
 
   test('args thread resume_checkpoint + existing pr/branch for idempotent resume', async () => {

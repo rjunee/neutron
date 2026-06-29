@@ -213,16 +213,19 @@ a slash-command.
   server.
 - **Security (opt-in per substrate).** Only the owner's WARM conversational
   substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
-  history-import REPL (`cc-import-*`) and the disposable Trident build REPLs
+  history-import REPL (`cc-import-*`) and the warm-pooled Trident build REPLs
   (`cc-trident-*`) leave it off, so a prompt-injection in untrusted content can
   never reach a Core tool. The bridge's MCP namespace is permitted via
   `--allowedTools mcp__neutron`. The built-in `--tools` surface is per-turn
   (`AgentSpec.tools`): the untrusted import REPL keeps `--tools ""` default-deny
   (no Bash/Read/Skill); the live agent declares `Read,Glob,Grep,Write,Edit,Bash,
-  Skill`. The Trident v2 LAUNCHER turn is a TRUSTED build path and declares
-  `Workflow,Agent,Bash,Edit,Read` so it can drive the inner CC Dynamic Workflow
-  (the surface is per-turn, so this never relaxes the import/conversational REPLs;
-  the MCP tool bridge stays OFF on `cc-trident-*`).
+  Skill`. The Trident v2 LAUNCHER turn is a TRUSTED build path and runs the FULL
+  built-in surface (`unrestrictedToolSurface` — NO `--tools` flag) so it has
+  `Workflow` AND the `Task*`/`Monitor` tools it polls the background run with
+  (a restricted `--tools` list would omit `Workflow`; the launcher needs the poll
+  tools to hold its turn open until the workflow drains). The surface is per-turn,
+  so this never relaxes the import/conversational REPLs; the MCP tool bridge stays
+  OFF on `cc-trident-*`.
 
 ### Native SKILL.md discovery for the agent (P1-5)
 
@@ -1151,15 +1154,26 @@ atomic, revertible commit):
   (`computeTransition`/`advanceTridentRun`) is kept intact for its unit tests +
   one-commit revertibility.
 - **Launcher:** `trident/inner-loop.ts` `buildWorkflowInnerLoop` runs ONE
-  substrate turn that invokes the `Workflow` tool on the script and reports
-  `TRIDENT_RESULT=<json>`. It copies the proven single-turn dispatch mechanics
-  (coalesce tokens, resolve on `completion`, timeout, **false-completion
+  HELD-OPEN substrate turn that invokes the `Workflow` tool on the script, then
+  POLLS the background run (`Task*`/`Monitor` + `sleep` cadence) to terminal — it
+  does NOT reply on the tool's immediate runId return — and reports
+  `TRIDENT_RESULT=<json>` in its single, final reply once the run has drained.
+  Holding the turn open keeps the launcher driving the workflow to completion (the
+  interactive analogue of print-mode's process-lifetime drain) with NO `claude -p`.
+  It copies the proven single-turn dispatch mechanics (coalesce tokens, resolve on
+  `completion`, a 2h `turn_timeout_ms` spanning the whole loop, **false-completion
   discipline** — a stream that ends with no terminal event is `failed`, never a
-  silent success). **Tool surface:** the v1 trident REPL ran `--tools ""`
-  (untrusted-import gate); the v2 launcher is a TRUSTED build path and declares
-  `Workflow,Agent,Bash,Edit,Read` on its own `AgentSpec.tools` (the surface is a
-  per-turn property, so this is a spec-level change — no substrate surgery, and
-  the import/conversational REPLs stay locked).
+  silent success). **Substrate:** a WARM, POOLED, NON-EPHEMERAL `cc-trident-*` REPL
+  on the SAME credential pool + (owner, project) dimensions as chat — REUSED across
+  runs (acceptance bar: "lands on the warm pooled child, reused, alive, not a
+  fresh/disposed spawn"). It is a SIBLING of chat's `cc-agent-*` pool, not chat's
+  exact child: chat's restricted `--tools` surface can't host `Workflow`, and the
+  substrate's tool-surface reuse guard would evict+respawn chat's child if the
+  unrestricted launcher landed on its key. **Tool surface:** the v1 trident REPL
+  ran `--tools ""` (untrusted-import gate); the v2 launcher is a TRUSTED build path
+  and runs the FULL built-in surface (`unrestrictedToolSurface`, no `--tools` flag)
+  so `Workflow` + the `Task*`/`Monitor` poll tools are present — no substrate
+  surgery, and the import/conversational REPLs stay locked.
 - **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
   workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
@@ -1180,16 +1194,21 @@ atomic, revertible commit):
 
 - **The production runner (LIVE + hardened).** The Open composer
   (`open/composer.ts`) threads `composition.trident = { build_substrate }` (the
-  per-worktree `cc-trident-*` factory), which flips the tick loop from its
+  warm-pooled `cc-trident-*` factory), which flips the tick loop from its
   `stubAdvanceDeps` no-op to the real `buildWorkflowInnerLoop` +
   `buildTridentOrchestrator` step in `build-core-modules.ts` (passed the project
   `db_path` for the workflow's checkpoint Bash steps). On APPROVE the step merges
   + cleans up; on REQUEST_CHANGES (maxRounds exhausted) or a crashed/timed-out
   dispatch it fails loudly.
-- **Per-worktree cwd + per-build isolation (DONE).** The launcher builds a FRESH
-  ephemeral CC-subprocess REPL PER CALL, rooted at the run's worktree, so one
-  build never inherits another's working context, and build turns never bleed
-  into the owner's warm conversational (`cc-agent-*`) pool. **Paused ≠ finished
+- **Warm-pooled launcher + stable repo-root cwd (DONE).** The launcher runs on a
+  WARM, POOLED, NON-EPHEMERAL `cc-trident-*` REPL (billing-exempt interactive
+  REPL, never `claude -p`), keyed per (owner, project, credential) and reused
+  across runs. Its cwd is the STABLE repo root — NOT a per-run worktree (a warm
+  child keeps its spawn cwd, so a worktree cwd would leave a later run's reused
+  child sitting in a removed dir); the Forge agent makes its OWN isolated worktree
+  (`isolation:'worktree'`) per build, so one build never inherits another's
+  working context, and the launcher is a SIBLING pool of — never thrashes — the
+  owner's warm conversational (`cc-agent-*`) pool. **Paused ≠ finished
   (false-completion guard):** a launcher turn whose event stream ends WITHOUT a
   terminal `completion`/`error` event maps to `failed`, never `completed` (Open
   analog of Vajra's fleet "paused vs finished" reap fix #160). The inlined Forge
