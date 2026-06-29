@@ -94,6 +94,75 @@ describe('resolveGbrainClientOptions', () => {
       expect(opts.env).toMatchObject({ GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text' })
     })
   })
+
+  // --- LAZY onboarding-key activation (key captured AFTER boot) -------------
+  // The composer can't see the onboarding/admin OpenAI key at boot (it's
+  // captured later, over the already-running server), so it threads a LAZY
+  // resolver. The embedder seam must NOT be baked into the static child env (the
+  // key isn't known yet) — it is resolved at spawn time via `resolveDynamicEnv`.
+  describe('lazy onboarding-key resolver (resolveOpenAiKey)', () => {
+    test('static child env stays keyword-only; a resolveDynamicEnv thunk is attached', () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/srv/owners/acme',
+        env: {},
+        resolveOpenAiKey: async () => 'sk-captured-later',
+      })
+      // The key is NOT in the static env — it resolves at spawn, not compose.
+      expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
+      expect(typeof opts.resolveDynamicEnv).toBe('function')
+    })
+
+    test('resolveDynamicEnv() yields the OpenAI embedding seam when the key is present', async () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => 'sk-captured-later',
+      })
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        OPENAI_API_KEY: 'sk-captured-later',
+      })
+    })
+
+    test('resolveDynamicEnv() yields NO embedding seam when the key is absent (keyword + graph)', async () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => undefined,
+      })
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+    })
+
+    test('a blank/whitespace key does NOT activate embeddings (no accidental billing)', async () => {
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => '   ',
+      })
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+    })
+
+    test('resolveDynamicEnv re-resolves each spawn → a key stored AFTER a keyword spawn activates', async () => {
+      // The miss is never cached at this seam: if the first memory op spawned
+      // keyword (no key yet), a later reconnect must pick up a key stored since.
+      let stored: string | undefined
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => stored,
+      })
+      // First spawn: no key → keyword + graph.
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      // Key pasted during onboarding/admin, THEN a reconnect spawns again.
+      stored = 'sk-stored-later'
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        OPENAI_API_KEY: 'sk-stored-later',
+      })
+    })
+  })
 })
 
 describe('buildGBrainMemory', () => {

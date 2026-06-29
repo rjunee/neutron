@@ -670,15 +670,31 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   1. **The onboarding-captured OpenAI key (the product path, ND1).** The
      onboarding optional-key offer (`onboarding/optional-keys.ts#OPENAI_OFFER`,
      "paste a key to unlock cloud embeddings") stores the key in the per-owner
-     `ApiKeyStore` (`provider=openai`, label `onboarding`). The composer resolves
-     it and passes it to `buildGBrainMemory({ openaiApiKey })`; a stored key alone
-     flips GBrain to semantic embeddings on the next turn/boot — no env flag — and
-     `ensureBrainInitialized` backfills pre-key pages once via `gbrain embed
-     --stale`. The same key is manageable post-onboarding in the admin
-     Integrations panel as the `openai_api_key` slot (a system slot in
-     `gateway/cores/integrations.ts`, persisting under the SAME secrets label so
-     onboarding ↔ admin share one key). Because that capture is explicit + purpose
-     -stated, using it for (billable) embeddings is consensual, not a surprise.
+     `ApiKeyStore` (`provider=openai`, label `onboarding`). The same key is
+     manageable post-onboarding in the admin Integrations panel as the
+     `openai_api_key` slot (a system slot in `gateway/cores/integrations.ts`,
+     persisting under the SAME secrets label so onboarding ↔ admin share one key).
+     Because that capture is explicit + purpose-stated, using it for (billable)
+     embeddings is consensual, not a surprise.
+
+     **The composer reads the key LAZILY, at the first `gbrain serve` spawn — NOT
+     at boot.** The boot path composes the GBrain wiring ONCE, at process boot,
+     but the key is captured LATER, over the already-running server (during
+     onboarding, or via the admin panel). An eager read at composition would
+     therefore miss every freshly-pasted key until a restart — the bug behind
+     "the OpenAI embeddings key is supposed to be wired to GBrain but isn't."
+     Instead the composer threads a resolver thunk
+     (`resolveOnboardingOpenAiKey` → `buildGBrainMemory({ resolveOpenAiKey })`),
+     and `buildGBrainMemory` calls it at the first memory op: the lazily-resolved
+     embedder env (`GBRAIN_EMBEDDING_*` + `OPENAI_API_KEY`) is merged into the
+     `gbrain serve` child via `GBrainStdioMcpClientOptions.resolveDynamicEnv`, and
+     `ensureBrainInitialized` inits against that same embedder and backfills
+     pre-key pages once via `gbrain embed --stale`. So a stored key alone flips
+     GBrain to semantic embeddings on the next turn — no env flag, no restart —
+     exactly as the onboarding offer ("flips on your next turn") promises. The key
+     is memoized at first spawn so the init guard + serve child agree on the
+     embedder selected then; `null`/absent → keyword + graph, byte-for-byte
+     unchanged.
   2. **The operator env opt-in (`NEUTRON_EMBEDDINGS`) — unchanged.**
      `resolveEmbedderConfig(env)`: `openai` (3072d), `ollama` (768d,
      `OLLAMA_BASE_URL`), `auto`, or `off`/unset. A bare `OPENAI_API_KEY` (consumed

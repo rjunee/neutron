@@ -46,6 +46,19 @@ export interface GBrainStdioMcpClientOptions {
   source?: string
   /** Extra child env (merged over `getDefaultEnvironment()`). */
   env?: Record<string, string>
+  /**
+   * Extra child env resolved LAZILY, at each `gbrain serve` spawn (first memory
+   * op), and merged OVER the static `env`. This is the seam that lets an
+   * embedder opted in AFTER process boot still activate: the onboarding/admin
+   * OpenAI key is captured over the already-running server (after the boot-time
+   * composition), so the static `env` baked at boot can't see it. The composer
+   * passes a resolver that reads the key from the `ApiKeyStore` at connect time,
+   * so the first memory op AFTER the key lands spawns gbrain with the embedding
+   * seam (`GBRAIN_EMBEDDING_*` + `OPENAI_API_KEY`) — exactly the "flips on your
+   * next turn" the onboarding offer promises. Fail-soft: a throwing resolver is
+   * logged and ignored (keyword + graph), never blocking the connect.
+   */
+  resolveDynamicEnv?: () => Promise<Record<string, string>>
   /** Working dir for the child. */
   cwd?: string
   /** Upgrade-notice mode. Default `notify` — Neutron never auto-upgrades. */
@@ -62,6 +75,35 @@ export interface GBrainStdioMcpClientOptions {
    * rather than blocking the connect.
    */
   ensureInitialized?: () => Promise<void>
+}
+
+/**
+ * Build the `gbrain serve` child env, merging (in precedence order) the MCP SDK
+ * defaults, the static `opts.env` (baked at composition), the LAZILY-resolved
+ * `opts.resolveDynamicEnv()` (the embedder seam for a key captured after boot),
+ * then the explicit `GBRAIN_BRAIN_ID` / `GBRAIN_SOURCE` scoping. Extracted (and
+ * exported) so the boot-time-vs-connect-time merge is unit-testable without a
+ * live spawn. Fail-soft: a throwing dynamic resolver degrades to keyword+graph.
+ */
+export async function composeGbrainChildEnv(
+  opts: Pick<GBrainStdioMcpClientOptions, 'env' | 'brainId' | 'source' | 'resolveDynamicEnv'>,
+  base: Record<string, string>,
+): Promise<Record<string, string>> {
+  const env: Record<string, string> = { ...base }
+  if (opts.env !== undefined) Object.assign(env, opts.env)
+  if (opts.resolveDynamicEnv !== undefined) {
+    try {
+      Object.assign(env, await opts.resolveDynamicEnv())
+    } catch (err) {
+      console.warn(
+        '[gbrain-stdio-client] dynamic env resolver threw (continuing keyword+graph): ' +
+          (err instanceof Error ? err.message : String(err)),
+      )
+    }
+  }
+  if (opts.brainId !== undefined) env['GBRAIN_BRAIN_ID'] = opts.brainId
+  if (opts.source !== undefined) env['GBRAIN_SOURCE'] = opts.source
+  return env
 }
 
 export class GBrainStdioMcpClient implements McpClient {
@@ -114,10 +156,7 @@ export class GBrainStdioMcpClient implements McpClient {
           )
         }
       }
-      const env: Record<string, string> = { ...getDefaultEnvironment() }
-      if (this.opts.env !== undefined) Object.assign(env, this.opts.env)
-      if (this.opts.brainId !== undefined) env['GBRAIN_BRAIN_ID'] = this.opts.brainId
-      if (this.opts.source !== undefined) env['GBRAIN_SOURCE'] = this.opts.source
+      const env = await composeGbrainChildEnv(this.opts, getDefaultEnvironment())
       const transport = new StdioClientTransport({
         command: this.opts.command ?? 'gbrain',
         args: this.opts.args ?? ['serve'],
