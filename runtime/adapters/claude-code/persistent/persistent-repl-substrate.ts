@@ -1176,6 +1176,16 @@ class ReplSession {
    *  guard checks so a bridge-mismatched turn never reuses this warm child
    *  (defense-in-depth: the bridge restriction stays local, not keying-dependent). */
   toolBridgeActive = false
+  /** Whether this REPL was SPAWNED with the FULL built-in surface
+   *  (`unrestrictedToolSurface` → `--tools` OMITTED, so `Workflow`/`Agent`/
+   *  `Task*`/`Monitor` are exposed; trident launcher only). This is NOT captured
+   *  by {@link toolSurface} (which records `spec.tools.join(',')` — `''` for the
+   *  launcher's empty `tools:[]`, identical to a default-deny `--tools ""` turn),
+   *  so without this bit a restricted `tools:[]` turn sharing this session key
+   *  would fingerprint-match and REUSE the full-surface REPL, bypassing the
+   *  `--tools ""` restriction (Codex [P2]). The reuse guard compares it so a
+   *  full-surface warm child can never be served to a restricted turn. */
+  unrestrictedToolSurface = false
   /** Fingerprint of the auth secret this REPL was SPAWNED with (`CLAUDE_CODE_
    *  OAUTH_TOKEN` / `ANTHROPIC_API_KEY`), hashed so no second plaintext copy of
    *  the secret lives on the long-held session. The credential-freshness reuse
@@ -1682,6 +1692,10 @@ async function spawnSession(
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive
+  // Codex [P2] — stamp the FULL-surface bit so the reuse guard can refuse to
+  // serve this full-`Workflow`/`Task*` REPL to a later restricted (`tools:[]`)
+  // turn on the same key (their `toolSurface` fingerprints both compute to '').
+  session.unrestrictedToolSurface = options.unrestrictedToolSurface === true
   // Stash the temp config paths so teardown can unlink them (Argus r5 IMPORTANT —
   // ephemeral one-shots write a fresh pair per call; leaked otherwise). The tools
   // manifest is only written when the bridge is active; include it when so.
@@ -2172,6 +2186,11 @@ async function getOrSpawnSession(
   // dependent on `substrate_instance_id` keying (today they align, so this never
   // fires; it survives a future edit that varies the bridge at a finer grain).
   const requestedToolBridge = options.enableToolBridge === true && replToolBridge !== undefined
+  // Codex [P2] — the FULL-surface bit is a SPAWN-time property like the surface
+  // and the bridge; fold it into the freshness check so a full-`Workflow` warm
+  // child is never reused for a restricted `tools:[]` turn (whose `toolSurface`
+  // fingerprint is the identical '').
+  const requestedUnrestricted = options.unrestrictedToolSurface === true
   // A resume-session-picker recovery (row #7) poisons the warm session AND records
   // the disk-recovered session id on it; captured below (for BOTH the alive-evict
   // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
@@ -2242,6 +2261,10 @@ async function getOrSpawnSession(
       const freshSurface = session.toolSurface === requestedToolSurface
       // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
       const freshBridge = session.toolBridgeActive === requestedToolBridge
+      // Codex [P2] defense-in-depth: never serve a FULL-surface warm child to a
+      // restricted turn (or vice-versa) — the `toolSurface` fingerprint alone
+      // can't tell them apart when both requested `tools:[]`.
+      const freshUnrestricted = session.unrestrictedToolSurface === requestedUnrestricted
       const freshCredential = session.authFingerprint === authFingerprintFor(options.env)
       // ABANDON-POISON guard (2026-06-18 warm-session hang fix): a session whose
       // prior turn was abandoned (caller timeout / substrate turn-timeout) is left
@@ -2251,7 +2274,8 @@ async function getOrSpawnSession(
       // never delivers (the cascade). Evict + respawn a clean REPL instead, exactly
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
-      if (freshSurface && freshBridge && freshCredential && !session.poisoned) return session
+      if (freshSurface && freshBridge && freshUnrestricted && freshCredential && !session.poisoned)
+        return session
       if (session.poisoned) {
         process.stderr.write(
           `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,

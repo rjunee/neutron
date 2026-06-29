@@ -176,6 +176,57 @@ describe('persistent REPL — tool restriction (Codex-r1-P1 SECURITY)', () => {
     expect(toolsValue(argvs[1]!)).toBe('')
   })
 
+  it('reuse guard (Codex [P2]): a restricted tools:[] turn never inherits an UNRESTRICTED full-surface warm REPL', async () => {
+    // The trident launcher spawns with `unrestrictedToolSurface` + `tools:[]`
+    // (full built-in surface, `--tools` omitted). Its `toolSurface` fingerprint
+    // is '' — IDENTICAL to a default-deny `tools:[]` turn. Without folding the
+    // unrestricted bit into the guard, a later restricted turn on the same key
+    // would fingerprint-match and reuse the full-`Workflow` REPL, bypassing
+    // `--tools ""`. The guard must evict + respawn instead.
+    const { host, argvs, spawnCount } = makeCapturingHost()
+    const sharedKey = {
+      substrate_instance_id: 'cc-trident-acme',
+      user_id: 'u-trident',
+      project_id: 'default',
+      credential_identity: 'cred-1',
+    } as const
+    // Turn 1: the UNRESTRICTED launcher (full surface; `--tools` omitted).
+    await drain(
+      createPersistentReplSubstrate(opts(host, { ...sharedKey, unrestrictedToolSurface: true })).start(
+        spec('launcher', []),
+      ),
+    )
+    // Turn 2: a RESTRICTED tools:[] turn on the SAME key must NOT reuse it.
+    await drain(createPersistentReplSubstrate(opts(host, sharedKey)).start(spec('restricted', [])))
+    expect(spawnCount()).toBe(2)
+    // Turn 1 omitted `--tools` (full surface); turn 2 pinned `--tools ""`.
+    expect(toolsValue(argvs[0]!)).toBeUndefined()
+    expect(argvs[0]).not.toContain('--tools')
+    expect(toolsValue(argvs[1]!)).toBe('')
+  })
+
+  it('reuse: two UNRESTRICTED turns on the same key reuse the one warm REPL (the trident launcher path)', async () => {
+    const { host, spawnCount } = makeCapturingHost()
+    const sharedKey = {
+      substrate_instance_id: 'cc-trident-acme',
+      user_id: 'u-trident-2',
+      project_id: 'default',
+      credential_identity: 'cred-1',
+    } as const
+    await drain(
+      createPersistentReplSubstrate(opts(host, { ...sharedKey, unrestrictedToolSurface: true })).start(
+        spec('run-1', []),
+      ),
+    )
+    await drain(
+      createPersistentReplSubstrate(opts(host, { ...sharedKey, unrestrictedToolSurface: true })).start(
+        spec('run-2', []),
+      ),
+    )
+    // Both runs are the full-surface launcher → the warm child is REUSED.
+    expect(spawnCount()).toBe(1)
+  })
+
   it('reuse: same tool surface across turns reuses the one warm REPL', async () => {
     const { host, spawnCount } = makeCapturingHost()
     const sharedKey = {
