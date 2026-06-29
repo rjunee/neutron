@@ -306,6 +306,32 @@ export class NeutronChatController {
       this.publish()
       return
     }
+    if (type === 'agent_typing') {
+      // Server-authoritative typing indicator (ephemeral, never persisted). The
+      // gateway fans `start` the moment it picks up a live-agent turn and `end`
+      // when the turn settles (on success AND failure) — so a warm turn shows
+      // the dots for its whole 5–240s duration instead of only the optimistic
+      // on-send guess. We drive the SAME `awaiting` bracket the optimistic path
+      // sets, so the existing `car-typing` indicator (keyed off
+      // awaitingFirstToken) lights up; the optimistic-on-send set stays as a
+      // fallback for a missed `start`. A stray frame tagged for a DIFFERENT
+      // project than the active one must not flip this surface's indicator.
+      if (this.isForeignProject(f['project_id'])) return
+      const state = f['state']
+      if (state === 'start') {
+        // Idempotent — back-to-back starts just keep the bracket on.
+        this.awaitingReply = true
+        this.publish()
+      } else if (state === 'end') {
+        // Clear the bracket. A live streaming bubble (if one is in flight)
+        // already supersedes the dots via awaitingFirstToken, so this is a
+        // no-op there; the next `agent_message` clears it regardless, so a
+        // dropped `end` can never wedge the indicator.
+        this.awaitingReply = false
+        this.publish()
+      }
+      return
+    }
     if (type === 'error') {
       // Clear the awaiting bracket AND surface the failure as a visible notice.
       // Previously the spinner cleared but nothing was shown, leaving the user's
@@ -591,6 +617,20 @@ export class NeutronChatController {
   private nextSeq(): number {
     this.seq += 1
     return this.seq
+  }
+
+  /**
+   * True when a frame is tagged for a DIFFERENT project than the active one.
+   * Only fires when BOTH the frame and this surface carry an explicit project —
+   * an unscoped frame (no `project_id`) or the General view (null active
+   * project) always applies, matching the message frames, which don't scope at
+   * all. Used to keep a stray `agent_typing` from flipping the wrong project's
+   * indicator.
+   */
+  private isForeignProject(rawProjectId: unknown): boolean {
+    if (typeof rawProjectId !== 'string' || rawProjectId.length === 0) return false
+    if (this.projectId === null || this.projectId.length === 0) return false
+    return rawProjectId !== this.projectId
   }
 }
 

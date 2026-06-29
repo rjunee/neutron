@@ -39,6 +39,22 @@ export interface AppWsInboundUserMessage {
   attachments?: ReadonlyArray<string>;
 }
 
+/**
+ * Chat-sync foundation — gap-fill request. On every socket (re)open (after
+ * `session_ready`) the client sends `{ v:1, type:'resume', after_seq:N }` where
+ * `N` is the highest server `seq` it has already applied. The surface replays
+ * `WHERE topic_id = ? AND seq > N ORDER BY seq` so a reply emitted during a
+ * socket blip is recoverable. `after_seq:0` (cold client) replays the whole
+ * transcript (bounded by the server's replay page size). Mirrors
+ * `channels/adapters/app-ws/envelope.ts` `AppWsInboundResume`.
+ */
+export interface AppWsInboundResume {
+  v: 1;
+  type: 'resume';
+  /** Highest server `seq` the client has already applied locally. */
+  after_seq: number;
+}
+
 export type AppWsInbound = AppWsInboundUserMessage;
 
 export interface AppWsOutboundSessionReady {
@@ -62,6 +78,12 @@ export interface AppWsOutboundUserMessageEcho {
   project_id?: string;
   /** P5.1 — echoed attachments so the optimistic bubble can reconcile. */
   attachments?: ReadonlyArray<string>;
+  /**
+   * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
+   * The client advances its resume cursor to `max(seq)`. Absent when the
+   * durable log isn't wired (legacy in-memory-only behaviour).
+   */
+  seq?: number;
 }
 
 export interface AppWsOutboundAgentMessageOption {
@@ -120,6 +142,12 @@ export interface AppWsOutboundAgentMessage {
   deep_link?: string;
   /** M2 chat-upload UX — drives phase-aware hint + drag-drop affordance. */
   upload_affordance?: AppWsOutboundAgentMessageUploadAffordance;
+  /**
+   * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
+   * Resume-cursor key, same semantics as the user echo's `seq`. Absent when
+   * the durable log isn't wired.
+   */
+  seq?: number;
 }
 
 /**
@@ -153,6 +181,25 @@ export interface AppWsOutboundError {
 }
 
 /**
+ * Chat transport — server-authoritative typing indicator. Emitted on the
+ * app-ws path the moment the gateway begins working a live-agent turn
+ * (`state:'start'`) and again when the turn settles (`state:'end'`, on BOTH
+ * success and failure). EPHEMERAL: NOT persisted, carries no `seq`, never
+ * replayed on `resume`. The client clears typing on the next `agent_message`
+ * regardless, so a dropped `end` frame can't wedge the indicator. Mirrors
+ * `channels/adapters/app-ws/envelope.ts` `AppWsOutboundAgentTyping`.
+ */
+export interface AppWsOutboundAgentTyping {
+  v: 1;
+  type: 'agent_typing';
+  /** `start` when the agent begins a turn; `end` when it settles. */
+  state: 'start' | 'end';
+  ts: number;
+  /** P5.2 parity — project the in-flight turn belongs to. */
+  project_id?: string;
+}
+
+/**
  * Result of a matched slash command (`/note`, `/remind`, `/cal`, `/skills`, …).
  * The app-ws surface answers a chat-command-filter match with exactly ONE of
  * these frames and SKIPS the agent dispatch — so NO `agent_message` follows.
@@ -176,5 +223,6 @@ export type AppWsOutbound =
   | AppWsOutboundUserMessageEcho
   | AppWsOutboundAgentMessage
   | AppWsOutboundAgentMessagePartial
+  | AppWsOutboundAgentTyping
   | AppWsOutboundError
   | AppWsOutboundChatCommandResult;

@@ -92,9 +92,16 @@ export interface ChatMessage {
 
 export interface ChatState {
   messages: ChatMessage[];
+  /**
+   * Server-authoritative typing indicator. Driven by the gateway's
+   * `agent_typing` frame (`start` → true, `end` → false) and ALWAYS cleared
+   * when an `agent_message` is applied, so a dropped `end` frame can't wedge
+   * the indicator on.
+   */
+  typing: boolean;
 }
 
-export const EMPTY_CHAT_STATE: ChatState = { messages: [] };
+export const EMPTY_CHAT_STATE: ChatState = { messages: [], typing: false };
 
 export type ChatAction =
   | { type: 'reset' }
@@ -105,7 +112,8 @@ export type ChatAction =
   | { type: 'apply_user_echo'; echo: AppWsOutboundUserMessageEcho }
   | { type: 'mark_send_failed'; client_msg_id: string }
   | { type: 'mark_send_retrying'; client_msg_id: string }
-  | { type: 'record_choice'; message_id: string; value: string };
+  | { type: 'record_choice'; message_id: string; value: string }
+  | { type: 'set_typing'; typing: boolean };
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
@@ -113,6 +121,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return EMPTY_CHAT_STATE;
     case 'append_system':
       return {
+        ...state,
         messages: state.messages.concat({
           id: `sys-${state.messages.length}-${action.ts}`,
           kind: 'system',
@@ -125,7 +134,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'apply_partial':
       return appendPartial(state, action.partial);
     case 'apply_agent_message':
-      return finalizeMessage(state, action.agent);
+      // ALWAYS clear typing when an agent_message lands — a dropped server
+      // `agent_typing` `end` frame can't wedge the indicator on.
+      return { ...finalizeMessage(state, action.agent), typing: false };
     case 'apply_user_echo':
       return reconcileEcho(state, action.echo);
     case 'mark_send_failed':
@@ -134,6 +145,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return markSendRetrying(state, action.client_msg_id);
     case 'record_choice':
       return recordChoice(state, action.message_id, action.value);
+    case 'set_typing':
+      return state.typing === action.typing ? state : { ...state, typing: action.typing };
     default: {
       // exhaustiveness — any new action MUST be handled above.
       const _exhaustive: never = action;
@@ -155,6 +168,7 @@ export function appendPartial(
   const idx = state.messages.findIndex((m) => m.id === partial.message_id);
   if (idx === -1) {
     return {
+      ...state,
       messages: state.messages.concat({
         id: partial.message_id,
         kind: 'agent',
@@ -171,7 +185,7 @@ export function appendPartial(
     body: existing.body + partial.body_delta,
     streaming: true,
   };
-  return { messages: next };
+  return { ...state, messages: next };
 }
 
 /**
@@ -188,6 +202,7 @@ export function finalizeMessage(
   const meta = pickAgentMetadata(agent);
   if (idx === -1) {
     return {
+      ...state,
       messages: state.messages.concat({
         id: agent.message_id,
         kind: 'agent',
@@ -206,7 +221,7 @@ export function finalizeMessage(
     streaming: false,
     ...meta,
   };
-  return { messages: next };
+  return { ...state, messages: next };
 }
 
 /**
@@ -236,13 +251,15 @@ export function reconcileEcho(
         failed: false,
         ...(echo.attachments !== undefined ? { attachments: echo.attachments } : {}),
       };
-      return { messages: next };
+      return { ...state, messages: next };
     }
   }
   // No matching pending bubble — back-fill. Deduplicate on id so a
-  // double-echo from a stale socket can't push two bubbles.
+  // double-echo from a stale socket (or a resume replay) can't push two
+  // bubbles.
   if (state.messages.some((m) => m.id === echo.message_id)) return state;
   return {
+    ...state,
     messages: state.messages.concat({
       id: echo.message_id,
       kind: 'user',
@@ -271,6 +288,7 @@ export function addOptimisticUserMessage(
   },
 ): ChatState {
   return {
+    ...state,
     messages: state.messages.concat({
       id: input.id,
       kind: 'user',
@@ -298,7 +316,7 @@ export function markSendFailed(state: ChatState, client_msg_id: string): ChatSta
   if (idx === -1) return state;
   const next = state.messages.slice();
   next[idx] = { ...next[idx]!, pending: false, failed: true };
-  return { messages: next };
+  return { ...state, messages: next };
 }
 
 /**
@@ -312,7 +330,7 @@ export function markSendRetrying(state: ChatState, client_msg_id: string): ChatS
   if (idx === -1) return state;
   const next = state.messages.slice();
   next[idx] = { ...next[idx]!, pending: true, failed: false };
-  return { messages: next };
+  return { ...state, messages: next };
 }
 
 /**
@@ -329,7 +347,7 @@ export function recordChoice(
   if (idx === -1) return state;
   const next = state.messages.slice();
   next[idx] = { ...next[idx]!, chosen_value: value };
-  return { messages: next };
+  return { ...state, messages: next };
 }
 
 function pickAgentMetadata(

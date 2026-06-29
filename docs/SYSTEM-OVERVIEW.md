@@ -952,9 +952,73 @@ engine is NOT forked). Scope is receipts only.
   `markRead(ids)`. Mobile (`ChatSyncSurface`) extends the ladder with `read`
   (blue ✓✓), reports agent messages read via `onViewableItemsChanged`, and
   excludes the sender's own device. React/assistant-ui surfaces a Telegram-style
-  delivery status line. Like Phase-1's `chat_log`, `receipt_log` is an additive
-  adapter option — wired in tests + composers, not yet in the live gateway
-  composition (the app-ws surface itself isn't productionised there yet).
+  delivery status line. **Wired live in Open as of 2026-06-29** — see the
+  "Durable chat transport" subsystem note below; `receipt_log` (and `chat_log`,
+  `reaction_log`, `edit_log`) are now constructed in `open/composer.ts` and
+  passed to the adapter, so the ladder is live, not test-only.
+
+## Durable chat transport (Telegram-class) — `open/composer.ts` wiring + real typing (2026-06-29)
+
+The single root cause behind a cluster of "feels broken" M1 chat gaps was that
+Open's composer constructed the app-ws adapter with **no durable logs**
+(`new AppWsAdapter({ registry, receiver })`), so `hasChatLog === false`
+everywhere and all the (already-built, already-tested) seq / resume /
+idempotency / receipt / reaction / edit machinery in the adapter + surface was
+**inert**. The fix wires the foundation in + adds a server-authoritative typing
+indicator. No feature flags — one live path.
+
+- **The wiring (`open/composer.ts`).** The adapter is now constructed with all
+  four per-topic logs, each backed by the single-owner `project.db`
+  (`new AppChatStore({ db })`, `AppChatReceiptStore`, `AppChatReactionStore`,
+  `AppChatEditStore`; migrations `0079/0082/0083/0087`). This single change flips
+  `hasChatLog`/`hasReceipts`/`hasReactions`/`hasEdits` true and lights up the
+  surface handlers (`gateway/http/app-ws-surface.ts`) that were already present:
+  - **#1 durable chat_log + monotonic per-topic `seq`** on every user echo +
+    agent reply (`app_chat_messages`), stamped on the wire.
+  - **#2 idempotent ingest on `client_msg_id`** — the retry button + the WS↔HTTP
+    fallback race re-send the SAME id; `ingestUserMessage` returns
+    `was_new:false`, and the surface's `if (!was_new) return` guards skip the
+    chat-command filter AND the agent dispatch, so a re-send NEVER re-runs the
+    turn (no dup reply, no double LLM spend, no double Bash/Write/Edit side
+    effects).
+  - **#3 gap-free reconnect** — `session_ready.last_seen_seq` + a
+    `{type:'resume',after_seq}` replay of everything after the client's cursor,
+    so a reply emitted during a socket blip is recovered (no orphaned "hung"
+    reply).
+  - **#4 receipts / reactions / edits** — persisted + fanned as `receipt_update`
+    / `reaction_update` / `edit_update`, replayed on resume.
+- **#5 fire-and-forget send (`gateway/http/app-ws-surface.ts`).** The HTTP
+  `/api/app/chat/send` fallback used to `await dispatchInbound` (the whole turn,
+  up to 240s) before responding, so the optimistic bubble couldn't confirm and an
+  RN/proxy timeout flipped it to `failed`. It now returns the durable echo (with
+  `seq`) IMMEDIATELY and runs the turn in the background; the reply fans over the
+  WS and is replayable from the chat_log.
+- **#6 real, server-authoritative typing (`AppWsOutboundAgentTyping`).** A new
+  ephemeral `{v:1,type:'agent_typing',state:'start'|'end',ts,project_id?}` frame
+  is fanned directly (NOT persisted, no seq, never replayed) around every
+  app-ws live-agent turn (`emitAppWsTyping` brackets each `appWsChatTurn` await —
+  steady-state typed turns, tapped quick-replies, and the onboarding seed). Unlike
+  a client-side optimistic guess, this is driven by the gateway actually picking
+  up + finishing the turn, so WARM turns (every turn after the cold first one) get
+  a real "replying…" affordance for their full duration. The legacy `web:` path's
+  `agent_typing_start`/`agent_typing_end` is the prior art; this collapses it into
+  one app-ws envelope with a `state` discriminator.
+- **Clients render it on both surfaces.** Web (React/assistant-ui via chat-core
+  `web-session` → `controller.ts`) already resumed + rendered receipts/reactions/
+  edits; it now drives its `car-typing` indicator off the authoritative
+  `agent_typing` frame (optimistic-on-send retained as a fallback). The live Expo
+  native tab (`chat.tsx` → `chat-state`/`ws-client`) renders the typing dots from
+  the same frame [and resumes on reconnect — see native notes]. The fully-synced
+  chat-core native surface (`ChatSyncSurface`) inherits all of the above for free
+  now that the server logs are wired; its tab cutover remains the tracked
+  follow-up.
+- **Verified on a real instance.** `open/__tests__/open-app-ws-durable-chatlog.test.ts`
+  boots the REAL Open composition over `Bun.serve`, opens `/ws/app/chat`, and
+  asserts #1–#6 on real (mocked-substrate) turns: echo+reply carry `seq` and
+  persist; a re-sent `client_msg_id` does NOT re-run the turn; a 2nd socket
+  resumes a gap-free transcript with `last_seen_seq`; the agent-read
+  `receipt_update` fans; the HTTP send returns the echo before the (delayed) turn
+  finishes; and a real `agent_typing` start→end bracket arrives.
 
 > **P1b (2026-06-26) — the app-ws surface IS now wired into the single-owner Open
 > boot.** `open/composer.ts` constructs `InMemoryAppWsSessionRegistry` +
@@ -964,9 +1028,11 @@ engine is NOT forked). Scope is receipts only.
 > for the `/api/cores/*` admin endpoints. So a fresh Open install serves working
 > React chat (`/ws/app/chat`), Documents (`/api/app/projects/<id>/docs`), and
 > admin endpoints — all behind ONE single-owner localhost-trust `AppWsAuthResolver`
-> (`bypass:true`; the owner is the sole 127.0.0.1 user, already HTTP-authed). No
-> `chat_log`/`receipt_log` wired yet in Open (live fan-out works; resume/seq is a
-> follow-up). Managed layers its own auth as the thin wrapper.
+> (`bypass:true`; the owner is the sole 127.0.0.1 user, already HTTP-authed).
+> **(2026-06-29: `chat_log`/`receipt_log`/`reaction_log`/`edit_log` are now ALL
+> wired in Open — durable seq, resume, idempotent retry, receipts/reactions/edits
+> are live. See "Durable chat transport" below.)** Managed layers its own auth as
+> the thin wrapper.
 
 > **P1b consolidate (2026-06-26) — `/ws/app/chat` is now the SINGLE chat WS
 > endpoint; onboarding is its INITIAL MODE.** The legacy `/ws/chat` onboarding

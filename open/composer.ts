@@ -149,8 +149,21 @@ import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/sessio
 import {
   appWsTopicId,
   type AppWsOutboundAgentMessage,
+  type AppWsOutboundAgentTyping,
   type AppWsOutboundProjectsChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
+// Chat transport — durable per-topic message log + receipt/reaction/edit logs
+// for the app-ws (Expo / web) surface. Wiring these into the adapter is what
+// turns the already-built seq/resume/idempotency/receipt machinery from inert
+// (no-log fallback) into live: durable chat_log with a monotonic seq, an
+// idempotent retry that never re-runs the agent turn, gap-free reconnect
+// replay, and persisted delivered/read receipts + reactions + edits.
+import {
+  AppChatStore,
+  AppChatReceiptStore,
+  AppChatReactionStore,
+  AppChatEditStore,
+} from '../persistence/index.ts'
 import { InMemoryConsumedTokens } from '../runtime/consumed-tokens-in-memory.ts'
 import type { ButtonChoice, ButtonPrompt } from '../channels/button-primitive.ts'
 import type {
@@ -2024,6 +2037,31 @@ export function buildOpenGraphComposer(
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
         void appWsHolder.adapter?.send(msg)
       }
+    // Chat transport — server-authoritative typing indicator. Fan an ephemeral
+    // `agent_typing` frame (start/end) directly to the socket topic's live
+    // devices around every live-agent turn. NOT routed through the adapter's
+    // `send` (which persists + assigns a seq) — typing is ephemeral and must
+    // never land in the durable log or a `resume` replay. Best-effort: a closed
+    // socket / registry miss is a silent no-op (the client clears typing on the
+    // next agent_message regardless, so a lost `end` can't wedge the dots).
+    const emitAppWsTyping = (
+      channel_topic_id: string,
+      state: 'start' | 'end',
+      project_id?: string,
+    ): void => {
+      const env: AppWsOutboundAgentTyping = {
+        v: 1,
+        type: 'agent_typing',
+        state,
+        ts: Date.now(),
+      }
+      if (project_id !== undefined && project_id.length > 0) env.project_id = project_id
+      try {
+        appWsRegistry.send(channel_topic_id, env)
+      } catch {
+        /* socket closed mid-turn; the start/end pair is best-effort */
+      }
+    }
     // Translate an engine `ButtonPrompt` → the app-ws `agent_message` envelope
     // (a superset already carrying options/prompt_id/allow_freeform/kind/
     // upload_affordance) and fan it out over the socket. Ephemeral by design:
@@ -2146,16 +2184,24 @@ export function buildOpenGraphComposer(
           emitProjectsChangedIfChanged(event.user.channel_user_id)
           return
         }
-        await appWsChatTurn({
-          project_slug,
-          user_id: event.user.channel_user_id,
-          // Project-scoped for warm-session/persona/history keying (Codex [P2]).
-          topic_id: turnTopicId,
-          ...(project_id !== undefined ? { project_id } : {}),
-          user_text: userText,
-          send: sendReply,
-          observed_at: event.received_at,
-        })
+        // Chat transport — server-authoritative typing. Show the indicator the
+        // moment the gateway picks up the turn; clear it when the turn settles
+        // (finally → fires on success AND failure so the dots never wedge).
+        emitAppWsTyping(event.channel_topic_id, 'start', project_id)
+        try {
+          await appWsChatTurn({
+            project_slug,
+            user_id: event.user.channel_user_id,
+            // Project-scoped for warm-session/persona/history keying (Codex [P2]).
+            topic_id: turnTopicId,
+            ...(project_id !== undefined ? { project_id } : {}),
+            user_text: userText,
+            send: sendReply,
+            observed_at: event.received_at,
+          })
+        } finally {
+          emitAppWsTyping(event.channel_topic_id, 'end', project_id)
+        }
         // Entity scribe → GBrain (Vajra parity) — fan the user's turn into the
         // extract→memory path, fire-and-forget + guarded, EXACTLY like the legacy
         // web chat-bridge does (chat-bridge.ts §scribe-phase-1). This was the ONLY
@@ -2196,7 +2242,24 @@ export function buildOpenGraphComposer(
         emitProjectsChangedIfChanged(event.user.channel_user_id)
       },
     }
-    appWsHolder.adapter = new AppWsAdapter({ registry: appWsRegistry, receiver: appWsReceiver })
+    // Chat transport (Ryan-directed best-in-class) — wire the durable per-topic
+    // logs onto the app-ws adapter. ALL four back the single-owner project.db
+    // (migrations 0079/0082/0083/0087). Passing them flips `hasChatLog` /
+    // `hasReceipts` / `hasReactions` / `hasEdits` true, which lights up the
+    // already-built surface machinery that was inert in M1:
+    //   • durable chat_log + monotonic per-topic seq on every echo/agent_message
+    //   • idempotent ingest on client_msg_id → the retry button + WS↔HTTP race
+    //     NEVER re-run the agent turn (the `if (!was_new) return` guards trip)
+    //   • `resume`/`session_ready.last_seen_seq` gap-free reconnect replay
+    //   • delivered/read receipts, reactions, and edit/delete — persisted + fanned
+    appWsHolder.adapter = new AppWsAdapter({
+      registry: appWsRegistry,
+      receiver: appWsReceiver,
+      chat_log: new AppChatStore({ db }),
+      receipt_log: new AppChatReceiptStore({ db }),
+      reaction_log: new AppChatReactionStore({ db }),
+      edit_log: new AppChatEditStore({ db }),
+    })
     const appWsSurface = createAppWsSurface({
       adapter: appWsHolder.adapter,
       registry: appWsRegistry,
@@ -2258,16 +2321,22 @@ export function buildOpenGraphComposer(
           }
           if (appWsChatTurn !== null && !seededOnboardingTopics.has(channel_topic_id)) {
             seededOnboardingTopics.add(channel_topic_id)
-            await appWsChatTurn({
-              project_slug,
-              user_id,
-              topic_id: channel_topic_id,
-              user_text:
-                '(The owner just opened the chat to begin onboarding. Greet them warmly by opening the conversation and asking your very first question now — start by asking what they would like you to call them. Do not wait for them to speak first.)',
-              send: buildAppWsSendReply(channel_topic_id),
-              observed_at: Date.now(),
-              seed_turn: true,
-            })
+            // Typing while the agent composes its onboarding opener.
+            emitAppWsTyping(channel_topic_id, 'start')
+            try {
+              await appWsChatTurn({
+                project_slug,
+                user_id,
+                topic_id: channel_topic_id,
+                user_text:
+                  '(The owner just opened the chat to begin onboarding. Greet them warmly by opening the conversation and asking your very first question now — start by asking what they would like you to call them. Do not wait for them to speak first.)',
+                send: buildAppWsSendReply(channel_topic_id),
+                observed_at: Date.now(),
+                seed_turn: true,
+              })
+            } finally {
+              emitAppWsTyping(channel_topic_id, 'end')
+            }
           }
         }
         // Emit if the seed turn (or anything since the pre-seed) changed the set.
@@ -2293,15 +2362,21 @@ export function buildOpenGraphComposer(
             : appWsTopicId(user_id)
         const replyText =
           freeform_text !== undefined && freeform_text.length > 0 ? freeform_text : choice_value
-        await appWsChatTurn({
-          project_slug,
-          user_id,
-          topic_id: turnTopicId,
-          ...(project_id !== undefined ? { project_id } : {}),
-          user_text: replyText,
-          send: buildAppWsSendReply(channel_topic_id, project_id),
-          observed_at: now,
-        })
+        // Typing while the agent works the tapped quick-reply as a turn.
+        emitAppWsTyping(channel_topic_id, 'start', project_id)
+        try {
+          await appWsChatTurn({
+            project_slug,
+            user_id,
+            topic_id: turnTopicId,
+            ...(project_id !== undefined ? { project_id } : {}),
+            user_text: replyText,
+            send: buildAppWsSendReply(channel_topic_id, project_id),
+            observed_at: now,
+          })
+        } finally {
+          emitAppWsTyping(channel_topic_id, 'end', project_id)
+        }
         // Entity scribe → GBrain (parity with the typed-message receiver above):
         // a freeform quick-reply answer is owner text worth extracting too, so a
         // long freeform reply doesn't silently skip memory just because it arrived

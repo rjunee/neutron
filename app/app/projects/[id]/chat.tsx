@@ -120,7 +120,8 @@ function ChatBody({
   initial_autosend?: string;
 }) {
   const router = useRouter();
-  const { messages, wsState, send, retry, chooseOption, signOut, topicInfo } = useChatState();
+  const { messages, wsState, typing, send, retry, chooseOption, signOut, topicInfo } =
+    useChatState();
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
   const listRef = useRef<FlatList<ChatMessage> | null>(null);
@@ -477,6 +478,7 @@ function ChatBody({
           </View>
         }
       />
+      {typing ? <TypingIndicator /> : null}
       <InputComposer
         onSend={handleSend}
         disabled={wsState === 'auth_failed'}
@@ -514,6 +516,21 @@ function ChatBody({
 function sourceLabel(source: 'chatgpt' | 'claude'): string {
   if (source === 'claude') return 'Claude';
   return 'ChatGPT';
+}
+
+/**
+ * Server-authoritative typing affordance. Shown between the gateway's
+ * `agent_typing` `start` and `end` frames (the chat-state reducer also clears
+ * it on the next `agent_message`, so a dropped `end` can't wedge it). Minimal
+ * by design — a spinner + "Replying…" row consistent with the surface styling.
+ */
+function TypingIndicator() {
+  return (
+    <View style={styles.typingRow} testID="chat-typing-indicator">
+      <ActivityIndicator size="small" color={THEME.text_muted} />
+      <Text style={styles.typingText}>Replying…</Text>
+    </View>
+  );
 }
 
 function hasFileInDataTransfer(dt: DataTransfer | null): boolean {
@@ -806,6 +823,18 @@ const styles = StyleSheet.create({
   dropMultiFileHintText: {
     ...TYPOGRAPHY.body_small,
     color: THEME.text_secondary,
+  },
+  // Server-authoritative typing indicator row (between the list and composer).
+  typingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.xs,
+  },
+  typingText: {
+    ...TYPOGRAPHY.caption,
+    color: THEME.text_muted,
   },
 });
 

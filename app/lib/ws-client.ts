@@ -19,6 +19,7 @@ import type {
   AppWsOutbound,
   AppWsOutboundAgentMessage,
   AppWsOutboundAgentMessagePartial,
+  AppWsOutboundAgentTyping,
   AppWsOutboundChatCommandResult,
   AppWsOutboundUserMessageEcho,
 } from './ws-envelope';
@@ -35,6 +36,12 @@ export interface AppWsClientEvents {
   agent_message: (msg: AppWsOutboundAgentMessage) => void;
   /** P5.1 — streaming chunk for an in-flight agent message. */
   agent_message_partial: (msg: AppWsOutboundAgentMessagePartial) => void;
+  /**
+   * Server-authoritative typing indicator. `start` when the gateway begins a
+   * live-agent turn; `end` when it settles (success OR failure). Ephemeral —
+   * not persisted, never replayed on resume.
+   */
+  agent_typing: (msg: AppWsOutboundAgentTyping) => void;
   user_message: (msg: AppWsOutboundUserMessageEcho) => void;
   session_ready: (input: {
     user_id: string;
@@ -90,6 +97,11 @@ export class AppWsClient {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionallyClosed = false;
+  // Chat-sync foundation — highest server `seq` applied across inbound
+  // user_message / agent_message frames. On every socket (re)open we send a
+  // `resume` frame carrying this cursor so the server replays anything missed
+  // during a blip. Starts at 0 (cold client → full-transcript replay).
+  private maxSeqSeen = 0;
   private readonly minBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly websocketCtor: typeof WebSocket;
@@ -292,18 +304,30 @@ export class AppWsClient {
           topic_id: env.topic_id,
           ...(env.project_id !== undefined ? { project_id: env.project_id } : {}),
         });
+        // Chat-sync foundation — request a gap-fill replay AFTER session_ready
+        // (the server replays to the requesting socket). `after_seq:0` on a cold
+        // client replays the whole transcript; a warm reconnect only pulls what
+        // it missed during the blip. Safe to re-apply replayed messages because
+        // the reducer upserts by message_id.
+        this.sendResume();
         return;
       }
       case 'user_message': {
+        this.observeSeq(env.seq);
         this.emit('user_message', env);
         return;
       }
       case 'agent_message': {
+        this.observeSeq(env.seq);
         this.emit('agent_message', env);
         return;
       }
       case 'agent_message_partial': {
         this.emit('agent_message_partial', env);
+        return;
+      }
+      case 'agent_typing': {
+        this.emit('agent_typing', env);
         return;
       }
       case 'error': {
@@ -317,6 +341,35 @@ export class AppWsClient {
       default:
         // Unknown type — forward-compat, drop quietly.
         return;
+    }
+  }
+
+  /**
+   * Chat-sync foundation — advance the resume cursor when an inbound message
+   * carries a monotonic `seq`. No-op when the durable log isn't wired (legacy
+   * frames omit `seq`), so the cursor stays 0 and a `resume` is harmless.
+   */
+  private observeSeq(seq: number | undefined): void {
+    if (typeof seq === 'number' && Number.isFinite(seq) && seq > this.maxSeqSeen) {
+      this.maxSeqSeen = seq;
+    }
+  }
+
+  /**
+   * Chat-sync foundation — send a `{ v:1, type:'resume', after_seq:N }` frame
+   * so the server replays every message after the highest `seq` we've applied.
+   * Called on each socket (re)open, after `session_ready`, when the socket is
+   * open. A pre-`seq` server ignores the unknown frame; a sync-aware one
+   * replays the gap.
+   */
+  private sendResume(): void {
+    if (this.socket === null || this.socket.readyState !== this.websocketCtor.OPEN) {
+      return;
+    }
+    try {
+      this.socket.send(JSON.stringify({ v: 1, type: 'resume', after_seq: this.maxSeqSeen }));
+    } catch (err) {
+      console.warn('[ws-client] resume send threw:', err);
     }
   }
 

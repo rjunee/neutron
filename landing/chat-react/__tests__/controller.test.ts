@@ -560,3 +560,84 @@ describe('NeutronChatController — BUG 7 (no empty bubble above the typing indi
     expect(vm.awaitingFirstToken).toBe(false)
   })
 })
+
+describe('NeutronChatController — server-authoritative typing (agent_typing)', () => {
+  it('shows typing on a start frame and clears it on an end frame', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // No optimistic send — the server alone drives the indicator for a warm
+    // turn (e.g. the agent replies to a prior message, or onboarding pushes).
+    expect(controller.getViewModel().isRunning).toBe(false)
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 1 })
+    await tick()
+    let vm = controller.getViewModel()
+    expect(vm.isRunning).toBe(true)
+    expect(vm.awaitingFirstToken).toBe(true)
+    // The turn settles → typing clears.
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'end', ts: 2 })
+    await tick()
+    vm = controller.getViewModel()
+    expect(vm.isRunning).toBe(false)
+    expect(vm.awaitingFirstToken).toBe(false)
+  })
+
+  it('a normal agent_message still clears typing after a start frame', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    // Server confirms it picked up the turn.
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 1 })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+    // The reply lands as a single non-streamed agent_message (no `end` frame
+    // needed) — the indicator must still clear, no regression.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'hello', ts: 2 })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.isRunning).toBe(false)
+    expect(vm.awaitingFirstToken).toBe(false)
+    expect(vm.messages.some((m) => m.role === 'agent' && m.text === 'hello')).toBe(true)
+  })
+
+  it('a streaming bubble keeps isRunning even after an end frame (bubble supersedes the dots)', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 1 })
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm9', body_delta: 'Hi', ts: 2 })
+    await tick()
+    // A live stream already supersedes the typing dots.
+    expect(controller.getViewModel().awaitingFirstToken).toBe(false)
+    // An `end` frame arrives while the bubble is still in flight — isRunning
+    // stays true off the streaming bubble (composer keeps showing Stop).
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'end', ts: 3 })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.messages.some((m) => m.streaming)).toBe(true)
+    expect(vm.isRunning).toBe(true)
+  })
+
+  it('ignores a start frame tagged for a different project than the active one', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    controller.setProject('proj-A')
+    // A stray typing frame for ANOTHER project must not light this surface.
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 1, project_id: 'proj-B' })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(false)
+    // The same project's frame DOES drive it.
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 2, project_id: 'proj-A' })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+  })
+})
