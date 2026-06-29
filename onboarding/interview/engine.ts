@@ -156,6 +156,7 @@ import type {
   LineEdit as PersonaLineEdit,
   PersonaDraft,
 } from '../persona-gen/compose.ts'
+import { looksLikeOpenAiKey } from '../optional-keys.ts'
 import { PersonaError } from '../persona-gen/compose.ts'
 // v0.1.80 — `PersonaFile` import dropped (Kieran r1 I1) along with the
 // `readPersonaFile` / `sectionToFile` / `parseLineSelection` helpers
@@ -9081,6 +9082,25 @@ export class InterviewEngine implements EngineInternals {
         state,
         observed_at,
         "That doesn't look like a setup-token. Run `claude setup-token` and paste the full result to try again.",
+      )
+    }
+    // Guard: an OpenAI key (sk-…, not sk-ant-…) pasted at the setup-token step
+    // would pass the length check and be persisted as a Claude
+    // `max_oauth_refresh`/`claude-setup-token` credential, then falsely
+    // reported as success — silently corrupting the substrate credential so the
+    // agent's premium-model calls fail later with no explanation. Reject it with
+    // a clear message instead of mis-storing it (symmetric to the OpenAI offer,
+    // which rejects an sk-ant- Anthropic key, and to the managed BYO path, which
+    // rejects a non-sk-ant- key). A real `claude setup-token` is an Anthropic
+    // OAuth token (sk-ant-…), so this never false-positives on a valid token.
+    if (looksLikeOpenAiKey(token)) {
+      return await this.reEmitMaxOauthOffered(
+        input,
+        state,
+        observed_at,
+        "That's an OpenAI key (sk-…), not a Claude setup-token. Your Claude substrate needs the " +
+          'output of `claude setup-token` (an Anthropic token, sk-ant-…). Paste that to continue, ' +
+          'or tap “Skip for now” to use the free tier.',
       )
     }
     if (this.deps.secrets === undefined) {

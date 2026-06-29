@@ -2,6 +2,47 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — An OpenAI key pasted at the setup-token step is no longer silently mis-stored as a Claude credential
+
+**What shipped (M1 adversarial E2E Round 3).** In Open onboarding, pasting an
+OpenAI key (`sk-…`, not `sk-ant-…`) at the "paste your `claude setup-token`" step
+is now REJECTED with a clear message instead of being silently persisted as the
+Claude substrate credential and falsely advancing to `wow_fired`.
+
+**The bug.** `persistSetupTokenAndAdvance` (`onboarding/interview/engine.ts`)
+validated only `token.length < 16`. An `sk-…`/`sk-proj-…` OpenAI key (50+ chars)
+passed and was written as `kind: 'max_oauth_refresh', label: 'claude-setup-token'`,
+then the phase advanced as if the Claude substrate were configured. Result: the
+agent's premium-model calls later fail at runtime because the stored "Claude
+credential" is actually an OpenAI key — a silent corruption with no error at
+paste time. The shared FAQ even invites users to paste an OpenAI key ("for
+semantic-search embeddings"), so a confused paste at the wrong step is plausible.
+
+**The fix.** A guard in `persistSetupTokenAndAdvance` uses the existing
+`looksLikeOpenAiKey` (`onboarding/optional-keys.ts`) to detect an OpenAI key and
+re-emit the setup-token prompt with a message identifying it as an OpenAI key —
+no persist, no false advance. Symmetric to the OpenAI offer (rejects `sk-ant-`)
+and the managed BYO path (rejects non-`sk-ant-`). A real `claude setup-token` is
+an Anthropic OAuth token (`sk-ant-oat01-…`), so the guard never false-positives.
+
+**Tests.** `onboarding/interview/__tests__/open-mode-phase-walk.test.ts` — in the
+full open-mode walk, an `sk-proj-…` paste at `max_oauth_offered` persists nothing
+and stays on the phase with an OpenAI-key message, while the subsequent valid
+`sk-ant-oat01-…` token still persists + advances. Full onboarding suite (1551)
+green; `tsc -p onboarding/tsconfig.json` clean.
+
+**KNOWN FOLLOW-UP (NOT in this PR — needs its own change + E2E verify).** The
+advertised "add an OpenAI key for sharper memory (semantic embeddings)" capture
+is still wired NOWHERE: `storeOptionalKey` / `detectOptionalKey`
+(`onboarding/optional-keys.ts`) have no production callers, while the consumer
+(`open/composer.ts` resolves `provider:'openai', label:ONBOARDING_OPENAI_LABEL`
+from `ApiKeyStore` to activate GBrain embeddings) is live. Persisting the key
+correctly requires an `ApiKeyStore` (it writes BOTH a secrets row AND an
+`api_keys` table row the consumer reads) threaded through the onboarding engine
+deps + `build-landing-stack` + the composer — a deliberate multi-layer change
+best verified end-to-end on a real instance. This PR stops the silent corruption
+(the dangerous half) now; full capture-wiring is the tracked follow-up.
+
 ## 2026-06-29 — Whitespace-only chat message no longer dead-ends (decode ⇄ worker trim parity)
 
 **What shipped (M1 adversarial E2E Round 2).** A whitespace-only chat message is
