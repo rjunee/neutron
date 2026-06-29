@@ -142,6 +142,26 @@ describe('resolveGbrainClientOptions', () => {
       })
       await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
     })
+
+    test('resolveDynamicEnv re-resolves each spawn → a key stored AFTER a keyword spawn activates', async () => {
+      // The miss is never cached at this seam: if the first memory op spawned
+      // keyword (no key yet), a later reconnect must pick up a key stored since.
+      let stored: string | undefined
+      const opts = resolveGbrainClientOptions({
+        owner_home: '/t',
+        env: {},
+        resolveOpenAiKey: async () => stored,
+      })
+      // First spawn: no key → keyword + graph.
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({})
+      // Key pasted during onboarding/admin, THEN a reconnect spawns again.
+      stored = 'sk-stored-later'
+      await expect(opts.resolveDynamicEnv!()).resolves.toEqual({
+        GBRAIN_EMBEDDING_MODEL: 'openai:text-embedding-3-large',
+        GBRAIN_EMBEDDING_DIMENSIONS: '3072',
+        OPENAI_API_KEY: 'sk-stored-later',
+      })
+    })
   })
 })
 

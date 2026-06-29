@@ -188,18 +188,22 @@ export function buildGBrainMemory(input: {
 }): GBrainMemoryWiring {
   const env = input.env ?? process.env
 
-  // Memoize the lazy key read so the init guard (below) and the serve childEnv
-  // (`resolveDynamicEnv`) resolve the SAME key once per client — the decision
-  // point is the first spawn, so both seams must agree on what was present then.
-  let keyPromise: Promise<string | undefined> | undefined
+  // Cache only a FOUND key, never a miss. Within a single spawn the init guard
+  // (below) and the serve childEnv (`resolveDynamicEnv`) must agree on the key —
+  // caching the first usable read guarantees that. But an ABSENT key must NOT be
+  // cached: if the first memory op fires before the key is stored, a later
+  // reconnect must be free to re-resolve and pick it up (else the cached miss
+  // would defeat the very no-restart activation this lazy path exists for).
+  const resolveOpenAiKey = input.resolveOpenAiKey
+  let cachedKey: string | undefined
   const getKey: (() => Promise<string | undefined>) | undefined =
-    input.resolveOpenAiKey === undefined
+    resolveOpenAiKey === undefined
       ? undefined
-      : () => {
-          if (keyPromise === undefined) {
-            keyPromise = input.resolveOpenAiKey!().catch(() => undefined)
-          }
-          return keyPromise
+      : async () => {
+          if (cachedKey !== undefined) return cachedKey
+          const key = await resolveOpenAiKey().catch(() => undefined)
+          if (key !== undefined && key.trim().length > 0) cachedKey = key
+          return key
         }
 
   const opts = resolveGbrainClientOptions({
