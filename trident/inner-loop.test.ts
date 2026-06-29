@@ -183,6 +183,32 @@ describe('buildWorkflowInnerLoop — launcher mechanics', () => {
     expect(fake.cwds).toEqual(['/wt/run-1'])
   })
 
+  test('the launcher spec pins a NON-EMPTY model_preference (persistent-REPL rejects [])', async () => {
+    // Regression guard: the persistent-REPL substrate throws
+    // `persistent-repl: model_preference is empty; at least one model required`
+    // when `spec.model_preference[0]` is undefined, so a launcher spec with `[]`
+    // can NEVER spawn — the inner loop dies at start() before invoking Workflow.
+    // (Real-run blocker the fake-substrate unit tests previously missed.)
+    const fake = fakeSubstrate(() => [
+      { kind: 'token', text: 'TRIDENT_RESULT={"verdict":"APPROVE"}' },
+      completion(),
+    ])
+    const loop = buildWorkflowInnerLoop({ build_substrate: fake.build })
+    await loop(input())
+    expect(fake.specs[0]!.model_preference.length).toBeGreaterThan(0)
+    expect(fake.specs[0]!.model_preference[0]).toBeTruthy()
+  })
+
+  test('the launcher model is overridable via opts.model', async () => {
+    const fake = fakeSubstrate(() => [
+      { kind: 'token', text: 'TRIDENT_RESULT={"verdict":"APPROVE"}' },
+      completion(),
+    ])
+    const loop = buildWorkflowInnerLoop({ build_substrate: fake.build, model: 'claude-opus-4-8' })
+    await loop(input())
+    expect(fake.specs[0]!.model_preference).toEqual(['claude-opus-4-8'])
+  })
+
   test('args thread resume_checkpoint + existing pr/branch for idempotent resume', async () => {
     const fake = fakeSubstrate(() => [
       { kind: 'token', text: 'TRIDENT_RESULT={"verdict":"APPROVE"}' },

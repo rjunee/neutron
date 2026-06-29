@@ -32,6 +32,7 @@
 import type { ToolDef } from '../core-sdk/types.ts'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { SessionHandle } from '../runtime/session-handle.ts'
+import { getBestModel } from '../runtime/models.ts'
 import type { TridentRun } from './store.ts'
 
 export interface InnerLoopInput {
@@ -73,6 +74,16 @@ export interface BuildWorkflowInnerLoopOptions {
   timeout_ms?: number
   /** Upper bound on completion tokens for the launcher turn. Omitted by default. */
   max_tokens?: number
+  /**
+   * Model that drives the LAUNCHER turn itself (the turn that invokes the
+   * `Workflow` tool). The persistent-REPL substrate REQUIRES a non-empty
+   * `model_preference` (`persistent-repl: model_preference is empty; at least
+   * one model required`), so the launcher MUST pin one or `start()` throws and
+   * the inner loop never runs. Defaults to `getBestModel()` — the same default
+   * the substrate's own resume path uses. The workflow's own `agent()` workers
+   * still pick their models independently; this only pins the thin invoker turn.
+   */
+  model?: string
   /** Timer seam (tests). Defaults to `setTimeout`. */
   set_timer?: (fn: () => void, ms: number) => unknown
   /** Timer-clear seam (tests). Defaults to `clearTimeout`. */
@@ -197,6 +208,7 @@ const FAILED = (raw: string): InnerLoopResult => ({
 export function buildWorkflowInnerLoop(opts: BuildWorkflowInnerLoopOptions): TridentInnerLoop {
   const scriptPath = opts.workflow_script_path ?? DEFAULT_INNER_WORKFLOW_PATH
   const timeoutMs = opts.timeout_ms ?? DEFAULT_TIMEOUT_MS
+  const model = opts.model ?? getBestModel()
   const setTimer =
     opts.set_timer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms))
   const clearTimer =
@@ -208,8 +220,10 @@ export function buildWorkflowInnerLoop(opts: BuildWorkflowInnerLoopOptions): Tri
     const spec: AgentSpec = {
       prompt: buildLauncherMessage(scriptPath, input),
       tools: launcherTools(),
-      // The launcher doesn't pin a model — the workflow's own agent()s pick.
-      model_preference: [],
+      // The launcher turn itself MUST pin a model: the persistent-REPL substrate
+      // rejects an empty `model_preference` (`start()` throws → inner loop never
+      // runs). The workflow's own agent()s still pick their models independently.
+      model_preference: [model],
       ...(opts.max_tokens !== undefined ? { max_tokens: opts.max_tokens } : {}),
     }
 
