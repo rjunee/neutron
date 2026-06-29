@@ -285,6 +285,21 @@ describe('Onboarding Open-mode — engine.advance walk cuts the managed-only pha
     expect(optionValues).not.toContain('attach_max')
     expect(optionValues).not.toContain('byo_key')
 
+    // GUARD (M1 r3): an OpenAI key (sk-…, not sk-ant-…) pasted here used to
+    // pass the length check and be mis-persisted as the Claude
+    // `max_oauth_refresh` credential, then falsely advance to wow_fired —
+    // silently corrupting the substrate credential. It must now be REJECTED:
+    // nothing persisted, still resting on max_oauth_offered, with a message
+    // identifying the OpenAI key.
+    observed_at += 1_000
+    await advanceFreeform(engine, project_slug, 'sk-proj-not-a-claude-setup-token-1234567890', observed_at)
+    const afterBadPaste = await stateStore.get(project_slug, 'u-1')
+    expect(afterBadPaste!.phase).toBe('max_oauth_offered')
+    expect(secretsPuts.length).toBe(0)
+    const rejectPrompt = lastPrompt()
+    expect(rejectPrompt.body).toContain('OpenAI key')
+    expect(rejectPrompt.body.toLowerCase()).toContain('setup-token')
+
     // Paste the setup-token (freeform) → persists to the local SecretsStore
     // as kind `max_oauth_refresh` and advances to wow_fired.
     observed_at += 1_000
