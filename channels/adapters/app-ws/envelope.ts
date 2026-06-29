@@ -624,15 +624,23 @@ export function decodeAppWsButtonChoice(raw: unknown): AppWsInboundButtonChoice 
 /**
  * P5.1 — predicate shared by the WS decoder and the HTTP `/api/app/chat/send`
  * handler so the empty-payload check has identical semantics on both
- * transports. A send is "empty" when the body is the empty string AND
+ * transports. A send is "empty" when the body has no non-whitespace content AND
  * no valid attachments rode along. Either one being non-empty is
  * sufficient to forward to the agent loop.
+ *
+ * TRIM PARITY (M1 E2E Round 2, 2026-06-29): the gate used raw `body.length`, so
+ * a whitespace-only body ("   " / "\n") read as non-empty and was forwarded — but
+ * the agent worker then trims it to '' and silently returns (no reply, no error),
+ * leaving the user's whitespace bubble a dead-end. The official client gates Send
+ * on `draft.trim()`, but the HTTP `/api/app/chat/send` endpoint and any malformed
+ * / third-party client could hit it. Trim here so both transports reject exactly
+ * the shape the worker rejects, keeping decode ⇄ worker parity.
  */
 export function payloadIsEmpty(
   body: string,
   attachments: ReadonlyArray<string> | null | undefined,
 ): boolean {
-  if (body.length > 0) return false
+  if (body.trim().length > 0) return false
   if (attachments !== null && attachments !== undefined && attachments.length > 0) {
     return false
   }

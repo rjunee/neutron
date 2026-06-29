@@ -2,6 +2,31 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — Whitespace-only chat message no longer dead-ends (decode ⇄ worker trim parity)
+
+**What shipped (M1 adversarial E2E Round 2).** A whitespace-only chat message is
+now rejected at decode on both transports instead of being accepted, echoed, and
+silently dropped with no reply.
+
+**The bug.** `payloadIsEmpty` (`channels/adapters/app-ws/envelope.ts`) — the gate
+shared by the `/ws/app/chat` decoder and the HTTP `/api/app/chat/send` handler —
+used raw `body.length`, so a whitespace-only body (`"   "` / `"\n"`) read as
+non-empty and was forwarded to the agent loop. The worker then trims it to `''`
+and returns early (`open/composer.ts` ~2029) — no reply, no error frame — leaving
+the user's whitespace bubble a dead-end and burning a dispatch round-trip. The
+official client gates Send on `draft.trim()`, but the HTTP endpoint and any
+malformed / third-party client could hit it.
+
+**The fix.** `payloadIsEmpty` now trims (`body.trim().length`) so both transports
+reject exactly the shape the worker rejects, restoring decode ⇄ worker parity. A
+whitespace body riding with a valid attachment is still forwarded (attachment-only
+sends unaffected).
+
+**Regression gate** adds `payloadIsEmpty` whitespace cases + a
+`decodeAppWsInbound` whitespace-rejection case to
+`channels/adapters/app-ws/__tests__/attachments.test.ts`. FAILS pre-fix, PASSES
+with the fix.
+
 ## 2026-06-28 — Claude-Max OAuth handoff is the DEFAULT first auth screen (functional, not a dead 503)
 
 **What shipped (AUTH-CORRECTION, Ryan-locked 2026-06-28).** A fresh Open

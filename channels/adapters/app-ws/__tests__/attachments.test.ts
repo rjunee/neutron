@@ -20,6 +20,7 @@ import { AppWsAdapter } from '../adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../session-registry.ts'
 import {
   decodeAppWsInbound,
+  payloadIsEmpty,
   sanitizeAttachments,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_URL_LEN,
@@ -74,6 +75,29 @@ describe('decodeAppWsInbound — attachments', () => {
       attachments: [huge],
     })
     expect(inbound?.attachments).toBeUndefined()
+  })
+})
+
+describe('payloadIsEmpty — whitespace parity with the agent worker', () => {
+  it('treats a whitespace-only body with no attachments as empty', () => {
+    // Pre-fix this returned false (raw length > 0) → the envelope was forwarded,
+    // the worker trimmed it to '' and silently dropped it: a dead-end bubble.
+    expect(payloadIsEmpty('   ', null)).toBe(true)
+    expect(payloadIsEmpty('\n\t ', undefined)).toBe(true)
+    expect(payloadIsEmpty('', null)).toBe(true)
+  })
+
+  it('keeps a whitespace body non-empty when a valid attachment rode along', () => {
+    expect(payloadIsEmpty('  ', ['https://cdn/x.png'])).toBe(false)
+  })
+
+  it('treats real text as non-empty', () => {
+    expect(payloadIsEmpty('  hi  ', null)).toBe(false)
+  })
+
+  it('decodeAppWsInbound rejects a whitespace-only user_message (no dead-end)', () => {
+    const inbound = decodeAppWsInbound({ v: 1, type: 'user_message', body: '   ' })
+    expect(inbound).toBeNull()
   })
 })
 
