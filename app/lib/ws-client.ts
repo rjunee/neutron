@@ -19,6 +19,7 @@ import type {
   AppWsOutbound,
   AppWsOutboundAgentMessage,
   AppWsOutboundAgentMessagePartial,
+  AppWsOutboundChatCommandResult,
   AppWsOutboundUserMessageEcho,
 } from './ws-envelope';
 
@@ -42,6 +43,9 @@ export interface AppWsClientEvents {
     project_id?: string;
   }) => void;
   error: (input: { code: string; message: string }) => void;
+  /** Result of a matched slash command — render `text`; no agent_message
+   *  follows. */
+  chat_command_result: (msg: AppWsOutboundChatCommandResult) => void;
 }
 
 export interface AppWsClientOptions {
@@ -304,6 +308,10 @@ export class AppWsClient {
       }
       case 'error': {
         this.emit('error', { code: env.code, message: env.message });
+        return;
+      }
+      case 'chat_command_result': {
+        this.emit('chat_command_result', env);
         return;
       }
       default:

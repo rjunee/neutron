@@ -2,6 +2,46 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — Slash-command results + error frames now render in chat (no more stuck spinner / lost output)
+
+**What shipped (M1 adversarial E2E Round 3).** Both chat clients (the served
+React web `/chat` and the Expo native app) now render the `chat_command_result`
+and `error` frames the app-ws surface sends, so slash commands surface their
+output and never hang.
+
+**The bug.** The app-ws surface answers a matched slash command (`/note`,
+`/remind`, `/cal`, `/skills`, …) with exactly ONE `chat_command_result` frame and
+deliberately SKIPS the agent dispatch (`gateway/http/app-ws-surface.ts`
+`postCommandResult`) — so no `agent_message` ever follows. Neither client handled
+that frame type:
+- **Web** (`landing/chat-react/controller.ts` `handleFrame`) had cases only for
+  `agent_message_partial` / `agent_message` / `error` / `projects_changed`. A
+  `chat_command_result` matched nothing, so `awaitingReply` stayed `true` →
+  `awaitingFirstToken` stayed `true` → the typing indicator spun FOREVER, and the
+  command's output was never shown. An entire wired feature surface (every slash
+  command) was dead on the primary M1 web client.
+- **Native** (`app/lib/ws-client.ts`) dropped the frame on its forward-compat
+  `default` branch, so the command confirmation was silently lost.
+- Web also cleared the spinner on an `error` frame but rendered nothing — a silent
+  dead-end — diverging from native, which already appends a system bubble.
+
+**The fix.**
+- `landing/chat-react/controller.ts`: handle `chat_command_result` (clear the
+  awaiting bracket + render the result text as an ephemeral agent-style notice)
+  and enrich the `error` case to render a visible notice. Notices are ordered with
+  live streams by arrival and are not persisted (matching the server, which
+  doesn't persist command results either).
+- `app/lib/ws-envelope.ts`: add `AppWsOutboundChatCommandResult` to the
+  `AppWsOutbound` union. `app/lib/ws-client.ts`: decode it + emit a typed
+  `chat_command_result` event. `app/lib/chat-state.tsx`: render it as a system
+  bubble (text, or the error message when text is empty).
+
+**Tests.** `landing/chat-react/__tests__/controller.test.ts` — a
+`chat_command_result` renders an agent bubble and clears the indicator; empty-text
+falls back to the error message; an `error` frame surfaces a visible notice.
+`app/__tests__/ws-client-chat-command-result.test.ts` — the native client decodes
+and emits the frame (success + error payloads).
+
 ## 2026-06-29 — Whitespace-only chat message no longer dead-ends (decode ⇄ worker trim parity)
 
 **What shipped (M1 adversarial E2E Round 2).** A whitespace-only chat message is

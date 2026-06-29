@@ -167,6 +167,18 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
         ts: Date.now(),
       });
     });
+    // A matched slash command (/note, /remind, /cal, /skills, …) is answered
+    // with a single chat_command_result and NO agent_message — without this the
+    // command's confirmation/output is silently dropped on native.
+    const offCommandResult = client.on('chat_command_result', (res) => {
+      const body =
+        res.text.length > 0
+          ? res.text
+          : res.error?.message !== undefined && res.error.message.length > 0
+            ? res.error.message
+            : 'Command completed.';
+      dispatch({ type: 'append_system', body, ts: Date.now() });
+    });
 
     client.connect();
     return () => {
@@ -176,6 +188,7 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
       offAgent();
       offPartial();
       offError();
+      offCommandResult();
       client.close();
       clientRef.current = null;
       for (const t of echoTimers.current.values()) clearTimeout(t);
