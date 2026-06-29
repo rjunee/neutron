@@ -175,6 +175,20 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
   test('a bounded fix loop runs while REQUEST_CHANGES and round < maxRounds', () => {
     expect(SRC).toMatch(/while \(finalVerdict === 'REQUEST_CHANGES' && round < maxRounds\)/)
   })
+
+  test('Codex [P1]: fix rounds RE-ENTER the existing branch/PR (no `git switch -c` collision, no duplicate PR)', () => {
+    // The forge contract is parameterized by `reenter`: round 1 creates the
+    // branch (`forgeBuildContract(resuming)`), but every fix round re-enters the
+    // EXISTING branch + reuses the PR (`forgeBuildContract(true)`). Reusing the
+    // round-1 (create) contract in fix rounds told Forge to `git switch -c` an
+    // already-created branch + `gh pr create` a duplicate — breaking every
+    // REQUEST_CHANGES run.
+    expect(SRC).toContain('function forgeBuildContract(reenter)')
+    expect(SRC).toContain('forgeBuildContract(resuming)')
+    expect(SRC).toContain('forgeBuildContract(true)')
+    // The re-enter step switches WITHOUT -c; the create step uses -c.
+    expect(SRC).toContain('Re-enter it WITHOUT')
+  })
 })
 
 describe('inner-workflow.mjs — mandatory worktree cleanup on ALL paths', () => {

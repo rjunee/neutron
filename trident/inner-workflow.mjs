@@ -160,35 +160,50 @@ const REDIRECT_RULE =
 // push + open-PR, PR_NUMBER/BRANCH/WORKTREE last-lines discipline. With
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
 // last-lines discipline is kept verbatim as the durable, parser-friendly fallback.
-// Step 1 differs on a resume: a fresh run creates the branch; a resume re-enters
-// the EXISTING branch a prior crashed run left behind (no `-c` — that collides).
-const FORGE_STEP1 = resuming
-  ? `A prior run already created branch ${forgeBranch}${isPr ? ' (and its PR)' : ''}. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue/verify the existing work — do NOT restart from scratch.`
-  : `Run \`git switch -c ${forgeBranch}\` as your FIRST step (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+// Step 1 + step 4 differ on whether the branch/PR ALREADY EXIST (`reenter`):
+//   • a FRESH round-1 run (reenter=false) CREATES the branch (`git switch -c`)
+//     and, in pr-mode, opens a PR;
+//   • a RE-ENTRY (reenter=true) — a crash-resume (`resuming`) OR any bounded
+//     fix round after round 1 — re-enters the EXISTING branch WITHOUT `-c`
+//     (which would collide: "branch already exists") and REUSES the PR (never a
+//     duplicate). Codex review [P1]: the fix loop previously reused the round-1
+//     contract, telling the fix agent to `git switch -c` an already-created
+//     branch + `gh pr create` a duplicate — conflicting instructions that broke
+//     every REQUEST_CHANGES run.
+function forgeStep1(reenter) {
+  return reenter
+    ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
+    : `Run \`git switch -c ${forgeBranch}\` as your FIRST step (the cleanup step relies on this EXACT branch name to find your worktree even if you fail later).`
+}
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
-const FORGE_PUSH_STEP = isPr
-  ? `Commit, then push the branch to origin, then ${
-      resuming
-        ? `REUSE the existing PR (confirm with \`gh pr list --head ${forgeBranch}\`) — NEVER open a duplicate`
-        : 'open a PR with `gh pr create`'
-    }. OPEN THE PR FIRST; any cross-model review is best-effort and must NEVER gate the PR or be a reason to yield your turn.`
-  : `Commit on ${forgeBranch}. This repo has NO GitHub remote — do NOT push or run \`gh pr create\`; the OUTER loop merges the local branch.`
+function forgePushStep(reenter) {
+  return isPr
+    ? `Commit, then push the branch to origin, then ${
+        reenter
+          ? `REUSE the existing PR (confirm with \`gh pr list --head ${forgeBranch}\`) — NEVER open a duplicate`
+          : 'open a PR with `gh pr create`'
+      }. OPEN THE PR FIRST; any cross-model review is best-effort and must NEVER gate the PR or be a reason to yield your turn.`
+    : `Commit on ${forgeBranch}. This repo has NO GitHub remote — do NOT push or run \`gh pr create\`; the OUTER loop merges the local branch.`
+}
 const FORGE_PR_LINE = isPr ? 'PR_NUMBER=<integer>' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
-const FORGE_BUILD_CONTRACT = `You are FORGE — Neutron's autonomous build sub-agent. You build, test, ${isPr ? 'push, and open a PR' : 'and commit'} without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+// `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
+function forgeBuildContract(reenter) {
+  return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, ${isPr ? 'push, and open a PR' : 'and commit'} without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
 CONTRACT
-1. ${FORGE_STEP1}
+1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
-4. ${FORGE_PUSH_STEP}
+4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
+}
 
 // Argus review rubric (from prompts/argus.md): APPROVE / REQUEST_CHANGES /
 // COMMENT, blockers/important/nits, oversized-diff guard, NEVER a silent exit.
@@ -302,8 +317,10 @@ try {
       : ''
   const ralphNote = ralph === true ? RALPH_NOTE : ''
 
+  // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
+  // CREATE the branch fresh.
   const forge = await agent(
-    `${FORGE_BUILD_CONTRACT}${ralphNote}${reuseNote}
+    `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
 ${task}`,
@@ -328,10 +345,13 @@ ${task}`,
   while (finalVerdict === 'REQUEST_CHANGES' && round < maxRounds) {
     round++
     log(`trident-v2 fix loop: round=${round}/${maxRounds} — re-Forge against findings`)
+    // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
+    // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
+    // reuses the PR (no duplicate). Codex [P1] fix.
     await agent(
-      `${FORGE_BUILD_CONTRACT}
+      `${forgeBuildContract(true)}
 
-You are FIXING Argus's findings on branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
+You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):
 ${JSON.stringify(synthesis.findings)}
 

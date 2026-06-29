@@ -123,6 +123,17 @@ the remote PR); in local-mode the branch is KEPT for the outer `mergeLocal`, whi
 deletes it post-merge (`merge.ts`). pr-mode was never affected (it merges the
 remote PR, not the local branch).
 
+**Fix-round re-entry (Codex cross-model review [P1]).** The bounded fix loop
+(round > 1) reused the round-1 Forge contract, whose step 1 was `git switch -c
+${forgeBranch}` (create) + `gh pr create` — but on a fix round that branch/PR
+already exist, so Forge got conflicting instructions and could fail on the
+existing branch / open a duplicate PR, breaking every REQUEST_CHANGES run. Fix:
+the Forge contract is now `forgeBuildContract(reenter)` — round 1 creates
+(`reenter=resuming`), every fix round re-enters the existing branch WITHOUT `-c`
+and reuses the PR (`reenter=true`). (The happy-path e2e used `max_rounds:1`, so
+the fix-loop path is covered by the static contract test, not a live multi-round
+run — noted as such.)
+
 **Acceptance status (VERIFIED — real `claude -p` end-to-end, 2026-06-29).**
 Unit/integration: full trident dir + `tsc -p trident/tsconfig.json` + root `tsc`
 green; leak-gate SILENT; full bounded suite green (one unrelated parallel-load
