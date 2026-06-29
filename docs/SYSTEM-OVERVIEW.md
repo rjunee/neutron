@@ -1430,6 +1430,27 @@ answered inline.
 `get_engagement_mode` / `set_engagement_mode` MCP tools on the `agent-settings`
 Core (`cores/free/agent-settings/`), sharing the same `projects`-table backend.
 
+**Agent profile (name + personality) on Open.** `update_agent_name` /
+`update_personality` route through an injected `AgentProfileBackend`. On the
+multi-tenant platform that backend opens the RW registry row; **Open has no
+registry**, so historically `mount-open-cores.ts` threaded nothing and the Core
+fell back to the `available:false` no-op — both tools returned
+`SETTINGS_BACKEND_UNAVAILABLE_ERROR` on every Open box, breaking onboarding's
+"update my name / switch personality later — just ask" promise. Open now threads
+`buildOpenAgentProfileBackend` (`open/agent-profile-backend.ts`), which persists
+to the only surface that feeds the live agent's identity in Open: the persona
+files under `<owner_home>/persona/`. Name + personality land in a canonical
+scalar store (`persona/agent-profile.json`, the `get()` source) **and** a
+clearly-delimited managed block at the top of `persona/SOUL.md` — the exact file
+`PersonaPromptLoader` (`gateway/realmode-composer/persona-loader.ts`) reads every
+agent turn and splices into the system prompt. The atomic write bumps SOUL.md's
+mtime (so the loader's mtime-keyed cache re-reads on the next turn) and the
+composer wires `onPersonaReload → personaLoader.invalidate('SOUL.md')` for
+immediate pickup, so a later turn reflects the new name/persona. The managed
+block is idempotently replaced and never clobbers onboarding-authored SOUL.md
+content. (`NEUTRON_AGENT_NAME` is read once at boot but never composed into the
+prompt, so it is NOT the persistence target.)
+
 ## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
 
 The persistent-REPL substrate drives the interactive `claude` TUI over a single
