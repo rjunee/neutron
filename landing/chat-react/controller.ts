@@ -174,6 +174,18 @@ export class NeutronChatController {
   private msgs: ChatMessage[] = []
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
+  /**
+   * Ephemeral agent-style notices the sync layer never persists: slash-command
+   * results (`chat_command_result`) and surfaced `error` frames. The app-ws
+   * surface answers a matched chat command with exactly ONE
+   * `chat_command_result` frame and SKIPS the agent dispatch — so no
+   * `agent_message` ever follows. Without rendering it the typing indicator
+   * spins forever (the awaiting bracket is never cleared) AND the command's
+   * output is silently lost. These live only for the controller's lifetime;
+   * the server doesn't persist them to the transcript either, so they vanish
+   * on reload — matching the server's own non-persistence.
+   */
+  private readonly notices: RenderMessage[] = []
   private connStatus: ConnStatus = 'idle'
   private awaitingReply = false
   private pending = 0
@@ -295,8 +307,42 @@ export class NeutronChatController {
       return
     }
     if (type === 'error') {
+      // Clear the awaiting bracket AND surface the failure as a visible notice.
+      // Previously the spinner cleared but nothing was shown, leaving the user's
+      // message a silent dead-end. The common LLM-failure path ships a friendly
+      // `agent_message` (not an `error` frame), so this only renders the genuine
+      // surface errors (button_choice_failed, dispatch_failed, malformed_envelope,
+      // resume_failed) — matching the Expo native client, which already appends a
+      // system bubble for `error` frames.
       this.awaitingReply = false
-      this.publish()
+      const msg = typeof f['message'] === 'string' ? (f['message'] as string) : ''
+      const code = typeof f['code'] === 'string' ? (f['code'] as string) : ''
+      const body =
+        msg.length > 0
+          ? msg
+          : code.length > 0
+            ? `Something went wrong (${code}).`
+            : 'Something went wrong.'
+      this.pushNotice(body)
+      return
+    }
+    if (type === 'chat_command_result') {
+      // A matched slash command (/note, /remind, /cal, /skills, …): the server
+      // answers with exactly ONE result frame and does NOT dispatch the agent,
+      // so no `agent_message` will follow. Clear the awaiting bracket (else the
+      // typing dots spin forever) and render the result text as an agent-style
+      // bubble (else the command's output is silently lost). `text` is set for
+      // both success and error responses; fall back to the error message only
+      // when text is empty.
+      this.awaitingReply = false
+      const text = typeof f['text'] === 'string' ? (f['text'] as string) : ''
+      const err = f['error']
+      const errMsg =
+        typeof err === 'object' && err !== null && typeof (err as Record<string, unknown>)['message'] === 'string'
+          ? ((err as Record<string, unknown>)['message'] as string)
+          : ''
+      const body = text.length > 0 ? text : errMsg.length > 0 ? errMsg : 'Command completed.'
+      this.pushNotice(body)
       return
     }
     // FIX 1 — a live project-list refresh (projects created/changed mid-session,
@@ -423,6 +469,36 @@ export class NeutronChatController {
     this.publish()
   }
 
+  /**
+   * Append an ephemeral agent-style notice (slash-command result / surfaced
+   * error) and republish. Ordered with live streams via the shared `seq`
+   * counter so a notice and a streamed reply interleave by arrival.
+   */
+  private pushNotice(text: string): void {
+    const seq = this.nextSeq()
+    this.notices.push({
+      id: `notice:${seq}`,
+      messageId: null,
+      role: 'agent',
+      text,
+      status: 'sent',
+      streaming: false,
+      attachments: null,
+      createdAt: seq,
+      delivery: null,
+      reactions: [],
+      edited: false,
+      deleted: false,
+      options: null,
+      promptId: null,
+      allowFreeform: null,
+      kind: null,
+      uploadAffordance: null,
+      chosenValue: null,
+    })
+    this.publish()
+  }
+
   private publish(): void {
     this.vm = this.computeVm()
     for (const fn of this.listeners) fn(this.vm)
@@ -485,8 +561,11 @@ export class NeutronChatController {
         chosenValue: null,
       })
     }
-    liveStreams.sort((a, b) => a.createdAt - b.createdAt)
-    const messages = [...rendered, ...liveStreams]
+    // Tail = live streaming bubbles + ephemeral notices (command results /
+    // errors), ordered together by arrival (`seq`) so a streamed reply and a
+    // notice interleave correctly. Both sort AFTER the durable transcript.
+    const tail = [...liveStreams, ...this.notices].sort((a, b) => a.createdAt - b.createdAt)
+    const messages = [...rendered, ...tail]
     // Latest user message's delivery — for a Telegram-style status line.
     let latestUserDelivery: DeliveryState | null = null
     for (let i = rendered.length - 1; i >= 0; i--) {

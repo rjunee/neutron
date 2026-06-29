@@ -29,6 +29,21 @@ import type {
   AppWsOutboundUserMessageEcho,
 } from './ws-envelope';
 
+/**
+ * Derive the visible body for a `chat_command_result` — used by BOTH the live
+ * WS frame handler and the HTTP-fallback response path in chat-state.tsx (a
+ * matched slash command answered over `POST /api/app/chat/send` when the socket
+ * is down carries the same result in the JSON body). Returns the result `text`,
+ * or the error message when text is empty, or a generic line. Lives in this
+ * RN-free module so it's unit-testable without the react-native runtime.
+ */
+export function commandResultBody(res: { text?: string; error?: { message?: string } }): string {
+  if (typeof res.text === 'string' && res.text.length > 0) return res.text;
+  const em = res.error?.message;
+  if (typeof em === 'string' && em.length > 0) return em;
+  return 'Command completed.';
+}
+
 export type ChatMessageKind = 'user' | 'agent' | 'system';
 
 export interface ChatMessage {

@@ -60,10 +60,12 @@
  */
 
 import {
+  ALL_REMINDER_RECURRENCES,
   ReminderStore,
   type CreateReminderInput,
   type CreateRecurringReminderInput,
   type Reminder,
+  type ReminderRecurrence,
 } from '@neutronai/reminders'
 import {
   NO_PROJECT,
@@ -101,6 +103,15 @@ export interface RemindersCreateInput {
   fire_at: number
   /** Optional project scope; persisted as the engine's topic_id under the hood. */
   project_id?: string
+  /**
+   * Optional cadence. When set, the reminder RECURS: `fire_at` is the first
+   * occurrence and the tick loop reschedules the next one after each fire
+   * (`weekly` +7d, `monthly` +30d, `occasional` +14d). When omitted the
+   * reminder is one-shot. Daily / weekday cadences are NOT representable here —
+   * the skill steers those to the nag-until-done pattern instead of falsely
+   * claiming recurrence.
+   */
+  recurrence?: ReminderRecurrence
 }
 
 export interface RemindersCreateResult {
@@ -282,6 +293,32 @@ export function buildReminderStoreBackend(
 
   return {
     async create(input: RemindersCreateInput): Promise<RemindersCreateResult> {
+      // A cadence makes the reminder RECUR: route through the engine's
+      // `createRecurring` so the tick loop reschedules the next occurrence
+      // after each fire (instead of a one-shot that fires once and dies — the
+      // bug where the agent confirmed "every week" but the row never repeated).
+      if (input.recurrence !== undefined) {
+        // The MCP boundary passes untyped JSON, so a model could send a cadence
+        // the engine can't represent (e.g. 'daily'). Reject it clearly rather
+        // than writing a row whose `computeNextRecurrence` delta is undefined →
+        // NaN fire_at that silently never reschedules.
+        if (!ALL_REMINDER_RECURRENCES.includes(input.recurrence)) {
+          throw new Error(
+            `reminders_create: unsupported recurrence '${String(input.recurrence)}' ` +
+              `(allowed: ${ALL_REMINDER_RECURRENCES.join(', ')})`,
+          )
+        }
+        const recurring_input: CreateRecurringReminderInput = {
+          project_slug: opts.project_slug,
+          topic_id: input.project_id ?? null,
+          fire_at: input.fire_at,
+          message: input.message,
+          recurrence: input.recurrence,
+          source: CORE_SOURCE_TAG,
+        }
+        const row = await store.createRecurring(recurring_input)
+        return { id: row.id, fire_at: row.fire_at }
+      }
       const create_input: CreateReminderInput = {
         project_slug: opts.project_slug,
         topic_id: input.project_id ?? null,
@@ -336,22 +373,38 @@ export function buildReminderStoreBackend(
             `reminders_snooze: id=${input.id} no longer pending`,
           )
         }
-        const create_input: CreateReminderInput = {
-          project_slug: original.project_slug,
-          topic_id: original.topic_id,
-          fire_at: input.new_fire_at,
-          message: original.message,
-          // Preserve the ORIGINAL row's source on the replacement.
-          // `list()` returns every pending row for the owner — incl.
-          // organic engine rows whose source is NULL — so a user can
-          // snooze a row this Core did not create. Re-tagging the
-          // replacement as CORE_SOURCE_TAG would make the uninstall
-          // sweep cancel a reminder the Core never owned (symmetric
-          // inverse of the r1 leak). `source` may be NULL, the Core
-          // tag, or another tag — round-trip it verbatim.
-          source: original.source,
+        // Preserve the ORIGINAL row's source on the replacement.
+        // `list()` returns every pending row for the owner — incl.
+        // organic engine rows whose source is NULL — so a user can
+        // snooze a row this Core did not create. Re-tagging the
+        // replacement as CORE_SOURCE_TAG would make the uninstall
+        // sweep cancel a reminder the Core never owned (symmetric
+        // inverse of the r1 leak). `source` may be NULL, the Core
+        // tag, or another tag — round-trip it verbatim.
+        //
+        // Recurring rows go through `createRecurring(...)` so snoozing a
+        // recurring reminder PRESERVES its cadence — otherwise a weekly/monthly
+        // reminder would silently become a one-shot after the first snooze and
+        // stop repeating (mirrors the `update` path's same branch).
+        let replacement: Reminder
+        if (original.recurrence !== null) {
+          replacement = await txStore.createRecurring({
+            project_slug: original.project_slug,
+            topic_id: original.topic_id,
+            fire_at: input.new_fire_at,
+            message: original.message,
+            recurrence: original.recurrence,
+            source: original.source,
+          })
+        } else {
+          replacement = await txStore.create({
+            project_slug: original.project_slug,
+            topic_id: original.topic_id,
+            fire_at: input.new_fire_at,
+            message: original.message,
+            source: original.source,
+          })
         }
-        const replacement = await txStore.create(create_input)
         return {
           id: replacement.id,
           cancelled_id: input.id,

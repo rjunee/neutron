@@ -49,7 +49,7 @@ composer passes it through when there's nothing to compose.
 
 | Intent | Tool | Notes |
 | --- | --- | --- |
-| Create | `mcp__neutron__reminders_create` | Resolve relative times ("in 20 min", "tomorrow 9am") to the owner's timezone BEFORE calling. For recurring ("every weekday 8am"), pass the recurrence the tool's schema accepts. |
+| Create | `mcp__neutron__reminders_create` | Resolve relative times ("in 20 min", "tomorrow 9am") to the owner's timezone BEFORE calling. For a repeating reminder, pass `recurrence` — but ONLY `weekly` / `monthly` / `occasional` are supported (see Rule 6 for daily/weekday). |
 | List | `mcp__neutron__reminders_list` | Use first when the owner references "the X reminder" so you can resolve it to an id. |
 | Snooze / reschedule | `mcp__neutron__reminders_snooze` | Needs the reminder id (list first). |
 | Cancel / delete | `mcp__neutron__reminders_cancel` | Needs the reminder id (list first). Confirm the match before cancelling if ambiguous. |
@@ -58,9 +58,9 @@ composer passes it through when there's nothing to compose.
 
 ## Rules
 
-1. **Resolve time before you call.** Parse "in 20 minutes", "tomorrow at 9", "every weekday at 8am"
-   into the concrete fire time / recurrence the tool expects, using the owner's timezone. Do not
-   push a raw natural-language time string into the store.
+1. **Resolve time before you call.** Parse "in 20 minutes", "tomorrow at 9", "every Monday at 8am"
+   into the concrete `fire_at` (unix seconds, owner's timezone) the tool expects. For a repeating
+   reminder also pass `recurrence`. Do not push a raw natural-language time string into the store.
 2. **Disambiguate by listing.** Whenever the owner refers to "the X reminder" for snooze / cancel /
    update, call `reminders_list` first, find the matching id, then act on that id.
 3. **Store intent, not just text.** Prefer an instruction the fire-time composer can flesh out over
@@ -69,3 +69,10 @@ composer passes it through when there's nothing to compose.
    the when), concisely.
 5. **Never** create cron jobs, launchd entries, RemoteTriggers, or scheduled cloud agents for a
    user-facing reminder — those are for infrastructure, not reminders.
+6. **Only confirm a recurrence you actually set.** `reminders_create` supports `recurrence` of
+   `weekly` / `monthly` / `occasional` ONLY. **Daily and weekday cadences are NOT representable** —
+   `recurrence: 'daily'` will be rejected. For "every day" / "every weekday" / "every morning",
+   either (a) set a one-shot for the next occurrence and tell the owner plainly it's a single
+   reminder, or (b) store a nag-until-done instruction in `message` so the fire-time agent re-arms
+   it. Do NOT call the tool with a one-shot `fire_at` and then tell the owner "I'll remind you every
+   day" — that false confirmation is the bug this rule exists to prevent.

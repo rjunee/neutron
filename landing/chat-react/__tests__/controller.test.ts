@@ -336,6 +336,73 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(msg?.text).toBe('')
     expect(msg?.edited).toBe(false)
   })
+
+  it('renders a chat_command_result as an agent bubble and clears the typing indicator', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('/note buy milk')
+    await tick()
+    // After the send, the typing indicator is on (awaiting a reply).
+    expect(controller.getViewModel().isRunning).toBe(true)
+    // The server answers a MATCHED slash command with exactly ONE
+    // chat_command_result frame and NO agent_message ever follows. Before this
+    // fix the spinner spun forever and the command output was lost entirely.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'chat_command_result',
+      channel_topic_id: TOPIC,
+      text: '📝 Saved note: buy milk',
+      ts: 5,
+      client_msg_id: 'cmid-1',
+    })
+    await tick()
+    const vm = controller.getViewModel()
+    // Typing indicator cleared — no agent_message will arrive.
+    expect(vm.isRunning).toBe(false)
+    expect(vm.awaitingFirstToken).toBe(false)
+    // The command output is rendered as an agent-style bubble, after the
+    // user's command bubble.
+    expect(vm.messages.map((m) => m.text)).toEqual(['/note buy milk', '📝 Saved note: buy milk'])
+    expect(vm.messages[1]?.role).toBe('agent')
+  })
+
+  it('falls back to the error message when a chat_command_result has empty text', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('/remind every weekday at 8am')
+    await tick()
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'chat_command_result',
+      channel_topic_id: TOPIC,
+      text: '',
+      error: { code: 'unsupported_recurrence', message: 'Recurring reminders are not supported in v1.' },
+      ts: 6,
+    })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.isRunning).toBe(false)
+    expect(vm.messages.some((m) => m.text === 'Recurring reminders are not supported in v1.')).toBe(true)
+  })
+
+  it('surfaces an error frame as a visible notice and clears the spinner (parity with native)', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('do a thing')
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+    sockets[0]!.deliver({ v: 1, type: 'error', code: 'dispatch_failed', message: 'The agent could not start.' })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.isRunning).toBe(false)
+    expect(vm.messages.some((m) => m.text === 'The agent could not start.')).toBe(true)
+  })
 })
 
 describe('NeutronChatController — live projects_changed (FIX 1)', () => {

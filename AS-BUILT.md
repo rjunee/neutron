@@ -42,6 +42,97 @@ correctly requires an `ApiKeyStore` (it writes BOTH a secrets row AND an
 deps + `build-landing-stack` + the composer — a deliberate multi-layer change
 best verified end-to-end on a real instance. This PR stops the silent corruption
 (the dangerous half) now; full capture-wiring is the tracked follow-up.
+## 2026-06-29 — Recurring reminders now reachable via the agent (no more silent one-shot + false confirmation)
+
+**What shipped (M1 adversarial E2E Round 3).** The `reminders_create` MCP tool —
+the path the conversational agent and the Expo app use — now accepts a
+`recurrence` cadence (`weekly` / `monthly` / `occasional`) and routes it through
+the engine's `createRecurring`, so a reminder the owner asks to repeat actually
+repeats.
+
+**The bug.** The recurring tick machinery (`reminders/tick.ts`
+`computeNextRecurrence` + `store.createRecurring` + `advanceRecurrence`) was
+sound, but NO user-facing create path ever set `recurrence`:
+- `cores/free/reminders` `reminders_create` exposed only `message` / `fire_at` /
+  `project_id` (`package.json` neutron block + `src/backend.ts`), always calling
+  one-shot `store.create()`.
+- `skills/remind/SKILL.md` nonetheless told the agent "for recurring, pass the
+  recurrence the tool's schema accepts" — no such field existed, so the agent
+  omitted it, created a one-shot that fires once and dies, and then **falsely
+  confirmed a recurring schedule**. ("remind me every Monday at 8am" → fires next
+  Monday only.) The only live caller of `createRecurring` was the onboarding
+  wow-moment.
+
+**The fix.**
+- `cores/free/reminders/src/backend.ts`: `RemindersCreateInput` gains optional
+  `recurrence`; `create()` routes to `store.createRecurring` when present, with a
+  runtime guard rejecting cadences the engine can't represent (the MCP boundary
+  passes untyped JSON, so a bare `'daily'` would otherwise write a row with a
+  NaN next-fire that never reschedules).
+- `cores/free/reminders/package.json` (authoritative manifest) + the mirror
+  `manifest.json`: add the `recurrence` enum to the `reminders_create`
+  input_schema so the agent can discover + pass it.
+- `skills/remind/SKILL.md`: document the supported cadences accurately and add
+  Rule 6 — daily/weekday are NOT representable (use the nag-until-done pattern),
+  and never confirm a recurrence you didn't actually set.
+- `cores/free/reminders/src/backend.ts` `snooze` (Codex r1 P2): now that recurring
+  reminders are reachable, snoozing one must PRESERVE its cadence — the snooze
+  recreate branched only through one-shot `create()`, so a weekly/monthly reminder
+  silently became a one-shot after the first snooze. Now branches on
+  `original.recurrence` and recreates via `createRecurring` (mirrors the `update`
+  path).
+
+**Tests.** `cores/free/reminders/__tests__/tools.test.ts`: a `recurrence: 'weekly'`
+create persists a recurring row (verified via the engine store side-channel) while
+a plain create stays one-shot; an unsupported `'daily'` cadence is rejected.
+Full reminders-core (100) + engine reminder (166) suites green; reminders-core
+leaf `tsc` clean.
+## 2026-06-29 — Slash-command results + error frames now render in chat (no more stuck spinner / lost output)
+
+**What shipped (M1 adversarial E2E Round 3).** Both chat clients (the served
+React web `/chat` and the Expo native app) now render the `chat_command_result`
+and `error` frames the app-ws surface sends, so slash commands surface their
+output and never hang.
+
+**The bug.** The app-ws surface answers a matched slash command (`/note`,
+`/remind`, `/cal`, `/skills`, …) with exactly ONE `chat_command_result` frame and
+deliberately SKIPS the agent dispatch (`gateway/http/app-ws-surface.ts`
+`postCommandResult`) — so no `agent_message` ever follows. Neither client handled
+that frame type:
+- **Web** (`landing/chat-react/controller.ts` `handleFrame`) had cases only for
+  `agent_message_partial` / `agent_message` / `error` / `projects_changed`. A
+  `chat_command_result` matched nothing, so `awaitingReply` stayed `true` →
+  `awaitingFirstToken` stayed `true` → the typing indicator spun FOREVER, and the
+  command's output was never shown. An entire wired feature surface (every slash
+  command) was dead on the primary M1 web client.
+- **Native** (`app/lib/ws-client.ts`) dropped the frame on its forward-compat
+  `default` branch, so the command confirmation was silently lost.
+- Web also cleared the spinner on an `error` frame but rendered nothing — a silent
+  dead-end — diverging from native, which already appends a system bubble.
+
+**The fix.**
+- `landing/chat-react/controller.ts`: handle `chat_command_result` (clear the
+  awaiting bracket + render the result text as an ephemeral agent-style notice)
+  and enrich the `error` case to render a visible notice. Notices are ordered with
+  live streams by arrival and are not persisted (matching the server, which
+  doesn't persist command results either).
+- `app/lib/ws-envelope.ts`: add `AppWsOutboundChatCommandResult` to the
+  `AppWsOutbound` union. `app/lib/ws-client.ts`: decode it + emit a typed
+  `chat_command_result` event. `app/lib/chat-state.tsx`: render it as a system
+  bubble (text, or the error message when text is empty).
+- `app/lib/chat-streaming.ts` + `app/lib/chat-state.tsx` (Codex r1 P2): the
+  native HTTP-fallback send (`POST /api/app/chat/send` when the socket is down)
+  returns the same `chat_command_result` in its JSON body and still skips the
+  agent dispatch — that field was unparsed, so the offline/reconnecting path
+  still lost the output. Now parsed and rendered via a shared, RN-free
+  `commandResultBody` helper. (Follow-up, not in this PR: command-result
+  `deep_link` navigation on native — never worked before, no regression.)
+
+**Tests.** `landing/chat-react/__tests__/controller.test.ts` — a
+`chat_command_result` renders an agent bubble and clears the indicator; empty-text
+falls back to the error message; an `error` frame surfaces a visible notice.
+`app/__tests__/ws-client-chat-command-result.test.ts` — the native client decodes
+and emits the frame (success + error payloads).
 
 ## 2026-06-29 — Whitespace-only chat message no longer dead-ends (decode ⇄ worker trim parity)
 

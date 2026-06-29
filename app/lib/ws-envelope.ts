@@ -152,9 +152,29 @@ export interface AppWsOutboundError {
   message: string;
 }
 
+/**
+ * Result of a matched slash command (`/note`, `/remind`, `/cal`, `/skills`, …).
+ * The app-ws surface answers a chat-command-filter match with exactly ONE of
+ * these frames and SKIPS the agent dispatch — so NO `agent_message` follows.
+ * The client must render `text` (else the command output is lost). Mirrors
+ * `gateway/http/app-ws-surface.ts` `postCommandResult`.
+ */
+export interface AppWsOutboundChatCommandResult {
+  v: 1;
+  type: 'chat_command_result';
+  channel_topic_id: string;
+  text: string;
+  ts: number;
+  data?: unknown;
+  deep_link?: string;
+  error?: { code?: string; message?: string };
+  client_msg_id?: string;
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
   | AppWsOutboundAgentMessage
   | AppWsOutboundAgentMessagePartial
-  | AppWsOutboundError;
+  | AppWsOutboundError
+  | AppWsOutboundChatCommandResult;
