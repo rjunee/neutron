@@ -35,6 +35,13 @@ that frame type:
   `AppWsOutbound` union. `app/lib/ws-client.ts`: decode it + emit a typed
   `chat_command_result` event. `app/lib/chat-state.tsx`: render it as a system
   bubble (text, or the error message when text is empty).
+- `app/lib/chat-streaming.ts` + `app/lib/chat-state.tsx` (Codex r1 P2): the
+  native HTTP-fallback send (`POST /api/app/chat/send` when the socket is down)
+  returns the same `chat_command_result` in its JSON body and still skips the
+  agent dispatch — that field was unparsed, so the offline/reconnecting path
+  still lost the output. Now parsed and rendered via a shared, RN-free
+  `commandResultBody` helper. (Follow-up, not in this PR: command-result
+  `deep_link` navigation on native — never worked before, no regression.)
 
 **Tests.** `landing/chat-react/__tests__/controller.test.ts` — a
 `chat_command_result` renders an agent bubble and clears the indicator; empty-text
