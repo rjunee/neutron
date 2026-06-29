@@ -160,8 +160,12 @@ describe('activeTabKeyFromSegments — loading default set', () => {
     }
   });
 
-  it('does NOT shadow/lock the Chat tab on the chat-sync route (PR #11 regression)', () => {
+  it('does NOT shadow/lock the Chat tab on an unknown sub-route (PR #11 regression)', () => {
+    // `chat-sync` was the legacy second chat surface; the 2026-06-29 chat-collapse
+    // removed it (single Chat tab now). An unknown leaf must still highlight
+    // NOTHING — never default-highlight Chat, which would suppress the escape tap.
     expect(activeTabKeyFromSegments([...base, 'chat-sync'], tabs)).toBeNull();
+    expect(activeTabKeyFromSegments([...base, 'some-removed-route'], tabs)).toBeNull();
   });
 
   it('highlights nothing on the other non-tab sub-routes', () => {

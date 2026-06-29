@@ -389,3 +389,80 @@ describe('MobileChatSession — offline send-queue + resume', () => {
 function tick(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
+
+describe('MobileChatSession — slash commands + button choices (parity with the deleted surface)', () => {
+  it('renders a chat_command_result as an agent message tagged with the view project', async () => {
+    const db = new Database(':memory:');
+    dbs.push(db);
+    const store = await SqliteChatStore.open(bunExecutor(db));
+    const sockets: FakeSocket[] = [];
+    const session = new MobileChatSession({
+      url: URL,
+      topic_id: TOPIC,
+      project_id: 'proj-7',
+      store,
+      createSocket: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+    });
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', project_slug: 'p', topic_id: TOPIC, ts: 1 });
+    await tick();
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'chat_command_result',
+      channel_topic_id: TOPIC,
+      text: '✅ Reminder set for 9am.',
+      ts: 42,
+      client_msg_id: 'cmd-abc',
+    });
+    await tick();
+    const m = (await session.messages()).find((x) => x.message_id === 'cmd:cmd-abc');
+    expect(m).toBeDefined();
+    expect(m?.role).toBe('agent');
+    expect(m?.body).toBe('✅ Reminder set for 9am.');
+    expect(m?.project_id).toBe('proj-7');
+  });
+
+  it('falls back to the error message, then a generic line, for an empty command result', async () => {
+    const store = await freshStore();
+    const sockets: FakeSocket[] = [];
+    const session = new MobileChatSession({
+      url: URL,
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+    });
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'chat_command_result', channel_topic_id: TOPIC, ts: 1, error: { message: 'nope' } });
+    sockets[0]!.deliver({ v: 1, type: 'chat_command_result', channel_topic_id: TOPIC, ts: 2 });
+    await tick();
+    const bodies = (await session.messages()).map((x) => x.body);
+    expect(bodies).toContain('nope');
+    expect(bodies).toContain('Command completed.');
+  });
+
+  it('chooseOption puts a button_choice frame on the wire', async () => {
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', project_slug: 'p', topic_id: TOPIC, ts: 1 });
+    await tick();
+    expect(session.chooseOption('prompt-1', 'claude')).toBe(true);
+    expect(sockets[0]!.sentEnvelopes()).toContainEqual({
+      v: 1,
+      type: 'button_choice',
+      prompt_id: 'prompt-1',
+      choice_value: 'claude',
+    });
+  });
+});

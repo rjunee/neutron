@@ -1022,12 +1022,19 @@ indicator. No feature flags — one live path.
 - **Clients render it on both surfaces.** Web (React/assistant-ui via chat-core
   `web-session` → `controller.ts`) already resumed + rendered receipts/reactions/
   edits; it now drives its `car-typing` indicator off the authoritative
-  `agent_typing` frame (optimistic-on-send retained as a fallback). The live Expo
-  native tab (`chat.tsx` → `chat-state`/`ws-client`) renders the typing dots from
-  the same frame [and resumes on reconnect — see native notes]. The fully-synced
-  chat-core native surface (`ChatSyncSurface`) inherits all of the above for free
-  now that the server logs are wired; its tab cutover remains the tracked
-  follow-up.
+  `agent_typing` frame (optimistic-on-send retained as a fallback). **The Expo
+  app now has exactly ONE native chat surface: `ChatSyncSurface` IS the Chat tab**
+  (`app/projects/[id]/chat.tsx` is a thin route that renders it). The 2026-06-29
+  chat-collapse deleted the legacy streaming surface and its transport
+  (`chat.tsx` body, `chat-state`, `ws-client` (legacy `AppWsClient`), `MessageItem`,
+  `ConnectionBanner`, `chat-deep-link-navigator`, and the separate `chat-sync`
+  sub-route) — no dual path, no flag. `ChatSyncSurface` runs on the durable
+  chat-core transport (offline send, gap-free resume, receipts/reactions/edits,
+  typing) and renders the full agent surface (markdown, attachments/inline images,
+  citations, doc-ref deep-links, onboarding option buttons / image-gallery, upload
+  affordance) plus the ported input/upload pipeline (InputComposer + UploadModal +
+  web drag-drop + ZIP/image upload). Slash-command answers (`chat_command_result`)
+  render as agent messages on this surface too.
 - **Verified on a real instance.** `open/__tests__/open-app-ws-durable-chatlog.test.ts`
   boots the REAL Open composition over `Bun.serve`, opens `/ws/app/chat`, and
   asserts #1–#6 on real (mocked-substrate) turns: echo+reply carry `seq` and

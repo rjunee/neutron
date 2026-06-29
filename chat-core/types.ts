@@ -44,6 +44,32 @@ export interface ChatMessageUploadAffordance {
 }
 
 /**
+ * P7.3 / web-search — an inline source citation attached to an agent message.
+ * Mirrors the `agent_message` envelope's `citations[]` (`{ title, url }`). Immutable
+ * wire data (no rev), persisted + replayed like {@link ChatMessageOption options}.
+ */
+export interface ChatMessageCitation {
+  title: string
+  url: string
+}
+
+/**
+ * P7.3 — a structured doc reference carried on an agent message: a deep-link the
+ * client renders as a tappable "linked doc" chip. Mirrors the app-ws envelope's
+ * `AppWsOutboundAgentMessageDocRef`. Immutable wire data.
+ */
+export interface ChatMessageDocRef {
+  /** Human-readable label rendered next to the link. */
+  label: string
+  /** Channel-resolved URL (`neutron://docs/...` for project-scoped). */
+  url: string
+  /** Owner project_id, or null for vault-legacy references. */
+  project_id: string | null
+  /** Path relative to the project's `docs/` root (or vault root). */
+  path: string
+}
+
+/**
  * A per-message acknowledgement (Track B Phase 4 — delivery + read receipts).
  * `delivered` means a device received the message over the socket (the server
  * records this for every connected device at fan-out time); `read` means a
@@ -190,6 +216,15 @@ export interface ChatMessage {
   kind?: PromptKind | null
   /** P1b — upload affordance for an onboarding import phase (clears on absence). */
   upload_affordance?: ChatMessageUploadAffordance | null
+  /** P7.3 — agent inline image URLs (rendered as a gallery under the body).
+   *  Distinct from {@link attachments} (the user's own uploaded images). */
+  image_urls?: readonly string[] | null
+  /** P7.3 / web-search — inline source citations on an agent message. */
+  citations?: readonly ChatMessageCitation[] | null
+  /** P7.3 — structured doc references (tappable deep-link chips). */
+  doc_refs?: readonly ChatMessageDocRef[] | null
+  /** ISSUE #18 — top-level deep-link the client navigates to once per message. */
+  deep_link?: string | null
 }
 
 /**
@@ -223,6 +258,10 @@ export interface InboundChatMessage {
   allow_freeform?: boolean | null
   kind?: PromptKind | null
   upload_affordance?: ChatMessageUploadAffordance | null
+  image_urls?: readonly string[] | null
+  citations?: readonly ChatMessageCitation[] | null
+  doc_refs?: readonly ChatMessageDocRef[] | null
+  deep_link?: string | null
 }
 
 /**
@@ -430,7 +469,53 @@ export function normalizeInbound(raw: unknown): InboundChatMessage | null {
   if (rawKind === 'buttons' || rawKind === 'image-gallery') out.kind = rawKind
   const upload = parseUploadAffordance(e['upload_affordance'])
   if (upload !== null) out.upload_affordance = upload
+  // P7.3 — inline agent images, citations, doc references, and the top-level
+  // deep-link. All optional + absent on user messages, so a plain message
+  // normalizes identically to before.
+  const imageUrls = parseStringArray(e['image_urls'])
+  if (imageUrls !== null) out.image_urls = imageUrls
+  const citations = parseCitations(e['citations'])
+  if (citations !== null) out.citations = citations
+  const docRefs = parseDocRefs(e['doc_refs'])
+  if (docRefs !== null) out.doc_refs = docRefs
+  if (typeof e['deep_link'] === 'string' && (e['deep_link'] as string).length > 0) {
+    out.deep_link = e['deep_link'] as string
+  }
   return out
+}
+
+/** Parse an untrusted value into a clean `ChatMessageCitation[]` (drops entries
+ *  missing a non-empty `url`; defaults `title` to the url), or `null` when empty. */
+export function parseCitations(raw: unknown): readonly ChatMessageCitation[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: ChatMessageCitation[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const c = entry as Record<string, unknown>
+    const url = c['url']
+    if (typeof url !== 'string' || url.length === 0) continue
+    const title = typeof c['title'] === 'string' && c['title'].length > 0 ? (c['title'] as string) : url
+    out.push({ title, url })
+  }
+  return out.length > 0 ? out : null
+}
+
+/** Parse an untrusted value into a clean `ChatMessageDocRef[]` (drops entries
+ *  missing a non-empty `url`), or `null` when empty/not an array. */
+export function parseDocRefs(raw: unknown): readonly ChatMessageDocRef[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: ChatMessageDocRef[] = []
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue
+    const d = entry as Record<string, unknown>
+    const url = d['url']
+    if (typeof url !== 'string' || url.length === 0) continue
+    const label = typeof d['label'] === 'string' && d['label'].length > 0 ? (d['label'] as string) : url
+    const path = typeof d['path'] === 'string' ? (d['path'] as string) : ''
+    const project_id = typeof d['project_id'] === 'string' && d['project_id'].length > 0 ? (d['project_id'] as string) : null
+    out.push({ label, url, project_id, path })
+  }
+  return out.length > 0 ? out : null
 }
 
 /** Parse an untrusted value into a clean `ChatMessageOption[]` (drops malformed

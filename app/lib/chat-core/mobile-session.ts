@@ -43,6 +43,8 @@ import {
   SyncEngine,
   type ChatMessage,
   type ConnStatus,
+  type InboundChatMessage,
+  type OutboundButtonChoice,
   type OutboundEdit,
   type OutboundReaction,
   type OutboundReceipt,
@@ -56,6 +58,10 @@ export interface MobileChatSessionOptions {
   url: string;
   /** The `app:<user_id>` topic this session renders. */
   topic_id: string;
+  /** The project_id this view is scoped to (empty/undefined = global). Used to
+   *  tag synthetic `chat_command_result` messages so a slash-command answer
+   *  shows in the project chat it was issued from. */
+  project_id?: string;
   /** Durable local store (op-sqlite) — or any Store. Defaults to in-memory. */
   store?: Store;
   /** Socket factory; defaults to the RN global WebSocket. Injected in tests. */
@@ -80,6 +86,8 @@ export class MobileChatSession {
   readonly topic_id: string;
   /** This device's id (for read-tick self-exclusion). */
   readonly device_id: string;
+  /** The view's project scope (null = global), for tagging command results. */
+  private readonly viewProjectId: string | null;
   private readonly store: Store;
   private readonly queue: SendQueue;
   private readonly engine: SyncEngine;
@@ -92,6 +100,7 @@ export class MobileChatSession {
   constructor(opts: MobileChatSessionOptions) {
     this.topic_id = opts.topic_id;
     this.device_id = opts.device_id ?? generateDeviceId(opts.generateId);
+    this.viewProjectId = opts.project_id !== undefined && opts.project_id.length > 0 ? opts.project_id : null;
     this.store = opts.store ?? new InMemoryStore();
     const queueOpts: { generateId?: () => string; now?: () => number } = {};
     if (opts.generateId !== undefined) queueOpts.generateId = opts.generateId;
@@ -239,6 +248,25 @@ export class MobileChatSession {
     return this.ws.send(env);
   }
 
+  /**
+   * P1b (onboarding / quick-reply buttons) — answer an agent prompt by tapping
+   * an option. Sends a `button_choice` frame the server routes to the composer's
+   * `on_button_choice` (engine.advance); the resulting `agent_message` arrives on
+   * the socket like any other. `freeform` carries an optional typed reply when the
+   * prompt allowed it. Best-effort over the open socket; returns whether sent.
+   */
+  chooseOption(prompt_id: string, choice_value: string, freeform?: string): boolean {
+    if (prompt_id.length === 0 || choice_value.length === 0) return false;
+    const env: OutboundButtonChoice = {
+      v: 1,
+      type: 'button_choice',
+      prompt_id,
+      choice_value,
+    };
+    if (freeform !== undefined && freeform.length > 0) env.freeform_text = freeform;
+    return this.ws.send(env);
+  }
+
   private async handleInbound(data: unknown): Promise<void> {
     // Hand the raw frame to the UI first so streaming partials + typing
     // brackets render even though chat-core only persists final messages.
@@ -248,6 +276,20 @@ export class MobileChatSession {
     const env = data as Record<string, unknown>;
     if (env['type'] === 'session_ready') {
       await this.resumeAndFlush();
+      return;
+    }
+    // A matched slash command (/note, /remind, /cal, /skills, …) is answered with
+    // a single `chat_command_result` and NO `agent_message` — without this the
+    // command's confirmation/output is silently dropped. Render it as an agent
+    // message (the bot's reply), tagged with the view's project so it shows in the
+    // project chat it was issued from. No server `seq` → it sorts in the optimistic
+    // tail by `created_at`, which is the bottom of the transcript (where it belongs).
+    if (env['type'] === 'chat_command_result') {
+      const inbound = commandResultToInbound(env, this.viewProjectId);
+      if (inbound !== null) {
+        await this.engine.applyInbound(this.topic_id, inbound);
+        this.emitChange();
+      }
       return;
     }
     // Track B Phase 4 — a receipt_update advances an already-applied message's
@@ -308,6 +350,43 @@ export class MobileChatSession {
   private emitChange(): void {
     if (this.onChange !== undefined) this.onChange();
   }
+}
+
+/**
+ * Build a synthetic inbound agent message from a `chat_command_result` frame.
+ * The visible body is the result `text`, else the error message, else a generic
+ * line (mirrors the legacy `commandResultBody`). Synthesizes a stable
+ * `message_id` from the client_msg_id (or ts) so a re-delivery upserts rather
+ * than duplicates. Returns null when the frame isn't a well-formed command result.
+ */
+function commandResultToInbound(
+  env: Record<string, unknown>,
+  viewProjectId: string | null,
+): InboundChatMessage | null {
+  const text = typeof env['text'] === 'string' ? (env['text'] as string) : '';
+  const error = env['error'] as { message?: unknown } | undefined;
+  const errMsg = typeof error?.message === 'string' ? (error.message as string) : '';
+  const body = text.length > 0 ? text : errMsg.length > 0 ? errMsg : 'Command completed.';
+  const ts = typeof env['ts'] === 'number' && Number.isFinite(env['ts']) ? (env['ts'] as number) : 0;
+  const cmid =
+    typeof env['client_msg_id'] === 'string' && (env['client_msg_id'] as string).length > 0
+      ? (env['client_msg_id'] as string)
+      : null;
+  const message_id = `cmd:${cmid ?? ts}`;
+  const out: InboundChatMessage = {
+    role: 'agent',
+    message_id,
+    seq: null,
+    body,
+    client_msg_id: null,
+    project_id: viewProjectId,
+    attachments: null,
+    created_at: ts,
+  };
+  if (typeof env['deep_link'] === 'string' && (env['deep_link'] as string).length > 0) {
+    out.deep_link = env['deep_link'] as string;
+  }
+  return out;
 }
 
 /** Mint a device id when the caller didn't supply a stable one. Prefer an
