@@ -2,6 +2,44 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — Restart resilience: re-arm the import-completion watcher on reconnect
+
+**What shipped (M1 adversarial E2E Round 2).** A server restart mid-import no
+longer permanently wedges onboarding.
+
+**The bug.** The Path-1 import-completion watcher (`watchImportCompletion` in
+`open/composer.ts`) is the ONLY consumer of the `import_analysis_presented`
+phase — it transitions that phase back to `work_interview_gap_fill` so the live
+interview can finish and materialize the imported projects, and the accept button
+for that phase is deliberately SUPPRESSED on the assumption the watcher
+auto-consumes it. But the watcher is a purely in-memory `setTimeout` chain armed
+ONLY inside `notifyImportUpload` (the upload request). So on a server restart
+(redeploy / crash / `launchctl kickstart`) the watcher is gone; the import-running
+cron (which DOES re-arm on boot) drives the persisted row into
+`import_analysis_presented`; and nothing ever consumes it. The post-turn extractor
+also refuses to finalize on top of an import phase. Onboarding wedged
+PERMANENTLY — a chat that never finishes onboarding and never materializes the
+imported projects.
+
+**The fix (no feature flag).** `on_session_open` now re-arms the watcher whenever
+the persisted phase is import-active (`import_running` / `import_analysis_presented`).
+The watcher is idempotent (`importWatchActive` guards a double-arm), so this is
+safe during a live session and a no-op when no import is in flight. A reconnect
+after a restart therefore resumes the consume.
+
+**Regression gate** `tests/integration/import-watch-rearm-on-reconnect.open.test.ts`
+seeds an `onboarding_state` row at `import_analysis_presented` (with an
+`import_result`), boots a FRESH Open composition over `Bun.serve` (no upload in
+this process → watcher unarmed, i.e. a restart), opens `/ws/app/chat`, and asserts
+the phase transitions back to `work_interview_gap_fill` within a few watcher ticks
+while preserving the import context. FAILS pre-fix (times out, phase stranded),
+PASSES with the fix.
+
+**Known related follow-up (not in this PR).** If the restart lands while the job
+is still `import_running`, the in-memory `ImportJobRunner.inflight` map is lost and
+nothing re-drives the persisted job, so the import-running cron waits up to the
+15-min hard-timeout before advancing — degraded but self-recovering (vs. this PR's
+PERMANENT wedge). Flagged for a boot-time job reaper/resumer.
 ## 2026-06-29 — Project-scoped reminders now live-deliver (the residual #105 missed)
 
 **What shipped (M1 adversarial E2E Round 2).** Fired reminders (and the morning

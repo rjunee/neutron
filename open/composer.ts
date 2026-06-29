@@ -2152,6 +2152,31 @@ export function buildOpenGraphComposer(
         // the pre-existing set; the post-emit below catches a seed-driven change).
         emitProjectsChangedIfChanged(user_id)
         if (await isOnboardingActive(user_id)) {
+          // RESTART RESILIENCE (M1 E2E Round 2, 2026-06-29) — re-arm the import-
+          // completion watcher on reconnect. The watcher is a purely in-memory
+          // `setTimeout` chain armed ONLY inside `notifyImportUpload` (the upload
+          // request). It is the single consumer of `import_analysis_presented`:
+          // it transitions that phase back to `work_interview_gap_fill` so the
+          // interview can finish + materialize the imported projects, and the
+          // accept button for that phase is deliberately SUPPRESSED on the
+          // assumption the watcher auto-consumes it. So if the server restarts
+          // mid-import (redeploy / crash / `launchctl kickstart`), the watcher is
+          // gone, the import-running cron (which DOES re-arm on boot) drives the
+          // persisted row into `import_analysis_presented`, and nothing ever
+          // consumes it — the button is hidden and the post-turn extractor refuses
+          // to finalize on top of an import phase. Onboarding wedges PERMANENTLY.
+          // Re-arm here (idempotent — `importWatchActive` guards a double-arm)
+          // whenever the persisted phase is import-active, so a reconnect after a
+          // restart resumes the consume. No-op when no import is in flight.
+          if (importWatchHolder.watch !== undefined) {
+            const st = await onboardingStateStore.get(project_slug, user_id)
+            if (
+              st !== null &&
+              (st.phase === 'import_running' || st.phase === 'import_analysis_presented')
+            ) {
+              importWatchHolder.watch(user_id)
+            }
+          }
           if (appWsChatTurn !== null && !seededOnboardingTopics.has(channel_topic_id)) {
             seededOnboardingTopics.add(channel_topic_id)
             await appWsChatTurn({
