@@ -23,14 +23,19 @@ dispatch.
   scans `git worktree list` for the deterministic `trident/<slug>` branch and
   removes it on EVERY path (the harness only auto-cleans an UNCHANGED worktree;
   Forge always commits → D-1).
-- **`trident/inner-loop.ts` (NEW).** `buildWorkflowInnerLoop` — runs ONE substrate
-  turn (per-worktree disposable REPL) that invokes the `Workflow` tool and reports
-  `TRIDENT_RESULT=<json>`. Copies the proven single-turn dispatch mechanics
-  (token coalesce, resolve on `completion`, timeout, false-completion discipline).
-  The launcher `AgentSpec.tools` declares `Workflow,Agent,Bash,Edit,Read` — the
-  v1 trident REPL ran `--tools ""` (untrusted-import gate); the v2 launcher is a
-  TRUSTED build path and the tool surface is per-turn, so this needs no substrate
-  surgery and leaves the import/conversational REPLs locked.
+- **`trident/inner-loop.ts` (NEW).** `buildWorkflowInnerLoop` — drives the
+  inner-workflow to a TERMINAL result and reports `TRIDENT_RESULT=<json>` under the
+  false-completion discipline (a launcher is `completed` ONLY on a clean exit +
+  a parseable result line; timeout → `timed_out`; spawn error / nonzero exit /
+  clean-exit-with-no-result → `failed`). It calls an injectable
+  `LaunchInnerWorkflow` seam; production wires `buildClaudePrintLauncher` (a
+  blocking `claude -p` print-mode subprocess — see the invocation-model fix
+  below). The launcher runs `--dangerously-skip-permissions` with NO `--tools`
+  restriction (TRUSTED build path; the workflow needs the full built-in surface
+  incl. `Workflow`/`Agent`/`Bash`/`Edit`/`Read`/`Write`) and `stdin:'ignore'` (so
+  `claude -p` never stalls waiting on stdin). The import/conversational REPLs are
+  untouched (the inner loop no longer routes through the persistent-REPL substrate
+  at all).
 - **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2).**
   Migration `0089` adds `workflow_run_id` / `inner_checkpoint` / `inner_verdict`.
   The workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
@@ -48,10 +53,15 @@ dispatch.
 - **Worktree cleanup ENFORCED (D-1/C3) in `merge.ts`.** Flipped the "NO `git
   worktree remove`" lock: both `mergePr` and `mergeLocal` add a best-effort,
   non-fatal `git worktree remove --force` + `prune` after the landed merge.
-- **Composer wiring.** `open/composer.ts` threads `trident: { build_substrate:
-  makeEphemeralSubstrate('cc-trident') }`; `build-core-modules.ts` builds
+- **Composer wiring.** `open/composer.ts` threads
+  `trident: { launch_inner_workflow: buildClaudePrintLauncher({ resolve_auth_env })
+  }`, where `resolve_auth_env` re-runs `resolveScrubbedAuthEnv({ pool: llmPool })`
+  per launch (rotated-token safe) to yield the scrubbed
+  `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` env (ISSUES #49) the spawned
+  `claude -p` authenticates with. `build-core-modules.ts` wraps it with
   `buildWorkflowInnerLoop` + passes `db_path` (`input.db.path`) into the
-  orchestrator. The `cc-trident` MCP tool bridge stays OFF.
+  orchestrator. No credential → `composition.trident` unset → the loop's
+  restart-safe stub no-op.
 
 **One-commit revert runbook.** `git revert <sha>` restores the v1 substrate-per-
 phase inner loop wholesale; in the neutron-managed vendor, re-pin the prior trident
@@ -73,19 +83,68 @@ model's tool-call serialization. Fix: `normalizeWorkflowArgs()` parses a JSON-st
 before the destructure; `buildLauncherMessage` additionally instructs the model to
 pass `args` as a structured object (defense in depth). 7 new regression tests.
 
-**Acceptance status (VERIFIED — real headless run, 2026-06-28).** Unit/integration:
-trident dir (257 tests) + `tsc -p trident/tsconfig.json` green. REAL end-to-end,
-proven by driving the production `buildLauncherMessage` through a spawned
-`claude --tools Workflow,Agent,Bash,Edit,Read` against the real
-`trident/inner-workflow.mjs`: (1) a spawned (top-level) claude DOES invoke the
-`Workflow` tool and run the inner-workflow end-to-end — the "nesting one level only"
-caveat does not bite; (2) a real `/code` task threads correctly post-fix → Forge
-worktree build → parallel Argus → asymmetric synthesis → `TRIDENT_RESULT={ok:true,
-branch:"trident/v2-verify",verdict:"APPROVE",round:1,checkpoint:"argus-approved"}`;
-(3) C1 checkpoints persist mid-run (NULL→`forge-done`→`argus-approved` in
-`code_trident_runs`); (4) C2 resume (relaunch with `resumeCheckpoint`) takes the
-idempotent early-return (`round:0`, NO rebuild, branch REUSED, no duplicate); (5)
-D-1 worktree cleanup leaves zero `trident/<slug>` orphans on every path.
+**Invocation-model fix (2026-06-29) — the make-or-break real-run blocker.** The
+first cut ran the inner-loop launcher as ONE turn on the per-worktree
+persistent-REPL substrate (`build_substrate`). That substrate bridges a turn's
+FIRST `reply()` to one `completion` Event and (ephemeral) disposes the REPL right
+after. But the CC `Workflow` tool is BACKGROUND/multi-turn — it returns a runId
+immediately and the workflow's completion arrives LATER as a `<task-notification>`
+(a new turn). So the launcher turn settled in ~30s while Forge was still building,
+the disposable REPL was killed, and the workflow was ABORTED (status:killed /
+"Workflow aborted"): Argus review, synthesis, SQLite checkpoints, and worktree
+cleanup NEVER ran, and the inner loop returned failed/null on EVERY real run. The
+unit tests passed because a FAKE substrate replayed a scripted `completion`
+synchronously; the prior "VERIFIED" run masked it by driving a TOP-LEVEL spawned
+`claude` (which, like `claude -p`, drains background tasks before exit) rather than
+the persistent-REPL substrate the production wiring actually used.
+
+**The fix:** the launcher is now a BLOCKING `claude -p` print-mode subprocess
+(`buildClaudePrintLauncher`, spawned via `child_process.spawn` mirroring the
+model-update probe). Print-mode DRAINS the in-flight Workflow (and its `agent()`
+workers) to completion BEFORE the process exits, so `TRIDENT_RESULT` lands in
+stdout — exactly the mechanism the proto-2 pipeline run relied on. The launcher
+resolves ONLY on the child's `close` event (never the first reply), SIGKILLs on
+timeout, and re-resolves the scrubbed auth env per launch. A regression test pins
+both guards: `buildClaudePrintLauncher` does not settle before `close`, and a clean
+exit with no `TRIDENT_RESULT` maps to `failed` (the exact pre-fix symptom). No
+feature flags, single code path. `Substrate`/`AgentSpec` are no longer touched by
+the launcher.
+
+**Local-mode merge fix (discovered during real-loop verification).** With the
+inner loop now ACTUALLY completing (pre-fix it returned failed/null and the outer
+merge was never reached), a pre-existing local-mode bug surfaced: the
+inner-workflow's `finally{}` cleanup did `git branch -D ${forgeBranch}`
+unconditionally, but in LOCAL mode that branch holds the ONLY copy of the
+un-merged commits — the OUTER loop's `mergeLocal` then failed with "not something
+we can merge". Fix: branch teardown is now MODE-AWARE — D-1 still removes the
+WORKTREE on every path (unconditional), but the branch is deleted in the inner
+cleanup ONLY in pr-mode (where the work is pushed to origin and `mergePr` merges
+the remote PR); in local-mode the branch is KEPT for the outer `mergeLocal`, which
+deletes it post-merge (`merge.ts`). pr-mode was never affected (it merges the
+remote PR, not the local branch).
+
+**Acceptance status (VERIFIED — real `claude -p` end-to-end, 2026-06-29).**
+Unit/integration: full trident dir + `tsc -p trident/tsconfig.json` + root `tsc`
+green; leak-gate SILENT; full bounded suite green (one unrelated parallel-load
+timeout flake, passes in isolation). REAL end-to-end: a Workflow-drain probe
+confirmed `claude -p` invokes the `Workflow` tool, runs a background `agent()` to
+completion, and prints `TRIDENT_RESULT` on a clean exit. Then the REAL inner loop
+was driven through the production `buildWorkflowInnerLoop` + `buildClaudePrintLauncher`
++ `buildTridentOrchestrator` against an isolated throwaway repo (fresh `project.db`
+with migration 0089, `merge_mode:'local'`):
+(1) the inner-workflow ran to completion — the launcher BLOCKED/drained the whole
+build instead of settling early; (2) Forge built in an `isolation:'worktree'`
+worktree (`.claude/worktrees/wf_…-1` on `trident/e2e-sum`) and committed `sum.ts`
++ `sum.test.ts`; (3) parallel Argus review + synthesis ran (checkpoint advanced
+`NULL → forge-done → argus-approved`); (4) `TRIDENT_RESULT={ok:true,prNumber:null,
+branch:"trident/e2e-sum",verdict:"APPROVE",round:1,checkpoint:"argus-approved"}`;
+(5) SQLite checkpoints persisted — `inner_checkpoint=argus-approved` (workflow Bash
+steps) + `inner_verdict=APPROVE` + `workflow_run_id` (orchestrator); (6) worktree
+cleaned — `git worktree list` shows zero orphans; (7) the inner loop returned
+`status:completed` (NOT failed/null — the bug); (8) the outer `mergeLocal` then
+landed the branch into `main` and the run reached `phase=done`. (First run proved
+1–7 with a `phase=failed` at the outer local-mode merge; that surfaced the
+branch-teardown bug above, which the second run confirms fixed.)
 
 **Files.** New `trident/inner-workflow.mjs`, `trident/inner-loop.ts`,
 `migrations/0089_code_trident_runs_inner_workflow.sql`; rewrote

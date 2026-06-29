@@ -34,7 +34,7 @@ export interface MiscCompositionInput {
   realmode_cleanups?: Array<() => void>
   /**
    * Trident v2 (Phase 2 hard cutover) — drive the foundational
-   * Forge→Argus→merge loop live. When `build_substrate` is supplied, the
+   * Forge→Argus→merge loop live. When `launch_inner_workflow` is supplied, the
    * `trident` module wires the REAL orchestrator `step`
    * (`buildTridentOrchestrator` + `buildWorkflowInnerLoop`) so every
    * non-terminal `code_trident_runs` row (created by `/code <task>` or a
@@ -45,14 +45,17 @@ export interface MiscCompositionInput {
    * the loop is live + restart-safe but advances nothing — the unchanged Open
    * dev/default behaviour.
    *
-   * `build_substrate(cwd)` builds a FRESH disposable substrate rooted at the
-   * run's worktree; the inner-loop launcher runs ONE turn on it that invokes the
-   * `Workflow` tool on `trident/inner-workflow.mjs` (the production composer
-   * passes the per-instance Anthropic `cc-trident-*` factory). `run_host` runs
-   * the git/gh host commands (defaults to a `Bun.spawn` runner).
+   * `launch_inner_workflow(input)` runs the inner-workflow launcher as a BLOCKING
+   * `claude -p` print-mode subprocess that drains the background `Workflow` tool
+   * (`trident/inner-workflow.mjs`) to completion and prints `TRIDENT_RESULT`
+   * (the production composer passes `buildClaudePrintLauncher` over the
+   * per-instance Anthropic credential pool). It is NOT a persistent-REPL turn —
+   * a REPL turn settles on the first reply, BEFORE the background workflow
+   * drains, which aborted the workflow on every real run (the bug this fixes).
+   * `run_host` runs the git/gh host commands (defaults to a `Bun.spawn` runner).
    */
   trident?: {
-    build_substrate: (cwd: string) => import('../../../runtime/substrate.ts').Substrate
+    launch_inner_workflow: import('../../../trident/inner-loop.ts').LaunchInnerWorkflow
     run_host?: import('../../../trident/merge.ts').RunHostCommand
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**

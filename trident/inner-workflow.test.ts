@@ -178,14 +178,23 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
 })
 
 describe('inner-workflow.mjs — mandatory worktree cleanup on ALL paths', () => {
-  test('a finally{} block scans git worktree list for the trident/<slug> branch and removes it', () => {
+  test('a finally{} block scans git worktree list for the trident/<slug> branch and removes the WORKTREE on every path (D-1, unconditional)', () => {
     expect(SRC).toContain('} finally {')
     expect(SRC).toContain('git worktree list --porcelain')
     expect(SRC).toContain('git worktree remove --force')
-    expect(SRC).toContain('git branch -D ${forgeBranch}')
     expect(SRC).toContain('git worktree prune')
     // Independent of Forge's return value — scans for the deterministic branch.
     expect(SRC).toContain("label: 'cleanup:worktree'")
+  })
+
+  test('branch teardown is MODE-AWARE: deleted only in pr-mode; KEPT in local-mode for the outer merge', () => {
+    // D-1 removes the worktree unconditionally, but the branch holds the only
+    // copy of the un-merged commits in local mode — the OUTER loop merges it.
+    expect(SRC).toContain('const branchTeardownStep = isPr')
+    // pr-mode: delete the local branch (work is on origin/the PR).
+    expect(SRC).toContain('git branch -D ${forgeBranch}')
+    // local-mode: KEEP the branch so the outer mergeLocal can merge it.
+    expect(SRC).toMatch(/KEEP the branch '\$\{forgeBranch\}'/)
   })
 
   test('the top-level return carries the Workflow result API shape', () => {

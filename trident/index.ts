@@ -130,6 +130,8 @@ export type {
 // (`inner-workflow.mjs`), launched per run by `buildWorkflowInnerLoop`.
 export {
   buildWorkflowInnerLoop,
+  buildClaudePrintLauncher,
+  buildClaudePrintArgs,
   buildLauncherMessage,
   parseTridentResult,
   DEFAULT_INNER_WORKFLOW_PATH,
@@ -139,6 +141,10 @@ export type {
   InnerLoopInput,
   InnerLoopResult,
   BuildWorkflowInnerLoopOptions,
+  LaunchInnerWorkflow,
+  LaunchInnerWorkflowInput,
+  LaunchInnerWorkflowResult,
+  ClaudePrintLauncherOptions,
 } from './inner-loop.ts'
 
 // PR-5 — the thin `/code` entry into foundational Trident (retires the

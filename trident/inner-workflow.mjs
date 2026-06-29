@@ -370,11 +370,21 @@ ${task}`,
   // DETERMINISTIC '${forgeBranch}' branch — independent of Forge's return value.
   // The branch is pushed on the success path, so removing the local worktree +
   // branch loses nothing. This is what makes the guarantee hold on ALL paths.
+  // BRANCH TEARDOWN IS MODE-AWARE — D-1 (never orphan a CHANGED worktree) is
+  // UNCONDITIONAL, but the branch must NOT be deleted here in LOCAL mode: the
+  // branch holds the ONLY copy of the un-merged commits, and the OUTER loop's
+  // `mergeLocal` (merge.ts) merges that exact branch THEN deletes it post-merge.
+  // Deleting it in this finally stranded every local-mode merge ("not something
+  // we can merge"). In PR mode the work is already pushed to origin and the
+  // OUTER `mergePr` merges the REMOTE PR, so the local branch is disposable here.
+  const branchTeardownStep = isPr
+    ? `3. git branch -D ${forgeBranch}   (ignore "not found" — the work is pushed to origin/the PR, so the local branch is disposable)`
+    : `3. KEEP the branch '${forgeBranch}' — do NOT delete it. This is LOCAL mode: the OUTER loop merges this branch and deletes it post-merge. Deleting it here would lose the build.`
   await agent(
     `Cleanup step (MUST succeed on every path; ignore individual command failures). From ${repoPath}:
 1. Find the worktree for branch '${forgeBranch}':  git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch /{ if ($2=="refs/heads/${forgeBranch}") print w }'
 2. For that path (if any):  git worktree remove --force <path>
-3. git branch -D ${forgeBranch}   (ignore "not found")
+${branchTeardownStep}
 4. git worktree prune
 5. Verify with \`git worktree list\` that NO worktree remains on '${forgeBranch}'. Report the final worktree count and whether any orphan remained.`,
     { label: 'cleanup:worktree', phase: 'Synthesis' },

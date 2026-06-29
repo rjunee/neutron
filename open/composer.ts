@@ -50,7 +50,9 @@ import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
+  resolveScrubbedAuthEnv,
 } from '../gateway/realmode-composer/build-llm-call-substrate.ts'
+import { buildClaudePrintLauncher } from '../trident/inner-loop.ts'
 import { BEST_MODEL } from '../runtime/models.ts'
 import {
   FIRST_CONVERSATIONAL_TIMEOUT_MS_DEFAULT,
@@ -420,12 +422,24 @@ export function buildOpenGraphComposer(
       }
 
     // Trident v2 (Phase 2 hard cutover) — the inner Forge→Argus→fix loop is one
-    // native CC Dynamic Workflow. The composer threads the per-worktree
-    // `cc-trident-*` substrate FACTORY; the build-core trident module builds the
-    // launcher (`buildWorkflowInnerLoop`) over it. Null (no credential) leaves
-    // `composition.trident` unset → the loop's restart-safe stub no-op.
-    const tridentBuildSubstrate =
-      llmPool !== null ? makeEphemeralSubstrate('cc-trident') : null
+    // native CC Dynamic Workflow. The composer threads a BLOCKING `claude -p`
+    // print-mode LAUNCHER (`buildClaudePrintLauncher`); the build-core trident
+    // module wraps it with `buildWorkflowInnerLoop`. The launcher spawns
+    // `claude -p` so print-mode DRAINS the background `Workflow` (and its
+    // `agent()` workers) to completion before the process exits — a
+    // persistent-REPL turn would instead settle on the first reply, BEFORE the
+    // workflow drains, aborting it (the real-run bug this fixes). Auth is the
+    // SAME single-owner Anthropic credential pool the conversational substrate
+    // uses: `resolveScrubbedAuthEnv({pool})` is re-run per launch (rotated-token
+    // safe) and yields the scrubbed `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`
+    // env (ISSUES #49). Null (no credential) leaves `composition.trident` unset
+    // → the loop's restart-safe stub no-op.
+    const tridentLaunchInnerWorkflow =
+      llmPool !== null
+        ? buildClaudePrintLauncher({
+            resolve_auth_env: async () => (await resolveScrubbedAuthEnv({ pool: llmPool })).env,
+          })
+        : null
 
     // Agent-dispatch family (parity gap #3) — the general named-specialist +
     // ad-hoc background-agent surface (research → Atlas, review → Sentinel,
@@ -2189,17 +2203,23 @@ export function buildOpenGraphComposer(
       // `build_substrate` here flips the trident tick loop (built in
       // `build-core-modules.ts`) from its `stubAdvanceDeps` no-op to the REAL
       // `buildWorkflowInnerLoop` + `buildTridentOrchestrator` step, so a
-      // `code_trident_runs` row is driven end-to-end: the launcher runs ONE turn
-      // on a fresh per-worktree `cc-trident-*` REPL that invokes the `Workflow`
-      // tool (see `tridentBuildSubstrate` above). Omitted when no credential
-      // resolves (`tridentBuildSubstrate === null`) → unchanged LLM-less
-      // behaviour (loop stays live + restart-safe but advances nothing).
-      // The `on_run_terminal` observer fires Skill Forge's auto-skillify audit
-      // (parity gap #5) on every terminal run — the audit drops non-`done`
-      // runs. Wired only on the live (dispatch) path; an LLM-less box never
-      // advances a run to terminal, so there is nothing to skillify.
-      ...(tridentBuildSubstrate !== null
-        ? { trident: { build_substrate: tridentBuildSubstrate, on_run_terminal: skillForgeOnRunTerminal } }
+      // `code_trident_runs` row is driven end-to-end: the launcher spawns a
+      // blocking `claude -p` print-mode process that invokes the `Workflow` tool
+      // and drains it to completion (see `tridentLaunchInnerWorkflow` above).
+      // Omitted when no credential resolves (`tridentLaunchInnerWorkflow === null`)
+      // → unchanged LLM-less behaviour (loop stays live + restart-safe but
+      // advances nothing). The `on_run_terminal` observer fires Skill Forge's
+      // auto-skillify audit (parity gap #5) on every terminal run — the audit
+      // drops non-`done` runs. Wired only on the live (dispatch) path; an
+      // LLM-less box never advances a run to terminal, so there is nothing to
+      // skillify.
+      ...(tridentLaunchInnerWorkflow !== null
+        ? {
+            trident: {
+              launch_inner_workflow: tridentLaunchInnerWorkflow,
+              on_run_terminal: skillForgeOnRunTerminal,
+            },
+          }
         : {}),
       // Agent-dispatch family (parity gap #3) — register the `dispatch_agent`
       // tool when the dispatch service was built (same credential gate as

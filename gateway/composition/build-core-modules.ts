@@ -317,11 +317,12 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
         // Trident v2 — the inner Forge→Argus→fix loop is one native CC Dynamic
-        // Workflow. The launcher runs ONE turn on a fresh per-worktree substrate
-        // that invokes the `Workflow` tool; the orchestrator step launches it
-        // per run, checkpoints via the workflow's own Bash steps (`db_path`),
-        // and merges on APPROVE.
-        const inner_loop = buildWorkflowInnerLoop({ build_substrate: tridentWiring.build_substrate })
+        // Workflow. The launcher runs it as a BLOCKING `claude -p` print-mode
+        // subprocess (`launch_inner_workflow`) that drains the background
+        // `Workflow` to completion + prints `TRIDENT_RESULT`; the orchestrator
+        // step launches it per run, checkpoints via the workflow's own Bash steps
+        // (`db_path`), and merges on APPROVE.
+        const inner_loop = buildWorkflowInnerLoop({ launch: tridentWiring.launch_inner_workflow })
         const orchestratorOpts: Parameters<typeof buildTridentOrchestrator>[0] = {
           inner_loop,
           db_path: input.db.path,
