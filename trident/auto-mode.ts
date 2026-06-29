@@ -331,6 +331,50 @@ const CATASTROPHIC_RM_RE =
  *  worktree-internal cleanup target and stays allowed. */
 const WHOLE_HOME_RM_RE = /(^|\s)\/(Users|home)(\/[^/\s]+)?(\s|\/?$)/
 
+/** Normalize a path token for an inside/outside-the-worktree comparison: strip a
+ *  trailing `/`, and expand a leading `~`/`$HOME`/`${HOME}` to the home dir so a
+ *  home-relative absolute target (`~/.ssh`) is compared correctly. */
+function normalizeRmTarget(token: string, home: string): string {
+  let p = token.replace(/\/+$/, '')
+  if (home !== '') {
+    p = p.replace(/^~(?=\/|$)/, home).replace(/^\$\{HOME\}/, home).replace(/^\$HOME(?=\/|$)/, home)
+  }
+  return p
+}
+
+/** Is `target` the same as, or a descendant of, `root`? Both should be absolute. */
+function isWithin(target: string, root: string): boolean {
+  if (root === '') return false
+  const r = root.replace(/\/+$/, '')
+  return target === r || target.startsWith(`${r}/`)
+}
+
+/**
+ * Does a recursive-force `rm` reference an ABSOLUTE path that is OUTSIDE every
+ * known safe root (the run's worktree + repo of record)? This is the enforcement
+ * of "rm -rf outside the worktree" the coarse system-root / whole-home globs do
+ * NOT cover — e.g. `rm -rf /Users/owner/.ssh` is neither a system root nor a whole
+ * home dir, yet must never be auto-run by the unattended launcher. Only ABSOLUTE
+ * targets are judged: a RELATIVE path resolves against the cwd (the worktree) and
+ * stays allowed, and a deep ABSOLUTE path INSIDE the worktree (`<wt>/node_modules`)
+ * is allowed. When no safe root is known we cannot decide, so we defer (the
+ * system-root / whole-home floor still applies).
+ */
+function rmTargetsOutsideWorktree(command: string, ctx: DenyGuardContext, home: string): boolean {
+  const roots = [ctx.worktreeRoot, ctx.repoPath].filter((r): r is string => !!r && r.length > 0)
+  if (roots.length === 0) return false
+  // Scan the rm sub-segment (up to the next pipe/seq operator) for absolute tokens.
+  const seg = command.slice(command.search(/(^|[\s;&|])rm(\s|$)/)).split(/[|&;]/)[0] ?? ''
+  for (const raw of seg.split(/\s+/)) {
+    if (raw === '' || raw.startsWith('-')) continue // skip flags
+    const isAbsolute = raw.startsWith('/') || /^(~|\$HOME|\$\{HOME\})(\/|$)/.test(raw)
+    if (!isAbsolute) continue // relative → resolved against the worktree cwd → allowed
+    const target = normalizeRmTarget(raw, home)
+    if (!roots.some((root) => isWithin(target, root))) return true
+  }
+  return false
+}
+
 /**
  * Evaluate a Bash command against the trident auto-mode deny-guard. Returns a
  * deny decision for the destructive shapes the coarse allow/deny globs cannot
@@ -386,9 +430,10 @@ export function evaluateBashDenyGuard(
     }
   }
 
-  // 7. `rm -rf` of a catastrophic system root or a WHOLE home dir (outside the
-  //    worktree). A deep path inside the worktree (e.g.
-  //    `<worktreeRoot>/dist`, `/Users/x/repos/proj/node_modules`) is NOT blocked.
+  // 7. `rm -rf` of a catastrophic system root, a WHOLE home dir, or ANY absolute
+  //    path OUTSIDE the run's worktree/repo. A deep path INSIDE the worktree (e.g.
+  //    `<worktreeRoot>/dist`, `<worktreeRoot>/node_modules`) and a relative path
+  //    (resolved against the worktree cwd) are NOT blocked.
   if (isRecursiveForceRm(cmd)) {
     const home = ctx.homeDir ?? process.env['HOME'] ?? ''
     if (CATASTROPHIC_RM_RE.test(cmd)) {
@@ -399,6 +444,12 @@ export function evaluateBashDenyGuard(
     }
     if (home !== '' && new RegExp(`(^|\\s)${escapeRe(home)}(\\s|/?$)`).test(cmd)) {
       return deny('`rm -rf` of the home directory is blocked in trident auto-mode')
+    }
+    // Codex [P1]: an absolute target OUTSIDE the worktree (e.g. `/Users/owner/.ssh`)
+    // is neither a system root nor a whole home dir, but the unattended launcher
+    // must never auto-run it. Enforce the "rm -rf outside the worktree" rule.
+    if (rmTargetsOutsideWorktree(cmd, ctx, home)) {
+      return deny('`rm -rf` of an absolute path outside the run worktree is blocked in trident auto-mode')
     }
   }
 
