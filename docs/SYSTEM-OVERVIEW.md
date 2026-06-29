@@ -546,7 +546,13 @@ now ships ON (no feature flag); `open/composer.ts` wires `tasks.proactive`.
 - **Daily morning brief** (`morning-brief.ts`) — **ACTIVE.** Once per owner-local
   day at/after `brief_hour`, composes from live context (focus/task queue,
   optional calendar / entity / project sources — each gathered behind its own
-  try/catch) and posts to the owner's General topic. **LLM composition (Vajra
+  try/catch) and posts to the owner's General topic. **Owner-local day** is
+  computed from the host's actual timezone, not a hardcoded Pacific default:
+  `open/composer.ts` resolves it once via `resolveLocalTimezone` (`local-timezone.ts`
+  — `process.env.TZ` override → the runtime's `Intl` zone → a defensive floor) and
+  threads it through `tasks.proactive.timezone`. A non-Pacific host therefore gets
+  the brief at its real local hour (Ryan: "Detect local computer time not hardcode pt").
+  **LLM composition (Vajra
   parity):** `buildLlmBriefComposer` routes the resolved `BriefContext` through
   the warm `cc-llm` substrate (grounded in exactly the resolved evidence, no
   fabrication); the pure `composeMorningBrief` template is the deterministic

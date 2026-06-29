@@ -116,6 +116,7 @@ import type { CompositionInput } from '../gateway/composition.ts'
 import { buildLlmBriefComposer } from '../gateway/proactive/morning-brief.ts'
 import { buildLlmNudgeRater } from '../gateway/proactive/idle-nudge-sweep.ts'
 import { buildButtonStoreProactiveSink } from '../gateway/proactive/button-store-sink.ts'
+import { resolveLocalTimezone } from '../gateway/proactive/local-timezone.ts'
 import { readSessionCookie, signSessionCookie } from '../landing/session-cookie.ts'
 
 import {
@@ -1607,12 +1608,22 @@ export function buildOpenGraphComposer(
       buttonStore: landing.buttonStore,
       registry: appWsAgentPushRegistry,
     })
+    // Detect the host's LOCAL timezone (Ryan: "Detect local computer time not
+    // hardcode pt"). Without this the morning brief fell back to the proactive
+    // module's hardcoded `America/Los_Angeles`, so a non-Pacific owner got the
+    // daily brief (and its tz-derived day/wording) at the wrong local hour.
+    // `resolveLocalTimezone` is the single source: `process.env.TZ` override →
+    // the runtime's resolved zone → a defensive floor. Threaded into the brief
+    // scheduler below; never hardcode a zone per-call.
+    const localTimezone = resolveLocalTimezone({ env })
     const tasksConfig: NonNullable<CompositionInput['tasks']> = {
       proactive: {
         // Morning brief — ACTIVE. Posts the daily brief to the owner's General
-        // topic through the durable web sink.
+        // topic through the durable web sink, computed for the host's local
+        // timezone (`localTimezone`) rather than a hardcoded Pacific default.
         sink: proactiveSink,
         resolveGeneralTopic: (): string => proactiveGeneralTopic,
+        timezone: localTimezone,
         // Idle-nudge SWEEP — DELIBERATELY NOT auto-enabled here (no
         // `listIdleTopics`), so the sweep cron does not register. The sweep
         // CODE + the ≥7 dual-rating quality gate (`rateNudge`) are complete and
