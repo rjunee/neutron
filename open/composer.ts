@@ -1524,19 +1524,36 @@ export function buildOpenGraphComposer(
         return true
       },
     }
-    // Map an engine reminder destination to the app-ws topic the client binds:
-    // null → the owner's General `app:<user>`; an already-app-shaped topic as-is;
-    // a bare project_id (or the Expo `app-project:<id>` form) → `app:<user>:<id>`
-    // (mirrors the live-agent turn's project-scoped topic — see `appWsReceiver`).
+    // Resolve every fired reminder/brief to the app-ws topic the client binds:
+    // the owner's BARE `app:<user>`.
+    //
+    // THE BUG (M1 E2E Round 2, 2026-06-29 — the residual #105 missed): the app-ws
+    // client opens ONE `/ws/app/chat` socket and registers its live sender +
+    // replays history on the BARE `app:<user>` topic only (`app-ws-surface.ts`
+    // registers `appWsTopicId(user_id)`; `config.topicId = appWsTopicId(userId)`);
+    // project context is a per-FRAME field, NOT a topic suffix. This differs from
+    // the LEGACY web path, which bound a per-socket sender on
+    // `web:<user>:<project>` — and #105 ported that suffixing pattern here,
+    // mapping a project reminder (`app-project:<id>`) to `app:<user>:<id>`. But
+    // NO sender is ever registered on that suffixed topic, so the live push
+    // matches nothing (`registry.send` → false, dropped), AND the durable
+    // `button_prompts` row lands under a topic the client NEVER replays (it only
+    // ever hydrates the bare `app:<user>`) — so a project-scoped reminder VANISHES
+    // entirely, live and on reload. (General reminders — `explicit_topic` null →
+    // bare topic — are the only case #105's test exercised, which is why this
+    // slipped through.)
+    //
+    // THE FIX: deliver ALL fired reminders/briefs to the owner's bare
+    // `app:<user>` topic — exactly the general-reminder path #105 made work and
+    // the one topic the client actually binds + hydrates. Project GROUPING is
+    // unaffected: it lives on the reminder row's stored `topic_id`
+    // (`app-project:<id>`) which the reminders tab filters on (`store.listBy*`)
+    // and `deriveReminderProjectId` keys context/metering off — neither reads
+    // this delivery topic. The fired message simply surfaces in the owner's chat,
+    // the single surface the app reads, instead of silently disappearing.
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
-    const resolveAppWsReminderTopic = (explicit_topic: string | null): string => {
-      if (explicit_topic === null || explicit_topic.length === 0) return reminderGeneralTopic
-      if (explicit_topic.startsWith('app:')) return explicit_topic
-      const projectId = explicit_topic.startsWith('app-project:')
-        ? explicit_topic.slice('app-project:'.length)
-        : explicit_topic
-      return `${reminderGeneralTopic}:${projectId}`
-    }
+    const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
+      reminderGeneralTopic
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: buildButtonStoreReminderOutbound({
         buttonStore: landing.buttonStore,
@@ -2135,6 +2152,31 @@ export function buildOpenGraphComposer(
         // the pre-existing set; the post-emit below catches a seed-driven change).
         emitProjectsChangedIfChanged(user_id)
         if (await isOnboardingActive(user_id)) {
+          // RESTART RESILIENCE (M1 E2E Round 2, 2026-06-29) — re-arm the import-
+          // completion watcher on reconnect. The watcher is a purely in-memory
+          // `setTimeout` chain armed ONLY inside `notifyImportUpload` (the upload
+          // request). It is the single consumer of `import_analysis_presented`:
+          // it transitions that phase back to `work_interview_gap_fill` so the
+          // interview can finish + materialize the imported projects, and the
+          // accept button for that phase is deliberately SUPPRESSED on the
+          // assumption the watcher auto-consumes it. So if the server restarts
+          // mid-import (redeploy / crash / `launchctl kickstart`), the watcher is
+          // gone, the import-running cron (which DOES re-arm on boot) drives the
+          // persisted row into `import_analysis_presented`, and nothing ever
+          // consumes it — the button is hidden and the post-turn extractor refuses
+          // to finalize on top of an import phase. Onboarding wedges PERMANENTLY.
+          // Re-arm here (idempotent — `importWatchActive` guards a double-arm)
+          // whenever the persisted phase is import-active, so a reconnect after a
+          // restart resumes the consume. No-op when no import is in flight.
+          if (importWatchHolder.watch !== undefined) {
+            const st = await onboardingStateStore.get(project_slug, user_id)
+            if (
+              st !== null &&
+              (st.phase === 'import_running' || st.phase === 'import_analysis_presented')
+            ) {
+              importWatchHolder.watch(user_id)
+            }
+          }
           if (appWsChatTurn !== null && !seededOnboardingTopics.has(channel_topic_id)) {
             seededOnboardingTopics.add(channel_topic_id)
             await appWsChatTurn({
