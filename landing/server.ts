@@ -962,32 +962,48 @@ export interface LandingServer {
  */
 const CHAT_AUTH_GATE_SCRIPT = `(function(){
   var PFX='/oauth/max/install-token';
-  var signupId=null,phase='init';
+  var signupId=null,activating=false,activeTicks=0;
+  var MAX_ACTIVATING_TICKS=30; // ~60s at 2s/poll before we surface a manual fallback
   function $(id){return document.getElementById(id)}
   function setStatus(t){var s=$('ng-status');if(s)s.textContent=t}
   function setManual(t){var m=$('ng-manual-status');if(m)m.textContent=t}
   function show(id,on){var e=$(id);if(e)e.style.display=on?'':'none'}
-  function activate(){
-    phase='activating';show('ng-auto',true);
-    setStatus('Connected — restarting Neutron to load your account…');
-    (function watch(){
-      fetch('/chat',{cache:'no-store',redirect:'manual'}).then(function(r){
-        if(r.status===200){location.href='/chat';return}
-        setTimeout(watch,2000);
-      }).catch(function(){setStatus('Almost there — Neutron is restarting…');setTimeout(watch,2000)});
-    })();
-  }
-  function poll(){
-    if(phase==='activating'||!signupId)return;
-    fetch(PFX+'/state?signup_id='+encodeURIComponent(signupId),{cache:'no-store'})
-      .then(function(r){return r.ok?r.json():{status:'gone'}})
-      .then(function(j){
-        if(j.status==='completed'){activate();return}
-        if(j.status==='expired'){init();return}
-        setTimeout(poll,2500);
-      }).catch(function(){setTimeout(poll,2500)});
+  function fail(msg){activating=false;setStatus(msg);var d=$('ng-manual-details');if(d)d.open=true}
+  // Primary navigation trigger: poll GET /chat for the 503 -> (restart) -> 200
+  // transition. This is robust across the restart that WIPES the in-memory
+  // store — we never rely on catching the brief 'completed' window before the
+  // process exits. /state is consulted only for nicer messaging.
+  function tick(){
+    fetch('/chat',{cache:'no-store',redirect:'manual'}).then(function(r){
+      if(r.status===200){location.href='/chat';return} // authed process is live
+      if(activating){
+        if(++activeTicks>MAX_ACTIVATING_TICKS){fail('Restart did not finish. Paste your token below, or run \\u0060neutron restart\\u0060 and reload.');return}
+        setStatus('Connected — restarting Neutron…');
+        setTimeout(tick,2000);return;
+      }
+      if(signupId){
+        fetch(PFX+'/state?signup_id='+encodeURIComponent(signupId),{cache:'no-store'})
+          .then(function(s){return s.ok?s.json():{status:(s.status===404?'gone':'err')}})
+          .then(function(j){
+            // 'gone' (404) for a signup_id WE hold means the store was wiped by
+            // the restart — treat it as completion and switch to the /chat watch.
+            if(j.status==='completed'||j.status==='gone'){activating=true;activeTicks=0;setStatus('Connected — restarting Neutron…')}
+            else if(j.status==='expired'){init()}
+            else setStatus('Run the command above in your terminal — this page advances automatically.')
+          }).catch(function(){}).then(function(){setTimeout(tick,2000)});
+        return;
+      }
+      setTimeout(tick,2000);
+    }).catch(function(){
+      // Connection refused: the server is mid-restart (or, un-supervised, gone).
+      activating=true;
+      if(++activeTicks>MAX_ACTIVATING_TICKS){fail('Neutron is not responding. If it does not come back, run \\u0060neutron restart\\u0060.');return}
+      setStatus('Almost there — Neutron is restarting…');
+      setTimeout(tick,2000);
+    });
   }
   function init(){
+    activating=false;activeTicks=0;
     fetch(PFX+'/initiate',{method:'POST',cache:'no-store'})
       .then(function(r){return r.ok?r.json():null})
       .then(function(j){
@@ -995,8 +1011,7 @@ const CHAT_AUTH_GATE_SCRIPT = `(function(){
         signupId=j.signup_id;
         var c=$('ng-cmd');if(c)c.textContent=j.command;
         show('ng-auto',true);
-        setStatus('Run the command above in your terminal — this page advances automatically when it finishes.');
-        setTimeout(poll,2500);
+        setStatus('Run the command above in your terminal — this page advances automatically.');
       }).catch(function(){show('ng-auto',false)});
   }
   var copy=$('ng-copy');
@@ -1012,10 +1027,11 @@ const CHAT_AUTH_GATE_SCRIPT = `(function(){
     if(!signupId){setManual('Still preparing — try again in a moment.');return}
     setManual('Activating…');
     fetch(PFX+'/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({signup_id:signupId,token:tok})})
-      .then(function(r){if(r.status===204||r.status===200){activate()}else{setManual('Token rejected (HTTP '+r.status+'). Check it and retry.')}})
+      .then(function(r){if(r.status===204||r.status===200){activating=true;activeTicks=0;setStatus('Connected — restarting Neutron…')}else{setManual('Token rejected (HTTP '+r.status+'). Check it and retry.')}})
       .catch(function(){setManual('Could not reach Neutron. Retry.')});
   });
   init();
+  setTimeout(tick,1500);
 })();`
 
 export function renderChatAuthGateHtml(): string {
@@ -1087,7 +1103,7 @@ export function renderChatAuthGateHtml(): string {
       <p class="status" id="ng-status">Preparing your install command…</p>
     </div>
 
-    <details>
+    <details id="ng-manual-details">
       <summary>Prefer to do it by hand?</summary>
       <ol>
         <li>Run <code>claude setup-token</code> — it opens a browser and prints a
@@ -1121,6 +1137,7 @@ export function chatAuthGateCsp(): string {
   return [
     "default-src 'none'",
     "base-uri 'none'",
+    "frame-ancestors 'none'",
     "style-src 'unsafe-inline'",
     `script-src 'sha256-${hash}'`,
     "connect-src 'self'",

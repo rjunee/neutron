@@ -51,6 +51,15 @@ const SIGNUP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** 10 minutes — matches the managed monorepo's `DEFAULT_TTL_MS`. */
 const DEFAULT_TTL_MS = 10 * 60 * 1_000
 
+/**
+ * Hard cap on retained rows. `/initiate` is an unauthenticated POST, so a local
+ * page could fire it in a loop; read-time eviction never frees memory, so bound
+ * it. FIFO: the in-flight (newest) handoff is never the one evicted under a
+ * flood until this many NEWER ones arrive — far beyond any real single-owner
+ * use. The cap exists only to make the Map's growth bounded.
+ */
+const MAX_ROWS = 512
+
 export type InstallTokenStatus = 'pending' | 'completed' | 'expired'
 
 export interface InstallTokenRow {
@@ -79,6 +88,13 @@ export class InstallTokenStore {
   }
 
   create(signup_id: string): InstallTokenRow {
+    // FIFO-evict the oldest rows so an unauthenticated /initiate flood can't
+    // grow the Map without bound (Map preserves insertion order).
+    while (this.rows.size >= MAX_ROWS) {
+      const oldest = this.rows.keys().next().value
+      if (oldest === undefined) break
+      this.rows.delete(oldest)
+    }
     const created = this.now()
     const row: InstallTokenRow = {
       signup_id,
@@ -258,6 +274,12 @@ export function buildOpenInstallTokenHandler(deps: OpenInstallTokenDeps): OpenIn
       const row = store.get(signup_id)
       if (row === null) return new Response('# install link not found\n', { status: 404 })
       if (row.status !== 'pending') return new Response('# install link expired\n', { status: 410 })
+      // callback_url is derived from the request origin (Host header). Safe for
+      // Open: the server binds 127.0.0.1 by default (`NEUTRON_HOST`), so the
+      // origin is loopback and a remote attacker can't reach it nor read the
+      // minted signup_id (no CORS). An operator who binds beyond loopback via
+      // NEUTRON_HOST owns that exposure (and would want the callback to match
+      // their chosen host anyway). Managed wires an HMAC-gated handler instead.
       const script = renderInstallTokenScript({
         signup_id,
         callback_url: `${url.origin}${ROUTE_PREFIX}/complete`,
@@ -291,15 +313,23 @@ export function buildOpenInstallTokenHandler(deps: OpenInstallTokenDeps): OpenIn
       if (row.status === 'completed') return json({ status: 'already_completed' }, 200)
 
       await deps.persistToken(token)
-      const marked = store.markCompleted(signup_id)
-      if (marked === null) {
-        // Lost a race to a concurrent callback — the token is already persisted,
-        // so this is success either way (idempotent).
-        return json({ status: 'already_completed' }, 200)
+      // Once the token is persisted, the box MUST restart to pick it up — so
+      // request the restart whenever we persisted, regardless of markCompleted's
+      // outcome. (Guarded so a concurrent duplicate callback, or a row that
+      // tipped past its TTL in the get→mark window, can't queue a second exit.)
+      const scheduleRestart = (): void => {
+        if (!restartScheduled) {
+          restartScheduled = true
+          deps.requestRestart()
+        }
       }
-      if (!restartScheduled) {
-        restartScheduled = true
-        deps.requestRestart()
+      const marked = store.markCompleted(signup_id)
+      scheduleRestart()
+      if (marked === null) {
+        // Lost a race to a concurrent callback (or a just-expired row) — the
+        // token is already persisted + a restart is scheduled, so this is
+        // success either way (idempotent).
+        return json({ status: 'already_completed' }, 200)
       }
       return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
     }

@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { buildOpenInstallTokenHandler } from '../install-token-handoff.ts'
+import { buildOpenInstallTokenHandler, InstallTokenStore } from '../install-token-handoff.ts'
 
 const GOOD_TOKEN = 'sk-ant-oat01-' + 'A'.repeat(40)
 const ORIGIN = 'http://127.0.0.1:7800'
@@ -141,6 +141,19 @@ describe('install-token handoff', () => {
       }),
     )
     expect(res!.status).toBe(404)
+  })
+
+  test('store growth is bounded — a flood of handoffs evicts the oldest (FIFO)', () => {
+    const store = new InstallTokenStore()
+    const ids: string[] = []
+    for (let i = 0; i < 600; i++) {
+      const id = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`
+      ids.push(id)
+      store.create(id)
+    }
+    // The earliest rows were evicted (cap 512); the most recent survive.
+    expect(store.get(ids[0]!)).toBeNull()
+    expect(store.get(ids[599]!)).not.toBeNull()
   })
 
   test('a handoff past its TTL reads expired and rejects completion', async () => {
