@@ -42,11 +42,20 @@ IS the single Chat tab — and deletes the legacy path entirely (no dual path, n
   `lib/chat-deep-link-dispatch.ts`, the `chat-sync` route, and their 6 tests.
   `useUploadState` was extracted to `lib/use-upload-state.ts`.
 
-**Tests.** chat-core 97 pass; app 601 pass (+6 new: agent-metadata round-trip +
-cold-open durability in `chat-core-sqlite-store`, `chat_command_result` + empty/error
-fallback + `button_choice` wire in `chat-core-mobile-session`, and the new
-`chat-core-deep-link-dispatch`). `tsc --noEmit` clean (app + chat-core). leak-gate
-SILENT. No dangling import of any deleted module (repo-wide grep clean).
+**Codex cross-model review fixes (same PR).** (P1) `SyncEngine.applyInbound` copied
+the old agent-meta but not the new `image_urls`/`citations`/`doc_refs`/`deep_link`, so
+the real socket + resume path dropped them despite the store columns — added them
+(regression test delivers a rich `agent_message` over the fake socket and asserts the
+fields survive to `messages()`). (P2) Tapping an option row only sent `button_choice`
+and the rows un-latched after `MOTION.base`, so a historical prompt could re-fire —
+the surface now records the chosen value per prompt and passes `chosen_value` so the
+row collapses immediately (parity with the legacy `recordChoice`).
+
+**Tests.** chat-core 97 pass; app 602 pass (+7 new: agent-metadata round-trip +
+cold-open durability in `chat-core-sqlite-store`; `chat_command_result` + empty/error
+fallback + `button_choice` wire + the rich-metadata inbound-path regression in
+`chat-core-mobile-session`; the new `chat-core-deep-link-dispatch`). `tsc --noEmit`
+clean (app + chat-core). leak-gate SILENT. No dangling import of any deleted module.
 
 **Parity note.** chat-core auto-retries unacked sends on reconnect, so the legacy
 manual "tap to retry" affordance has no equivalent failure state (the queue handles

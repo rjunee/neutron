@@ -466,3 +466,40 @@ describe('MobileChatSession — slash commands + button choices (parity with the
     });
   });
 });
+
+describe('MobileChatSession — rich agent metadata survives the inbound path (Codex P1 regression)', () => {
+  it('persists options / image_urls / citations / doc_refs / deep_link from a live agent_message', async () => {
+    const store = await freshStore();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', project_slug: 'p', topic_id: TOPIC, ts: 1 });
+    await tick();
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'agent_message',
+      message_id: 'rich-1',
+      seq: 5,
+      body: 'choose + look',
+      ts: 10,
+      options: [{ label: 'Yes', body: 'Yes', value: 'yes' }],
+      prompt_id: 'p-9',
+      kind: 'buttons',
+      upload_affordance: { source: 'claude' },
+      image_urls: ['https://x/i.png'],
+      citations: [{ title: 'Src', url: 'https://x/src' }],
+      doc_refs: [{ label: 'Doc', url: 'neutron://docs/d', project_id: 'pr', path: 'd.md' }],
+      deep_link: 'neutron://docs/d',
+    });
+    await tick();
+    const m = (await session.messages()).find((x) => x.message_id === 'rich-1');
+    expect(m).toBeDefined();
+    expect(m?.options?.[0]?.value).toBe('yes');
+    expect(m?.prompt_id).toBe('p-9');
+    expect(m?.upload_affordance).toEqual({ source: 'claude' });
+    expect(m?.image_urls).toEqual(['https://x/i.png']);
+    expect(m?.citations).toEqual([{ title: 'Src', url: 'https://x/src' }]);
+    expect(m?.doc_refs?.[0]?.path).toBe('d.md');
+    expect(m?.deep_link).toBe('neutron://docs/d');
+  });
+});

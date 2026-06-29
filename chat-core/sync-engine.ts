@@ -84,6 +84,14 @@ export class SyncEngine {
     if (env.upload_affordance !== undefined && env.upload_affordance !== null) {
       msg.upload_affordance = env.upload_affordance
     }
+    // P7.3 — inline images / citations / doc refs / deep-link. Same posture:
+    // only set when present so a plain message's row stays unchanged. Without
+    // these the socket + resume path would drop them despite the SQLite columns
+    // (the rich renderer + deep-link dispatcher would never see them).
+    if (env.image_urls !== undefined && env.image_urls !== null) msg.image_urls = env.image_urls
+    if (env.citations !== undefined && env.citations !== null) msg.citations = env.citations
+    if (env.doc_refs !== undefined && env.doc_refs !== null) msg.doc_refs = env.doc_refs
+    if (env.deep_link !== undefined && env.deep_link !== null) msg.deep_link = env.deep_link
     await this.store.upsert(msg)
     return { seq: env.seq, applied: !deduped, reconciled }
   }

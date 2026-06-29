@@ -153,12 +153,20 @@ export function ChatSyncSurface({
     [react],
   );
 
+  // Record the chosen option per prompt so the row collapses immediately and
+  // can't re-fire (ButtonOptionRow/ImageGalleryRow only latch for MOTION.base;
+  // the legacy surface tracked this as `chosen_value`). Session-scoped — the
+  // server advances the prompt after a choice, so a fresh cold-open never shows
+  // an answered-but-still-open prompt.
+  const [chosenByPrompt, setChosenByPrompt] = useState<Record<string, string>>({});
   const onChoose = useCallback(
     (value: string, promptId?: string): void => {
       if (promptId === undefined || promptId.length === 0) return;
+      if (chosenByPrompt[promptId] !== undefined) return; // already answered
+      setChosenByPrompt((prev) => ({ ...prev, [promptId]: value }));
       chooseOption(promptId, value);
     },
-    [chooseOption],
+    [chooseOption, chosenByPrompt],
   );
 
   const onDocRef = useCallback(
@@ -323,19 +331,25 @@ export function ChatSyncSurface({
   }, [hasPromptWithFreeform, uploadAffordance]);
 
   const renderItem = useCallback(
-    ({ item }: { item: RenderRow }) => (
-      <ChatRow
-        row={item}
-        selfDeviceId={selfDeviceId}
-        auth={attachmentAuth}
-        onToggleReaction={onToggleReaction}
-        onEdit={editMessage}
-        onDelete={deleteMessage}
-        onChoose={onChoose}
-        onDocRef={onDocRef}
-      />
-    ),
-    [selfDeviceId, attachmentAuth, onToggleReaction, editMessage, deleteMessage, onChoose, onDocRef],
+    ({ item }: { item: RenderRow }) => {
+      const promptId = item.kind === 'message' ? item.message.prompt_id : null;
+      const chosenValue =
+        promptId !== null && promptId !== undefined ? chosenByPrompt[promptId] : undefined;
+      return (
+        <ChatRow
+          row={item}
+          selfDeviceId={selfDeviceId}
+          auth={attachmentAuth}
+          {...(chosenValue !== undefined ? { chosenValue } : {})}
+          onToggleReaction={onToggleReaction}
+          onEdit={editMessage}
+          onDelete={deleteMessage}
+          onChoose={onChoose}
+          onDocRef={onDocRef}
+        />
+      );
+    },
+    [selfDeviceId, attachmentAuth, chosenByPrompt, onToggleReaction, editMessage, deleteMessage, onChoose, onDocRef],
   );
 
   const onViewableItemsChanged = useCallback(
@@ -454,6 +468,7 @@ function ChatRow({
   row,
   selfDeviceId,
   auth,
+  chosenValue,
   onToggleReaction,
   onEdit,
   onDelete,
@@ -463,6 +478,7 @@ function ChatRow({
   row: RenderRow;
   selfDeviceId: string;
   auth: AttachmentAuthCtx | null;
+  chosenValue?: string;
   onToggleReaction: (messageId: string, emoji: string, reactedBySelf: boolean) => void;
   onEdit: (messageId: string, body: string) => void;
   onDelete: (messageId: string) => void;
@@ -607,12 +623,14 @@ function ChatRow({
                 <ImageGalleryRow
                   options={message.options}
                   {...(message.prompt_id !== null && message.prompt_id !== undefined ? { prompt_id: message.prompt_id } : {})}
+                  {...(chosenValue !== undefined ? { chosen_value: chosenValue } : {})}
                   onChoose={onChoose}
                 />
               ) : (
                 <ButtonOptionRow
                   options={message.options}
                   {...(message.prompt_id !== null && message.prompt_id !== undefined ? { prompt_id: message.prompt_id } : {})}
+                  {...(chosenValue !== undefined ? { chosen_value: chosenValue } : {})}
                   onChoose={onChoose}
                 />
               )
