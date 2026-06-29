@@ -83,6 +83,7 @@ import { join as joinPath } from 'node:path'
 import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
 import { DocSearchIndex } from '../doc-search/store.ts'
 import { DocSearchRuntime } from '../doc-search/runtime.ts'
+import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
 import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/message-search-wiring.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
 import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
@@ -614,7 +615,15 @@ export function buildOpenGraphComposer(
       const docIndexPath = joinPath(owner_home, 'cache', 'doc-search', 'index.db')
       mkdirSync(joinPath(owner_home, 'cache', 'doc-search'), { recursive: true })
       const docIndex = DocSearchIndex.open(docIndexPath)
-      docSearchRuntime = new DocSearchRuntime({ ownerHome: owner_home, index: docIndex })
+      docSearchRuntime = new DocSearchRuntime({
+        ownerHome: owner_home,
+        index: docIndex,
+        // Exclude SOFT-DELETED projects from the corpus: `delete_project` only
+        // sets `projects.deleted_at` and never removes the on-disk folder, so
+        // without this the indexer keeps the folder and `doc_search` keeps
+        // surfacing a deleted project's docs (M1 E2E Round 4, bug E).
+        enumerateProjects: buildLiveProjectEnumerator(db),
+      })
       realmodeCleanups.push(() => {
         try {
           docIndex.close()
