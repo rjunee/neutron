@@ -86,7 +86,7 @@ function defaultHasCredentialsFile(env: NodeJS.ProcessEnv): boolean {
  * AUTH-CORRECTION (2026-06-28) — opt OUT of the ambient/Keychain fast-path.
  * The Claude-Max OAuth handoff is the DEFAULT first onboarding step; the
  * Keychain branch (#101) is only a save-a-step optimisation for a box whose
- * owner happens to already have a `claude` login. A managed tenant (or any box
+ * owner happens to already have a `claude` login. A headless deployment (or any box
  * that must always present the handoff, e.g. a deterministic test) sets
  * `NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH=1` so an INCIDENTAL host `claude` login
  * can't silently satisfy auth and skip the handoff screen. Checked BEFORE the

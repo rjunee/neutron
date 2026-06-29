@@ -15,15 +15,15 @@ resolution order is unchanged in spirit and maps 1:1 onto the existing
 2. **Keychain fast-path (#101)** — if `claude` is already ambient/Keychain-authed
    → use it, skip the step. KEPT intact (`open/ambient-claude-auth.ts`), a
    save-a-step optimisation, NOT deleted.
-3. **Handoff (the DEFAULT)** — no token AND no Keychain (the case every managed
-   tenant + every Linux box hits) → the gate page renders a copy-paste one-liner
+3. **Handoff (the DEFAULT)** — no token AND no Keychain (the default case —
+   Linux/headless boxes, fresh installs) → the gate page renders a copy-paste one-liner
    that installs the `claude` CLI, runs `claude setup-token`, captures the
    `sk-ant-oat…` token, and POSTs it back. **No more dead 503.**
 
-**Mechanism (single-service Open port of the managed monorepo flow).**
+**Mechanism (single-service Open port of the prior install-token handoff flow).**
 `open/install-token-handoff.ts` mounts four routes ahead of the `/chat` gate via
 the existing `installTokenHandler` extension point (previously unimplemented in
-Open; Managed wires its own HMAC handler at the same paths):
+Open; a hosted deployment can wire its own HMAC-guarded handler at the same paths):
 
 - `POST /oauth/max/install-token/initiate` — mint a `signup_id` (UUID, the
   capability) + the one-liner for this origin.
@@ -34,11 +34,10 @@ Open; Managed wires its own HMAC handler at the same paths):
   token shape, persist it to `.env`, mark the handoff complete, restart.
 - `GET  /oauth/max/install-token/state?signup_id=` — poll status.
 
-No HMAC shared-secret (unlike managed): Open is single-owner on `127.0.0.1`, so
+No HMAC shared-secret needed: Open is single-owner on `127.0.0.1`, so
 the unguessable `signup_id` is a sufficient capability. The handler validates
 token SHAPE only — Open's substrate is the `claude` CLI, which validates the
-token itself at spawn, so the box never calls api.anthropic.com directly (the
-managed handler probes).
+token itself at spawn, so the box never calls the Anthropic API directly.
 
 **Why a restart, not a live env mutation.** The Open composer resolves the LLM
 substrate ONCE at boot (`open/composer.ts:313`, gated on a non-null pool). A box
@@ -47,17 +46,17 @@ live would clear the gate but leave chat LLM-less. So `/complete` persists the
 token to the code-dir `.env` (`open/install-token-env.ts`, mirroring install.sh's
 `persist_oauth_token_to_env`) then exits; the launchd `KeepAlive` / systemd
 `Restart=always` supervisor respawns the process, which re-reads `.env` and
-builds a LIVE substrate — exactly the managed flow's `systemctl restart` step,
+builds a LIVE substrate — exactly the documented `systemctl restart` step,
 and what the old dead page already told users to do by hand. The gate page polls
 `GET /chat` for the 503 → (restart window) → 200 transition, then auto-advances
 into onboarding. A manual `claude setup-token` → paste box is the secondary
 path; the static "add to `.env` + restart" copy is the final fallback if the
 routes are unmounted.
 
-**Managed-tenant / force-handoff knob.** Added `NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH`
+**Force-handoff knob.** Added `NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH`
 (`open/ambient-claude-auth.ts`): when set, the Keychain fast-path is skipped so a
-box that must ALWAYS present the handoff (every managed tenant; a deterministic
-test) can't have an INCIDENTAL host `claude` login silently satisfy auth. This
+box that must ALWAYS present the handoff (a headless deployment with no Keychain;
+a deterministic test) can't have an INCIDENTAL host `claude` login silently satisfy auth. This
 also makes the boot-shell gate tests host-independent (they failed on a dev Mac
 with a real `claude` login because #101's probe reads the Keychain directly, not
 env).
@@ -69,13 +68,9 @@ inline `<script>` pinned by a `sha256-` CSP (`chatAuthGateCsp`). Tests:
 `open/__tests__/install-token-env.test.ts`, updated
 `landing/__tests__/chat-auth-gate.test.ts` + `open/__tests__/open-boot-shell.test.ts`.
 
-**Managed per-tenant handoff (follow-up, not in this PR).** Managed needs its own
-`installTokenHandler` that: (a) keeps the HMAC shared-secret on `/complete` (the
-bash callback crosses the public internet), (b) persists per-tenant into the
-encrypted `SecretsStore` (`max_oauth_refresh`/`max_oauth_access` via
-`MaxOAuthClient.persistPasteToken`) rather than a single `.env`, (c) probes the
-token against api.anthropic.com before persisting, and (d) restarts the
-per-tenant unit. The shared gate page + route shapes are reused as-is.
+(A hosted/multi-instance deployment's own HMAC-guarded handler + encrypted
+per-instance token store is tracked separately in that deployment's repo — out of
+scope for this Open PR; the shared gate page + route shapes are reused as-is.)
 
 ## 2026-06-28 — Chat auth-gate accepts an ambient/Keychain-authed `claude` (fresh-install 503 fix)
 

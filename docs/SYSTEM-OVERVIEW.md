@@ -843,7 +843,7 @@ ADDITIVELY activates a capability.
   `resolveOpenLlmPool` order: **env OAuth/API token → Keychain fast-path (#101) →
   `null`**. The `null` case no longer renders a dead 503 — it renders the
   FUNCTIONAL Claude-Max OAuth **handoff** (the DEFAULT the UX assumes: no token,
-  no Keychain — every managed tenant + every Linux box). `GET /chat`'s gate page
+  no Keychain — Linux/headless boxes, fresh installs). `GET /chat`'s gate page
   (`landing/server.ts:renderChatAuthGateHtml`, pinned by a `sha256-` CSP) drives
   `open/install-token-handoff.ts`'s routes (`/oauth/max/install-token/{initiate,
   <id>.sh,complete,state}`, mounted via `installTokenHandler`): a copy-paste
@@ -854,10 +854,10 @@ ADDITIVELY activates a capability.
   page polls `GET /chat` for the 503 → restart → 200 transition and auto-advances
   into onboarding. The Keychain fast-path stays a save-a-step optimisation;
   `NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH=1` forces the handoff even when a host
-  `claude` login exists (managed tenants; deterministic tests). Open persists to
-  `.env`; the managed per-tenant handoff (follow-up) persists per-tenant into the
-  encrypted `SecretsStore` with an HMAC-gated `/complete` + an api.anthropic.com
-  probe.
+  `claude` login exists (headless deployments with no Keychain; deterministic
+  tests). Open persists to `.env`; a hosted/multi-instance deployment's own
+  handoff (tracked in that deployment's repo) persists into an encrypted
+  per-instance secrets store with an HMAC-gated `/complete`.
 
 ## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
 

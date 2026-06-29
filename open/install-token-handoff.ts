@@ -10,9 +10,9 @@
  * `open/ambient-claude-auth.ts`) stays as a save-a-step optimisation — when the
  * box already has an ambient `claude` login, `resolveOpenLlmPool` resolves it
  * and this gate never renders. The handoff is the DEFAULT (no token + no
- * Keychain — the case every managed tenant and every Linux box hits).
+ * Keychain — the default case: Linux/headless boxes, fresh installs).
  *
- * This is a faithful but SIMPLIFIED port of the managed monorepo flow
+ * This is a faithful but SIMPLIFIED port of the prior monorepo install-token flow
  * (`neutron-old/identity/oauth/install-token-{handoff,store,page,script}.ts`).
  * The managed flow is a TWO-service architecture (identity service + signup
  * landing proxy) that needs an HMAC shared-secret on `/complete` because the
