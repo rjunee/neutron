@@ -6444,3 +6444,51 @@ never sets it). Does NOT hit the normal button-driven flow (which sets `signup_v
 confirmed by injecting it: import advanced + materialized in ~20s), but in single-owner Open
 the channel is always app-socket so a missing `signup_via` should never strand a user.
 Rec: default `channel_kind='app-socket'` when `signup_via` missing + `topic_id` present.
+
+## Reminders + proactive briefs now DELIVER to the app-ws client (M1 E2E live-delivery fix, 2026-06-28)
+
+**Bug (verified on a fresh isolated instance, real `/ws/app/chat` + real tick loop).**
+Fired reminders and the proactive morning brief are timer-driven AGENT MESSAGES, but the
+Open composer delivered them over the LEGACY `web:` chat registry (`landing.registry`) on
+the `web:<owner>` topic (`open/composer.ts` `reminderGeneralTopic` /
+`proactiveGeneralTopic`). The only client — the React/Expo app — connects to
+`/ws/app/chat` and binds its live sender in `appWsRegistry` under `app:<owner>`
+(`app-ws-surface.ts` `appWsTopicId`). So a fired reminder reached the durable history but
+its live push (`registry.send('web:<owner>', …)`) matched NO sender → the connected client
+was never notified, while a steady-state live-agent reply (delivered via `appWsRegistry` on
+`app:<owner>`) paints instantly. Net first-10-minutes M1 failure: you set "remind me at
+3pm", 3pm arrives, and nothing appears in your chat until you manually reload. (This was the
+"app: vs web: live-push parity" follow-up the prior reminder/proactive wiring flagged as
+deferred — comment at the old `proactiveGeneralTopic`.) Proven empirically: a steady-state
+reply reached the socket live; a fired reminder did NOT; the reminder durable row landed
+under `button_prompts:web:owner` while the reply's landed under `button_prompts:app:owner`;
+`app_chat_messages` (the adapter replay log) was empty (Open's `AppWsAdapter` is live-only).
+
+**Fix (`open/composer.ts`, no feature flag).** Deliver reminders + briefs the SAME way the
+agent delivers its own replies. `reminderGeneralTopic` / `proactiveGeneralTopic` now resolve
+to `appWsTopicId(OWNER_USER_ID)` (`app:<owner>`), and `resolveAppWsReminderTopic` maps a
+project destination to `app:<owner>:<project_id>` (mirrors the live-agent turn's
+project-scoped topic). A thin `appWsAgentPushRegistry` (a `WebChatSenderRegistry`-shaped
+bridge) forwards every fired-reminder/brief `agent_message` to `buildAppWsSendReply` — the
+EXACT steady-state reply path → `appWsHolder.adapter.send` → `appWsRegistry`. It
+forward-references `buildAppWsSendReply` / `appWsRegistry` (defined later in the same
+composition scope); both are touched only at FIRE time (tick loop / brief cron), never
+during boot. The durable `button_prompts` row now lands under the same `app:<owner>` topic
+agent replies use, carrying its `prompt_id` into the live frame so a later hydration
+de-dupes cleanly. The now-unused `webTopicId` import is dropped.
+
+**Verification.** New regression gate `open/__tests__/open-reminder-appws-live-delivery.test.ts`
+boots the real Open composition over `Bun.serve`, opens `/ws/app/chat`, creates a reminder
+via the real `/remind` command, nudges `fire_at` into the past, and asserts the REAL wired
+tick loop (a) marks it fired, (b) live-pushes the composed body to the CONNECTED socket, and
+(c) persists the durable row under `app:owner`. The gate FAILS on the pre-fix build (no live
+frame at `expect(liveFrame).toBeDefined()`) and PASSES with the fix. `open/__tests__/`
+(88 tests) + `reminders/` + `gateway/proactive/` green; `tsc -p tsconfig.json` clean;
+`open-proactive-activation.test.ts` updated to assert the corrected `app:<owner>` brief topic.
+
+**Also exercised + confirmed CLEAN this M1 sweep (no PR needed):** the tokenless chat turn
+degrades gracefully over the socket ("this box has no AI credential configured" —
+`open/composer.ts` appWsReceiver, not a crash/hang); adversarial `/remind` inputs
+(recurring `daily` → friendly `unsupported_recurrence`, empty → help, garbage time →
+`malformed_time_spec`, whitespace → help) all return clean structured results with no LLM
+dispatch; reminder create→persist→fire composes correctly end-to-end.

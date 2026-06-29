@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
-import { webTopicId } from '../../gateway/http/web-topic-id.ts'
+import { appWsTopicId } from '../../channels/adapters/app-ws/envelope.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -78,8 +78,10 @@ describe('Open proactive activation wiring', () => {
     const proactive = composition.tasks?.proactive
     expect(proactive).toBeDefined()
 
-    // The brief posts to the owner's General web topic.
-    expect(proactive!.resolveGeneralTopic?.()).toBe(webTopicId(OWNER_USER_ID))
+    // The brief posts to the owner's General app-ws topic — the SAME topic the
+    // connected React/Expo client binds + the live-agent reply path uses, so a
+    // fired brief reaches the open socket live (live-delivery fix 2026-06-28).
+    expect(proactive!.resolveGeneralTopic?.()).toBe(appWsTopicId(OWNER_USER_ID))
 
     // A DURABLE web sink is wired (NOT the live-only ChannelRouter) so a
     // timer-fired post survives a disconnected socket.
@@ -113,7 +115,7 @@ describe('Open proactive activation wiring', () => {
     const proactive = composition.tasks?.proactive
     expect(proactive).toBeDefined()
     // No feature flag — the brief topic + durable sink are wired regardless.
-    expect(proactive!.resolveGeneralTopic?.()).toBe(webTopicId(OWNER_USER_ID))
+    expect(proactive!.resolveGeneralTopic?.()).toBe(appWsTopicId(OWNER_USER_ID))
     expect(typeof proactive!.sink?.send).toBe('function')
     // LLM seams degrade to absent (the modules fall back to the pure template /
     // no quality gate) rather than crashing the boot.
