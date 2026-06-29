@@ -192,9 +192,15 @@ export function tridentDenyList(): string[] {
     'Bash(git filter-branch:*)',
     'Bash(git filter-repo:*)',
     'Bash(sudo:*)',
-    // Protected paths — never auto-written even under the allowlist.
+    // Protected paths — never auto-written even under the allowlist. Both the
+    // cwd-relative form (`.git/**`) AND the nested/absolute form (`**/.git/**`)
+    // are listed: the Edit/Write tools usually supply an ABSOLUTE worktree path
+    // (e.g. `/work/tree/.git/config`), which a relative-only pattern misses
+    // (Codex P2). The nested glob matches `.git`/`.claude` at any path depth.
     'Edit(.git/**)',
     'Write(.git/**)',
+    'Edit(**/.git/**)',
+    'Write(**/.git/**)',
     'Edit(.claude/**)',
     'Write(.claude/**)',
     'Edit(**/.claude/**)',
@@ -286,9 +292,17 @@ function isRecursiveForceRm(command: string): boolean {
   return hasRecursive && hasForce
 }
 
-/** Catastrophic absolute roots an `rm -rf` must never touch. */
+/** Catastrophic absolute SYSTEM roots an `rm -rf` must never touch: a bare
+ *  `/`/`~`/`$HOME`/`/*`, or a top-level system dir. (Home dirs under
+ *  `/Users`/`/home` are handled separately so a DEEP path inside a worktree —
+ *  e.g. `/Users/x/repos/proj/dist` — is NOT over-blocked; Codex P2.) */
 const CATASTROPHIC_RM_RE =
-  /(^|\s)(\/|~|\$HOME|\$\{HOME\}|\/\*|\/(usr|etc|var|bin|sbin|lib|lib64|boot|dev|sys|proc|root|opt|System|Library|Applications|home|Users)(\b|\/))/
+  /(^|\s)(\/|~|\$HOME|\$\{HOME\}|\/\*)(\s|\/?$)|(^|\s)\/(usr|etc|var|bin|sbin|lib|lib64|boot|dev|sys|proc|root|opt|System|Library|Applications)(\b|\/)/
+
+/** A WHOLE home directory (`/Users`, `/Users/<user>`, `/home/<user>`) — but NOT
+ *  a deeper project path under it (`/Users/<user>/repos/…`), which is a normal
+ *  worktree-internal cleanup target and stays allowed. */
+const WHOLE_HOME_RM_RE = /(^|\s)\/(Users|home)(\/[^/\s]+)?(\s|\/?$)/
 
 /**
  * Evaluate a Bash command against the trident auto-mode deny-guard. Returns a
@@ -345,11 +359,16 @@ export function evaluateBashDenyGuard(
     }
   }
 
-  // 7. `rm -rf` of a catastrophic root / home dir (outside the worktree).
+  // 7. `rm -rf` of a catastrophic system root or a WHOLE home dir (outside the
+  //    worktree). A deep path inside the worktree (e.g.
+  //    `<worktreeRoot>/dist`, `/Users/x/repos/proj/node_modules`) is NOT blocked.
   if (isRecursiveForceRm(cmd)) {
     const home = ctx.homeDir ?? process.env['HOME'] ?? ''
     if (CATASTROPHIC_RM_RE.test(cmd)) {
-      return deny('`rm -rf` of a system/home root is blocked in trident auto-mode')
+      return deny('`rm -rf` of a system root is blocked in trident auto-mode')
+    }
+    if (WHOLE_HOME_RM_RE.test(cmd)) {
+      return deny('`rm -rf` of a whole home directory is blocked in trident auto-mode')
     }
     if (home !== '' && new RegExp(`(^|\\s)${escapeRe(home)}(\\s|/?$)`).test(cmd)) {
       return deny('`rm -rf` of the home directory is blocked in trident auto-mode')

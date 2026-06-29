@@ -53,7 +53,7 @@ describe('buildTridentAutoModeSettings', () => {
     expect(allow).toContain('Bash(date:*)')
   })
 
-  test('deny list blocks force-push, reset --hard, and protected-path writes', () => {
+  test('deny list blocks force-push, reset --hard, and protected-path writes (relative + absolute)', () => {
     const deny = settings.permissions.deny
     expect(deny).toContain('Bash(git push --force:*)')
     expect(deny).toContain('Bash(git push -f:*)')
@@ -61,6 +61,11 @@ describe('buildTridentAutoModeSettings', () => {
     expect(deny).toContain('Edit(.git/**)')
     expect(deny).toContain('Edit(.claude/**)')
     expect(deny).toContain('Write(.claude/**)')
+    // Codex P2: the nested/absolute form must also be denied (Edit/Write usually
+    // supply an absolute worktree path like `/work/tree/.git/config`).
+    expect(deny).toContain('Edit(**/.git/**)')
+    expect(deny).toContain('Write(**/.git/**)')
+    expect(deny).toContain('Edit(**/.claude/**)')
   })
 
   test('wires a PreToolUse Bash deny-guard hook pointing at the hook script', () => {
@@ -144,7 +149,7 @@ describe('deny-guard — BLOCKS the destructive shapes (brief acceptance)', () =
     expect(denied('git branch -D master')).toBe(true)
   })
 
-  test('rm -rf of a system/home root is denied', () => {
+  test('rm -rf of a system root / whole home dir is denied', () => {
     expect(denied('rm -rf /')).toBe(true)
     expect(denied('rm -rf ~')).toBe(true)
     expect(denied('rm -rf $HOME')).toBe(true)
@@ -152,6 +157,8 @@ describe('deny-guard — BLOCKS the destructive shapes (brief acceptance)', () =
     expect(denied('rm -rf /etc')).toBe(true)
     expect(denied('rm -fr /System')).toBe(true)
     expect(denied('rm -rf /Users/ryan', { homeDir: '/Users/ryan' })).toBe(true)
+    expect(denied('rm -rf /Users')).toBe(true) // all homes
+    expect(denied('rm -rf /home/ubuntu')).toBe(true) // a whole home dir
   })
 
   test('curl|bash (remote-code exec) is denied', () => {
@@ -182,10 +189,15 @@ describe('deny-guard — ALLOWS legitimate build ops (no over-denial → never n
     expect(allowed('sqlite3 /tmp/p.db "UPDATE code_trident_runs SET x=1"')).toBe(true)
   })
 
-  test('rm of a relative path or a tmp work-file is allowed', () => {
+  test('rm of a relative path, a tmp work-file, or a DEEP worktree path is allowed (Codex P2)', () => {
     expect(allowed('rm -rf node_modules')).toBe(true)
     expect(allowed('rm -rf ./dist')).toBe(true)
     expect(allowed('rm -f /tmp/trident-add-widget.diff')).toBe(true) // not recursive
+    // A legitimate cleanup deep inside a worktree under /Users must NOT be
+    // over-blocked (the catastrophic-root rule only catches system + whole-home).
+    expect(allowed('rm -rf /Users/ryan/repos/neutron/dist')).toBe(true)
+    expect(allowed('rm -rf /Users/ryan/repos/project/node_modules')).toBe(true)
+    expect(allowed('rm -rf /home/ubuntu/app/build', { worktreeRoot: '/home/ubuntu/app' })).toBe(true)
   })
 
   test('empty / non-destructive commands are allowed', () => {
