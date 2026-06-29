@@ -2,6 +2,46 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-29 — Recurring reminders now reachable via the agent (no more silent one-shot + false confirmation)
+
+**What shipped (M1 adversarial E2E Round 3).** The `reminders_create` MCP tool —
+the path the conversational agent and the Expo app use — now accepts a
+`recurrence` cadence (`weekly` / `monthly` / `occasional`) and routes it through
+the engine's `createRecurring`, so a reminder the owner asks to repeat actually
+repeats.
+
+**The bug.** The recurring tick machinery (`reminders/tick.ts`
+`computeNextRecurrence` + `store.createRecurring` + `advanceRecurrence`) was
+sound, but NO user-facing create path ever set `recurrence`:
+- `cores/free/reminders` `reminders_create` exposed only `message` / `fire_at` /
+  `project_id` (`package.json` neutron block + `src/backend.ts`), always calling
+  one-shot `store.create()`.
+- `skills/remind/SKILL.md` nonetheless told the agent "for recurring, pass the
+  recurrence the tool's schema accepts" — no such field existed, so the agent
+  omitted it, created a one-shot that fires once and dies, and then **falsely
+  confirmed a recurring schedule**. ("remind me every Monday at 8am" → fires next
+  Monday only.) The only live caller of `createRecurring` was the onboarding
+  wow-moment.
+
+**The fix.**
+- `cores/free/reminders/src/backend.ts`: `RemindersCreateInput` gains optional
+  `recurrence`; `create()` routes to `store.createRecurring` when present, with a
+  runtime guard rejecting cadences the engine can't represent (the MCP boundary
+  passes untyped JSON, so a bare `'daily'` would otherwise write a row with a
+  NaN next-fire that never reschedules).
+- `cores/free/reminders/package.json` (authoritative manifest) + the mirror
+  `manifest.json`: add the `recurrence` enum to the `reminders_create`
+  input_schema so the agent can discover + pass it.
+- `skills/remind/SKILL.md`: document the supported cadences accurately and add
+  Rule 6 — daily/weekday are NOT representable (use the nag-until-done pattern),
+  and never confirm a recurrence you didn't actually set.
+
+**Tests.** `cores/free/reminders/__tests__/tools.test.ts`: a `recurrence: 'weekly'`
+create persists a recurring row (verified via the engine store side-channel) while
+a plain create stays one-shot; an unsupported `'daily'` cadence is rejected.
+Full reminders-core (100) + engine reminder (166) suites green; reminders-core
+leaf `tsc` clean.
+
 ## 2026-06-29 — Whitespace-only chat message no longer dead-ends (decode ⇄ worker trim parity)
 
 **What shipped (M1 adversarial E2E Round 2).** A whitespace-only chat message is

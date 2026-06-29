@@ -60,10 +60,12 @@
  */
 
 import {
+  ALL_REMINDER_RECURRENCES,
   ReminderStore,
   type CreateReminderInput,
   type CreateRecurringReminderInput,
   type Reminder,
+  type ReminderRecurrence,
 } from '@neutronai/reminders'
 import {
   NO_PROJECT,
@@ -101,6 +103,15 @@ export interface RemindersCreateInput {
   fire_at: number
   /** Optional project scope; persisted as the engine's topic_id under the hood. */
   project_id?: string
+  /**
+   * Optional cadence. When set, the reminder RECURS: `fire_at` is the first
+   * occurrence and the tick loop reschedules the next one after each fire
+   * (`weekly` +7d, `monthly` +30d, `occasional` +14d). When omitted the
+   * reminder is one-shot. Daily / weekday cadences are NOT representable here —
+   * the skill steers those to the nag-until-done pattern instead of falsely
+   * claiming recurrence.
+   */
+  recurrence?: ReminderRecurrence
 }
 
 export interface RemindersCreateResult {
@@ -282,6 +293,32 @@ export function buildReminderStoreBackend(
 
   return {
     async create(input: RemindersCreateInput): Promise<RemindersCreateResult> {
+      // A cadence makes the reminder RECUR: route through the engine's
+      // `createRecurring` so the tick loop reschedules the next occurrence
+      // after each fire (instead of a one-shot that fires once and dies — the
+      // bug where the agent confirmed "every week" but the row never repeated).
+      if (input.recurrence !== undefined) {
+        // The MCP boundary passes untyped JSON, so a model could send a cadence
+        // the engine can't represent (e.g. 'daily'). Reject it clearly rather
+        // than writing a row whose `computeNextRecurrence` delta is undefined →
+        // NaN fire_at that silently never reschedules.
+        if (!ALL_REMINDER_RECURRENCES.includes(input.recurrence)) {
+          throw new Error(
+            `reminders_create: unsupported recurrence '${String(input.recurrence)}' ` +
+              `(allowed: ${ALL_REMINDER_RECURRENCES.join(', ')})`,
+          )
+        }
+        const recurring_input: CreateRecurringReminderInput = {
+          project_slug: opts.project_slug,
+          topic_id: input.project_id ?? null,
+          fire_at: input.fire_at,
+          message: input.message,
+          recurrence: input.recurrence,
+          source: CORE_SOURCE_TAG,
+        }
+        const row = await store.createRecurring(recurring_input)
+        return { id: row.id, fire_at: row.fire_at }
+      }
       const create_input: CreateReminderInput = {
         project_slug: opts.project_slug,
         topic_id: input.project_id ?? null,

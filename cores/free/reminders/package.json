@@ -28,13 +28,14 @@
     "tools": [
       {
         "name": "reminders_create",
-        "description": "Schedule a one-shot reminder. Returns the new reminder's id and the persisted fire_at (unix seconds).",
+        "description": "Schedule a reminder. One-shot by default; pass `recurrence` to make it repeat. Returns the new reminder's id and the persisted fire_at (unix seconds).",
         "input_schema": {
           "type": "object",
           "properties": {
             "message":    { "type": "string", "description": "Reminder body — composed verbatim or wrapped by the fire-time agent." },
-            "fire_at":    { "type": "number", "description": "Unix seconds (UTC) when the reminder should fire." },
-            "project_id": { "type": "string", "description": "Optional project scope; persisted as topic_id under the hood." }
+            "fire_at":    { "type": "number", "description": "Unix seconds (UTC) when the reminder should fire (the FIRST occurrence when recurring)." },
+            "project_id": { "type": "string", "description": "Optional project scope; persisted as topic_id under the hood." },
+            "recurrence": { "type": "string", "enum": ["weekly", "monthly", "occasional"], "description": "Optional cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. Daily / weekday cadences are NOT supported here; use the nag-until-done reminder pattern for those instead of claiming a recurrence." }
           },
           "required": ["message", "fire_at"]
         },
