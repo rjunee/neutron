@@ -11,7 +11,7 @@ strategist" in chat and have it persist and take effect — the long-promised
 address the agent by the new name and adopt the new disposition.
 
 **The bug.** The `agent-settings` Core's `update_agent_name` / `update_personality`
-route through an injected `AgentProfileBackend`. The multi-tenant platform threads
+route through an injected `AgentProfileBackend`. The hosting layer threads
 an RW-registry-backed impl; Open has no registry, and `mount-open-cores.ts`
 threaded **nothing**, so `buildCoresBackendFactories` fell back to the
 `available:false` no-op (`gateway/boot-helpers.ts:1168`). Both tools then

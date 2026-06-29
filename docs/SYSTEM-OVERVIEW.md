@@ -1431,8 +1431,7 @@ answered inline.
 Core (`cores/free/agent-settings/`), sharing the same `projects`-table backend.
 
 **Agent profile (name + personality) on Open.** `update_agent_name` /
-`update_personality` route through an injected `AgentProfileBackend`. On the
-multi-tenant platform that backend opens the RW registry row; **Open has no
+`update_personality` route through an injected `AgentProfileBackend`. In a hosted deployment that backend opens the RW registry row; **Open has no
 registry**, so historically `mount-open-cores.ts` threaded nothing and the Core
 fell back to the `available:false` no-op — both tools returned
 `SETTINGS_BACKEND_UNAVAILABLE_ERROR` on every Open box, breaking onboarding's

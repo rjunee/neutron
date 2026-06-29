@@ -4,7 +4,7 @@
  * The agent-settings Core exposes `update_agent_name` / `update_personality`,
  * which the onboarding final-handoff promises the user can call later ("switch
  * personality / update my name later — just ask"). Both route through an
- * injected `AgentProfileBackend`; on the multi-tenant platform that backend
+ * injected `AgentProfileBackend`; in a hosted deployment that backend
  * opens the RW registry row (`NEUTRON_REGISTRY_DB_PATH`). Open has NO registry,
  * so historically `mount-open-cores.ts` threaded nothing and the Core fell back
  * to the `available:false` no-op — both tools returned
