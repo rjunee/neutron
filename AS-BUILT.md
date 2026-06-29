@@ -31,6 +31,81 @@ one row).
 names `[Topline Revenue, Acme, Book]`, import proposes `[Acme, Infra]`; asserts
 all four projects materialize (`Acme` once) instead of the pre-fix `[Acme, Infra]`.
 FAILS pre-fix, PASSES with the fix; the four pre-existing finalize tests stay green.
+## 2026-06-29 — Restart resilience: re-arm the import-completion watcher on reconnect
+
+**What shipped (M1 adversarial E2E Round 2).** A server restart mid-import no
+longer permanently wedges onboarding.
+
+**The bug.** The Path-1 import-completion watcher (`watchImportCompletion` in
+`open/composer.ts`) is the ONLY consumer of the `import_analysis_presented`
+phase — it transitions that phase back to `work_interview_gap_fill` so the live
+interview can finish and materialize the imported projects, and the accept button
+for that phase is deliberately SUPPRESSED on the assumption the watcher
+auto-consumes it. But the watcher is a purely in-memory `setTimeout` chain armed
+ONLY inside `notifyImportUpload` (the upload request). So on a server restart
+(redeploy / crash / `launchctl kickstart`) the watcher is gone; the import-running
+cron (which DOES re-arm on boot) drives the persisted row into
+`import_analysis_presented`; and nothing ever consumes it. The post-turn extractor
+also refuses to finalize on top of an import phase. Onboarding wedged
+PERMANENTLY — a chat that never finishes onboarding and never materializes the
+imported projects.
+
+**The fix (no feature flag).** `on_session_open` now re-arms the watcher whenever
+the persisted phase is import-active (`import_running` / `import_analysis_presented`).
+The watcher is idempotent (`importWatchActive` guards a double-arm), so this is
+safe during a live session and a no-op when no import is in flight. A reconnect
+after a restart therefore resumes the consume.
+
+**Regression gate** `tests/integration/import-watch-rearm-on-reconnect.open.test.ts`
+seeds an `onboarding_state` row at `import_analysis_presented` (with an
+`import_result`), boots a FRESH Open composition over `Bun.serve` (no upload in
+this process → watcher unarmed, i.e. a restart), opens `/ws/app/chat`, and asserts
+the phase transitions back to `work_interview_gap_fill` within a few watcher ticks
+while preserving the import context. FAILS pre-fix (times out, phase stranded),
+PASSES with the fix.
+
+**Known related follow-up (not in this PR).** If the restart lands while the job
+is still `import_running`, the in-memory `ImportJobRunner.inflight` map is lost and
+nothing re-drives the persisted job, so the import-running cron waits up to the
+15-min hard-timeout before advancing — degraded but self-recovering (vs. this PR's
+PERMANENT wedge). Flagged for a boot-time job reaper/resumer.
+## 2026-06-29 — Project-scoped reminders now live-deliver (the residual #105 missed)
+
+**What shipped (M1 adversarial E2E Round 2).** Fired reminders (and the morning
+brief) that are scoped to a PROJECT now actually reach the connected
+`/ws/app/chat` client, instead of silently vanishing. #105 fixed this for the
+GENERAL case but the project-scoped case stayed broken.
+
+**The bug.** `resolveAppWsReminderTopic` (`open/composer.ts`) mapped a project
+reminder (`topic_id = app-project:<id>`, the shape `app-reminders-surface` stamps
+at create time) to the app-ws topic `app:<user>:<projectId>`, porting the LEGACY
+web path's per-project topic suffixing (`web:<user>:<project>`). But the app-ws
+client opens ONE socket and registers its live sender + replays history on the
+BARE `app:<user>` topic only (`app-ws-surface.ts` registers
+`appWsTopicId(user_id)`; `config.topicId = appWsTopicId(userId)`); project context
+is a per-FRAME field, not a topic suffix. So a project reminder's live push hit
+`registry.send('app:<user>:<projectId>', …)` — no registered sender → dropped —
+AND its durable `button_prompts` row landed under a topic the client NEVER
+replays. A project-scoped reminder therefore disappeared entirely, live and on
+reload, and a RECURRING project reminder no-op'd on every occurrence. #105's
+regression test only exercised the General topic, which is why this slipped.
+
+**The fix (no feature flag).** `resolveAppWsReminderTopic` now resolves EVERY
+fired reminder/brief to the owner's bare `app:<user>` topic — the one surface the
+client binds + hydrates, exactly the General-reminder path #105 made work.
+Project grouping is unaffected: it lives on the reminder row's stored `topic_id`
+(`app-project:<id>`) which the reminders tab filters on and
+`deriveReminderProjectId` keys context/metering off — neither reads this delivery
+topic. The fired message now simply surfaces in the owner's chat (the single
+surface the app reads) instead of being lost.
+
+**Regression gate** `open/__tests__/open-project-reminder-appws-live-delivery.test.ts`
+boots the real Open composition over a live `Bun.serve`, opens `/ws/app/chat` with
+a project context, fires a `topic_id = app-project:<id>` reminder via the real
+tick loop, and asserts the composed body (a) live-pushes to the connected socket
+and (b) persists under the bare `app:owner` topic. FAILS pre-fix (no frame; durable
+row under `app:owner:<id>`), PASSES with the fix. The existing
+`open-reminder-appws-live-delivery.test.ts` (General) stays green.
 
 ## 2026-06-28 — Claude-Max OAuth handoff is the DEFAULT first auth screen (functional, not a dead 503)
 
