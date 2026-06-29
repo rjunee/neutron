@@ -41,6 +41,34 @@ describe('resolveLocalTimezone', () => {
     expect(tz).toBe('Australia/Sydney')
   })
 
+  test('rejects an invalid TZ override (ICU-unsupported) and falls through to the runtime zone', () => {
+    // A colon-prefixed / typo'd TZ would throw RangeError downstream in
+    // resolveOwnerDay's Intl.DateTimeFormat — skip it instead of wedging.
+    // (Legacy POSIX aliases like `PST8PDT`/`EST5EDT` ARE ICU-valid and are
+    // intentionally NOT rejected — they never throw.)
+    for (const bad of [':America/New_York', 'Not/AZone', 'America/Nowhere', 'totally-bogus']) {
+      const tz = resolveLocalTimezone({
+        env: { TZ: bad },
+        intlTimeZone: () => 'Europe/Madrid',
+      })
+      expect(tz).toBe('Europe/Madrid')
+    }
+  })
+
+  test('an invalid TZ with no usable runtime zone lands on the defensive floor (never an invalid zone)', () => {
+    const tz = resolveLocalTimezone({
+      env: { TZ: 'Not/AZone' },
+      intlTimeZone: () => undefined,
+    })
+    expect(tz).toBe(LAST_RESORT_TIMEZONE)
+  })
+
+  test('the returned zone is always accepted by Intl.DateTimeFormat (no downstream RangeError)', () => {
+    const tz = resolveLocalTimezone({ env: { TZ: 'totally-bogus' } })
+    // Must not throw — this is exactly what the brief scheduler does.
+    expect(() => new Intl.DateTimeFormat('en-US', { timeZone: tz })).not.toThrow()
+  })
+
   test('uses the defensive last-resort floor only when both sources are unavailable', () => {
     const tz = resolveLocalTimezone({
       env: {},

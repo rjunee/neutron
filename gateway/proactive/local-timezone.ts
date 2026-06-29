@@ -48,14 +48,34 @@ function defaultIntlTimeZone(): string | undefined {
   }
 }
 
-/** A timezone string is usable only if it is a non-empty, non-blank string. */
+/**
+ * A timezone string is usable only if it is a non-empty string that ICU
+ * actually accepts as an IANA zone. This is the critical guard: the resolved
+ * value is threaded straight into `Intl.DateTimeFormat({ timeZone })` by the
+ * brief scheduler (`resolveOwnerDay` / `ownerLocalHour`), which THROWS a
+ * `RangeError` on an unsupported zone — so an operator who exported a POSIX-ish
+ * `TZ` (e.g. `PST8PDT`), a colon-prefixed value (`:America/New_York`), or a
+ * typo would wedge the cron every tick. Rejecting invalid values here makes the
+ * resolver fall through to the next source (runtime zone → floor) instead.
+ */
 function usable(tz: string | undefined | null): tz is string {
-  return typeof tz === 'string' && tz.trim().length > 0
+  if (typeof tz !== 'string') return false
+  const trimmed = tz.trim()
+  if (trimmed.length === 0) return false
+  try {
+    // Throws RangeError for any zone ICU does not recognise.
+    new Intl.DateTimeFormat('en-US', { timeZone: trimmed })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
  * Resolve the host's local IANA timezone. Prefers an explicit `TZ` env override,
- * then the runtime's resolved zone, then the defensive floor. Never throws.
+ * then the runtime's resolved zone, then the defensive floor. Every candidate is
+ * validated against ICU before it is returned, so the result is always a zone
+ * `Intl.DateTimeFormat` accepts. Never throws.
  */
 export function resolveLocalTimezone(deps: ResolveLocalTimezoneDeps = {}): string {
   const env = deps.env ?? process.env
