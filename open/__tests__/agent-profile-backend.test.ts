@@ -161,6 +161,32 @@ describe('buildOpenAgentProfileBackend — persistence', () => {
     expect(soul.split(PROFILE_BLOCK_START).length - 1).toBe(1)
   })
 
+  test('concurrent name + personality updates do NOT lose a field (serialized)', async () => {
+    const backend = buildOpenAgentProfileBackend({ owner_home: ownerHome })
+    // Simulate an agent issuing both tools in the same turn.
+    await Promise.all([
+      backend.setAgentName('Nova'),
+      backend.setAgentPersonality('calm strategist — precise, warm'),
+    ])
+    const store = readStore()
+    expect(store.agent_name).toBe('Nova')
+    expect(store.agent_personality).toBe('calm strategist — precise, warm')
+    const soul = readSoul()
+    expect(soul).toContain('You are Nova.')
+    expect(soul).toContain('Your personality: calm strategist — precise, warm')
+    expect(soul.split(PROFILE_BLOCK_START).length - 1).toBe(1)
+  })
+
+  test('rejects a symlinked persona/ directory instead of writing through it', async () => {
+    const { symlinkSync, mkdtempSync } = await import('node:fs')
+    // Point <owner_home>/persona at an outside dir via symlink.
+    const outside = mkdtempSync(join(tmpdir(), 'open-agent-profile-escape-'))
+    symlinkSync(outside, join(ownerHome, 'persona'))
+    const backend = buildOpenAgentProfileBackend({ owner_home: ownerHome })
+    await expect(backend.setAgentName('Nova')).rejects.toThrow(/persona directory rejected: symlink/)
+    rmSync(outside, { recursive: true, force: true })
+  })
+
   test('preserves an existing onboarding-authored SOUL.md body', async () => {
     mkdirSync(join(ownerHome, 'persona'), { recursive: true })
     writeFileSync(

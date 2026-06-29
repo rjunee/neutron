@@ -44,7 +44,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { AgentProfileBackend } from '../cores/free/agent-settings/index.ts'
@@ -176,8 +176,31 @@ export function buildOpenAgentProfileBackend(
     }
   }
 
+  /**
+   * Refuse to write through a symlinked `persona/` directory. `mkdir(...,
+   * { recursive: true })` accepts an existing symlink and would let a hostile
+   * `persona -> /elsewhere` redirect the profile writes outside `owner_home`.
+   * The PersonaPromptLoader + admin-personality-surface reject a symlinked
+   * `persona/` dir for reads (ISSUE #37); the writer enforces the same.
+   */
+  const assertPersonaDirSafe = async (): Promise<void> => {
+    try {
+      const st = await lstat(personaDir)
+      if (st.isSymbolicLink()) {
+        throw new Error(
+          `persona directory rejected: symlink (refusing to write agent profile through ${personaDir})`,
+        )
+      }
+    } catch (err) {
+      // Re-throw our own rejection; a missing dir (ENOENT) is fine — mkdir
+      // below creates a real one.
+      if (err instanceof Error && err.message.startsWith('persona directory rejected')) throw err
+    }
+  }
+
   /** Atomic write via tmp + rename, with the persona dir created on demand. */
   const atomicWrite = async (target: string, content: string): Promise<void> => {
+    await assertPersonaDirSafe()
     await mkdir(personaDir, { recursive: true })
     const tmp = `${target}.${randomUUID()}.tmp`
     try {
@@ -230,18 +253,39 @@ export function buildOpenAgentProfileBackend(
     }
   }
 
+  // Serialize the read-modify-write of the two setters. An agent can issue
+  // `update_agent_name` AND `update_personality` in the SAME turn; without a
+  // lock both would read the same old store, then each persist a full snapshot
+  // and the last writer would drop the other's field. The chain makes each
+  // setter read the latest store after the prior write committed.
+  let writeChain: Promise<unknown> = Promise.resolve()
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = writeChain.then(fn, fn)
+    // Keep the chain alive regardless of this op's outcome (don't let a reject
+    // poison subsequent writes); swallow here, surface via the returned promise.
+    writeChain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
   return {
     available: true,
     async get(): Promise<{ agent_name: string | null; agent_personality: string | null }> {
       return await readStore()
     },
     async setAgentName(agent_name: string | null): Promise<void> {
-      const current = await readStore()
-      await persist({ ...current, agent_name })
+      await serialize(async () => {
+        const current = await readStore()
+        await persist({ ...current, agent_name })
+      })
     },
     async setAgentPersonality(agent_personality: string | null): Promise<void> {
-      const current = await readStore()
-      await persist({ ...current, agent_personality })
+      await serialize(async () => {
+        const current = await readStore()
+        await persist({ ...current, agent_personality })
+      })
     },
   }
 }
