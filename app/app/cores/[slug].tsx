@@ -18,10 +18,12 @@
  */
 
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  type AppStateStatus,
   Linking,
   Pressable,
   ScrollView,
@@ -30,6 +32,7 @@ import {
   View,
 } from 'react-native';
 
+import { appStateBecameActive } from '../../lib/app-state-refetch';
 import { loadAppConfig } from '../../lib/config';
 import { useAuthSession } from '../../lib/session';
 import {
@@ -61,9 +64,11 @@ export default function CoreScreen() {
     if (user === null) router.replace('/login');
   }, [router, user]);
 
-  const fetchAll = useCallback(async () => {
+  // `silent` skips the full-screen loading state so a foreground refetch keeps
+  // the current view visible (no spinner flash) instead of blanking the screen.
+  const fetchAll = useCallback(async (opts?: { silent?: boolean }) => {
     if (client === null || slugValue.length === 0) return;
-    setLoading(true);
+    if (opts?.silent !== true) setLoading(true);
     setError(null);
     try {
       const list = await client.list();
@@ -87,12 +92,26 @@ export default function CoreScreen() {
     } catch (err) {
       setError(formatErr(err));
     } finally {
-      setLoading(false);
+      if (opts?.silent !== true) setLoading(false);
     }
   }, [client, slugValue]);
 
   useEffect(() => {
     void fetchAll();
+  }, [fetchAll]);
+
+  // Refetch when the app returns to the foreground. `Connect` opens the system
+  // browser via `Linking.openURL` (Google blocks OAuth in webviews), which
+  // backgrounds the app WITHOUT unmounting this screen — so the mount-time
+  // fetch never re-runs and the status would stay stale ("Not connected") after
+  // a successful grant. A foreground refetch reconciles it.
+  const appState = useRef(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (appStateBecameActive(appState.current, next)) void fetchAll({ silent: true });
+      appState.current = next;
+    });
+    return () => sub.remove();
   }, [fetchAll]);
 
   const handleConnect = useCallback(async () => {

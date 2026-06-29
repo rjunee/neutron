@@ -19,10 +19,12 @@
  */
 
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  type AppStateStatus,
   Linking,
   Pressable,
   ScrollView,
@@ -32,6 +34,7 @@ import {
   View,
 } from 'react-native';
 
+import { appStateBecameActive } from '../lib/app-state-refetch';
 import { shouldRedirectToLogin } from '../lib/auth-helpers';
 import { loadAppConfig } from '../lib/config';
 import { useAuthSession } from '../lib/session';
@@ -71,21 +74,39 @@ export default function IntegrationsScreen() {
     if (shouldRedirectToLogin({ status, user })) router.replace('/login');
   }, [router, status, user]);
 
-  const fetchAll = useCallback(async () => {
+  // `silent` skips the full-screen loading state so a foreground refetch keeps
+  // the current rows visible (no spinner flash) instead of blanking the screen.
+  const fetchAll = useCallback(async (opts?: { silent?: boolean }) => {
     if (client === null) return;
-    setLoading(true);
+    if (opts?.silent !== true) setLoading(true);
     setError(null);
     try {
       setData(await client.integrations());
     } catch (err) {
       setError(formatErr(err));
     } finally {
-      setLoading(false);
+      if (opts?.silent !== true) setLoading(false);
     }
   }, [client]);
 
   useEffect(() => {
     void fetchAll();
+  }, [fetchAll]);
+
+  // Refetch when the app returns to the foreground. `Connect` hands off to the
+  // system browser (Google blocks OAuth in webviews) via `Linking.openURL`,
+  // which backgrounds the app WITHOUT unmounting/blurring this screen — so the
+  // mount-time fetch never re-runs and the row would keep reading the stale
+  // pre-grant status ("Not connected") even though the connect succeeded. A
+  // foreground refetch reconciles it. (The web sibling tab has a manual Refresh
+  // button for the same reason.)
+  const appState = useRef(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (appStateBecameActive(appState.current, next)) void fetchAll({ silent: true });
+      appState.current = next;
+    });
+    return () => sub.remove();
   }, [fetchAll]);
 
   const view = useMemo(
