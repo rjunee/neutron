@@ -99,3 +99,31 @@ export function resolveAttachmentSource(
   const absolute = uri.startsWith('/') ? `${ctx.base_url.replace(/\/+$/, '')}${uri}` : uri;
   return { uri: absolute, headers: { Authorization: `Bearer ${ctx.token}` } };
 }
+
+/**
+ * Convert the attachment URIs stored on an optimistic chat bubble into
+ * gateway-sendable URLs ahead of a (re)send.
+ *
+ * An optimistic bubble stores the raw *local* device URIs
+ * (`file://`/`content://`/`ph://`, `chat-state.tsx:send`); only a
+ * successful echo swaps them for the `/api/app/upload/<user>/<hash>.<ext>`
+ * server URL via `reconcileEcho`. A FAILED send never echoed, so on
+ * `retry()` the bubble still holds local URIs — and the gateway's
+ * `sanitizeAttachments` rejects the WHOLE array if any entry isn't
+ * `https?://`- or `/`-prefixed (`channels/adapters/app-ws/envelope.ts`),
+ * so the image-only retry 400s (`missing_body`) and a text+image retry
+ * silently loses the image.
+ *
+ * Routing every stored URI back through `uploadFn` (which itself no-ops
+ * any entry that is already an uploaded URL, via
+ * `isAlreadyUploadedAttachmentUrl`) guarantees the gateway only ever sees
+ * URLs it will accept — and makes retry idempotent for the
+ * already-uploaded case + recoverable for the upload-failed case.
+ */
+export async function resolveSendableAttachments(
+  storedUris: ReadonlyArray<string>,
+  uploadFn: (atts: ReadonlyArray<{ uri: string }>) => Promise<string[]>,
+): Promise<string[]> {
+  if (storedUris.length === 0) return [];
+  return uploadFn(storedUris.map((uri) => ({ uri })));
+}

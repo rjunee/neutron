@@ -31,7 +31,7 @@ import type {
   AppWsOutboundAgentMessagePartial,
   AppWsOutboundUserMessageEcho,
 } from './ws-envelope';
-import { isAlreadyUploadedAttachmentUrl } from './attachment-url';
+import { isAlreadyUploadedAttachmentUrl, resolveSendableAttachments } from './attachment-url';
 import { chatReducer, commandResultBody, EMPTY_CHAT_STATE, type ChatMessage, type ChatState } from './chat-streaming';
 import { uploadAttachment, type UploadProgress } from './upload-client';
 
@@ -352,17 +352,37 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
       );
       if (target === undefined) return false;
       dispatch({ type: 'mark_send_retrying', client_msg_id });
+      // The optimistic bubble carries the *local* device URIs
+      // (`file://`/`content://`/`ph://`) — they're only swapped for the
+      // gateway `/api/app/upload/...` URL by `reconcileEcho`, which never
+      // ran for a failed send. Re-run them through `performUpload` (which
+      // short-circuits any entry that is already an uploaded URL via
+      // `isAlreadyUploadedAttachmentUrl`) so retry ships server URLs the
+      // gateway's `sanitizeAttachments` accepts. Without this the gateway
+      // drops the whole `attachments` array → image-only retry 400s
+      // (`missing_body`) and text+image silently loses the image.
+      let attachmentUrls: string[] = [];
+      if (target.attachments !== undefined && target.attachments.length > 0) {
+        try {
+          attachmentUrls = await resolveSendableAttachments(
+            target.attachments,
+            performUpload,
+          );
+        } catch (err) {
+          console.warn('[chat-state] retry upload failed:', err);
+          dispatch({ type: 'mark_send_failed', client_msg_id });
+          return false;
+        }
+      }
       const sendOk = await dispatchSend({
         client_msg_id,
         body: target.body,
-        ...(target.attachments !== undefined && target.attachments.length > 0
-          ? { attachments: target.attachments }
-          : {}),
+        ...(attachmentUrls.length > 0 ? { attachments: attachmentUrls } : {}),
       });
       if (!sendOk) dispatch({ type: 'mark_send_failed', client_msg_id });
       return sendOk;
     },
-    [state.messages, dispatchSend],
+    [state.messages, performUpload, dispatchSend],
   );
 
   const chooseOption = useCallback(

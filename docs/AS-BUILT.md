@@ -2,6 +2,36 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Chat — retrying a failed image send now re-uploads (no more lost/broken image on retry)
+
+**What shipped.** Fix for the M1 round-6 adversarial-E2E bug: in the Expo native
+app, tapping **Retry** on a failed image send never recovered the image. The
+optimistic bubble stores the raw *local* device URI (`file://`/`content://`/`ph://`)
+and only a successful echo swaps it for the gateway `/api/app/upload/...` URL via
+`reconcileEcho` — a failed send never echoed. `retry()` re-sent the stored local
+URI verbatim with no re-upload (only `send()` ever called `performUpload`), so the
+gateway's `sanitizeAttachments` (which rejects the WHOLE array unless every entry
+is `https?://`/`/`-prefixed) dropped it: **image-only retry 400'd permanently**
+(`missing_body`) and a **text+image retry silently lost the image**. This was the
+untested companion to #116 (which fixed *rendering* the same attachments).
+
+- **`app/lib/attachment-url.ts`** — new pure `resolveSendableAttachments(storedUris,
+  uploadFn)` that routes a bubble's stored URIs through the upload step (the same
+  `performUpload` `send()` uses, which no-ops already-uploaded URLs via
+  `isAlreadyUploadedAttachmentUrl`). Idempotent for already-uploaded entries,
+  recoverable for the upload-failed case.
+- **`app/lib/chat-state.tsx`** — `retry()` now calls `resolveSendableAttachments`
+  before `dispatchSend` (and marks the send failed if the re-upload throws),
+  mirroring `send()`'s upload→dispatch order.
+
+**Tests.** `app/__tests__/chat-retry-reupload-attachments.test.ts` (8 new):
+pure-helper coverage (empty list, single/triple local-URI recovery across
+`file`/`content`/`ph`, idempotent already-uploaded pass-through, mixed array,
+upload-failure propagation) plus a CONTROL that reproduces the pre-fix rejection
+against the **real** gateway `sanitizeAttachments`. `tsc -p app/tsconfig.json`
+clean; adjacent chat suites green (39). Round-6 findings:
+`docs/research/m1-e2e-round6-findings-2026-06-29.md`.
+
 ## Trident v2 — inner Forge→Argus→fix loop is now a native CC Dynamic Workflow (Phase 2 hard cutover)
 
 **What shipped.** The trident INNER loop (Forge build → Argus review → fix loop)
