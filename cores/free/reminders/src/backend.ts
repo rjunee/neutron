@@ -373,22 +373,38 @@ export function buildReminderStoreBackend(
             `reminders_snooze: id=${input.id} no longer pending`,
           )
         }
-        const create_input: CreateReminderInput = {
-          project_slug: original.project_slug,
-          topic_id: original.topic_id,
-          fire_at: input.new_fire_at,
-          message: original.message,
-          // Preserve the ORIGINAL row's source on the replacement.
-          // `list()` returns every pending row for the owner — incl.
-          // organic engine rows whose source is NULL — so a user can
-          // snooze a row this Core did not create. Re-tagging the
-          // replacement as CORE_SOURCE_TAG would make the uninstall
-          // sweep cancel a reminder the Core never owned (symmetric
-          // inverse of the r1 leak). `source` may be NULL, the Core
-          // tag, or another tag — round-trip it verbatim.
-          source: original.source,
+        // Preserve the ORIGINAL row's source on the replacement.
+        // `list()` returns every pending row for the owner — incl.
+        // organic engine rows whose source is NULL — so a user can
+        // snooze a row this Core did not create. Re-tagging the
+        // replacement as CORE_SOURCE_TAG would make the uninstall
+        // sweep cancel a reminder the Core never owned (symmetric
+        // inverse of the r1 leak). `source` may be NULL, the Core
+        // tag, or another tag — round-trip it verbatim.
+        //
+        // Recurring rows go through `createRecurring(...)` so snoozing a
+        // recurring reminder PRESERVES its cadence — otherwise a weekly/monthly
+        // reminder would silently become a one-shot after the first snooze and
+        // stop repeating (mirrors the `update` path's same branch).
+        let replacement: Reminder
+        if (original.recurrence !== null) {
+          replacement = await txStore.createRecurring({
+            project_slug: original.project_slug,
+            topic_id: original.topic_id,
+            fire_at: input.new_fire_at,
+            message: original.message,
+            recurrence: original.recurrence,
+            source: original.source,
+          })
+        } else {
+          replacement = await txStore.create({
+            project_slug: original.project_slug,
+            topic_id: original.topic_id,
+            fire_at: input.new_fire_at,
+            message: original.message,
+            source: original.source,
+          })
         }
-        const replacement = await txStore.create(create_input)
         return {
           id: replacement.id,
           cancelled_id: input.id,

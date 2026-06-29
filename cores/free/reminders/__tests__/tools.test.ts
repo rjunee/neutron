@@ -231,6 +231,23 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(listed.results[0]?.fire_at).toBe(1_700_500_000)
   })
 
+  test('reminders_snooze PRESERVES recurrence (a snoozed weekly reminder stays weekly)', async () => {
+    const tools = makeTools()
+    // Now that recurring reminders are reachable, snoozing one must keep its
+    // cadence — otherwise it silently degrades to a one-shot after the first
+    // snooze and stops repeating (Codex r1 P2).
+    const original = await tools.reminders_create({
+      message: 'weekly review',
+      fire_at: 1_700_000_000,
+      recurrence: 'weekly',
+    })
+    const snoozed = await tools.reminders_snooze({ id: original.id, new_fire_at: 1_700_500_000 })
+    const replacement = store.get(snoozed.id)
+    expect(replacement?.status).toBe('pending')
+    expect(replacement?.fire_at).toBe(1_700_500_000)
+    expect(replacement?.recurrence).toBe('weekly')
+  })
+
   test('reminders_snooze rejects a non-pending reminder', async () => {
     const tools = makeTools()
     const r = await tools.reminders_create({ message: 'x', fire_at: 1000 })

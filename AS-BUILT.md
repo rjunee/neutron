@@ -35,6 +35,12 @@ sound, but NO user-facing create path ever set `recurrence`:
 - `skills/remind/SKILL.md`: document the supported cadences accurately and add
   Rule 6 — daily/weekday are NOT representable (use the nag-until-done pattern),
   and never confirm a recurrence you didn't actually set.
+- `cores/free/reminders/src/backend.ts` `snooze` (Codex r1 P2): now that recurring
+  reminders are reachable, snoozing one must PRESERVE its cadence — the snooze
+  recreate branched only through one-shot `create()`, so a weekly/monthly reminder
+  silently became a one-shot after the first snooze. Now branches on
+  `original.recurrence` and recreates via `createRecurring` (mirrors the `update`
+  path).
 
 **Tests.** `cores/free/reminders/__tests__/tools.test.ts`: a `recurrence: 'weekly'`
 create persists a recurring row (verified via the engine store side-channel) while
