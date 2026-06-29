@@ -82,6 +82,7 @@ import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
+import { resolveOnboardingOpenAiKey } from '../gateway/realmode-composer/resolve-onboarding-openai-key.ts'
 import { DocSearchIndex } from '../doc-search/store.ts'
 import { DocSearchRuntime } from '../doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
@@ -104,8 +105,6 @@ import {
 } from '../runtime/adapters/claude-code/persistent/agent-skills.ts'
 import type { TridentRun } from '../trident/store.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
-import { ApiKeyStore } from '../auth/api-key-store.ts'
-import { ONBOARDING_OPENAI_LABEL } from '../onboarding/optional-keys.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
@@ -682,34 +681,26 @@ export function buildOpenGraphComposer(
     // gbrain — previously unwired in Open), and the Path 1 onboarding finalize.
     // Lazy + fail-soft: building it never spawns `gbrain serve` until first use.
     //
-    // ND1: resolve the owner's onboarding-captured OpenAI key (ApiKeyStore,
-    // provider=openai label=onboarding; internal_handle == project_slug). When
-    // present, GBrain initializes + serves with semantic embeddings; absent →
-    // keyword + graph default. Best-effort: a missing key / store error
-    // degrades to the default and never blocks the turn.
-    let onboardingOpenAiKey: string | undefined
-    try {
-      const apiKeys = new ApiKeyStore({
-        db,
-        secrets: new SecretsStore({ data_dir: owner_home, db }),
-      })
-      onboardingOpenAiKey =
-        (await apiKeys.resolveSecret({
-          internal_handle,
-          provider: 'openai',
-          label: ONBOARDING_OPENAI_LABEL,
-        })) ?? undefined
-    } catch (err) {
-      console.warn(
-        `[gbrain-memory] project=${project_slug} could not resolve onboarding OpenAI key ` +
-          `(continuing keyword+graph): ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
+    // ND1: activate GBrain semantic embeddings from the owner's onboarding-
+    // captured OpenAI key (ApiKeyStore, provider=openai label=onboarding;
+    // internal_handle == project_slug). When present, GBrain serves with
+    // OpenAI `text-embedding-3-large`; absent → keyword + graph default.
+    //
+    // LAZY resolution (not an eager read here): this composition runs ONCE at
+    // process boot, but the key is captured LATER — during onboarding / via the
+    // admin Integrations surface, over the already-running server. An eager read
+    // at boot would miss every freshly-pasted key until a restart (the bug:
+    // "Openai embeddings key is supposed to be wired to Gbrain"). Threading a
+    // resolver thunk instead defers the read to the FIRST `gbrain serve` spawn
+    // (first memory op, after onboarding), so the key flips on embeddings at the
+    // next turn — exactly what the onboarding offer promises. Best-effort: the
+    // resolver swallows store errors and returns undefined (keyword + graph).
     const gbrainMemory = buildGBrainMemory({
       owner_home,
       project_slug,
       env,
-      ...(onboardingOpenAiKey !== undefined ? { openaiApiKey: onboardingOpenAiKey } : {}),
+      resolveOpenAiKey: () =>
+        resolveOnboardingOpenAiKey({ db, owner_home, internal_handle, project_slug }),
     })
     realmodeCleanups.push(() => {
       void gbrainMemory.close().catch(() => undefined)
