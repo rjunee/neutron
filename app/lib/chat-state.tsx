@@ -32,7 +32,7 @@ import type {
   AppWsOutboundUserMessageEcho,
 } from './ws-envelope';
 import { isAlreadyUploadedAttachmentUrl } from './attachment-url';
-import { chatReducer, EMPTY_CHAT_STATE, type ChatMessage, type ChatState } from './chat-streaming';
+import { chatReducer, commandResultBody, EMPTY_CHAT_STATE, type ChatMessage, type ChatState } from './chat-streaming';
 import { uploadAttachment, type UploadProgress } from './upload-client';
 
 /** Timeout after which an un-echoed pending bubble is marked failed. */
@@ -167,6 +167,12 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
         ts: Date.now(),
       });
     });
+    // A matched slash command (/note, /remind, /cal, /skills, …) is answered
+    // with a single chat_command_result and NO agent_message — without this the
+    // command's confirmation/output is silently dropped on native.
+    const offCommandResult = client.on('chat_command_result', (res) => {
+      dispatch({ type: 'append_system', body: commandResultBody(res), ts: Date.now() });
+    });
 
     client.connect();
     return () => {
@@ -176,6 +182,7 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
       offAgent();
       offPartial();
       offError();
+      offCommandResult();
       client.close();
       clientRef.current = null;
       for (const t of echoTimers.current.values()) clearTimeout(t);
@@ -262,11 +269,30 @@ export function ChatStateProvider({ project_id, children }: ChatStateProviderPro
         });
         if (!res.ok) return false;
         const json = (await res.json().catch(() => null)) as
-          | { ok?: boolean; echo?: AppWsOutboundUserMessageEcho }
+          | {
+              ok?: boolean;
+              echo?: AppWsOutboundUserMessageEcho;
+              chat_command_result?: {
+                text?: string;
+                data?: unknown;
+                deep_link?: string;
+                error?: { code?: string; message?: string };
+              };
+            }
           | null;
         if (json?.echo !== undefined) {
           clearEchoTimer(input.client_msg_id);
           dispatch({ type: 'apply_user_echo', echo: json.echo });
+        }
+        if (json?.chat_command_result !== undefined) {
+          // Parity with the WS path: a matched slash command answered over the
+          // HTTP fallback (socket down) returns its result in the response body
+          // and still skips the agent dispatch — render it or it's lost.
+          dispatch({
+            type: 'append_system',
+            body: commandResultBody(json.chat_command_result),
+            ts: Date.now(),
+          });
         }
         return true;
       } catch (err) {
