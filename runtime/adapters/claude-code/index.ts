@@ -37,6 +37,7 @@ import {
 } from './persistent/persistent-repl-substrate.ts'
 import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
+import type { SettingsOverlay } from './persistent/build-settings.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
 export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
@@ -164,6 +165,34 @@ export interface ClaudeCodeSubstrateOptions {
    * See `PersistentReplSubstrateOptions.enableToolBridge`.
    */
   enableToolBridge?: boolean
+  /**
+   * TRIDENT inner-loop launcher only — give the REPL claude's FULL built-in tool
+   * set (`--tools` omitted) so `Workflow` + the `Task*`/`Monitor` background-task
+   * tools are exposed. SECURITY-SENSITIVE; set ONLY on the trusted `cc-trident-*`
+   * launcher substrate, governed by the `permissionMode` allowlist. See
+   * `PersistentReplSubstrateOptions.unrestrictedToolSurface`.
+   */
+  unrestrictedToolSurface?: boolean
+  /**
+   * Per-turn timeout (ms) → `PersistentReplSubstrateOptions.turnTimeoutMs`. The
+   * trident launcher raises it to the whole inner-loop budget: its single
+   * interactive turn stays open, polling the background `Workflow` to terminal,
+   * far longer than the conversational 180s default. Omitted → substrate default.
+   */
+  turn_timeout_ms?: number
+  /**
+   * Permission mode → `--permission-mode <mode>` (trident auto-mode sets
+   * `dontAsk`). REPLACES `--dangerously-skip-permissions`: non-allowlisted ops are
+   * DENIED, never asked (headless-safe) or blanket-run. See
+   * `PersistentReplSubstrateOptions.permissionMode`.
+   */
+  permissionMode?: string
+  /**
+   * Settings overlay merged into the `--settings` JSON (trident auto-mode
+   * allowlist/deny list + PreToolUse deny-guard). The enforce-reply Stop hook is
+   * preserved. See `PersistentReplSubstrateOptions.settingsOverlay`.
+   */
+  settingsOverlay?: SettingsOverlay
 }
 
 /**
@@ -239,6 +268,15 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   }
   // P0-1 — native-MCP tool bridge opt-in (owner's warm conversational REPL only).
   if (options.enableToolBridge !== undefined) p.enableToolBridge = options.enableToolBridge
+  // Trident inner-loop launcher — full built-in surface (Workflow + Task*/Monitor),
+  // a raised per-turn timeout (the launcher's turn spans the whole drained inner
+  // Workflow), and auto-mode dontAsk + settings overlay.
+  if (options.unrestrictedToolSurface !== undefined) {
+    p.unrestrictedToolSurface = options.unrestrictedToolSurface
+  }
+  if (options.turn_timeout_ms !== undefined) p.turnTimeoutMs = options.turn_timeout_ms
+  if (options.permissionMode !== undefined) p.permissionMode = options.permissionMode
+  if (options.settingsOverlay !== undefined) p.settingsOverlay = options.settingsOverlay
 
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →

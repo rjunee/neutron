@@ -7,45 +7,55 @@
  * `TridentInnerLoop` that, per call, runs the inner-workflow to a TERMINAL
  * result and reports it back as one `InnerLoopResult`.
  *
- * ── INVOCATION MODEL (the 2026-06-29 fix) ────────────────────────────────────
- * The launcher is a BLOCKING `claude -p` (print-mode / headless one-shot)
- * subprocess — NOT a turn on the persistent interactive-REPL substrate.
+ * ── INVOCATION MODEL (the 2026-06-29 BILLING fix) ────────────────────────────
+ * The launcher is ONE turn on the persistent INTERACTIVE-REPL substrate — NOT a
+ * `claude -p` (print-mode) subprocess. There is no `claude -p` / `--print`
+ * anywhere in the trident inner loop.
  *
- * WHY: the CC `Workflow` tool is BACKGROUND / multi-turn. Invoking it returns a
- * runId IMMEDIATELY; the workflow's completion arrives LATER as a
- * `<task-notification>` (a NEW turn). The persistent-REPL substrate bridges each
- * turn's FIRST `reply()` to one `completion` Event and (in `ephemeral` mode)
- * disposes the REPL right after — so the launcher turn settled in ~30s while the
- * background workflow was still building, the disposable REPL was killed, and the
- * workflow was ABORTED (observed: status:killed / "Workflow aborted"). Argus
- * review, synthesis, SQLite checkpoints, and worktree cleanup NEVER ran, no
- * TRIDENT_RESULT was produced, and the inner loop returned failed/null on EVERY
- * real run. (CI's unit tests passed because a FAKE substrate replayed a scripted
- * `completion` synchronously; they never exercised a live background Workflow.)
+ * WHY (billing): `claude -p` is API-BILLED (a separate capped credit at API
+ * rates since 2026-06-15), NOT covered by the Max subscription — even with an
+ * OAuth token set. The billing-EXEMPT boundary is INVOCATION MODE: only an
+ * INTERACTIVE PTY/REPL session draws on the Max subscription, which is why the
+ * whole Neutron substrate is persistent interactive REPLs. So the inner launcher
+ * MUST run on the same interactive substrate the rest of Neutron uses for
+ * billing-exempt LLM work (`buildLlmCallSubstrate` → `createClaudeCodeSubstrateAuto`
+ * → the persistent dev-channel REPL), NEVER a `-p` one-shot.
  *
- * `claude -p` is the proven path: print-mode DRAINS in-flight background tasks
- * (the Workflow run + its `agent()` workers) to completion BEFORE the process
- * exits, so TRIDENT_RESULT lands in the process's stdout. This is exactly what
- * made the proto-2 pipeline run succeed (`docs/research/trident-v2-prototype2-*`,
- * run `wf_13f3e3c8-726`). The thin DURABLE OUTER loop still owns cross-session
- * survival/scheduling; only the inner launcher is a blocking one-shot.
+ * THE DRAIN PROBLEM (and how the interactive path solves it): the CC `Workflow`
+ * tool is BACKGROUND. Invoking it returns a runId IMMEDIATELY; the run completes
+ * later. The persistent-REPL substrate settles a turn on the FIRST dev-channel
+ * `reply()` and (ephemeral) disposes the REPL right after — so a naive launcher
+ * turn that replies straight after invoking `Workflow` settles in ~30s, the REPL
+ * is killed, and the background workflow is ABORTED before Argus / synthesis /
+ * checkpoints / cleanup run (the original real-run bug). The fix is option (b):
+ * the launcher holds its ONE interactive turn OPEN — after invoking `Workflow` it
+ * POLLS the background run to terminal (the `Task*`/`Monitor` tools + `sleep`
+ * cadence) and only emits its single `reply()` (carrying `TRIDENT_RESULT=`) once
+ * the run has fully finished. The held-open turn keeps the REPL process alive so
+ * the background workflow drains to completion — the interactive analogue of
+ * print-mode's process-lifetime drain — WITHOUT any `claude -p`.
  *
- * The per-turn `claude -p` substrate transport was hard-deleted in the S3
- * rip-replace, so this module spawns the print-mode process DIRECTLY (mirroring
- * the model-update probe's `child_process.spawn` discipline) via an injectable
- * `LaunchInnerWorkflow` seam. Production wires `buildClaudePrintLauncher`, which
- * resolves the scrubbed Anthropic auth env per call (rotated-token safe) and
- * spawns `claude -p … --dangerously-skip-permissions --model <model>` rooted at
- * the run's repo. Tests inject a fake `launch` and never touch a live `claude`.
+ * The substrate is supplied via an injectable `build_substrate(cwd)` factory
+ * (production: the trident interactive REPL the Open composer builds over the
+ * single-owner credential pool, with the FULL built-in tool surface incl.
+ * `Workflow`, a raised `turnTimeoutMs` spanning the whole inner loop, and
+ * auto-mode dontAsk + allowlist + deny-guard). The launcher seam
+ * (`LaunchInnerWorkflow`) is unchanged in shape, so `buildWorkflowInnerLoop` and
+ * the durable OUTER loop are untouched; production wires
+ * `buildSubstrateInnerLauncher`. Tests inject a fake `launch` / `Substrate` and
+ * never touch a live `claude`.
  *
  * FALSE-COMPLETION discipline (paused ≠ finished; Vajra fleet-premature-
  * completion reconciliation #160/#164) is preserved: a launcher is `completed`
- * ONLY when the process exits CLEANLY (code 0) AND its stdout carries a parseable
- * `TRIDENT_RESULT=<json>` line. A timeout → `timed_out`; a spawn error, nonzero
- * exit, or a clean exit with no result line → `failed`. Never a silent success.
+ * ONLY when the turn settles with a `completion` event AND its reply carries a
+ * parseable `TRIDENT_RESULT=<json>` line. A timeout → `timed_out`; a substrate
+ * `error`, a start() throw, or a settled turn with no result line → `failed`.
+ * Never a silent success.
  */
 
-import { spawn } from 'node:child_process'
+import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
+import type { SessionHandle } from '../runtime/session-handle.ts'
+import { assertAutoModeModelFloor } from './auto-mode.ts'
 import type { TridentRun } from './store.ts'
 
 export interface InnerLoopInput {
@@ -74,34 +84,42 @@ export interface InnerLoopResult {
 
 export type TridentInnerLoop = (input: InnerLoopInput) => Promise<InnerLoopResult>
 
-/** Input to one print-mode launcher invocation. */
+/** Input to one interactive-substrate launcher invocation. */
 export interface LaunchInnerWorkflowInput {
-  /** The launcher user message (passed as `claude -p`'s positional prompt). */
+  /** The launcher user message (the interactive turn's prompt). */
   prompt: string
-  /** Working directory for the spawned process — the run's repo/worktree root. */
+  /** Working directory for the launcher REPL — the run's repo/worktree root. */
   cwd: string
-  /** Wall-clock budget; the launcher SIGKILLs the child when it elapses. */
+  /** Wall-clock budget; the launcher cancels the turn when it elapses. */
   timeout_ms: number
 }
 
-/** The terminal outcome of one print-mode launcher invocation. */
+/**
+ * The terminal outcome of one launcher invocation. Field names are retained from
+ * the prior print-mode seam so `buildWorkflowInnerLoop` is unchanged: for the
+ * interactive substrate, `stdout` carries the turn's coalesced reply text (where
+ * the model's `TRIDENT_RESULT=` line lands) and `exit_code` is `0` on a clean
+ * `completion` event / `null` otherwise.
+ */
 export interface LaunchInnerWorkflowResult {
-  /** Captured stdout (where the model's final `TRIDENT_RESULT=` line lands). */
+  /** The turn's coalesced reply text (where the model's `TRIDENT_RESULT=` lands). */
   stdout: string
-  /** Captured stderr (audit only). */
+  /** Diagnostic detail (a substrate `error` message), audit only. */
   stderr: string
-  /** Process exit code, or null if it never cleanly exited (killed / errored). */
+  /** `0` iff the turn settled with a `completion` event; `null` otherwise. */
   exit_code: number | null
-  /** True iff the wall-clock budget elapsed and the child was SIGKILLed. */
+  /** True iff the wall-clock budget elapsed and the turn was cancelled. */
   timed_out: boolean
-  /** Non-null iff the process could not be spawned (or auth-env resolution threw). */
+  /** Non-null iff the turn failed to start / errored / settled with no terminal
+   *  completion (paused ≠ finished). */
   spawn_error: string | null
 }
 
 /**
- * The print-mode launcher seam. Production = `buildClaudePrintLauncher`; tests
- * inject a fake. It MUST resolve only AFTER the spawned process exits (i.e. after
- * print-mode has drained the background Workflow to completion) — never early.
+ * The launcher seam. Production = `buildSubstrateInnerLauncher` (one interactive
+ * substrate turn). Tests inject a fake. It MUST resolve only AFTER the turn has
+ * fully settled (i.e. after the launcher polled the background Workflow to
+ * terminal and replied) — never early.
  */
 export type LaunchInnerWorkflow = (
   input: LaunchInnerWorkflowInput,
@@ -109,9 +127,9 @@ export type LaunchInnerWorkflow = (
 
 export interface BuildWorkflowInnerLoopOptions {
   /**
-   * PRODUCTION launcher — a blocking `claude -p` print-mode invocation that
-   * drains the inner-workflow to a terminal result. Build it with
-   * `buildClaudePrintLauncher`. Tests inject a fake `LaunchInnerWorkflow`.
+   * PRODUCTION launcher — one interactive-substrate turn that drains the
+   * inner-workflow to a terminal result. Build it with
+   * `buildSubstrateInnerLauncher`. Tests inject a fake `LaunchInnerWorkflow`.
    */
   launch: LaunchInnerWorkflow
   /** Absolute path to the inner-workflow script. Defaults to the sibling
@@ -121,7 +139,11 @@ export interface BuildWorkflowInnerLoopOptions {
   timeout_ms?: number
 }
 
-const DEFAULT_TIMEOUT_MS = 2 * 60 * 60_000
+/** Wall-clock budget for the whole inner loop (the launcher turn + its drained
+ *  background Workflow). The trident substrate's `turnTimeoutMs` is aligned to
+ *  this so the substrate never times the held-open turn out before the loop. */
+export const DEFAULT_INNER_LOOP_TIMEOUT_MS = 2 * 60 * 60_000
+const DEFAULT_TIMEOUT_MS = DEFAULT_INNER_LOOP_TIMEOUT_MS
 
 /** The default abs path of the sibling inner-workflow script. */
 export const DEFAULT_INNER_WORKFLOW_PATH = new URL('./inner-workflow.mjs', import.meta.url).pathname
@@ -153,24 +175,35 @@ function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown> {
 }
 
 /**
- * The launcher's user message: invoke the `Workflow` tool on the inner-workflow
- * script with the JSON args, WAIT for it to return, then emit EXACTLY one final
- * unfenced line `TRIDENT_RESULT=<compact JSON of the workflow's return value>`.
+ * The launcher's user message for the INTERACTIVE substrate turn. The launcher
+ * invokes the `Workflow` tool, then HOLDS THE TURN OPEN — polling the background
+ * run to terminal — and only at the very end emits its single `reply()` carrying
+ * the `TRIDENT_RESULT=<compact JSON>` line.
+ *
+ * Why the held-open turn matters: the substrate settles this turn the instant the
+ * launcher calls `reply()`, then disposes the (ephemeral) REPL — which would KILL
+ * the still-running background Workflow. So the cardinal rule is: do NOT reply
+ * until the Workflow has fully finished. Holding the turn open (by polling) keeps
+ * the REPL process alive so the workflow drains — the interactive analogue of the
+ * old print-mode drain, with no `claude -p` and no API billing.
  */
 export function buildLauncherMessage(scriptPath: string, input: InnerLoopInput): string {
   const argsJson = JSON.stringify(buildWorkflowArgs(input))
-  return `You are the trident-v2 inner-loop LAUNCHER, running headless via \`claude -p\`. You run UNATTENDED — NEVER ask for input; on any blocker, finish with the result line below carrying a REQUEST_CHANGES verdict rather than hanging.
+  return `You are the trident-v2 inner-loop LAUNCHER, running as ONE unattended interactive session turn. NEVER ask for input; on any blocker, finish with the result line below carrying a REQUEST_CHANGES verdict rather than hanging.
+
+⚠️ CARDINAL RULE — DO NOT call the dev-channel \`reply()\` tool until the Workflow has FULLY FINISHED. Calling \`reply()\` ENDS this turn, and ending the turn KILLS the still-running background Workflow (no Argus review, no PR, no checkpoints). Hold this turn OPEN by polling (step 2) until the run is terminal, THEN reply exactly once (step 3).
 
 Do EXACTLY this, nothing else:
 1. Invoke the \`Workflow\` tool with:
    scriptPath = ${scriptPath}
    args = ${argsJson}
    Pass \`args\` as a STRUCTURED JSON OBJECT (the parsed value), NOT as a JSON-encoded string — a stringified value reaches the workflow as one string and breaks every \`args.*\` field.
-2. The \`Workflow\` tool runs in the BACKGROUND: it returns a runId immediately and the workflow's completion arrives LATER as a \`<task-notification>\`. Do NOT emit your final result until that notification arrives. WAIT for the workflow to fully finish; it drives Forge build → parallel Argus review → synthesis → bounded fix loop and RETURNS an object like {ok, prNumber, branch, verdict, round, checkpoint}.
-3. ONLY after the workflow has returned, emit EXACTLY ONE final line, UNFENCED, with NO trailing text after it:
+   The tool returns a runId IMMEDIATELY and runs in the BACKGROUND. It drives Forge build → parallel Argus review → synthesis → bounded fix loop and RETURNS an object like {ok, prNumber, branch, verdict, round, checkpoint}.
+2. POLL the background run to terminal WITHOUT ending the turn. Do NOT reply yet. Repeatedly check the run with the task tools — \`TaskList\`, then \`TaskGet <runId>\` / \`TaskOutput <runId>\` — pausing about 30s between checks with \`sleep 30\` (Bash). Keep polling until the run has FINISHED and you can read its returned object. (Equivalently you may use a \`Monitor\` until-loop.) Never end the turn while the run is still in progress.
+3. ONLY after the run has fully finished, call \`reply()\` EXACTLY ONCE. The reply body's FINAL line MUST be, unfenced, with NO trailing text after it:
    TRIDENT_RESULT=<the workflow's returned object as compact one-line JSON>
 
-The TRIDENT_RESULT= line MUST be the very last line of your response.`
+The TRIDENT_RESULT= line MUST be the very last line of your reply.`
 }
 
 /**
@@ -217,28 +250,34 @@ const FAILED = (raw: string): InnerLoopResult => ({
   raw,
 })
 
-// ── Production print-mode launcher (`claude -p`) ──────────────────────────────
+// ── Production interactive-substrate launcher ─────────────────────────────────
 
-export interface ClaudePrintLauncherOptions {
+export interface SubstrateInnerLauncherOptions {
   /**
-   * Resolve the scrubbed Anthropic auth env overlay for the spawned `claude`.
-   * Re-run on EVERY launch so a rotated OAuth token is picked up without a
-   * restart (production wires `() => resolveScrubbedAuthEnv({pool}).then(r => r.env)`).
-   * The result is layered over `base_env`; per ISSUES #49 it explicitly UNSETS
-   * the three Anthropic auth vars and sets exactly one to the live secret.
+   * PRODUCTION substrate factory — the billing-EXEMPT persistent interactive REPL
+   * (`buildLlmCallSubstrate` → `createClaudeCodeSubstrateAuto`). Built ONCE PER
+   * LAUNCH with the run's worktree as the cwd, so the launcher turn runs IN the
+   * run's worktree on a fresh `cc-trident-*` REPL — never the owner's warm
+   * conversational pool. Production wires the trident substrate with the FULL
+   * built-in tool surface (so `Workflow` + the `Task*`/`Monitor` poll tools are
+   * present), a `turnTimeoutMs` spanning the whole inner loop, and auto-mode
+   * dontAsk + allowlist + deny-guard. Tests inject a fake `Substrate`.
    */
-  resolve_auth_env: () => Promise<Record<string, string | undefined>>
-  /** Binary path. Default `base_env.CLAUDE_BIN` → `process.env.CLAUDE_BIN` → `claude`. */
-  claude_bin?: string
-  /** `--model` value. Default `opus` (so the workflow's `agent()` workers run
-   *  on the current top-tier alias). */
+  build_substrate: (cwd: string) => Substrate
+  /**
+   * `--model` value, threaded as `spec.model_preference[0]` AND checked against
+   * the auto-mode floor. Default `opus` (current top-tier alias). The workflow's
+   * `agent()` workers inherit it.
+   */
   model?: string
-  /** Base environment the auth overlay is layered over. Default `process.env`. */
-  base_env?: NodeJS.ProcessEnv
-  /** Extra argv appended after the standard flags (e.g. `--add-dir <repo>`). */
-  extra_args?: ReadonlyArray<string>
-  /** DI: a `child_process.spawn`-shaped function (tests inject a fake). */
-  spawn?: typeof spawn
+  /**
+   * Auto-mode model-floor guard. Default `assertAutoModeModelFloor` — a
+   * positively-below-floor model (auto mode wants Opus 4.6+/Sonnet 4.6+) fails the
+   * launch LOUDLY (no turn, no silent bad run). Tests inject a no-op.
+   */
+  assert_model_floor?: (model: string) => void
+  /** Upper bound on completion tokens for the turn. Omitted → substrate ceiling. */
+  max_tokens?: number
   /** Timer seam (tests). Defaults to `setTimeout`. */
   set_timer?: (fn: () => void, ms: number) => unknown
   /** Timer-clear seam (tests). Defaults to `clearTimeout`. */
@@ -246,39 +285,24 @@ export interface ClaudePrintLauncherOptions {
 }
 
 /**
- * Build the `claude -p` argv. Print-mode one-shot (`-p` with the prompt as the
- * positional), `--dangerously-skip-permissions` so the unattended launcher +
- * every Workflow `agent()` worker it spawns auto-execute (proto-2 Q2: subagents
- * inherit the launcher's permission mode), and `--model` LAST so nothing shadows
- * it. No `--tools` restriction: this is a TRUSTED build path (owner-authored
- * task), and the workflow needs the full built-in surface incl. `Workflow`,
- * `Agent`, `Bash`, `Edit`, `Read`, `Write`.
- */
-export function buildClaudePrintArgs(
-  prompt: string,
-  model: string,
-  extra?: ReadonlyArray<string>,
-): string[] {
-  const args = ['-p', prompt, '--dangerously-skip-permissions']
-  if (extra !== undefined && extra.length > 0) args.push(...extra)
-  args.push('--model', model)
-  return args
-}
-
-/**
- * Production `LaunchInnerWorkflow`: spawn a blocking `claude -p` process, capture
- * its stdout/stderr, and resolve ONLY when the process closes — by which point
- * print-mode has drained the background Workflow (and its `agent()` workers) to
- * completion. SIGKILLs the child on timeout. Never rejects.
+ * Production `LaunchInnerWorkflow`: run ONE turn on the interactive substrate and
+ * resolve ONLY when the turn has fully settled — by which point the launcher has
+ * (per `buildLauncherMessage`) held its turn open, polled the background Workflow
+ * to terminal, and replied with `TRIDENT_RESULT=`. This is the billing-EXEMPT
+ * path: the invocation is an interactive REPL turn, NOT a `claude -p` subprocess.
  *
- * Mirrors the model-update probe's async-spawn discipline
- * (`model-update-watchdog.ts realProbeModel`): `child_process.spawn` (not
- * `spawnSync`) so a multi-hour build never blocks the gateway event loop, output
- * aggregated via `.on('data')`, terminal handling on `close` (not `exit`).
+ * Mirrors the proven billing-exempt substrate event loop in
+ * `trident/substrate-dispatch.ts`: coalesce `token` events into the reply text,
+ * map `completion` → success (`exit_code: 0`), `error` → failure, the wall-clock
+ * timer → `timed_out` (cancelling the turn), and a stream that ends with NO
+ * terminal `completion` → failure (paused ≠ finished — never a silent success).
+ * Never rejects.
  */
-export function buildClaudePrintLauncher(opts: ClaudePrintLauncherOptions): LaunchInnerWorkflow {
-  const spawnFn = opts.spawn ?? spawn
+export function buildSubstrateInnerLauncher(
+  opts: SubstrateInnerLauncherOptions,
+): LaunchInnerWorkflow {
   const model = opts.model ?? 'opus'
+  const assertFloor = opts.assert_model_floor ?? assertAutoModeModelFloor
   const setTimer =
     opts.set_timer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms))
   const clearTimer =
@@ -288,46 +312,46 @@ export function buildClaudePrintLauncher(opts: ClaudePrintLauncherOptions): Laun
   return function launch(input: LaunchInnerWorkflowInput): Promise<LaunchInnerWorkflowResult> {
     return new Promise<LaunchInnerWorkflowResult>((resolve) => {
       void (async (): Promise<void> => {
-        // Resolve the auth env per-call (rotated-token safe). A throw here is a
-        // crashed launcher — surface it as a spawn_error, never a silent success.
-        let authEnv: Record<string, string | undefined>
+        // Auto-mode model floor (Opus 4.6+/Sonnet 4.6+). A positively-below-floor
+        // model fails the launch LOUDLY (no turn, no silent bad run).
         try {
-          authEnv = await opts.resolve_auth_env()
+          assertFloor(model)
         } catch (e) {
           resolve({
             stdout: '',
             stderr: '',
             exit_code: null,
             timed_out: false,
-            spawn_error: `auth env resolution failed: ${e instanceof Error ? e.message : String(e)}`,
+            spawn_error: e instanceof Error ? e.message : String(e),
           })
           return
         }
 
-        const baseEnv = opts.base_env ?? process.env
-        const bin = opts.claude_bin ?? baseEnv['CLAUDE_BIN'] ?? 'claude'
-        const args = buildClaudePrintArgs(input.prompt, model, opts.extra_args)
-        const env = { ...baseEnv, ...authEnv }
+        const spec: AgentSpec = {
+          prompt: input.prompt,
+          tools: [],
+          model_preference: [model],
+          ...(opts.max_tokens !== undefined ? { max_tokens: opts.max_tokens } : {}),
+        }
 
-        let child: ReturnType<typeof spawn>
+        let handle: SessionHandle
         try {
-          // stdin: 'ignore' — the launcher feeds the whole task via the `-p`
-          // positional prompt; leaving stdin as an open pipe makes `claude -p`
-          // stall ~3s ("no stdin data received") and risks it blocking on stdin.
-          child = spawnFn(bin, args, { cwd: input.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+          // Build a fresh substrate rooted at THIS run's worktree so the turn runs
+          // in `input.cwd`. A factory throw (e.g. an empty credential pool) is a
+          // crashed launcher — surface it as a spawn_error, never a silent success.
+          handle = opts.build_substrate(input.cwd).start(spec)
         } catch (e) {
           resolve({
             stdout: '',
             stderr: '',
             exit_code: null,
             timed_out: false,
-            spawn_error: `claude -p spawn failed: ${e instanceof Error ? e.message : String(e)}`,
+            spawn_error: `substrate start failed: ${e instanceof Error ? e.message : String(e)}`,
           })
           return
         }
 
-        let out = ''
-        let err = ''
+        let text = ''
         let timedOut = false
         let settled = false
         const finish = (r: LaunchInnerWorkflowResult): void => {
@@ -338,43 +362,68 @@ export function buildClaudePrintLauncher(opts: ClaudePrintLauncherOptions): Laun
         }
         const timer = setTimer(() => {
           timedOut = true
-          try {
-            child.kill('SIGKILL')
-          } catch {
-            /* already gone */
-          }
-          finish({ stdout: out, stderr: err, exit_code: null, timed_out: true, spawn_error: null })
+          // Cancel the turn — actually terminate the REPL turn so the held-open
+          // launcher can't keep the budget burning past the wall-clock cap.
+          void handle.cancel().catch(() => {})
+          finish({ stdout: text, stderr: '', exit_code: null, timed_out: true, spawn_error: null })
         }, input.timeout_ms)
-        // Don't let the launcher's pipes keep the event loop alive on their own.
+        // Don't let the turn timer keep the event loop alive on its own.
         ;(timer as { unref?: () => void })?.unref?.()
 
-        child.stdout?.on('data', (d: Buffer | string) => {
-          out += d.toString()
-        })
-        child.stderr?.on('data', (d: Buffer | string) => {
-          err += d.toString()
-        })
-        child.on('error', (e: Error) =>
+        try {
+          for await (const ev of handle.events) {
+            if (ev.kind === 'token') {
+              // The only coalesce-OK event — the launcher's reply text.
+              text += ev.text
+            } else if (ev.kind === 'completion') {
+              finish({ stdout: text, stderr: '', exit_code: 0, timed_out: false, spawn_error: null })
+              return
+            } else if (ev.kind === 'error') {
+              void handle.cancel().catch(() => {})
+              finish({
+                stdout: text,
+                stderr: ev.message,
+                exit_code: null,
+                timed_out: timedOut,
+                spawn_error: `substrate error: ${ev.message}`,
+              })
+              return
+            }
+            // thinking / status / tool_* carry no terminal text — ignored.
+          }
+        } catch (e) {
+          // Iterator threw (cancellation or transport error). A timeout that
+          // cancelled the stream is `timed_out`; anything else is a failure.
           finish({
-            stdout: out,
-            stderr: err,
+            stdout: text,
+            stderr: e instanceof Error ? e.message : String(e),
             exit_code: null,
             timed_out: timedOut,
-            spawn_error: `claude -p error: ${e.message}`,
-          }),
-        )
-        child.on('close', (code: number | null) =>
-          finish({ stdout: out, stderr: err, exit_code: code, timed_out: timedOut, spawn_error: null }),
-        )
+            spawn_error: timedOut ? null : `substrate turn threw: ${e instanceof Error ? e.message : String(e)}`,
+          })
+          return
+        }
+
+        // Stream ended WITHOUT a terminal `completion` event. The persistent-REPL
+        // substrate ALWAYS settles a real turn with `completion`/`error` before
+        // closing — so a clean-but-terminal-less end is a paused / abnormally-closed
+        // turn, NOT a confirmed finish (paused ≠ finished, #160/#164). Fail loudly.
+        finish({
+          stdout: text,
+          stderr: '',
+          exit_code: null,
+          timed_out: timedOut,
+          spawn_error: timedOut ? null : 'substrate turn ended without a terminal completion event',
+        })
       })()
     })
   }
 }
 
 /**
- * Build a production `TridentInnerLoop`. Each call spawns ONE blocking `claude -p`
- * launcher that drives the inner-workflow to a terminal result, then resolves a
- * parsed `InnerLoopResult` under the false-completion discipline.
+ * Build a production `TridentInnerLoop`. Each call runs ONE interactive-substrate
+ * launcher turn that drives the inner-workflow to a terminal result, then resolves
+ * a parsed `InnerLoopResult` under the false-completion discipline.
  */
 export function buildWorkflowInnerLoop(opts: BuildWorkflowInnerLoopOptions): TridentInnerLoop {
   const scriptPath = opts.workflow_script_path ?? DEFAULT_INNER_WORKFLOW_PATH
@@ -395,9 +444,9 @@ export function buildWorkflowInnerLoop(opts: BuildWorkflowInnerLoopOptions): Tri
 
     if (res.timed_out) return { ...FAILED(res.stdout), status: 'timed_out' }
     if (res.spawn_error !== null) return FAILED(res.stdout)
-    // The print-mode process exiting CLEANLY (code 0) — after draining the
-    // background Workflow to completion — is the terminal signal (the `claude -p`
-    // analogue of a `completion` event). A nonzero exit is a crashed launcher;
+    // The turn settling with a `completion` event (`exit_code: 0`) — after the
+    // launcher held its turn open, drained the background Workflow to completion,
+    // and replied — is the terminal signal. Anything else is a crashed launcher;
     // paused ≠ finished, so it is a FAILURE, never a silent success.
     if (res.exit_code !== 0) return FAILED(res.stdout)
 
@@ -407,9 +456,9 @@ export function buildWorkflowInnerLoop(opts: BuildWorkflowInnerLoopOptions): Tri
   function finalize(raw: string, status: 'completed'): InnerLoopResult {
     const parsed = parseTridentResult(raw)
     if (parsed === null) {
-      // A clean exit that never emitted a parseable result line is a FAILURE (no
-      // silent success): the workflow result is unknown — this is exactly the
-      // pre-fix symptom (process exited before TRIDENT_RESULT existed).
+      // A settled turn whose reply carried no parseable result line is a FAILURE
+      // (no silent success): the workflow result is unknown — this is exactly the
+      // pre-fix symptom (turn settled before TRIDENT_RESULT existed).
       return FAILED(raw)
     }
     return {

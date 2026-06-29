@@ -41,6 +41,7 @@ import {
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
 } from '../../runtime/adapters/claude-code/index.ts'
+import type { SettingsOverlay } from '../../runtime/adapters/claude-code/persistent/build-settings.ts'
 import {
   reportFailure,
   reportSuccess,
@@ -379,6 +380,27 @@ export interface BuildLlmCallSubstrateInput {
    * content can never reach a Core tool.
    */
   enableToolBridge?: boolean
+  /**
+   * TRIDENT inner-loop launcher only — full built-in tool surface (`Workflow` +
+   * the `Task*`/`Monitor` poll tools). SECURITY-SENSITIVE; set ONLY on the trusted
+   * `cc-trident-*` launcher substrate, governed by `permissionMode` (dontAsk) +
+   * `settingsOverlay` (allowlist). See `ClaudeCodeSubstrateOptions.unrestrictedToolSurface`.
+   */
+  unrestrictedToolSurface?: boolean
+  /**
+   * Per-turn timeout (ms). The trident launcher raises it to the inner-loop budget
+   * so its one interactive turn can stay open polling the background Workflow to
+   * terminal. Omitted → substrate default (180s). */
+  turn_timeout_ms?: number
+  /**
+   * `--permission-mode` (trident auto-mode: `dontAsk`) — replaces the blanket
+   * skip-permissions so non-allowlisted ops are denied, never asked/auto-run. */
+  permissionMode?: string
+  /**
+   * Settings overlay (trident auto-mode allowlist/deny list + PreToolUse
+   * deny-guard) merged into the `--settings` JSON. The enforce-reply Stop hook is
+   * preserved. */
+  settingsOverlay?: SettingsOverlay
 }
 
 /**
@@ -495,6 +517,14 @@ export function buildLlmCallSubstrate(
         if (input.enableToolBridge !== undefined) {
           opts.enableToolBridge = input.enableToolBridge
         }
+        // Trident inner-loop launcher — full built-in surface + raised turn
+        // timeout + auto-mode dontAsk/allowlist (trusted owner-authored path only).
+        if (input.unrestrictedToolSurface !== undefined) {
+          opts.unrestrictedToolSurface = input.unrestrictedToolSurface
+        }
+        if (input.turn_timeout_ms !== undefined) opts.turn_timeout_ms = input.turn_timeout_ms
+        if (input.permissionMode !== undefined) opts.permissionMode = input.permissionMode
+        if (input.settingsOverlay !== undefined) opts.settingsOverlay = input.settingsOverlay
         // `createClaudeCodeSubstrateAuto` UNCONDITIONALLY builds the persistent
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).
         // The `substrateFactory` seam lets tests inject a fake substrate.

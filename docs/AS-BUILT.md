@@ -115,17 +115,21 @@ dispatch.
   Forge always commits → D-1).
 - **`trident/inner-loop.ts` (NEW).** `buildWorkflowInnerLoop` — drives the
   inner-workflow to a TERMINAL result and reports `TRIDENT_RESULT=<json>` under the
-  false-completion discipline (a launcher is `completed` ONLY on a clean exit +
-  a parseable result line; timeout → `timed_out`; spawn error / nonzero exit /
-  clean-exit-with-no-result → `failed`). It calls an injectable
-  `LaunchInnerWorkflow` seam; production wires `buildClaudePrintLauncher` (a
-  blocking `claude -p` print-mode subprocess — see the invocation-model fix
-  below). The launcher runs `--dangerously-skip-permissions` with NO `--tools`
-  restriction (TRUSTED build path; the workflow needs the full built-in surface
-  incl. `Workflow`/`Agent`/`Bash`/`Edit`/`Read`/`Write`) and `stdin:'ignore'` (so
-  `claude -p` never stalls waiting on stdin). The import/conversational REPLs are
-  untouched (the inner loop no longer routes through the persistent-REPL substrate
-  at all).
+  false-completion discipline (a launcher is `completed` ONLY when the turn settles
+  with a `completion` event AND a parseable result line; timeout → `timed_out`;
+  start error / non-completion settle / settle-with-no-result → `failed`). It calls
+  an injectable `LaunchInnerWorkflow` seam; production wires
+  `buildSubstrateInnerLauncher` — ONE turn on the INTERACTIVE persistent-REPL
+  substrate (the BILLING-EXEMPT seam), NOT a `claude -p` subprocess (which is
+  API-billed off the Max subscription since 2026-06-15). See the BILLING fix below.
+  The launcher substrate runs with the FULL built-in tool surface
+  (`unrestrictedToolSurface` → `--tools` omitted, so `Workflow`/`Agent`/`Bash`/
+  `Edit`/`Read`/`Write` + the `Task*`/`Monitor` poll tools are all present —
+  TRUSTED build path) under auto-mode `--permission-mode dontAsk` + the trident
+  allowlist/deny list + a PreToolUse Bash deny-guard (REPLACES the reckless
+  `--dangerously-skip-permissions`), and a `turnTimeoutMs` raised to the whole
+  inner-loop budget so the launcher can HOLD its turn open. The import/
+  conversational REPLs are untouched (the new substrate options are default-off).
 - **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2).**
   Migration `0089` adds `workflow_run_id` / `inner_checkpoint` / `inner_verdict`.
   The workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
@@ -144,14 +148,16 @@ dispatch.
   worktree remove`" lock: both `mergePr` and `mergeLocal` add a best-effort,
   non-fatal `git worktree remove --force` + `prune` after the landed merge.
 - **Composer wiring.** `open/composer.ts` threads
-  `trident: { launch_inner_workflow: buildClaudePrintLauncher({ resolve_auth_env })
-  }`, where `resolve_auth_env` re-runs `resolveScrubbedAuthEnv({ pool: llmPool })`
-  per launch (rotated-token safe) to yield the scrubbed
-  `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` env (ISSUES #49) the spawned
-  `claude -p` authenticates with. `build-core-modules.ts` wraps it with
-  `buildWorkflowInnerLoop` + passes `db_path` (`input.db.path`) into the
-  orchestrator. No credential → `composition.trident` unset → the loop's
-  restart-safe stub no-op.
+  `trident: { launch_inner_workflow: buildSubstrateInnerLauncher({ build_substrate })
+  }`, where `build_substrate` is a per-launch factory that builds a FRESH ephemeral
+  `cc-trident-*` interactive REPL over the SAME single-owner `llmPool` the
+  conversational substrate uses (`buildLlmCallSubstrate`, never a direct
+  api.anthropic.com call), rooted at the run's worktree, with
+  `unrestrictedToolSurface` + `turn_timeout_ms = DEFAULT_INNER_LOOP_TIMEOUT_MS` +
+  auto-mode `permissionMode: dontAsk` + the `buildTridentAutoModeSettings()`
+  overlay. `build-core-modules.ts` wraps it with `buildWorkflowInnerLoop` + passes
+  `db_path` (`input.db.path`) into the orchestrator. No credential →
+  `composition.trident` unset → the loop's restart-safe stub no-op.
 
 **One-commit revert runbook.** `git revert <sha>` restores the v1 substrate-per-
 phase inner loop wholesale; in the neutron-managed vendor, re-pin the prior trident
@@ -200,6 +206,50 @@ exit with no `TRIDENT_RESULT` maps to `failed` (the exact pre-fix symptom). No
 feature flags, single code path. `Substrate`/`AgentSpec` are no longer touched by
 the launcher.
 
+**BILLING fix (2026-06-29) — SUPERSEDES the `claude -p` launcher above.** The
+print-mode launcher worked but is BILLING-DISQUALIFIED: `claude -p` is API-billed
+(a separate capped credit at API rates since 2026-06-15), NOT covered by the Max
+subscription — even with `CLAUDE_CODE_OAUTH_TOKEN` set. The billing-exempt boundary
+is INVOCATION MODE: only an INTERACTIVE PTY/REPL session draws on the Max
+subscription (this is why the whole Neutron substrate is persistent interactive
+REPLs). So the inner launcher MUST run on the interactive substrate.
+
+`buildClaudePrintLauncher`/`buildClaudePrintArgs`/`ClaudePrintLauncherOptions` are
+DELETED — there is no `claude -p` / `--print` anywhere in the trident inner loop.
+The launcher is now `buildSubstrateInnerLauncher`: ONE turn on the SAME interactive
+persistent-REPL substrate chat/dispatch use (`buildLlmCallSubstrate` →
+`createClaudeCodeSubstrateAuto`). The drain problem is solved WITHOUT `-p` by
+OPTION (b) — the launcher message (`buildLauncherMessage`) tells the model to
+invoke `Workflow`, then HOLD the turn open by POLLING the background run to terminal
+(`Task*`/`Monitor` tools + `sleep` cadence) and only reply with `TRIDENT_RESULT=`
+once the run has fully finished. The held-open turn keeps the REPL process alive so
+the workflow drains — the interactive analogue of print-mode's process-lifetime
+drain. Three default-off substrate options (trident-only; chat path byte-identical)
+make it work: `unrestrictedToolSurface` (the full built-in surface so `Workflow` +
+the poll tools are present — a restricted `--tools` list omits `Workflow`),
+`turn_timeout_ms = DEFAULT_INNER_LOOP_TIMEOUT_MS` (the launcher turn spans the whole
+inner loop, far past the 180s conversational default), and the auto-mode
+`permissionMode: dontAsk` + `settingsOverlay` (see auto-mode below). These thread
+buildLlmCallSubstrate → `ClaudeCodeSubstrateOptions` → `PersistentReplSubstrateOptions`
+→ buildReplArgv/buildSettings. The false-completion discipline is preserved: a
+launcher is `completed` ONLY on a `completion` event + a parseable `TRIDENT_RESULT`;
+a substrate `error` / start() throw / settle-with-no-completion → `failed`. The
+unit-level billing-exempt proof: `open-trident-prod-boot-wiring.test.ts` INVOKES the
+wired launcher and asserts the turn routes through the injected (interactive)
+substrate factory and returns a parsed TRIDENT_RESULT — never a `claude -p` spawn.
+
+**Auto mode (Phase 3) applied to the interactive launcher (2026-06-29).** Reconciled
+from the held #104 line onto the new launcher. `trident/auto-mode.ts` +
+`trident/hooks/auto-mode-deny-guard.ts`: the launcher REPL runs under
+`--permission-mode dontAsk` (REPLACING `--dangerously-skip-permissions`) with the
+`tridentAllowList()` (git/gh/bun/sqlite/coreutils + Read/Edit/Write/Agent/Workflow +
+— NEW for the interactive drain — `Monitor`/`Task*` poll tools + `Bash(sleep:*)`),
+the `tridentDenyList()` (force-push / reset --hard / `.git`/`.claude` writes), and a
+PreToolUse Bash deny-guard (`evaluateBashDenyGuard`: push-to-main, rm -rf outside the
+worktree, history rewrites, curl|bash). Workflow `agent()` workers INHERIT the
+launcher's mode (proto-2 Q2). A below-floor model fails the launch loudly
+(`assertAutoModeModelFloor`). MERGE stays the OUTER/human gate.
+
 **Local-mode merge fix (discovered during real-loop verification).** With the
 inner loop now ACTUALLY completing (pre-fix it returned failed/null and the outer
 merge was never reached), a pre-existing local-mode bug surfaced: the
@@ -224,28 +274,28 @@ and reuses the PR (`reenter=true`). (The happy-path e2e used `max_rounds:1`, so
 the fix-loop path is covered by the static contract test, not a live multi-round
 run — noted as such.)
 
-**Acceptance status (VERIFIED — real `claude -p` end-to-end, 2026-06-29).**
-Unit/integration: full trident dir + `tsc -p trident/tsconfig.json` + root `tsc`
-green; leak-gate SILENT; full bounded suite green (one unrelated parallel-load
-timeout flake, passes in isolation). REAL end-to-end: a Workflow-drain probe
-confirmed `claude -p` invokes the `Workflow` tool, runs a background `agent()` to
-completion, and prints `TRIDENT_RESULT` on a clean exit. Then the REAL inner loop
-was driven through the production `buildWorkflowInnerLoop` + `buildClaudePrintLauncher`
-+ `buildTridentOrchestrator` against an isolated throwaway repo (fresh `project.db`
-with migration 0089, `merge_mode:'local'`):
-(1) the inner-workflow ran to completion — the launcher BLOCKED/drained the whole
-build instead of settling early; (2) Forge built in an `isolation:'worktree'`
-worktree (`.claude/worktrees/wf_…-1` on `trident/e2e-sum`) and committed `sum.ts`
-+ `sum.test.ts`; (3) parallel Argus review + synthesis ran (checkpoint advanced
-`NULL → forge-done → argus-approved`); (4) `TRIDENT_RESULT={ok:true,prNumber:null,
-branch:"trident/e2e-sum",verdict:"APPROVE",round:1,checkpoint:"argus-approved"}`;
-(5) SQLite checkpoints persisted — `inner_checkpoint=argus-approved` (workflow Bash
-steps) + `inner_verdict=APPROVE` + `workflow_run_id` (orchestrator); (6) worktree
-cleaned — `git worktree list` shows zero orphans; (7) the inner loop returned
-`status:completed` (NOT failed/null — the bug); (8) the outer `mergeLocal` then
-landed the branch into `main` and the run reached `phase=done`. (First run proved
-1–7 with a `phase=failed` at the outer local-mode merge; that surfaced the
-branch-teardown bug above, which the second run confirms fixed.)
+**Acceptance status — print-mode era (superseded by the BILLING fix).** The
+`claude -p` end-to-end above (2026-06-29) verified the print-mode launcher drained
+the Workflow to completion with checkpoints + clean worktree. That mechanism is now
+DELETED for billing reasons; its proof is retained only as history.
+
+**Acceptance status — BILLING fix (interactive substrate, 2026-06-29).**
+Unit/integration GREEN: full trident dir (288 tests) + `tsc -p trident/tsconfig.json`
++ root `tsc --noEmit` (deploy gate) clean; leak-gate SILENT; the affected sweep
+(trident + `runtime/adapters/claude-code` + `gateway/realmode-composer` + the open
+prod-boot wiring = 1238 tests) green; `no-direct-anthropic-api` green. BILLING-EXEMPT
+PROOF (invocation mode, the exemption criterion): grep shows NO `claude -p` /
+`--print` in the trident inner-loop live path (only negated/historical comments);
+`open-trident-prod-boot-wiring.test.ts` boots the REAL Open composer with a synthetic
+credential, INVOKES `composition.trident.launch_inner_workflow(...)`, and asserts the
+turn routes through the injected INTERACTIVE substrate factory (the billing-exempt
+seam) and returns a parsed `TRIDENT_RESULT` — never a print-mode spawn; cite
+`open/composer.ts` `makeTridentSubstrate` → `buildLlmCallSubstrate` →
+`createClaudeCodeSubstrateAuto`. The full LIVE real-`/code` loop (a real interactive
+`claude` REPL driving a real `Workflow` → Forge/Argus → checkpoints + clean worktree)
+needs a live LLM session and is the orchestrator's/owner's end-to-end gate — NOTED as
+pending live verification, with the unit-level interactive-substrate proof above
+standing in headlessly.
 
 **Files.** New `trident/inner-workflow.mjs`, `trident/inner-loop.ts`,
 `migrations/0089_code_trident_runs_inner_workflow.sql`; rewrote
@@ -257,6 +307,24 @@ branch-teardown bug above, which the second run confirms fixed.)
 `trident/ralph.test.ts`; updated `trident/{store,vajra-fixes,substrate-dispatch,
 code-command}.test.ts` + the open/migration wiring tests; removed
 `trident/orchestrator-native-prompt.test.ts`.
+
+**BILLING fix — files (2026-06-29).** Rewrote `trident/inner-loop.ts`
+(`buildClaudePrintLauncher`/`buildClaudePrintArgs` DELETED → `buildSubstrateInnerLauncher`
++ `DEFAULT_INNER_LOOP_TIMEOUT_MS`; no `node:child_process`); ported
+`trident/auto-mode.ts` + `trident/hooks/auto-mode-deny-guard.ts` (+ the drain-tool
+allowlist additions). Threaded default-off substrate options
+`unrestrictedToolSurface` / `turn_timeout_ms` / `permissionMode` / `settingsOverlay`
+through `runtime/adapters/claude-code/persistent/build-repl-argv.ts`,
+`runtime/adapters/claude-code/persistent/build-settings.ts` (`SettingsOverlay`),
+`runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts`,
+`runtime/adapters/claude-code/index.ts`, and
+`gateway/realmode-composer/build-llm-call-substrate.ts`. Rewired `open/composer.ts`
+(`makeTridentSubstrate` + `buildSubstrateInnerLauncher`) and updated
+`gateway/composition/input/misc-input.ts` (doc). Tests: rewrote
+`trident/inner-loop.test.ts` (interactive-substrate launcher over a fake `Substrate`);
+new `trident/auto-mode.test.ts`; updated `trident/vajra-fixes.test.ts`,
+`open/__tests__/open-trident-prod-boot-wiring.test.ts` (billing-exempt invocation
+proof), and the persistent `build-repl-argv` / `build-settings` test suites.
 
 ## Install GUARANTEES GBrain memory — retry + abort-on-failure (no silent degrade)
 

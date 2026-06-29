@@ -130,11 +130,11 @@ export type {
 // (`inner-workflow.mjs`), launched per run by `buildWorkflowInnerLoop`.
 export {
   buildWorkflowInnerLoop,
-  buildClaudePrintLauncher,
-  buildClaudePrintArgs,
+  buildSubstrateInnerLauncher,
   buildLauncherMessage,
   parseTridentResult,
   DEFAULT_INNER_WORKFLOW_PATH,
+  DEFAULT_INNER_LOOP_TIMEOUT_MS,
 } from './inner-loop.ts'
 export type {
   TridentInnerLoop,
@@ -144,8 +144,27 @@ export type {
   LaunchInnerWorkflow,
   LaunchInnerWorkflowInput,
   LaunchInnerWorkflowResult,
-  ClaudePrintLauncherOptions,
+  SubstrateInnerLauncherOptions,
 } from './inner-loop.ts'
+
+// Trident v2 — auto mode (Phase 3): the dontAsk allowlist/deny list + PreToolUse
+// deny-guard applied to the interactive inner-loop launcher substrate.
+export {
+  AUTO_MODE_PERMISSION_MODE,
+  DENY_GUARD_HOOK_PATH,
+  isAutoModeModelAtFloor,
+  assertAutoModeModelFloor,
+  tridentAllowList,
+  tridentDenyList,
+  buildTridentAutoModeSettings,
+  evaluateBashDenyGuard,
+} from './auto-mode.ts'
+export type {
+  TridentAutoModeSettings,
+  BuildTridentAutoModeSettingsOptions,
+  DenyGuardContext,
+  DenyGuardDecision,
+} from './auto-mode.ts'
 
 // PR-5 — the thin `/code` entry into foundational Trident (retires the
 // Code-Gen Core wrapper's separate orchestration path).

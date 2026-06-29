@@ -97,6 +97,50 @@ describe('buildReplArgv', () => {
     })
   })
 
+  // TRUSTED FULL SURFACE — the trident inner-loop launcher OMITS --tools so the
+  // complete built-in set (incl. Workflow + Task*/Monitor) is exposed. This is the
+  // INVERSE of default-deny and is set ONLY for the trusted trident build path.
+  describe('unrestrictedToolSurface (trident launcher full built-in surface)', () => {
+    it('OMITS --tools entirely so claude exposes its full built-in surface (Workflow etc.)', () => {
+      const argv = buildReplArgv({ ...base, resume: false, unrestrictedToolSurface: true })
+      expect(argv).not.toContain('--tools')
+    })
+
+    it('unrestricted wins over a declared tools list (the full surface is intended)', () => {
+      const argv = buildReplArgv({
+        ...base,
+        resume: false,
+        tools: ['Read'],
+        unrestrictedToolSurface: true,
+      })
+      expect(argv).not.toContain('--tools')
+    })
+  })
+
+  // AUTO MODE — `--permission-mode dontAsk` REPLACES `--dangerously-skip-permissions`
+  // so a non-allowlisted op is denied (not asked, not blanket-run).
+  describe('permissionMode (trident auto-mode dontAsk)', () => {
+    it('emits --permission-mode <mode> and SUPPRESSES --dangerously-skip-permissions', () => {
+      const argv = buildReplArgv({
+        ...base,
+        resume: false,
+        permissionMode: 'dontAsk',
+        skipPermissions: true, // would normally add the blanket skip
+      })
+      const i = argv.indexOf('--permission-mode')
+      expect(i).toBeGreaterThanOrEqual(0)
+      expect(argv[i + 1]).toBe('dontAsk')
+      // dontAsk REPLACES the blanket skip — only one of the two is ever emitted.
+      expect(argv).not.toContain('--dangerously-skip-permissions')
+    })
+
+    it('without permissionMode, skipPermissions still governs (unchanged)', () => {
+      const argv = buildReplArgv({ ...base, resume: false, skipPermissions: true })
+      expect(argv).toContain('--dangerously-skip-permissions')
+      expect(argv).not.toContain('--permission-mode')
+    })
+  })
+
   // P0-1 — the native-MCP tool bridge permission grant. ORTHOGONAL to --tools:
   // --allowedTools grants the MCP namespace WITHOUT re-enabling any built-in.
   describe('--allowedTools (P0-1 native-MCP tool bridge grant)', () => {

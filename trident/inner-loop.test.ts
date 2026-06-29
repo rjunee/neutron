@@ -1,36 +1,39 @@
 /**
  * Tests for the Trident v2 inner-loop LAUNCHER (`buildWorkflowInnerLoop`) and the
- * production print-mode launcher (`buildClaudePrintLauncher`).
+ * production INTERACTIVE-substrate launcher (`buildSubstrateInnerLauncher`).
  *
- * The launcher spawns a BLOCKING `claude -p` print-mode process that invokes the
- * `Workflow` tool on `inner-workflow.mjs`, drains the background workflow to
- * completion, and prints `TRIDENT_RESULT=<json>`. These tests inject a FAKE
- * `LaunchInnerWorkflow` (for the loop mechanics) and a FAKE `spawn` (for the
- * print-mode launcher), so everything is exercised WITHOUT a live claude /
- * Workflow tool.
+ * THE BILLING FIX (2026-06-29): the launcher runs as ONE turn on the persistent
+ * INTERACTIVE-REPL substrate (billing-EXEMPT), NOT a `claude -p` print-mode
+ * subprocess (API-billed). The launcher invokes the `Workflow` tool, HOLDS its
+ * turn open while polling the background run to terminal, and replies with
+ * `TRIDENT_RESULT=<json>`. These tests inject a FAKE `LaunchInnerWorkflow` (for
+ * the loop mechanics) and a FAKE `Substrate` (for the launcher), so everything is
+ * exercised WITHOUT a live claude / Workflow tool — and WITHOUT ever spawning a
+ * `claude -p` subprocess (there is none in this module).
  *
- * THE REGRESSION THIS SUITE PINS: the pre-fix launcher ran as a persistent-REPL
- * turn that settled on the FIRST reply — i.e. it could resolve BEFORE
- * TRIDENT_RESULT existed (the background workflow was still running and got
- * aborted). Two guards encode "the launcher does NOT settle before the workflow
- * produces a terminal result":
- *   (1) `buildClaudePrintLauncher` resolves ONLY on the child's `close` event
- *       (by which point print-mode has drained the workflow), never earlier.
- *   (2) `buildWorkflowInnerLoop` maps a clean exit with NO parseable
+ * THE REGRESSION THIS SUITE PINS: the pre-fix launcher settled on the FIRST reply
+ * — i.e. it could resolve BEFORE TRIDENT_RESULT existed (the background workflow
+ * still running, then aborted). Two guards encode "the launcher does NOT settle
+ * before the turn produces a terminal result":
+ *   (1) `buildSubstrateInnerLauncher` resolves ONLY on the substrate's `completion`
+ *       event (by which point the launcher polled the workflow to terminal +
+ *       replied), never on an earlier `token`.
+ *   (2) `buildWorkflowInnerLoop` maps a settled turn with NO parseable
  *       TRIDENT_RESULT to `failed` (no silent success).
  */
 
 import { describe, expect, test } from 'bun:test'
-import { EventEmitter } from 'node:events'
 import {
   buildWorkflowInnerLoop,
-  buildClaudePrintLauncher,
-  buildClaudePrintArgs,
+  buildSubstrateInnerLauncher,
   parseTridentResult,
   type InnerLoopInput,
   type LaunchInnerWorkflow,
   type LaunchInnerWorkflowResult,
 } from './inner-loop.ts'
+import type { Event } from '../runtime/events.ts'
+import type { SessionHandle } from '../runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { TridentRun } from './store.ts'
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {
@@ -109,8 +112,8 @@ describe('parseTridentResult — walks from the end, tolerates preamble', () => 
   })
 })
 
-describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launch seam)', () => {
-  test('a clean exit (code 0) with a TRIDENT_RESULT line → parsed result', async () => {
+describe('buildWorkflowInnerLoop — launcher mechanics (over the launch seam)', () => {
+  test('a clean turn (exit_code 0) with a TRIDENT_RESULT line → parsed result', async () => {
     const { launch } = fakeLaunch(() => ({
       ...OK,
       stdout:
@@ -139,7 +142,7 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launc
     expect(res.pr_number).toBe(9)
   })
 
-  test('the launcher prompt carries the Workflow scriptPath + args + structured-JSON note, rooted at the worktree cwd', async () => {
+  test('the launcher prompt carries scriptPath + args + structured-JSON note + the held-open-turn discipline, rooted at the worktree cwd', async () => {
     const { launch, calls } = fakeLaunch(() => ({
       ...OK,
       stdout: 'TRIDENT_RESULT={"verdict":"APPROVE"}',
@@ -159,10 +162,12 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launc
     // structured JSON object, not a JSON-encoded string (a real run showed the
     // model stringifying it, which zeroes out every workflow field).
     expect(call.prompt).toContain('STRUCTURED JSON OBJECT')
-    // …and to WAIT for the background workflow rather than settling on the
-    // Workflow tool's immediate runId return (the bug this fix closes).
+    // …and to HOLD the turn open (poll the BACKGROUND run) rather than replying
+    // on the Workflow tool's immediate runId return (the abort this fix closes).
     expect(call.prompt.toLowerCase()).toContain('background')
-    // The launcher process is rooted at the run's worktree.
+    expect(call.prompt.toLowerCase()).toContain('poll')
+    expect(call.prompt).toContain('reply()')
+    // The launcher turn is rooted at the run's worktree.
     expect(call.cwd).toBe('/wt/run-1')
   })
 
@@ -178,13 +183,13 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launc
     expect(prompt).toContain('"resumeCheckpoint":"argus-request-changes"')
   })
 
-  test('REGRESSION: a clean exit with NO parseable result line → failed (process exited before TRIDENT_RESULT existed)', async () => {
-    // This is the EXACT pre-fix symptom: the launcher returned before the
-    // background workflow produced a result. A clean exit with no result line
-    // must be a LOUD failure, never a silent success.
+  test('REGRESSION: a settled turn with NO parseable result line → failed (turn settled before TRIDENT_RESULT existed)', async () => {
+    // The pre-fix symptom: the launcher settled before the background workflow
+    // produced a result. A clean turn with no result line must be a LOUD failure,
+    // never a silent success.
     const { launch } = fakeLaunch(() => ({
       ...OK,
-      stdout: 'I launched the workflow but the process exited before it finished',
+      stdout: 'I launched the workflow but the turn settled before it finished',
     }))
     const loop = buildWorkflowInnerLoop({ launch })
     const res = await loop(input())
@@ -192,10 +197,11 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launc
     expect(res.verdict).toBeNull()
   })
 
-  test('a nonzero exit → failed even if a stray result line is present (crashed launcher)', async () => {
+  test('a non-completion turn (exit_code !== 0) → failed even with a stray result line', async () => {
     const { launch } = fakeLaunch(() => ({
       ...OK,
-      exit_code: 1,
+      exit_code: null,
+      spawn_error: 'substrate error: boom',
       stdout: 'TRIDENT_RESULT={"verdict":"APPROVE"}',
     }))
     const loop = buildWorkflowInnerLoop({ launch })
@@ -203,13 +209,13 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launc
     expect(res.status).toBe('failed')
   })
 
-  test('a spawn error → failed', async () => {
+  test('a launcher spawn_error → failed', async () => {
     const { launch } = fakeLaunch(() => ({
       stdout: '',
       stderr: '',
       exit_code: null,
       timed_out: false,
-      spawn_error: 'claude -p spawn failed: ENOENT',
+      spawn_error: 'substrate start failed: empty Anthropic credential pool',
     }))
     const loop = buildWorkflowInnerLoop({ launch })
     const res = await loop(input())
@@ -240,80 +246,106 @@ describe('buildWorkflowInnerLoop — launcher mechanics (over a print-mode launc
   })
 })
 
-// ── The production print-mode launcher (`claude -p`) ──────────────────────────
+// ── The production interactive-substrate launcher ─────────────────────────────
+//
+// A controllable fake `Substrate` whose `start(spec)` returns a SessionHandle
+// driven by `push(event)` / `end()`. This stands in for the billing-EXEMPT
+// persistent interactive REPL — there is NO `claude -p`, NO `child_process.spawn`.
 
-interface FakeChild extends EventEmitter {
-  stdout: EventEmitter
-  stderr: EventEmitter
-  kill: (sig?: string) => void
-  killed: () => boolean
-  killSignal: () => string | undefined
-}
-
-function makeFakeChild(): FakeChild {
-  const child = new EventEmitter() as FakeChild
-  child.stdout = new EventEmitter()
-  child.stderr = new EventEmitter()
-  let killed = false
-  let sig: string | undefined
-  child.kill = (s?: string) => {
-    killed = true
-    sig = s
-  }
-  child.killed = () => killed
-  child.killSignal = () => sig
-  return child
-}
-
-/** A fake `child_process.spawn` recording its (bin, args, opts) + handing back a
- *  controllable child. */
-function fakeSpawn(): {
-  spawn: (bin: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }) => FakeChild
-  calls: Array<{ bin: string; args: string[]; opts: { cwd?: string; env?: NodeJS.ProcessEnv } }>
-  child: () => FakeChild
+function makeChannelSubstrate(): {
+  build: (cwd: string) => Substrate
+  cwds: string[]
+  specs: AgentSpec[]
+  push: (ev: Event) => void
+  end: () => void
+  cancelled: () => boolean
+  started: () => boolean
 } {
-  const calls: Array<{ bin: string; args: string[]; opts: { cwd?: string; env?: NodeJS.ProcessEnv } }> =
-    []
-  let last: FakeChild | null = null
-  const spawn = (bin: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
-    calls.push({ bin, args, opts })
-    last = makeFakeChild()
-    return last
+  const cwds: string[] = []
+  const specs: AgentSpec[] = []
+  let cancelledFlag = false
+  let started = false
+  const queue: Event[] = []
+  let wake: (() => void) | null = null
+  let ended = false
+  const push = (ev: Event): void => {
+    queue.push(ev)
+    wake?.()
+    wake = null
   }
-  return { spawn, calls, child: () => last! }
+  const end = (): void => {
+    ended = true
+    wake?.()
+    wake = null
+  }
+  async function* gen(): AsyncGenerator<Event, void, void> {
+    for (;;) {
+      if (queue.length > 0) {
+        yield queue.shift()!
+        continue
+      }
+      if (ended) return
+      await new Promise<void>((r) => {
+        wake = r
+      })
+    }
+  }
+  const build = (cwd: string): Substrate => ({
+    start(spec: AgentSpec): SessionHandle {
+      started = true
+      cwds.push(cwd)
+      specs.push(spec)
+      return {
+        events: gen(),
+        async respondToTool(): Promise<void> {},
+        async cancel(): Promise<void> {
+          cancelledFlag = true
+          end()
+        },
+        tool_resolution: 'internal',
+      }
+    },
+  })
+  return { build, cwds, specs, push, end, cancelled: () => cancelledFlag, started: () => started }
 }
 
-/** Flush enough microtasks that the launcher's `await resolve_auth_env()` +
- *  synchronous spawn have run and the child exists. */
+/** Flush enough microtasks that the launcher's synchronous start() + first
+ *  iterator step have run. */
 async function flush(): Promise<void> {
   for (let i = 0; i < 5; i++) await Promise.resolve()
 }
 
-describe('buildClaudePrintArgs — print-mode argv', () => {
-  test('uses -p (print mode), skip-permissions, and pins --model LAST', () => {
-    const args = buildClaudePrintArgs('the prompt', 'opus')
-    expect(args[0]).toBe('-p')
-    expect(args[1]).toBe('the prompt')
-    expect(args).toContain('--dangerously-skip-permissions')
-    const mi = args.indexOf('--model')
-    expect(mi).toBeGreaterThanOrEqual(0)
-    expect(args[mi + 1]).toBe('opus')
-    // No --tools restriction (trusted build path — full surface incl. Workflow).
-    expect(args).not.toContain('--tools')
+describe('buildSubstrateInnerLauncher — interactive substrate turn (billing-exempt)', () => {
+  test('starts the turn on the substrate rooted at cwd; spec carries the prompt + model, declares no Core tools', async () => {
+    const sub = makeChannelSubstrate()
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: sub.build,
+      model: 'opus',
+      assert_model_floor: () => {},
+    })
+    const p = launch({ prompt: 'launcher prompt', cwd: '/wt/run-1', timeout_ms: 60_000 })
+    await flush()
+    expect(sub.started()).toBe(true)
+    expect(sub.cwds[0]).toBe('/wt/run-1')
+    expect(sub.specs[0]!.prompt).toBe('launcher prompt')
+    expect(sub.specs[0]!.model_preference).toEqual(['opus'])
+    // The launcher declares NO Core ToolDefs — the REPL's built-in surface
+    // (Workflow + Task*/Monitor) comes from the substrate, not the spec.
+    expect(sub.specs[0]!.tools).toEqual([])
+    sub.push({ kind: 'token', text: 'TRIDENT_RESULT={"verdict":"APPROVE"}' })
+    sub.push({
+      kind: 'completion',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      substrate_instance_id: 'cc-trident-x',
+    } as Event)
+    await p
   })
-  test('appends extra_args before --model', () => {
-    const args = buildClaudePrintArgs('p', 'opus', ['--add-dir', '/repo'])
-    expect(args.join(' ')).toContain('--add-dir /repo')
-    expect(args.indexOf('--add-dir')).toBeLessThan(args.indexOf('--model'))
-  })
-})
 
-describe('buildClaudePrintLauncher — blocking spawn that drains to close', () => {
-  test('REGRESSION: resolves ONLY on the child close event, never before (drain-to-terminal)', async () => {
-    const fs = fakeSpawn()
-    const launch = buildClaudePrintLauncher({
-      resolve_auth_env: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }),
-      spawn: fs.spawn as never,
+  test('REGRESSION: resolves ONLY on the completion event, never on an earlier token (held-open turn)', async () => {
+    const sub = makeChannelSubstrate()
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: sub.build,
+      assert_model_floor: () => {},
     })
 
     let settled = false
@@ -323,18 +355,22 @@ describe('buildClaudePrintLauncher — blocking spawn that drains to close', () 
     })
 
     await flush()
-    const child = fs.child()
-    // The workflow's output streams in — but the process has NOT closed yet.
-    child.stdout.emit('data', 'launched workflow…\n')
+    // The launcher's progress streams in as tokens — but the turn has NOT settled
+    // (the background workflow is still running; the launcher is still polling).
+    sub.push({ kind: 'token', text: 'launched workflow, polling…\n' })
     await flush()
-    // CRITICAL: the launcher must NOT have settled — the background workflow is
-    // still running. (Pre-fix, the REPL turn settled here, aborting the workflow.)
+    // CRITICAL: must NOT have settled on the token. (Pre-fix, the REPL turn settled
+    // on the first reply here, aborting the still-running workflow.)
     expect(settled).toBe(false)
 
-    // The final turn (after the workflow drained) prints TRIDENT_RESULT, then the
-    // process closes cleanly.
-    child.stdout.emit('data', 'TRIDENT_RESULT={"verdict":"APPROVE","prNumber":7}\n')
-    child.emit('close', 0)
+    // The final reply (after the workflow drained) carries TRIDENT_RESULT; the
+    // substrate then emits its single completion event.
+    sub.push({ kind: 'token', text: 'TRIDENT_RESULT={"verdict":"APPROVE","prNumber":7}' })
+    sub.push({
+      kind: 'completion',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      substrate_instance_id: 'cc-trident-x',
+    } as Event)
 
     const res = await p
     expect(settled).toBe(true)
@@ -344,40 +380,27 @@ describe('buildClaudePrintLauncher — blocking spawn that drains to close', () 
     expect(parseTridentResult(res.stdout)).toEqual({ verdict: 'APPROVE', prNumber: 7 })
   })
 
-  test('spawns the right bin/argv/cwd and layers the auth env over base_env', async () => {
-    const fs = fakeSpawn()
-    const launch = buildClaudePrintLauncher({
-      resolve_auth_env: async () => ({
-        CLAUDE_CODE_OAUTH_TOKEN: 'sekret',
-        ANTHROPIC_API_KEY: undefined,
-      }),
-      claude_bin: '/opt/claude',
-      model: 'opus',
-      base_env: { PATH: '/usr/bin', ANTHROPIC_API_KEY: 'inherited-should-be-scrubbed' },
-      spawn: fs.spawn as never,
+  test('a substrate error event → spawn_error (never a silent success), and cancels the turn', async () => {
+    const sub = makeChannelSubstrate()
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: sub.build,
+      assert_model_floor: () => {},
     })
-    const p = launch({ prompt: 'go', cwd: '/work/tree', timeout_ms: 60_000 })
+    const p = launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
     await flush()
-    const call = fs.calls[0]!
-    expect(call.bin).toBe('/opt/claude')
-    expect(call.args[0]).toBe('-p')
-    expect(call.opts.cwd).toBe('/work/tree')
-    // Auth overlay applied: the live secret is set…
-    expect(call.opts.env!['CLAUDE_CODE_OAUTH_TOKEN']).toBe('sekret')
-    // …and the inherited API key is scrubbed to undefined (ISSUES #49).
-    expect(call.opts.env!['ANTHROPIC_API_KEY']).toBeUndefined()
-    // …while unrelated base env survives.
-    expect(call.opts.env!['PATH']).toBe('/usr/bin')
-    fs.child().emit('close', 0)
-    await p
+    sub.push({ kind: 'error', message: 'HTTP 429: rate limited', retryable: true } as Event)
+    const res = await p
+    expect(res.spawn_error).toContain('429')
+    expect(res.exit_code).toBeNull()
+    expect(sub.cancelled()).toBe(true)
   })
 
-  test('SIGKILLs the child + reports timed_out when the budget elapses', async () => {
-    const fs = fakeSpawn()
+  test('cancels the turn + reports timed_out when the budget elapses', async () => {
+    const sub = makeChannelSubstrate()
     let fire: (() => void) | null = null
-    const launch = buildClaudePrintLauncher({
-      resolve_auth_env: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }),
-      spawn: fs.spawn as never,
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: sub.build,
+      assert_model_floor: () => {},
       set_timer: (fn) => {
         fire = fn
         return 1
@@ -391,45 +414,48 @@ describe('buildClaudePrintLauncher — blocking spawn that drains to close', () 
     const res = await p
     expect(res.timed_out).toBe(true)
     expect(res.exit_code).toBeNull()
-    expect(fs.child().killed()).toBe(true)
-    expect(fs.child().killSignal()).toBe('SIGKILL')
+    expect(sub.cancelled()).toBe(true)
   })
 
-  test('a spawn that throws → spawn_error (never a silent success)', async () => {
-    const launch = buildClaudePrintLauncher({
-      resolve_auth_env: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }),
-      spawn: (() => {
-        throw new Error('ENOENT claude')
-      }) as never,
-    })
-    const res = await launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
-    expect(res.spawn_error).toContain('ENOENT claude')
-    expect(res.exit_code).toBeNull()
-  })
-
-  test('an auth-env resolution failure → spawn_error (no process spawned)', async () => {
-    const fs = fakeSpawn()
-    const launch = buildClaudePrintLauncher({
-      resolve_auth_env: async () => {
-        throw new Error('all_cooldown')
-      },
-      spawn: fs.spawn as never,
-    })
-    const res = await launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
-    expect(res.spawn_error).toContain('all_cooldown')
-    expect(fs.calls).toHaveLength(0)
-  })
-
-  test('a child error event → spawn_error', async () => {
-    const fs = fakeSpawn()
-    const launch = buildClaudePrintLauncher({
-      resolve_auth_env: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }),
-      spawn: fs.spawn as never,
+  test('REGRESSION: a turn that ends with NO completion event → failed (paused ≠ finished)', async () => {
+    const sub = makeChannelSubstrate()
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: sub.build,
+      assert_model_floor: () => {},
     })
     const p = launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
     await flush()
-    fs.child().emit('error', new Error('broken pipe'))
+    sub.push({ kind: 'token', text: 'some partial work' })
+    sub.end() // channel closed WITHOUT a terminal completion event
     const res = await p
-    expect(res.spawn_error).toContain('broken pipe')
+    expect(res.exit_code).toBeNull()
+    expect(res.spawn_error).toContain('without a terminal completion')
+  })
+
+  test('a substrate start() that throws → spawn_error (no turn, never a silent success)', async () => {
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: () => {
+        throw new Error('empty Anthropic credential pool')
+      },
+      assert_model_floor: () => {},
+    })
+    const res = await launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
+    expect(res.spawn_error).toContain('substrate start failed')
+    expect(res.spawn_error).toContain('empty Anthropic credential pool')
+    expect(res.exit_code).toBeNull()
+  })
+
+  test('a below-floor model fails the launch LOUDLY (auto-mode model floor)', async () => {
+    const sub = makeChannelSubstrate()
+    // The default floor guard rejects a positively-below-floor model.
+    const launch = buildSubstrateInnerLauncher({
+      build_substrate: sub.build,
+      model: 'claude-opus-4-5',
+    })
+    const res = await launch({ prompt: 'go', cwd: '/repo', timeout_ms: 60_000 })
+    expect(res.spawn_error).toContain('below floor')
+    expect(res.exit_code).toBeNull()
+    // No turn was ever started.
+    expect(sub.started()).toBe(false)
   })
 })

@@ -45,13 +45,15 @@ export interface MiscCompositionInput {
    * the loop is live + restart-safe but advances nothing — the unchanged Open
    * dev/default behaviour.
    *
-   * `launch_inner_workflow(input)` runs the inner-workflow launcher as a BLOCKING
-   * `claude -p` print-mode subprocess that drains the background `Workflow` tool
-   * (`trident/inner-workflow.mjs`) to completion and prints `TRIDENT_RESULT`
-   * (the production composer passes `buildClaudePrintLauncher` over the
-   * per-instance Anthropic credential pool). It is NOT a persistent-REPL turn —
-   * a REPL turn settles on the first reply, BEFORE the background workflow
-   * drains, which aborted the workflow on every real run (the bug this fixes).
+   * `launch_inner_workflow(input)` runs the inner-workflow launcher as ONE turn on
+   * the INTERACTIVE persistent-REPL substrate — the billing-EXEMPT seam (the
+   * production composer passes `buildSubstrateInnerLauncher` over the per-instance
+   * Anthropic credential pool), NOT a `claude -p` print-mode subprocess (which is
+   * API-billed). The launcher HOLDS its turn open, polling the background
+   * `Workflow` tool (`trident/inner-workflow.mjs`) to completion before replying
+   * with `TRIDENT_RESULT` — the held-open turn keeps the REPL alive so the
+   * workflow drains (a naive REPL turn would settle on the first reply, BEFORE the
+   * workflow drained, aborting it — the bug this design avoids).
    * `run_host` runs the git/gh host commands (defaults to a `Bun.spawn` runner).
    */
   trident?: {

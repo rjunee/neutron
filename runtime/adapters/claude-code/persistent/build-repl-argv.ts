@@ -61,6 +61,30 @@ export interface BuildReplArgvInput {
    */
   tools?: ReadonlyArray<string>
   /**
+   * TRUSTED FULL BUILT-IN SURFACE (the trident inner-loop launcher only). When
+   * true, the `--tools` flag is OMITTED ENTIRELY so the spawned `claude` exposes
+   * its COMPLETE built-in tool set (`Workflow`, `Agent`, `Bash`, the
+   * `Task*`/`Monitor` background-task tools, `Read`/`Edit`/`Write`, …). The
+   * trident launcher needs `Workflow` (absent from any restricted `--tools` list)
+   * to drive the inner loop and the `Task*`/`Monitor` tools to poll the background
+   * run to terminal within its own turn. This is the INVERSE of the default-deny
+   * `--tools ""`: it is SECURITY-SENSITIVE and set ONLY for the owner-authored,
+   * trusted trident build path (NEVER the untrusted history-import REPL). `tools`
+   * is IGNORED when this is true. The dontAsk permission mode + allowlist (see
+   * `permissionMode`) is what actually governs which built-ins may RUN — the full
+   * surface is merely VISIBLE.
+   */
+  unrestrictedToolSurface?: boolean
+  /**
+   * Permission mode → `--permission-mode <mode>` (e.g. `dontAsk`). Set by the
+   * trident auto-mode launcher so a non-allowlisted op is IMMEDIATELY DENIED
+   * (never a prompt, never a headless hang) rather than auto-executed. When set,
+   * `--dangerously-skip-permissions` is NOT emitted even if `skipPermissions` is
+   * true — dontAsk + the allowlist REPLACES the blanket skip. Omitted → unchanged
+   * (skipPermissions governs).
+   */
+  permissionMode?: string
+  /**
    * P0-1 — MCP tool namespaces to PERMIT via `--allowedTools` (e.g.
    * `['mcp__neutron']`). This is ORTHOGONAL to `tools`: `--tools` gates the
    * BUILT-IN set, while `--allowedTools` grants permission for MCP-server tools
@@ -89,10 +113,14 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   argv.push('--dangerously-load-development-channels', `server:${input.channelName}`)
   argv.push('--mcp-config', input.mcpConfigPath)
   argv.push('--settings', input.settingsPath)
-  // Default-deny tool surface (SECURITY-CRITICAL — see `tools` field docs).
-  // Empty/undefined → `--tools ""` (disables every built-in); populated →
-  // `--tools <comma-list>` so only the named built-ins survive.
-  if (input.tools === undefined || input.tools.length === 0) {
+  // Tool surface. TRUSTED-FULL (trident launcher): OMIT `--tools` so the complete
+  // built-in set (incl. `Workflow` + the `Task*`/`Monitor` poll tools) is exposed
+  // — see `unrestrictedToolSurface` docs. Otherwise default-deny (SECURITY-
+  // CRITICAL): empty/undefined → `--tools ""` (disables every built-in); populated
+  // → `--tools <comma-list>` so only the named built-ins survive.
+  if (input.unrestrictedToolSurface === true) {
+    // no `--tools` flag → claude's full built-in surface (dontAsk + allowlist gates use)
+  } else if (input.tools === undefined || input.tools.length === 0) {
     argv.push('--tools', '')
   } else {
     argv.push('--tools', input.tools.join(','))
@@ -103,7 +131,12 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   if (input.allowedMcpTools !== undefined && input.allowedMcpTools.length > 0) {
     argv.push('--allowedTools', input.allowedMcpTools.join(','))
   }
-  if (input.skipPermissions === true) {
+  // Permission mode. `--permission-mode <mode>` (auto-mode dontAsk) REPLACES the
+  // blanket `--dangerously-skip-permissions`: a non-allowlisted op is denied (not
+  // asked, not auto-run). Only one of the two is ever emitted.
+  if (input.permissionMode !== undefined && input.permissionMode !== '') {
+    argv.push('--permission-mode', input.permissionMode)
+  } else if (input.skipPermissions === true) {
     argv.push('--dangerously-skip-permissions')
   }
   argv.push('--append-system-prompt-file', input.appendSystemPromptFile)

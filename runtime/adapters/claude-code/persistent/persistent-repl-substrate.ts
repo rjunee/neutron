@@ -42,7 +42,7 @@ import type { SessionHandle } from '../../../session-handle.ts'
 import type { Event, TokenUsage } from '../../../events.ts'
 import { EventChannel } from './event-channel.ts'
 import { buildReplArgv } from './build-repl-argv.ts'
-import { buildSettings } from './build-settings.ts'
+import { buildSettings, type SettingsOverlay } from './build-settings.ts'
 import { assertReplAlive, type SpawnAssertionConfig } from './post-spawn-assertion.ts'
 import {
   buildChannelWedgeCapAlertText,
@@ -726,6 +726,29 @@ export interface PersistentReplSubstrateOptions {
    * a `ReplToolBridge` was also wired via `setReplToolBridge`.
    */
   enableToolBridge?: boolean
+  /**
+   * TRUSTED FULL BUILT-IN SURFACE (the trident inner-loop launcher only). When
+   * true the spawned REPL is given claude's COMPLETE built-in tool set (`--tools`
+   * omitted) — including `Workflow` (which no restricted `--tools` list contains)
+   * and the `Task*`/`Monitor` background-task tools the launcher uses to poll the
+   * inner Workflow to terminal within its own turn. SECURITY-SENSITIVE: set ONLY
+   * for the owner-authored trusted trident build path, NEVER the untrusted
+   * history-import REPL (which keeps `--tools ""`). Use is still gated by the
+   * `permissionMode` (dontAsk) allowlist below. See build-repl-argv.ts. */
+  unrestrictedToolSurface?: boolean
+  /**
+   * Permission mode → `--permission-mode <mode>` (the trident auto-mode launcher
+   * sets `dontAsk`). When set it REPLACES `--dangerously-skip-permissions`: a
+   * non-allowlisted op is immediately DENIED (never a headless prompt-hang, never
+   * a blanket auto-run). Pair with `settingsOverlay.permissions` (the allowlist)
+   * so legitimate ops are granted. Omitted → unchanged (skip_permissions governs). */
+  permissionMode?: string
+  /**
+   * Settings OVERLAY merged into the generated `--settings` JSON (trident
+   * auto-mode: the dontAsk allowlist/deny list + a PreToolUse Bash deny-guard
+   * hook). The enforce-reply Stop hook is always preserved. Omitted → only the
+   * Stop hook is written (unchanged). See build-settings.ts `SettingsOverlay`. */
+  settingsOverlay?: SettingsOverlay
   // --- host / test injection (all optional; production uses defaults) ---
   /** PTY backend. Default: Bun-native terminal host. Tests inject a fake. */
   ptyHost?: PtyHost
@@ -1610,7 +1633,13 @@ async function spawnSession(
   }
 
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2))
-  buildSettings({ settingsPath })
+  // The settings file always carries the enforce-reply Stop hook; the trident
+  // auto-mode launcher additionally folds in its dontAsk permissions (allowlist +
+  // deny list) and a PreToolUse Bash deny-guard via `settingsOverlay`.
+  buildSettings({
+    settingsPath,
+    ...(options.settingsOverlay !== undefined ? { overlay: options.settingsOverlay } : {}),
+  })
 
   // SECURITY-CRITICAL (Codex-r1-P1): thread the spec's declared tool surface into
   // the REPL spawn so the persistent path honors `tools: []` exactly like the
@@ -1632,12 +1661,17 @@ async function spawnSession(
     model,
     addDir: cwd,
     tools: toolSurface,
+    // TRUSTED-FULL surface (trident launcher) → omit `--tools` so `Workflow` +
+    // the `Task*`/`Monitor` poll tools are exposed; dontAsk + allowlist gates use.
+    ...(options.unrestrictedToolSurface === true ? { unrestrictedToolSurface: true } : {}),
     // P0-1 — when the tool bridge is attached, permit its MCP namespace so the
     // agent can invoke the Neutron tools without a per-call approval prompt.
     // `--tools` only gates the BUILT-IN set, so the security-critical
     // `--tools ""` for untrusted-content REPLs is untouched; this allow-list is
     // the MCP-tool permission grant (`mcp__neutron`), added ONLY here.
     ...(toolBridgeActive ? { allowedMcpTools: [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] } : {}),
+    // Auto-mode dontAsk REPLACES the blanket skip-permissions when set.
+    ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
   })
 

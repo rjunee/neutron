@@ -25,7 +25,10 @@ import {
   renderForgePrompt,
 } from './prompts.ts'
 import { buildTridentOrchestrator, computeDiffLineCount } from './orchestrator.ts'
-import { buildClaudePrintArgs } from './inner-loop.ts'
+import { buildSubstrateInnerLauncher } from './inner-loop.ts'
+import type { Event } from '../runtime/events.ts'
+import type { SessionHandle } from '../runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import { TridentSessionManager, type TridentDispatch } from './session.ts'
 import { computeTransition } from './state-machine.ts'
 import type { MergeMode, TridentRun } from './store.ts'
@@ -351,19 +354,39 @@ describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
 // and the Fable opt-in was removed (export-control). Trident v2 analog: per-phase
 // model routing MOVED into the inner workflow's own agent() calls (the
 // orchestrator no longer carries forge_model/argus_model). The v2 invariant is
-// (a) the `claude -p` LAUNCHER pins a NON-Fable model (default `opus`) for the
-// print-mode process, while per-phase routing still lives in the workflow's own
-// agent() calls, and (b) export-control holds — the workflow never hard-pins a
-// Fable id.
+// (a) the interactive-substrate LAUNCHER pins a NON-Fable model (default `opus`)
+// on the turn's `model_preference`, while per-phase routing still lives in the
+// workflow's own agent() calls, and (b) export-control holds — the workflow never
+// hard-pins a Fable id.
 // ---------------------------------------------------------------------------
 describe('FIX 8 — model routing delegated to the workflow (export-control holds)', () => {
-  test('the inner-loop launcher pins a non-Fable model (default opus; per-phase routing lives in the workflow)', () => {
-    const args = buildClaudePrintArgs('launcher prompt', 'opus')
-    const mi = args.indexOf('--model')
-    expect(mi).toBeGreaterThanOrEqual(0)
-    expect(args[mi + 1]).toBe('opus')
-    // Export-control: the launcher argv never hard-pins a Fable model id.
-    expect(args.join(' ').toLowerCase()).not.toContain('fable')
+  test('the inner-loop launcher pins a non-Fable model (default opus; per-phase routing lives in the workflow)', async () => {
+    const specs: AgentSpec[] = []
+    const build = (): Substrate => ({
+      start(spec: AgentSpec): SessionHandle {
+        specs.push(spec)
+        async function* gen(): AsyncGenerator<Event, void, void> {
+          yield { kind: 'token', text: 'TRIDENT_RESULT={"verdict":"APPROVE"}' }
+          yield {
+            kind: 'completion',
+            usage: { input_tokens: 0, output_tokens: 0 },
+            substrate_instance_id: 'cc-trident',
+          } as Event
+        }
+        return {
+          events: gen(),
+          async respondToTool(): Promise<void> {},
+          async cancel(): Promise<void> {},
+          tool_resolution: 'internal',
+        }
+      },
+    })
+    // Default model is the non-Fable top-tier alias `opus`.
+    const launch = buildSubstrateInnerLauncher({ build_substrate: build, assert_model_floor: () => {} })
+    await launch({ prompt: 'launcher prompt', cwd: '/repo', timeout_ms: 60_000 })
+    expect(specs[0]!.model_preference).toEqual(['opus'])
+    // Export-control: the launcher never pins a Fable model id.
+    expect(specs[0]!.model_preference.join(' ').toLowerCase()).not.toContain('fable')
   })
 
   test('export-control: the inner workflow source never hard-pins a Fable model id', () => {

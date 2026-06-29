@@ -54,9 +54,12 @@ import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
-  resolveScrubbedAuthEnv,
 } from '../gateway/realmode-composer/build-llm-call-substrate.ts'
-import { buildClaudePrintLauncher } from '../trident/inner-loop.ts'
+import {
+  buildSubstrateInnerLauncher,
+  DEFAULT_INNER_LOOP_TIMEOUT_MS,
+} from '../trident/inner-loop.ts'
+import { buildTridentAutoModeSettings } from '../trident/auto-mode.ts'
 import { BEST_MODEL } from '../runtime/models.ts'
 import {
   FIRST_CONVERSATIONAL_TIMEOUT_MS_DEFAULT,
@@ -475,25 +478,59 @@ export function buildOpenGraphComposer(
         return s
       }
 
-    // Trident v2 (Phase 2 hard cutover) — the inner Forge→Argus→fix loop is one
-    // native CC Dynamic Workflow. The composer threads a BLOCKING `claude -p`
-    // print-mode LAUNCHER (`buildClaudePrintLauncher`); the build-core trident
-    // module wraps it with `buildWorkflowInnerLoop`. The launcher spawns
-    // `claude -p` so print-mode DRAINS the background `Workflow` (and its
-    // `agent()` workers) to completion before the process exits — a
-    // persistent-REPL turn would instead settle on the first reply, BEFORE the
-    // workflow drains, aborting it (the real-run bug this fixes). Auth is the
-    // SAME single-owner Anthropic credential pool the conversational substrate
-    // uses: `resolveScrubbedAuthEnv({pool})` is re-run per launch (rotated-token
-    // safe) and yields the scrubbed `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`
-    // env (ISSUES #49). Null (no credential) leaves `composition.trident` unset
-    // → the loop's restart-safe stub no-op.
+    // Trident v2 — the inner Forge→Argus→fix loop is one native CC Dynamic
+    // Workflow. THE BILLING FIX (2026-06-29): the inner launcher runs as ONE turn
+    // on the INTERACTIVE persistent-REPL substrate — the SAME billing-EXEMPT seam
+    // chat/dispatch/cores use — NOT a `claude -p` print-mode subprocess (which is
+    // API-BILLED off the Max subscription since 2026-06-15). The build-core trident
+    // module wraps this launcher with `buildWorkflowInnerLoop`.
+    //
+    // The launcher substrate is a FRESH ephemeral `cc-trident-*` REPL per launch,
+    // rooted at the run's worktree, configured for the inner loop:
+    //   • `unrestrictedToolSurface` — the FULL built-in surface so `Workflow` (and
+    //     the `Task*`/`Monitor` tools the launcher uses to poll the background run
+    //     to terminal) are present (a restricted `--tools` list omits `Workflow`).
+    //   • `turn_timeout_ms = DEFAULT_INNER_LOOP_TIMEOUT_MS` — the launcher HOLDS
+    //     its turn open (polling) for the whole build, far past the 180s
+    //     conversational default; the held-open turn keeps the REPL alive so the
+    //     background Workflow drains (the interactive analogue of print-mode's
+    //     process-lifetime drain) — the real-run abort this replaces.
+    //   • auto-mode (Phase 3): `--permission-mode dontAsk` + the trident allowlist
+    //     / deny list + a PreToolUse Bash deny-guard (REPLACES the reckless
+    //     `--dangerously-skip-permissions`); the Workflow `agent()` workers inherit
+    //     the launcher's mode (proto-2 Q2). MERGE stays the OUTER/human gate.
+    // Auth is the SAME single-owner credential pool the conversational substrate
+    // uses (`buildLlmCallSubstrate` over `llmPool`, never a direct api.anthropic.com
+    // call). Null (no credential) leaves `composition.trident` unset → the loop's
+    // restart-safe stub no-op.
+    const tridentAutoModeSettings = buildTridentAutoModeSettings({})
+    const makeTridentSubstrate = (cwd: string): Substrate => {
+      const s =
+        llmPool === null
+          ? null
+          : buildLlmCallSubstrate({
+              pool: llmPool,
+              substrate_instance_id: `cc-trident-${internal_handle}`,
+              cwd,
+              internal_handle,
+              user_id: OWNER_USER_ID,
+              project_slug,
+              ephemeral: true,
+              // Full built-in surface (Workflow + Task*/Monitor) — trusted path.
+              unrestrictedToolSurface: true,
+              // Held-open launcher turn spans the whole inner loop.
+              turn_timeout_ms: DEFAULT_INNER_LOOP_TIMEOUT_MS,
+              // Auto-mode dontAsk REPLACES --dangerously-skip-permissions; the
+              // allowlist + PreToolUse deny-guard ride the settings overlay.
+              permissionMode: tridentAutoModeSettings.permissions.defaultMode,
+              settingsOverlay: tridentAutoModeSettings,
+              ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+            })
+      if (s === null) throw new Error('cc-trident: empty Anthropic credential pool')
+      return s
+    }
     const tridentLaunchInnerWorkflow =
-      llmPool !== null
-        ? buildClaudePrintLauncher({
-            resolve_auth_env: async () => (await resolveScrubbedAuthEnv({ pool: llmPool })).env,
-          })
-        : null
+      llmPool !== null ? buildSubstrateInnerLauncher({ build_substrate: makeTridentSubstrate }) : null
 
     // Agent-dispatch family (parity gap #3) — the general named-specialist +
     // ad-hoc background-agent surface (research → Atlas, review → Sentinel,
