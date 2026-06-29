@@ -122,7 +122,6 @@ import {
   buildButtonStoreReminderOutbound,
   buildStatusMdContextSource,
 } from '../reminders/index.ts'
-import { webTopicId } from '../gateway/http/web-topic-id.ts'
 
 import { buildLocalStartTokenAuth } from './local-start-token.ts'
 import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
@@ -1489,26 +1488,65 @@ export function buildOpenGraphComposer(
     // topic a client actually subscribes to (else it writes history + live-
     // pushes to a key nobody reads). Also forward an already-web-shaped topic
     // and unwrap the Expo app's `app-project:<id>` form.
-    const reminderGeneralTopic = webTopicId(OWNER_USER_ID)
+    // ── Live-delivery: fired reminders + briefs go to the app-ws client ────────
+    // THE BUG (M1 E2E 2026-06-28, verified on an isolated instance): fired
+    // reminders (and the proactive morning brief) are timer-driven AGENT
+    // MESSAGES, but they were delivered over the LEGACY `web:` chat registry
+    // (`landing.registry`) on the `web:<user>` topic. The ONLY client — the
+    // React/Expo app — connects to `/ws/app/chat` and binds its live sender in
+    // `appWsRegistry` under `app:<user>` (`app-ws-surface.ts` `appWsTopicId`).
+    // So a fired reminder hit the durable history but was NEVER pushed to the
+    // connected client (`registry.send('web:<user>', …)` matches no sender),
+    // while a steady-state live-agent reply — delivered via `buildAppWsSendReply`
+    // → `appWsRegistry` on `app:<user>` — paints instantly. Net: you set a
+    // reminder, it fires, and nothing appears in your chat until you reload.
+    // (Proven: a steady-state reply reached the socket live; a fired reminder
+    // did not; the reminder durable row landed under `web:<owner>` while the
+    // reply's landed under `app:<owner>`.) This is the "app: vs web: live-push
+    // parity" follow-up the earlier wiring flagged as deferred.
+    //
+    // THE FIX: deliver reminders + briefs the SAME way the agent delivers its
+    // own replies. `appWsAgentPushRegistry` is a thin `WebChatSenderRegistry`-
+    // shaped bridge that forwards each agent_message to `buildAppWsSendReply`
+    // (the exact steady-state reply path → `appWsHolder.adapter.send` →
+    // `appWsRegistry`). It forward-references `buildAppWsSendReply` / `appWsRegistry`
+    // (defined below); both are touched only at FIRE time (tick loop / brief
+    // cron), long after boot wires the adapter — never during composition. The
+    // durable `button_prompts` row now lands under the SAME `app:<user>` topic
+    // agent replies use, carrying its `prompt_id` into the live frame so a later
+    // hydration de-dupes cleanly. NO feature flag.
+    const appWsAgentPushRegistry = {
+      register: (): void => {},
+      unregister: (): void => {},
+      has: (topic_id: string): boolean => appWsRegistry.has(topic_id),
+      send: (topic_id: string, event: ChatOutbound): boolean => {
+        buildAppWsSendReply(topic_id)(event)
+        return true
+      },
+    }
+    // Map an engine reminder destination to the app-ws topic the client binds:
+    // null → the owner's General `app:<user>`; an already-app-shaped topic as-is;
+    // a bare project_id (or the Expo `app-project:<id>` form) → `app:<user>:<id>`
+    // (mirrors the live-agent turn's project-scoped topic — see `appWsReceiver`).
+    const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
+    const resolveAppWsReminderTopic = (explicit_topic: string | null): string => {
+      if (explicit_topic === null || explicit_topic.length === 0) return reminderGeneralTopic
+      if (explicit_topic.startsWith('app:')) return explicit_topic
+      const projectId = explicit_topic.startsWith('app-project:')
+        ? explicit_topic.slice('app-project:'.length)
+        : explicit_topic
+      return `${reminderGeneralTopic}:${projectId}`
+    }
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: buildButtonStoreReminderOutbound({
         buttonStore: landing.buttonStore,
-        registry: landing.registry,
+        registry: appWsAgentPushRegistry,
       }),
       ...(liveAgentSubstrate !== null
         ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
-      resolveTopicId: ({ explicit_topic }): string => {
-        if (explicit_topic === null || explicit_topic.length === 0) {
-          return reminderGeneralTopic
-        }
-        if (explicit_topic.startsWith('web:')) return explicit_topic
-        const projectId = explicit_topic.startsWith('app-project:')
-          ? explicit_topic.slice('app-project:'.length)
-          : explicit_topic
-        return `${reminderGeneralTopic}:${projectId}`
-      },
+      resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
     })
 
     // ── P1-4 — proactive messaging ACTIVATION (morning brief + idle nudge) ──
@@ -1523,19 +1561,18 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
         : null
-    // The brief posts to the General topic on the SAME durable path fired
-    // reminders use (`reminderGeneralTopic = webTopicId(OWNER_USER_ID)` +
-    // `landing.registry`, just above): persist a durable history row + best-
-    // effort live-push via the web chat registry. Deliberate PARITY with
-    // reminders — the durable row is the guarantee (read on the next hydration);
-    // the live push reaches the web (`web:`) chat registry. Full live parity
-    // with the Expo app-ws (`app:`) client is a platform-wide concern shared
-    // with reminders (both use this web-registry path), tracked as follow-up —
-    // out of scope for reviving the proactive modules.
-    const proactiveGeneralTopic = webTopicId(OWNER_USER_ID)
+    // The brief posts to the General topic on the SAME app-ws delivery path
+    // fired reminders now use (`reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)`
+    // + `appWsAgentPushRegistry`, just above): persist a durable history row
+    // under `app:<user>` + live-push through the app-ws session registry so a
+    // connected client paints the brief immediately (the previous `web:` +
+    // `landing.registry` path reached no app-ws client — same live-delivery bug
+    // as reminders, now fixed for both). The durable row is the guarantee (read
+    // on the next hydration); the live push reaches the owner's open socket.
+    const proactiveGeneralTopic = appWsTopicId(OWNER_USER_ID)
     const proactiveSink = buildButtonStoreProactiveSink({
       buttonStore: landing.buttonStore,
-      registry: landing.registry,
+      registry: appWsAgentPushRegistry,
     })
     const tasksConfig: NonNullable<CompositionInput['tasks']> = {
       proactive: {
