@@ -37,6 +37,7 @@ const SAVED_ENV_KEYS = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
+  'TZ',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -97,6 +98,32 @@ describe('Open proactive activation wiring', () => {
     // + dual web:/app: namespace (see composer comment + AS-BUILT). The gate is
     // wired and ready; the sweep cron only registers once listIdleTopics lands.
     expect(proactive!.listIdleTopics).toBeUndefined()
+
+    for (const cleanup of composition.realmode_cleanups ?? []) {
+      try {
+        cleanup()
+      } catch {
+        /* best-effort */
+      }
+    }
+  }, 20_000)
+
+  test('threads the HOST LOCAL timezone into the brief scheduler — not the hardcoded Pacific default', async () => {
+    // Ryan: "Detect local computer time not hardcode pt." Before this fix the
+    // composer never set `tasks.proactive.timezone`, so `runMorningBrief` fell
+    // back to the module's hardcoded `America/Los_Angeles` and a non-Pacific
+    // owner got the brief computed for the wrong local day/hour. Pin that the
+    // composer now resolves the host zone (`process.env.TZ` override → runtime
+    // zone) and threads it through, so a non-PT host drives a non-PT brief.
+    process.env['TZ'] = 'Asia/Tokyo'
+    const composer = buildOpenGraphComposer({ env: process.env })
+    const composition = await composer({ db, project_slug: 'owner' })
+
+    const proactive = composition.tasks?.proactive
+    expect(proactive).toBeDefined()
+    expect(proactive!.timezone).toBe('Asia/Tokyo')
+    // And explicitly NOT the old hardcoded Pacific default.
+    expect(proactive!.timezone).not.toBe('America/Los_Angeles')
 
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
