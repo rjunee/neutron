@@ -7,7 +7,7 @@
  * unit-testable; the composer injects these as `persistToken` / `requestRestart`.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const TOKEN_LINE_RE = /^[\t ]*(?:export[\t ]+)?CLAUDE_CODE_OAUTH_TOKEN=/
@@ -35,6 +35,16 @@ export function persistOauthTokenToEnv(token: string, envFilePath = defaultEnvFi
   while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
   kept.push(`CLAUDE_CODE_OAUTH_TOKEN=${token}`)
   writeFileSync(envFilePath, kept.join('\n') + '\n', { mode: 0o600 })
+  // `mode` on writeFileSync only applies when CREATING the file — an existing
+  // `.env` (e.g. 0644 from a template or manual setup) keeps its old perms. We
+  // are writing a long-lived OAuth secret, so force 0600 regardless of prior
+  // mode (Codex review P2). Best-effort: a chmod failure (e.g. exotic FS) must
+  // not abort the handoff — the token is already persisted.
+  try {
+    chmodSync(envFilePath, 0o600)
+  } catch {
+    /* non-fatal */
+  }
 }
 
 /**

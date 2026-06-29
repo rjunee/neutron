@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -47,6 +47,13 @@ describe('persistOauthTokenToEnv', () => {
     expect(out).toContain(`CLAUDE_CODE_OAUTH_TOKEN=${TOKEN}`)
     expect(out).not.toContain('sk-ant-oat01-old')
     expect(out).toContain('PORT=7800')
+  })
+
+  test('tightens an existing world-readable .env to 0600 (secret hygiene)', () => {
+    writeFileSync(envPath, 'PORT=7800\n')
+    chmodSync(envPath, 0o644) // pre-existing permissive file
+    persistOauthTokenToEnv(TOKEN, envPath)
+    expect(statSync(envPath).mode & 0o777).toBe(0o600)
   })
 
   test('repeated writes do not accumulate blank lines', () => {
