@@ -13,6 +13,8 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import type { HostCommandResult } from './git-mode.ts'
 import {
   ARGUS_DIFF_LINE_LIMIT,
@@ -23,6 +25,7 @@ import {
   renderForgePrompt,
 } from './prompts.ts'
 import { buildTridentOrchestrator, computeDiffLineCount } from './orchestrator.ts'
+import { buildClaudePrintArgs } from './inner-loop.ts'
 import { TridentSessionManager, type TridentDispatch } from './session.ts'
 import { computeTransition } from './state-machine.ts'
 import type { MergeMode, TridentRun } from './store.ts'
@@ -53,6 +56,9 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     thread_id: null,
     channel_kind: 'telegram',
     failure_reason: null,
+    workflow_run_id: null,
+    inner_checkpoint: null,
+    inner_verdict: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
     ...over,
@@ -109,57 +115,54 @@ describe('FIX 1 — spawn validation (no phantom in-flight)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// FIX 2 — Reap / "session never became ready" → re-dispatch, bounded.
-// Vajra reaped a dead tmux window/PID and re-dispatched. Open analog: an
-// orphaned persisted subagent_run_id (untracked after restart) re-dispatches
-// the phase once per process under the default policy.
-// (Full lifecycle in restart-resume.test.ts; here we pin the bound.)
+// FIX 2 — Reap / "dispatch lost on restart" → re-dispatch, bounded. Vajra reaped
+// a dead tmux window/PID and re-dispatched. Open v2 analog: an orphaned
+// persisted subagent_run_id (the inner-loop dispatch this process no longer
+// tracks) relaunches a FRESH workflow once per process under the default policy.
+// (Full lifecycle in restart-resume.test.ts; here we pin the bound + 'wait'.)
 // ---------------------------------------------------------------------------
 describe('FIX 2 — reap → bounded re-dispatch', () => {
   test('an untracked in-flight id re-dispatches exactly once, then waits (bounded)', async () => {
-    const seen: string[] = []
-    const session = new TridentSessionManager({
-      // Each dispatched session never completes, so the run stays in-flight
-      // and the SAME run re-enters the orphan path on the next tick.
-      dispatch: async () => {
-        await new Promise<void>(() => {})
-        return { result: '', status: 'completed' }
-      },
-    })
+    let calls = 0
+    // The inner loop never settles, so the run stays in flight and the SAME run
+    // re-enters the orphan path on the next tick.
     const { step } = buildTridentOrchestrator({
-      session,
+      inner_loop: async () => {
+        calls++
+        await new Promise<void>(() => {})
+        return { status: 'failed', verdict: null, pr_number: null, branch: null, round: 0, checkpoint: null, raw: '' }
+      },
+      db_path: '/tmp/db',
       run_host: async () => ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
-    // Mid-argus run with a stale id the fresh session never tracked.
-    let run = makeRun({ phase: 'argus', subagent_run_id: 'STALE', subagent_status: 'running' })
+    let run = makeRun({ subagent_run_id: 'STALE', subagent_status: 'running' })
 
     const t1 = await step(run)
-    seen.push(t1.note)
     run = t1.run
     // Re-dispatched: slot now holds a fresh, tracked id (not STALE).
     expect(run.subagent_run_id).not.toBe('STALE')
     expect(run.subagent_run_id).not.toBeNull()
+    expect(calls).toBe(1)
 
-    // The new session is in flight but its id is now ALSO untracked from
-    // the run's perspective only if lost again — it is tracked, so the next
-    // step polls it (running) rather than re-dispatching a third agent.
+    // Tracked now → the next step polls it (waiting), never a 2nd re-dispatch.
     const t2 = await step(run)
     expect(t2.waiting).toBe(true)
-    expect(t2.run.subagent_run_id).toBe(run.subagent_run_id) // unchanged: no 2nd re-dispatch
+    expect(t2.run.subagent_run_id).toBe(run.subagent_run_id)
+    expect(calls).toBe(1)
   })
 
   test("'wait' policy never re-dispatches an orphan (operator-driven recovery)", async () => {
-    const session = new TridentSessionManager({ dispatch: async () => ({ result: 'APPROVE', status: 'completed' }) })
     const { step } = buildTridentOrchestrator({
-      session,
+      inner_loop: async () => ({ status: 'completed', verdict: 'APPROVE', pr_number: 1, branch: 'feat-x', round: 1, checkpoint: 'argus-approved', raw: '' }),
+      db_path: '/tmp/db',
       run_host: async () => ok(),
       base_branch: 'main',
       on_orphaned_session: 'wait',
       now: () => new Date(0).toISOString(),
     })
-    const run = makeRun({ phase: 'argus', subagent_run_id: 'STALE', subagent_status: 'running' })
+    const run = makeRun({ subagent_run_id: 'STALE', subagent_status: 'running' })
     const out = await step(run)
     expect(out.changed).toBe(false)
     expect(out.waiting).toBe(true)
@@ -344,56 +347,28 @@ describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
 })
 
 // ---------------------------------------------------------------------------
-// FIX 8 — Model routing / effort defaults the skill specifies. Vajra routes
-// every spawn to the fleet default and the Fable opt-in was removed
-// (export-control). Open analog: the orchestrator routes Forge + Argus to
-// configured models (defaults applied), and the model rides on every
-// dispatch — never an empty/implicit model.
+// FIX 8 — Model routing / effort. Vajra routed every spawn to the fleet default
+// and the Fable opt-in was removed (export-control). Trident v2 analog: per-phase
+// model routing MOVED into the inner workflow's own agent() calls (the
+// orchestrator no longer carries forge_model/argus_model). The v2 invariant is
+// (a) the `claude -p` LAUNCHER pins a NON-Fable model (default `opus`) for the
+// print-mode process, while per-phase routing still lives in the workflow's own
+// agent() calls, and (b) export-control holds — the workflow never hard-pins a
+// Fable id.
 // ---------------------------------------------------------------------------
-describe('FIX 8 — model routing defaults', () => {
-  async function captureModels(opts: { forge_model?: string; argus_model?: string }) {
-    const models: Record<string, string> = {}
-    const session = new TridentSessionManager({
-      dispatch: async (input) => {
-        models[input.kind] = input.model
-        if (input.kind === 'argus') return { result: 'APPROVE', status: 'completed' }
-        return { result: 'PR_NUMBER=1\nBRANCH=feat-x\nWORKTREE=/repo', status: 'completed' }
-      },
-    })
-    const orchestratorOpts: Parameters<typeof buildTridentOrchestrator>[0] = {
-      session,
-      run_host: async (cmd) => (cmd.includes('--numstat') ? ok('1\t1\tf') : ok()),
-      base_branch: 'main',
-      now: () => new Date(0).toISOString(),
-    }
-    if (opts.forge_model !== undefined) orchestratorOpts.forge_model = opts.forge_model
-    if (opts.argus_model !== undefined) orchestratorOpts.argus_model = opts.argus_model
-    const { step } = buildTridentOrchestrator(orchestratorOpts)
-    let run = makeRun({ phase: 'forge-init', subagent_run_id: null })
-    // forge-init spawn
-    run = (await step(run)).run
-    await session.drain()
-    // forge-init complete → argus
-    run = (await step(run)).run
-    // argus spawn
-    run = (await step(run)).run
-    await session.drain()
-    return models
-  }
-
-  test('defaults are applied + every dispatch carries a non-empty model', async () => {
-    const models = await captureModels({})
-    expect(models['forge']).toBe('claude-sonnet-4-6')
-    expect(models['argus']).toBe('claude-sonnet-4-6')
-    expect((models['forge'] ?? '').length).toBeGreaterThan(0)
+describe('FIX 8 — model routing delegated to the workflow (export-control holds)', () => {
+  test('the inner-loop launcher pins a non-Fable model (default opus; per-phase routing lives in the workflow)', () => {
+    const args = buildClaudePrintArgs('launcher prompt', 'opus')
+    const mi = args.indexOf('--model')
+    expect(mi).toBeGreaterThanOrEqual(0)
+    expect(args[mi + 1]).toBe('opus')
+    // Export-control: the launcher argv never hard-pins a Fable model id.
+    expect(args.join(' ').toLowerCase()).not.toContain('fable')
   })
 
-  test('explicit forge/argus model overrides route through', async () => {
-    const models = await captureModels({ forge_model: 'claude-opus-4-8', argus_model: 'claude-haiku-4-5' })
-    expect(models['forge']).toBe('claude-opus-4-8')
-    expect(models['argus']).toBe('claude-haiku-4-5')
-    // Export-control: nothing routes to the disabled Fable id by default.
-    expect(models['forge']).not.toContain('fable')
+  test('export-control: the inner workflow source never hard-pins a Fable model id', () => {
+    const src = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+    expect(src.toLowerCase()).not.toContain('fable')
   })
 })
 

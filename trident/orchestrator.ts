@@ -1,119 +1,88 @@
 /**
- * @neutronai/trident — the PR-3 orchestration step.
+ * @neutronai/trident — the orchestration step (Trident v2 hard cutover).
  *
- * Wires the real Forge/Argus substrate sessions into the PR-2 state
- * machine. The tick loop calls `step(run)` for every non-terminal run;
- * the step does exactly three things, in order:
+ * The durable OUTER loop (`tick.ts` + the `code_trident_runs` SQLite table)
+ * calls `step(run)` for every non-terminal run. As of Trident v2 the INNER
+ * Forge→Argus→fix loop is ONE native CC Dynamic Workflow
+ * (`trident/inner-workflow.mjs`), launched once per run via a `TridentInnerLoop`
+ * (`trident/inner-loop.ts`). The v1 substrate-per-phase inner mechanism
+ * (`session.spawn`/`spawnForPhase`/the per-phase state graph) is REMOVED from
+ * this prod step — the workflow owns the Forge build, the parallel Argus review,
+ * the synthesis, and the bounded fix loop internally.
  *
- *   1. SPAWN-IF-NEEDED. A live phase with no in-flight sub-agent
- *      (`subagent_run_id === null`) gets its sub-agent launched now:
- *      render the phase's prompt, `session.spawn(...)`, and persist the
- *      returned id + `running` on the row. This is the ONLY place a
- *      sub-agent is spawned, and it is guarded by the null check — once
- *      a non-null id is persisted, a re-entrant tick takes the POLL path
- *      instead, so a session is never double-spawned (the resume-safe
- *      invariant from the brief).
+ * What this step still owns (the OUTER concerns):
  *
- *   2. POLL + TRANSITION. With an agent in flight, defer to the pure
- *      `advanceTridentRun` (PR-2) using the session manager's
- *      `classify`. running → wait; crashed → failed; completed → the
- *      pure transition graph advances the phase and CLEARS the sub-agent
- *      slot, so step (1) on the next tick spawns the next phase's agent.
+ *   1. LAUNCH-IF-NEEDED. A live run with no in-flight dispatch
+ *      (`subagent_run_id === null`) gets the inner loop launched now: mint a
+ *      uuid, persist it + `subagent_status='running'`, and run the workflow in
+ *      the BACKGROUND. Idempotent crash-resume: before launch, fold any existing
+ *      PR/branch + the last `inner_checkpoint` into the dispatch so the workflow
+ *      REUSES the PR (no duplicate) and skips finished phases.
  *
- *   3. MERGE-ON-DONE. When the transition lands on `done` (Argus
- *      APPROVE), run the merge + cleanup for the run's git-mode. A merge
- *      failure routes the run to `failed` (recoverable: re-run) rather
- *      than leaving a half-merged terminal state.
+ *   2. ORPHAN RECOVERY. A persisted `subagent_run_id` this process does NOT track
+ *      (lost on restart) is recovered per `on_orphaned_session` (redispatch /
+ *      wait / fail). Redispatch relaunches a FRESH workflow that resumes from the
+ *      persisted checkpoint — never a double-launch, bounded to one per process.
  *
- * The step is the composition root; the pieces (session manager, merge
- * deps, prompt renderers, diff-size probe) are all injected so the whole
- * loop is exercised against a scripted fake dispatch + fake git/gh.
+ *   3. POLL + TERMINATE. With a dispatch in flight, defer until it settles. On
+ *      `APPROVE` → phase `done` (persist pr/branch/inner_checkpoint/inner_verdict)
+ *      then merge + cleanup (`cleanupAfterMerge`, the outer/human gate). On
+ *      `REQUEST_CHANGES` (maxRounds exhausted) or a crashed/timed-out dispatch →
+ *      phase `failed` with a named reason (recoverable: re-run), never a silent
+ *      success.
+ *
+ * `state-machine.ts` (`computeTransition`/`advanceTridentRun`) is intentionally
+ * KEPT intact (its unit tests + one-commit revertibility) even though this prod
+ * step no longer drives the per-phase graph for the inner loop.
  */
 
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
+import type { InnerLoopResult, TridentInnerLoop } from './inner-loop.ts'
 import { buildMergeCleanupDeps, detectBaseBranch, type RunHostCommand } from './merge.ts'
-import {
-  ARGUS_DIFF_LINE_LIMIT,
-  renderArgusPrompt,
-  renderForgeFixPrompt,
-  renderForgePrompt,
-  renderRalphPlanPrompt,
-  renderRalphTaskPrompt,
-} from './prompts.ts'
-import { TridentSessionManager } from './session.ts'
-import {
-  advanceTridentRun,
-  isTerminalPhase,
-  type AdvanceOutcome,
-} from './state-machine.ts'
-import type { TridentPhase, TridentRun } from './store.ts'
-
-/**
- * Defensive guard: raised if `spawnForPhase` is ever asked to spawn for a
- * phase with no spawner. As of PR-4 every LIVE phase (forge-init, forge-fix,
- * argus, ralph-plan, ralph-task) is wired; only the terminal phases hit the
- * default, and `step` short-circuits those before spawn. So this is now a
- * never-should-happen backstop, not an expected control-flow path.
- */
-export class TridentPhaseNotWiredError extends Error {
-  constructor(readonly phase: TridentPhase) {
-    super(`trident: no sub-agent spawner wired for phase '${phase}'`)
-    this.name = 'TridentPhaseNotWiredError'
-  }
-}
+import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
+import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
+import type { TridentRun } from './store.ts'
 
 export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
 }
 
 export interface BuildTridentOrchestratorOptions {
-  session: TridentSessionManager
-  /** Host command runner — diff-size probe, base-branch detect, merge. */
+  /** The inner-loop launcher (Trident v2). Drives Forge→Argus→fix as one CC
+   *  Dynamic Workflow; see `buildWorkflowInnerLoop`. */
+  inner_loop: TridentInnerLoop
+  /** Absolute sqlite file path threaded to the workflow's checkpoint Bash steps. */
+  db_path: string
+  /** Host command runner — base-branch detect, existing-PR probe, merge. */
   run_host: RunHostCommand
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
-  /** Forge model id. Default 'claude-sonnet-4-6'. */
-  forge_model?: string
-  /** Argus model id. Default 'claude-sonnet-4-6'. */
-  argus_model?: string
-  /** Per-sub-agent wall-clock budget. Default 30 min. */
-  subagent_timeout_ms?: number
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
+  /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
+  mint_run_id?: () => string
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
-   * `subagent_run_id` is persisted (non-null) but which the session
-   * manager no longer tracks (`session.isTracked === false`). This is the
-   * restart / "session never became ready" case: a sub-agent launched by
-   * a PRIOR control-plane process whose in-memory dispatch was lost when
-   * this process booted.
+   * `subagent_run_id` is persisted but which THIS process no longer tracks (the
+   * restart case: the inner-loop dispatch was launched by a prior control-plane
+   * process and lost when this one booted).
    *
-   *   • `'redispatch'` (default) — RESUME the run by re-launching the same
-   *     phase's sub-agent (clear the slot so the spawn path re-fires).
-   *     BOUNDED to one re-dispatch per run per process (a re-spawned
-   *     session registers synchronously, so steady state never re-enters
-   *     this path; the per-process guard stops a crash-restart storm from
-   *     spinning). This is NOT a double-spawn: the prior in-process agent
-   *     is already gone, so exactly one agent is ever live for the phase.
-   *   • `'wait'` — leave the run untouched and keep polling (the prior
-   *     conservative default — an operator can `/trident stop` a genuine
-   *     orphan).
-   *   • `'fail'` — mark the run failed immediately (loud reap).
+   *   • `'redispatch'` (default) — RESUME by relaunching a FRESH workflow that
+   *     reads `inner_checkpoint`/`pr`/`branch` and idempotently skips finished
+   *     phases + reuses the PR. Bounded to one redispatch per run per process.
+   *   • `'wait'` — leave untouched, keep polling (operator can `/trident stop`).
+   *   • `'fail'` — reap the orphan loudly to `failed`.
    */
   on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
 }
 
-const DEFAULT_FORGE_MODEL = 'claude-sonnet-4-6'
-const DEFAULT_ARGUS_MODEL = 'claude-sonnet-4-6'
-const DEFAULT_SUBAGENT_TIMEOUT_MS = 30 * 60_000
-
 /**
- * Sum changed lines from `git diff --numstat <base>..HEAD`. Conservative
- * on failure: a probe that can't measure returns OVER the ceiling so the
- * oversized-diff guard takes the safe meaty-commits path rather than
- * pushing a possibly-huge diff at Argus.
+ * Sum changed lines from `git diff --numstat <base>..HEAD`. RETAINED as an
+ * exported helper (its Vajra-parity tests + revertibility) though the inner
+ * workflow now does its own oversized-diff guard internally. Conservative on
+ * failure: returns OVER the ceiling so an unmeasurable diff is treated as large.
  */
 export async function computeDiffLineCount(
   run_host: RunHostCommand,
@@ -142,18 +111,25 @@ export async function computeDiffLineCount(
   return total
 }
 
+/** In-process tracking of the ONE inner-loop dispatch per run, keyed by the
+ *  minted `subagent_run_id`. Mirrors `TridentSessionManager`'s spawn/classify
+ *  but with a single dispatch per run (the workflow owns the inner phases). */
+type InnerDispatch = { status: 'running' } | { status: 'done'; result: InnerLoopResult }
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
-): { step: TridentStep } {
+): { step: TridentStep; drain: () => Promise<void> } {
   const now = opts.now ?? (() => new Date().toISOString())
-  const forge_model = opts.forge_model ?? DEFAULT_FORGE_MODEL
-  const argus_model = opts.argus_model ?? DEFAULT_ARGUS_MODEL
-  const timeout_ms = opts.subagent_timeout_ms ?? DEFAULT_SUBAGENT_TIMEOUT_MS
+  const inner_loop = opts.inner_loop
+  const db_path = opts.db_path
   const merge_deps = opts.merge_deps ?? buildMergeCleanupDeps(opts.run_host)
-  const session = opts.session
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
-  // Run ids re-dispatched in THIS process — the per-process bound on the
-  // resume/reap recovery so a crash-restart loop can't spin forever.
+  const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
+
+  const dispatches = new Map<string, InnerDispatch>()
+  const inflight = new Set<Promise<void>>()
+  // Run ids redispatched in THIS process — the per-process bound on orphan
+  // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
 
   async function resolveBase(run: TridentRun): Promise<string> {
@@ -161,93 +137,143 @@ export function buildTridentOrchestrator(
     return detectBaseBranch(opts.run_host, run.repo_path)
   }
 
-  async function spawnForPhase(run: TridentRun): Promise<string> {
-    const base = await resolveBase(run)
-    switch (run.phase) {
-      case 'forge-init': {
-        return session.spawn({
-          kind: 'forge',
-          phase: run.phase,
-          system: 'forge',
-          user_message: renderForgePrompt(run, base),
-          repo_path: run.worktree ?? run.repo_path,
-          trident_run_id: run.id,
-          model: forge_model,
-          timeout_ms,
-        })
+  /** Best-effort probe for an existing PR on the run's branch (idempotent resume
+   *  — never open a duplicate). Only meaningful in `pr` mode; never throws. */
+  async function detectExistingPr(run: TridentRun): Promise<number | null> {
+    if (run.merge_mode !== 'pr') return null
+    const branch = run.branch ?? `trident/${run.slug}`
+    try {
+      const res = await opts.run_host(
+        ['gh', 'pr', 'list', '--head', branch, '--json', 'number', '--jq', '.[0].number // empty'],
+        run.repo_path,
+      )
+      if (res.ok) {
+        const n = parseInt(res.stdout.trim(), 10)
+        if (Number.isFinite(n) && n > 0) return n
       }
-      case 'forge-fix': {
-        const findings = session.findingsFor(run.id)
-        return session.spawn({
-          kind: 'forge',
-          phase: run.phase,
-          system: 'forge',
-          user_message: renderForgeFixPrompt(run, base, findings, run.round),
-          repo_path: run.worktree ?? run.repo_path,
-          trident_run_id: run.id,
-          model: forge_model,
-          timeout_ms,
-        })
-      }
-      case 'ralph-plan': {
-        // A fresh, docs-only planning pass: diff SPEC.md against the code
-        // and (re)write IMPLEMENTATION_PLAN.md. Reports REMAINING_TASKS +
-        // NEXT_TASK (parsed by the session manager's ralph-plan branch).
-        return session.spawn({
-          kind: 'forge',
-          phase: run.phase,
-          system: 'forge',
-          user_message: renderRalphPlanPrompt(run, base),
-          repo_path: run.worktree ?? run.repo_path,
-          trident_run_id: run.id,
-          model: forge_model,
-          timeout_ms,
-        })
-      }
-      case 'ralph-task': {
-        // A fresh Forge with a clean context that implements ONLY the single
-        // task the prior planning pass surfaced.
-        const next_task = session.nextTaskFor(run.id)
-        return session.spawn({
-          kind: 'forge',
-          phase: run.phase,
-          system: 'forge',
-          user_message: renderRalphTaskPrompt(run, base, next_task),
-          repo_path: run.worktree ?? run.repo_path,
-          trident_run_id: run.id,
-          model: forge_model,
-          timeout_ms,
-        })
-      }
-      case 'argus': {
-        const diff_line_count = await computeDiffLineCount(
-          opts.run_host,
-          run.worktree ?? run.repo_path,
-          base,
-        )
-        const prompt = renderArgusPrompt({
-          branch: run.branch ?? `trident/${run.slug}`,
-          pr_number: run.pr ?? 0,
-          round: run.round,
-          max_rounds: run.max_rounds,
-          base_branch: base,
-          diff_line_count,
-        })
-        return session.spawn({
-          kind: 'argus',
-          phase: run.phase,
-          system: 'argus',
-          user_message: prompt,
-          repo_path: run.worktree ?? run.repo_path,
-          trident_run_id: run.id,
-          model: argus_model,
-          timeout_ms,
-        })
-      }
-      default:
-        // Terminal phases only — `step` short-circuits them before here.
-        throw new TridentPhaseNotWiredError(run.phase)
+    } catch {
+      // probe failure → treat as no existing PR (the workflow opens one).
     }
+    return null
+  }
+
+  function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
+    return {
+      ...run,
+      phase: 'failed',
+      subagent_status: 'failed',
+      subagent_run_id: keepSubagentId ? run.subagent_run_id : null,
+      failure_reason: reason,
+      last_advanced_at: now(),
+    }
+  }
+
+  /** Launch the inner loop in the background; persist the tracking id. Folds any
+   *  existing PR + the last checkpoint into the dispatch for idempotent resume. */
+  async function launch(run: TridentRun): Promise<AdvanceOutcome> {
+    const base = await resolveBase(run)
+    const resume_checkpoint = run.inner_checkpoint
+    const existingPr = run.pr ?? (await detectExistingPr(run))
+    const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
+
+    const id = mint()
+    if (typeof id !== 'string' || id.length === 0) {
+      return {
+        run: failedRun(run, 'trident: mint_run_id produced an empty id', false),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (empty dispatch id)`,
+      }
+    }
+    dispatches.set(id, { status: 'running' })
+    const p = (async (): Promise<void> => {
+      let result: InnerLoopResult
+      try {
+        result = await inner_loop({
+          run: launchRun,
+          base_branch: base,
+          db_path,
+          max_rounds: run.max_rounds,
+          resume_checkpoint,
+        })
+      } catch (err) {
+        result = {
+          status: 'failed',
+          verdict: null,
+          pr_number: null,
+          branch: null,
+          round: 0,
+          checkpoint: null,
+          raw: err instanceof Error ? err.message : String(err),
+        }
+      }
+      dispatches.set(id, { status: 'done', result })
+    })()
+    inflight.add(p)
+    void p.finally(() => inflight.delete(p))
+
+    const next: TridentRun = {
+      ...launchRun,
+      subagent_run_id: id,
+      subagent_status: 'running',
+      last_advanced_at: now(),
+    }
+    return {
+      run: next,
+      changed: true,
+      waiting: true,
+      note: `launched inner loop ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
+    }
+  }
+
+  /** Apply a settled inner-loop result to the run (merge on APPROVE, else fail). */
+  async function applyResult(run: TridentRun, id: string, result: InnerLoopResult): Promise<AdvanceOutcome> {
+    dispatches.delete(id)
+
+    if (result.status !== 'completed') {
+      // Crashed / timed_out inner loop → fail LOUDLY (never a silent success).
+      const failed = failedRun(run, `inner loop ${result.status}`, true)
+      return { run: failed, changed: true, waiting: false, note: `inner loop ${result.status} → failed` }
+    }
+
+    if (result.verdict === 'APPROVE') {
+      const doneRun: TridentRun = {
+        ...run,
+        phase: 'done',
+        pr: result.pr_number ?? run.pr,
+        branch: result.branch ?? run.branch,
+        inner_checkpoint: result.checkpoint ?? 'argus-approved',
+        inner_verdict: 'APPROVE',
+        workflow_run_id: run.workflow_run_id ?? id,
+        subagent_run_id: id,
+        subagent_status: 'completed',
+        failure_reason: null,
+        last_advanced_at: now(),
+      }
+      try {
+        const res = await cleanupAfterMerge(doneRun, merge_deps)
+        return { run: doneRun, changed: true, waiting: false, note: `inner loop APPROVE → done; ${res.note}` }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'merge failed'
+        return {
+          run: { ...failedRun(doneRun, `merge failed: ${reason}`, true), inner_verdict: 'APPROVE' },
+          changed: true,
+          waiting: false,
+          note: `done → failed (${reason})`,
+        }
+      }
+    }
+
+    // REQUEST_CHANGES — the inner loop exhausted maxRounds without an APPROVE.
+    const failed: TridentRun = {
+      ...failedRun(run, `inner loop exhausted ${run.max_rounds} round(s) without Argus APPROVE`, true),
+      pr: result.pr_number ?? run.pr,
+      branch: result.branch ?? run.branch,
+      inner_checkpoint: result.checkpoint ?? 'argus-request-changes',
+      inner_verdict: 'REQUEST_CHANGES',
+      workflow_run_id: run.workflow_run_id ?? id,
+    }
+    return { run: failed, changed: true, waiting: false, note: 'inner loop REQUEST_CHANGES (max rounds) → failed' }
   }
 
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
@@ -255,115 +281,53 @@ export function buildTridentOrchestrator(
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
-    // (0) Resume / reap. A non-null persisted sub-agent the manager does
-    //     NOT track is an ORPHAN — launched by a prior control-plane
-    //     process and lost on restart (the in-memory dispatch is gone), or
-    //     one that never became ready. Recover per `on_orphaned_session`
-    //     BEFORE poll/spawn so a fresh process resumes in-flight runs from
-    //     their persisted `subagent_run_id`/`subagent_status` rather than
-    //     polling a phantom forever.
-    if (run.subagent_run_id !== null && !session.isTracked(run.subagent_run_id)) {
+    // (0) Orphan recovery. A persisted dispatch id this process does NOT track is
+    //     an orphan (lost on restart). Recover per policy BEFORE launch/poll.
+    if (run.subagent_run_id !== null && !dispatches.has(run.subagent_run_id)) {
       const orphanId = run.subagent_run_id
       if (on_orphaned === 'fail') {
-        const failed: TridentRun = {
+        // Loud reap — keep the 'crashed' sub-status (an orphan is a lost agent,
+        // distinct from a clean self-failure), so the audit trail reads truthfully.
+        const reaped: TridentRun = {
           ...run,
           phase: 'failed',
           subagent_status: 'crashed',
-          failure_reason: `orphaned ${run.phase} sub-agent ${orphanId} (lost after restart / never became ready)`,
+          failure_reason: `orphaned inner-loop dispatch ${orphanId} (lost after restart / never became ready)`,
           last_advanced_at: now(),
         }
-        return { run: failed, changed: true, waiting: false, note: `${run.phase} → failed (orphaned sub-agent reaped)` }
+        return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (orphaned dispatch reaped)` }
       }
       if (on_orphaned === 'wait' || redispatched.has(run.id)) {
-        // 'wait' policy, OR we already re-dispatched this run once this
-        // process (the new session registers synchronously, so re-arriving
-        // here means even the re-dispatch was lost — don't spin; wait for
-        // an operator). Keep polling without spawning: no double-spawn.
-        return { run, changed: false, waiting: true, note: `waiting on orphaned ${run.phase} sub-agent ${orphanId}` }
+        return { run, changed: false, waiting: true, note: `waiting on orphaned inner-loop dispatch ${orphanId}` }
       }
-      // 'redispatch' (default): resume by clearing the slot so the
-      // spawn-if-needed path below re-launches THIS phase. The prior agent
-      // is already gone (in-process), so exactly one agent is ever live.
+      // redispatch (default): clear the slot so the launch path relaunches a
+      // FRESH workflow that resumes from the persisted checkpoint.
       redispatched.add(run.id)
       run = { ...run, subagent_run_id: null, subagent_status: null }
     }
 
-    // (1) Spawn-if-needed — the single, null-guarded spawn site.
+    // (1) Launch-if-needed — the single launch site (null-guarded).
     if (run.subagent_run_id === null) {
-      try {
-        const id = await spawnForPhase(run)
-        const next: TridentRun = {
-          ...run,
-          subagent_run_id: id,
-          subagent_status: 'running',
-          last_advanced_at: now(),
-        }
-        return {
-          run: next,
-          changed: true,
-          waiting: true,
-          note: `spawned ${run.phase} sub-agent ${id}`,
-        }
-      } catch (err) {
-        // An un-spawnable phase (e.g. Ralph pre-PR-4) fails the run loudly
-        // and bounded, never an infinite spawn-retry loop.
-        const reason =
-          err instanceof Error ? err.message : `failed to spawn ${run.phase} sub-agent`
-        const failed: TridentRun = {
-          ...run,
-          phase: 'failed',
-          subagent_status: 'failed',
-          failure_reason: reason,
-          last_advanced_at: now(),
-        }
-        return { run: failed, changed: true, waiting: false, note: `${run.phase} → failed (${reason})` }
-      }
+      return launch(run)
     }
 
-    // (2) Poll + transition via the pure state machine.
-    const wasForge =
-      run.phase === 'forge-init' ||
-      run.phase === 'forge-fix' ||
-      run.phase === 'ralph-plan' ||
-      run.phase === 'ralph-task'
-    let out = await advanceTridentRun(run, {
-      now,
-      classify: (r) => session.classify(r),
-    })
-
-    // (2a) Fold the completed Forge turn's PR/branch/worktree onto the run
-    // the tick persists. Done HERE (single writer) rather than from the
-    // background dispatch, which would race this step's own save.
-    if (out.changed && wasForge) {
-      const meta = session.forgeMetaFor(run.id)
-      if (meta !== null) {
-        out = {
-          ...out,
-          run: { ...out.run, pr: meta.pr, branch: meta.branch, worktree: meta.worktree },
-        }
-      }
+    // (2) Poll the in-flight dispatch.
+    const d = dispatches.get(run.subagent_run_id)
+    if (d === undefined || d.status === 'running') {
+      return { run, changed: false, waiting: true, note: `waiting on inner-loop dispatch ${run.subagent_run_id}` }
     }
 
-    // (3) Merge-on-done.
-    if (out.changed && out.run.phase === 'done') {
-      try {
-        const res = await cleanupAfterMerge(out.run, merge_deps)
-        return { ...out, note: `${out.note}; ${res.note}` }
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : 'merge failed'
-        const failed: TridentRun = {
-          ...out.run,
-          phase: 'failed',
-          subagent_status: 'failed',
-          failure_reason: `merge failed: ${reason}`,
-          last_advanced_at: now(),
-        }
-        return { run: failed, changed: true, waiting: false, note: `done → failed (${reason})` }
-      }
-    }
-
-    return out
+    // (3) Settled — apply the result (merge-on-APPROVE or fail).
+    return applyResult(run, run.subagent_run_id, d.result)
   }
 
-  return { step }
+  /** Resolve once every in-flight background inner-loop dispatch has settled
+   *  (tests + graceful shutdown). */
+  async function drain(): Promise<void> {
+    while (inflight.size > 0) {
+      await Promise.all([...inflight])
+    }
+  }
+
+  return { step, drain }
 }

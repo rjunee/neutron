@@ -33,28 +33,30 @@ export interface MiscCompositionInput {
    */
   realmode_cleanups?: Array<() => void>
   /**
-   * Trident-port PR-5 — drive the foundational Forge→Argus→merge loop
-   * live. When `dispatch` is supplied, the `trident` module wires the
-   * REAL orchestrator `step` (`buildTridentOrchestrator`) so every
+   * Trident v2 (Phase 2 hard cutover) — drive the foundational
+   * Forge→Argus→merge loop live. When `launch_inner_workflow` is supplied, the
+   * `trident` module wires the REAL orchestrator `step`
+   * (`buildTridentOrchestrator` + `buildWorkflowInnerLoop`) so every
    * non-terminal `code_trident_runs` row (created by `/code <task>` or a
-   * governed Ralph run) is advanced end-to-end by the tick loop:
-   * forge-init → argus → fix loop → merge (per git-mode) → done. When
-   * omitted, the module falls back to `stubAdvanceDeps` (classify always
-   * "running") so the loop is live + restart-safe but advances nothing —
-   * the unchanged Open dev/default behaviour.
+   * governed Ralph run) is advanced end-to-end by the tick loop: launch the
+   * inner CC Dynamic Workflow (Forge build → parallel Argus review → synthesis
+   * → bounded fix loop) → on APPROVE merge (per git-mode) → done. When omitted,
+   * the module falls back to `stubAdvanceDeps` (classify always "running") so
+   * the loop is live + restart-safe but advances nothing — the unchanged Open
+   * dev/default behaviour.
    *
-   * `dispatch` runs one Forge/Argus turn to terminal text (the production
-   * composer builds it from the per-instance Anthropic substrate — the
-   * same credential closure the Code-Gen Core's sub-agent dispatch
-   * consumed before Trident superseded the wrapper). `run_host` runs the
-   * git/gh/numstat host commands (defaults to a `Bun.spawn` runner).
+   * `launch_inner_workflow(input)` runs the inner-workflow launcher as a BLOCKING
+   * `claude -p` print-mode subprocess that drains the background `Workflow` tool
+   * (`trident/inner-workflow.mjs`) to completion and prints `TRIDENT_RESULT`
+   * (the production composer passes `buildClaudePrintLauncher` over the
+   * per-instance Anthropic credential pool). It is NOT a persistent-REPL turn —
+   * a REPL turn settles on the first reply, BEFORE the background workflow
+   * drains, which aborted the workflow on every real run (the bug this fixes).
+   * `run_host` runs the git/gh host commands (defaults to a `Bun.spawn` runner).
    */
   trident?: {
-    dispatch: import('../../../trident/session.ts').TridentDispatch
+    launch_inner_workflow: import('../../../trident/inner-loop.ts').LaunchInnerWorkflow
     run_host?: import('../../../trident/merge.ts').RunHostCommand
-    forge_model?: string
-    argus_model?: string
-    subagent_timeout_ms?: number
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**
      * Skill-forge trigger (parity gap #5) — an OPTIONAL observer the trident

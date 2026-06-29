@@ -595,10 +595,10 @@ export function buildRemindersChatCommandFilter(deps: {
  * simply CREATES a `code_trident_runs` row via the per-instance
  * `TridentRunStore` and returns — the foundational tick loop
  * (`buildTridentOrchestrator`, wired in `build-core-modules.ts` from
- * `input.trident.dispatch`) picks the row up and drives it through
- * forge-init → argus → fix loop → merge (per git-mode) → done. State
- * lives in SQLite, so a `/code` build survives a control-plane restart
- * and resumes from its persisted phase.
+ * `input.trident.build_substrate`) picks the row up and drives it: launch the
+ * inner CC Dynamic Workflow (Forge build → parallel Argus review → synthesis →
+ * fix loop) → merge (per git-mode) → done. State lives in SQLite, so a `/code`
+ * build survives a control-plane restart and resumes from its persisted phase.
  *
  * The composer threads `resolve_context(input)` — given the inbound
  * envelope (project_id / user_id / project_slug), it returns the

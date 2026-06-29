@@ -216,10 +216,13 @@ a slash-command.
   history-import REPL (`cc-import-*`) and the disposable Trident build REPLs
   (`cc-trident-*`) leave it off, so a prompt-injection in untrusted content can
   never reach a Core tool. The bridge's MCP namespace is permitted via
-  `--allowedTools mcp__neutron`. The built-in `--tools` surface is per-substrate:
-  the untrusted import/Trident REPLs keep `--tools ""` default-deny (no Bash/
-  Read/Skill); the live agent declares `Read,Glob,Grep,Write,Edit,Bash,Skill`
-  (the read tools + the native skill mechanism + the file/exec tools skills need).
+  `--allowedTools mcp__neutron`. The built-in `--tools` surface is per-turn
+  (`AgentSpec.tools`): the untrusted import REPL keeps `--tools ""` default-deny
+  (no Bash/Read/Skill); the live agent declares `Read,Glob,Grep,Write,Edit,Bash,
+  Skill`. The Trident v2 LAUNCHER turn is a TRUSTED build path and declares
+  `Workflow,Agent,Bash,Edit,Read` so it can drive the inner CC Dynamic Workflow
+  (the surface is per-turn, so this never relaxes the import/conversational REPLs;
+  the MCP tool bridge stays OFF on `cc-trident-*`).
 
 ### Native SKILL.md discovery for the agent (P1-5)
 
@@ -1031,48 +1034,78 @@ socket-attributed, durable + resume-replayable, sync engine NOT forked).
 
 ## `/code` → foundational Trident (runtime DONE — runner live + hardened)
 
-The ~5-PR port folding Vajra's full Trident into Neutron Open as foundational
-runtime is **runtime-complete**: the state machine, tick loop, real
-Forge→Argus→merge `step`, git-mode auto-detect, Ralph loop, and restart-resume
-all land in `trident/` and pass end-to-end against scripted dispatches. The
-production filter `buildTridentCodeChatCommandFilter` parses `/code <task>` and
-CREATES a `code_trident_runs` row (`trident/code-command.ts`); the tick loop
-drives it build → review → fix loop → merge → done (or the Ralph plan↔task loop
-for governed repos). State in SQLite ⇒ restart-safe + resumable.
+### Trident v2 (Phase 2 hard cutover) — OUTER durable loop / INNER CC Dynamic Workflow
+
+**As of Trident v2 the OUTER and INNER loops are split and the INNER loop is a
+single native CC Dynamic Workflow** (NO feature flags — a hard cutover, one
+atomic, revertible commit):
+
+- **OUTER (durable, unchanged):** `trident/tick.ts` sweeps the `code_trident_runs`
+  SQLite table (migration 0077) and calls the orchestrator `step` per run. State
+  in SQLite ⇒ restart-safe + resumable. Merge stays the OUTER / human gate
+  (`trident/merge.ts`), and the Ralph spec-drift docs are unchanged.
+- **INNER (the cutover):** `trident/inner-workflow.mjs` is ONE CC Dynamic Workflow
+  (run by the `Workflow` tool) that drives **Forge build (isolated worktree) →
+  parallel adversarial Argus review → asymmetric-gated synthesis → bounded fix
+  loop → verdict**. The Forge/Argus contracts are INLINED into the workflow's
+  bare `agent()` workers (no CLAUDE.md rides along), each carrying a
+  `NO_INTERACTIVE_RULE` (never `AskUserQuestion`; ABORT instead of hang) and a
+  `REDIRECT_RULE` (redirect verbose build/test output to a log, read only the
+  tail). The v1 substrate-per-phase inner dispatch (`session.spawn`/`spawnForPhase`/
+  the per-phase state graph) is REMOVED from the prod step; `state-machine.ts`
+  (`computeTransition`/`advanceTridentRun`) is kept intact for its unit tests +
+  one-commit revertibility.
+- **Launcher:** `trident/inner-loop.ts` `buildWorkflowInnerLoop` runs ONE
+  substrate turn that invokes the `Workflow` tool on the script and reports
+  `TRIDENT_RESULT=<json>`. It copies the proven single-turn dispatch mechanics
+  (coalesce tokens, resolve on `completion`, timeout, **false-completion
+  discipline** — a stream that ends with no terminal event is `failed`, never a
+  silent success). **Tool surface:** the v1 trident REPL ran `--tools ""`
+  (untrusted-import gate); the v2 launcher is a TRUSTED build path and declares
+  `Workflow,Agent,Bash,Edit,Read` on its own `AgentSpec.tools` (the surface is a
+  per-turn property, so this is a spec-level change — no substrate surgery, and
+  the import/conversational REPLs stay locked).
+- **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
+  workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
+  (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
+  / `fix-round-N`; timestamps via `date -u +%FT%TZ` since `Date.now` is
+  unavailable in a workflow). A workflow is session-bound (`resumeFromRunId` is
+  same-session only), so a crash relaunches a FRESH workflow that reads the
+  checkpoint, skips finished phases, and REUSES the existing PR (`gh pr list
+  --head` — never a duplicate). Migration `0089` adds `workflow_run_id` /
+  `inner_checkpoint` / `inner_verdict`.
+- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` scans `git
+  worktree list` for the deterministic `trident/<slug>` branch and removes it on
+  every path (independent of Forge's return value — the harness only auto-cleans
+  an UNCHANGED worktree, and a Forge build always commits). `merge.ts` adds the
+  OUTER backstop (best-effort `git worktree remove --force` + `prune` after a
+  landed merge), flipping the old "NO `git worktree remove`" lock.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
 - **The production runner (LIVE + hardened).** The Open composer
-  (`open/composer.ts`) threads `composition.trident = { dispatch }` (via
-  `buildSubstrateTridentDispatch`, `trident/substrate-dispatch.ts`), which flips
-  the tick loop from its `stubAdvanceDeps` no-op to the real
-  `buildTridentOrchestrator` step in `build-core-modules.ts`. Before this, the
-  Open composer never set `input.trident`, so a `/code` build would have hit the
-  loop's no-op (the `CodegenNotConfiguredError` "production runner not wired"
-  class). Each dispatch runs ONE Forge/Argus turn on the CC-subprocess substrate
-  to terminal text — all prompt rendering + verdict parsing stay above it in the
-  orchestrator + session manager.
-- **Per-worktree cwd + per-build isolation (DONE).** The composer no longer pins
-  ONE warm `cc-trident-*` substrate to `owner_home`. Instead it threads a
-  `build_substrate(cwd)` FACTORY: `buildSubstrateTridentDispatch` builds a FRESH
-  ephemeral CC-subprocess REPL PER DISPATCH, rooted at the run's worktree
-  (`input.repo_path`). So each Forge/Argus turn runs IN its own worktree on a
-  disposable session — one build never inherits another's working context, and
-  build turns never bleed into the owner's warm conversational (`cc-agent-*`)
-  pool. (`AgentSpec` carries no per-call cwd, so per-worktree dispatch re-roots
-  the substrate per turn.) This closes the two hardening items the first
-  prod-boot wiring PR deferred.
-  class). `buildSubstrateTridentDispatch` runs ONE Forge/Argus turn on the
-  substrate to terminal text — all prompt rendering + verdict parsing stay above
-  it in the orchestrator + session manager. **Paused ≠ finished
-  (false-completion guard):** a turn whose event stream ends WITHOUT a terminal
-  `completion`/`error` event maps to `failed`, never `completed` — a
-  paused/abnormally-closed turn is not a confirmed finish, so the session manager
-  recovers/fails it loudly instead of silently advancing the build. This is the
-  Open analog of Vajra's fleet "paused vs finished" reap fix (#160). Relatedly,
-  `FORGE_SYSTEM_PROMPT` now hard-rules cross-model review as **best-effort, after
-  the PR is open, never a turn-yielding hang point** (Open analog of Vajra PR
-  #164). See `docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md`.
+  (`open/composer.ts`) threads `composition.trident = { build_substrate }` (the
+  per-worktree `cc-trident-*` factory), which flips the tick loop from its
+  `stubAdvanceDeps` no-op to the real `buildWorkflowInnerLoop` +
+  `buildTridentOrchestrator` step in `build-core-modules.ts` (passed the project
+  `db_path` for the workflow's checkpoint Bash steps). On APPROVE the step merges
+  + cleans up; on REQUEST_CHANGES (maxRounds exhausted) or a crashed/timed-out
+  dispatch it fails loudly.
+- **Per-worktree cwd + per-build isolation (DONE).** The launcher builds a FRESH
+  ephemeral CC-subprocess REPL PER CALL, rooted at the run's worktree, so one
+  build never inherits another's working context, and build turns never bleed
+  into the owner's warm conversational (`cc-agent-*`) pool. **Paused ≠ finished
+  (false-completion guard):** a launcher turn whose event stream ends WITHOUT a
+  terminal `completion`/`error` event maps to `failed`, never `completed` (Open
+  analog of Vajra's fleet "paused vs finished" reap fix #160). The inlined Forge
+  contract still hard-rules cross-model review as **best-effort, after the PR is
+  open, never a turn-yielding hang point** (Open analog of Vajra PR #164). See
+  `docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md`.
+- **One-commit revert runbook.** The cutover is one atomic commit: `git revert
+  <sha>` restores the v1 substrate-per-phase inner loop wholesale (and, in the
+  neutron-managed vendor, re-pin the prior trident vendor snapshot). Migration
+  0089's columns are additive + nullable, so a revert leaves them harmlessly
+  unused.
 - **The `/code` command surface (NEXT PR).** Routing the literal `/code`
   keystroke from the Open landing chat into `buildTridentCodeChatCommandFilter`
   is NOT yet wired — the landing chat path (`landing/server.ts` →

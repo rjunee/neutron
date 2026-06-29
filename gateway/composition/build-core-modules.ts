@@ -53,8 +53,8 @@ import { ReminderTickLoop } from '../../reminders/tick.ts'
 import { TridentRunStore } from '../../trident/store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from '../../trident/tick.ts'
 import { stubAdvanceDeps } from '../../trident/state-machine.ts'
-import { TridentSessionManager } from '../../trident/session.ts'
 import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
+import { buildWorkflowInnerLoop } from '../../trident/inner-loop.ts'
 import { buildTridentDelivery } from '../../trident/delivery.ts'
 import { withTerminalObserver } from '../../trident/terminal-observer.ts'
 import { spawnCapture } from '../../trident/git-mode.ts'
@@ -271,16 +271,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
   // it via the state machine, exactly as the reminders loop sweeps due
   // reminders.
   //
-  // PR-3 landed the real loop in `trident/orchestrator.ts`
-  // (`buildTridentOrchestrator` → a `step` that spawns Forge/Argus
-  // substrate sessions, parses verdicts, loops fix↔review, and merges per
-  // the git-mode). PR-5 wires it into production: when the composer
-  // threads `input.trident.dispatch` (one Forge/Argus turn → terminal
-  // text, built from the per-instance Anthropic substrate — the same
-  // credential closure the Code-Gen Core's sub-agent dispatch consumed
-  // before Trident superseded the wrapper), the module builds that real
-  // `step` here. `/code <task>` (and governed Ralph runs) create
-  // `code_trident_runs` rows that THIS loop drives end-to-end.
+  // Trident v2 (Phase 2 hard cutover): the INNER Forge→Argus→fix loop is one
+  // native CC Dynamic Workflow (`trident/inner-workflow.mjs`). When the composer
+  // threads `input.trident.build_substrate` (a fresh per-worktree
+  // `cc-trident-*` substrate factory), the module builds the real `step` here —
+  // `buildWorkflowInnerLoop` (the launcher) + `buildTridentOrchestrator` (launch
+  // the workflow per run, checkpoint via its Bash steps, merge on APPROVE).
+  // `/code <task>` (and governed Ralph runs) create `code_trident_runs` rows
+  // that THIS loop drives end-to-end.
   //
   // When no dispatch is threaded (Open dev / default), the module falls
   // back to `stubAdvanceDeps` (classify always "running") so the loop is
@@ -318,15 +316,17 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           : withTerminalObserver(delivery, runTerminalObserver)
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
-        const session = new TridentSessionManager({ dispatch: tridentWiring.dispatch })
+        // Trident v2 — the inner Forge→Argus→fix loop is one native CC Dynamic
+        // Workflow. The launcher runs it as a BLOCKING `claude -p` print-mode
+        // subprocess (`launch_inner_workflow`) that drains the background
+        // `Workflow` to completion + prints `TRIDENT_RESULT`; the orchestrator
+        // step launches it per run, checkpoints via the workflow's own Bash steps
+        // (`db_path`), and merges on APPROVE.
+        const inner_loop = buildWorkflowInnerLoop({ launch: tridentWiring.launch_inner_workflow })
         const orchestratorOpts: Parameters<typeof buildTridentOrchestrator>[0] = {
-          session,
+          inner_loop,
+          db_path: input.db.path,
           run_host: tridentWiring.run_host ?? spawnCapture,
-        }
-        if (tridentWiring.forge_model !== undefined) orchestratorOpts.forge_model = tridentWiring.forge_model
-        if (tridentWiring.argus_model !== undefined) orchestratorOpts.argus_model = tridentWiring.argus_model
-        if (tridentWiring.subagent_timeout_ms !== undefined) {
-          orchestratorOpts.subagent_timeout_ms = tridentWiring.subagent_timeout_ms
         }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session

@@ -81,6 +81,26 @@ export interface TridentRun {
    */
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
+  /**
+   * Trident v2 (migration 0089) — the CC workflow run id of the last
+   * inner-loop dispatch. Observability only (correlate the row with its
+   * workflow transcript); null until the inner loop has launched.
+   */
+  workflow_run_id: string | null
+  /**
+   * Trident v2 (migration 0089) — C1 per-phase checkpoint written by the
+   * inner workflow's own Bash steps (`forge-done`, `argus-approved` /
+   * `argus-request-changes`, `fix-round-N`). A relaunched (crash-resumed)
+   * workflow reads this as `resumeCheckpoint` to skip finished phases +
+   * reuse the existing PR rather than rebuild from zero. Null pre-launch.
+   */
+  inner_checkpoint: string | null
+  /**
+   * Trident v2 (migration 0089) — the inner loop's final synthesised Argus
+   * verdict (`APPROVE` → merge; `REQUEST_CHANGES` → failed after maxRounds).
+   * Null while in flight.
+   */
+  inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** ISO-8601 UTC. */
   started_at: string
   /** ISO-8601 UTC; re-stamped on every state-machine transition. */
@@ -128,6 +148,9 @@ export interface TridentRunUpdate {
   subagent_status?: SubagentStatus | null
   worktree?: string | null
   failure_reason?: string | null
+  workflow_run_id?: string | null
+  inner_checkpoint?: string | null
+  inner_verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
 }
 
 interface TridentRunDbRow {
@@ -152,6 +175,9 @@ interface TridentRunDbRow {
   thread_id: string | null
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
+  workflow_run_id: string | null
+  inner_checkpoint: string | null
+  inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   started_at: string
   last_advanced_at: string
 }
@@ -160,6 +186,7 @@ const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
+  'workflow_run_id, inner_checkpoint, inner_verdict, ' +
   'started_at, last_advanced_at'
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
@@ -197,12 +224,15 @@ export class TridentRunStore {
       thread_id: input.thread_id ?? null,
       channel_kind: input.channel_kind ?? 'telegram',
       failure_reason: null,
+      workflow_run_id: null,
+      inner_checkpoint: null,
+      inner_verdict: null,
       started_at: ts,
       last_advanced_at: ts,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.slug,
@@ -225,6 +255,9 @@ export class TridentRunStore {
         run.thread_id,
         run.channel_kind,
         run.failure_reason,
+        run.workflow_run_id,
+        run.inner_checkpoint,
+        run.inner_verdict,
         run.started_at,
         run.last_advanced_at,
       ],
@@ -290,6 +323,9 @@ export class TridentRunStore {
     if (patch.subagent_status !== undefined) push('subagent_status', patch.subagent_status)
     if (patch.worktree !== undefined) push('worktree', patch.worktree)
     if (patch.failure_reason !== undefined) push('failure_reason', patch.failure_reason)
+    if (patch.workflow_run_id !== undefined) push('workflow_run_id', patch.workflow_run_id)
+    if (patch.inner_checkpoint !== undefined) push('inner_checkpoint', patch.inner_checkpoint)
+    if (patch.inner_verdict !== undefined) push('inner_verdict', patch.inner_verdict)
     // Always advance the cursor timestamp.
     push('last_advanced_at', this.now())
     params.push(id)
@@ -311,7 +347,8 @@ export class TridentRunStore {
       `UPDATE code_trident_runs
           SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
-              worktree = ?, failure_reason = ?, last_advanced_at = ?
+              worktree = ?, failure_reason = ?, workflow_run_id = ?,
+              inner_checkpoint = ?, inner_verdict = ?, last_advanced_at = ?
         WHERE id = ?`,
       [
         run.phase,
@@ -324,6 +361,9 @@ export class TridentRunStore {
         run.subagent_status,
         run.worktree,
         run.failure_reason,
+        run.workflow_run_id,
+        run.inner_checkpoint,
+        run.inner_verdict,
         this.now(),
         run.id,
       ],
@@ -359,6 +399,9 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     thread_id: row.thread_id,
     channel_kind: row.channel_kind,
     failure_reason: row.failure_reason,
+    workflow_run_id: row.workflow_run_id,
+    inner_checkpoint: row.inner_checkpoint,
+    inner_verdict: row.inner_verdict,
     started_at: row.started_at,
     last_advanced_at: row.last_advanced_at,
   }

@@ -120,12 +120,32 @@ export type { RunHostCommand } from './merge.ts'
 export {
   buildTridentOrchestrator,
   computeDiffLineCount,
-  TridentPhaseNotWiredError,
 } from './orchestrator.ts'
 export type {
   TridentStep,
   BuildTridentOrchestratorOptions,
 } from './orchestrator.ts'
+
+// Trident v2 — the inner Forge→Argus→fix loop as ONE native CC Dynamic Workflow
+// (`inner-workflow.mjs`), launched per run by `buildWorkflowInnerLoop`.
+export {
+  buildWorkflowInnerLoop,
+  buildClaudePrintLauncher,
+  buildClaudePrintArgs,
+  buildLauncherMessage,
+  parseTridentResult,
+  DEFAULT_INNER_WORKFLOW_PATH,
+} from './inner-loop.ts'
+export type {
+  TridentInnerLoop,
+  InnerLoopInput,
+  InnerLoopResult,
+  BuildWorkflowInnerLoopOptions,
+  LaunchInnerWorkflow,
+  LaunchInnerWorkflowInput,
+  LaunchInnerWorkflowResult,
+  ClaudePrintLauncherOptions,
+} from './inner-loop.ts'
 
 // PR-5 — the thin `/code` entry into foundational Trident (retires the
 // Code-Gen Core wrapper's separate orchestration path).
