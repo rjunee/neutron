@@ -35,8 +35,22 @@
  * the model-update probe's `child_process.spawn` discipline) via an injectable
  * `LaunchInnerWorkflow` seam. Production wires `buildClaudePrintLauncher`, which
  * resolves the scrubbed Anthropic auth env per call (rotated-token safe) and
- * spawns `claude -p … --dangerously-skip-permissions --model <model>` rooted at
- * the run's repo. Tests inject a fake `launch` and never touch a live `claude`.
+ * spawns `claude -p … --permission-mode dontAsk --settings <auto-mode> --model
+ * <model>` rooted at the run's repo.
+ *
+ * ── AUTO MODE (Phase 3) ──────────────────────────────────────────────────────
+ * The launcher runs under autonomous permissioning ("auto mode",
+ * `trident/auto-mode.ts`), NOT the old reckless `--dangerously-skip-permissions`.
+ * `--permission-mode dontAsk` means any op NOT on the allowlist is immediately
+ * DENIED (no prompt → never hangs headlessly); a per-launch `--settings` file
+ * carries the trident allowlist + deny list + a PreToolUse deny-guard hook that
+ * blocks force-push / push-to-main / reset --hard / rm -rf of a system-or-home
+ * root / history rewrites. Workflow `agent()` subagents INHERIT this launcher
+ * mode (proto-2 Q2), so every Forge/Argus worker runs under it. A below-floor
+ * model (auto mode wants Opus 4.6+/Sonnet 4.6+) fails the launch LOUDLY.
+ * MERGE stays the OUTER/human gate — never the autonomous inner loop.
+ *
+ * Tests inject a fake `launch` and never touch a live `claude`.
  *
  * FALSE-COMPLETION discipline (paused ≠ finished; Vajra fleet-premature-
  * completion reconciliation #160/#164) is preserved: a launcher is `completed`
@@ -46,6 +60,15 @@
  */
 
 import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { atomicWriteFileSync } from '../runtime/atomic-write.ts'
+import {
+  AUTO_MODE_PERMISSION_MODE,
+  assertAutoModeModelFloor,
+  buildTridentAutoModeSettings,
+  type TridentAutoModeSettings,
+} from './auto-mode.ts'
 import type { TridentRun } from './store.ts'
 
 export interface InnerLoopInput {
@@ -243,24 +266,59 @@ export interface ClaudePrintLauncherOptions {
   set_timer?: (fn: () => void, ms: number) => unknown
   /** Timer-clear seam (tests). Defaults to `clearTimeout`. */
   clear_timer?: (handle: unknown) => void
+  /**
+   * Write the per-launch auto-mode `--settings` JSON and return its absolute
+   * path. Default writes a tmp file (`buildTridentAutoModeSettings` → atomic
+   * write under `os.tmpdir()`). Tests inject a fake to avoid disk I/O. Returning
+   * a falsy/empty path omits `--settings` (dontAsk still applies via the flag).
+   */
+  write_auto_mode_settings?: (settings: TridentAutoModeSettings) => string
+  /** `bun` binary the deny-guard hook command runs under. Default `bun`. */
+  bun_bin?: string
+}
+
+let autoModeSettingsCounter = 0
+
+/** Default settings writer: serialise the auto-mode settings to a unique tmp
+ *  file and return its path. Unique per process via pid + a monotonic counter
+ *  (no `Date.now`/random needed). */
+function defaultWriteAutoModeSettings(settings: TridentAutoModeSettings): string {
+  const path = join(
+    tmpdir(),
+    `neutron-trident-automode-${process.pid}-${autoModeSettingsCounter++}.settings.json`,
+  )
+  atomicWriteFileSync(path, JSON.stringify(settings, null, 2), { mode: 0o644 })
+  return path
+}
+
+/** Options for `buildClaudePrintArgs`. */
+export interface BuildClaudePrintArgsOptions {
+  /** Path to the per-launch auto-mode `--settings` JSON (allowlist + deny-guard).
+   *  Omitted → no `--settings` flag (dontAsk still applies via `--permission-mode`). */
+  settingsPath?: string
+  /** Extra argv appended before `--model` (e.g. `--add-dir <repo>`). */
+  extra?: ReadonlyArray<string>
 }
 
 /**
  * Build the `claude -p` argv. Print-mode one-shot (`-p` with the prompt as the
- * positional), `--dangerously-skip-permissions` so the unattended launcher +
- * every Workflow `agent()` worker it spawns auto-execute (proto-2 Q2: subagents
- * inherit the launcher's permission mode), and `--model` LAST so nothing shadows
- * it. No `--tools` restriction: this is a TRUSTED build path (owner-authored
- * task), and the workflow needs the full built-in surface incl. `Workflow`,
- * `Agent`, `Bash`, `Edit`, `Read`, `Write`.
+ * positional), AUTO MODE — `--permission-mode dontAsk` + a `--settings`
+ * allowlist/deny-guard (NOT `--dangerously-skip-permissions`) so a headless run
+ * can NEVER hang on a prompt (non-allowlisted ops are denied, not asked) yet
+ * dangerous ops stay blocked. Workflow `agent()` workers INHERIT this mode
+ * (proto-2 Q2). `--model` is LAST so nothing shadows it. No `--tools`
+ * restriction: this is a TRUSTED build path (owner-authored task) and the
+ * workflow needs the full built-in surface (`Workflow`/`Agent`/`Bash`/`Edit`/
+ * `Read`/`Write`) — which the allowlist grants and the deny-guard polices.
  */
 export function buildClaudePrintArgs(
   prompt: string,
   model: string,
-  extra?: ReadonlyArray<string>,
+  opts: BuildClaudePrintArgsOptions = {},
 ): string[] {
-  const args = ['-p', prompt, '--dangerously-skip-permissions']
-  if (extra !== undefined && extra.length > 0) args.push(...extra)
+  const args = ['-p', prompt, '--permission-mode', AUTO_MODE_PERMISSION_MODE]
+  if (opts.settingsPath !== undefined) args.push('--settings', opts.settingsPath)
+  if (opts.extra !== undefined && opts.extra.length > 0) args.push(...opts.extra)
   args.push('--model', model)
   return args
 }
@@ -285,9 +343,27 @@ export function buildClaudePrintLauncher(opts: ClaudePrintLauncherOptions): Laun
     opts.clear_timer ??
     ((handle: unknown): void => clearTimeout(handle as ReturnType<typeof setTimeout>))
 
+  const writeSettings = opts.write_auto_mode_settings ?? defaultWriteAutoModeSettings
+  const bunBin = opts.bun_bin ?? 'bun'
+
   return function launch(input: LaunchInnerWorkflowInput): Promise<LaunchInnerWorkflowResult> {
     return new Promise<LaunchInnerWorkflowResult>((resolve) => {
       void (async (): Promise<void> => {
+        // Auto-mode model floor (Opus 4.6+/Sonnet 4.6+). A positively-below-floor
+        // model fails the launch LOUDLY (no spawn, no silent bad run).
+        try {
+          assertAutoModeModelFloor(model)
+        } catch (e) {
+          resolve({
+            stdout: '',
+            stderr: '',
+            exit_code: null,
+            timed_out: false,
+            spawn_error: e instanceof Error ? e.message : String(e),
+          })
+          return
+        }
+
         // Resolve the auth env per-call (rotated-token safe). A throw here is a
         // crashed launcher — surface it as a spawn_error, never a silent success.
         let authEnv: Record<string, string | undefined>
@@ -304,9 +380,28 @@ export function buildClaudePrintLauncher(opts: ClaudePrintLauncherOptions): Laun
           return
         }
 
+        // Write the per-launch auto-mode settings (allowlist + deny list +
+        // PreToolUse deny-guard hook). A throw here is a crashed launcher.
+        let settingsPath: string
+        try {
+          settingsPath = writeSettings(buildTridentAutoModeSettings({ bunBin }))
+        } catch (e) {
+          resolve({
+            stdout: '',
+            stderr: '',
+            exit_code: null,
+            timed_out: false,
+            spawn_error: `auto-mode settings write failed: ${e instanceof Error ? e.message : String(e)}`,
+          })
+          return
+        }
+
         const baseEnv = opts.base_env ?? process.env
         const bin = opts.claude_bin ?? baseEnv['CLAUDE_BIN'] ?? 'claude'
-        const args = buildClaudePrintArgs(input.prompt, model, opts.extra_args)
+        const args = buildClaudePrintArgs(input.prompt, model, {
+          ...(settingsPath ? { settingsPath } : {}),
+          ...(opts.extra_args !== undefined ? { extra: opts.extra_args } : {}),
+        })
         const env = { ...baseEnv, ...authEnv }
 
         let child: ReturnType<typeof spawn>
