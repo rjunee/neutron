@@ -20,6 +20,7 @@ import { ProjectDb } from '../../../persistence/index.ts'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { SqliteOnboardingStateStore } from '../../../onboarding/interview/sqlite-state-store.ts'
 import { slugifyProjectId } from '../../../onboarding/wow-moment/project-identity.ts'
+import { MAX_ANALYSIS_PROJECTS } from '../../../onboarding/interview/phase-prompts.ts'
 import {
   buildOnboardingFinalize,
   type OnboardingFinalizeDeps,
@@ -355,6 +356,67 @@ test('finalize honors a curation DROP — a dropped project is never materialize
   // proposed_projects (the defensive union would otherwise have re-added it).
   expect(names).toEqual(['Acme', 'Book', 'Topline Revenue'])
   expect(names).not.toContain('Infra')
+
+  h.db.close()
+})
+
+test('finalize reconciles to the DISPLAYED set — proposed projects beyond MAX_ANALYSIS_PROJECTS are never materialized (M1, 2026-06-30)', async () => {
+  const h = makeHarness()
+  // A >7 synthesis. The presentation only ever showed the user the first
+  // MAX_ANALYSIS_PROJECTS (7). Pre-fix the engine stamped the FULL list into
+  // import_result AND merged ALL names into primary_projects, so the 8th/9th —
+  // which the user never saw and could not drop — got locked in + materialized.
+  // This seeds that exact polluted phase_state (primary_projects carrying the
+  // full 9) and asserts finalize materializes ONLY the displayed 7.
+  const NINE = [
+    'Topline',
+    'Northwind',
+    'Acme Studio',
+    'Acme',
+    'Info Product Playbooks',
+    'Functional Chocolate',
+    'Home Finances',
+    'Phantom Eight', // beyond the cap — never displayed
+    'Phantom Nine', // beyond the cap — never displayed
+  ]
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      // Pre-cap pollution: the engine merge copied all 9 names in here.
+      primary_projects: [...NINE],
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      entities: [],
+      topics: [],
+      proposed_projects: NINE.map((name) => ({
+        name,
+        rationale: 'Seen across the export.',
+        suggested_topics: [],
+      })),
+      proposed_tasks: [],
+      proposed_reminders: [],
+    } as never,
+  })
+
+  const names = h.db
+    .prepare<{ name: string }, []>(`SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name`)
+    .all()
+    .map((r) => r.name)
+  // Exactly the displayed 7 — no phantoms.
+  expect(names.length).toBe(MAX_ANALYSIS_PROJECTS)
+  expect(names.sort()).toEqual([...NINE.slice(0, MAX_ANALYSIS_PROJECTS)].sort())
+  expect(names).not.toContain('Phantom Eight')
+  expect(names).not.toContain('Phantom Nine')
 
   h.db.close()
 })

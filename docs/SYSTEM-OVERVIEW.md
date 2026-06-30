@@ -412,6 +412,35 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > buttons) stays ephemeral (the engine owns their reconnect re-emit); safe from
 > double-render because `on_session_open` never re-sends the body and the watcher
 > resolves the phase so the reconnect re-emit won't re-fire it.
+>
+> **Import-running status-bubble ordering (M1 verify, 2026-06-30).** The same
+> seq-less-sorts-to-tail seam hit the "Reading through your export now…" progress
+> bubble (the `import_running` `status` prompt): fanned ephemerally it pinned to
+> the chat BOTTOM and stayed there after the import completed and the analysis +
+> later turns arrived. Fix (`open/composer.ts`
+> `resolveImportRunningStatusDelivery`, pure + unit-tested): persist the FIRST
+> status bubble through the durable adapter (chat_log `seq` → chronological), and
+> SUPPRESS the engine cron's re-emits (`import_running_attempt_count > 1`) so they
+> don't stack duplicate durable bubbles — the live `import_progress` banner covers
+> ongoing progress and the durable analysis body lands after on completion. Only
+> the plain buttonless `status` bubble is persisted/suppressed; failure /
+> rate-limit / resume prompts (real buttons) stay ephemeral.
+>
+> **Proposed-set reconciliation — finalized = displayed (M1 verify, 2026-06-30).**
+> The presentation caps the proposal at `MAX_ANALYSIS_PROJECTS` (7), but Pass-2 /
+> synthesis only caps as a prompt instruction (NOT enforced in code), so a >7
+> synthesis stamped the FULL list into `phase_state.import_result` AND merged all
+> N names into `primary_projects` — locking in projects the user never saw nor
+> could drop (the agent's `onboardingContext` seam, persona-gen, and finalize all
+> read the uncapped list). Fix: `capProposedProjects` (single source of truth,
+> `phase-prompts.ts`) is applied at the engine STAMP chokepoint
+> (`advanceFromImportRunningOnComplete` caps both `import_result` and the
+> `primary_projects` merge), so the per-turn seam + persona-gen + finalize all see
+> ≤7; the presentation slice uses the same helper, and `resolveProjects`
+> additionally excludes any import "overflow" beyond the cap from BOTH union
+> sources as a finalize-layer guard. Explicit user adds (never in the overflow)
+> flow through `primary_projects` untouched. GAP1 "no-narrowing" invariant
+> (present every proposed project the user could confirm) is preserved.
 
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
@@ -668,9 +697,12 @@ agent can create a project mid-turn through the same `createProjectAndRefresh`.
 `.car-rail-create`). The rail is a flex column with the `+ Create Project`
 button pinned via `margin-top:auto`, ALWAYS visible (even with only General);
 the rail itself always mounts now (previously hidden at zero projects). Click →
-`window.prompt` for a name → `POST /api/app/projects` with the bearer →
-`controller.setProject(newId)` navigates in; the live `projects_changed` frame
-refreshes the list (and 0→N auto-selects the new project).
+the button toggles to an INLINE name input (`.car-rail-input`, mirrors the
+mobile pattern; Enter submits, Esc cancels, empty name shows an inline error —
+NO native `window.prompt`, which is unstyleable and blocks E2E/CDP automation) →
+`POST /api/app/projects` with the bearer → `controller.setProject(newId)`
+navigates in; the live `projects_changed` frame refreshes the list (and 0→N
+auto-selects the new project). A failed POST renders inline (no `window.alert`).
 
 **Mobile rail** (`app/app/projects/index.tsx` + `app/lib/projects.ts`
 `createProject` / `projects-client.ts` `create`). A bottom-pinned `+ Create

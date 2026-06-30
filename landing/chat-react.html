@@ -288,6 +288,23 @@
   }
   .car-rail-create:hover:not(:disabled) { background: rgba(108,170,255,.10); border-color: var(--accent); }
   .car-rail-create:disabled { opacity: .6; cursor: default; }
+  /* Inline create-project form (replaces the native window.prompt). Pinned to
+     the bottom like the closed button (margin-top:auto). */
+  .car-rail-create-form { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+  .car-rail-input {
+    width: 100%; box-sizing: border-box; font: inherit;
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; outline: none;
+  }
+  .car-rail-input:focus { border-color: var(--accent); }
+  .car-rail-create-error { color: #ff8080; font-size: 12px; padding: 0 2px; }
+  .car-rail-create-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .car-rail-create-cancel, .car-rail-create-confirm {
+    font-size: 12px; padding: 4px 10px; border-radius: 8px; cursor: pointer; font: inherit;
+    border: 1px solid var(--border); background: var(--surface, rgba(255,255,255,0.04)); color: inherit;
+  }
+  .car-rail-create-confirm { border-color: var(--accent); color: var(--accent); }
+  .car-rail-create-cancel:disabled, .car-rail-create-confirm:disabled { opacity: .6; cursor: default; }
   @media (max-width: 720px) { .car-rail { display: none; } }
   /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
   .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }

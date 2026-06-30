@@ -689,8 +689,123 @@ describe('ChatApp render (happy-dom)', () => {
         }),
       )
     }
-    // The rail prompts for a name via window.prompt.
-    ;(window as unknown as { prompt: () => string }).prompt = () => 'Taxes'
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+
+    // The closed button is always present, even with zero projects (only General).
+    const createBtn = container.querySelector('.car-rail-create') as HTMLButtonElement | null
+    expect(createBtn).not.toBeNull()
+    expect(createBtn!.textContent).toContain('Create Project')
+
+    // Clicking it opens the INLINE name input (no native window.prompt).
+    await act(async () => {
+      createBtn!.click()
+      await tick()
+    })
+    const input = container.querySelector('.car-rail-input') as HTMLInputElement | null
+    expect(input).not.toBeNull()
+    // The closed button is replaced by the form.
+    expect(container.querySelector('.car-rail-create')).toBeNull()
+
+    // Type a name into the controlled input (native setter + input event), then
+    // submit with Enter.
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!
+    await act(async () => {
+      setInputValue.call(input!, 'Taxes')
+      input!.dispatchEvent(new window.Event('input', { bubbles: true }))
+      await tick()
+    })
+    await act(async () => {
+      input!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await tick()
+      await tick()
+    })
+
+    // It POSTed the trimmed name to the create endpoint with the bearer token…
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.url).toBe('https://sam.neutron.test/api/app/projects')
+    expect(calls[0]!.init?.method).toBe('POST')
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ name: 'Taxes' })
+    const headers = new Headers(calls[0]!.init?.headers)
+    expect(headers.get('authorization')).toBe('Bearer dev:sam')
+    // …and navigated into the new project.
+    expect(controller.getViewModel().projectId).toBe('taxes')
+    // …and the inline form closed back to the button on success.
+    expect(container.querySelector('.car-rail-input')).toBeNull()
+    expect(container.querySelector('.car-rail-create')).not.toBeNull()
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('inline Create Project: Escape cancels and an empty name does not POST', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const makeSocket = () =>
+      ({
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: () => {},
+        close: () => {},
+      }) as never
+
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    const calls: Array<{ url: string }> = []
+    const fetchImpl = (url: string): Promise<Response> => {
+      calls.push({ url })
+      return Promise.resolve(new Response('{}', { status: 201 }))
+    }
 
     function Harness(): React.JSX.Element {
       const draft = useAttachmentDraft({ token: config.token })
@@ -709,26 +824,30 @@ describe('ChatApp render (happy-dom)', () => {
       root.render(<Harness />)
     })
 
-    // The button is always present, even with zero projects (only General).
-    const createBtn = container.querySelector('.car-rail-create') as HTMLButtonElement | null
-    expect(createBtn).not.toBeNull()
-    expect(createBtn!.textContent).toContain('Create Project')
-
+    // Open the inline form.
     await act(async () => {
-      createBtn!.click()
-      await tick()
+      ;(container.querySelector('.car-rail-create') as HTMLButtonElement).click()
       await tick()
     })
+    const input = container.querySelector('.car-rail-input') as HTMLInputElement | null
+    expect(input).not.toBeNull()
 
-    // It POSTed the trimmed name to the create endpoint with the bearer token…
-    expect(calls.length).toBe(1)
-    expect(calls[0]!.url).toBe('https://sam.neutron.test/api/app/projects')
-    expect(calls[0]!.init?.method).toBe('POST')
-    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ name: 'Taxes' })
-    const headers = new Headers(calls[0]!.init?.headers)
-    expect(headers.get('authorization')).toBe('Bearer dev:sam')
-    // …and navigated into the new project.
-    expect(controller.getViewModel().projectId).toBe('taxes')
+    // Empty-name Enter shows an inline error and does NOT POST.
+    await act(async () => {
+      input!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await tick()
+    })
+    expect(calls.length).toBe(0)
+    expect(container.querySelector('.car-rail-create-error')).not.toBeNull()
+
+    // Escape closes the form back to the button (still no POST).
+    await act(async () => {
+      input!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await tick()
+    })
+    expect(calls.length).toBe(0)
+    expect(container.querySelector('.car-rail-input')).toBeNull()
+    expect(container.querySelector('.car-rail-create')).not.toBeNull()
 
     await act(async () => {
       root.unmount()

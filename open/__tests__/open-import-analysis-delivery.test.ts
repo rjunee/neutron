@@ -25,7 +25,10 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { ButtonPrompt } from '../../channels/button-primitive.ts'
-import { resolveOpenImportPromptEmission } from '../composer.ts'
+import {
+  resolveImportRunningStatusDelivery,
+  resolveOpenImportPromptEmission,
+} from '../composer.ts'
 
 const analysisPrompt: ButtonPrompt = {
   prompt_id: 'p-analysis',
@@ -74,5 +77,82 @@ describe('resolveOpenImportPromptEmission (Open import-analysis render gap)', ()
     }
     expect(resolveOpenImportPromptEmission(other, 'import_running', false)).toBe(other)
     expect(resolveOpenImportPromptEmission(other, null, false)).toBe(other)
+  })
+})
+
+describe('resolveImportRunningStatusDelivery (import_running status-bubble ordering, M1 2026-06-30)', () => {
+  test('the FIRST plain status bubble is persisted DURABLY (chronological seq, not tail-pinned)', () => {
+    expect(
+      resolveImportRunningStatusDelivery({
+        phase: 'import_running',
+        sub_step: 'status',
+        attempt_count: 1,
+        option_count: 0,
+      }),
+    ).toBe('durable')
+  })
+
+  test('the cron RE-EMITS (attempt_count > 1) are SUPPRESSED — no stacked duplicate bubbles', () => {
+    for (const attempt_count of [2, 3, 17]) {
+      expect(
+        resolveImportRunningStatusDelivery({
+          phase: 'import_running',
+          sub_step: 'status',
+          attempt_count,
+          option_count: 0,
+        }),
+      ).toBe('suppress')
+    }
+  })
+
+  test('a missing/garbage attempt_count is treated as the first (durable, not dropped)', () => {
+    for (const attempt_count of [undefined, null, NaN, 'x']) {
+      expect(
+        resolveImportRunningStatusDelivery({
+          phase: 'import_running',
+          sub_step: 'status',
+          attempt_count,
+          option_count: 0,
+        }),
+      ).toBe('durable')
+    }
+  })
+
+  test('a status bubble that carries a button is left ephemeral (only buttonless progress is persisted)', () => {
+    expect(
+      resolveImportRunningStatusDelivery({
+        phase: 'import_running',
+        sub_step: 'status',
+        attempt_count: 1,
+        option_count: 2,
+      }),
+    ).toBe('ephemeral')
+  })
+
+  test('non-status sub_steps (rate_limit_paused / failure) and other phases stay ephemeral', () => {
+    expect(
+      resolveImportRunningStatusDelivery({
+        phase: 'import_running',
+        sub_step: 'rate_limit_paused',
+        attempt_count: 1,
+        option_count: 0,
+      }),
+    ).toBe('ephemeral')
+    expect(
+      resolveImportRunningStatusDelivery({
+        phase: 'import_analysis_presented',
+        sub_step: 'status',
+        attempt_count: 1,
+        option_count: 0,
+      }),
+    ).toBe('ephemeral')
+    expect(
+      resolveImportRunningStatusDelivery({
+        phase: null,
+        sub_step: undefined,
+        attempt_count: 1,
+        option_count: 0,
+      }),
+    ).toBe('ephemeral')
   })
 })

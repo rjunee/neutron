@@ -22,6 +22,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   buildImportAnalysisPresentedPromptSpec,
+  capProposedProjects,
   MAX_ANALYSIS_PROJECTS,
   type ImportResultForAnalysisBuilder,
 } from '../phase-prompts.ts'
@@ -65,5 +66,36 @@ describe('GAP1 — presentation shows ALL proposed projects (no 5-slice)', () =>
     // Specifically the previously-dropped tail.
     expect(spec.body).toContain('Functional Chocolate')
     expect(spec.body).toContain('Home Finances')
+  })
+})
+
+describe('capProposedProjects — the displayed-set boundary (M1 reconciliation, 2026-06-30)', () => {
+  test('caps to the FIRST MAX_ANALYSIS_PROJECTS, preserving order', () => {
+    const ten = Array.from({ length: 10 }, (_, i) => ({ name: `P${i + 1}` }))
+    const capped = capProposedProjects(ten)
+    expect(capped.length).toBe(MAX_ANALYSIS_PROJECTS)
+    expect(capped.map((p) => p.name)).toEqual(
+      ten.slice(0, MAX_ANALYSIS_PROJECTS).map((p) => p.name),
+    )
+  })
+
+  test('a ≤cap list passes through unchanged', () => {
+    const three = [{ name: 'A' }, { name: 'B' }, { name: 'C' }]
+    expect(capProposedProjects(three)).toEqual(three)
+  })
+
+  test('the presented body and the cap agree on exactly the same set', () => {
+    // Same array the engine stamps into import_result; the displayed slice and
+    // the persisted slice MUST be identical so finalize == display.
+    const displayed = capProposedProjects(SEVEN_PROPOSED.proposed_projects)
+    const spec = buildImportAnalysisPresentedPromptSpec({
+      user_first_name: 'Sam',
+      import_source: 'claude-zip',
+      import_result: SEVEN_PROPOSED,
+      import_failed: false,
+      import_partial: false,
+      import_months_span: null,
+    })
+    for (const p of displayed) expect(spec.body).toContain(p.name)
   })
 })

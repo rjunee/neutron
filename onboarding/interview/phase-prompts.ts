@@ -597,6 +597,25 @@ export const LOW_CONFIDENCE_THRESHOLD = 0.5
  */
 export const MAX_ANALYSIS_PROJECTS = 7
 
+/**
+ * The single source of truth for "the proposed projects the user is shown".
+ *
+ * The presentation (`buildImportAnalysisPresentedPromptSpec` below) caps the
+ * proposal at `MAX_ANALYSIS_PROJECTS`. That same cap is the reconciliation
+ * boundary for EVERYTHING downstream — the persisted `phase_state.import_result`
+ * + merged `primary_projects` (engine-import-routing), the per-turn onboarding
+ * context seam (composer `onboardingContext`), and the finalizer
+ * (build-onboarding-finalize). Pass-2 / Pass-2-synthesis is supposed to
+ * hard-cap `proposed_projects` at 7 but does NOT enforce it in code (only as a
+ * prompt instruction), so a >7 synthesis would persist + lock in projects the
+ * user never saw and could not drop (M1 verify, 2026-06-30). Apply this cap at
+ * every persistence/finalize boundary so the locked-in set always equals the
+ * displayed set (minus drops, plus explicit adds).
+ */
+export function capProposedProjects<T>(proposed: readonly T[]): T[] {
+  return proposed.slice(0, MAX_ANALYSIS_PROJECTS)
+}
+
 export function buildImportAnalysisPresentedPromptSpec(
   input: BuildImportAnalysisPresentedPromptSpecInput,
 ): PhasePromptSpec {
@@ -642,7 +661,7 @@ export function buildImportAnalysisPresentedPromptSpec(
           .join(', ')})`,
     )
   }
-  const projects = result.proposed_projects.slice(0, MAX_ANALYSIS_PROJECTS)
+  const projects = capProposedProjects(result.proposed_projects)
   const interests = result.inferred_interests ?? []
   const confidence = result.confidence_by_inference ?? []
 
