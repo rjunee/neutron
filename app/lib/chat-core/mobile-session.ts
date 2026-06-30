@@ -39,6 +39,7 @@ import {
   normalizeInbound,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
+  parseSessionReadyMaxSeq,
   SendQueue,
   SyncEngine,
   type ChatMessage,
@@ -275,6 +276,11 @@ export class MobileChatSession {
     if (typeof data !== 'object' || data === null) return;
     const env = data as Record<string, unknown>;
     if (env['type'] === 'session_ready') {
+      // Stale-store reset detection (M1) — BEFORE resuming, check whether the
+      // server's high-water seq regressed below our local cursor (server wiped /
+      // reinstalled under us). If so the on-device transcript is from a dead
+      // server; drop it so the resume below re-syncs the fresh one from seq 0.
+      await this.reconcileServerReset(data);
       await this.resumeAndFlush();
       return;
     }
@@ -323,6 +329,20 @@ export class MobileChatSession {
     if (msg === null) return;
     await this.engine.applyInbound(this.topic_id, msg);
     this.emitChange();
+  }
+
+  /**
+   * Stale-store reset detection (M1). On `session_ready`, if the server's
+   * reported high-water seq has regressed below our local cursor, the server was
+   * wiped / reinstalled under us; clear the stale on-device transcript so the
+   * resume that follows re-syncs from the fresh server. Emits a change on a real
+   * reset so the UI drops the stale messages immediately, before the replay
+   * lands. A no-op on every normal connect (server at/ahead of us, or no seq).
+   */
+  private async reconcileServerReset(frame: unknown): Promise<void> {
+    const serverMaxSeq = parseSessionReadyMaxSeq(frame);
+    const { reset } = await this.engine.reconcileServerReset(this.topic_id, serverMaxSeq);
+    if (reset) this.emitChange();
   }
 
   /** Resume from the local cursor, then re-drive every not-yet-acked send.

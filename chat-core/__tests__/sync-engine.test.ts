@@ -117,6 +117,100 @@ describe('SyncEngine — reconnect replay fills the gap', () => {
   })
 })
 
+describe('SyncEngine — stale-store reset detection (M1)', () => {
+  it('clears the topic when the server seq regressed below the local cursor', async () => {
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    // Local store holds a transcript from the OLD server (cursor at 40).
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'old1', seq: 39, body: 'old a' }))
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'old2', seq: 40, body: 'old b' }))
+    expect(await engine.cursor(TOPIC)).toBe(40)
+    // Server reinstalled: its high-water seq is now 2 (fresh welcome messages).
+    const { reset } = await engine.reconcileServerReset(TOPIC, 2)
+    expect(reset).toBe(true)
+    // Stale transcript wiped; cursor reset so the resume re-syncs from 0.
+    expect(await engine.messages(TOPIC)).toEqual([])
+    expect(await engine.cursor(TOPIC)).toBe(0)
+    expect(await engine.resumeRequest(TOPIC)).toEqual({ v: 1, type: 'resume', after_seq: 0 })
+  })
+
+  it('does NOT clear on a normal reconnect (server seq >= local cursor)', async () => {
+    const engine = new SyncEngine(new InMemoryStore())
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'm1', seq: 1, body: 'a' }))
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'm2', seq: 2, body: 'b' }))
+    // Server is at the same seq (idle reconnect) — no regression.
+    const same = await engine.reconcileServerReset(TOPIC, 2)
+    expect(same.reset).toBe(false)
+    // Server is ahead (it has new messages to replay) — no regression.
+    const ahead = await engine.reconcileServerReset(TOPIC, 9)
+    expect(ahead.reset).toBe(false)
+    expect((await engine.messages(TOPIC)).length).toBe(2)
+    expect(await engine.cursor(TOPIC)).toBe(2)
+  })
+
+  it('does NOT clear when the server reported no seq (null) — no-durable-log deployment', async () => {
+    const engine = new SyncEngine(new InMemoryStore())
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'm1', seq: 5, body: 'a' }))
+    // An absent last_seen_seq normalizes to null; clearing here would destroy
+    // the only copy of the transcript, so it must be a no-op.
+    const { reset } = await engine.reconcileServerReset(TOPIC, null)
+    expect(reset).toBe(false)
+    expect((await engine.messages(TOPIC)).length).toBe(1)
+    expect(await engine.cursor(TOPIC)).toBe(5)
+  })
+
+  it('clears a stale client when the server reports an empty durable log (seq 0)', async () => {
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    // Stale client (cursor 40) connects to a freshly reinstalled server whose
+    // durable log is still empty → it affirmatively reports last_seen_seq = 0.
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'old', seq: 40, body: 'stale' }))
+    const { reset } = await engine.reconcileServerReset(TOPIC, 0)
+    expect(reset).toBe(true)
+    expect(await engine.messages(TOPIC)).toEqual([])
+    expect(await engine.cursor(TOPIC)).toBe(0)
+  })
+
+  it('preserves un-acked local sends across a reset (never loses a queued message)', async () => {
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    const queue = new SendQueue(store, { generateId: () => 'cmid-keep', now: () => 1 })
+    // An old acked transcript (cursor 40) + a user message queued offline.
+    await engine.applyInbound(TOPIC, inbound({ message_id: 'old', seq: 40, body: 'stale' }))
+    await queue.enqueue({ topic_id: TOPIC, body: 'undelivered note' })
+    // Server reinstalled (regressed to seq 1).
+    const { reset } = await engine.reconcileServerReset(TOPIC, 1)
+    expect(reset).toBe(true)
+    const msgs = await engine.messages(TOPIC)
+    // Stale acked row dropped; the queued send survives so the flush re-drives it.
+    expect(msgs.map((m) => m.body)).toEqual(['undelivered note'])
+    expect(msgs[0]?.status).toBe('queued')
+    expect(msgs[0]?.seq).toBeNull()
+    expect(await store.pendingSends(TOPIC)).toHaveLength(1)
+    // Cursor is back to 0 (the un-acked send carries no seq) → resume from 0.
+    expect(await engine.cursor(TOPIC)).toBe(0)
+  })
+
+  it('does NOT clear a fresh client (local cursor 0) even if the server reports a lower seq', async () => {
+    const engine = new SyncEngine(new InMemoryStore())
+    // Brand-new client connecting to an established server. Nothing to wipe.
+    const { reset } = await engine.reconcileServerReset(TOPIC, 0)
+    expect(reset).toBe(false)
+    expect(await engine.cursor(TOPIC)).toBe(0)
+  })
+
+  it('ignores un-sequenced optimistic sends (null seq) when computing the cursor', async () => {
+    const store = new InMemoryStore()
+    const engine = new SyncEngine(store)
+    const queue = new SendQueue(store, { generateId: () => 'cmid-1', now: () => 1 })
+    // A queued offline send has no seq → cursor stays 0 → no false reset.
+    await queue.enqueue({ topic_id: TOPIC, body: 'pending' })
+    const { reset } = await engine.reconcileServerReset(TOPIC, 0)
+    expect(reset).toBe(false)
+    expect((await engine.messages(TOPIC)).length).toBe(1)
+  })
+})
+
 describe('SyncEngine — resume replay is bounded (no O(N²) list scan)', () => {
   // A Store that counts how the engine resolves existing rows: the old apply
   // path called `list(topic)` (a full scan + sort) per message → O(N²) over a
@@ -140,6 +234,7 @@ describe('SyncEngine — resume replay is bounded (no O(N²) list scan)', () => 
       lastSeenSeq: (t: string) => inner.lastSeenSeq(t),
       pendingSends: (t: string) => inner.pendingSends(t),
       clear: (t: string) => inner.clear(t),
+      clearAckedTranscript: (t: string) => inner.clearAckedTranscript(t),
       searchMessages: (q, opts) => inner.searchMessages(q, opts),
     }
     return { store, listCalls: () => listCalls, byMidCalls: () => byMidCalls }

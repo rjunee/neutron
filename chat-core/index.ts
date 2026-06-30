@@ -14,6 +14,7 @@ export {
   normalizeReceiptUpdate,
   normalizeReactionUpdate,
   normalizeEditUpdate,
+  parseSessionReadyMaxSeq,
   parseReactions,
   parseOptions,
   parseUploadAffordance,

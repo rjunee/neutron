@@ -29,6 +29,7 @@ import {
   normalizeInbound,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
+  parseSessionReadyMaxSeq,
   type ChatMessage,
   type OutboundButtonChoice,
   type OutboundEdit,
@@ -178,6 +179,11 @@ export class WebChatSession {
     // On (re)connect the server announces the topic + high-water seq. That's
     // our trigger to fill the gap and flush anything queued while offline.
     if (env['type'] === 'session_ready') {
+      // Stale-store reset detection (M1) — BEFORE resuming, check whether the
+      // server's high-water seq regressed below our local cursor (server wiped /
+      // reinstalled under us). If so the local transcript is from a dead server;
+      // drop it so the resume below re-syncs the fresh transcript from seq 0.
+      await this.reconcileServerReset(data)
       await this.resumeAndFlush()
       return
     }
@@ -295,6 +301,20 @@ export class WebChatSession {
     const env: OutboundButtonChoice = { v: 1, type: 'button_choice', prompt_id, choice_value }
     if (freeform_text !== undefined && freeform_text.length > 0) env.freeform_text = freeform_text
     return this.ws.send(env)
+  }
+
+  /**
+   * Stale-store reset detection (M1). On `session_ready`, if the server's
+   * reported high-water seq has regressed below our local cursor, the server was
+   * wiped / reinstalled under us; clear the stale local transcript so the resume
+   * that follows re-syncs from the fresh server. Emits a change on a real reset
+   * so the UI drops the stale messages immediately, before the replay lands.
+   * A no-op on every normal connect (server at/ahead of us, or no reported seq).
+   */
+  private async reconcileServerReset(frame: unknown): Promise<void> {
+    const serverMaxSeq = parseSessionReadyMaxSeq(frame)
+    const { reset } = await this.engine.reconcileServerReset(this.topic_id, serverMaxSeq)
+    if (reset) this.emitChange()
   }
 
   /** Send the resume request from our local cursor, then re-drive every

@@ -276,6 +276,16 @@ export class SqliteChatStore implements Store {
     await this.db.execute(`DELETE FROM ${TABLE} WHERE topic_id = ?`, [topic_id]);
   }
 
+  async clearAckedTranscript(topic_id: string): Promise<void> {
+    // Stale-store reset (M1) — one atomic statement deletes only the dead
+    // server's acked transcript, leaving un-acked local sends (queued/sent) so a
+    // send that races the reset can't fall into a snapshot/reinsert window. The
+    // AFTER DELETE trigger keeps the FTS mirror in sync for the removed rows.
+    await this.db.execute(`DELETE FROM ${TABLE} WHERE topic_id = ? AND status = 'acked'`, [
+      topic_id,
+    ]);
+  }
+
   async searchMessages(
     query: string,
     opts: MessageSearchOptions = {},

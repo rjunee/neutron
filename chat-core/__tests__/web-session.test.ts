@@ -192,3 +192,99 @@ describe('WebChatSession — gap-free reconnect (resume)', () => {
     expect(msgs[0]?.status).toBe('acked')
   })
 })
+
+describe('WebChatSession — stale-store reset on server reinstall (M1)', () => {
+  // A store pre-seeded with a transcript from a now-dead server, simulating the
+  // OPFS snapshot that survives a server uninstall+reinstall behind the same
+  // browser origin. The session is constructed over THIS store.
+  async function seededSession(): Promise<{
+    session: WebChatSession
+    sockets: FakeSocket[]
+    store: InMemoryStore
+  }> {
+    const store = new InMemoryStore()
+    // Old transcript: cursor sits at seq 40.
+    await store.upsert({
+      topic_id: TOPIC, client_msg_id: '', message_id: 'old1', seq: 39, role: 'agent',
+      body: 'stale: skip it', project_id: null, attachments: null, created_at: 1, status: 'acked',
+    })
+    await store.upsert({
+      topic_id: TOPIC, client_msg_id: '', message_id: 'old2', seq: 40, role: 'agent',
+      body: 'stale: Tabs, Amascence, Pristine', project_id: null, attachments: null, created_at: 2, status: 'acked',
+    })
+    const sockets: FakeSocket[] = []
+    let id = 0
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store,
+      createSocket: () => { const s = new FakeSocket(); sockets.push(s); return s },
+      generateId: () => `cmid-${++id}`,
+      now: (() => { let t = 0; return () => ++t })(),
+    })
+    return { session, sockets, store }
+  }
+
+  it('clears the stale transcript + resumes from 0 when the fresh server seq regressed', async () => {
+    const { session, sockets, store } = await seededSession()
+    session.start()
+    sockets[0]!.open()
+    // Fresh server announces a LOWER high-water seq (2 welcome messages).
+    sockets[0]!.deliver(readyFrame(2))
+    await new Promise((r) => setTimeout(r, 0))
+    // Stale rows wiped before the replay; resume requested from after_seq=0.
+    expect(await store.lastSeenSeq(TOPIC)).toBe(0)
+    expect(sockets[0]!.resumeFrames().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 0 })
+    // The fresh server then replays its real transcript, which renders cleanly.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'new1', seq: 1, body: 'Welcome to Neutron', ts: 3 })
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'new2', seq: 2, body: "What's your name?", ts: 4 })
+    await new Promise((r) => setTimeout(r, 0))
+    const msgs = await session.messages()
+    expect(msgs.map((m) => m.body)).toEqual(['Welcome to Neutron', "What's your name?"])
+    expect(msgs.some((m) => m.body.startsWith('stale:'))).toBe(false)
+  })
+
+  it('preserves a queued offline send across the reset and re-drives it on the fresh server', async () => {
+    const { session, sockets, store } = await seededSession()
+    session.start()
+    // User types a message while offline (queued, never delivered to old server).
+    await session.send('please keep me', { client_msg_id: 'cmid-keep' })
+    sockets[0]!.open()
+    // Fresh server announces a regressed seq → reset.
+    sockets[0]!.deliver(readyFrame(2))
+    await new Promise((r) => setTimeout(r, 0))
+    // Stale acked rows gone, but the queued send survives the wipe …
+    const msgs = await session.messages()
+    expect(msgs.some((m) => m.body.startsWith('stale:'))).toBe(false)
+    expect(msgs.map((m) => m.body)).toContain('please keep me')
+    // … and is re-driven to the fresh server (idempotent on client_msg_id).
+    expect(await store.lastSeenSeq(TOPIC)).toBe(0)
+    expect(sockets[0]!.sentUserMessages().map((e) => e['body'])).toContain('please keep me')
+  })
+
+  it('does NOT clear on a normal reconnect (server seq >= local cursor)', async () => {
+    const { session, sockets, store } = await seededSession()
+    session.start()
+    sockets[0]!.open()
+    // Same server, reconnecting: it reports its true high-water seq (40).
+    sockets[0]!.deliver(readyFrame(40))
+    await new Promise((r) => setTimeout(r, 0))
+    // Transcript preserved; resume continues forward from the existing cursor.
+    expect(await store.lastSeenSeq(TOPIC)).toBe(40)
+    expect((await session.messages()).length).toBe(2)
+    expect(sockets[0]!.resumeFrames().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
+  })
+
+  it('does NOT clear when the server omits last_seen_seq (absent → never a wipe)', async () => {
+    const { session, sockets, store } = await seededSession()
+    session.start()
+    sockets[0]!.open()
+    // No last_seen_seq on the frame (e.g. no durable log): must not destroy the
+    // local store, which could be the only copy of the transcript.
+    sockets[0]!.deliver(readyFrame())
+    await new Promise((r) => setTimeout(r, 0))
+    expect(await store.lastSeenSeq(TOPIC)).toBe(40)
+    expect((await session.messages()).length).toBe(2)
+    expect(sockets[0]!.resumeFrames().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
+  })
+})

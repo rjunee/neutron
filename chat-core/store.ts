@@ -56,6 +56,17 @@ export interface Store {
   /** Drop all messages for a topic (e.g. account switch). */
   clear(topic_id: string): Promise<void>
   /**
+   * Stale-store reset (M1) — drop ONLY the ACKED (server-sequenced) transcript
+   * for a topic, preserving un-acked local sends (status `queued`/`sent`, which
+   * carry no server seq). Used when a server reinstall is detected
+   * ({@link SyncEngine.reconcileServerReset}): the dead server's transcript is
+   * wiped while the user's typed-but-undelivered messages survive to be
+   * re-driven against the fresh server. A SINGLE store operation (not a
+   * read-clear-reinsert cycle), so a send that races the reset can't be lost in
+   * a window between snapshot and delete.
+   */
+  clearAckedTranscript(topic_id: string): Promise<void>
+  /**
    * Full-text search the transcript. `query` is free text; results are ranked
    * by relevance + recency with `[`…`]`-highlighted snippets (research doc §5
    * — "FTS5 over the local message store"). Scope with
@@ -421,6 +432,17 @@ export class InMemoryStore implements Store {
 
   async clear(topic_id: string): Promise<void> {
     this.byTopic.delete(topic_id)
+  }
+
+  async clearAckedTranscript(topic_id: string): Promise<void> {
+    const topic = this.byTopic.get(topic_id)
+    if (topic === undefined) return
+    // Single pass: drop every server-acked row (the dead server's transcript),
+    // keep un-acked local sends (queued/sent) so a reset never loses them.
+    for (const [identity, m] of topic) {
+      if (m.status === 'acked') topic.delete(identity)
+    }
+    if (topic.size === 0) this.byTopic.delete(topic_id)
   }
 
   async searchMessages(

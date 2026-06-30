@@ -38,6 +38,13 @@ async function storeContract(store: Store): Promise<void> {
   // Point lookup by server message_id (the indexed resume-replay path).
   expect((await store.getByMessageId(TOPIC, 'm1'))?.body).toBe('one')
   expect(await store.getByMessageId(TOPIC, 'no-such-id')).toBeNull()
+  // Stale-store reset (M1): clearAckedTranscript drops the acked transcript
+  // (c1/c2) but keeps the un-acked local send (c3), and the cursor falls to 0.
+  await store.clearAckedTranscript(TOPIC)
+  const afterReset = await store.list(TOPIC)
+  expect(afterReset.map((m) => m.body)).toEqual(['pending'])
+  expect(afterReset[0]?.status).toBe('queued')
+  expect(await store.lastSeenSeq(TOPIC)).toBe(0)
   await store.clear(TOPIC)
   expect((await store.list(TOPIC)).length).toBe(0)
 }

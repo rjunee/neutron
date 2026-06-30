@@ -303,11 +303,20 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // Chat-sync foundation — tell the client the current high-water seq
         // so it can decide whether a `resume` is even needed (its local
         // cursor already at last_seen_seq → skip the round-trip). Cheap MAX
-        // query; 0 / unset when no durable log is wired.
+        // query.
+        //
+        // Stale-store reset detection (M1) — when a durable log IS wired we
+        // ALWAYS send last_seen_seq, INCLUDING 0 (a freshly reinstalled server
+        // whose log is still empty at connect time). A present 0 is an
+        // affirmative "this server has nothing for the topic" signal: a client
+        // whose local cursor is ahead recognises the seq regression, clears its
+        // stale transcript, and re-syncs. Omitting the field on 0 (the old
+        // behaviour) was indistinguishable from "no durable log wired", where
+        // clearing would destroy the only copy — so the field stays ABSENT only
+        // when there is no durable log at all (or the MAX query failed).
         if (adapter.hasChatLog) {
           try {
-            const last_seen_seq = await adapter.currentMaxSeq(data.channel_topic_id)
-            if (last_seen_seq > 0) ready.last_seen_seq = last_seen_seq
+            ready.last_seen_seq = await adapter.currentMaxSeq(data.channel_topic_id)
           } catch {
             /* non-fatal: omit last_seen_seq, client resumes from its cursor */
           }

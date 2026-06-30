@@ -331,4 +331,20 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     sock.close()
     await sleep(50)
   }, 30_000)
+
+  test('#7 the FIRST session_ready on a fresh topic carries last_seen_seq:0 (M1 reset signal)', async () => {
+    harness = await startHarness()
+    const sock = await openSocket(harness.base)
+    await waitFor(() => framesOfType(sock.frames, 'session_ready').length > 0)
+    // The first connect's session_ready is emitted BEFORE the async onboarding
+    // opener persists, so the durable log is still empty. With a durable log
+    // wired the surface now ALWAYS reports last_seen_seq — INCLUDING 0 — so a
+    // stale client whose local cursor is ahead recognises the seq regression and
+    // wipes its old transcript. (Previously the field was omitted on 0, which a
+    // client couldn't distinguish from a no-durable-log deployment.)
+    const ready = framesOfType(sock.frames, 'session_ready')[0]!
+    expect(ready['last_seen_seq']).toBe(0)
+    sock.close()
+    await sleep(50)
+  }, 30_000)
 })
