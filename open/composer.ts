@@ -1914,7 +1914,11 @@ export function buildOpenGraphComposer(
     const createProjectAndRefresh = async (input: {
       name: string
       user_id: string | null
-    }): Promise<{ project_id: string; name: string; created: boolean }> => {
+    }): Promise<{
+      project_id: string
+      name: string
+      outcome: 'created' | 'existing' | 'skipped'
+    }> => {
       const row = await createProjectRow(scaffoldDeps, { name: input.name })
       if (row.outcome !== 'skipped') {
         // Fire-and-forget on-disk scaffold; never blocks the response / rollback.
@@ -1931,7 +1935,9 @@ export function buildOpenGraphComposer(
         // Known mutation → always push the fresh rail snapshot.
         emitProjectsChangedNow(input.user_id ?? OWNER_USER_ID)
       }
-      return { project_id: row.project_id, name: row.name, created: row.outcome === 'created' }
+      // A 'skipped' outcome (soft-deleted-name collision) is surfaced as a
+      // failure by the HTTP/tool callers — never resurrected, never a success.
+      return { project_id: row.project_id, name: row.name, outcome: row.outcome }
     }
     // HTTP surface (`/api/app/projects` GET list + POST create). Wiring the
     // surface in Open also gives the mobile app's `fetchProjects` list a real

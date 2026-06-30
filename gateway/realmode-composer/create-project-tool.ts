@@ -34,7 +34,13 @@ export interface CreateProjectToolService {
     project_slug: string
     /** NULL for solo/system turns — the binding defaults the rail-refresh target to the owner. */
     speaker_user_id: string | null
-  }): Promise<{ project_id: string; name: string; created: boolean }>
+  }): Promise<{
+    project_id: string
+    name: string
+    /** 'created' — new row; 'existing' — idempotent resolve; 'skipped' — the
+     *  name maps to a SOFT-DELETED project (never resurrected → not a success). */
+    outcome: 'created' | 'existing' | 'skipped'
+  }>
 }
 
 const inputSchema: JsonSchemaDocument = {
@@ -99,11 +105,19 @@ export function registerCreateProjectToolSurface(
         project_slug: ctx.project_slug,
         speaker_user_id: ctx.speaker_user_id,
       })
+      if (result.outcome === 'skipped') {
+        // The name maps to a soft-deleted project — never resurrected, so this
+        // is not a successful create.
+        return {
+          ok: false,
+          error: 'a deleted project already uses this name — restore it or choose another name',
+        }
+      }
       return {
         ok: true,
         project_id: result.project_id,
         name: result.name,
-        created: result.created,
+        created: result.outcome === 'created',
       }
     },
   })

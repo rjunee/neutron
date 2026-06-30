@@ -315,7 +315,13 @@ export interface CreateProjectHandler {
     name: string
     user_id: string
     project_slug: string
-  }): Promise<{ project_id: string; name: string; created: boolean }>
+  }): Promise<{
+    project_id: string
+    name: string
+    /** 'created' — new row; 'existing' — idempotent resolve; 'skipped' — the
+     *  name maps to a SOFT-DELETED project (never resurrected → not a success). */
+    outcome: 'created' | 'existing' | 'skipped'
+  }>
 }
 
 /** A connected member as the app renders it (owner|collaborator role badge). */
@@ -594,10 +600,20 @@ async function handleCreate(
     return jsonError(400, 'invalid_name', 'name must be 1-128 characters')
   }
   const result = await createProject({ name, user_id, project_slug })
+  if (result.outcome === 'skipped') {
+    // The name maps to a soft-deleted project id. We never resurrect a deleted
+    // project, so there is no live project to return — don't claim success
+    // (the client would navigate to a row that isn't in the rail/list).
+    return jsonError(
+      409,
+      'project_deleted',
+      'a deleted project already uses this name — restore it or choose another name',
+    )
+  }
   // 201 on a fresh create, 200 when an existing project was resolved (idempotent).
   return jsonOk(
-    { project: { id: result.project_id, label: result.name }, created: result.created },
-    result.created ? 201 : 200,
+    { project: { id: result.project_id, label: result.name }, created: result.outcome === 'created' },
+    result.outcome === 'created' ? 201 : 200,
   )
 }
 

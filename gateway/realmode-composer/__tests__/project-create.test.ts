@@ -113,7 +113,8 @@ test('create_project tool validates name + delegates to the bound service', asyn
   const service: CreateProjectToolService = {
     create: async (input) => {
       calls.push(input)
-      return { project_id: 'taxes', name: input.name, created: true }
+      const outcome = /deleted/i.test(input.name) ? 'skipped' : 'created'
+      return { project_id: 'taxes', name: input.name, outcome }
     },
   }
   const reg = new ToolRegistry()
@@ -148,4 +149,12 @@ test('create_project tool validates name + delegates to the bound service', asyn
   expect(calls).toEqual([
     { name: 'Taxes', project_slug: PROJECT_SLUG, speaker_user_id: 'sam' },
   ])
+
+  // A 'skipped' outcome (soft-deleted-name collision) is NOT reported as success.
+  const skipped = (await tool!.handler({ name: 'Deleted Project' }, ctx)) as {
+    ok: boolean
+    error?: string
+  }
+  expect(skipped.ok).toBe(false)
+  expect(skipped.error).toBeDefined()
 })

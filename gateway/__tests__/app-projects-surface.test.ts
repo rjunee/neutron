@@ -359,8 +359,14 @@ describe('app-projects surface — POST /api/app/projects (create)', () => {
       auth,
       createProject: async (input) => {
         calls.push(input)
-        // Echo a deterministic slug so the test asserts the round-trip shape.
-        return { project_id: input.name.toLowerCase().replace(/\s+/g, '-'), name: input.name, created: true }
+        // Echo a deterministic slug so the test asserts the round-trip shape. A
+        // name containing "deleted" simulates the soft-deleted-collision skip.
+        const outcome = /deleted/i.test(input.name) ? 'skipped' : 'created'
+        return {
+          project_id: input.name.toLowerCase().replace(/\s+/g, '-'),
+          name: input.name,
+          outcome,
+        }
       },
     })
     const composed = composeHttpHandler({
@@ -430,5 +436,16 @@ describe('app-projects surface — POST /api/app/projects (create)', () => {
     expect(harness.calls).toEqual([
       { name: 'My Taxes', user_id: 'sam', project_slug: PROJECT_SLUG },
     ])
+  })
+
+  it('returns 409 project_deleted when the name maps to a soft-deleted project', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects`, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Deleted Thing' }),
+    })
+    expect(res.status).toBe(409)
+    const json = (await res.json()) as { ok: boolean; code: string }
+    expect(json.ok).toBe(false)
+    expect(json.code).toBe('project_deleted')
   })
 })
