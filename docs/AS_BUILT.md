@@ -210,7 +210,10 @@ topic `chat_history_surface` hydrates + a `buildAppWsSendReply` socket push) and
 AFTER `emitProjectsChanged`, emits a deterministic General closing pointing at the
 populated left rail ("open one to find its Plan, Documents, and Chat" — uses "Plan",
 not "Work Board"). Emitted from finalize (not just the preamble) so the projects
-are guaranteed in the rail when it lands.
+are guaranteed in the rail when it lands. The closing + each opening carry a stable
+per-(topic, kind) `dedupe_key`; the composer keys the durable `button_prompts` row
+on it AND suppresses the live re-send when the row already existed, so a
+re-finalize from an overlapping recovery path never double-posts (Codex P2).
 
 **(7) Per-project opening message.** Path-1 finalize materialized projects with
 rich docs but seeded no opening chat message. `materializeProjects` now returns the

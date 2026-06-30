@@ -119,11 +119,20 @@ export interface OnboardingFinalizeDeps {
    * the message both renders live and hydrates on reload. Best-effort + non-
    * throwing by contract; omitted on the LLM-less path → no closing/opening
    * (onboarding can't run LLM-less anyway). NEVER blocks finalize.
+   *
+   * `dedupe_key` is a STABLE per-(topic, message-kind) idempotency seed. Finalize
+   * is reachable from several recovery paths (post-turn extractor onComplete,
+   * the import-completion watcher, reconnect recovery) that can overlap or retry
+   * before the terminal `completed` upsert is observed, so the composer keys the
+   * durable `button_prompts` row on it (collapsing duplicate history rows) AND
+   * suppresses the live re-send when the row already existed — a re-finalize
+   * therefore never double-posts the closing or a project opening.
    */
   emitChatMessage?: (input: {
     user_id: string
     project_id: string | null
     body: string
+    dedupe_key: string
   }) => void | Promise<void>
   now?: () => number
   log?: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void
@@ -248,6 +257,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
             user_id: input.user_id,
             project_id: null,
             body: ONBOARDING_CLOSING_MESSAGE,
+            dedupe_key: 'onboarding_closing',
           })
         } catch (err) {
           log('warn', 'finalize: closing message emit failed', { err: errStr(err) })
@@ -297,6 +307,7 @@ async function emitProjectOpenings(
         user_id,
         project_id: project.project_id,
         body,
+        dedupe_key: `onboarding_opening:${project.project_id}`,
       })
     } catch (err) {
       log('warn', 'finalize: per-project opening emit failed; continuing', {

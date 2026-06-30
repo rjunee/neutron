@@ -2037,7 +2037,12 @@ export function buildOpenGraphComposer(
     // only ever CALLED at finalize time (long after boot). Mirrors the
     // `importWatchHolder` / `appWsButtonPromptRouter` late-binding pattern.
     const onboardingMsgHolder: {
-      emit?: (input: { user_id: string; project_id: string | null; body: string }) => Promise<void>
+      emit?: (input: {
+        user_id: string
+        project_id: string | null
+        body: string
+        dedupe_key: string
+      }) => Promise<void>
     } = {}
     // Path 1 finalize seam: persona compose+commit + project materialization
     // (DB rows + topics + docs + gbrain) + mark completed + rail refresh +
@@ -2334,13 +2339,19 @@ export function buildOpenGraphComposer(
     // finalize. NOTE (sibling client PR coordination): the React client reads a
     // project's chat off this `app:<user>:<project>` topic — the same key the
     // live-agent reply path uses — so the opening lands where the client subscribes.
-    onboardingMsgHolder.emit = async ({ user_id, project_id, body }): Promise<void> => {
+    onboardingMsgHolder.emit = async ({ user_id, project_id, body, dedupe_key }): Promise<void> => {
       const channelTopic = appWsTopicId(user_id)
       const turnTopic =
         project_id !== null && project_id.length > 0
           ? `${channelTopic}:${project_id}`
           : channelTopic
       let prompt_id: string | undefined
+      // Idempotency: finalize is reachable from several overlapping recovery
+      // paths, so key the durable row on (instance, topic, dedupe_key). A
+      // re-finalize collapses onto the SAME row (was_new=false) and we SKIP the
+      // live re-send below — no duplicate closing / opening bubble. Default to
+      // sending (fail-open) only when persistence itself failed (no key written).
+      let wasNew = true
       try {
         const prompt = buildButtonPrompt({
           body,
@@ -2349,10 +2360,12 @@ export function buildOpenGraphComposer(
           // Long TTL so the history row never hits the unresolved-prompt ghost
           // filter (mirrors the live-agent reply row's REPLY_ROW_TTL_MS).
           expires_in_ms: 10 * 365 * 24 * 60 * 60 * 1_000,
+          idempotency: { project_slug, topic_id: turnTopic, seed: dedupe_key },
           uuid: randomUUID,
         })
         const emitted = await landing.buttonStore.emit(prompt, { topic_id: turnTopic })
         prompt_id = emitted.prompt_id
+        wasNew = emitted.was_new
       } catch (err) {
         console.warn(
           `[open] event=onboarding_msg_persist_failed project=${project_slug} topic=${turnTopic} err=${
@@ -2360,6 +2373,8 @@ export function buildOpenGraphComposer(
           }`,
         )
       }
+      // A duplicate finalize already delivered this message — don't re-post it live.
+      if (!wasNew) return
       const out: ChatOutbound = {
         type: 'agent_message',
         body,
