@@ -79,6 +79,23 @@ operator model picks still resolve + price ONCE at build (loud-fail on typo).
 Test added: a `setBestModelOverride` flip between two calls on the SAME import
 caller reaches the second dispatch.
 
+**Codex review round 3 — env-pin keeps strict pricing.** `getBestModel()` returns
+`runtimeBestModel ?? BEST_MODEL`, so an operator's `NEUTRON_BEST_MODEL` pin
+(surfaced as `BEST_MODEL`) was being silently billed at $0 when unpriced —
+regressing the typo loud-fail. Now ONLY a watchdog-adopted override (model !==
+`BEST_MODEL`) degrades; the env/default base keeps the strict `resolvePricingFor`
+loud-fail.
+
+**Codex review round 4 — model attribution / metadata (P3).** Two
+non-dispatch sites that should NOT track the live accessor: (a)
+`onboarding/history-import/job-runner.ts` stamps `synthesizer_model` for a
+legacy/pre-S21 row that ALREADY completed — reverted to the stable `BEST_MODEL`
+(attribution, not selection; a watchdog flip mustn't mislabel old results). (b)
+The free-email `/email` chat-command filter's reported `model` was captured at
+mount while `emailLlm` dispatches `getBestModel()` per call — the filter's
+`model` option now accepts a thunk resolved per-call in `match`, so the reported
+model stays aligned with the dispatch.
+
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.

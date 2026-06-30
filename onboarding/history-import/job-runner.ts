@@ -48,7 +48,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '../../persistence/index.ts'
-import { getBestModel } from '../../runtime/models.ts'
+import { BEST_MODEL } from '../../runtime/models.ts'
 import type { CredentialKind } from '../../runtime/credential-pool.ts'
 import { aggregatePass1, pass2Synthesize, type Pass2LlmCall } from './pass2-synthesis.ts'
 import { pass1Triage, type Pass1LlmCall } from './pass1-triage.ts'
@@ -545,7 +545,14 @@ export class ImportJobRunner {
           !result.partial &&
           job.result.synthesizer_model === undefined
         ) {
-          job.result.synthesizer_model = getBestModel()
+          // ATTRIBUTION, not selection: this stamps the synthesizer for a
+          // legacy/pre-S21 row that ALREADY completed without the field. It must
+          // be the STABLE default (`BEST_MODEL` seed), NOT the live
+          // `getBestModel()` — a watchdog flip after the row completed would
+          // otherwise mislabel old results with a model that never produced them
+          // (Codex cross-model review). Live always-latest applies to DISPATCH
+          // sites, not historical attribution.
+          job.result.synthesizer_model = BEST_MODEL
         }
       }
     }

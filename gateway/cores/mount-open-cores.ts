@@ -294,7 +294,9 @@ export async function mountOpenCores(
       resolver: emailResolver,
       client: gmailClient,
       llm: emailLlm,
-      model: getBestModel(),
+      // Pass the accessor (thunk) so the reported model resolves PER-CALL,
+      // aligned with the per-call `emailLlm` dispatch after a watchdog flip.
+      model: getBestModel,
       default_project_id,
     }),
     createNotesChatCommandFilter({ resolver: notesResolver, default_project_id }),
