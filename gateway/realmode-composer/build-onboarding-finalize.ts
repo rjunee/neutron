@@ -369,23 +369,40 @@ function interviewProjects(state: OnboardingState): CapturedProject[] {
  * project whose slug isn't already covered is appended. With `import_result` null
  * this is unchanged (interview-only). The caller's `seenSlugs` dedup +
  * `resolveBindTarget` already make a superset safe.
+ *
+ * CURATION DROPS (import-curation handoff, 2026-06-29): the union is defensive —
+ * it independently re-pulls `import_result.proposed_projects`, so subtracting a
+ * dropped project from `phase_state.primary_projects` alone is NOT enough (the
+ * import side re-adds it). When the owner explicitly drops a proposed project
+ * during curation ("drop Family Home"), the post-turn extractor records it under
+ * `phase_state.dropped_projects`; we EXCLUDE those slugs from BOTH union sources
+ * here so a dropped project is never materialized. (The extractor also subtracts
+ * them from `primary_projects`, so persona-gen — which reads `primary_projects` —
+ * agrees.) Mirrors the legacy engine's `(prior ∪ adds) MINUS removals`.
  */
 function resolveProjects(
   state: OnboardingState,
   import_result: ImportResult | null,
 ): CapturedProject[] {
+  const droppedRaw = state.phase_state['dropped_projects']
+  const dropped = new Set(
+    (Array.isArray(droppedRaw) ? droppedRaw : [])
+      .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+      .map((s) => slugifyProjectId(s)),
+  )
   const fromImport =
     import_result !== null
       ? import_result.proposed_projects
           .map((p) => ({ name: p.name.trim(), rationale: p.rationale }))
           .filter((p) => p.name.length > 0)
       : []
-  const out: CapturedProject[] = [...fromImport]
-  const seen = new Set(fromImport.map((p) => slugifyProjectId(p.name)))
-  for (const p of interviewProjects(state)) {
+  const out: CapturedProject[] = []
+  const seen = new Set<string>()
+  for (const p of [...fromImport, ...interviewProjects(state)]) {
     const slug = slugifyProjectId(p.name)
     if (seen.has(slug)) continue
     seen.add(slug)
+    if (dropped.has(slug)) continue
     out.push(p)
   }
   return out

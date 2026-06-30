@@ -49,7 +49,10 @@ import { buildProjectDocComposer } from '../gateway/realmode-composer/build-proj
 import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
 import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
 import { auditRequiredFields } from '../onboarding/interview/required-fields-audit.ts'
-import { buildOnboardingPreamble } from '../onboarding/interview/onboarding-preamble.ts'
+import {
+  buildImportAnalysisContextFragment,
+  buildOnboardingPreamble,
+} from '../onboarding/interview/onboarding-preamble.ts'
 import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
   buildLlmCallSubstrate,
@@ -2046,6 +2049,37 @@ export function buildOpenGraphComposer(
         ? {
             isActive: (user_id: string): Promise<boolean> => isOnboardingActive(user_id),
             systemPreamble: (): string => onboardingPreambleText,
+            // Per-turn grounding: re-inject the import-analysis the agent already
+            // presented (proposed projects + curation status) so the warm session
+            // KNOWS what it proposed and can honor "drop X" / "keep the rest".
+            // Reads the durable phase_state (where the engine stamped the full
+            // import_result + the merged primary_projects). Best-effort: any read
+            // failure degrades to no block (the turn still runs).
+            onboardingContext: async (user_id: string): Promise<string | null> => {
+              try {
+                const st = await onboardingStateStore.get(project_slug, user_id)
+                if (st === null) return null
+                const ir = st.phase_state['import_result']
+                const importResult =
+                  ir !== null && typeof ir === 'object' ? (ir as ImportResult) : null
+                if (importResult === null) return null
+                const activeRaw = st.phase_state['primary_projects']
+                const active_project_names = Array.isArray(activeRaw)
+                  ? activeRaw.filter((s): s is string => typeof s === 'string')
+                  : []
+                const fn = st.phase_state['user_first_name']
+                return buildImportAnalysisContextFragment({
+                  proposed_projects: importResult.proposed_projects.map((p) => ({
+                    name: p.name,
+                    rationale: p.rationale,
+                  })),
+                  active_project_names,
+                  user_first_name: typeof fn === 'string' ? fn : null,
+                })
+              } catch {
+                return null
+              }
+            },
             uploadAffordance: (): { source: 'chatgpt' | 'claude' } | null =>
               importSubstrate !== null ? { source: 'chatgpt' } : null,
             onTurnComplete: (turn): void => onboardingExtractor.onTurnComplete(turn),
@@ -2200,6 +2234,38 @@ export function buildOpenGraphComposer(
         // (which left the owner never seeing their import result). See
         // resolveOpenImportPromptEmission for the rationale.
         const toEmit = resolveOpenImportPromptEmission(prompt, st?.phase ?? null, importFailed)
+        // Ordering fix (import-curation handoff, 2026-06-29): the SUCCESSFUL
+        // import_analysis_presented body is a plain "wow moment" agent message
+        // (its dangling button is stripped above, and the watcher auto-consumes
+        // the phase). Delivered ephemerally via emitOnboardingPrompt it carries NO
+        // chat_log `seq`, so the client sorts it to the tail and a later real-seq
+        // user message renders ABOVE it (newest-at-bottom broken) — and it
+        // vanishes on resume. Persist THIS one through the durable adapter
+        // (chat_log → monotonic seq, replayable) so it orders with live chat.
+        // Safe from double-render: on_session_open never re-sends the body, and
+        // the watcher resolves the phase (active_prompt_id→null) so the engine's
+        // reconnect re-emit won't re-fire it. Every OTHER onboarding prompt
+        // (import failure / rate-limit / resume — real buttons) stays ephemeral,
+        // since the engine owns their durability + reconnect re-emit.
+        if (
+          st?.phase === 'import_analysis_presented' &&
+          !importFailed &&
+          toEmit.options.length === 0 &&
+          appWsHolder.adapter !== undefined
+        ) {
+          const msg: OutgoingMessage = {
+            topic: {
+              topic_id: '',
+              channel_kind: 'app_socket',
+              channel_topic_id: topic_id,
+              project_id: null,
+              privacy_mode: 'regular',
+            },
+            text: toEmit.body,
+          }
+          const id = await appWsHolder.adapter.send(msg)
+          return { message_id: prompt.prompt_id, was_new: !id.startsWith('app-ws:dropped:') }
+        }
         const ok = emitOnboardingPrompt(topic_id, toEmit)
         return { message_id: prompt.prompt_id, was_new: ok }
       } catch {

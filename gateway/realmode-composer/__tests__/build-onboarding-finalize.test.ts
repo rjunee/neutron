@@ -312,3 +312,49 @@ test('finalize unions interview-named projects with import_result.proposed_proje
 
   h.db.close()
 })
+
+test('finalize honors a curation DROP — a dropped project is never materialized, even from the import union', async () => {
+  const h = makeHarness()
+  // The owner curated their import: "drop Infra, keep the rest". The post-turn
+  // extractor subtracted 'Infra' from primary_projects AND recorded it under
+  // dropped_projects. The import's proposed_projects STILL lists 'Infra'.
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      primary_projects: ['Topline Revenue', 'Acme', 'Book'],
+      dropped_projects: ['Infra'],
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      entities: [],
+      topics: [],
+      proposed_projects: [
+        { name: 'Acme', rationale: 'Seen across the export.', suggested_topics: [] },
+        { name: 'Infra', rationale: 'Seen across the export.', suggested_topics: [] },
+      ],
+      proposed_tasks: [],
+      proposed_reminders: [],
+    } as never,
+  })
+
+  const names = h.db
+    .prepare<{ name: string }, []>(`SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name`)
+    .all()
+    .map((r) => r.name)
+    .sort()
+  // 'Infra' was dropped — it is NOT created even though it's in the import's
+  // proposed_projects (the defensive union would otherwise have re-added it).
+  expect(names).toEqual(['Acme', 'Book', 'Topline Revenue'])
+  expect(names).not.toContain('Infra')
+
+  h.db.close()
+})

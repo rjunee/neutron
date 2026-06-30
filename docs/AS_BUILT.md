@@ -2,6 +2,63 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-29 — M1: onboarding import flow rework — offered FIRST + live progress + curation handoff + ordering
+
+This is one coherent import-onboarding rework (PR #130). Two further bugs were
+folded in after the initial offer-first + progress pass:
+
+**Bug 3 — analysis → curation handoff was BROKEN (the killer).** The import-
+analysis result (proposed-projects list) reached the client but was NOT in the
+live-agent's conversation context. So when the owner replied to curate ("drop
+the Family Home project, keep the rest"), the agent had no record of proposing
+anything and answered "this is our first conversation, I haven't proposed any
+projects" — the import was visible but un-actionable.
+
+- Root cause: the analysis "wow moment" is delivered OUT OF BAND (ephemeral
+  app-ws `agent_message`, never in the warm REPL transcript), and the onboarding
+  `systemPreamble` is a static string spliced ONLY on the cold first turn — so a
+  warm session post-import had no grounding on what it proposed.
+- Fix (1) — context threading: new optional seam method
+  `LiveAgentOnboardingSeam.onboardingContext(user_id)` (`build-live-agent-turn.ts`)
+  re-injected on EVERY onboarding turn (warm AND cold), mirroring the Work Board
+  block. `open/composer.ts` implements it: reads durable `phase_state.import_result`
+  + `primary_projects` and calls the new `buildImportAnalysisContextFragment`
+  (`onboarding-preamble.ts`) → an `<import_analysis>` block listing the proposed
+  projects (with rationale + which were dropped) and telling the agent it already
+  presented them + how to handle keep/drop/edit/add.
+- Fix (2) — drop propagation: the Path-1 post-turn extractor never implemented the
+  `removed_projects` channel that `ExtractedFields` has documented since GAP1
+  (2026-06-09) and the legacy engine honors. Ported it: `parseExtractedFields`
+  parses `removed_projects`; the extraction prompt asks for explicit drops;
+  `buildPhaseStatePatch` subtracts them from the merged `primary_projects` AND
+  accumulates them under `phase_state.dropped_projects`. `build-onboarding-finalize.ts`
+  `resolveProjects` excludes `dropped_projects` from BOTH union sources (the import
+  side re-pulls `proposed_projects`, so the `primary_projects` subtraction alone
+  wasn't enough). Mirrors the legacy engine's `(prior ∪ adds) MINUS removals`. So
+  a dropped project is never materialized; persona-gen (reads `primary_projects`)
+  agrees. The additive no-narrowing rule is intact for non-removal turns.
+
+**Bug 4 — import-delivered messages mis-ordered.** New user messages rendered
+ABOVE the import-delivered analysis instead of newest-at-bottom. The successful
+`import_analysis_presented` body was fanned via the ephemeral `emitOnboardingPrompt`
+(no chat_log `seq`), and chat-core's `compareForDisplay` pins seq-less messages to
+the tail — so a later real-seq user message sorted above it (and it vanished on
+resume). Fix: that specific buttonless "wow moment" now persists through the
+durable app-ws adapter (`open/composer.ts` button-prompt router → `adapter.send`
+→ chat_log → monotonic `seq`, replayable). Every OTHER onboarding prompt (failure
+/ rate-limit / resume — real buttons) stays ephemeral. Safe from double-render:
+`on_session_open` never re-sends the body and the watcher resolves the phase so
+the reconnect re-emit won't re-fire it.
+
+Tests added: `onboarding-preamble.test.ts` (context fragment — lists proposed,
+marks dropped, case-insensitive); `post-turn-extractor-removed-projects.test.ts`
+(parse + subtract + accumulate `dropped_projects`, additive when no removals);
+`build-onboarding-finalize.test.ts` (a dropped project is not materialized even
+from the import union). tsc clean; leak-gate SILENT; onboarding-interview (957),
+realmode-composer (379), app-ws (107), Open import/boot suites all green.
+
+---
+
 ## 2026-06-29 — M1: onboarding import offered FIRST + real live import progress
 
 **Problem (two live-test bugs).** Ryan hit two issues on a fresh M1 install:

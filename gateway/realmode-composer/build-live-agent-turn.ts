@@ -190,6 +190,15 @@ export interface LiveAgentOnboardingSeam {
   isActive(user_id: string): Promise<boolean>
   /** The onboarding interview preamble spliced into the first-turn system prompt. */
   systemPreamble(): string
+  /**
+   * Per-turn onboarding grounding re-injected on EVERY onboarding turn (warm AND
+   * cold), mirroring the Work Board block — so a warm session can act on state
+   * that landed AFTER the cold first turn. Today this carries the import-analysis
+   * the agent already presented (proposed projects + curation status) so the
+   * owner can curate it ("drop X"); `null` when there's nothing to ground on.
+   * Optional + best-effort: a throwing/absent seam degrades to no block.
+   */
+  onboardingContext?(user_id: string): Promise<string | null>
   /** Upload affordance attached to onboarding agent_messages (zip import), or null. */
   uploadAffordance(): { source: 'chatgpt' | 'claude' } | null
   /** Fire-and-forget post-turn scribe — never blocks, never throws into the turn. */
@@ -423,19 +432,47 @@ export function buildLiveAgentTurn(
         )
       }
     }
+    // Onboarding per-turn grounding (e.g. the import analysis the agent already
+    // presented) — re-resolved EVERY onboarding turn so a warm session can act on
+    // state that landed after the cold first turn (the import completes minutes
+    // in). Mirrors workBoardFragment: spliced before the user message on warm
+    // turns, folded into the system prefix on the cold turn. Best-effort.
+    let onboardingContextFragment: string | null = null
+    if (onboardingActive && input.onboarding?.onboardingContext !== undefined) {
+      try {
+        onboardingContextFragment = await input.onboarding.onboardingContext(turn.user_id)
+      } catch (err) {
+        console.warn(
+          `${LOG_TAG} event=onboarding_context_failed user=${turn.user_id} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
     let prompt: string
     const isColdFirstTurn = !contextSent.has(topicKey)
     if (!isColdFirstTurn) {
       // Warm turn: the system prefix is already cached in the REPL's transcript;
-      // re-ground by splicing the FRESH board block before the user's message.
+      // re-ground by splicing the FRESH board + onboarding-context blocks before
+      // the user's message (onboarding context LAST so it's most salient).
+      const warmPrefix = [workBoardFragment, onboardingContextFragment].filter(
+        (s): s is string => s !== null && s.length > 0,
+      )
       prompt =
-        workBoardFragment !== null ? `${workBoardFragment}\n\n${turn.user_text}` : turn.user_text
+        warmPrefix.length > 0 ? `${warmPrefix.join('\n\n')}\n\n${turn.user_text}` : turn.user_text
     } else {
       // While onboarding, splice the interview preamble into the first-turn
       // system prompt so the warm session conducts the interview conversationally.
       const onboardingPreamble =
         onboardingActive && input.onboarding !== undefined ? input.onboarding.systemPreamble() : null
-      prompt = await composeFirstTurnPrompt(input, turn, now(), onboardingPreamble, workBoardFragment)
+      prompt = await composeFirstTurnPrompt(
+        input,
+        turn,
+        now(),
+        onboardingPreamble,
+        workBoardFragment,
+        onboardingContextFragment,
+      )
     }
 
     // Item 12 — cold-start ack. On the first turn into this topic the warm
@@ -696,6 +733,7 @@ async function composeFirstTurnPrompt(
   wall_now: number,
   onboardingPreamble?: string | null,
   boardFragment?: string | null,
+  onboardingContextFragment?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -761,12 +799,19 @@ async function composeFirstTurnPrompt(
   // user message). Already `<work_board>`-delimited + escaped at the seam.
   const workBoardFragment =
     typeof boardFragment === 'string' && boardFragment.trim().length > 0 ? boardFragment : null
+  // Per-turn onboarding grounding (import-analysis the agent already presented).
+  // Sits LAST so it governs this turn most strongly — the owner is curating it.
+  const onboardingContext =
+    typeof onboardingContextFragment === 'string' && onboardingContextFragment.trim().length > 0
+      ? onboardingContextFragment
+      : null
   const instance_fragments = [
     doctrineFragment,
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,
     ...(workBoardFragment !== null ? [workBoardFragment] : []),
     ...(onboardingFragment !== null ? [onboardingFragment] : []),
+    ...(onboardingContext !== null ? [onboardingContext] : []),
   ]
   let system: string
   try {

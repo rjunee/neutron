@@ -80,3 +80,74 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   lines.push('</onboarding>')
   return lines.join('\n')
 }
+
+/** A project the agent proposed from the user's import (name + why). */
+export interface ProposedProjectForContext {
+  name: string
+  rationale?: string
+}
+
+export interface ImportAnalysisContextInput {
+  /** The projects the agent presented after reading the import (verbatim). */
+  proposed_projects: ReadonlyArray<ProposedProjectForContext>
+  /**
+   * The CURRENT working project set (`phase_state.primary_projects`) AFTER any
+   * curation — a proposed project missing from here has been dropped by the
+   * owner and will NOT be created.
+   */
+  active_project_names: ReadonlyArray<string>
+  /** The owner's first name, if already known. */
+  user_first_name?: string | null
+}
+
+/**
+ * Per-turn onboarding grounding for the import-analysis → curation handoff.
+ *
+ * THE BUG this fixes: the import-analysis result (the proposed-projects list the
+ * agent "presented" after reading the export) is delivered to the client OUT OF
+ * BAND — an ephemeral app-ws `agent_message` that never enters the warm REPL's
+ * transcript. So when the owner replies to curate it ("drop the Family Home
+ * project, keep the rest"), the live-agent turn has NO record of having proposed
+ * anything and answers "this is our first conversation, I haven't proposed any
+ * projects." This fragment re-injects the proposed set (with rationale + which
+ * have already been dropped) into the agent's context EVERY onboarding turn —
+ * exactly like the Work Board block re-grounds every turn — so the warm session
+ * KNOWS what it proposed and can handle keep/drop/edit/add, then finalize the
+ * curated set. Returns null when there's no import analysis to ground on.
+ */
+export function buildImportAnalysisContextFragment(
+  input: ImportAnalysisContextInput,
+): string | null {
+  const proposed = input.proposed_projects.filter((p) => p.name.trim().length > 0)
+  if (proposed.length === 0) return null
+  const active = new Set(
+    input.active_project_names.map((n) => n.trim().toLowerCase()).filter((n) => n.length > 0),
+  )
+  const lines: string[] = []
+  lines.push('<import_analysis>')
+  lines.push(
+    'CONTEXT — you have ALREADY read this owner\'s imported ChatGPT/Claude history earlier in',
+    'THIS onboarding and PRESENTED them an analysis, including the proposed projects below.',
+    'Do NOT claim you have not proposed anything, that you have no memory of it, or that this',
+    'is your first message — you proposed these, and the owner may now be reviewing/curating',
+    'the list.',
+  )
+  lines.push('')
+  lines.push('Projects you proposed from their import:')
+  for (const p of proposed) {
+    const dropped = !active.has(p.name.trim().toLowerCase())
+    const rationale =
+      p.rationale !== undefined && p.rationale.trim().length > 0 ? ` — ${p.rationale.trim()}` : ''
+    lines.push(`  - ${p.name.trim()}${rationale}${dropped ? '   [DROPPED by the owner — will NOT be created]' : ''}`)
+  }
+  lines.push('')
+  lines.push(
+    'When the owner curates ("drop X", "keep the rest", "rename Y to Z", "add W"), respond',
+    'naturally and confirm the updated set; a dropped project is not created, and one you',
+    'add is. You do not need their explicit sign-off on every project — once the set looks',
+    'right, keep going. You still need the rest of the interview (their work focus beyond',
+    'these, a non-work interest, your personality, and your name) before you finalize.',
+  )
+  lines.push('</import_analysis>')
+  return lines.join('\n')
+}

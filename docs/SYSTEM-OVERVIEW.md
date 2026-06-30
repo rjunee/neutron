@@ -374,6 +374,40 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > matching the onboarding-experience spec (upload precedes the informed interview)
 > and the always-on 📎 drop-zone affordance. No new phase/modal: a pure preamble
 > reposition (Option A, in-chat).
+>
+> **Import analysis → curation handoff (M1 live-test, 2026-06-29).** The
+> import-analysis RESULT (the proposed-projects list) was delivered to the client
+> but NOT threaded into the live-agent's context, so when the owner replied to
+> curate it ("drop the Family Home project"), the agent answered "this is our
+> first conversation, I haven't proposed any projects." Root cause: the analysis
+> "wow moment" is delivered OUT OF BAND (an ephemeral app-ws `agent_message` that
+> never enters the warm REPL transcript), and the onboarding `systemPreamble` is
+> static + only spliced on the cold first turn — so nothing re-grounded the warm
+> session on what it proposed. The fix threads it back in: (1) a new per-turn
+> seam method `LiveAgentOnboardingSeam.onboardingContext(user_id)` reads the
+> durable `phase_state.import_result` and emits an `<import_analysis>` fragment
+> (proposed projects + rationale + which were dropped), re-injected on EVERY
+> onboarding turn (warm AND cold) exactly like the Work Board block; (2) the
+> Path-1 post-turn extractor now implements the `removed_projects` channel
+> (already in `ExtractedFields` since GAP1) — an explicit "drop X" subtracts X
+> from `primary_projects` AND records it under `phase_state.dropped_projects`;
+> (3) finalize's `resolveProjects` excludes `dropped_projects` from BOTH union
+> sources (the import side re-pulls `proposed_projects`, so subtracting from
+> `primary_projects` alone wasn't enough), so a dropped project is never
+> materialized and persona-gen (reads `primary_projects`) agrees. Mirrors the
+> legacy engine's `(prior ∪ adds) MINUS removals`.
+>
+> **Import-delivered analysis ordering (M1 live-test, 2026-06-29).** The
+> successful `import_analysis_presented` body was fanned via the ephemeral
+> `emitOnboardingPrompt` (no chat_log `seq`), so the chat-core display sort
+> (`compareForDisplay`, "seq-less sorts to the tail") pinned it BELOW any later
+> real-seq user message — newest-at-bottom broken, and it vanished on resume.
+> That specific buttonless "wow moment" message now persists through the durable
+> app-ws adapter (chat_log → monotonic `seq`, replayable), so it orders with live
+> chat. Every OTHER onboarding prompt (failure / rate-limit / resume — real
+> buttons) stays ephemeral (the engine owns their reconnect re-emit); safe from
+> double-render because `on_session_open` never re-sends the body and the watcher
+> resolves the phase so the reconnect re-emit won't re-fire it.
 
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
