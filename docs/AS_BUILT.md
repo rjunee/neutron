@@ -96,6 +96,15 @@ mount while `emailLlm` dispatches `getBestModel()` per call — the filter's
 `model` option now accepts a thunk resolved per-call in `match`, so the reported
 model stays aligned with the dispatch.
 
+**Codex review round 5 — Email Core backend metadata (P3).** Same boot-capture
+in the Email-Managed Core MCP-tool path: `buildTools` stamped a boot-time model
+onto `email_triage` / `email_summarize` brief metadata while `llm` dispatched
+`getBestModel()` per call. Threaded a `string | (() => string)` thunk through
+`emailModel` (`mount-open-cores` → `boot-helpers` factory → `buildTools`),
+resolved PER-CALL inside each tool handler, so the stamped model tracks a
+watchdog flip. (Email Core is OAuth-gated / inert in default Open, but kept
+consistent with the dispatch.)
+
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.

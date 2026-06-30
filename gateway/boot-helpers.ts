@@ -805,8 +805,12 @@ export async function buildCoresBackendFactories(
      * Haiku-fast call when wired); tests inject their own.
      */
     emailLlm?: (prompt: string) => Promise<string>
-    /** Resolved Haiku-fast model id (from `@neutronai/runtime`). */
-    emailModel?: string
+    /**
+     * Model id (or a thunk resolving it) stamped on email brief/triage
+     * metadata. A thunk (e.g. the `getBestModel` accessor) is resolved PER-CALL
+     * so the recorded model tracks a watchdog flip (Codex cross-model review).
+     */
+    emailModel?: string | (() => string)
     /**
      * Tasks Core S1 — per-process Tasks Core deps registry. The
      * `tasks_core` factory stashes the wrapped `{store, pickNext}`
@@ -1030,7 +1034,7 @@ export async function buildCoresBackendFactories(
         summarizer: import('@neutronai/email-managed-core').EmailSummarizer
         cacheFor: (project_id: string) => Promise<import('@neutronai/email-managed-core').EmailProjectCache>
         llm?: (prompt: string) => Promise<string>
-        model?: string
+        model?: string | (() => string)
       } = {
         client,
         summarizer: mod.buildStubEmailSummarizer(),

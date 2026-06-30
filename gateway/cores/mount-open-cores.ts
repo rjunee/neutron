@@ -266,7 +266,9 @@ export async function mountOpenCores(
     emailResolver,
     ...(emailOAuthTokens !== undefined ? { emailOAuthTokens } : {}),
     emailLlm,
-    emailModel: getBestModel(),
+    // Thunk (not a snapshot) so the email Core's stamped model resolves
+    // per-call, aligned with the per-call `emailLlm` dispatch after a flip.
+    emailModel: getBestModel,
     googleOAuthAccessToken,
     calendarClient,
     researchProjectBackend: researchWiring.project_backend,

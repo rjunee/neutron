@@ -123,8 +123,13 @@ export interface ToolDeps {
   summarizer: EmailSummarizer
   /** Pluggable LLM call for the prose-brief + triage agents. */
   llm?: (prompt: string) => Promise<string>
-  /** Resolved Haiku-fast model id. */
-  model?: string
+  /**
+   * Model id stamped onto brief/triage result metadata. Accepts a thunk so a
+   * live always-latest accessor (`getBestModel`) resolves PER-CALL — keeping the
+   * recorded model aligned with what `llm` actually dispatched after a
+   * model-update-watchdog flip (Codex cross-model review).
+   */
+  model?: string | (() => string)
   /** Optional per-project cache resolver; required for the triage
    *  audit log + summary cache. */
   cacheFor?: (project_id: string) => Promise<EmailProjectCache>
@@ -163,7 +168,12 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     audit: deps.audit,
   })
   const llm = deps.llm ?? NULL_LLM
-  const model = deps.model ?? 'claude-haiku-4-5-20251001'
+  // Resolve PER-CALL (thunk → live accessor) so the stamped model tracks a
+  // watchdog flip; a plain string pins a fixed id. Default Haiku-fast.
+  const resolveModel = (): string => {
+    const m = typeof deps.model === 'function' ? deps.model() : deps.model
+    return m ?? 'claude-haiku-4-5-20251001'
+  }
   const now = deps.now ?? ((): number => Date.now())
 
   const email_list = guard.wrapToolHandler<EmailListToolInput, EmailListToolOutput>({
@@ -215,7 +225,7 @@ export function buildTools(deps: ToolDeps): BuiltTools {
           structuredRow: summary,
           rawMessage: message,
           llm,
-          model,
+          model: resolveModel(),
         })
         // Cache when the call succeeded; the chat-command path also
         // populates the cache, so the MCP-tool path keeps parity.
@@ -301,7 +311,7 @@ export function buildTools(deps: ToolDeps): BuiltTools {
         inbox,
         userTz: 'America/Los_Angeles',
         llm,
-        model,
+        model: resolveModel(),
       })
       let posted_chat_message_id: string | null = null
       const isDryRun = input.dry_run === true
