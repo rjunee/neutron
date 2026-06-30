@@ -447,8 +447,14 @@ export function buildLiveAgentTurn(
     // fast turn clears the timer before it fires, so there's no spurious
     // ack (and tests with synchronous stubs never see it). Best-effort:
     // sendSafe swallows a closed-socket throw.
+    // Suppress the cold-start ack DURING onboarding: the onboarding flow shows
+    // its own "Setting things up…" empty-state loader (ChatApp.tsx), which should
+    // stay visible until the REPL is ready and the "Hey, welcome in" message
+    // lands — a "Waking up your workspace…" bubble in front of it is redundant
+    // and confusing (Ryan 2026-06-30). The ack remains for post-onboarding cold
+    // first turns (a genuine project wake-up reassurance).
     let ackTimer: ReturnType<typeof setTimeout> | null = null
-    if (isColdFirstTurn) {
+    if (isColdFirstTurn && !onboardingActive) {
       ackTimer = setTimeout(() => {
         sendSafe(turn.send, { type: 'agent_message', body: COLD_START_ACK_BODY, topic_id: turn.topic_id })
       }, ack_delay_ms)
