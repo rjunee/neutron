@@ -81,6 +81,17 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   return lines.join('\n')
 }
 
+/**
+ * Escape import-derived text before splicing it into the `<import_analysis>`
+ * prompt block. The proposed project name/rationale come from the user's
+ * ChatGPT/Claude export (untrusted), so XML-like content must not be able to
+ * close the wrapper or inject sibling instructions. Mirrors `work-board/
+ * fragment.ts`'s `escapeData` + `escalation-loader.ts`'s `escapeXmlText`.
+ */
+function escapeImportText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 /** A project the agent proposed from the user's import (name + why). */
 export interface ProposedProjectForContext {
   name: string
@@ -136,9 +147,17 @@ export function buildImportAnalysisContextFragment(
   lines.push('Projects you proposed from their import:')
   for (const p of proposed) {
     const dropped = !active.has(p.name.trim().toLowerCase())
+    // Escape import-derived text: a project name / rationale lifted from the
+    // user's ChatGPT/Claude export is untrusted and could contain XML-like text
+    // (e.g. "</import_analysis>") that would close this wrapper and inject
+    // sibling instructions into every warm onboarding turn. Mirrors the
+    // anti-injection escaping the work-board + escalation prompt seams use.
+    const name = escapeImportText(p.name.trim())
     const rationale =
-      p.rationale !== undefined && p.rationale.trim().length > 0 ? ` — ${p.rationale.trim()}` : ''
-    lines.push(`  - ${p.name.trim()}${rationale}${dropped ? '   [DROPPED by the owner — will NOT be created]' : ''}`)
+      p.rationale !== undefined && p.rationale.trim().length > 0
+        ? ` — ${escapeImportText(p.rationale.trim())}`
+        : ''
+    lines.push(`  - ${name}${rationale}${dropped ? '   [DROPPED by the owner — will NOT be created]' : ''}`)
   }
   lines.push('')
   lines.push(

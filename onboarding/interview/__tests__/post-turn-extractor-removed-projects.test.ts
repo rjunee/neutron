@@ -68,4 +68,29 @@ describe('buildPhaseStatePatch — curation drop', () => {
     expect(patch['primary_projects']).toEqual(['Amascence', 'Family Home', 'New Thing'])
     expect(patch['dropped_projects']).toBeUndefined()
   })
+
+  it('a later explicit RE-ADD clears a prior drop (owner changed their mind)', () => {
+    // Turn 1 dropped Family Home; turn 2 the owner says "actually keep Family Home".
+    const prior = { primary_projects: ['Amascence'], dropped_projects: ['Family Home'] }
+    const patch = buildPhaseStatePatch(
+      prior,
+      { primary_projects: ['Family Home'] },
+      'actually keep family home',
+    )
+    // It is added back to primary AND removed from the dropped list, so finalize
+    // will create it (the reversal is honored, not silently ignored).
+    expect(patch['primary_projects']).toEqual(['Amascence', 'Family Home'])
+    expect(patch['dropped_projects']).toEqual([])
+  })
+
+  it('a same-turn drop wins over a same-turn add of the same project (stays dropped)', () => {
+    const prior = { primary_projects: ['Amascence', 'Family Home'] }
+    const patch = buildPhaseStatePatch(
+      prior,
+      { primary_projects: ['Family Home'], removed_projects: ['Family Home'] },
+      'contradictory',
+    )
+    expect(patch['primary_projects']).toEqual(['Amascence'])
+    expect(patch['dropped_projects']).toEqual(['Family Home'])
+  })
 })

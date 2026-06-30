@@ -357,17 +357,30 @@ export function buildPhaseStatePatch(
     patch['primary_projects'] =
       removedKeys.size > 0 ? union.filter((p) => !removedKeys.has(p.trim().toLowerCase())) : union
   }
-  // Accumulate the explicit drops separately. Subtracting from primary_projects
-  // alone is not enough: finalize's project resolution re-pulls the import's
+  // Track the explicit drops separately. Subtracting from primary_projects alone
+  // is not enough: finalize's project resolution re-pulls the import's
   // proposed_projects (a defensive union), so it needs this dropped list to
-  // exclude a dropped project from the IMPORT side too. Additive + deduped so a
-  // later unrelated turn never resurrects a drop.
-  if (removedKeys.size > 0) {
-    const priorDropped = readStringArray(prior_phase_state, 'dropped_projects')
-    const newDropped = (fields?.removed_projects ?? [])
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0)
-    patch['dropped_projects'] = dedupeStringsCaseInsensitive([...priorDropped, ...newDropped])
+  // exclude a dropped project from the IMPORT side too. Two rules:
+  //  - additive across turns (an unrelated turn never resurrects a drop), BUT
+  //  - a later explicit RE-ADD clears a prior drop — the owner changed their mind
+  //    ("drop X" then "actually keep X"). An added name (that isn't ALSO being
+  //    dropped this same turn) is removed from the accumulated set, so finalize
+  //    creates it again. Without this, a reversal would be silently ignored.
+  const priorDropped = readStringArray(prior_phase_state, 'dropped_projects')
+  const newlyDropped = (fields?.removed_projects ?? [])
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+  const readdedKeys = new Set(
+    addedProjects.map((p) => p.trim().toLowerCase()).filter((k) => !removedKeys.has(k)),
+  )
+  const accumulatedDropped = dedupeStringsCaseInsensitive([...priorDropped, ...newlyDropped]).filter(
+    (p) => !readdedKeys.has(p.trim().toLowerCase()),
+  )
+  const droppedChanged =
+    accumulatedDropped.length !== priorDropped.length ||
+    accumulatedDropped.some((p, i) => p !== priorDropped[i])
+  if (droppedChanged) {
+    patch['dropped_projects'] = accumulatedDropped
   }
   if (fields?.non_work_interests !== undefined && fields.non_work_interests.length > 0) {
     patch['non_work_interests'] = mergeInterests(prior_phase_state, fields.non_work_interests)
