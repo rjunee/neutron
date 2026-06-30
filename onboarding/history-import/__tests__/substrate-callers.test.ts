@@ -442,4 +442,35 @@ describe('always-latest (2026-06-30) — import survives a watchdog-adopted UNPR
       setBestModelOverride(undefined)
     }
   })
+
+  test('the dynamic default resolves PER-CALL — a watchdog flip after construction reaches the next import', async () => {
+    // The import callers are built once at gateway wire-up; a build-time capture
+    // would pin the boot model. Construct on the boot default, then flip the
+    // runtime override and dispatch AGAIN on the SAME caller — the 2nd dispatch
+    // must carry the newly-adopted model. (Codex cross-model review #2.)
+    setBestModelOverride(undefined)
+    try {
+      const ev = [
+        { kind: 'token', text: '{}' } as const,
+        { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'cc' } as const,
+      ]
+      const calls: RecordedCall[] = []
+      const substrate: Substrate = {
+        start(spec) {
+          calls.push({ spec })
+          const it = (async function* () { for (const e of ev) yield e })()
+          return { events: it, respondToTool: () => Promise.reject(new Error('x')), cancel: async () => undefined, tool_resolution: 'internal' }
+        },
+      }
+      const pass1 = buildPass1SubstrateCaller({ substrate })
+      await pass1({ chunk: makeChunk(), prompt: 'p' }) // boot default
+      expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
+      setBestModelOverride('claude-opus-9-9') // watchdog adopts a newer model
+      await pass1({ chunk: makeChunk(), prompt: 'p' }) // SAME caller, later import
+      expect(calls[1]!.spec.model_preference[0]).toBe('claude-opus-9-9')
+      expect(calls[1]!.spec.model_preference[0]).not.toBe(BEST_MODEL)
+    } finally {
+      setBestModelOverride(undefined)
+    }
+  })
 })

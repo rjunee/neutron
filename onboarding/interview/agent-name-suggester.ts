@@ -223,9 +223,6 @@ export function buildAgentNameSuggester(
   deps: BuildAgentNameSuggesterDeps,
 ): AgentNameSuggester {
   const opts = deps.options ?? {}
-  // Dynamic accessor (not the frozen BEST_MODEL constant): this suggester is
-  // rebuilt per onboarding session, so it tracks the watchdog's adopted model.
-  const model = opts.model ?? getBestModel()
   const timeout_ms = positiveInt(
     opts.timeout_ms ?? SUGGESTER_TIMEOUT_MS_DEFAULT,
     SUGGESTER_TIMEOUT_MS_DEFAULT,
@@ -244,6 +241,10 @@ export function buildAgentNameSuggester(
         suggestions: buildDiverseAgentNameFallback(input.seed),
         source: 'fallback',
       })
+      // Resolve PER-CALL through the dynamic accessor (this suggester is built
+      // once at composer boot, so a builder-scope capture would pin the boot
+      // model and miss a watchdog flip). An explicit `opts.model` still wins.
+      const model = opts.model ?? getBestModel()
       const system = buildSystemPrompt()
       const user = buildUserPrompt(input)
       const raw = await callModel(

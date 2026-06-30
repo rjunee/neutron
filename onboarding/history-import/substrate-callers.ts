@@ -240,22 +240,26 @@ export interface BuildPass2SubstrateCallerDeps {
 export function buildPass1SubstrateCaller(
   deps: BuildPass1SubstrateCallerDeps,
 ): Pass1LlmCall {
-  const usedDynamicDefault =
-    deps.model_preference === undefined || deps.model_preference.length === 0
-  const modelPref = usedDynamicDefault ? [getBestModel()] : [...deps.model_preference!]
+  const explicitPref =
+    deps.model_preference !== undefined && deps.model_preference.length > 0
+      ? [...deps.model_preference]
+      : null
   const maxTokens = deps.max_tokens ?? 1500
   // P2-v2 S23 — pricing is derived from the model id actually dispatched.
-  // An EXPLICIT `model_preference` typo loud-fails at build (resolvePricingFor);
-  // the DYNAMIC always-latest default degrades to $0 telemetry instead of
-  // crashing the import when the watchdog adopts a not-yet-priced model
-  // (resolvePricingForDynamicDefault — Codex cross-model review). Tests pass an
-  // explicit `pricing` override to keep dollar-billing assertions deterministic.
-  const pricing =
-    deps.pricing ??
-    (usedDynamicDefault ? resolvePricingForDynamicDefault : resolvePricingFor)(
-      modelPref[0] ?? getBestModel(),
-    )
+  // An EXPLICIT `model_preference` is captured + priced ONCE here so a typo
+  // loud-fails at build (resolvePricingFor). The DYNAMIC always-latest default
+  // is resolved PER-CALL inside the returned closure (below) so a post-boot
+  // model-update-watchdog flip reaches later imports — the import callers are
+  // built once at gateway wire-up, so a build-time capture would pin the
+  // boot-time model (Codex cross-model review). `deps.pricing` overrides either.
+  const explicitPricing =
+    explicitPref !== null ? (deps.pricing ?? resolvePricingFor(explicitPref[0]!)) : null
   return async (input: { chunk: Chunk; prompt: string }) => {
+    const modelPref = explicitPref ?? [getBestModel()]
+    // Dynamic default degrades to $0 telemetry instead of crashing the import
+    // when the watchdog adopts a not-yet-priced model.
+    const pricing =
+      deps.pricing ?? explicitPricing ?? resolvePricingForDynamicDefault(modelPref[0]!)
     const handle = deps.substrate.start({
       prompt: composeSystemPlusUser(input.prompt, renderChunkUserTurn(input.chunk)),
       tools: [],
@@ -282,39 +286,37 @@ export function buildPass1SubstrateCaller(
 export function buildPass2SubstrateCaller(
   deps: BuildPass2SubstrateCallerDeps,
 ): Pass2LlmCall {
-  const usedDynamicDefault =
-    deps.model_preference === undefined || deps.model_preference.length === 0
-  const modelPref = usedDynamicDefault ? [getBestModel()] : [...deps.model_preference!]
+  const explicitPref =
+    deps.model_preference !== undefined && deps.model_preference.length > 0
+      ? [...deps.model_preference]
+      : null
   const fallbackPref =
     deps.fallback_model_preference !== undefined && deps.fallback_model_preference.length > 0
       ? [...deps.fallback_model_preference]
       : null
   const maxTokens = deps.max_tokens ?? 4096
-  const primaryModel = modelPref[0] ?? getBestModel()
-  // P2-v2 S23 — pricing derived from each dispatched model id via the
-  // registry. Fixes the S21 R2 follow-up: pre-S23 a `NEUTRON_SONNET_MODEL`
-  // env override could silently mis-bill because the fallback `pricing`
-  // block hard-coded Sonnet 4.6 rates regardless of which Sonnet variant
-  // the operator actually configured. Now the per-model lookup happens
-  // at build time and an unknown model id throws a descriptive error at
-  // startup (`resolveModelPricing`) instead of silently overstating /
-  // understating cost.
-  // EXPLICIT operator pick → strict loud-fail; dynamic always-latest default →
-  // degrade to $0 telemetry (Codex cross-model review). See Pass-1 above.
-  const pricing =
-    deps.pricing ??
-    (usedDynamicDefault ? resolvePricingForDynamicDefault : resolvePricingFor)(primaryModel)
-  // Resolve the fallback model + its pricing eagerly at build time so an
-  // unregistered `NEUTRON_SONNET_MODEL` typo fails fast at composer wiring
-  // rather than at the first 429. The fallback is ALWAYS an explicit operator
-  // opt-in (`fallback_model_preference`), so it keeps the strict loud-fail.
-  const fallbackModel: string | null =
-    fallbackPref !== null ? (fallbackPref[0] ?? primaryModel) : null
+  // P2-v2 S23 — pricing derived from each dispatched model id via the registry
+  // (fixes the S21 R2 silent-mis-bill). An EXPLICIT primary is captured + priced
+  // ONCE here so a typo loud-fails at build; the DYNAMIC always-latest default
+  // resolves PER-CALL inside the closure (below) so a post-boot watchdog flip
+  // reaches later imports (Codex cross-model review). `deps.pricing` overrides.
+  const explicitPricing =
+    explicitPref !== null ? (deps.pricing ?? resolvePricingFor(explicitPref[0]!)) : null
+  // The fallback is ALWAYS an explicit operator opt-in (`fallback_model_preference`),
+  // so resolve its model + pricing eagerly at build time — an unregistered
+  // `NEUTRON_SONNET_MODEL` typo fails fast at composer wiring, not at the first 429.
+  const fallbackModel: string | null = fallbackPref !== null ? fallbackPref[0]! : null
   const fallbackPricing =
     fallbackModel !== null
       ? (deps.fallback_pricing ?? resolvePricingFor(fallbackModel))
       : null
   return async (input: { aggregated: AggregatedPass1; prompt: string; source?: string }) => {
+    const modelPref = explicitPref ?? [getBestModel()]
+    const primaryModel = modelPref[0]!
+    // Dynamic default degrades to $0 telemetry instead of crashing on a
+    // not-yet-priced watchdog-adopted model.
+    const pricing =
+      deps.pricing ?? explicitPricing ?? resolvePricingForDynamicDefault(primaryModel)
     const body = composeSystemPlusUser(input.prompt, renderAggregatedUserTurn(input.aggregated))
     try {
       const handle = deps.substrate.start({

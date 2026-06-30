@@ -284,9 +284,6 @@ export function buildPersonalityCharacterSuggester(
   deps: BuildPersonalityCharacterSuggesterDeps,
 ): PersonalityCharacterSuggester {
   const opts = deps.options ?? {}
-  // Dynamic accessor (not the frozen BEST_MODEL constant): this suggester is
-  // rebuilt per onboarding session, so it tracks the watchdog's adopted model.
-  const model = opts.model ?? getBestModel()
   const timeout_ms = positiveInt(
     opts.timeout_ms ?? SUGGESTER_TIMEOUT_MS_DEFAULT,
     SUGGESTER_TIMEOUT_MS_DEFAULT,
@@ -305,6 +302,9 @@ export function buildPersonalityCharacterSuggester(
         suggestions: buildDiverseCharacterFallback(input.seed),
         source: 'fallback',
       })
+      // Resolve PER-CALL (built once at composer boot; a builder-scope capture
+      // would pin the boot model and miss a watchdog flip). Explicit wins.
+      const model = opts.model ?? getBestModel()
       const system = buildSystemPrompt()
       const user = buildUserPrompt(input)
       const raw = await callModel(

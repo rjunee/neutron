@@ -69,6 +69,16 @@ one-time warn — the import runs on the latest model regardless. Regression tes
 added (`buildPass1/Pass2SubstrateCaller` construct + run on an unpriced
 watchdog-adopted model, billing $0).
 
+**Codex review round 2 — per-call resolution.** The import callers + onboarding
+suggesters + post-turn-extractor are constructed ONCE at gateway/composer boot,
+so a builder-scope `getBestModel()` capture would pin the boot model and miss a
+later watchdog flip. Moved the dynamic-default model (+ its pricing, for the
+import callers) resolution INSIDE each returned closure (per-call), so a
+post-boot adoption reaches the next import / suggestion / extraction. Explicit
+operator model picks still resolve + price ONCE at build (loud-fail on typo).
+Test added: a `setBestModelOverride` flip between two calls on the SAME import
+caller reaches the second dispatch.
+
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.
