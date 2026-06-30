@@ -268,6 +268,9 @@
     background: var(--surface);
     padding: 12px 8px;
     overflow-y: auto;
+    /* Flex column so the Create Project button pins to the bottom (margin-top:auto). */
+    display: flex;
+    flex-direction: column;
   }
   .car-rail-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 8px 8px; }
   .car-rail-item {
@@ -277,6 +280,14 @@
   }
   .car-rail-item:hover { background: rgba(255,255,255,.05); }
   .car-rail-item-active { background: rgba(108,170,255,.16); color: #cfe6ff; }
+  /* Pinned to the bottom of the rail (margin-top:auto pushes it down). */
+  .car-rail-create {
+    margin-top: auto; width: 100%; text-align: left;
+    background: transparent; color: var(--accent); border: 1px dashed var(--border);
+    border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit;
+  }
+  .car-rail-create:hover:not(:disabled) { background: rgba(108,170,255,.10); border-color: var(--accent); }
+  .car-rail-create:disabled { opacity: .6; cursor: default; }
   @media (max-width: 720px) { .car-rail { display: none; } }
   /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
   .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }

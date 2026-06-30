@@ -632,4 +632,106 @@ describe('ChatApp render (happy-dom)', () => {
       root.unmount()
     })
   })
+
+  it('renders the pinned Create Project button and POSTs to /api/app/projects on click', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const makeSocket = () =>
+      ({
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: () => {},
+        close: () => {},
+      }) as never
+
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    // Capture the create POST; return a created project the controller navigates to.
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
+      calls.push({ url, init })
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    // The rail prompts for a name via window.prompt.
+    ;(window as unknown as { prompt: () => string }).prompt = () => 'Taxes'
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+
+    // The button is always present, even with zero projects (only General).
+    const createBtn = container.querySelector('.car-rail-create') as HTMLButtonElement | null
+    expect(createBtn).not.toBeNull()
+    expect(createBtn!.textContent).toContain('Create Project')
+
+    await act(async () => {
+      createBtn!.click()
+      await tick()
+      await tick()
+    })
+
+    // It POSTed the trimmed name to the create endpoint with the bearer token…
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.url).toBe('https://sam.neutron.test/api/app/projects')
+    expect(calls[0]!.init?.method).toBe('POST')
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ name: 'Taxes' })
+    const headers = new Headers(calls[0]!.init?.headers)
+    expect(headers.get('authorization')).toBe('Bearer dev:sam')
+    // …and navigated into the new project.
+    expect(controller.getViewModel().projectId).toBe('taxes')
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
 })

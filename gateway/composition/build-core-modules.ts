@@ -23,6 +23,7 @@ import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerGBrainSearchToolSurface } from '../../gbrain-memory/agent-tool.ts'
 import { registerWorkBoardToolSurface } from '../../work-board/agent-tool.ts'
+import { registerCreateProjectToolSurface } from '../realmode-composer/create-project-tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '../../skill-forge/tool.ts'
@@ -191,6 +192,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // the #87 tools-bridge as `mcp__neutron__work_board_*`.
       if (input.work_board !== undefined) {
         registerWorkBoardToolSurface(reg, input.work_board.store)
+      }
+      // Create-project (project-rail Create Project parity) — register the
+      // `create_project` agent tool when the composer wired the service, so the
+      // live agent can create a project mid-turn. Same owner-scoped create path
+      // the HTTP surface uses (one code path). Rides the #87 tools-bridge as
+      // `mcp__neutron__create_project`.
+      if (input.create_project !== undefined) {
+        registerCreateProjectToolSurface(reg, input.create_project.service)
       }
       return reg
     },

@@ -126,6 +126,43 @@ describe('ProjectsClient', () => {
     expect(got.privacy_mode).toBe('public');
   });
 
+  it('create POSTs { name } and parses the new project id + label', async () => {
+    const stub = makeFetchStub((req) => {
+      expect(req.method).toBe('POST');
+      expect(req.url).toBe('http://example.test/api/app/projects');
+      expect(req.headers['authorization']).toBe('Bearer dev:sam');
+      expect(req.headers['content-type']).toBe('application/json');
+      expect(req.body).toBe(JSON.stringify({ name: 'Taxes' }));
+      return {
+        status: 201,
+        body: { ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true },
+      };
+    });
+    globalThis.fetch = stub.fetch;
+    const client = new ProjectsClient({ base_url: 'http://example.test', token: 'dev:sam' });
+    const got = await client.create('Taxes');
+    expect(got).toEqual({ id: 'taxes', label: 'Taxes', created: true });
+  });
+
+  it('create surfaces a typed error on 400 invalid_name', async () => {
+    const stub = makeFetchStub(() => ({
+      status: 400,
+      body: { ok: false, code: 'invalid_name', message: 'name is required' },
+    }));
+    globalThis.fetch = stub.fetch;
+    const client = new ProjectsClient({ base_url: 'http://x', token: 't' });
+    let err: unknown = null;
+    try {
+      await client.create('');
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ProjectsClientError);
+    if (err instanceof ProjectsClientError) {
+      expect(err.code).toBe('invalid_name');
+    }
+  });
+
   it('401 raises ProjectsClientError with code=unauthorized', async () => {
     const stub = makeFetchStub(() => ({
       status: 401,

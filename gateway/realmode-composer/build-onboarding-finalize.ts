@@ -35,7 +35,6 @@
  * project repos (the materializer's STATUS.md marker keeps re-runs idempotent).
  */
 
-import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -53,12 +52,11 @@ import { PersonaComposer } from '../../onboarding/persona-gen/compose.ts'
 import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts'
 import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
 import { buildComposeInput } from '../../onboarding/interview/engine-internals.ts'
+import { slugifyProjectId } from '../../onboarding/wow-moment/project-identity.ts'
 import {
-  slugifyProjectId,
-  synthesizeProjectContext,
-} from '../../onboarding/wow-moment/project-identity.ts'
-import { buildProjectMaterializer } from '../../onboarding/wow-moment/project-materializer.ts'
-import { buildProjectPageIndexer } from './build-project-page-indexer.ts'
+  buildScaffoldMaterializer,
+  ensureProjectRow,
+} from './project-create.ts'
 
 /**
  * The persona composer surface `finalize` consumes. Matches the public
@@ -268,21 +266,10 @@ async function materializeProjects(
     return
   }
 
-  // Shared materializer — CC-substrate doc composer (optional) + GBrain page
-  // indexer (built from the optional syncHook). Mirrors the wow dispatcher's
-  // enriched instance, just without a button surface.
-  const materializer = buildProjectMaterializer({
-    owner_home: deps.owner_home,
-    project_slug: deps.project_slug,
-    db: deps.db,
-    now,
-    composer: deps.projectDocComposer ?? null,
-    indexer: buildProjectPageIndexer({
-      ownerDataDir: deps.owner_home,
-      project_slug: deps.project_slug,
-      ...(deps.gbrainSyncHook !== undefined ? { syncHook: deps.gbrainSyncHook } : {}),
-    }),
-  })
+  // Shared materializer — the SAME CC-substrate doc composer (optional) +
+  // GBrain page indexer the user-initiated create-project capability uses
+  // (`project-create.ts`). One materialization code path.
+  const materializer = buildScaffoldMaterializer(deps)
 
   // Dedup by slug — two names can normalize to the same project_id, and we
   // must not double-create a row or double-materialize a folder.
@@ -293,7 +280,8 @@ async function materializeProjects(
     seenSlugs.add(slug)
     try {
       const { outcome, bind_id } = await ensureProjectRow(
-        deps,
+        deps.db,
+        deps.project_slug,
         project,
         slug,
         import_result,
@@ -406,119 +394,6 @@ function resolveProjects(
     out.push(p)
   }
   return out
-}
-
-/**
- * Resolve which existing `projects` row this onboarding project should bind
- * to, BEFORE we mint a new slug-keyed row. Mirrors `03-project-shells.ts`'s
- * `resolveBindTarget` (the old wow-shell path) so finalize never creates a
- * SECOND row for a project that already exists under a different id. Two-step:
- *
- *   1. The deterministic slug row (`id = slugifyProjectId(name)`).
- *   2. Failing that, a live row whose NAME normalizes (via the SAME
- *      `slugifyProjectId`) to this slug but was persisted under a DIFFERENT id.
- *      Example: a pre-existing row `id='x'`, `name='Acme'` — `slugifyProjectId
- *      ('Acme') === 'acme'`, NOT `'x'`. Keying only on the slug missed it, so a
- *      re-onboard minted a SECOND live "Acme" (id `acme`) while the original
- *      `x` row lingered → the rail showed TWO. This name-normalized fallback
- *      resolves the existing row instead.
- *
- * Both lookups filter `deleted_at IS NULL` so a soft-deleted row is never
- * resolved as a bind target — `ensureProjectRow` separately detects a
- * soft-deleted row sitting on the resolved id and returns `'skipped'`.
- */
-function resolveBindTarget(db: ProjectDb, slug: string): string {
-  const byId = db
-    .prepare<{ id: string }, [string]>(
-      `SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL`,
-    )
-    .get(slug)
-  if (byId != null) return byId.id
-  const live = db
-    .prepare<{ id: string; name: string }, []>(
-      `SELECT id, name FROM projects WHERE deleted_at IS NULL`,
-    )
-    .all()
-  for (const row of live) {
-    if (slugifyProjectId(row.name) === slug) return row.id
-  }
-  return slug
-}
-
-/**
- * Create one real `projects` row + its cli wow-shell `topics` binding in a
- * single transaction. The project id is the deterministic
- * `slugifyProjectId(name)` OR — when a row already exists whose id matches the
- * slug or whose name slugifies to it — the existing row's id (see
- * `resolveBindTarget`). Replicates the minimal write `03-project-shells.ts`'s
- * (module-private) `reconcileProject` performs — matching its exact column
- * set, the `INSERT OR IGNORE` idempotency, the NULL `projects.topic_id`
- * (migration 0053 reserves it for the Telegram thread id; cli shells have
- * none), and the soft-deleted-row skip (never resurrect a project the user
- * deleted).
- *
- * Returns `bind_id` (the id the row/topic/materializer key off) plus an
- * outcome: 'created' when a new row landed this run, 'existing' when one was
- * already present (idempotent re-run / pre-existing project), 'skipped' when a
- * soft-deleted row holds the resolved id. When the resolved id is a
- * pre-existing live row, we REUSE it — no second row, no duplicate binding.
- */
-async function ensureProjectRow(
-  deps: OnboardingFinalizeDeps,
-  project: CapturedProject,
-  slug: string,
-  import_result: ImportResult | null,
-  nowMs: number,
-): Promise<{ outcome: 'created' | 'existing' | 'skipped'; bind_id: string }> {
-  const name = project.name.trim()
-  const description = synthesizeProjectContext(project, import_result)
-  const iso = new Date(nowMs).toISOString() // projects.created_at/updated_at are TEXT ISO
-  const topicTs = nowMs / 1000 // topics.created_at/updated_at are REAL epoch-seconds
-  return deps.db.transaction(async (tx) => {
-    // Resolve the row to bind: the slug row, OR an existing live row whose
-    // name normalizes to the same slug under a different id. Reusing it is
-    // what kills the duplicate-row class this fix targets.
-    const bind_id = resolveBindTarget(deps.db, slug)
-
-    // A soft-deleted row occupying this id is intentional user state (they
-    // deleted the project). Never resurrect/bind/report it.
-    const deletedRow = deps.db
-      .prepare<{ id: string }, [string]>(
-        `SELECT id FROM projects WHERE id = ? AND deleted_at IS NOT NULL`,
-      )
-      .get(bind_id)
-    if (deletedRow != null) return { outcome: 'skipped' as const, bind_id }
-
-    const existingRow = deps.db
-      .prepare<{ id: string }, [string]>(
-        `SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL`,
-      )
-      .get(bind_id)
-    const exists = existingRow != null
-
-    if (!exists) {
-      // persona left NULL by design — the synthesized at-rest context lands in
-      // `description`; persona is a post-onboarding settings concern.
-      await tx.run(
-        `INSERT OR IGNORE INTO projects
-           (id, name, description, persona, privacy_mode, billing_mode,
-            created_at, updated_at)
-         VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
-        [bind_id, name, description, iso, iso],
-      )
-    }
-    // The wow-shell topic IS the durable binding marker; INSERT OR IGNORE on
-    // its (channel_kind, channel_topic_id) keeps re-fires idempotent AND a
-    // reuse of a pre-existing row from minting a duplicate binding.
-    await tx.run(
-      `INSERT OR IGNORE INTO topics
-         (id, project_slug, project_id, channel_kind, channel_topic_id,
-          privacy_mode, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'cli', ?, 'regular', 'active', ?, ?)`,
-      [randomUUID(), deps.project_slug, bind_id, `wow-shell-${bind_id}`, topicTs, topicTs],
-    )
-    return { outcome: exists ? ('existing' as const) : ('created' as const), bind_id }
-  })
 }
 
 // ---------------------------------------------------------------------------

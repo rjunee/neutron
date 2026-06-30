@@ -7,6 +7,7 @@
  *
  * Routes:
  *   - `GET   /api/app/projects`                          — list endpoint (ISSUES #9)
+ *   - `POST  /api/app/projects`                          — create endpoint (project-rail Create Project)
  *   - `GET   /api/app/projects/<project_id>/settings`    — read drawer doc
  *   - `PATCH /api/app/projects/<project_id>/settings`    — flip privacy_mode
  *
@@ -30,11 +31,11 @@
  * members / description) are read-only here and edited via follow-up
  * surfaces (P5.7 admin, member-invite, etc.).
  *
- * List endpoint: read-only at ISSUES #9. Project create / delete via
- * HTTP is explicitly out of scope (deferred — see PR description) —
- * projects are populated by the auto-seed on first settings access
- * AND/OR by a future onboarding/signup sprint that explicitly writes
- * to the table.
+ * List endpoint: read-only. Create endpoint: `POST /api/app/projects`
+ * wired via the optional `createProject` binding (the project-rail
+ * "Create Project" button) — the SAME owner-scoped create path the
+ * `create_project` agent tool uses. Delete via HTTP remains out of
+ * scope (soft-delete is an onboarding/admin concern).
  */
 
 import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
@@ -295,6 +296,26 @@ export interface AppProjectsSurfaceOptions {
    * (owner box); gateway tests inject synthetic deps.
    */
   connect?: AppConnectSurfaceDeps
+  /**
+   * Create-project capability (project-rail "Create Project" button →
+   * `POST /api/app/projects`). When provided, a POST with `{ name }` creates a
+   * real project (row + topic + materialized scaffold) and fans the live rail
+   * refresh, returning `{ project: { id, label }, created }`. When omitted, the
+   * POST returns 501 `create_not_configured` (the read-only deploys / Managed
+   * tier that don't wire the owner-scoped scaffold path). The composer binds
+   * this to the SAME `createProjectRow` path the `create_project` agent tool
+   * uses (one code path).
+   */
+  createProject?: CreateProjectHandler
+}
+
+/** The owner-scoped create-project binding the surface invokes on POST. */
+export interface CreateProjectHandler {
+  (input: {
+    name: string
+    user_id: string
+    project_slug: string
+  }): Promise<{ project_id: string; name: string; created: boolean }>
 }
 
 /** A connected member as the app renders it (owner|collaborator role badge). */
@@ -347,7 +368,7 @@ const ALLOWED_PATCH_FIELDS: ReadonlyArray<'privacy_mode' | 'agent_engagement_mod
 const ALLOWED_PATCH_FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_PATCH_FIELDS)
 
 export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppProjectsSurface {
-  const { store, auth, invite, sharedProjects, connect } = opts
+  const { store, auth, invite, sharedProjects, connect, createProject } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -358,8 +379,9 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
       const method = req.method
 
       // GET /api/app/projects — list endpoint (ISSUES #9).
+      // POST /api/app/projects — create endpoint (project-rail Create Project).
       if (pathname === LIST_PATH) {
-        if (method !== 'GET') {
+        if (method !== 'GET' && method !== 'POST') {
           return jsonError(
             405,
             'method_not_allowed',
@@ -369,6 +391,9 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
         const resolved = await resolveBearer(req, auth)
         if ('code' in resolved) {
           return jsonError(401, resolved.code, resolved.message)
+        }
+        if (method === 'POST') {
+          return handleCreate(req, createProject, resolved.project_slug, resolved.user_id)
         }
         return handleList(store, resolved.project_slug, resolved.user_id, sharedProjects)
       }
@@ -537,6 +562,43 @@ async function handleList(
   }
 
   return jsonOk({ projects, project_slug, source_errors: shared.source_errors })
+}
+
+/**
+ * POST /api/app/projects — create a project from `{ name }`. Bearer-gated like
+ * the rest of the surface; delegates to the owner-scoped `createProject`
+ * binding (the SAME `createProjectRow` + materialize + live-rail-refresh path
+ * the `create_project` agent tool uses). Idempotent on the name (a name that
+ * resolves to an existing project returns it with `created:false`).
+ */
+async function handleCreate(
+  req: Request,
+  createProject: CreateProjectHandler | undefined,
+  project_slug: string,
+  user_id: string,
+): Promise<Response> {
+  if (createProject === undefined) {
+    return jsonError(
+      501,
+      'create_not_configured',
+      'project creation is not configured on this gateway',
+    )
+  }
+  const body = await readJsonBody(req)
+  const rawName = (body as { name?: unknown } | null)?.name
+  const name = typeof rawName === 'string' ? rawName.trim() : ''
+  if (name.length === 0) {
+    return jsonError(400, 'invalid_name', 'name is required')
+  }
+  if (name.length > 128) {
+    return jsonError(400, 'invalid_name', 'name must be 1-128 characters')
+  }
+  const result = await createProject({ name, user_id, project_slug })
+  // 201 on a fresh create, 200 when an existing project was resolved (idempotent).
+  return jsonOk(
+    { project: { id: result.project_id, label: result.name }, created: result.created },
+    result.created ? 201 : 200,
+  )
 }
 
 /** Project a cross-instance `SharedProjectItem` into the unified list shape.

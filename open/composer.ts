@@ -143,6 +143,14 @@ import type { AppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
 import { DocStore } from '../gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
 import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
+import { createAppProjectsSurface } from '../gateway/http/app-projects-surface.ts'
+import { SqliteProjectSettingsStore } from '../gateway/projects/sqlite-store.ts'
+import {
+  createProjectRow,
+  materializeProjectScaffold,
+  type ProjectScaffoldDeps,
+} from '../gateway/realmode-composer/project-create.ts'
+import type { CreateProjectToolService } from '../gateway/realmode-composer/create-project-tool.ts'
 import { createAppTasksSurface } from '../gateway/http/app-tasks-surface.ts'
 import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
 import { TaskStore } from '../tasks/store.ts'
@@ -1787,22 +1795,35 @@ export function buildOpenGraphComposer(
     // bootstrapped with the then-current set) only seeds the baseline so we emit
     // on real CHANGES, never on the initial load.
     let lastProjectsSnapshot: string | null = null
-    const emitProjectsChangedIfChanged = (user_id: string): void => {
+    const buildProjectsChangedFrame = (): AppWsOutboundProjectsChanged => {
       const projects = readProjectRows()
-      const snapshot = JSON.stringify(projects)
-      if (lastProjectsSnapshot === null) {
-        lastProjectsSnapshot = snapshot
-        return
-      }
-      if (snapshot === lastProjectsSnapshot) return
-      lastProjectsSnapshot = snapshot
-      const frame: AppWsOutboundProjectsChanged = {
+      return {
         v: 1,
         type: 'projects_changed',
         projects,
         active_project_id: projects.length > 0 ? projects[0]!.id : null,
         ts: Date.now(),
       }
+    }
+    const emitProjectsChangedIfChanged = (user_id: string): void => {
+      const frame = buildProjectsChangedFrame()
+      const snapshot = JSON.stringify(frame.projects)
+      if (lastProjectsSnapshot === null) {
+        lastProjectsSnapshot = snapshot
+        return
+      }
+      if (snapshot === lastProjectsSnapshot) return
+      lastProjectsSnapshot = snapshot
+      appWsRegistry.send(appWsTopicId(user_id), frame)
+    }
+    // Unconditional fan — a KNOWN mutation (the create-project capability) just
+    // changed the project set, so always push the fresh snapshot (and reseed the
+    // diff baseline) rather than relying on the post-turn diff probe, which
+    // would no-op on a skip-import owner whose first action is "Create Project"
+    // (baseline still null → diff path swallows the first emit).
+    const emitProjectsChangedNow = (user_id: string): void => {
+      const frame = buildProjectsChangedFrame()
+      lastProjectsSnapshot = JSON.stringify(frame.projects)
       appWsRegistry.send(appWsTopicId(user_id), frame)
     }
 
@@ -1872,6 +1893,61 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildProjectDocComposer({ client: onboardingAnthropicClient })
         : null
+
+    // ── Create-project capability (project-rail "Create Project" button) ──────
+    // ONE owner-scoped create path, shared by the HTTP surface
+    // (`POST /api/app/projects`) and the `create_project` agent tool, reusing the
+    // SAME `createProjectRow` + materializer the onboarding finalizer runs. The
+    // row write (fast, deterministic) is awaited; the live rail refresh fans
+    // immediately; the on-disk materialization (git + docs + gbrain page) is
+    // fire-and-forget + failure-isolated (the materializer never throws) — so the
+    // button is snappy and the project's row/topic/Work-Board are usable at once
+    // while its docs fill in shortly after. Mirrors how finalize is itself
+    // dispatched fire-and-forget.
+    const scaffoldDeps: ProjectScaffoldDeps = {
+      owner_home,
+      project_slug,
+      db,
+      ...(projectDocComposer !== null ? { projectDocComposer } : {}),
+      gbrainSyncHook,
+    }
+    const createProjectAndRefresh = async (input: {
+      name: string
+      user_id: string | null
+    }): Promise<{ project_id: string; name: string; created: boolean }> => {
+      const row = await createProjectRow(scaffoldDeps, { name: input.name })
+      if (row.outcome !== 'skipped') {
+        // Fire-and-forget on-disk scaffold; never blocks the response / rollback.
+        void materializeProjectScaffold(scaffoldDeps, {
+          name: row.name,
+          project_id: row.project_id,
+        }).catch((err: unknown) => {
+          console.warn(
+            `[create-project] event=materialize_failed project=${project_slug} id=${
+              row.project_id
+            } err=${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
+        // Known mutation → always push the fresh rail snapshot.
+        emitProjectsChangedNow(input.user_id ?? OWNER_USER_ID)
+      }
+      return { project_id: row.project_id, name: row.name, created: row.outcome === 'created' }
+    }
+    // HTTP surface (`/api/app/projects` GET list + POST create). Wiring the
+    // surface in Open also gives the mobile app's `fetchProjects` list a real
+    // backend (previously unmounted here). Bearer-gated by the same owner auth.
+    const appProjectsSurface = createAppProjectsSurface({
+      store: new SqliteProjectSettingsStore(db),
+      auth: appOwnerAuth,
+      createProject: ({ name, user_id }) => createProjectAndRefresh({ name, user_id }),
+    })
+    // Agent-tool service (`create_project`) — same path, owner as the refresh
+    // target when the turn has no explicit speaker (solo/system).
+    const createProjectToolService: CreateProjectToolService = {
+      create: ({ name, speaker_user_id }) =>
+        createProjectAndRefresh({ name, user_id: speaker_user_id }),
+    }
+
     // Path 1 finalize seam: persona compose+commit + project materialization
     // (DB rows + topics + docs + gbrain) + mark completed + rail refresh. Wired
     // only when the box has an LLM path (onboarding can't run LLM-less anyway).
@@ -2633,6 +2709,10 @@ export function buildOpenGraphComposer(
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
       work_board: { store: workBoardStore },
+      // Create-project agent tool (create_project) — agent-native parity with
+      // the project-rail Create Project button; same owner-scoped create path
+      // the HTTP surface uses (one code path).
+      create_project: { service: createProjectToolService },
       // Message-search agent tool (message_search) — chat-history twin of
       // doc_search. Backed by this owner's ButtonStore turn history so the
       // live agent can recall what was said earlier in the conversation.
@@ -2712,6 +2792,9 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
+      // Project list (GET) + create (POST /api/app/projects) surface — feeds the
+      // mobile app's project list AND the project-rail Create Project button.
+      app_projects_surface: { handler: appProjectsSurface.handler },
       // Work Board (Phase 1a) — the human read+WRITE board API
       // (`/api/app/projects/<id>/work-board`), bearer-gated like the tabs
       // surface, dispatching the same canonical WorkBoardStore the agent uses.

@@ -330,13 +330,105 @@ describe('app-projects surface — GET /api/app/projects (list)', () => {
     expect(ids).toEqual(['acme', 'neutron'])
   })
 
-  it('rejects POST /api/app/projects with method_not_allowed', async () => {
+  it('returns 501 create_not_configured for POST when no create binding is wired', async () => {
+    // This harness wires the surface without a `createProject` binding, so the
+    // create route degrades gracefully (read-only / unconfigured deploy).
     const res = await authedFetch(harness.base, `/api/app/projects`, {
       method: 'POST',
       body: JSON.stringify({ name: 'whatever' }),
     })
-    expect(res.status).toBe(405)
+    expect(res.status).toBe(501)
     const json = (await res.json()) as { code: string }
-    expect(json.code).toBe('method_not_allowed')
+    expect(json.code).toBe('create_not_configured')
+  })
+})
+
+describe('app-projects surface — POST /api/app/projects (create)', () => {
+  interface CreateHarness {
+    base: string
+    calls: Array<{ name: string; user_id: string; project_slug: string }>
+    close(): Promise<void>
+  }
+
+  async function startCreateGateway(): Promise<CreateHarness> {
+    const store = new InMemoryProjectSettingsStore()
+    const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
+    const calls: CreateHarness['calls'] = []
+    const surface = createAppProjectsSurface({
+      store,
+      auth,
+      createProject: async (input) => {
+        calls.push(input)
+        // Echo a deterministic slug so the test asserts the round-trip shape.
+        return { project_id: input.name.toLowerCase().replace(/\s+/g, '-'), name: input.name, created: true }
+      },
+    })
+    const composed = composeHttpHandler({
+      appProjects: { handler: surface.handler },
+      defaultHandler: () => new Response('not found', { status: 404 }),
+    })
+    const host = `gw-${++__gatewaySeq}.test`
+    __composedHandlers.set(host, composed)
+    return {
+      base: `http://${host}`,
+      calls,
+      close: async () => {
+        __composedHandlers.delete(host)
+      },
+    }
+  }
+
+  let harness: CreateHarness
+  beforeEach(async () => {
+    harness = await startCreateGateway()
+  })
+  afterEach(async () => {
+    await harness.close()
+  })
+
+  it('rejects POST without a Bearer token (401 missing_bearer)', async () => {
+    const res = await fetch(`${harness.base}/api/app/projects`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Taxes' }),
+    })
+    expect(res.status).toBe(401)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('missing_bearer')
+    expect(harness.calls).toEqual([])
+  })
+
+  it('rejects a missing/empty name with 400 invalid_name', async () => {
+    for (const body of [{}, { name: '   ' }, { name: '' }]) {
+      const res = await authedFetch(harness.base, `/api/app/projects`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as { code: string }
+      expect(json.code).toBe('invalid_name')
+    }
+    expect(harness.calls).toEqual([])
+  })
+
+  it('creates a project and returns 201 with { project, created }', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects`, {
+      method: 'POST',
+      body: JSON.stringify({ name: '  My Taxes  ' }),
+    })
+    expect(res.status).toBe(201)
+    const json = (await res.json()) as {
+      ok: boolean
+      project: { id: string; label: string }
+      created: boolean
+    }
+    expect(json.ok).toBe(true)
+    expect(json.created).toBe(true)
+    expect(json.project).toEqual({ id: 'my-taxes', label: 'My Taxes' })
+    // The binding receives the TRIMMED name + the resolved owner identity
+    // (never an agent/client-supplied scope).
+    expect(harness.calls).toEqual([
+      { name: 'My Taxes', user_id: 'sam', project_slug: PROJECT_SLUG },
+    ])
   })
 })

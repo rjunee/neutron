@@ -164,4 +164,16 @@ export interface MiscCompositionInput {
   work_board?: {
     store: import('../../../work-board/store.ts').WorkBoardStore
   }
+  /**
+   * Create-project capability — when supplied, the `tools` module registers the
+   * `create_project` agent tool (agent-native parity with the project-rail
+   * "Create Project" button). The bound service runs the SAME owner-scoped
+   * `createProjectRow` + materialize + live-rail-refresh path the HTTP surface
+   * (`POST /api/app/projects`) uses, so an agent-created and a human-created
+   * project share one code path. `project_slug` / `speaker_user_id` come from
+   * the server-injected `ToolCallContext`, never an agent arg.
+   */
+  create_project?: {
+    service: import('../../../gateway/realmode-composer/create-project-tool.ts').CreateProjectToolService
+  }
 }

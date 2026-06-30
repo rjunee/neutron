@@ -21,10 +21,12 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 
 import {
+  createProject,
   fetchProjects,
   formatLastActivity,
   loadProjects,
@@ -49,6 +51,12 @@ export default function ProjectListScreen() {
   // unified list still renders; these surface a quiet "unavailable" notice.
   const [sourceErrors, setSourceErrors] = useState<ProjectSourceError[]>([]);
   const [reloading, setReloading] = useState(false);
+  // Create-project flow (bottom-pinned affordance). `createOpen` toggles the
+  // inline name input; `creating` guards a double-submit.
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   // Stale-response guard: each fetch claims a sequence number; only the
   // newest claim is allowed to write state. A slow response from a prior
   // bearer (sign-out / account switch) or one that lands after unmount is
@@ -170,6 +178,33 @@ export default function ProjectListScreen() {
     router.replace('/login');
   }, [clear, router, user]);
 
+  // Create a project from the inline name input, then navigate into it. The
+  // server creates the row + topic + materialized scaffold; we refresh the list
+  // and push the detail route so the new project (and its tabs) open at once.
+  const handleCreate = useCallback(async () => {
+    if (user === null || creating) return;
+    const name = newName.trim();
+    if (name.length === 0) {
+      setCreateError('Enter a project name.');
+      return;
+    }
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const cfg = loadAppConfig();
+      const created = await createProject({ base_url: cfg.base_url, token: user.token, name });
+      setNewName('');
+      setCreateOpen(false);
+      await loadFromServer();
+      router.push(`/projects/${created.id}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not create project.';
+      setCreateError(msg);
+    } finally {
+      setCreating(false);
+    }
+  }, [user, creating, newName, loadFromServer, router]);
+
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
@@ -231,7 +266,7 @@ export default function ProjectListScreen() {
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>No projects yet.</Text>
             <Text style={styles.emptyBody}>
-              The "Create project" flow lands in a later P5.x sprint.
+              Tap "Create Project" below to start a fresh project.
             </Text>
           </View>
         }
@@ -244,6 +279,70 @@ export default function ProjectListScreen() {
           />
         }
       />
+
+      {/* Pinned to the bottom of the screen — always visible, even with only
+          the seeded projects, so the owner can jump into a fresh project. */}
+      <View style={styles.createBar}>
+        {createOpen ? (
+          <View>
+            <TextInput
+              style={styles.createInput}
+              placeholder="Project name"
+              placeholderTextColor="#6b6b6b"
+              value={newName}
+              onChangeText={setNewName}
+              autoFocus
+              editable={!creating}
+              onSubmitEditing={() => void handleCreate()}
+              returnKeyType="done"
+              testID="create-project-input"
+            />
+            {createError !== null ? (
+              <Text style={styles.createError}>{createError}</Text>
+            ) : null}
+            <View style={styles.createRow}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel create project"
+                onPress={() => {
+                  setCreateOpen(false);
+                  setNewName('');
+                  setCreateError(null);
+                }}
+                disabled={creating}
+                style={({ pressed }) => [styles.createCancel, pressed && styles.pressed]}
+              >
+                <Text style={styles.createCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Confirm create project"
+                testID="create-project-confirm"
+                onPress={() => void handleCreate()}
+                disabled={creating}
+                style={({ pressed }) => [styles.createConfirm, pressed && styles.pressed]}
+              >
+                <Text style={styles.createConfirmText}>
+                  {creating ? 'Creating…' : 'Create'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Create a new project"
+            testID="create-project-btn"
+            onPress={() => {
+              setCreateError(null);
+              setCreateOpen(true);
+            }}
+            style={({ pressed }) => [styles.createButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.createButtonText}>+ Create Project</Text>
+          </Pressable>
+        )}
+      </View>
     </View>
   );
 }
@@ -393,6 +492,48 @@ const styles = StyleSheet.create({
   signOutText: { color: '#ddd', fontSize: 12, fontWeight: '500' },
   pressed: { opacity: 0.7 },
   listContent: { padding: 16, gap: 12 },
+  createBar: {
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#1f1f1f',
+    backgroundColor: '#0a0a0a',
+  },
+  createButton: {
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2a3550',
+    backgroundColor: '#10151f',
+    alignItems: 'center',
+  },
+  createButtonText: { color: '#6caaff', fontSize: 14, fontWeight: '600' },
+  createInput: {
+    backgroundColor: '#121212',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    color: '#eee',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  createError: { color: '#ff8080', fontSize: 12, marginTop: 6 },
+  createRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 },
+  createCancel: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  createCancelText: { color: '#bbb', fontSize: 13, fontWeight: '500' },
+  createConfirm: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#2a3550',
+  },
+  createConfirmText: { color: '#cfe6ff', fontSize: 13, fontWeight: '600' },
   card: {
     backgroundColor: '#121212',
     borderRadius: 14,
