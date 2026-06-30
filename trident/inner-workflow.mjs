@@ -429,6 +429,32 @@ ${task}`,
   }
   await writeTerminalResult(terminalResult)
   return terminalResult
+} catch (err) {
+  // EXEC-MODEL FAILURE HARVEST (Codex review [P2]). A thrown workflow (Forge
+  // returns null, an Argus agent errors, a checkpoint Bash step fails, …) has NO
+  // process/stdout left to report failure — the OUTER loop harvests `inner_result`
+  // from the DB. Without a terminal write here, a crashed build would sit
+  // `running` until the 2 h stall guard instead of failing PROMPTLY. So persist a
+  // terminal FAILURE result (verdict REQUEST_CHANGES → the harvest fails the run
+  // on the next tick). Best-effort: if THIS write also throws, the stall guard is
+  // the backstop. The `finally` cleanup still runs. We RETURN the failure object
+  // (the detached workflow's result API) rather than re-throwing, so the result is
+  // a clean terminal value, not an error.
+  log(`trident-v2 inner THREW: ${err && err.message ? err.message : String(err)}`)
+  const failureResult = {
+    ok: false,
+    prNumber: pr,
+    branch: forgeBranch,
+    verdict: 'REQUEST_CHANGES',
+    round,
+    checkpoint: 'inner-error',
+  }
+  try {
+    await writeTerminalResult(failureResult)
+  } catch (e2) {
+    log(`trident-v2 terminal-failure write ALSO failed (stall guard is the backstop): ${e2 && e2.message ? e2.message : String(e2)}`)
+  }
+  return failureResult
 } finally {
   // (A) MANDATORY WORKTREE CLEANUP — runs on success, REQUEST_CHANGES, throw, or
   // abort. The harness removes a worktree ONLY IF UNCHANGED, and a Forge build
