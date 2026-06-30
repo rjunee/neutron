@@ -105,6 +105,14 @@ export class OpfsChatStore implements Store {
     this.schedulePersist()
   }
 
+  async clearAckedTranscript(topic_id: string): Promise<void> {
+    // Drop the dead server's acked transcript from the in-memory index, keep
+    // un-acked local sends; snapshot the result. The topic stays in
+    // knownTopics so any surviving sends keep persisting.
+    await this.mem.clearAckedTranscript(topic_id)
+    this.schedulePersist()
+  }
+
   // Message search delegates to the in-memory index this store already keeps
   // hot (the OPFS snapshot is just durability). When the Phase-2 wasm-SQLite
   // engine lands here it gets real FTS5 via SqliteChatStore, behind this same

@@ -519,10 +519,12 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     return store;
   }
 
-  it('clears the on-device transcript + resumes from 0 when the fresh server seq regressed', async () => {
+  it('clears the on-device acked transcript (keeping queued sends) + resumes from 0 on regression', async () => {
     const store = await seeded();
     const { session, sockets } = makeSession(store);
     session.start();
+    // A user message queued offline before the reinstall is detected.
+    await session.send('keep me', { client_msg_id: 'cmid-keep' });
     sockets[0]!.open();
     // Reinstalled server announces a LOWER high-water seq.
     sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1, last_seen_seq: 2 });
@@ -530,11 +532,16 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     expect(await store.lastSeenSeq(TOPIC)).toBe(0);
     const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
     expect(resume).toMatchObject({ type: 'resume', after_seq: 0 });
+    // Stale acked rows gone, but the queued send survived the on-device wipe …
+    expect((await session.messages()).map((m) => m.body)).toEqual(['keep me']);
+    // … and was re-driven to the fresh server (idempotent on client_msg_id).
+    expect(sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'user_message').map((e) => e['body'])).toContain('keep me');
     // The fresh transcript then replays cleanly with no stale rows.
     sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'new1', seq: 1, body: 'fresh welcome', ts: 3 });
     await tick();
     const bodies = (await session.messages()).map((m) => m.body);
-    expect(bodies).toEqual(['fresh welcome']);
+    expect(bodies).toContain('fresh welcome');
+    expect(bodies.some((b) => b === 'stale a' || b === 'stale b')).toBe(false);
   });
 
   it('does NOT clear on a normal reconnect (server seq >= local cursor)', async () => {

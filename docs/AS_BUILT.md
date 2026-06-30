@@ -42,11 +42,14 @@ for the topic" signal; the field stays ABSENT only when there is no durable log
 at all (where `null` → never clear, protecting the only copy). `open/composer.ts`
 wires the durable `AppChatStore` chat_log, so Open always reports the real value.
 
-**No-data-loss on reset (Codex P1b).** `reconcileServerReset` preserves un-acked
-local sends (status `queued`/`sent`, no server seq) across the wipe — it drops
-only the stale ACKED transcript — so a reset re-drives the user's
-typed-but-undelivered messages against the fresh server (idempotent on
-`client_msg_id`) instead of silently losing them.
+**No-data-loss on reset (Codex P1b + P2).** Added a `Store.clearAckedTranscript(topic)`
+primitive (InMemory + OPFS + Sqlite) that drops only the ACKED (server-sequenced)
+transcript in a SINGLE atomic store operation, preserving un-acked local sends
+(status `queued`/`sent`, no server seq). `reconcileServerReset` calls it instead
+of a read-clear-reinsert cycle, so a send that races the reset can't be lost in a
+snapshot→clear window (it's either an already-kept non-acked row or arrives
+after). The preserved sends are re-driven against the fresh server by the
+following resume/flush (idempotent on `client_msg_id`).
 
 **Not changed.** No new local-store namespace keyed on a server instance id (the
 frame exposes no per-install id today; the seq-regression heuristic is the
