@@ -150,7 +150,11 @@ import {
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentTyping,
   type AppWsOutboundProjectsChanged,
+  type AppWsOutboundWorkBoardChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
+import { createWorkBoardSurface } from '../gateway/http/work-board-surface.ts'
+import { WorkBoardStore } from '../work-board/store.ts'
+import { formatWorkBoardFragment } from '../work-board/fragment.ts'
 // Chat transport — durable per-topic message log + receipt/reaction/edit logs
 // for the app-ws (Expo / web) surface. Wiring these into the adapter is what
 // turns the already-built seq/resume/idempotency/receipt machinery from inert
@@ -1798,6 +1802,46 @@ export function buildOpenGraphComposer(
       appWsRegistry.send(appWsTopicId(user_id), frame)
     }
 
+    // Work Board (Phase 1a) — the per-project live work-tracking board that
+    // doubles as the orchestrator's EXTERNAL memory. ONE canonical store shared
+    // by the agent `work_board_*` tools (build-core-modules), the HTTP surface
+    // (createWorkBoardSurface below), and the per-turn injection seam — so every
+    // mutation, agent OR human, runs ONE code path and fires ONE
+    // `work_board_changed` full-snapshot push to the owner's app-ws topic. The
+    // push is best-effort (the registry `send` is non-throwing; the wrapper
+    // guards the snapshot read) so it can never roll back a committed write.
+    const workBoardStore = new WorkBoardStore(db, {
+      onChange: (): void => {
+        try {
+          const frame: AppWsOutboundWorkBoardChanged = {
+            v: 1,
+            type: 'work_board_changed',
+            items: workBoardStore.list(project_slug).map((it) => ({
+              id: it.id,
+              title: it.title,
+              status: it.status,
+              sort_order: it.sort_order,
+              design_doc_ref: it.design_doc_ref,
+              inline_active: it.inline_active,
+              linked_run_id: it.linked_run_id,
+              created_at: it.created_at,
+              updated_at: it.updated_at,
+              completed_at: it.completed_at,
+            })),
+            ts: Date.now(),
+          }
+          appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+        } catch (err) {
+          console.warn(
+            `[work-board] event=push_failed project=${project_slug} err=${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        }
+      },
+    })
+    const workBoardSurface = createWorkBoardSurface({ store: workBoardStore, auth: appOwnerAuth })
+
     // ── Onboarding-as-CC-session → Path 1 (2026-06-27): ONE live-session path ─
     // Onboarding is NOT a separate engine/socket and NO LONGER a per-turn phase
     // machine. It is the INITIAL MODE of this same `/ws/app/chat` live agent:
@@ -2015,6 +2059,11 @@ export function buildOpenGraphComposer(
             projectPersonaResolver,
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
+            // Work Board (Phase 1a) — re-ground EVERY turn on the board (the
+            // orchestrator's external memory). Returns the already-formatted,
+            // escaped `<work_board>` DATA block for the active+next items.
+            workBoardSnapshot: (slug: string): string =>
+              formatWorkBoardFragment(workBoardStore.listActive(slug)),
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
@@ -2488,6 +2537,11 @@ export function buildOpenGraphComposer(
       // always built (`buildGBrainMemory`), so this is unconditional; the tool
       // degrades to empty results on a host without the `gbrain` binary.
       gbrain_search: { store: gbrainMemory.memoryStore },
+      // Work Board (Phase 1a) — register the `work_board_*` agent tools backed
+      // by the SAME canonical store the HTTP surface + per-turn injection use,
+      // so an agent mutation and a human HTTP write share one code path + one
+      // live `work_board_changed` push.
+      work_board: { store: workBoardStore },
       // Message-search agent tool (message_search) — chat-history twin of
       // doc_search. Backed by this owner's ButtonStore turn history so the
       // live agent can recall what was said earlier in the conversation.
@@ -2567,6 +2621,10 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
+      // Work Board (Phase 1a) — the human read+WRITE board API
+      // (`/api/app/projects/<id>/work-board`), bearer-gated like the tabs
+      // surface, dispatching the same canonical WorkBoardStore the agent uses.
+      app_work_board_surface: { handler: workBoardSurface.handler },
       // P1b — Tasks tab backend + chat attachment upload, so every visible React
       // control has a live backend (no 404s behind a shown tab/button).
       app_tasks_surface: { handler: appTasksSurface.handler },

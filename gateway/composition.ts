@@ -222,6 +222,9 @@ async function buildComposedHttpFromComposition(
   if (composition.app_tabs_surface !== undefined) {
     composeInput.appTabs = { handler: composition.app_tabs_surface.handler }
   }
+  if (composition.app_work_board_surface !== undefined) {
+    composeInput.appWorkBoard = { handler: composition.app_work_board_surface.handler }
+  }
   if (composition.app_backups_surface !== undefined) {
     composeInput.appBackups = {
       handler: composition.app_backups_surface.handler,
@@ -278,6 +281,7 @@ async function buildComposedHttpFromComposition(
     composition.app_devices_surface !== undefined ||
     composition.app_docs_surface !== undefined ||
     composition.app_tabs_surface !== undefined ||
+    composition.app_work_board_surface !== undefined ||
     composition.app_backups_surface !== undefined ||
     composition.cores_surface !== undefined ||
     composition.cores_oauth_surface !== undefined ||

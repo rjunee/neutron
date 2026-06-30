@@ -151,4 +151,17 @@ export interface MiscCompositionInput {
   skill_forge?: {
     backend: import('../../../skill-forge/backend.ts').SkillForgeBackend
   }
+  /**
+   * Work Board (Phase 1a) — when supplied, the `tools` module registers the
+   * `work_board_*` agent tools (list/add/update/complete/reorder) backed by
+   * this SHARED `WorkBoardStore`. The store is the SAME instance the HTTP
+   * surface + the per-turn injection use (the production composer constructs it
+   * with the `work_board_changed` push hook), so an agent mutation and a human
+   * HTTP write share one code path + one live-push. Omitting it leaves the
+   * surface unregistered (unchanged pre-Work-Board behaviour). `project_slug`
+   * is taken from the server-injected `ToolCallContext`, never an agent arg.
+   */
+  work_board?: {
+    store: import('../../../work-board/store.ts').WorkBoardStore
+  }
 }

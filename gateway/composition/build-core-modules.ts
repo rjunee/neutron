@@ -22,6 +22,7 @@ import {
 import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerGBrainSearchToolSurface } from '../../gbrain-memory/agent-tool.ts'
+import { registerWorkBoardToolSurface } from '../../work-board/agent-tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '../../skill-forge/tool.ts'
@@ -182,6 +183,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // parity with the `/skills` chat command, which shares the SAME backend).
       if (input.skill_forge !== undefined) {
         registerSkillForgeToolSurface(reg, input.skill_forge.backend)
+      }
+      // Work Board (Phase 1a) — register the `work_board_*` tools when the
+      // composer wired the shared store, so the orchestrator can read+write its
+      // own external-memory board mid-turn. Same store instance the HTTP
+      // surface + per-turn injection use (one code path, one live-push). Rides
+      // the #87 tools-bridge as `mcp__neutron__work_board_*`.
+      if (input.work_board !== undefined) {
+        registerWorkBoardToolSurface(reg, input.work_board.store)
       }
       return reg
     },
