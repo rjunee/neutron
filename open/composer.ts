@@ -276,6 +276,36 @@ export function resolveOpenLlmPool(
 }
 
 /**
+ * Open-mode app-ws routing decision for an engine-emitted onboarding
+ * `ButtonPrompt`. In Path-1/Open the engine no longer drives the conversation
+ * (the live CC session does) — it only emits IMPORT-side prompts on this socket.
+ *
+ * The successful `import_analysis_presented` prompt is special: its accept/resume
+ * BUTTON is redundant (the import-completion watcher auto-advances the phase) and
+ * a tap would dangle (button choices route to the engine store, not the live
+ * session). A prior version suppressed the WHOLE prompt — body included — which
+ * meant a real install's import would complete (e.g. 175 conversations, 8
+ * projects) but the rich analysis "wow moment" NEVER reached the React chat
+ * (2026-06-29 render-gap). The fix: still deliver the analysis BODY (the bulleted
+ * project list IS the picker; the user confirms in freeform), but STRIP the
+ * dangling button options. Every OTHER prompt — including a FAILED-import
+ * analysis / rate-limit / resume prompt the user genuinely needs — emits as-is.
+ *
+ * Pure + exported for unit coverage; the router (in {@link buildOpenGraphComposer})
+ * calls this then fans the result over the app-ws registry.
+ */
+export function resolveOpenImportPromptEmission(
+  prompt: ButtonPrompt,
+  phase: string | null,
+  importFailed: boolean,
+): ButtonPrompt {
+  if (phase === 'import_analysis_presented' && !importFailed) {
+    return { ...prompt, options: [], allow_freeform: true }
+  }
+  return prompt
+}
+
+/**
  * Build the single-owner Open graph composer. The returned closure is what
  * `boot({ composer })` invokes after migrations — it receives the live
  * `ProjectDb` + the boot-frozen `project_slug` and returns the
@@ -2114,10 +2144,14 @@ export function buildOpenGraphComposer(
       try {
         const st = await onboardingStateStore.get(project_slug, OWNER_USER_ID)
         const importFailed = st?.phase_state?.['import_failed'] === true
-        if (st !== null && st.phase === 'import_analysis_presented' && !importFailed) {
-          // Suppress the successful analysis-accept prompt (auto-consumed).
-          return { message_id: prompt.prompt_id, was_new: true }
-        }
+        // 2026-06-29 render-gap fix — for the successful import_analysis_presented
+        // prompt, emit the rich analysis BODY (the "wow moment") with the dangling
+        // accept/resume button STRIPPED, instead of suppressing the whole prompt
+        // (which left the owner never seeing their import result). See
+        // resolveOpenImportPromptEmission for the rationale.
+        const toEmit = resolveOpenImportPromptEmission(prompt, st?.phase ?? null, importFailed)
+        const ok = emitOnboardingPrompt(topic_id, toEmit)
+        return { message_id: prompt.prompt_id, was_new: ok }
       } catch {
         // Any lookup failure → fall through and emit (fail open, user sees it).
       }

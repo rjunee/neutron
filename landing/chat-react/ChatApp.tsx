@@ -24,7 +24,7 @@ import {
 } from '@assistant-ui/react'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
-import type { ChatViewModel, RenderMessage } from './controller.ts'
+import type { ChatViewModel, RenderMessage, ImportProgressVM } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
@@ -130,9 +130,6 @@ function TextPart(): React.JSX.Element {
  *  text without assistant-ui's typewriter smoothing (see {@link TextPart}). */
 const PART_COMPONENTS = { Image: AttachmentImagePart, Text: TextPart } as const
 
-/** Quick-reaction palette the web "add reaction" affordance offers. */
-const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const
-
 /**
  * Track B Phase 4 — per-message reaction data + an add/remove callback, shared
  * down to the assistant-ui message components (which only receive the rendered
@@ -146,26 +143,26 @@ interface ReactionsCtx {
 const ReactionsContext = createContext<ReactionsCtx | null>(null)
 
 /**
- * Reaction chips + an add-reaction affordance for a single message bubble.
- * Reads the current message id from assistant-ui's `useMessage`, looks up its
- * reactions from context, and renders the chip row. Tapping a self-chip removes
- * it; the "＋" opens a small emoji palette. A bubble with no wire message id yet
- * (optimistic, not server-acked) can't be reacted to, so we render nothing.
+ * Reaction chips for a single message bubble.
+ *
+ * BUG 5 (2026-06-29) — Ryan doesn't want reactions on web. The add-reaction
+ * "＋" trigger + emoji picker are NO LONGER rendered, so a fresh chat shows no
+ * reaction affordance at all (a message with no reactions renders nothing).
+ * Existing chips (e.g. one an agent set via the backend store) still display
+ * and a self-chip can still be tapped to remove it — the backend reaction store
+ * + `controller.react` path are untouched (agent-native parity preserved); only
+ * the user-facing ADD UI is gone. A bubble with no wire message id yet
+ * (optimistic, not server-acked) can't carry reactions, so it renders nothing.
  */
 function MessageReactions(): React.JSX.Element | null {
   const ctx = useContext(ReactionsContext)
   const message = useMessage()
-  const [pickerOpen, setPickerOpen] = useState(false)
   if (ctx === null) return null
   const entry = ctx.byRenderId.get(message.id)
   if (entry === undefined || entry.messageId === null) return null
   const messageId = entry.messageId
   const { reactions } = entry
-
-  const toggle = (emoji: string, reactedBySelf: boolean): void => {
-    ctx.onReact(messageId, emoji, reactedBySelf)
-    setPickerOpen(false)
-  }
+  if (reactions.length === 0) return null
 
   return (
     <div className="car-reactions">
@@ -174,38 +171,12 @@ function MessageReactions(): React.JSX.Element | null {
           key={chip.emoji}
           type="button"
           className={`car-reaction${chip.reactedBySelf ? ' car-reaction-self' : ''}`}
-          onClick={() => toggle(chip.emoji, chip.reactedBySelf)}
+          onClick={() => ctx.onReact(messageId, chip.emoji, chip.reactedBySelf)}
           aria-label={`${chip.emoji} ${chip.count}${chip.reactedBySelf ? ', reacted' : ''}`}
         >
           {chip.emoji} {chip.count}
         </button>
       ))}
-      <button
-        type="button"
-        className="car-reaction car-reaction-add"
-        onClick={() => setPickerOpen((v) => !v)}
-        aria-label="Add reaction"
-      >
-        ＋
-      </button>
-      {pickerOpen ? (
-        <span className="car-reaction-picker" role="menu">
-          {QUICK_REACTIONS.map((emoji) => {
-            const existing = reactions.find((c) => c.emoji === emoji)
-            return (
-              <button
-                key={emoji}
-                type="button"
-                className="car-reaction-pick"
-                onClick={() => toggle(emoji, existing?.reactedBySelf ?? false)}
-                aria-label={`React ${emoji}`}
-              >
-                {emoji}
-              </button>
-            )
-          })}
-        </span>
-      ) : null}
     </div>
   )
 }
@@ -520,24 +491,91 @@ function latestUploadAffordance(
   return null
 }
 
+/** Human label for an import source: 'chatgpt' → 'ChatGPT', else 'Claude'. */
+function importSourceLabel(affordance: ChatMessageUploadAffordance | null): string {
+  if (affordance === null) return 'export'
+  return affordance.source === 'chatgpt' ? 'ChatGPT' : 'Claude'
+}
+
 /**
- * P1b — a phase-aware hint above the composer when the agent message advertises
- * an export-import affordance. Hint-only for now: it tells the user to attach
- * their export ZIP, reusing the existing composer attach/drag-drop path rather
- * than adding a new upload widget (kept minimal to avoid composer regressions).
+ * BUG 2+4 (2026-06-29) — the prominent web drag-and-drop overlay for a history
+ * import: the web counterpart of `app/components/DropZoneOverlay.tsx`. A single
+ * tinted scrim with a dashed-border frame + one instructional line.
+ *
+ * Shown ONLY while a file is being dragged over the chat AND an upload affordance
+ * is active (uploads accepted) — so it is NEVER premature. This replaces the old
+ * always-on passive hint (`UploadAffordanceHint`), which nagged from the very
+ * first onboarding turn ("what should I call you?") because the Open/Path-1 seam
+ * stamps the affordance on EVERY onboarding agent_message (it gates the server's
+ * solicited-upload accept, not a discrete "import step"). The explicit ask is the
+ * agent's own conversational message ("export your data and drop the .zip here");
+ * this overlay + the 📎 picker are the affordances that ask gestures land in.
  */
-function UploadAffordanceHint({
-  affordance,
+function WebDropZoneOverlay({
+  visible,
+  source,
 }: {
-  affordance: ChatMessageUploadAffordance | null
+  visible: boolean
+  source: string
 }): React.JSX.Element | null {
-  if (affordance === null) return null
-  const source = affordance.source === 'chatgpt' ? 'ChatGPT' : 'Claude'
+  if (!visible) return null
   return (
-    <div className="car-upload-hint" role="note">
-      📎 Attach or drop your {source} export ZIP to import your history.
+    <div className="car-dropzone" role="alert" aria-label="Drop your export ZIP to import">
+      <div className="car-dropzone-frame">
+        <div className="car-dropzone-title">Drop your {source} export here</div>
+        <div className="car-dropzone-hint">
+          Release to upload — Neutron reads it in the background while you keep chatting.
+        </div>
+      </div>
     </div>
   )
+}
+
+/**
+ * BUG 3 (2026-06-29) — live history-import progress above the composer. Prefers
+ * the server's `import_progress` stream (a spinner + the per-pass body line +
+ * a progress bar) once it begins, so a long import visibly works instead of
+ * stalling on a one-shot "received" banner. Until the first progress frame lands
+ * (or when no import is in flight) it falls back to the upload `importState`
+ * banner (uploading / received / error). Renders nothing when both are idle.
+ */
+function ImportStatus({
+  progress,
+  upload,
+}: {
+  progress: ImportProgressVM | null
+  upload: ImportState
+}): React.JSX.Element | null {
+  if (progress !== null) {
+    const pct = Math.max(0, Math.min(100, Math.round(progress.pct * 100)))
+    const body = progress.body.length > 0 ? progress.body : 'Reading through your history…'
+    return (
+      <div className="car-import-status car-import-uploading" role="status" aria-live="polite">
+        <span className="car-import-row">
+          <span className="car-spinner" aria-hidden="true" />
+          <span className="car-import-body">{body}</span>
+        </span>
+        <span className="car-import-bar" aria-hidden="true">
+          <span className="car-import-bar-fill" style={{ width: `${pct}%` }} />
+        </span>
+      </div>
+    )
+  }
+  if (upload.status !== 'idle') {
+    return (
+      <div className={`car-import-status car-import-${upload.status}`} role="status" aria-live="polite">
+        {upload.status === 'uploading' ? (
+          <span className="car-import-row">
+            <span className="car-spinner" aria-hidden="true" />
+            <span className="car-import-body">{upload.message}</span>
+          </span>
+        ) : (
+          upload.message
+        )}
+      </div>
+    )
+  }
+  return null
 }
 
 /** Build the render-id → {messageId, reactions} lookup the bubbles read. */
@@ -716,89 +754,29 @@ interface ImportState {
 function Composer({
   draft,
   controller,
-  uploadAffordance,
-  token,
-  topicId,
+  importActive,
+  onFiles,
 }: {
   draft: AttachmentDraft
   controller: NeutronChatController
-  /** BUG 4 — the active history-import affordance (null when onboarding isn't
-   *  asking for an export). Gates whether a dropped/picked `.zip` routes to the
-   *  import endpoint and whether the file picker advertises `.zip`. */
-  uploadAffordance: ChatMessageUploadAffordance | null
-  /** App-ws bearer token for the import upload. */
-  token: string
-  /** App-ws topic (`app:<user>`) so the post-import prompt routes back here. */
-  topicId: string
+  /** BUG 4 — true when a history-import affordance is active (uploads accepted):
+   *  the file picker then advertises `.zip` in addition to images. */
+  importActive: boolean
+  /** Route picked files through the shared surface handler (import ZIP vs image
+   *  draft) — same path the surface-level drag-and-drop drop uses. */
+  onFiles: (files: FileList | readonly File[]) => void
 }): React.JSX.Element {
   const composer = useComposer()
   const composerRuntime = useComposerRuntime()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const [dragOver, setDragOver] = useState(false)
-  const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
 
   const text = composer.text
   const canSend = text.trim().length > 0 || draft.hasReady
-  const importActive = uploadAffordance !== null
-
-  // BUG 4 — route a ChatGPT/Claude export ZIP to the history-import endpoint
-  // (NOT the image-only attachment draft). Images still go to the draft. A ZIP
-  // dropped with no active import affordance is rejected with a clear note (the
-  // agent hasn't asked for one).
-  const handleFiles = (files: FileList | readonly File[]): void => {
-    const list = Array.from(files)
-    if (list.length === 0) return
-    const zips = list.filter(isExportZip)
-    const images = list.filter((f) => !isExportZip(f))
-    if (images.length > 0) draft.addFiles(images)
-    if (zips.length === 0) return
-    const zip = zips[0]
-    if (zip === undefined) return
-    if (!importActive || uploadAffordance === null) {
-      setImportState({
-        status: 'error',
-        message: 'No history import is in progress — Neutron will ask when it wants your export.',
-      })
-      return
-    }
-    setImportState({ status: 'uploading', message: `Importing ${zip.name}…` })
-    void importHistoryZip(zip, uploadAffordance.source, { token, topicId })
-      .then((result) => {
-        // ND2 (dogfood 2026-06-27) — only claim "reading your history now" when
-        // the engine actually STARTED an import job (`job_id` present). A 200
-        // with `job_id: null` is a no-op (engine declined to route the upload);
-        // showing success there is the banned silent-false-success that left a
-        // user staring at a "reading your history" banner while `import_jobs`
-        // stayed empty forever. Surface an honest "couldn't start" notice so the
-        // failure is visible (and the user can retry) instead of masked.
-        if (result.job_id !== null) {
-          setImportState({ status: 'done', message: 'Export received — reading through your history now.' })
-        } else {
-          setImportState({
-            status: 'error',
-            message: "Couldn't start the import — your export was received but no import job started. Try uploading again.",
-          })
-        }
-      })
-      .catch((err: unknown) => {
-        setImportState({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'import failed',
-        })
-      })
-  }
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const files = e.target.files
-    if (files !== null && files.length > 0) handleFiles(files)
+    if (files !== null && files.length > 0) onFiles(files)
     e.target.value = '' // allow re-picking the same file
-  }
-
-  const onDrop = (e: React.DragEvent): void => {
-    e.preventDefault()
-    setDragOver(false)
-    const files = e.dataTransfer?.files
-    if (files !== undefined && files.length > 0) handleFiles(files)
   }
 
   const send = (): void => {
@@ -824,21 +802,8 @@ function Composer({
   }
 
   return (
-    <div
-      className={`car-composer-wrap${dragOver ? ' car-dragover' : ''}`}
-      onDragOver={(e) => {
-        e.preventDefault()
-        setDragOver(true)
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={onDrop}
-    >
+    <div className="car-composer-wrap">
       <AttachmentChips draft={draft} />
-      {importState.status !== 'idle' ? (
-        <div className={`car-import-status car-import-${importState.status}`} role="status">
-          {importState.message}
-        </div>
-      ) : null}
       <ComposerPrimitive.Root className="car-composer">
         <button
           type="button"
@@ -880,6 +845,153 @@ function Composer({
         </ThreadPrimitive.If>
       </ComposerPrimitive.Root>
     </div>
+  )
+}
+
+/**
+ * The chat surface (banner · thread · composer) plus the import-upload concerns
+ * lifted UP from the composer (BUG 2+4): surface-wide drag-and-drop, the import
+ * ZIP / image-draft router, the prominent {@link WebDropZoneOverlay}, and the
+ * live {@link ImportStatus}. Dropping a file ANYWHERE over the surface (not just
+ * on the composer) routes through the same `handleFiles` the 📎 picker uses.
+ */
+function ChatSurface({
+  vm,
+  controller,
+  config,
+  draft,
+  uploadAffordance,
+}: {
+  vm: ChatViewModel
+  controller: NeutronChatController
+  config: BootstrapConfig
+  draft: AttachmentDraft
+  uploadAffordance: ChatMessageUploadAffordance | null
+}): React.JSX.Element {
+  const [dragOver, setDragOver] = useState(false)
+  const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
+  const importActive = uploadAffordance !== null
+
+  // BUG 3 — once the live `import_progress` stream begins, the one-shot upload
+  // banner has done its job; drop it so the live progress is the sole indicator
+  // (and nothing lingers after the import finishes and progress clears).
+  const hasLiveProgress = vm.importProgress !== null
+  useEffect(() => {
+    if (hasLiveProgress) setImportState({ status: 'idle' })
+  }, [hasLiveProgress])
+
+  // BUG 4 — route a ChatGPT/Claude export ZIP to the history-import endpoint
+  // (NOT the image-only attachment draft). Images still go to the draft. A ZIP
+  // dropped with no active import affordance is rejected with a clear note.
+  const handleFiles = (files: FileList | readonly File[]): void => {
+    const list = Array.from(files)
+    if (list.length === 0) return
+    const zips = list.filter(isExportZip)
+    const images = list.filter((f) => !isExportZip(f))
+    if (images.length > 0) draft.addFiles(images)
+    if (zips.length === 0) return
+    const zip = zips[0]
+    if (zip === undefined) return
+    if (!importActive || uploadAffordance === null) {
+      setImportState({
+        status: 'error',
+        message: 'No history import is in progress — Neutron will ask when it wants your export.',
+      })
+      return
+    }
+    setImportState({ status: 'uploading', message: `Importing ${zip.name}…` })
+    void importHistoryZip(zip, uploadAffordance.source, { token: config.token, topicId: config.topicId })
+      .then((result) => {
+        // ND2 (dogfood 2026-06-27) — only claim "reading your history now" when
+        // the engine actually STARTED an import job (`job_id` present). A 200
+        // with `job_id: null` is a no-op (engine declined to route the upload);
+        // showing success there is the banned silent-false-success that left a
+        // user staring at a "reading your history" banner while `import_jobs`
+        // stayed empty forever. Surface an honest "couldn't start" notice so the
+        // failure is visible (and the user can retry) instead of masked.
+        if (result.job_id !== null) {
+          setImportState({ status: 'done', message: 'Export received — reading through your history now.' })
+        } else {
+          setImportState({
+            status: 'error',
+            message: "Couldn't start the import — your export was received but no import job started. Try uploading again.",
+          })
+        }
+      })
+      .catch((err: unknown) => {
+        setImportState({
+          status: 'error',
+          message: err instanceof Error ? err.message : 'import failed',
+        })
+      })
+  }
+
+  const onDrop = (e: React.DragEvent): void => {
+    e.preventDefault()
+    setDragOver(false)
+    const files = e.dataTransfer?.files
+    if (files !== undefined && files.length > 0) handleFiles(files)
+  }
+
+  // Surface-wide drag affordance — only armed while uploads are accepted, so a
+  // stray image/file drag during steady-state chat doesn't flash the overlay.
+  const dragProps = importActive
+    ? {
+        onDragOver: (e: React.DragEvent): void => {
+          e.preventDefault()
+          setDragOver(true)
+        },
+        // Only clear when the pointer genuinely leaves the surface (not when it
+        // crosses between child elements) to avoid overlay flicker.
+        onDragLeave: (e: React.DragEvent): void => {
+          if (!(e.currentTarget as Node).contains(e.relatedTarget as Node | null)) setDragOver(false)
+        },
+        onDrop,
+      }
+    : {}
+
+  return (
+    <main className="car-main" {...dragProps}>
+      <ConnectionBanner status={vm.status} />
+      <WebDropZoneOverlay visible={dragOver && importActive} source={importSourceLabel(uploadAffordance)} />
+      <ThreadPrimitive.Root className="car-thread">
+        <ThreadPrimitive.Viewport className="car-viewport">
+          <ThreadPrimitive.Empty>
+            {config.onboardingActive ? (
+              // BUG 1 — a FRESH onboarding auto-starts: the server pushes the
+              // first prompt on connect. Show a loading indicator (matching
+              // the old vanilla chat's "Setting things up…") while it arrives,
+              // NOT the steady-state "Send a message to begin." empty state.
+              <div className="car-empty">
+                <div className="car-empty-title">Neutron</div>
+                <div className="car-empty-sub car-empty-loading" role="status" aria-live="polite">
+                  <span className="car-typing" aria-hidden="true">
+                    <span className="car-dot" />
+                    <span className="car-dot" />
+                    <span className="car-dot" />
+                  </span>
+                  Setting things up…
+                </div>
+              </div>
+            ) : (
+              <div className="car-empty">
+                <div className="car-empty-title">Neutron</div>
+                <div className="car-empty-sub">Send a message to begin.</div>
+              </div>
+            )}
+          </ThreadPrimitive.Empty>
+          <ThreadPrimitive.Messages components={MESSAGE_COMPONENTS} />
+          {vm.awaitingFirstToken ? <TypingIndicator /> : null}
+        </ThreadPrimitive.Viewport>
+        <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
+          ↓
+        </ThreadPrimitive.ScrollToBottom>
+        <PendingBadge pending={vm.pending} />
+        <DeliveryStatus delivery={vm.latestUserDelivery} isRunning={vm.isRunning} />
+        <ImportStatus progress={vm.importProgress} upload={importState} />
+        <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
+      </ThreadPrimitive.Root>
+    </main>
   )
 }
 
@@ -928,52 +1040,13 @@ export function ChatApp({
           onSelect={(id) => controller.setProject(id)}
         />
       )}
-      <main className="car-main">
-        <ConnectionBanner status={vm.status} />
-        <ThreadPrimitive.Root className="car-thread">
-          <ThreadPrimitive.Viewport className="car-viewport">
-            <ThreadPrimitive.Empty>
-              {config.onboardingActive ? (
-                // BUG 1 — a FRESH onboarding auto-starts: the server pushes the
-                // first prompt on connect. Show a loading indicator (matching
-                // the old vanilla chat's "Setting things up…") while it arrives,
-                // NOT the steady-state "Send a message to begin." empty state.
-                <div className="car-empty">
-                  <div className="car-empty-title">Neutron</div>
-                  <div className="car-empty-sub car-empty-loading" role="status" aria-live="polite">
-                    <span className="car-typing" aria-hidden="true">
-                      <span className="car-dot" />
-                      <span className="car-dot" />
-                      <span className="car-dot" />
-                    </span>
-                    Setting things up…
-                  </div>
-                </div>
-              ) : (
-                <div className="car-empty">
-                  <div className="car-empty-title">Neutron</div>
-                  <div className="car-empty-sub">Send a message to begin.</div>
-                </div>
-              )}
-            </ThreadPrimitive.Empty>
-            <ThreadPrimitive.Messages components={MESSAGE_COMPONENTS} />
-            {vm.awaitingFirstToken ? <TypingIndicator /> : null}
-          </ThreadPrimitive.Viewport>
-          <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
-            ↓
-          </ThreadPrimitive.ScrollToBottom>
-          <PendingBadge pending={vm.pending} />
-          <DeliveryStatus delivery={vm.latestUserDelivery} isRunning={vm.isRunning} />
-          <UploadAffordanceHint affordance={uploadAffordance} />
-          <Composer
-            draft={draft}
-            controller={controller}
-            uploadAffordance={uploadAffordance}
-            token={config.token}
-            topicId={config.topicId}
-          />
-        </ThreadPrimitive.Root>
-      </main>
+      <ChatSurface
+        vm={vm}
+        controller={controller}
+        config={config}
+        draft={draft}
+        uploadAffordance={uploadAffordance}
+      />
     </div>
     </ButtonsContext.Provider>
     </EditsContext.Provider>

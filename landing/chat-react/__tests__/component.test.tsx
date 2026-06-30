@@ -441,8 +441,18 @@ describe('ChatApp render (happy-dom)', () => {
     expect(choiceTexts).toContain('Skip')
     expect(choiceTexts).not.toContain('A')
     expect(choiceTexts).not.toContain('B')
-    // The upload-affordance hint is surfaced above the composer.
-    expect(container.textContent).toContain('ChatGPT export ZIP')
+    // BUG 2 (2026-06-29) — the old always-on passive "attach your export ZIP"
+    // hint was REMOVED (it nagged from the first onboarding turn). An active
+    // upload affordance now surfaces NO persistent banner; instead the 📎 picker
+    // accepts .zip and a prominent drag-and-drop overlay appears on drag.
+    expect(container.textContent).not.toContain('export ZIP to import your history')
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement | null
+    expect(fileInput).not.toBeNull()
+    expect(fileInput!.accept).toContain('.zip')
+    const attachBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.getAttribute('aria-label')?.includes('export ZIP'),
+    )
+    expect(attachBtn).toBeDefined()
 
     // Click the first option → posts a button_choice frame + collapses the row.
     const yesBtn = Array.from(container.querySelectorAll('button')).find(
@@ -459,6 +469,148 @@ describe('ChatApp render (happy-dom)', () => {
     expect(choiceFrames).toContainEqual({ v: 1, type: 'button_choice', prompt_id: 'p1', choice_value: 'yes' })
     // Collapsed summary shows the chosen label; the buttons are gone.
     expect(container.textContent).toContain('→ Yes, import')
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('BUG 2/3/4/5 — drag overlay on drag, live import progress, no reaction trigger', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{
+      open: () => void
+      deliver: (o: unknown) => void
+      onopen: (() => void) | null
+      onmessage: ((ev: { data: unknown }) => void) | null
+      onclose: (() => void) | null
+      onerror: (() => void) | null
+      send: (d: string) => void
+      close: () => void
+    }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+        </AssistantRuntimeProvider>
+      )
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+
+    // An agent message with an active upload affordance (uploads accepted).
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'agent_message',
+        message_id: 'm1',
+        seq: 1,
+        ts: 1,
+        body: 'Want to import your ChatGPT history? Drop your export here.',
+        upload_affordance: { source: 'chatgpt' },
+      })
+      await tick()
+    })
+    // BUG 5 — no add-reaction "＋" trigger anywhere.
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (b) => b.getAttribute('aria-label') === 'Add reaction',
+      ),
+    ).toBe(false)
+    // BUG 2 — the prominent overlay is NOT shown at rest (no premature affordance).
+    expect(container.querySelector('.car-dropzone')).toBeNull()
+
+    // BUG 4 — dragging a file over the surface reveals the prominent dropzone.
+    const main = container.querySelector('.car-main') as HTMLElement
+    expect(main).not.toBeNull()
+    await act(async () => {
+      const ev = new window.Event('dragover', { bubbles: true, cancelable: true })
+      main.dispatchEvent(ev)
+      await tick()
+    })
+    const dropzone = container.querySelector('.car-dropzone')
+    expect(dropzone).not.toBeNull()
+    expect(dropzone?.textContent).toContain('Drop your ChatGPT export here')
+
+    // BUG 3 — a live import_progress frame renders a spinner + body + bar.
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'import_progress',
+        job_id: 'job-1',
+        status: 'pass1-running',
+        pass: 1,
+        pct: 0.47,
+        chunks_total_known: true,
+        body: 'Pass 1: 47/57 batches · ~3 min remaining',
+        ts: 2,
+      })
+      await tick()
+    })
+    expect(container.textContent).toContain('Pass 1: 47/57 batches')
+    expect(container.querySelector('.car-spinner')).not.toBeNull()
+    const fill = container.querySelector('.car-import-bar-fill') as HTMLElement | null
+    expect(fill).not.toBeNull()
+    expect(fill!.style.width).toBe('47%')
 
     await act(async () => {
       root.unmount()

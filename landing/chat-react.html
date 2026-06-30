@@ -23,6 +23,10 @@
     --agent-fg: #e9eaee;
     --agent-avatar-bg: #2b3037;
     --bubble-radius: 18px;
+    /* BUG 1 — centered, constrained chat column width (mirrors .cint-scroll's
+       760px); applied to message rows + composer + status lines so the chat is
+       a centered column on wide screens, full-width (margins collapse) on mobile. */
+    --chat-col: 760px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -203,7 +207,8 @@
   .car-rail-item:hover { background: rgba(255,255,255,.05); }
   .car-rail-item-active { background: rgba(108,170,255,.16); color: #cfe6ff; }
   @media (max-width: 720px) { .car-rail { display: none; } }
-  .car-main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+  /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
+  .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
   .car-banner {
     text-align: center; font-size: 13px; padding: 6px 12px;
     background: #2a2410; color: #ffd479; border-bottom: 1px solid var(--border);
@@ -214,7 +219,10 @@
   .car-viewport { flex: 1 1 auto; overflow-y: auto; padding: 18px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
   .car-empty { margin: auto; text-align: center; color: var(--muted); }
   .car-empty-title { font-size: 22px; color: var(--fg); margin-bottom: 6px; }
-  .car-row { display: flex; gap: 8px; align-items: flex-end; max-width: 100%; }
+  /* BUG 1 — each row is a centered, column-width flex container: the user bubble
+     right-aligns within it, the agent bubble left-aligns, and the whole column
+     sits centered on wide screens (width:100% collapses the auto margins on mobile). */
+  .car-row { display: flex; gap: 8px; align-items: flex-end; width: 100%; max-width: var(--chat-col); margin-left: auto; margin-right: auto; }
   .car-row-user { justify-content: flex-end; }
   .car-row-agent { justify-content: flex-start; }
   .car-avatar {
@@ -239,16 +247,16 @@
   .car-dot:nth-child(2) { animation-delay: .2s; }
   .car-dot:nth-child(3) { animation-delay: .4s; }
   @keyframes car-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
-  .car-pending { text-align: center; font-size: 12px; color: var(--muted); padding: 4px; }
+  /* BUG 1 — keep the queued/receipt status lines aligned to the centered column. */
+  .car-pending { text-align: center; font-size: 12px; color: var(--muted); padding: 4px; max-width: var(--chat-col); margin: 0 auto; }
   /* Track B Phase 4 — delivery/read receipt status line for the latest send. */
-  .car-receipt { text-align: right; font-size: 11px; color: var(--muted); padding: 2px 14px; }
+  .car-receipt { text-align: right; font-size: 11px; color: var(--muted); padding: 2px 14px; max-width: var(--chat-col); margin: 0 auto; }
   .car-receipt-read { color: var(--accent); }
   /* Track B Phase 4 — per-message emoji reaction chips.
-     BUG 5 (iMessage-style) — the resting bubble is CLEAN: existing reaction
-     chips stay visible, but the "＋" add affordance is hidden until the row is
-     hovered/focused (desktop) so there's no persistent "+" on every bubble.
-     The container carries no top margin of its own (it's empty at rest when a
-     message has no reactions); the chips supply their own spacing. */
+     BUG 5 (2026-06-29) — Ryan doesn't want reactions: the "＋" add trigger +
+     emoji picker are no longer rendered, so a message with no reactions shows no
+     reaction UI at all. Only existing chips (e.g. an agent-set reaction) render;
+     the add-affordance + picker styles were removed with the markup. */
   .car-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 0; align-items: center; }
   .car-reaction {
     font-size: 12px; line-height: 1; margin-top: 6px; padding: 3px 8px; border-radius: 11px;
@@ -256,12 +264,6 @@
     color: inherit; cursor: pointer;
   }
   .car-reaction-self { border-color: var(--accent); color: var(--accent); }
-  /* The "＋" stays in the DOM + tab order (opacity, NOT display:none) so
-     keyboard focus can reach it; hover/focus reveals it on pointer devices. */
-  .car-reaction-add { opacity: 0.6; padding: 3px 7px; }
-  .car-reaction-add:hover { opacity: 1; }
-  .car-reaction-picker { display: inline-flex; gap: 2px; margin-left: 2px; margin-top: 6px; }
-  .car-reaction-pick { font-size: 15px; background: none; border: none; cursor: pointer; padding: 1px 3px; }
   /* P1b — onboarding / quick-reply button rows + image gallery. */
   .car-choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .car-choice {
@@ -285,40 +287,61 @@
     position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 8px; text-align: left;
     font-size: 12px; font-weight: 600; color: #fff; background: rgba(10,10,10,0.7);
   }
-  .car-upload-hint {
-    font-size: 12px; color: var(--muted); padding: 6px 14px;
-    border-top: 1px solid var(--border); background: var(--surface);
-  }
-  /* BUG 4 — history-import upload status, shown above the composer while a
-     ChatGPT/Claude export ZIP uploads + after it lands. */
+  /* BUG 3/4 — history-import status above the composer: the one-shot upload
+     banner AND the live `import_progress` indicator (spinner + body + bar).
+     Centered to the chat column (BUG 1). */
   .car-import-status {
-    font-size: 12px; padding: 6px 12px; margin: 6px 12px 0; border-radius: 8px;
+    font-size: 12px; padding: 8px 12px; margin: 6px auto 0; max-width: var(--chat-col); border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+    display: flex; flex-direction: column; gap: 6px;
   }
   .car-import-uploading { color: #8cc6ff; border-color: rgba(140,198,255,.4); }
   .car-import-done { color: #7ddf9b; border-color: rgba(125,223,155,.4); }
   .car-import-error { color: #ff8a8a; border-color: rgba(255,138,138,.4); }
+  /* BUG 3 — live progress: spinner + body line + a thin determinate bar. */
+  .car-import-row { display: flex; align-items: center; gap: 8px; }
+  .car-import-body { flex: 1 1 auto; min-width: 0; }
+  .car-spinner {
+    flex: 0 0 auto; width: 13px; height: 13px; border-radius: 50%;
+    border: 2px solid rgba(140,198,255,.3); border-top-color: #8cc6ff;
+    animation: car-spin 0.8s linear infinite;
+  }
+  @keyframes car-spin { to { transform: rotate(360deg); } }
+  .car-import-bar { display: block; height: 4px; border-radius: 999px; background: rgba(140,198,255,.18); overflow: hidden; }
+  .car-import-bar-fill { display: block; height: 100%; background: #8cc6ff; border-radius: 999px; transition: width .4s ease; }
+  /* BUG 2+4 — the prominent drag-and-drop overlay (web counterpart of
+     app/components/DropZoneOverlay.tsx). Full-surface tinted scrim + dashed frame,
+     shown only while dragging a file with an active import affordance. */
+  .car-dropzone {
+    position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+    padding: 24px; background: rgba(10,10,10,0.62); animation: car-fade .12s ease;
+  }
+  @keyframes car-fade { from { opacity: 0; } to { opacity: 1; } }
+  .car-dropzone-frame {
+    width: 100%; max-width: 480px; border-radius: 14px; border: 2px dashed var(--accent);
+    background: rgba(18,18,18,0.92); padding: 28px 24px; text-align: center;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .car-dropzone-title { font-size: 18px; font-weight: 600; color: var(--fg); }
+  .car-dropzone-hint { font-size: 13px; color: var(--muted); }
   /* BUG 1 — fresh-onboarding auto-start loader (matches the old chat's
      "Setting things up…"). The typing dots sit inline before the label. */
   .car-empty-loading { display: inline-flex; align-items: center; gap: 8px; }
   /* Track B Phase 4 — message edit/delete: edited marker, actions, inline editor. */
   .car-edited { font-size: 11px; opacity: 0.55; margin-top: 2px; display: inline-block; }
-  /* BUG 5 — Edit/Delete + the reaction "＋" are NOT always-on clutter under
-     every bubble. On HOVER-CAPABLE pointer devices (desktop) they're invisible
-     at rest and revealed on row hover/focus, like iMessage's secondary actions.
-     We use opacity (NOT display:none) so the buttons stay in the tab order and
-     keyboard focus both reaches AND reveals them (`:focus-within`). On touch /
-     no-hover devices there is no hover to reveal them, so they stay visible —
-     never unreachable (a11y, per cross-model review). */
+  /* BUG 5 — Edit/Delete are NOT always-on clutter under every bubble. On
+     HOVER-CAPABLE pointer devices (desktop) they're invisible at rest and
+     revealed on row hover/focus, like iMessage's secondary actions. We use
+     opacity (NOT display:none) so the buttons stay in the tab order and keyboard
+     focus both reaches AND reveals them (`:focus-within`). On touch / no-hover
+     devices there is no hover to reveal them, so they stay visible — never
+     unreachable (a11y, per cross-model review). (The reaction "＋" trigger was
+     removed entirely — Ryan doesn't want reactions on web.) */
   .car-msg-actions { display: flex; gap: 8px; margin-top: 4px; }
   @media (hover: hover) and (pointer: fine) {
-    .car-msg-actions,
-    .car-reaction-add { opacity: 0; pointer-events: none; transition: opacity 0.12s ease; }
+    .car-msg-actions { opacity: 0; pointer-events: none; transition: opacity 0.12s ease; }
     .car-row:hover .car-msg-actions,
     .car-row:focus-within .car-msg-actions { opacity: 1; pointer-events: auto; }
-    .car-row:hover .car-reaction-add,
-    .car-row:focus-within .car-reaction-add { opacity: 0.6; pointer-events: auto; }
-    .car-reaction-add:focus,
     .car-msg-action:focus { opacity: 1; }
   }
   .car-msg-action {
@@ -345,8 +368,10 @@
     background: var(--surface); color: var(--fg); cursor: pointer; font-size: 16px;
   }
   .car-scroll-bottom[data-state="hidden"] { display: none; }
+  /* BUG 1 — the composer input row is centered to the chat column; the
+     full-width band (border + surface) is supplied by .car-composer-wrap. */
   .car-composer {
-    display: flex; gap: 8px; align-items: flex-end;
+    display: flex; gap: 8px; align-items: flex-end; width: 100%; max-width: var(--chat-col); margin: 0 auto;
     padding: 10px 12px; border-top: 1px solid var(--border); background: var(--surface);
   }
   .car-input {
@@ -365,9 +390,9 @@
   .car-attach-img { max-width: 100%; border-radius: 12px; display: block; margin-top: 6px; }
   .car-attach-loading, .car-attach-error { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--muted); }
   .car-composer-wrap { border-top: 1px solid var(--border); background: var(--surface); }
-  .car-composer-wrap.car-dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
   .car-composer-wrap .car-composer { border-top: 0; }
-  .car-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+  /* BUG 1 — staged-attachment chips align to the centered composer column. */
+  .car-attach-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; width: 100%; max-width: var(--chat-col); margin: 0 auto; }
   .car-attach-chip {
     display: inline-flex; align-items: center; gap: 2px; max-width: 240px;
     font-size: 12px; padding: 4px 6px 4px 10px; border-radius: 12px;

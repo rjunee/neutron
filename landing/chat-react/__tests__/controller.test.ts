@@ -640,4 +640,108 @@ describe('NeutronChatController — server-authoritative typing (agent_typing)',
     await tick()
     expect(controller.getViewModel().isRunning).toBe(true)
   })
+
+  // BUG 3 (2026-06-29) — live history-import progress off the `import_progress`
+  // frame the engine emits every ~5s. Pre-fix the controller DROPPED this frame
+  // (no handler), so a long import showed no live feedback.
+  it('surfaces import_progress on the view model and refreshes it per frame', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().importProgress).toBeNull()
+
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'import_progress',
+      job_id: 'job-1',
+      status: 'pass1-running',
+      pass: 1,
+      pct: 0.4,
+      chunks_total_known: true,
+      body: 'Pass 1: 4/10 batches',
+      ts: 1,
+    })
+    await tick()
+    let prog = controller.getViewModel().importProgress
+    expect(prog).not.toBeNull()
+    expect(prog?.jobId).toBe('job-1')
+    expect(prog?.pass).toBe(1)
+    expect(prog?.pct).toBeCloseTo(0.4)
+    expect(prog?.body).toBe('Pass 1: 4/10 batches')
+
+    // A later frame refreshes (pass 2, further along).
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'import_progress',
+      job_id: 'job-1',
+      status: 'pass2-running',
+      pass: 2,
+      pct: 0.8,
+      chunks_total_known: true,
+      body: 'Pass 2: synthesizing',
+      ts: 2,
+    })
+    await tick()
+    prog = controller.getViewModel().importProgress
+    expect(prog?.pass).toBe(2)
+    expect(prog?.pct).toBeCloseTo(0.8)
+    expect(prog?.body).toBe('Pass 2: synthesizing')
+  })
+
+  it('clears import_progress on a terminal status frame', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver({
+      v: 1, type: 'import_progress', job_id: 'j', status: 'pass1-running', pass: 1, pct: 0.2,
+      chunks_total_known: true, body: 'Pass 1: 2/10 batches', ts: 1,
+    })
+    await tick()
+    expect(controller.getViewModel().importProgress).not.toBeNull()
+    sockets[0]!.deliver({
+      v: 1, type: 'import_progress', job_id: 'j', status: 'completed', pass: 2, pct: 1,
+      chunks_total_known: true, body: 'done', ts: 2,
+    })
+    await tick()
+    expect(controller.getViewModel().importProgress).toBeNull()
+  })
+
+  it('auto-clears stale import_progress when frames stop arriving', async () => {
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      // A tiny staleness window so the test doesn't wait on the 12s default.
+      importProgressStaleMs: 20,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver({
+      v: 1, type: 'import_progress', job_id: 'j', status: 'pass1-running', pass: 1, pct: 0.5,
+      chunks_total_known: true, body: 'Pass 1: 5/10 batches', ts: 1,
+    })
+    await tick()
+    expect(controller.getViewModel().importProgress).not.toBeNull()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(controller.getViewModel().importProgress).toBeNull()
+    controller.stop()
+  })
 })
