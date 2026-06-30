@@ -32,13 +32,18 @@ on disk — then start the import via the existing
 synthesis substrate) and managed mode both still `noop_no_state`. The #130
 offer-first / live-progress / ordering / curation-context handoff are untouched.
 
-**Concurrency guard (Codex r1 P2).** Before seeding, the no-state branch re-reads
-the row; if a concurrent fresh-install upload (double-submit / retry) or the
-post-turn extractor created it in the meantime, the engine re-enters the normal
-flow so the existing non-null guards apply (`alreadyHasImportJob` → no duplicate
-job; no downgrading a live `import_running` off the cron). Covered by two added
-concurrency tests (sequential double-submit; a get-hooked store simulating the
-truly-concurrent window).
+**Concurrency guard (Codex r1 P2).** Two layers. (1) `notifyImportUpload` is now
+serialized per `(project_slug, user_id)` via an in-process promise-chain tail
+(mirrors the post-turn extractor's `chains` map). Single-owner Open is one
+process, so this fully eliminates the upload-vs-upload race: two truly-
+simultaneous fresh-install uploads run one-at-a-time, so the second observes the
+first's `import_running` row and takes the `alreadyHasImportJob` guard — no
+duplicate job, no downgrade. (2) Before seeding, the no-state branch also re-reads
+the row and, if it now exists (e.g. the post-turn extractor — which is NOT under
+this tail — created it), re-enters the locked body so all non-null guards apply.
+Covered by added tests: sequential double-submit; a get-hooked store simulating
+the concurrent window; and two truly-simultaneous `Promise.all` uploads → exactly
+one job.
 
 **Test (forbidden-pattern fixed).** The passing acceptance test
 `tests/integration/nd2-real-export-path1-import-runs.test.ts` SQL-SEEDED an

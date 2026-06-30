@@ -456,4 +456,46 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     expect(final?.phase).toBe('import_running')
     expect(final?.phase_state['import_job_id']).toBe('concurrent-job')
   })
+
+  test('no-state, TWO truly-simultaneous uploads → exactly ONE job (per-user serialization)', async () => {
+    // Codex r1 P2, definitive: fire two no-state uploads for the same fresh-
+    // install user concurrently. The engine's per-(project,user) serialization
+    // tail runs them one at a time, so the second observes the first's
+    // `import_running` row and takes the `alreadyHasImportJob` guard — never a
+    // duplicate job, never a downgrade of the live import_running.
+    const stack = stubImportStack()
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
+
+    expect(await stateStore.get(OWNER, USER)).toBeNull()
+
+    const [a, b] = await Promise.all([
+      engine.notifyImportUpload({
+        project_slug: OWNER,
+        topic_id: TOPIC,
+        user_id: USER,
+        channel_kind: 'app-socket',
+        source: 'claude',
+        observed_at: NOW_MS + 1_000,
+      }),
+      engine.notifyImportUpload({
+        project_slug: OWNER,
+        topic_id: TOPIC,
+        user_id: USER,
+        channel_kind: 'app-socket',
+        source: 'claude',
+        observed_at: NOW_MS + 1_001,
+      }),
+    ])
+
+    // Exactly one import job started across both concurrent requests.
+    expect(stack.startedSources).toEqual(['claude-zip'])
+    // One request started it; the other hit the no-duplicate guard.
+    const outcomes = [a.outcome, b.outcome].sort()
+    expect(outcomes).toContain('no_active_prompt')
+
+    const final = await stateStore.get(OWNER, USER)
+    expect(final?.phase).toBe('import_running')
+    expect(final?.phase_state['import_job_id']).toBe('job-1')
+    expect(final?.phase_state['signup_via']).toBe('web')
+  })
 })

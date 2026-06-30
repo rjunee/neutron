@@ -554,6 +554,18 @@ export class InterviewEngine implements EngineInternals {
    */
   readonly deploymentMode: OnboardingDeploymentMode
 
+  /**
+   * Per-(project_slug, user_id) serialization tail for `notifyImportUpload`.
+   * Single-owner Open runs in ONE process, so chaining same-user upload
+   * notifications here fully eliminates the upload-vs-upload race in the
+   * no-state import-start path (Codex r1 P2): two simultaneous fresh-install
+   * uploads can no longer both observe `state===null` and start duplicate /
+   * mutually-downgrading import jobs — the second runs only after the first has
+   * committed `import_running`, so it takes the `alreadyHasImportJob` guard.
+   * Mirrors the post-turn extractor's per-user `chains` map.
+   */
+  private readonly importUploadSerial = new Map<string, Promise<unknown>>()
+
   constructor(deps: InterviewEngineDeps) {
     this.deps = deps
     this.now = deps.now ?? ((): number => Date.now())
@@ -2319,6 +2331,32 @@ export class InterviewEngine implements EngineInternals {
     source: 'chatgpt' | 'claude'
     observed_at?: number
   }): Promise<AdvanceResult> {
+    // Serialize per (project_slug, user_id) so concurrent uploads for the same
+    // fresh-install owner can't race the no-state import-start path (Codex r1
+    // P2). The body (`notifyImportUploadLocked`) is the real logic; the recheck
+    // re-entry inside it calls the locked body DIRECTLY (not this wrapper) so it
+    // never re-acquires this tail and deadlocks.
+    const key = `${input.project_slug}:${input.user_id}`
+    const prev = this.importUploadSerial.get(key) ?? Promise.resolve()
+    const run = prev
+      .catch(() => undefined)
+      .then(() => this.notifyImportUploadLocked(input))
+    this.importUploadSerial.set(key, run)
+    try {
+      return await run
+    } finally {
+      if (this.importUploadSerial.get(key) === run) this.importUploadSerial.delete(key)
+    }
+  }
+
+  private async notifyImportUploadLocked(input: {
+    project_slug: string
+    topic_id: string
+    user_id: string
+    channel_kind: ChannelKindForButton
+    source: 'chatgpt' | 'claude'
+    observed_at?: number
+  }): Promise<AdvanceResult> {
     this.clearResolvedSpecCache()
     const observed_at = input.observed_at ?? this.now()
     const state = await this.deps.stateStore.get(input.project_slug, input.user_id)
@@ -2365,7 +2403,9 @@ export class InterviewEngine implements EngineInternals {
         // path's own non-atomic `alreadyHasImportJob` check.
         const recheck = await this.deps.stateStore.get(input.project_slug, input.user_id)
         if (recheck !== null) {
-          return await this.notifyImportUpload({ ...input, observed_at })
+          // Call the LOCKED body, not the public wrapper — we already hold the
+          // per-user serialization tail; re-acquiring it would deadlock.
+          return await this.notifyImportUploadLocked({ ...input, observed_at })
         }
         const advanceInput: AdvanceInput = {
           project_slug: input.project_slug,
