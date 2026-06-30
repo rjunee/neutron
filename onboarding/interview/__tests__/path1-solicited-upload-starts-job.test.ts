@@ -173,6 +173,86 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     expect(next?.phase_state['import_source']).toBe('claude-zip')
   })
 
+  test('open mode, NO onboarding_state row yet (#130 race): upload SEEDS the row + STARTS the import', async () => {
+    // THE #130 BUG. The open-mode live-agent onboarding never calls
+    // `engine.start()`; the onboarding_state row is created lazily + async by
+    // the fire-and-forget post-turn extractor. #130 moved the import offer to
+    // right after the name, so a fresh-install owner uploads BEFORE the
+    // background extractor has created the row → `notifyImportUpload` reads
+    // state===null. Pre-fix this returned `noop_no_state` (job_id:null →
+    // "Couldn't start the import"). NO `seedPhase` here — that is exactly the
+    // precondition the live flow never creates, so we drive it for real.
+    const stack = stubImportStack()
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
+
+    expect(await stateStore.get(OWNER, USER)).toBeNull()
+
+    const out = await engine.notifyImportUpload({
+      project_slug: OWNER,
+      topic_id: TOPIC,
+      user_id: USER,
+      channel_kind: 'app-socket',
+      source: 'claude',
+      observed_at: NOW_MS + 1_000,
+    })
+
+    // The fix: a solicited no-state upload starts a real job (NOT the old
+    // silent no-op).
+    expect(out.outcome).not.toBe('no_active_prompt')
+    expect(out.outcome).not.toBe('noop_no_state')
+    expect(stack.startedSources).toEqual(['claude-zip'])
+
+    // The engine SEEDED the row + advanced it to import_running with the real
+    // job_id and the `signup_via` the import-running cron's channel-context
+    // invariant needs (stamped because open Path-1 has no engine.start).
+    const next = await stateStore.get(OWNER, USER)
+    expect(next?.phase).toBe('import_running')
+    expect(next?.phase_state['import_job_id']).toBe('job-1')
+    expect(next?.phase_state['import_source']).toBe('claude-zip')
+    expect(next?.phase_state['signup_via']).toBe('web')
+  })
+
+  test('open mode, NO row but affordance NOT offered → still no-op (stray upload, no row created)', async () => {
+    // The no-state mirror of the affordance-off guard: a stray upload when no
+    // substrate exists (affordance hidden) must NOT seed a row or start a job.
+    const stack = stubImportStack()
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: false, ...stack })
+
+    expect(await stateStore.get(OWNER, USER)).toBeNull()
+
+    const out = await engine.notifyImportUpload({
+      project_slug: OWNER,
+      topic_id: TOPIC,
+      user_id: USER,
+      channel_kind: 'app-socket',
+      source: 'claude',
+      observed_at: NOW_MS + 1_000,
+    })
+
+    expect(out.outcome).toBe('noop_no_state')
+    expect(stack.startedSources).toEqual([])
+    // No row was manufactured for an unsolicited upload.
+    expect(await stateStore.get(OWNER, USER)).toBeNull()
+  })
+
+  test('managed mode, NO row → no-op (never seeds a row outside open Path-1)', async () => {
+    const stack = stubImportStack()
+    const engine = buildEngine({ deploymentMode: 'managed', importAffordanceOffered: true, ...stack })
+
+    const out = await engine.notifyImportUpload({
+      project_slug: OWNER,
+      topic_id: TOPIC,
+      user_id: USER,
+      channel_kind: 'app-socket',
+      source: 'claude',
+      observed_at: NOW_MS + 1_000,
+    })
+
+    expect(out.outcome).toBe('noop_no_state')
+    expect(stack.startedSources).toEqual([])
+    expect(await stateStore.get(OWNER, USER)).toBeNull()
+  })
+
   test('open mode honors the SNIFFED source (chatgpt affordance, claude zip)', async () => {
     const stack = stubImportStack()
     const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })

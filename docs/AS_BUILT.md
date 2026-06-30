@@ -2,6 +2,47 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-29 — M1 CRITICAL: open-mode history import wouldn't START (#130 regression) — upload right after the name now seeds the row + starts the job
+
+**Symptom.** On a fresh Open install, the reworked onboarding (#130) offers
+history import right after the name. The owner uploads their ChatGPT/Claude
+export and the server returns `job_id: null`; the client shows "Couldn't start
+the import — no import job started." The import never runs (`import_jobs` empty,
+`in_flight_imports=0` forever) behind a false success.
+
+**Root cause.** `InterviewEngine.notifyImportUpload`
+(`onboarding/interview/engine.ts`) reads the onboarding_state row and short-
+circuits with `noop_no_state` when it's absent — **before** the open-mode
+import-start gate. The open-mode live-agent onboarding never calls
+`engine.start()` (managed mode's row-seeding entry); the row is created
+**lazily + asynchronously** by the fire-and-forget post-turn extractor
+(`post-turn-extractor.ts`), a multi-second background LLM call that only upserts
+once it extracts a field. #130 moved the import offer to right after the name —
+**earlier than the background extractor can create the row** — so the upload
+races ahead of the row and lands at `state === null`.
+
+**Fix (no flags, tenant-silent).** In `notifyImportUpload`'s `state === null`
+branch, when the upload is a SOLICITED open-mode Path-1 upload (the SAME signal
+the non-null gate uses: `deploymentMode === 'open'` AND `importAffordanceOffered`,
+the exact condition the live-agent seam renders the 📎 affordance under), seed
+the onboarding_state row at the `work_interview_gap_fill` conversational marker —
+stamping `signup_via` so the import-running cron's channel-context invariant holds
+on disk — then start the import via the existing
+`startImportAndAdvanceToRunning`. A STRAY upload (affordance not offered, e.g. no
+synthesis substrate) and managed mode both still `noop_no_state`. The #130
+offer-first / live-progress / ordering / curation-context handoff are untouched.
+
+**Test (forbidden-pattern fixed).** The passing acceptance test
+`tests/integration/nd2-real-export-path1-import-runs.test.ts` SQL-SEEDED an
+onboarding_state row before uploading — manufacturing the precondition the live
+flow never creates, so it could never catch this. It now seeds NO row and drives
+the real no-state upload (verified end-to-end with Ryan's real 3.6MB / 184-convo
+Claude export → job started). Added two engine-level repros in
+`onboarding/interview/__tests__/path1-solicited-upload-starts-job.test.ts`
+(no-state solicited → seeds row + starts; no-state affordance-off / managed →
+no-op, no row manufactured). Negative control: reverting the engine fix fails
+exactly these no-state tests.
+
 ## 2026-06-29 — M1: onboarding import flow rework — offered FIRST + live progress + curation handoff + ordering
 
 This is one coherent import-onboarding rework (PR #130). Two further bugs were

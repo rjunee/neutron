@@ -127,15 +127,14 @@ describe('ND2 real-export — Path-1 conversational upload STARTS the import', (
   test.skipIf(!HAVE_EXPORT)(
     "Ryan's real Claude export at work_interview_gap_fill kicks a real import job ingesting the real conversations.json",
     async () => {
-      // Live Path-1: the engine sits at a conversational phase, NO import job —
-      // the exact state where the upload used to be silently orphaned.
-      await stateStore.upsert({
-        user_id: 'test-user',
-        project_slug: 'test-owner',
-        phase: 'work_interview_gap_fill',
-        phase_state_patch: { topic_id: 'chat', user_id: 'test-user', signup_via: 'web' },
-        advanced_at: 1,
-      })
+      // Live Path-1, fresh install: there is NO onboarding_state row yet. The
+      // open-mode live-agent flow never calls `engine.start()`, and #130 offers
+      // the import right after the name — BEFORE the fire-and-forget post-turn
+      // extractor has lazily/async created the row. This test deliberately does
+      // NOT seed a row (it previously SQL-seeded one, which manufactured the
+      // precondition the live flow never creates — so it could never catch the
+      // #130 regression). The upload itself must seed the row + start the import.
+      expect(await stateStore.get('test-owner', 'test-user')).toBeNull()
 
       // POST the REAL export to the web affordance's hardcoded /chatgpt route;
       // the handler's sniffer re-routes it to the Claude parser.
