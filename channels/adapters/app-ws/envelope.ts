@@ -470,6 +470,49 @@ export interface AppWsOutboundWorkBoardChanged {
   ts: number
 }
 
+/**
+ * Onboarding history-import — live progress for the in-flight import job.
+ *
+ * Fanned to the owner's app-ws topic every ~5s by the import-running cron
+ * (`onboarding/interview/import-running-cron.ts` → `engine-import-routing.ts`)
+ * while a ChatGPT/Claude history import processes, so a long import (minutes,
+ * for hundreds of conversations) visibly works instead of stalling on a one-shot
+ * "received" banner. Collapses the legacy `web:` path's `import_progress`
+ * `ChatOutbound` frame (`landing/server.ts`) onto the consolidated app-ws wire.
+ *
+ * EPHEMERAL + UI-only: NOT persisted, carries no `seq`, never replayed on
+ * `resume` — mirrors `agent_typing` / `work_board_changed`. Terminal statuses
+ * normally arrive via the phase advance + analysis `agent_message`, not here;
+ * the client clears its spinner defensively if a terminal frame does land.
+ */
+export interface AppWsOutboundImportProgress {
+  v: 1
+  type: 'import_progress'
+  /** The import job this update belongs to. */
+  job_id: string
+  status:
+    | 'queued'
+    | 'pass1-running'
+    | 'pass2-running'
+    | 'rate_limit_cooling_off'
+    | 'rate_limit_paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+  /** 1 = triage pass (counting conversations), 2 = synthesis pass. */
+  pass: 1 | 2
+  /** 0..1 fractional progress within the current pass. */
+  pct: number
+  /**
+   * Whether the chunk denominator is stable (render "N of M") vs still
+   * streaming (count-only). Mirrors `ImportJob.chunks_total_known` end-to-end.
+   */
+  chunks_total_known: boolean
+  /** Human-readable progress line, e.g. "reading conversation N of M…". */
+  body?: string
+  ts: number
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
@@ -481,6 +524,7 @@ export type AppWsOutbound =
   | AppWsOutboundProjectsChanged
   | AppWsOutboundWorkBoardChanged
   | AppWsOutboundAgentTyping
+  | AppWsOutboundImportProgress
   | AppWsOutboundError
 
 /**

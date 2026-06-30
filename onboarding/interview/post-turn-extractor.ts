@@ -336,12 +336,51 @@ export function buildPhaseStatePatch(
   if (fields?.agent_personality !== undefined && fields.agent_personality.trim().length > 0) {
     patch['agent_personality'] = fields.agent_personality.trim()
   }
-  if (fields?.primary_projects !== undefined && fields.primary_projects.length > 0) {
+  // primary_projects — additive merge (a confirm/restate can only ADD, never
+  // silently shrink the seeded list: the 7→3 GAP1 regression), THEN subtract any
+  // the owner EXPLICITLY dropped this turn ("drop Family Home"). Mirrors the
+  // legacy engine's `mergeAdvanceProjectsAdditively` — `(prior ∪ adds) MINUS
+  // removals` (case-insensitive). The Path-1 extractor previously had no removal
+  // channel, so a dropped import-proposed project was re-added by the union and
+  // still got a shell. The removal OVERRIDES the additive rule ONLY for projects
+  // the extractor flagged as explicitly removed; mere omission never shrinks.
+  const addedProjects =
+    fields?.primary_projects !== undefined
+      ? fields.primary_projects.map((p) => p.trim()).filter((p) => p.length > 0)
+      : []
+  const removedKeys = new Set(
+    (fields?.removed_projects ?? []).map((p) => p.trim().toLowerCase()).filter((p) => p.length > 0),
+  )
+  if (addedProjects.length > 0 || removedKeys.size > 0) {
     const prior = readStringArray(prior_phase_state, 'primary_projects')
-    patch['primary_projects'] = dedupeStringsCaseInsensitive([
-      ...prior,
-      ...fields.primary_projects.map((p) => p.trim()).filter((p) => p.length > 0),
-    ])
+    const union = dedupeStringsCaseInsensitive([...prior, ...addedProjects])
+    patch['primary_projects'] =
+      removedKeys.size > 0 ? union.filter((p) => !removedKeys.has(p.trim().toLowerCase())) : union
+  }
+  // Track the explicit drops separately. Subtracting from primary_projects alone
+  // is not enough: finalize's project resolution re-pulls the import's
+  // proposed_projects (a defensive union), so it needs this dropped list to
+  // exclude a dropped project from the IMPORT side too. Two rules:
+  //  - additive across turns (an unrelated turn never resurrects a drop), BUT
+  //  - a later explicit RE-ADD clears a prior drop — the owner changed their mind
+  //    ("drop X" then "actually keep X"). An added name (that isn't ALSO being
+  //    dropped this same turn) is removed from the accumulated set, so finalize
+  //    creates it again. Without this, a reversal would be silently ignored.
+  const priorDropped = readStringArray(prior_phase_state, 'dropped_projects')
+  const newlyDropped = (fields?.removed_projects ?? [])
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+  const readdedKeys = new Set(
+    addedProjects.map((p) => p.trim().toLowerCase()).filter((k) => !removedKeys.has(k)),
+  )
+  const accumulatedDropped = dedupeStringsCaseInsensitive([...priorDropped, ...newlyDropped]).filter(
+    (p) => !readdedKeys.has(p.trim().toLowerCase()),
+  )
+  const droppedChanged =
+    accumulatedDropped.length !== priorDropped.length ||
+    accumulatedDropped.some((p, i) => p !== priorDropped[i])
+  if (droppedChanged) {
+    patch['dropped_projects'] = accumulatedDropped
   }
   if (fields?.non_work_interests !== undefined && fields.non_work_interests.length > 0) {
     patch['non_work_interests'] = mergeInterests(prior_phase_state, fields.non_work_interests)
@@ -408,7 +447,11 @@ Fields:
     "dry and concise"), if expressed.
   - primary_projects: array of the user's work projects / focus areas, VERBATIM
     short labels (e.g. ["Topline", "a book on focus", "Acme infra"]). Only what
-    they named.
+    they named. Include a project they CONFIRM/keep from a list you proposed.
+  - removed_projects: array of project labels the user EXPLICITLY asked to drop,
+    skip, or remove from a list you previously proposed (e.g. "drop Family Home",
+    "skip the personal one, keep the rest"). VERBATIM labels matching what you
+    proposed. ONLY on a clear removal — never infer a drop from mere omission.
   - non_work_interests: array of {name, cadence_hint?} for hobbies / interests
     outside work (cadence_hint ∈ weekly|monthly|occasional, optional).
 
@@ -523,6 +566,13 @@ export function parseExtractedFields(raw: string): ExtractedFields | null {
   if (Array.isArray(pp)) {
     const arr = pp.filter((e): e is string => typeof e === 'string').slice(0, 8)
     if (arr.length > 0) out.primary_projects = arr
+  }
+  const rp = obj['removed_projects']
+  if (Array.isArray(rp)) {
+    const arr = rp
+      .filter((e): e is string => typeof e === 'string' && e.trim().length > 0)
+      .slice(0, 8)
+    if (arr.length > 0) out.removed_projects = arr
   }
   const nwi = obj['non_work_interests']
   if (Array.isArray(nwi)) {

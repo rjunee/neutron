@@ -49,7 +49,10 @@ import { buildProjectDocComposer } from '../gateway/realmode-composer/build-proj
 import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
 import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
 import { auditRequiredFields } from '../onboarding/interview/required-fields-audit.ts'
-import { buildOnboardingPreamble } from '../onboarding/interview/onboarding-preamble.ts'
+import {
+  buildImportAnalysisContextFragment,
+  buildOnboardingPreamble,
+} from '../onboarding/interview/onboarding-preamble.ts'
 import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
   buildLlmCallSubstrate,
@@ -149,6 +152,7 @@ import {
   appWsTopicId,
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentTyping,
+  type AppWsOutboundImportProgress,
   type AppWsOutboundProjectsChanged,
   type AppWsOutboundWorkBoardChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
@@ -2045,6 +2049,37 @@ export function buildOpenGraphComposer(
         ? {
             isActive: (user_id: string): Promise<boolean> => isOnboardingActive(user_id),
             systemPreamble: (): string => onboardingPreambleText,
+            // Per-turn grounding: re-inject the import-analysis the agent already
+            // presented (proposed projects + curation status) so the warm session
+            // KNOWS what it proposed and can honor "drop X" / "keep the rest".
+            // Reads the durable phase_state (where the engine stamped the full
+            // import_result + the merged primary_projects). Best-effort: any read
+            // failure degrades to no block (the turn still runs).
+            onboardingContext: async (user_id: string): Promise<string | null> => {
+              try {
+                const st = await onboardingStateStore.get(project_slug, user_id)
+                if (st === null) return null
+                const ir = st.phase_state['import_result']
+                const importResult =
+                  ir !== null && typeof ir === 'object' ? (ir as ImportResult) : null
+                if (importResult === null) return null
+                const activeRaw = st.phase_state['primary_projects']
+                const active_project_names = Array.isArray(activeRaw)
+                  ? activeRaw.filter((s): s is string => typeof s === 'string')
+                  : []
+                const fn = st.phase_state['user_first_name']
+                return buildImportAnalysisContextFragment({
+                  proposed_projects: importResult.proposed_projects.map((p) => ({
+                    name: p.name,
+                    rationale: p.rationale,
+                  })),
+                  active_project_names,
+                  user_first_name: typeof fn === 'string' ? fn : null,
+                })
+              } catch {
+                return null
+              }
+            },
             uploadAffordance: (): { source: 'chatgpt' | 'claude' } | null =>
               importSubstrate !== null ? { source: 'chatgpt' } : null,
             onTurnComplete: (turn): void => onboardingExtractor.onTurnComplete(turn),
@@ -2199,6 +2234,38 @@ export function buildOpenGraphComposer(
         // (which left the owner never seeing their import result). See
         // resolveOpenImportPromptEmission for the rationale.
         const toEmit = resolveOpenImportPromptEmission(prompt, st?.phase ?? null, importFailed)
+        // Ordering fix (import-curation handoff, 2026-06-29): the SUCCESSFUL
+        // import_analysis_presented body is a plain "wow moment" agent message
+        // (its dangling button is stripped above, and the watcher auto-consumes
+        // the phase). Delivered ephemerally via emitOnboardingPrompt it carries NO
+        // chat_log `seq`, so the client sorts it to the tail and a later real-seq
+        // user message renders ABOVE it (newest-at-bottom broken) — and it
+        // vanishes on resume. Persist THIS one through the durable adapter
+        // (chat_log → monotonic seq, replayable) so it orders with live chat.
+        // Safe from double-render: on_session_open never re-sends the body, and
+        // the watcher resolves the phase (active_prompt_id→null) so the engine's
+        // reconnect re-emit won't re-fire it. Every OTHER onboarding prompt
+        // (import failure / rate-limit / resume — real buttons) stays ephemeral,
+        // since the engine owns their durability + reconnect re-emit.
+        if (
+          st?.phase === 'import_analysis_presented' &&
+          !importFailed &&
+          toEmit.options.length === 0 &&
+          appWsHolder.adapter !== undefined
+        ) {
+          const msg: OutgoingMessage = {
+            topic: {
+              topic_id: '',
+              channel_kind: 'app_socket',
+              channel_topic_id: topic_id,
+              project_id: null,
+              privacy_mode: 'regular',
+            },
+            text: toEmit.body,
+          }
+          const id = await appWsHolder.adapter.send(msg)
+          return { message_id: prompt.prompt_id, was_new: !id.startsWith('app-ws:dropped:') }
+        }
         const ok = emitOnboardingPrompt(topic_id, toEmit)
         return { message_id: prompt.prompt_id, was_new: ok }
       } catch {
@@ -2207,11 +2274,35 @@ export function buildOpenGraphComposer(
       const ok = emitOnboardingPrompt(topic_id, prompt)
       return { message_id: prompt.prompt_id, was_new: ok }
     }
-    // Import-progress over app-ws: dropped for now (the terminal-state prompt
-    // still lands via the button-prompt path). Left as an explicit no-op holder
-    // so the router prefix is recognised (no "unknown-channel" warn). A future
-    // pass can translate progress → an `agent_message_partial`-style update.
-    void appWsImportProgressRouter
+    // Import-progress over app-ws (2026-06-29): the engine's import-running cron
+    // emits an `import_progress` event every ~5s while a history import runs, and
+    // `buildRoutedSendImportProgress` routes `app:<user>` topics to this holder.
+    // Fan it to the owner's live socket as an ephemeral `import_progress` frame
+    // (mirrors `emitAppWsTyping` / `work_board_changed`): the React client renders
+    // a live spinner + per-pass progress line off it, so a long import visibly
+    // works instead of stalling on the one-shot "received" banner. UI-only — NOT
+    // persisted, no `seq`, never replayed on `resume`. Terminal statuses still
+    // deliver their analysis body via the button-prompt path above; a terminal
+    // frame here just clears the client's spinner defensively. Best-effort: a
+    // closed socket / registry miss is a silent non-delivery (re-emitted next tick).
+    appWsImportProgressRouter.send = async ({ topic_id, event }) => {
+      const env: AppWsOutboundImportProgress = {
+        v: 1,
+        type: 'import_progress',
+        job_id: event.job_id,
+        status: event.status,
+        pass: event.pass,
+        pct: event.pct,
+        chunks_total_known: event.chunks_total_known,
+        ts: Date.now(),
+      }
+      if (event.body !== undefined) env.body = event.body
+      try {
+        return { delivered: appWsRegistry.send(topic_id, env) }
+      } catch {
+        return { delivered: false }
+      }
+    }
 
     const appWsReceiver = {
       receive: async (event: IncomingEvent): Promise<void> => {

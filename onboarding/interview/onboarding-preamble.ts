@@ -32,6 +32,28 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   lines.push('')
   lines.push('Over the course of the conversation, naturally learn:')
   lines.push('  1. Their first name (what they\'d like you to call them).')
+  if (input.import_offered) {
+    // The import offer is the EXPLICIT, EARLY first step — right after the name
+    // and BEFORE the work questions — so the box can analyse their real history
+    // and the rest of the interview is informed by it (onboarding-experience
+    // spec: upload precedes the guided interview). Positioned here, between goal
+    // #1 and goal #2, on purpose: placed at the end the model defers it past the
+    // work-interview, which is the "import is buried" bug this fixes.
+    lines.push('')
+    lines.push(
+      'RIGHT AFTER they tell you their name — as your very FIRST move, and BEFORE you ask',
+      'what they work on — EXPLICITLY and prominently offer to import their existing ChatGPT',
+      'or Claude history, so you start out already knowing their projects and context. Make',
+      'this a clear, up-front ask (not a throwaway aside): tell them they can export their',
+      'data from ChatGPT/Claude settings and then drag-and-drop or attach the .zip right here',
+      'in the chat — there is an attach (📎) / drop-zone control for exactly this. If they',
+      'attach one, acknowledge it warmly; the import runs in the background and shows live',
+      'progress while you keep talking, then you\'ll share what you found. If they decline or',
+      'don\'t have an export handy, that is completely fine — just move on to the questions',
+      'below. Either way, only ask this once.',
+    )
+    lines.push('')
+  }
   lines.push(
     '  2. What they work on — get at least three concrete projects, focus areas, or',
     '     things currently on their plate. Probe gently for more if they give only one.',
@@ -46,18 +68,6 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     '  5. A name for you, their assistant. Suggest a few that fit the personality they',
     '     picked, and let them choose or invent one.',
   )
-  if (input.import_offered) {
-    lines.push('')
-    lines.push(
-      'EARLY in the conversation (after you have their name and a sense of their work),',
-      'OFFER to import their existing ChatGPT or Claude history so you start already',
-      'knowing their projects and context. Tell them they can export their data from',
-      'ChatGPT/Claude settings and attach the .zip right here in the chat — there is an',
-      'attach (📎) control for it. If they attach one, acknowledge it warmly; the import',
-      'runs in the background and you can keep talking while it processes. If they decline',
-      'or don\'t have one, that is completely fine — just continue.',
-    )
-  }
   lines.push('')
   lines.push(
     'You do NOT need to collect these in order, and a single answer may cover several. Do',
@@ -68,5 +78,95 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     'onboarding"; the transition should feel seamless.',
   )
   lines.push('</onboarding>')
+  return lines.join('\n')
+}
+
+/**
+ * Escape import-derived text before splicing it into the `<import_analysis>`
+ * prompt block. The proposed project name/rationale come from the user's
+ * ChatGPT/Claude export (untrusted), so XML-like content must not be able to
+ * close the wrapper or inject sibling instructions. Mirrors `work-board/
+ * fragment.ts`'s `escapeData` + `escalation-loader.ts`'s `escapeXmlText`.
+ */
+function escapeImportText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** A project the agent proposed from the user's import (name + why). */
+export interface ProposedProjectForContext {
+  name: string
+  rationale?: string
+}
+
+export interface ImportAnalysisContextInput {
+  /** The projects the agent presented after reading the import (verbatim). */
+  proposed_projects: ReadonlyArray<ProposedProjectForContext>
+  /**
+   * The CURRENT working project set (`phase_state.primary_projects`) AFTER any
+   * curation — a proposed project missing from here has been dropped by the
+   * owner and will NOT be created.
+   */
+  active_project_names: ReadonlyArray<string>
+  /** The owner's first name, if already known. */
+  user_first_name?: string | null
+}
+
+/**
+ * Per-turn onboarding grounding for the import-analysis → curation handoff.
+ *
+ * THE BUG this fixes: the import-analysis result (the proposed-projects list the
+ * agent "presented" after reading the export) is delivered to the client OUT OF
+ * BAND — an ephemeral app-ws `agent_message` that never enters the warm REPL's
+ * transcript. So when the owner replies to curate it ("drop the Family Home
+ * project, keep the rest"), the live-agent turn has NO record of having proposed
+ * anything and answers "this is our first conversation, I haven't proposed any
+ * projects." This fragment re-injects the proposed set (with rationale + which
+ * have already been dropped) into the agent's context EVERY onboarding turn —
+ * exactly like the Work Board block re-grounds every turn — so the warm session
+ * KNOWS what it proposed and can handle keep/drop/edit/add, then finalize the
+ * curated set. Returns null when there's no import analysis to ground on.
+ */
+export function buildImportAnalysisContextFragment(
+  input: ImportAnalysisContextInput,
+): string | null {
+  const proposed = input.proposed_projects.filter((p) => p.name.trim().length > 0)
+  if (proposed.length === 0) return null
+  const active = new Set(
+    input.active_project_names.map((n) => n.trim().toLowerCase()).filter((n) => n.length > 0),
+  )
+  const lines: string[] = []
+  lines.push('<import_analysis>')
+  lines.push(
+    'CONTEXT — you have ALREADY read this owner\'s imported ChatGPT/Claude history earlier in',
+    'THIS onboarding and PRESENTED them an analysis, including the proposed projects below.',
+    'Do NOT claim you have not proposed anything, that you have no memory of it, or that this',
+    'is your first message — you proposed these, and the owner may now be reviewing/curating',
+    'the list.',
+  )
+  lines.push('')
+  lines.push('Projects you proposed from their import:')
+  for (const p of proposed) {
+    const dropped = !active.has(p.name.trim().toLowerCase())
+    // Escape import-derived text: a project name / rationale lifted from the
+    // user's ChatGPT/Claude export is untrusted and could contain XML-like text
+    // (e.g. "</import_analysis>") that would close this wrapper and inject
+    // sibling instructions into every warm onboarding turn. Mirrors the
+    // anti-injection escaping the work-board + escalation prompt seams use.
+    const name = escapeImportText(p.name.trim())
+    const rationale =
+      p.rationale !== undefined && p.rationale.trim().length > 0
+        ? ` — ${escapeImportText(p.rationale.trim())}`
+        : ''
+    lines.push(`  - ${name}${rationale}${dropped ? '   [DROPPED by the owner — will NOT be created]' : ''}`)
+  }
+  lines.push('')
+  lines.push(
+    'When the owner curates ("drop X", "keep the rest", "rename Y to Z", "add W"), respond',
+    'naturally and confirm the updated set; a dropped project is not created, and one you',
+    'add is. You do not need their explicit sign-off on every project — once the set looks',
+    'right, keep going. You still need the rest of the interview (their work focus beyond',
+    'these, a non-work interest, your personality, and your name) before you finalize.',
+  )
+  lines.push('</import_analysis>')
   return lines.join('\n')
 }

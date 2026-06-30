@@ -362,6 +362,52 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > `signup_via='web'` onto its first real extraction write when absent, so the
 > invariant holds on disk too. Root-caused in
 > `docs/research/fullpipe-e2e-2026-06-28.md` § Stage 3.
+>
+> **Import is offered FIRST + explicitly (M1 live-test, 2026-06-29).** Path-1
+> onboarding is prompt-driven (the engine runs only the import subsystem), so the
+> import offer's ordering lives entirely in the `<onboarding>` preamble
+> (`onboarding/interview/onboarding-preamble.ts`). The offer used to sit after all
+> five learning goals + was gated "after you have their name AND a sense of their
+> work", so the model deferred it past the work-interview ("import is buried").
+> It now renders between goal #1 (name) and goal #2 (work) and is reworded to an
+> EXPLICIT, prominent ask made RIGHT AFTER the name and BEFORE the work questions —
+> matching the onboarding-experience spec (upload precedes the informed interview)
+> and the always-on 📎 drop-zone affordance. No new phase/modal: a pure preamble
+> reposition (Option A, in-chat).
+>
+> **Import analysis → curation handoff (M1 live-test, 2026-06-29).** The
+> import-analysis RESULT (the proposed-projects list) was delivered to the client
+> but NOT threaded into the live-agent's context, so when the owner replied to
+> curate it ("drop the Family Home project"), the agent answered "this is our
+> first conversation, I haven't proposed any projects." Root cause: the analysis
+> "wow moment" is delivered OUT OF BAND (an ephemeral app-ws `agent_message` that
+> never enters the warm REPL transcript), and the onboarding `systemPreamble` is
+> static + only spliced on the cold first turn — so nothing re-grounded the warm
+> session on what it proposed. The fix threads it back in: (1) a new per-turn
+> seam method `LiveAgentOnboardingSeam.onboardingContext(user_id)` reads the
+> durable `phase_state.import_result` and emits an `<import_analysis>` fragment
+> (proposed projects + rationale + which were dropped), re-injected on EVERY
+> onboarding turn (warm AND cold) exactly like the Work Board block; (2) the
+> Path-1 post-turn extractor now implements the `removed_projects` channel
+> (already in `ExtractedFields` since GAP1) — an explicit "drop X" subtracts X
+> from `primary_projects` AND records it under `phase_state.dropped_projects`;
+> (3) finalize's `resolveProjects` excludes `dropped_projects` from BOTH union
+> sources (the import side re-pulls `proposed_projects`, so subtracting from
+> `primary_projects` alone wasn't enough), so a dropped project is never
+> materialized and persona-gen (reads `primary_projects`) agrees. Mirrors the
+> legacy engine's `(prior ∪ adds) MINUS removals`.
+>
+> **Import-delivered analysis ordering (M1 live-test, 2026-06-29).** The
+> successful `import_analysis_presented` body was fanned via the ephemeral
+> `emitOnboardingPrompt` (no chat_log `seq`), so the chat-core display sort
+> (`compareForDisplay`, "seq-less sorts to the tail") pinned it BELOW any later
+> real-seq user message — newest-at-bottom broken, and it vanished on resume.
+> That specific buttonless "wow moment" message now persists through the durable
+> app-ws adapter (chat_log → monotonic `seq`, replayable), so it orders with live
+> chat. Every OTHER onboarding prompt (failure / rate-limit / resume — real
+> buttons) stays ephemeral (the engine owns their reconnect re-emit); safe from
+> double-render because `on_session_open` never re-sends the body and the watcher
+> resolves the phase so the reconnect re-emit won't re-fire it.
 
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
@@ -1100,6 +1146,22 @@ indicator. No feature flags — one live path.
   a real "replying…" affordance for their full duration. The legacy `web:` path's
   `agent_typing_start`/`agent_typing_end` is the prior art; this collapses it into
   one app-ws envelope with a `state` discriminator.
+- **#7 live history-import progress (`AppWsOutboundImportProgress`).** A long
+  ChatGPT/Claude import (minutes, for hundreds of conversations) previously showed
+  no live progress on the app-ws surface: the engine's `import-running-cron` emits
+  an `import_progress` event every ~5s, `buildRoutedSendImportProgress` routes
+  `app:<user>` topics to a composer holder — but that holder's `.send` was a
+  documented NO-OP (`open/composer.ts`), so every frame was dropped and the chat
+  stalled on a one-shot "received" banner. The holder now fans an ephemeral
+  `{v:1,type:'import_progress',job_id,status,pass,pct,chunks_total_known,body?,ts}`
+  frame via `appWsRegistry.send` (NOT persisted, no seq, never replayed — mirrors
+  `agent_typing`/`work_board_changed`). The React client already consumed it
+  (`controller.ts`) and renders a live spinner + per-pass progress line
+  (`ChatApp.tsx` `ImportStatus`), so a long import visibly works, then the
+  proposed-projects analysis renders. Engine/cron/client-render were already built
+  — this fix was wiring the dropped `app:` route + defining the wire envelope (M1
+  live-test, 2026-06-29). The legacy `web:` path's `import_progress` `ChatOutbound`
+  frame is the prior art.
 - **Clients render it on both surfaces.** Web (React/assistant-ui via chat-core
   `web-session` → `controller.ts`) already resumed + rendered receipts/reactions/
   edits; it now drives its `car-typing` indicator off the authoritative
