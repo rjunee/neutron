@@ -22,13 +22,40 @@ This plan is the single source for the build. It also resolves the trident **par
 
 ---
 
-## 0. Verified facts this plan rests on (do not re-derive)
+## Enhancement Summary (deepened 2026-06-29 — 7 parallel reviews: architecture, agent-native, simplicity, security, data-integrity, orchestration research, frontend-design)
+
+**THE central change (resolves the most findings at once): move harvest + correlation + crash-recovery OFF the inject path and ONTO the durable `TridentTickLoop`.** The inner-workflow persists its TYPED terminal result (verdict/prNumber/branch/round) to `code_trident_runs` (it already writes checkpoints there, `inner-workflow.mjs:225`); the tick loop (90s, restart-safe, `tick.ts:154/169`) correlates by `runId`, updates the board item, and advances the state machine deterministically in TS. The injected turn becomes OPTIONAL narration only — delimited DATA, never an instruction stream. This one change resolves architecture P0-2/3 (fragile LLM-parsed interleaved harvest), architecture P0-4 + research (crash recovery: durable loop re-derives in-flight runs on boot + idempotent re-fire — workflow-runtime resume does NOT survive process exit, per Anthropic docs), and security H1/H2/M1 (untrusted workflow output injected into a Bash+Workflow orchestrator; self-asserted verdict; uncorrelated N-parallel harvest).
+
+**Corrections (verify-before-assert):**
+- §0 KEYSTONE was OVERCLAIMED — the 3-sleep-workflow probe proves the Workflow TOOL runs N in parallel + the session stays responsive, but NOT real Forge/Argus `agent()` workers, `runId`-correlated harvest, or billing-mode. Reframed to "parallelism mechanism proven; full real-loop is the load-bearing Phase-0 test."
+- §7.1 mechanism fix: `Workflow` is a CC-NATIVE tool gated by `DEFAULT_TOOL_NAMES` + the warm-REPL constant-surface reuse-guard (`build-live-agent-turn.ts:99-103`) — NOT a Neutron MCP registry tool. Exposing it = a `--tools` edit (with the reuse-guard caveat), not MCP registration. (`work_board_*` DO ride the MCP bridge — that part was right.)
+- **NEW Phase-0 gate (critical): assert BILLING MODE** — confirm the background Workflow's nested `agent()` workers inherit the parent PTY's Max-OAuth exemption (not API-billed). This is the entire reason for the rearchitecture; if they bill as API it fails its purpose.
+
+**Security model (adopt):** harvest only TYPED fields (never raw stdout); verdict provenance server-gated to the Argus phase (`inner_checkpoint`/0089), never a self-asserted `TRIDENT_RESULT` line; `work_board_*` derive `project_slug` server-side (never agent-supplied), `approval_policy:'auto'` + a capability; `design_doc_ref` scheme allow-list (`https:` + in-app docs scheme) at write AND render, `rel=noopener`, never raw `Linking.openURL`; CHECK constraints + title length cap + newline-strip; per-turn injection as escaped, length-capped DELIMITED DATA; new `GET /work-board` bearer-gated like the tabs surface; tenant-vocab-silent.
+
+**Agent-native (adopt):** ADD the human write path — UI add/edit/complete + `POST/PATCH /work-board` sharing the same `WorkBoardStore` (board is read+WRITE for the owner, not agent-owned-read-only); the hard-rule becomes a REQUIRED `board_item_id` param on the dispatch tools (`dispatch_agent`/`/code`/Workflow dispatch) rejected at the chokepoint (`spawnSubagent`/`DispatchService`) — enforceable AND self-documenting, not a naggy refusal; inject the board via an UNCONDITIONAL `instance_fragments` entry, NOT the optional `reflection` seam (avoid silent un-wiring).
+
+**Simplicity (adopt):** the trident row is the SINGLE source of run activity — the board DERIVES sub-agent state via join on `linked_run_id` (do not duplicate `subagent_status`); keep only a lightweight `inline`-active marker (Ryan's distinct inline-icon requirement stays); drop fractional `sort_order REAL` → order by `(status, created_at)` / simple integer, defer the reorder tool; Layer-B aggressive-reset becomes its OWN later phase (not bundled into the board PR); tighten phases (0 verify; 1 board-works; 2 trident-bound+parallel; future notes: TodoWrite, Layer-B).
+
+**Data-integrity (adopt):** `0090` — CHECK constraints on status/activity, TEXT ISO-8601 timestamps (match 0077), partial index on `linked_run_id`, regenerate `expected-schema.txt` (snapshot.test.ts gate) in the same PR; wrap reorder/append in `db.transaction()` (`.get()` bypasses the write mutex → race under N-parallel); null `completed_at` on any re-open off `done`; reconcile orphaned `linked_run_id`/activity off the run's terminal transition (now handled by the durable-loop harvest).
+
+**Flow-control (research):** the 16/1000 agent caps are PER-RUN — N tridents have no cross-run ceiling. Add an orchestrator-level concurrency cap with the board as the bounded queue (`upcoming` = backlog; promote/fire only under the ceiling). Pass `runId`/board-item-id via the workflow `args` global for self-correlation. (Agent Teams rejected: mailbox pollution + experimental resume/one-team limits.)
+
+**UI (frontend-design, refines §9/§6):** flat one-line rows, NO cards (distinct from Tasks' editable cards); 8px status dot — hollow ring=upcoming, filled live-BLUE=in_progress (use `#6cf`/`link` family, NOT mobile's gray `accent` token), quiet `text_muted`/✓=done; activity glyph only when ≠idle — fork `⑂`=subagent vs caret `›`/`▎`=inline, distinguished by silhouette+motion+a11y label (not color); completed = collapsed disclosure `▸ Completed · N`, dimmed rows, right-aligned mono datestamp, reverse-chron, own scroll region, forever; 3 subtle motions reusing `car-blink` (live pulse), a `cwb-flash` on change, quiet fade on completion — all `prefers-reduced-motion`-gated; web `cwb-`-prefixed styles + `TabContent` branch, mobile `workboard.tsx` route; only new token = reuse `link:#5fb6ff` for "running."
+
+**Two decisions flagged for Ryan** (see §12): (1) board is read+WRITE for the human in the UI [recommended] vs agent-owned read-only; (2) Layer-B aggressive-reset as its own later phase [recommended] vs in the first board PR.
+
+> The sections below are the original plan; where this summary amends a section, the summary governs.
+
+---
+
+## 0. Verified facts this plan rests on (Phase-0 re-verifies the load-bearing ones)
 
 Live tests on real interactive `claude` + the real `Workflow` tool (2026-06-29):
 
 - **A fired Workflow runs in the background; the launching session STAYS RESPONSIVE.** (Injected a chat turn mid-run, answered instantly.)
 - **The workflow's internals stay OUT of the launching session's context** — only the compact result returns. (Context-isolation already works; it was never the problem.)
-- **KEYSTONE: one session fired 3 Workflows that ran TRULY IN PARALLEL** — all START 16:49:12, all DONE 16:50:12 (the 60s sleep; not serialized), all returned `ok`, session responsive throughout. ⇒ **one topic/orchestrator REPL can orchestrate N parallel tridents. Sibling/per-run REPLs are NOT required for parallelism.**
+- **KEYSTONE (parallelism mechanism proven; full real-loop pending Phase 0): one session fired 3 Workflows that ran TRULY IN PARALLEL** — all START 16:49:12, all DONE 16:50:12 (the 60s sleep; not serialized), all returned `ok`, session responsive throughout. ⇒ **one topic/orchestrator REPL can orchestrate N parallel tridents; sibling/per-run REPLs are NOT required for parallelism.** SCOPE CAVEAT (deepening): these were trivial sleep-workflows — this proves the Workflow TOOL's parallelism + session-responsiveness, NOT real Forge/Argus `agent()` workers, `runId`-correlated harvest, or billing-mode. Those are the load-bearing **Phase-0 V1** tests (+ the new billing-mode assertion). Do not treat the full real loop as verified yet.
 - Neutron's persistent-REPL substrate **settles a turn on the first `reply()`** (`runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts:1295/1326`) AND has an **out-of-band inject path** that can deliver a NEW turn to a warm session (`injectMessage` `persistent-repl-substrate.ts:2326`; system-notice inject `dev-channel.ts:277`). ⇒ async-harvest is feasible without holding a turn open.
 
 ---
@@ -143,7 +170,7 @@ The Work Board is the orchestrator's EXTERNAL memory; the conversation becomes d
 ## 9. Web + mobile tab UI
 
 - Web: `WorkBoardTab.tsx` + `TabContent` branch (`ProjectShell.tsx:132-164`). Mobile: `app/app/projects/[id]/workboard.tsx`. Both consume a `GET /api/app/projects/<id>/work-board` + live `work_board_changed` frames.
-- UX (minimal, Ryan-locked): single list — active+next at top, each ONE line with a colored status dot + activity icon (sub-agent vs distinct inline) + optional design-doc link; completed items collapsed at the bottom with a completion datestamp. No section cruft. Follow project design conventions; no AI-slop.
+- UX (minimal, Ryan-locked): single list — active+next at top, each ONE line with a colored status dot + activity icon (sub-agent vs distinct inline) + optional design-doc link; completed items collapsed at the bottom, **reverse-chronological (most recent at top)**, each with a **completion datestamp**, and they **stay forever** (full history — no auto-archive). No section cruft. Follow project design conventions; no AI-slop.
 
 ---
 
@@ -170,7 +197,7 @@ Repo routing: **all Neutron Open.** Each phase = its own PR(s), verified in a re
 - **Resource ceiling at high N** (V2) — when one process hosting many workflows strains; the sibling tunable is the escape hatch.
 - **Hard-rule enforcement ergonomics** — forcing "write an item first" must not be annoying for trivial inline work; advisory-first softens this.
 - **TodoWrite mapping** is greenfield; keep it last so it can't block the reliability win.
-- Open question for Ryan: should completed items ever auto-archive/age out, or stay forever for full history? (Plan assumes: stay, collapsed.)
+- RESOLVED (Ryan 2026-06-29): completed items **stay forever** in a collapsed section at the bottom, **reverse-chronological (most recent at top)**, each **completion-datestamped**. No auto-archive/age-out.
 
 ---
 
