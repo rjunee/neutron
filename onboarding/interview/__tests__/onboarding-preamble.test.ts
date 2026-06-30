@@ -16,7 +16,60 @@ import { describe, expect, it } from 'bun:test'
 import {
   buildImportAnalysisContextFragment,
   buildOnboardingPreamble,
+  buildOnboardingStepGuardFragment,
 } from '../onboarding-preamble.ts'
+
+/** A phase_state with the 3 non-button fields filled, so the audit's only
+ *  remaining gaps are the button-driven personality + name steps. */
+const NON_BUTTON_FIELDS_FILLED = {
+  user_first_name: 'Sam',
+  primary_projects: ['A', 'B', 'C'],
+  non_work_interests: ['climbing'],
+} as const
+
+describe('buildOnboardingStepGuardFragment — deterministic personality/name guard (item 3)', () => {
+  it('forces the personality archetype [[OPTIONS]] while agent_personality is unset', () => {
+    const out = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED })
+    expect(out).not.toBeNull()
+    expect(out as string).toContain('PERSONALITY')
+    expect(out as string).toContain('[[OPTIONS]]')
+    // Names the curated archetypes (e.g. Sherlock) rather than letting the model
+    // improvise a list.
+    expect(out as string).toContain('Sherlock')
+    // Hard contract: never settle by free text alone, never finalize without it.
+    expect(out as string).toContain('`[[OPTIONS]]` block')
+    expect(out as string).toContain('never settled by')
+    expect(out as string).toContain('You may not wrap up / finalize')
+  })
+
+  it('forces the name [[OPTIONS]] once personality is set but agent_name is unset', () => {
+    const out = buildOnboardingStepGuardFragment({
+      ...NON_BUTTON_FIELDS_FILLED,
+      agent_personality: 'warm and direct',
+    })
+    expect(out).not.toBeNull()
+    expect(out as string).toContain('NAME')
+    expect(out as string).toContain('[[OPTIONS]]')
+    // Personality is settled → the guard no longer pushes the archetype step.
+    expect(out as string).not.toContain('PERSONALITY')
+  })
+
+  it('returns null once BOTH personality and name are settled (nothing to force)', () => {
+    const out = buildOnboardingStepGuardFragment({
+      ...NON_BUTTON_FIELDS_FILLED,
+      agent_personality: 'warm and direct',
+      agent_name: 'Atlas',
+    })
+    expect(out).toBeNull()
+  })
+
+  it('flags BOTH steps when personality and name are both unset', () => {
+    const out = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED })
+    expect(out).not.toBeNull()
+    expect(out as string).toContain('PERSONALITY')
+    expect(out as string).toContain('NAME')
+  })
+})
 
 describe('buildOnboardingPreamble — import offer ordering', () => {
   it('offers the import when import_offered is true', () => {

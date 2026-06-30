@@ -1077,11 +1077,22 @@ function ChatSurface({
       <ThreadPrimitive.Root className="car-thread">
         <ThreadPrimitive.Viewport className="car-viewport">
           <ThreadPrimitive.Empty>
-            {config.onboardingActive ? (
+            {config.onboardingActive && vm.projectId === null ? (
               // BUG 1 — a FRESH onboarding auto-starts: the server pushes the
               // first prompt on connect. Show a loading indicator (matching
               // the old vanilla chat's "Setting things up…") while it arrives,
               // NOT the steady-state "Send a message to begin." empty state.
+              //
+              // ONBOARDING IS GENERAL-TOPIC-ONLY (2026-06-30 fresh-install fix).
+              // The welcome seed only auto-fires on the owner's General topic
+              // (`vm.projectId === null`); a PROJECT topic is always steady-state
+              // (its deterministic opening is seeded by finalize + regenerated on
+              // entry). `config.onboardingActive` is a page-global bootstrap flag,
+              // so WITHOUT the `vm.projectId === null` guard, opening an empty
+              // project tab while still onboarding (or right after) painted this
+              // infinite "Setting things up…" loader FOREVER (it never resolves,
+              // even on reload). Gate on the active topic so a project tab shows a
+              // usable empty state, never the onboarding loader.
               <div className="car-empty">
                 <div className="car-empty-title">Neutron</div>
                 <div className="car-empty-sub car-empty-loading" role="status" aria-live="polite">

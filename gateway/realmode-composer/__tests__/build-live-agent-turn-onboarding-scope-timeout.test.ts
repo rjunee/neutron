@@ -10,7 +10,7 @@
  *  improvising "…what should I call you?".
  *
  *  FIX 2 (cold-turn 180s hard-fail): a COLD first turn / onboarding turn raises
- *  the per-turn budget to `COLD_TURN_TIMEOUT_MS` (360s) on BOTH the composer
+ *  the per-turn budget to `COLD_TURN_TIMEOUT_MS` (600s) on BOTH the composer
  *  AbortController and the substrate (`spec.turn_timeout_ms`); a warm
  *  steady-state turn sends no override (keeps the snappy default). A FAILED
  *  `seed_turn` stays silent (no persisted `FAILURE_BODY` bubble) so a reload can
@@ -37,7 +37,9 @@ import {
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
-const COLD_TURN_TIMEOUT_MS = 360_000
+// Mirror of the production constant (build-live-agent-turn.ts). Raised 360s → 600s
+// on 2026-06-30 after a real onboarding turn still hard-failed at ~5.5min under load.
+const COLD_TURN_TIMEOUT_MS = 600_000
 
 let tmp: string
 let db: ProjectDb
@@ -170,7 +172,7 @@ describe('FIX 1 — onboarding is General-topic-only', () => {
 })
 
 describe('FIX 2 — cold/onboarding turn timeout budget', () => {
-  test('a COLD first turn requests the 360s budget via spec.turn_timeout_ms', async () => {
+  test('a COLD first turn requests the 600s budget via spec.turn_timeout_ms', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }) })
@@ -178,7 +180,7 @@ describe('FIX 2 — cold/onboarding turn timeout budget', () => {
     expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_TIMEOUT_MS)
   })
 
-  test('an ONBOARDING turn requests the 360s budget even when warm', async () => {
+  test('an ONBOARDING turn requests the 600s budget even when warm', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }), onboarding: true })

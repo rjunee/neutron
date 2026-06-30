@@ -2,6 +2,67 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-30 — Onboarding reliability: per-project opening recovery + empty-project loader + deterministic archetype step + larger cold budget
+
+**P0 — four reliability gaps from a full fresh-install verify of #136+#138.** All
+fixed inside Path-1 (no flags, live-session locked, honoring #129; no regression
+of #136 custom-name/closing, #137 per-project-chat/Plan/markdown/tabs, #138
+General-only onboarding + raised-timeout + welcome-reload-recovery).
+
+**Issue 1 — per-project OPENING never landed (DB-confirmed 0 rows).** Finalize's
+`emitProjectOpenings` logic was correct and unit-tested, yet the live box showed 6
+projects with ZERO `app:<user>:<project>` `button_prompts` rows: the opening was a
+fire-once side effect of finalize that can race the project-tab socket, be
+swallowed, or be delayed under cold-turn load, and nothing regenerated it on entry
+(reload recovered only the General welcome). **Fix:** made the opening a property
+of ENTERING a materialized project. `open/composer.ts` `on_session_open` now, on
+every steady-state connect to a materialized PROJECT topic with no message yet,
+regenerates + persists the SAME deterministic opening
+(`build-onboarding-handoff.ts:buildDeterministicProjectOpening` over the
+materialized `STATUS.md`/`README.md`) via the idempotent `onboardingMsgHolder.emit`
+(`dedupe_key: onboarding_opening:<project_id>`) — collapses onto finalize's row if
+that already landed, never double-posts. Doubles as reload recovery for a
+stuck/missing project opening (Issue 4b).
+
+**Issue 2 — empty project chat showed a PERMANENT "Setting things up…" loader.**
+`chat-react/ChatApp.tsx` gated the loader on the page-global
+`config.onboardingActive` ALONE, so opening an empty project tab while onboarding
+(or just after) painted the infinite onboarding loader forever. **Fix:** gate on
+`config.onboardingActive && vm.projectId === null` — onboarding is General-only, so
+a project topic resolves to the usable "Send a message to begin." empty state,
+never the loader.
+
+**Issue 3 — personality/archetype step was non-deterministic (skipped).** The
+archetype + name steps lived only as soft preamble prose, and the preamble also
+says "you do NOT need to collect these in order" — a fresh-install run showed ZERO
+option buttons. **Fix:** new `onboarding-preamble.ts:buildOnboardingStepGuardFragment`
+audits the durable `phase_state` and, while `agent_personality`/`agent_name` are
+unset, HARD-REQUIRES the named-archetype / name `[[OPTIONS]]` block (never settle by
+free text alone, never finalize without it). Injected EVERY onboarding turn via the
+`LiveAgentOnboardingSeam.onboardingContext` seam (joined with the import-analysis
+grounding), so the agent cannot drift past the personality step without rendering
+the buttons — reliable, not LLM-whim, still inside Path-1.
+
+**Issue 4 — cold turn still hard-erred + reload didn't recover project openings.**
+(a) `COLD_TURN_TIMEOUT_MS` raised 360s → 600s (`build-live-agent-turn.ts`): #138's
+360s still hard-failed a real onboarding turn at ~5.5min under load; 10 min leaves
+comfortable headroom. (b) Reload recovery for project openings is the Issue-1
+`on_session_open` regeneration above.
+
+**Tests.** `onboarding-preamble.test.ts` (+4: step guard fires while unset, name
+step after personality, null once both settled, both-missing); `chat-react`
+`component.test.tsx` (+2: empty project topic shows no loader / General still does);
+new `open/__tests__/open-project-opening-recovery.test.ts` (+2 integration: a
+project-topic connect seeds the STATUS.md opening; no seed when the topic already
+has a message); existing cold-turn budget test updated 360s → 600s. tsc clean
+(root + chat-react leaf); leak-gate SILENT.
+
+**Touched:** `open/composer.ts` (opening-recovery helper + `on_session_open`
+steady-state branch + `onboardingContext` step-guard wiring),
+`onboarding/interview/onboarding-preamble.ts` (step-guard fragment),
+`landing/chat-react/ChatApp.tsx` (loader gate),
+`gateway/realmode-composer/build-live-agent-turn.ts` (600s budget).
+
 ## 2026-06-30 — REPL/live-agent model is ALWAYS the latest (never a hardcoded stale id)
 
 **P0 onboarding hang fix.** A fresh Open box spawned the live-agent / onboarding
