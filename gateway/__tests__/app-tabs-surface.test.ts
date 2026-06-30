@@ -162,7 +162,7 @@ describe('app-tabs surface — builtin-only (no Cores wired)', () => {
     expect(json.ok).toBe(true)
     expect(json.scope).toBe('project')
     expect(json.project_id).toBe(PROJECT_ID)
-    expect(json.tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'tasks'])
+    expect(json.tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents'])
     expect(json.tabs.every((t) => t.source === 'builtin' && t.scope === 'project')).toBe(true)
   })
 
@@ -222,7 +222,6 @@ describe('app-tabs surface — Core union (PR-2)', () => {
         'chat',
         'work_board',
         'documents',
-        'tasks',
         'core:notes',
       ])
       const notes = json.tabs.find((t) => t.key === 'core:notes')!

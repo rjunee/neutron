@@ -108,6 +108,68 @@ consistent with the dispatch.)
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.
+## 2026-06-30 — Web-client rework: per-project chat + rail/tab layout + Plan rename + remove Tasks + markdown (P0)
+
+The linchpin fix for the onboarding→project UX. Five linked changes, all in the
+web client + tabs registry + the app-ws topic-binding seam. No feature flags.
+
+**(1) Real per-project chat.** The `/ws/app/chat` surface previously bound EVERY
+connection to the per-user topic `app:<user>` and treated `project_id` as a
+cosmetic tag, so all projects shared one transcript and clicking a project showed
+the same chat. Now a `platform=web` socket carrying a `project_id` binds the
+PER-PROJECT topic `app:<user>:<project>` (`appWsProjectTopicId`,
+`channels/adapters/app-ws/envelope.ts`); General omits `project_id` → bare
+`app:<user>`. Persistence + seq + resume + fan-out key on the topic string
+(independent transcripts, verified safe — the agent loop scopes off the
+`project_id` field, not the topic), so each project has its own history. The
+client `controller.setProject` RE-SCOPES: tears the socket down and stands up a
+fresh one bound to the new topic, hydrating that topic's transcript from the
+shared OPFS store (`main.tsx` `topicForProject`/`wsUrlFor`; `config.ts`). The
+`turnTopicId` warm-session key was de-duped so the already-project-scoped web bind
+isn't double-suffixed (`open/composer.ts`). **Gated on `platform === 'web'`** —
+mobile keeps its single `app:<user>` socket + `project_id`-field model, unchanged.
+Topic string is `app:<user>:<project>` (user-scoped, NOT `wow-shell-<id>`) so two
+users opening the same project can never share a transcript — mirrors the proven
+`landing/server.ts` `web:<user>:<project>` model. The 0→N `projects_changed`
+auto-select was DROPPED: a mid-onboarding project appears in the rail but does NOT
+yank the chat off General (which would drop still-arriving onboarding messages);
+the user enters a project by tapping it. **Known behavior:** reminders/briefs still
+fan to the bare `app:<user>` (General inbox) topic, so they surface in General, not
+the per-project chats (durable rows always under `app:<user>`).
+
+**(2) Persistent rail + tab layout.** `TopicRail` was nested INSIDE the Chat tab
+body, so it vanished on other tabs, and the `TabBar` floated above everything only
+in project views. Now `ProjectShell` is the app shell: a persistent `TopicRail`
+left column + a content pane with the `TabBar` in BOTH General and project views.
+**General** = Chat + Admin (global tabs); **project** = Chat / Plan / Documents
+(NO Admin fold-in — the prior bug). `ChatApp` is now just the Chat-tab body
+(`ChatSurface` + its bubble contexts); the create-project flow moved to the shell.
+
+**(3) "Work Board" → "Plan"** user-facing label (`tabs/registry.ts`); internal
+`work_board_*` tools / `cwb-` CSS / `work_board_changed` frame / DB table keep
+their identifiers (no churny rename).
+
+**(4) Tasks tab removed** from the engine (Ryan directive). The `tasks`
+`BUILTIN_TABS` entry + `TasksTab.tsx` + `tasks-client.ts` + the `ProjectShell`
+`target==='tasks'` branch + their tests were deleted; Tasks returns in WAVE 3 as a
+Core-contributed webview tab via the existing `CoreTabContribution` path.
+
+**(5) Markdown rendering.** Agent chat bodies (`ChatApp` `TextPart`, via
+`useMessagePartText`) and the Documents viewer render sanitized GitHub-flavored
+markdown through a shared `Markdown.tsx` (`react-markdown` + `remark-gfm` +
+`rehype-sanitize`; links open `target=_blank rel=noopener`). User chat messages
+stay plain. The Documents tab gains a Rendered↔Source toggle — Rendered is the
+default; Source exposes the raw `<pre>` so comment anchors still map to RAW
+character offsets. Deps added to `landing/package.json`; the lazy `Bun.build`
+bundle stays ~0.91 MB.
+
+Verification: root + chat-react-leaf + mobile `tsc` clean; chat-react 143 tests,
+registry/app-tabs/app-ws-surface 46, app-ws adapter 107, composer/realmode 502 all
+green; leak-gate SILENT. Files: `gateway/http/app-ws-surface.ts`,
+`channels/adapters/app-ws/{envelope,adapter}.ts`, `open/composer.ts`,
+`tabs/registry.ts`, `landing/chat-react/{ProjectShell,ChatApp,DocumentsTab,
+controller,config,main,Markdown}.tsx?`, `landing/chat-react.html`,
+`landing/package.json`.
 
 ## 2026-06-30 — M1 onboarding/UI cleanup batch (3 minor verify-pass fixes)
 

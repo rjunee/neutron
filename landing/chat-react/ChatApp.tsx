@@ -19,9 +19,11 @@ import {
   ComposerPrimitive,
   MessagePartPrimitive,
   useMessage,
+  useMessagePartText,
   useComposer,
   useComposerRuntime,
 } from '@assistant-ui/react'
+import { Markdown } from './Markdown.tsx'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
 import type { ChatViewModel, RenderMessage, ImportProgressVM } from './controller.ts'
@@ -105,7 +107,14 @@ function AttachmentImagePart({ image }: { image: string }): React.JSX.Element {
 }
 
 /**
- * Custom text content part rendered with `smooth={false}`.
+ * Custom text content part.
+ *
+ * AGENT messages render as sanitized GitHub-flavored MARKDOWN (headings, lists,
+ * bold/italic, links, code blocks, tables) via the shared {@link Markdown}
+ * component — the agent speaks markdown, so a raw "**bold**" should render bold.
+ * USER messages stay PLAIN text (`white-space: pre-line`) — a person typing
+ * literal asterisks means asterisks, and plain text also dodges the streaming
+ * concern below for the user's own echoes.
  *
  * Track B Phase 4 (edit/delete) — assistant-ui's default Text part smooths
  * (typewriter-reveals) any text change whose new value extends the displayed
@@ -113,12 +122,16 @@ function AttachmentImagePart({ image }: { image: string }): React.JSX.Element {
  * (edited)") looks exactly like a streaming append, so the default defers the
  * new body behind a `requestAnimationFrame` reveal — the edited text only
  * appears once the animation runs (and never under jsdom/happy-dom, where RAF
- * doesn't flush). Neutron already streams via chat-core partials, so we don't
- * want assistant-ui's typewriter on top: disabling it makes the rendered body
- * reflect the message synchronously, which is the correct UX for an edit (the
- * new body shows immediately, not letter-by-letter). Mirrors the web default's
- * `<p style="white-space: pre-line">` wrapper. */
+ * doesn't flush). Neutron already streams via chat-core partials, so the plain
+ * branch disables assistant-ui's typewriter (`smooth={false}`); the markdown
+ * branch reads the live part text directly (`useMessagePartText`), so a streamed
+ * agent reply re-renders its markdown per token with no extra smoothing layer. */
 function TextPart(): React.JSX.Element {
+  const message = useMessage()
+  const part = useMessagePartText()
+  if (message.role === 'assistant') {
+    return <Markdown text={part.text} />
+  }
   return (
     <p className="car-text" style={{ whiteSpace: 'pre-line' }}>
       <MessagePartPrimitive.Text smooth={false} />
@@ -685,7 +698,7 @@ function DeliveryStatus({
   )
 }
 
-function TopicRail({
+export function TopicRail({
   projects,
   activeId,
   onSelect,
@@ -1135,58 +1148,16 @@ export function ChatApp({
     ? { token: config.token, origin: config.origin, fetchImpl }
     : { token: config.token, origin: config.origin }
 
-  // Create-project flow (rail button): the rail owns an INLINE name input
-  // (mirrors the mobile `app/app/projects` pattern — no native window.prompt,
-  // which is unstyleable and blocks E2E/CDP automation). This callback does the
-  // POST to the bearer-gated create endpoint, navigates into the new project on
-  // success, and RETURNS an error string (or null) so the rail can render the
-  // failure inline instead of a blocking window.alert. The live
-  // `projects_changed` frame refreshes the rail list; `setProject` makes the
-  // navigation immediate (and is a no-op duplicate of the 0→N auto-select).
-  const [creatingProject, setCreatingProject] = useState(false)
-  const onCreateProject = useCallback(
-    async (name: string): Promise<string | null> => {
-      if (creatingProject) return null
-      setCreatingProject(true)
-      const doFetch: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
-      try {
-        const res = await doFetch(`${config.origin}/api/app/projects`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${config.token}`,
-          },
-          body: JSON.stringify({ name }),
-        })
-        if (res.ok) {
-          const data = (await res.json()) as { project?: { id?: unknown } }
-          const id = data.project?.id
-          if (typeof id === 'string' && id.length > 0) controller.setProject(id)
-          return null
-        }
-        return `Could not create project (${res.status}).`
-      } catch {
-        return 'Could not create project.'
-      } finally {
-        setCreatingProject(false)
-      }
-    },
-    [creatingProject, fetchImpl, config.origin, config.token, controller],
-  )
-
+  // ChatApp is now JUST the Chat-tab body (`ChatSurface` + its message-bubble
+  // contexts). The persistent project rail + the tab bar live one level up in
+  // `ProjectShell` (the rail is a persistent left column across ALL tabs; this
+  // surface is only the chat pane). `ChatApp` stays mounted across tab switches
+  // so the live session, stream, and scroll state survive.
   return (
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
     <ButtonsContext.Provider value={buttonsCtx}>
-    <div className="car-shell">
-      <TopicRail
-        projects={vm.projects}
-        activeId={vm.projectId}
-        onSelect={(id) => controller.setProject(id)}
-        onCreate={onCreateProject}
-        creating={creatingProject}
-      />
       <ChatSurface
         vm={vm}
         controller={controller}
@@ -1194,7 +1165,6 @@ export function ChatApp({
         draft={draft}
         uploadAffordance={uploadAffordance}
       />
-    </div>
     </ButtonsContext.Provider>
     </EditsContext.Provider>
     </ReactionsContext.Provider>

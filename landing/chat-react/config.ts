@@ -27,9 +27,20 @@ export interface ProjectTab {
 }
 
 export interface BootstrapConfig {
-  /** `wss://host/ws/app/chat?platform=web&token=…` */
+  /** `wss://host/ws/app/chat?platform=web&token=…` — the INITIAL socket URL
+   *  (carries the bootstrap `project_id`, if any). On a project switch the
+   *  controller rebuilds this per scope via {@link buildWsUrl}. */
   wsUrl: string
-  /** The `app:<user_id>` topic this session renders. */
+  /**
+   * Explicit WS-URL override (`window.__neutron_app_ws_url`), when present. A
+   * dev/test escape hatch: when set, the controller reuses it verbatim across
+   * project switches (single fixed socket) instead of deriving a per-project
+   * URL. Absent in production (the Open composer doesn't inject it), so the
+   * controller derives `?project_id=<id>` per scope.
+   */
+  wsUrlOverride?: string
+  /** The `app:<user_id>` topic this session renders (General). Per-project
+   *  scopes derive `app:<user>:<project>` via {@link topicForProject}. */
   topicId: string
   userId: string
   /** Active project tag (sent with each message; null = default/General). */
@@ -77,6 +88,29 @@ export interface WindowLike {
  *  (kept inline so the browser bundle doesn't pull in the channels package). */
 export function appWsTopicId(userId: string): string {
   return `app:${userId}`
+}
+
+/**
+ * Per-project app-ws topic id — `app:<user>:<project>`. Mirrors the server's
+ * `appWsProjectTopicId` (channels/adapters/app-ws/envelope.ts). The web client
+ * opens one socket per active project (reconnecting on a switch) so each
+ * project's transcript + seq + resume scope to this topic; General uses the
+ * user-scoped {@link appWsTopicId}. Kept inline so the browser bundle doesn't
+ * pull in the channels package.
+ */
+export function appWsProjectTopicId(userId: string, projectId: string): string {
+  return `app:${userId}:${projectId}`
+}
+
+/**
+ * The store key + WS topic for a given active project (null = General). The
+ * controller calls this on a project switch to re-scope the session: each
+ * project's durable transcript lives under its own topic in the shared store.
+ */
+export function topicForProject(userId: string, projectId: string | null): string {
+  return projectId !== null && projectId.length > 0
+    ? appWsProjectTopicId(userId, projectId)
+    : appWsTopicId(userId)
 }
 
 /**
@@ -158,7 +192,7 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     win.__neutron_app_ws_url ??
     buildWsUrl(win.location.protocol, win.location.host, appWsToken, projectId, deviceId)
   const origin = `${win.location.protocol}//${win.location.host}`
-  return {
+  const config: BootstrapConfig = {
     wsUrl,
     topicId: appWsTopicId(userId),
     userId,
@@ -169,4 +203,6 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     token: appWsToken,
     onboardingActive: win.__neutron_onboarding_active === true,
   }
+  if (win.__neutron_app_ws_url !== undefined) config.wsUrlOverride = win.__neutron_app_ws_url
+  return config
 }

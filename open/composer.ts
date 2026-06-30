@@ -2514,17 +2514,22 @@ export function buildOpenGraphComposer(
           typeof event.adapter_metadata?.['project_id'] === 'string'
             ? (event.adapter_metadata['project_id'] as string)
             : undefined
-        // Codex r1 [P2]: the React client keeps ONE app-ws channel topic
-        // (`app:<owner>`) and switches projects via the `project_id` field only.
-        // Keying the live-agent turn on the bare channel topic would share the
-        // warm session + first-turn context + button-store history across ALL
-        // projects (wrong-project grounding). Derive a PROJECT-SCOPED turn topic
-        // (`app:<owner>:<project_id>`) — mirrors the web path's
-        // `web:<owner>:<project>` — so each project gets its own warm REPL +
-        // persona + history. The REPLY is still delivered to the socket's real
-        // `channel_topic_id` (below), since that's where the client listens.
+        // The live-agent turn is keyed on a PROJECT-SCOPED warm-session topic
+        // (`app:<owner>:<project_id>`) so each project gets its own warm REPL +
+        // persona + button-store history (sharing the bare channel topic across
+        // projects would cross-ground them).
+        //   - The WEB client now binds the SOCKET per-project, so
+        //     `event.channel_topic_id` is ALREADY `app:<owner>:<project_id>` —
+        //     re-appending would double the suffix, so skip it when the topic
+        //     already ends with `:<project_id>`.
+        //   - MOBILE keeps ONE `app:<owner>` socket + a `project_id` FIELD, so
+        //     the suffix IS appended there (the topic is the bare `app:<owner>`).
+        // The REPLY is still delivered to the socket's real `channel_topic_id`
+        // (below), since that's where the client listens.
         const turnTopicId =
-          project_id !== undefined && project_id.length > 0
+          project_id !== undefined &&
+          project_id.length > 0 &&
+          !event.channel_topic_id.endsWith(`:${project_id}`)
             ? `${event.channel_topic_id}:${project_id}`
             : event.channel_topic_id
         const sendReply = buildAppWsSendReply(event.channel_topic_id, project_id)

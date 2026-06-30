@@ -835,9 +835,14 @@ export function appChatRowToEnvelope(row: AppChatRow): AppWsOutbound {
   return env
 }
 
-/** Best-effort `app:<user_id>` → `<user_id>`; returns '' on a non-app topic. */
+/** Best-effort `app:<user_id>` or `app:<user_id>:<project_id>` → `<user_id>`;
+ *  returns '' on a non-app topic. The per-project web topic carries a
+ *  `:<project_id>` suffix, so strip at the first colon after the `app:` prefix. */
 function topicUserId(topic_id: string): string {
-  return topic_id.startsWith('app:') ? topic_id.slice('app:'.length) : ''
+  if (!topic_id.startsWith('app:')) return ''
+  const rest = topic_id.slice('app:'.length)
+  const colon = rest.indexOf(':')
+  return colon === -1 ? rest : rest.slice(0, colon)
 }
 
 /**

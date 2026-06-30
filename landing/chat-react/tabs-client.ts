@@ -8,8 +8,9 @@
  *
  * The engine (`tabs/registry.ts` + `gateway/http/app-tabs-surface.ts`) is the
  * SINGLE SOURCE OF TRUTH for which tabs a project renders — builtin
- * Chat/Documents/Tasks UNIONed with the `project_tab` surfaces of Cores
- * installed in that project. The web `ProjectShell` consumes this list instead
+ * Chat/Plan/Documents UNIONed with the `project_tab` surfaces of Cores
+ * installed in that project (Tasks is Core-contributed, not a builtin). The web
+ * `ProjectShell` consumes this list instead
  * of hardcoding tabs. Always on — no feature flag (SPEC Decisions Log,
  * 2026-06-23).
  *
@@ -34,7 +35,7 @@ export type TabMountKind = 'builtin' | 'webview'
 
 export interface TabMount {
   kind: TabMountKind
-  /** builtin → view key (`chat` | `docs` | `tasks`); webview → URL. */
+  /** builtin → view key (`chat` | `workboard` | `docs`); webview → URL. */
   target: string
 }
 

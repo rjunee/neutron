@@ -1,42 +1,53 @@
 /**
- * landing/chat-react — web project TAB SHELL (WAVE 3 PR-4).
+ * landing/chat-react — web APP SHELL (WAVE 3 PR-4; rail/tab rework 2026-06-30).
  *
- * Wraps the existing `ChatApp` as the **Chat** tab and renders the project's
- * tab bar from the engine resolver (`GET /api/app/projects/<id>/tabs`), so the
- * web project view shows tabs (Chat + Documents + Tasks + any installed Core
- * tabs) instead of chat-only. This is the web twin of the mobile registry-driven
- * tab bar shipped in PR-3 (`app/components/ProjectTabBar.tsx`).
+ * The top-level layout for the React web client. Two persistent regions:
+ *
+ *   ┌────────────┬──────────────────────────────────────┐
+ *   │ TopicRail  │ TabBar (Chat · …)                     │
+ *   │ (projects, │──────────────────────────────────────│
+ *   │  always    │ active tab body (ChatApp / Documents  │
+ *   │  visible)  │ / Plan / Admin / Core webview)        │
+ *   └────────────┴──────────────────────────────────────┘
+ *
+ * ── TopicRail = persistent left column ──────────────────────────────────────
+ * The project rail is ALWAYS visible — General + every project, on every tab —
+ * so the user can switch project (which re-scopes the chat to that project's
+ * topic) or create a project from anywhere. It used to be nested INSIDE the Chat
+ * tab body (`ChatApp`), so it vanished on non-Chat tabs; it now lives here at the
+ * layout root. `ChatApp` is just the Chat-tab body (`ChatSurface`).
+ *
+ * ── TabBar in BOTH General and project ──────────────────────────────────────
+ * The tab bar renders in the right content pane for BOTH views:
+ *   - General (no active project): Chat + Admin (the global-scope tabs).
+ *   - Project: Chat / Plan / Documents (+ any installed project Core tabs). NO
+ *     Admin — it's a global surface, reachable from General, NOT folded into a
+ *     project (mixing a global tab into a project's set was the old bug).
+ *
+ * ── Tab content ─────────────────────────────────────────────────────────────
+ *   - Chat (builtin)         → `ChatApp`, kept MOUNTED across tab switches
+ *     (hidden via `hidden`) so the chat-core session, streaming state, and
+ *     scroll position survive a round-trip to another tab.
+ *   - Plan / Documents (builtin) → the live Work Board / Documents views.
+ *   - Admin (builtin, global)  → the owner-facing integrations surface.
+ *   - Core (webview)         → the Core's `project_tab` surface in a sandboxed
+ *     `<iframe>`, scheme-validated (`sanitizeCoreTabUrl`) before the iframe `src`.
+ *
+ * Tasks is NO LONGER a builtin tab (Ryan directive, WAVE 3) — it returns as a
+ * Core-contributed webview tab via the `CoreTabContribution` path, so the
+ * generic `webview` branch below renders it with no engine tasks code.
  *
  * ── No feature flag ─────────────────────────────────────────────────────────
  * Per the SPEC Decisions Log (Ryan, 2026-06-23) WAVE 3 ships WITHOUT feature
- * flags. The shell renders the resolved tabs directly — there is no toggle and
- * no dual chat-only path. When the resolver can't be reached the bar degrades to
- * the guaranteed Chat tab (the existing chat experience), which is graceful
- * fallback, not a flag.
- *
- * ── Tab content ─────────────────────────────────────────────────────────────
- *   - Chat (builtin)         → the existing `ChatApp`, kept MOUNTED across tab
- *     switches (hidden via `hidden`) so the chat-core session, streaming state,
- *     and scroll position survive a round-trip to another tab.
- *   - Documents/Tasks (builtin) → a "coming soon" placeholder until PR-5..9 land
- *     their real views. This is unbuilt content, NOT a flag.
- *   - Core (webview)         → the Core's `project_tab` surface in a sandboxed
- *     `<iframe>`, mirroring the mobile `cores/[slug]` webview from PR-3. The URL
- *     is scheme-validated (`sanitizeCoreTabUrl`) before it ever reaches the
- *     iframe `src`.
- *
- * ── Project scope ───────────────────────────────────────────────────────────
- * Tabs are resolved per project. When a project is active (`vm.projectId`) the
- * shell fetches that project's tab set; the General (no-project) view has no
- * project tabs, so it stays chat-only. Switching projects re-fetches and resets
- * the active tab to Chat.
+ * flags. The shell renders the resolved tabs directly; when a resolver can't be
+ * reached the bar degrades to the guaranteed Chat tab (graceful fallback, not a
+ * flag).
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { ChatApp } from './ChatApp.tsx'
+import { ChatApp, TopicRail } from './ChatApp.tsx'
 import { DocumentsTab } from './DocumentsTab.tsx'
-import { TasksTab } from './TasksTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import type { ChatViewModel } from './controller.ts'
@@ -66,7 +77,7 @@ function TabBar({
   onSelect: (key: string) => void
 }): React.JSX.Element {
   return (
-    <nav className="car-tabs" role="tablist" aria-label="Project sections">
+    <nav className="car-tabs" role="tablist" aria-label="Sections">
       {tabs.map((t) => {
         const active = t.key === activeKey
         return (
@@ -96,8 +107,10 @@ function TabPlaceholder({ label }: { label: string }): React.JSX.Element {
   )
 }
 
-/** Render one non-Chat tab's body: the Documents view, a Core webview, or a
- *  builtin placeholder for tabs whose real view ships in a later PR. */
+/** Render one non-Chat tab's body: Documents, the Plan board, the Admin
+ *  integrations surface, a Core webview, or a builtin placeholder. `projectId`
+ *  is '' for the General (no-project) view — only the global Admin tab renders
+ *  there, and it doesn't require a concrete project. */
 function TabContent({
   tab,
   projectId,
@@ -143,8 +156,8 @@ function TabContent({
       />
     )
   }
-  // Builtin Work Board — the live work-tracker (active+next, completed history),
-  // human read+WRITE, applying live `work_board_changed` frames off the controller.
+  // Builtin Plan (work_board) — the live work-tracker (active+next, completed
+  // history), human read+WRITE, applying live `work_board_changed` frames.
   if (tab.mount.target === 'workboard') {
     return (
       <WorkBoardTab
@@ -155,18 +168,8 @@ function TabContent({
       />
     )
   }
-  // Builtin Tasks — the LLM-prioritized, agent+user-parity tasks view (PR-8).
-  if (tab.mount.target === 'tasks') {
-    return (
-      <TasksTab
-        projectId={projectId}
-        config={config}
-        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-      />
-    )
-  }
-  // Builtin Admin — the owner-facing OAuth + API-key integrations surface. This
-  // is a GLOBAL-scope tab (per-instance, not per-project) folded into the bar.
+  // Builtin Admin — the owner-facing OAuth + API-key integrations surface. A
+  // GLOBAL-scope tab (per-instance, not per-project); shown in the General view.
   if (tab.mount.target === 'admin') {
     return (
       <IntegrationsTab
@@ -207,50 +210,49 @@ export function ProjectShell({
   const [tabs, setTabs] = useState<TabDescriptor[]>([CHAT_TAB])
   const [activeKey, setActiveKey] = useState<string>(CHAT_KEY)
   const projectId = vm.projectId
+  const isGeneral = projectId === null || projectId.length === 0
 
-  // Resolve the tab set for the active project. The General (no-project) view
-  // has no project tabs, so it falls back to the guaranteed Chat tab. A stale
-  // in-flight fetch (rapid project switches, StrictMode double-invoke) is
-  // ignored via the `cancelled` latch.
+  // Resolve the tab set for the current scope:
+  //   - General  → Chat + the GLOBAL tabs (builtin Admin + global Core tabs).
+  //   - Project  → the project tabs (Chat / Plan / Documents + project Core
+  //                tabs). NO global fold-in — Admin is reachable from General.
+  // A stale in-flight fetch (rapid switches, StrictMode double-invoke) is
+  // ignored via the `cancelled` latch. Switching scope resets the active tab to
+  // Chat so we never land on a tab that doesn't exist in the new set.
   useEffect(() => {
-    if (projectId === null || projectId.length === 0) {
-      setTabs([CHAT_TAB])
-      setActiveKey(CHAT_KEY)
-      return
-    }
     let cancelled = false
-    // Reset to the Chat fallback IMMEDIATELY on a project switch so the previous
-    // project's resolved tabs (incl. its Core iframe URLs) can't linger — and be
-    // clicked under the new project's chat — while the new fetch is in flight.
     setActiveKey(CHAT_KEY)
     setTabs([CHAT_TAB])
-    // Resolve per-project tabs (Chat/Documents/Tasks + project Core tabs) and the
-    // GLOBAL tabs (builtin Admin + global Core tabs) in parallel, then fold the
-    // global tabs in AFTER the project tabs so the owner can reach the Admin /
-    // Integrations surface from the project shell. A failed global fetch degrades
-    // to the project-only set (the Admin tab just won't appear) — not a flag.
-    void Promise.all([
-      client.listProjectTabs(projectId),
-      client.listGlobalTabs().catch(() => [] as TabDescriptor[]),
-    ])
-      .then(([projectTabs, globalTabs]) => {
+    if (isGeneral) {
+      void client
+        .listGlobalTabs()
+        .then((globalTabs) => {
+          if (cancelled) return
+          setTabs([CHAT_TAB, ...globalTabs])
+        })
+        .catch(() => {
+          if (!cancelled) setTabs([CHAT_TAB])
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+    void client
+      .listProjectTabs(projectId as string)
+      .then((projectTabs) => {
         if (cancelled) return
-        const base = projectTabs.length > 0 ? projectTabs : [CHAT_TAB]
-        const seen = new Set(base.map((t) => t.key))
-        const extra = globalTabs.filter((t) => !seen.has(t.key))
-        setTabs([...base, ...extra])
+        setTabs(projectTabs.length > 0 ? projectTabs : [CHAT_TAB])
       })
       .catch(() => {
-        if (cancelled) return
-        setTabs([CHAT_TAB])
+        if (!cancelled) setTabs([CHAT_TAB])
       })
     return () => {
       cancelled = true
     }
-  }, [client, projectId])
+  }, [client, projectId, isGeneral])
 
-  // The previous active tab can vanish when the set changes (project switch /
-  // Core uninstall). Fall back to Chat so we never highlight a missing tab.
+  // The previous active tab can vanish when the set changes (scope switch / Core
+  // uninstall). Fall back to Chat so we never highlight a missing tab.
   const hasActive = tabs.some((t) => t.key === activeKey)
   const resolvedActiveKey = hasActive ? activeKey : CHAT_KEY
   const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
@@ -259,41 +261,83 @@ export function ProjectShell({
   // view on mount; keep the panels container as the scroll parent.
   const panelsRef = useRef<HTMLDivElement>(null)
 
-  // The General (no-project) view has no project tabs, so it stays the existing
-  // CHAT-ONLY experience — no tab strip, full chat area. The tab bar only
-  // appears once a project is active. `ChatApp` keeps the SAME tree position
-  // either way, so crossing the General↔project boundary doesn't remount it.
-  const isGeneral = projectId === null || projectId.length === 0
-  const chatHidden = !isGeneral && resolvedActiveKey !== CHAT_KEY
+  // Chat stays mounted across tab switches so the live session, stream, and
+  // scroll state survive — only its visibility toggles.
+  const chatHidden = resolvedActiveKey !== CHAT_KEY
+
+  // Create-project flow (rail button): the rail owns an INLINE name input
+  // (mirrors the mobile `app/app/projects` pattern — no native window.prompt,
+  // which is unstyleable and blocks E2E/CDP automation). This callback POSTs to
+  // the bearer-gated create endpoint, navigates into the new project on success
+  // (`setProject` re-scopes the chat), and RETURNS an error string (or null) so
+  // the rail renders the failure inline instead of a blocking window.alert. The
+  // live `projects_changed` frame refreshes the rail list.
+  const [creatingProject, setCreatingProject] = useState(false)
+  const onCreateProject = useCallback(
+    async (name: string): Promise<string | null> => {
+      if (creatingProject) return null
+      setCreatingProject(true)
+      const doFetch: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
+      try {
+        const res = await doFetch(`${config.origin}/api/app/projects`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${config.token}`,
+          },
+          body: JSON.stringify({ name }),
+        })
+        if (res.ok) {
+          const data = (await res.json()) as { project?: { id?: unknown } }
+          const id = data.project?.id
+          if (typeof id === 'string' && id.length > 0) controller.setProject(id)
+          return null
+        }
+        return `Could not create project (${res.status}).`
+      } catch {
+        return 'Could not create project.'
+      } finally {
+        setCreatingProject(false)
+      }
+    },
+    [creatingProject, fetchImpl, config.origin, config.token, controller],
+  )
 
   return (
-    <div className="car-projectshell">
-      {!isGeneral ? (
+    <div className="car-app">
+      <TopicRail
+        projects={vm.projects}
+        activeId={vm.projectId}
+        onSelect={(id) => controller.setProject(id)}
+        onCreate={onCreateProject}
+        creating={creatingProject}
+      />
+      <div className="car-content">
         <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
-      ) : null}
-      <div className="car-tabpanels" ref={panelsRef}>
-        {/* Chat stays mounted across tab switches so the live session, stream,
-            and scroll state survive — only its visibility toggles. */}
-        <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
-          <ChatApp
-            vm={vm}
-            controller={controller}
-            config={config}
-            draft={draft}
-            {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-          />
-        </div>
-        {!isGeneral && resolvedActiveKey !== CHAT_KEY && projectId !== null ? (
-          <div className="car-tabpanel" role="tabpanel">
-            <TabContent
-              tab={activeTab}
-              projectId={projectId}
-              config={config}
+        <div className="car-tabpanels" ref={panelsRef}>
+          {/* Chat stays mounted across tab switches so the live session, stream,
+              and scroll state survive — only its visibility toggles. */}
+          <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
+            <ChatApp
+              vm={vm}
               controller={controller}
+              config={config}
+              draft={draft}
               {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             />
           </div>
-        ) : null}
+          {resolvedActiveKey !== CHAT_KEY ? (
+            <div className="car-tabpanel" role="tabpanel">
+              <TabContent
+                tab={activeTab}
+                projectId={projectId ?? ''}
+                config={config}
+                controller={controller}
+                {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+              />
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

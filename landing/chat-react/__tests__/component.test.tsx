@@ -641,7 +641,8 @@ describe('ChatApp render (happy-dom)', () => {
     const { NeutronChatController } = await import('../controller.ts')
     const { useNeutronChat } = await import('../useNeutronChat.ts')
     const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
-    const { ChatApp } = await import('../ChatApp.tsx')
+    // Create-project lives in the persistent rail, now owned by ProjectShell.
+    const { ProjectShell } = await import('../ProjectShell.tsx')
     const React = await import('react')
 
     const makeSocket = () =>
@@ -681,7 +682,17 @@ describe('ChatApp render (happy-dom)', () => {
     // Capture the create POST; return a created project the controller navigates to.
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
-      calls.push({ url, init })
+      // The shell resolves its tab set (global, then per-project after navigate);
+      // serve those empty and DON'T record them so `calls` is just the create POST.
+      if (url.endsWith('/tabs')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ok: true, tabs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
+      calls.push({ url, ...(init !== undefined ? { init } : {}) })
       return Promise.resolve(
         new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
           status: 201,
@@ -694,7 +705,7 @@ describe('ChatApp render (happy-dom)', () => {
       const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
       return (
         <AssistantRuntimeProvider runtime={runtime}>
-          <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
         </AssistantRuntimeProvider>
       )
     }
@@ -764,7 +775,8 @@ describe('ChatApp render (happy-dom)', () => {
     const { NeutronChatController } = await import('../controller.ts')
     const { useNeutronChat } = await import('../useNeutronChat.ts')
     const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
-    const { ChatApp } = await import('../ChatApp.tsx')
+    // Create-project lives in the persistent rail, now owned by ProjectShell.
+    const { ProjectShell } = await import('../ProjectShell.tsx')
     const React = await import('react')
 
     const makeSocket = () =>
@@ -803,6 +815,15 @@ describe('ChatApp render (happy-dom)', () => {
 
     const calls: Array<{ url: string }> = []
     const fetchImpl = (url: string): Promise<Response> => {
+      // Serve the shell's tab resolver empty without recording it (see above).
+      if (url.endsWith('/tabs')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ok: true, tabs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
       calls.push({ url })
       return Promise.resolve(new Response('{}', { status: 201 }))
     }
@@ -812,7 +833,7 @@ describe('ChatApp render (happy-dom)', () => {
       const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
       return (
         <AssistantRuntimeProvider runtime={runtime}>
-          <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
         </AssistantRuntimeProvider>
       )
     }
