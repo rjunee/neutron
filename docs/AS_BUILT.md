@@ -31,10 +31,12 @@ could not drop. **Fix**: `capProposedProjects` (single source of truth in
 `phase-prompts.ts`, used by the presentation too) is applied at the engine STAMP
 chokepoint (`advanceFromImportRunningOnComplete` caps both `import_result` and
 the `primary_projects` merge), so everything downstream agrees with the displayed
-slice. `build-onboarding-finalize.resolveProjects` additionally excludes any
-import "overflow" beyond the cap from BOTH union sources as a finalize-layer
-guard. Explicit user adds (never in the overflow) pass through untouched; the
-GAP1 "no-narrowing" invariant is preserved (finalize = displayed − dropped +
+slice. `build-onboarding-finalize.resolveProjects` caps the IMPORT contribution to
+the displayed set as a finalize-layer guard but TRUSTS `primary_projects` verbatim
+(only displayed names + explicit adds, since the engine merge is capped) — it does
+not filter primary against the overflow, which would wrongly drop an explicit add
+whose name collides with an unshown overflow proposal (fixed per Codex review).
+The GAP1 "no-narrowing" invariant is preserved (finalize = displayed − dropped +
 adds).
 
 **(c) Create Project used the native `window.prompt()`.** Replaced the blocking,

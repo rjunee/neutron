@@ -53,10 +53,7 @@ import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts
 import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
 import { buildComposeInput } from '../../onboarding/interview/engine-internals.ts'
 import { slugifyProjectId } from '../../onboarding/wow-moment/project-identity.ts'
-import {
-  capProposedProjects,
-  MAX_ANALYSIS_PROJECTS,
-} from '../../onboarding/interview/phase-prompts.ts'
+import { capProposedProjects } from '../../onboarding/interview/phase-prompts.ts'
 import {
   buildScaffoldMaterializer,
   ensureProjectRow,
@@ -382,21 +379,18 @@ function resolveProjects(
       .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
       .map((s) => slugifyProjectId(s)),
   )
-  // Reconcile to the DISPLAYED proposal. The presentation caps the proposal at
-  // MAX_ANALYSIS_PROJECTS; the engine now caps `import_result` + `primary_projects`
-  // to the same bound at the stamp chokepoint, so in production the lists here are
-  // already ≤ cap. This is the finalize-layer guard for that invariant: only the
-  // first `MAX_ANALYSIS_PROJECTS` import projects are eligible, and any "overflow"
-  // beyond the cap (projects the user never saw) is excluded from BOTH union
-  // sources — so even a `primary_projects` polluted by a pre-cap merge can't
-  // re-introduce a phantom the user couldn't drop. Explicit user adds (which are
-  // never in the import overflow) flow through `primary_projects` untouched.
-  const overflowSlugs = new Set(
-    (import_result !== null ? import_result.proposed_projects.slice(MAX_ANALYSIS_PROJECTS) : [])
-      .map((p) => (typeof p.name === 'string' ? p.name.trim() : ''))
-      .filter((name) => name.length > 0)
-      .map((name) => slugifyProjectId(name)),
-  )
+  // Reconcile the IMPORT contribution to the DISPLAYED proposal. The
+  // presentation caps the proposal at MAX_ANALYSIS_PROJECTS, so only the first
+  // `MAX_ANALYSIS_PROJECTS` import projects were ever shown + droppable; cap the
+  // import side here too so a >cap synthesis can't materialize a project the user
+  // never saw. The engine already caps both `import_result` AND the
+  // `primary_projects` merge to the same bound at the stamp chokepoint
+  // (advanceFromImportRunningOnComplete), so `primary_projects` carries only the
+  // displayed import names plus the owner's EXPLICIT conversational adds — we
+  // trust it verbatim (do NOT filter it against the import overflow, which would
+  // wrongly drop an explicit add whose name happens to collide with an unshown
+  // overflow proposal). Union semantics are unchanged: import-displayed ∪
+  // primary, minus the owner's curation drops.
   const fromImport =
     import_result !== null
       ? capProposedProjects(import_result.proposed_projects)
@@ -410,7 +404,6 @@ function resolveProjects(
     if (seen.has(slug)) continue
     seen.add(slug)
     if (dropped.has(slug)) continue
-    if (overflowSlugs.has(slug)) continue
     out.push(p)
   }
   return out

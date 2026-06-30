@@ -436,11 +436,14 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > `phase-prompts.ts`) is applied at the engine STAMP chokepoint
 > (`advanceFromImportRunningOnComplete` caps both `import_result` and the
 > `primary_projects` merge), so the per-turn seam + persona-gen + finalize all see
-> ≤7; the presentation slice uses the same helper, and `resolveProjects`
-> additionally excludes any import "overflow" beyond the cap from BOTH union
-> sources as a finalize-layer guard. Explicit user adds (never in the overflow)
-> flow through `primary_projects` untouched. GAP1 "no-narrowing" invariant
-> (present every proposed project the user could confirm) is preserved.
+> ≤7; the presentation slice uses the same helper. `resolveProjects` caps the
+> IMPORT contribution to the displayed set as a finalize-layer guard but TRUSTS
+> `primary_projects` verbatim (it carries only displayed names + the owner's
+> explicit conversational adds, since the engine merge is capped) — it does NOT
+> filter primary against the overflow, which would wrongly drop an explicit add
+> whose name collides with an unshown overflow proposal (Codex P2). GAP1
+> "no-narrowing" invariant (present every proposed project the user could confirm)
+> is preserved.
 
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
