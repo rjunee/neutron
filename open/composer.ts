@@ -154,7 +154,7 @@ import type { CreateProjectToolService } from '../gateway/realmode-composer/crea
 import { createAppTasksSurface } from '../gateway/http/app-tasks-surface.ts'
 import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
 import { TaskStore } from '../tasks/store.ts'
-import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
+import { AppWsAdapter, optionsToInlineChoices } from '../channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
 import {
   appWsTopicId,
@@ -2305,7 +2305,11 @@ export function buildOpenGraphComposer(
           text: out.body,
         }
         if (out.options !== undefined && out.options.length > 0) {
-          msg.inline_choices = out.options.map((o) => ({ label: o.label, callback_data: o.value }))
+          // Carry the HUMAN-READABLE option text into `InlineChoice.label` (the
+          // adapter renders the button's `body` from it) — NOT the "A"/"B"
+          // legend, which would paint live onboarding buttons as bare letters
+          // (Codex P2, 2026-06-30). Shared, unit-tested helper.
+          msg.inline_choices = optionsToInlineChoices(out.options)
         }
         const adapter_options: Record<string, unknown> = {}
         if (project_id !== undefined) adapter_options['project_id'] = project_id

@@ -38,6 +38,7 @@ import type {
   ChannelAdapterManifest,
   IncomingEvent,
   IncomingEventReceiver,
+  InlineChoice,
   OutgoingMessage,
 } from '../../types.ts'
 import type {
@@ -717,6 +718,10 @@ export class AppWsAdapter implements ChannelAdapter {
       ts: this.now(),
     }
     if (message.inline_choices && message.inline_choices.length > 0) {
+      // The web client renders the option's `body` (`optionText` = body||label),
+      // and this adapter projects an `InlineChoice`'s human-readable `label` into
+      // BOTH `label` and `body` — so the producer MUST put the display text in
+      // `InlineChoice.label` (not an "A"/"B" legend). See `optionsToInlineChoices`.
       env.options = message.inline_choices.map((c) => ({
         label: c.label,
         body: c.label,
@@ -843,6 +848,27 @@ function topicUserId(topic_id: string): string {
   const rest = topic_id.slice('app:'.length)
   const colon = rest.indexOf(':')
   return colon === -1 ? rest : rest.slice(0, colon)
+}
+
+/**
+ * Map agent-message options (`{ label legend, body display, value }`) → the
+ * app-ws `InlineChoice` wire shape (`{ label, callback_data }`).
+ *
+ * The app-ws adapter projects an `InlineChoice.label` into BOTH the rendered
+ * option's `label` AND its `body` (the field the React client actually paints),
+ * so the HUMAN-READABLE display text — the option's `body` — MUST ride in
+ * `label`, NOT the "A"/"B" legend. Putting the legend there paints live
+ * onboarding buttons as bare letters until a reload hydrates the full text from
+ * `button_prompts` (Codex P2, 2026-06-30). Falls back to the legend label only
+ * when a caller left `body` empty.
+ */
+export function optionsToInlineChoices(
+  options: ReadonlyArray<{ label: string; body?: string; value: string }>,
+): InlineChoice[] {
+  return options.map((o) => ({
+    label: o.body !== undefined && o.body.length > 0 ? o.body : o.label,
+    callback_data: o.value,
+  }))
 }
 
 /**
