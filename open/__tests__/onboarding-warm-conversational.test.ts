@@ -254,6 +254,61 @@ describe('awaitPrewarmReady — bounded first-turn gate (2026-06-18 cold-spawn f
   })
 })
 
+/**
+ * always-latest-model (2026-06-30) — the pre-warm spawn HEATS the onboarding
+ * REPL and stamps the warm record's `model`, which the first real turn reuses.
+ * It MUST resolve via the dynamic `getBestModel()` accessor, never a frozen
+ * `BEST_MODEL` constant — a stale literal here is exactly what pinned the
+ * retired `opus-4-7` and hung onboarding for the full 180s per-turn timeout.
+ */
+describe('prewarmSubstrate — dynamic model resolution (always-latest)', () => {
+  function recordingSubstrate(specs: AgentSpec[]): Substrate {
+    return {
+      start(spec: AgentSpec): SessionHandle {
+        specs.push(spec)
+        const events = (async function* (): AsyncGenerator<Event, void, void> {
+          yield { kind: 'token', text: 'ok' }
+          yield {
+            kind: 'completion',
+            usage: { input_tokens: 1, output_tokens: 1 },
+            substrate_instance_id: 'stub',
+          }
+        })()
+        return {
+          events,
+          async respondToTool(): Promise<void> {},
+          async cancel(): Promise<void> {},
+          tool_resolution: 'internal',
+        }
+      },
+    }
+  }
+
+  test('pre-warm spawns getBestModel() and tracks a watchdog flip on the next pre-warm', async () => {
+    const { BEST_MODEL, getBestModel, setBestModelOverride } = await import(
+      '../../runtime/models.ts'
+    )
+    setBestModelOverride(undefined)
+    try {
+      const specs: AgentSpec[] = []
+      await prewarmSubstrate(recordingSubstrate(specs))
+      expect(specs[0]!.model_preference[0]).toBe(getBestModel())
+      expect(specs[0]!.model_preference[0]).toBe(BEST_MODEL)
+
+      // The watchdog adopts a newer top-tier model; the NEXT pre-warm spawn
+      // must heat the REPL on it (a frozen constant would still show BEST_MODEL).
+      const NEWER = 'claude-opus-9-9'
+      setBestModelOverride(NEWER)
+      const specs2: AgentSpec[] = []
+      await prewarmSubstrate(recordingSubstrate(specs2))
+      expect(specs2[0]!.model_preference[0]).toBe(NEWER)
+      expect(specs2[0]!.model_preference[0]).not.toBe(BEST_MODEL)
+    } finally {
+      setBestModelOverride(undefined)
+    }
+  })
+})
+
 describe('phase-spec substrate session reuse contract (warm vs ephemeral)', () => {
   const pool = newCredentialPool({
     strategy: 'fill_first',

@@ -26,7 +26,7 @@
 
 import type { Substrate } from '../../runtime/substrate.ts'
 import type { Event } from '../../runtime/events.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import { extractJsonObject } from '../history-import/substrate-callers.ts'
 import {
   SYNTHESIS_CEILING_MS_DEFAULT,
@@ -919,7 +919,7 @@ function deriveSummary(projects: ReadonlyArray<ProjectModel>, people: ReadonlyAr
 function resolveModelPref(deps: SynthesisSessionDeps): ReadonlyArray<string> {
   return deps.model_preference !== undefined && deps.model_preference.length > 0
     ? deps.model_preference
-    : [BEST_MODEL]
+    : [getBestModel()]
 }
 
 function asRecord(v: unknown): Record<string, unknown> {

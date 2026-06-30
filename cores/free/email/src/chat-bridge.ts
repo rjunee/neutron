@@ -49,8 +49,13 @@ export interface CreateEmailChatCommandFilterOptions {
   client: GmailClient
   /** Pluggable LLM call for triage + summarizer agents. */
   llm: (prompt: string) => Promise<string>
-  /** Resolved Haiku-fast model id. */
-  model: string
+  /**
+   * The model id used for the command's LLM dispatch metadata. Accepts a thunk
+   * so a live always-latest accessor (`getBestModel`) is resolved PER-CALL at
+   * `match` time — keeping the reported model aligned with what `llm` actually
+   * dispatched after a model-update-watchdog flip (Codex cross-model review).
+   */
+  model: string | (() => string)
   /** Optional structured-row summarizer. Production uses the stub
    *  (the brief composer wraps with Haiku); tests inject a fake. */
   summarizer?: EmailSummarizer
@@ -85,7 +90,7 @@ export function createEmailChatCommandFilter(
         user_tz: default_user_tz,
         now: now(),
         llm: opts.llm,
-        model: opts.model,
+        model: typeof opts.model === 'function' ? opts.model() : opts.model,
         summarizer,
       })
       const out: EmailChatCommandFilterResult = { text: response.text }

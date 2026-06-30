@@ -59,7 +59,7 @@ import {
   collectTokensToString,
 } from '../gateway/realmode-composer/build-llm-call-substrate.ts'
 import { buildSubstrateWorkflowFire } from '../trident/inner-loop.ts'
-import { BEST_MODEL } from '../runtime/models.ts'
+import { getBestModel } from '../runtime/models.ts'
 import {
   FIRST_CONVERSATIONAL_TIMEOUT_MS_DEFAULT,
   PREWARM_AWAIT_CAP_MS_DEFAULT,
@@ -640,7 +640,9 @@ export function buildOpenGraphComposer(
         },
         instance_key: internal_handle,
         repo_path: owner_home,
-        default_model: BEST_MODEL,
+        // Pass the dynamic accessor (thunk) so each dispatch resolves the live
+        // best model — the watchdog's adopted id reaches new agent-dispatch runs.
+        default_model: getBestModel,
         persona_loader: defaultPersonaLoader,
       })
     })()
@@ -1043,7 +1045,7 @@ export function buildOpenGraphComposer(
     // items from the synthesis. Same warm substrate, BEST_MODEL.
     const wowPickerLlm =
       llmCallSubstrate !== null
-        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
+        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate })
         : undefined
 
     // WAVE 2 Track A — per-project persona resolver. Reads the canonical
@@ -1713,7 +1715,7 @@ export function buildOpenGraphComposer(
     // nudge engine / wow picker use (`buildAnthropicLlmCall`).
     const proactiveLlm =
       llmCallSubstrate !== null
-        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: BEST_MODEL })
+        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate })
         : null
     // The brief posts to the General topic on the SAME app-ws delivery path
     // fired reminders now use (`reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)`
@@ -2962,7 +2964,12 @@ export function prewarmSubstrate(substrate: Substrate): Promise<void> {
   const spec: AgentSpec = {
     prompt: PREWARM_PROMPT,
     tools: [],
-    model_preference: [BEST_MODEL],
+    // Resolve the warm-pool model PER-PREWARM via the dynamic accessor. This is
+    // the spawn that HEATS the onboarding REPL (it stamps the warm record's
+    // `model`, which the first real turn then reuses): a frozen id here is what
+    // pinned the dead `opus-4-7` and hung onboarding for the full 180s turn
+    // timeout (the 2026-06-30 incident). `getBestModel()` tracks the watchdog.
+    model_preference: [getBestModel()],
     max_tokens: 16,
   }
   return (async (): Promise<void> => {

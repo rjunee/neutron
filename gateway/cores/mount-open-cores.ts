@@ -53,7 +53,7 @@ import { buildCalendarCacheResolver } from './calendar-wiring.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import type { Substrate, AgentSpec } from '../../runtime/substrate.ts'
 import type { SecretsStore } from '../../auth/secrets-store.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import { collectTokensToString } from '../realmode-composer/build-llm-call-substrate.ts'
 
 import type { CalendarClient } from '@neutronai/calendar-core'
@@ -144,7 +144,9 @@ function buildOneShotSubstrateLlm(
     const spec: AgentSpec = {
       prompt,
       tools: [],
-      model_preference: [BEST_MODEL],
+      // Resolve PER-CALL — the watchdog's adopted id reaches each one-shot
+      // Core LLM dispatch instead of a frozen module-load constant.
+      model_preference: [getBestModel()],
       max_tokens: 2048,
     }
     return await collectTokensToString(substrate.start(spec))
@@ -264,7 +266,9 @@ export async function mountOpenCores(
     emailResolver,
     ...(emailOAuthTokens !== undefined ? { emailOAuthTokens } : {}),
     emailLlm,
-    emailModel: BEST_MODEL,
+    // Thunk (not a snapshot) so the email Core's stamped model resolves
+    // per-call, aligned with the per-call `emailLlm` dispatch after a flip.
+    emailModel: getBestModel,
     googleOAuthAccessToken,
     calendarClient,
     researchProjectBackend: researchWiring.project_backend,
@@ -292,7 +296,9 @@ export async function mountOpenCores(
       resolver: emailResolver,
       client: gmailClient,
       llm: emailLlm,
-      model: BEST_MODEL,
+      // Pass the accessor (thunk) so the reported model resolves PER-CALL,
+      // aligned with the per-call `emailLlm` dispatch after a watchdog flip.
+      model: getBestModel,
       default_project_id,
     }),
     createNotesChatCommandFilter({ resolver: notesResolver, default_project_id }),

@@ -2,6 +2,113 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-30 — REPL/live-agent model is ALWAYS the latest (never a hardcoded stale id)
+
+**P0 onboarding hang fix.** A fresh Open box spawned the live-agent / onboarding
+REPL with `--model claude-opus-4-7` (the hardcoded `BEST_MODEL` default in
+`runtime/models.ts`). Once `opus-4-7` stopped serving, the model call hung → the
+turn produced ZERO tokens → the persistent-REPL 180s per-turn timeout fired →
+the user got the failure bubble / an indefinite "Setting things up…" loader.
+Repro: a clean instance on the default hung 180s + failed; pinned to
+`claude-opus-4-8` it delivered the welcome in ~32s.
+
+**Root cause.** `runtime/models.ts` already exposes a dynamic accessor
+`getBestModel()` (the model-update watchdog flips its override via
+`setBestModelOverride` when a newer top-tier model ships), but the gateway-level
+spawn/dispatch sites read the **frozen `BEST_MODEL` constant** instead — so the
+watchdog's adopted id never reached new/cold spawns, and the stale literal rotted
+into a hang the moment the pinned model was retired.
+
+**Fix (no flags, no dual paths).**
+- **Seed bump:** `BEST_MODEL` default `claude-opus-4-7` → `claude-opus-4-8` (the
+  fresh-install, pre-first-watchdog-tick seed) + a doc note that this is a SEED,
+  not the live value. Added the matching `claude-opus-4-8` row to
+  `runtime/model-pricing.ts` (same Opus $5/$25 rates) so
+  `resolvePricingFor(getBestModel())` doesn't throw at import-build.
+- **Dynamic resolution at every live spawn/dispatch site**, resolved as late as
+  feasible (per-turn / per-call, never captured when a runner is built once at
+  boot): `open/composer.ts` `prewarmSubstrate` (the warm-pool spawn that heats
+  the onboarding REPL — THE confirmed-bug site), `build-live-agent-turn.ts`
+  (resolved inside the per-turn body), `build-llm-router.ts`,
+  `build-project-opening-message.ts`, `build-project-doc-composer.ts`,
+  `build-phase-spec-resolver.ts` (`buildAnthropicLlmCall` model now optional →
+  `getBestModel()` per-call), `build-agent-watcher-llm-call.ts`,
+  `gateway/cores/mount-open-cores.ts` (one-shot Core LLM + email model), the
+  onboarding suggesters (`agent-name-suggester.ts`,
+  `personality-character-suggester.ts`) + `post-turn-extractor.ts`,
+  `onboarding/synthesis/synthesis-session.ts`,
+  `onboarding/history-import/substrate-callers.ts` + `job-runner.ts`,
+  `scribe/extract.ts`, `reflection/detector.ts`. `agent-dispatch/service.ts`
+  `default_model` now accepts a `string | (() => string)` thunk, and the Open
+  composer passes the `getBestModel` accessor so each dispatch resolves live.
+  Trident keeps the dynamic `--model opus` CLI alias (already always-latest);
+  reminders/research keep their intentional `FAST_MODEL`/`SONNET_MODEL` picks.
+- After this change there are **no remaining runtime references to the frozen
+  `BEST_MODEL` constant** outside `runtime/models.ts` (the seed) and
+  `runtime/model-pricing.ts` (doc text) — verified by grep.
+
+**Tests.** New `build-live-agent-turn-model-resolution.test.ts`: a runner built
+WITHOUT an explicit model spawns `getBestModel()`; a `setBestModelOverride` flip
+AFTER the runner is built reaches the NEXT turn on the SAME runner (proves
+per-turn, not per-build, resolution); an explicit `input.model` still wins. New
+`prewarmSubstrate` model-resolution test (in `onboarding-warm-conversational`):
+the pre-warm spawn uses `getBestModel()` and tracks a watchdog flip. Updated the
+`models.ts` default assertion (4.7→4.8), the watchdog-wiring oldModel/no-downgrade
+assertions (assert against `BEST_MODEL` not a literal), and the import
+substrate-caller default assertions. tsc clean (root + trident); leak-gate
+SILENT; models/substrate/onboarding/cores/realmode-composer suites green.
+
+**Codex cross-model review follow-up.** Making the import default dynamic meant
+that, after the watchdog adopts a brand-new top-tier id with no pricing row yet,
+`resolvePricingFor(getBestModel())` (eager, at `buildPass{1,2}SubstrateCaller`
+construction) would throw and break onboarding/imports. Fixed by splitting the
+resolver: an EXPLICIT operator `model_preference`/`fallback_model_preference`
+keeps the strict loud-fail (typo protection), while the DYNAMIC always-latest
+default degrades to a $0 estimate (`dollars_billed` is telemetry-only) with a
+one-time warn — the import runs on the latest model regardless. Regression test
+added (`buildPass1/Pass2SubstrateCaller` construct + run on an unpriced
+watchdog-adopted model, billing $0).
+
+**Codex review round 2 — per-call resolution.** The import callers + onboarding
+suggesters + post-turn-extractor are constructed ONCE at gateway/composer boot,
+so a builder-scope `getBestModel()` capture would pin the boot model and miss a
+later watchdog flip. Moved the dynamic-default model (+ its pricing, for the
+import callers) resolution INSIDE each returned closure (per-call), so a
+post-boot adoption reaches the next import / suggestion / extraction. Explicit
+operator model picks still resolve + price ONCE at build (loud-fail on typo).
+Test added: a `setBestModelOverride` flip between two calls on the SAME import
+caller reaches the second dispatch.
+
+**Codex review round 3 — env-pin keeps strict pricing.** `getBestModel()` returns
+`runtimeBestModel ?? BEST_MODEL`, so an operator's `NEUTRON_BEST_MODEL` pin
+(surfaced as `BEST_MODEL`) was being silently billed at $0 when unpriced —
+regressing the typo loud-fail. Now ONLY a watchdog-adopted override (model !==
+`BEST_MODEL`) degrades; the env/default base keeps the strict `resolvePricingFor`
+loud-fail.
+
+**Codex review round 4 — model attribution / metadata (P3).** Two
+non-dispatch sites that should NOT track the live accessor: (a)
+`onboarding/history-import/job-runner.ts` stamps `synthesizer_model` for a
+legacy/pre-S21 row that ALREADY completed — reverted to the stable `BEST_MODEL`
+(attribution, not selection; a watchdog flip mustn't mislabel old results). (b)
+The free-email `/email` chat-command filter's reported `model` was captured at
+mount while `emailLlm` dispatches `getBestModel()` per call — the filter's
+`model` option now accepts a thunk resolved per-call in `match`, so the reported
+model stays aligned with the dispatch.
+
+**Codex review round 5 — Email Core backend metadata (P3).** Same boot-capture
+in the Email-Managed Core MCP-tool path: `buildTools` stamped a boot-time model
+onto `email_triage` / `email_summarize` brief metadata while `llm` dispatched
+`getBestModel()` per call. Threaded a `string | (() => string)` thunk through
+`emailModel` (`mount-open-cores` → `boot-helpers` factory → `buildTools`),
+resolved PER-CALL inside each tool handler, so the stamped model tracks a
+watchdog flip. (Email Core is OAuth-gated / inert in default Open, but kept
+consistent with the dispatch.)
+
+NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
+timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
+regression from this change.
+
 ## 2026-06-30 — M1 onboarding/UI cleanup batch (3 minor verify-pass fixes)
 
 Three minor, non-architectural polish fixes surfaced during the M1

@@ -79,6 +79,18 @@ const PRICING_VERIFIED_AT = '2026-05-17'
 export const MODEL_PRICING_TABLE: Readonly<
   Record<string, Readonly<ModelPricingEntry>>
 > = Object.freeze({
+  // The current `runtime/models.ts:BEST_MODEL` default. Opus is priced
+  // identically across the 4.x generation ($5 in / $25 out per MTok), so this
+  // matches the 4-7 row; it MUST exist because `resolvePricingFor(getBestModel())`
+  // is called at import-job build time and throws on an unregistered id.
+  'claude-opus-4-8': Object.freeze({
+    input_usd_per_m: 5,
+    output_usd_per_m: 25,
+    verified_at: PRICING_VERIFIED_AT,
+    source_url: PRICING_SOURCE_URL,
+  }),
+  // Retained for historical billing + the snapshot-fallback contract; was the
+  // BEST_MODEL default before the 2026-06-30 always-latest bump.
   'claude-opus-4-7': Object.freeze({
     input_usd_per_m: 5,
     output_usd_per_m: 25,

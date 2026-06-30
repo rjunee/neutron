@@ -42,7 +42,7 @@ import {
 } from './build-llm-call-substrate.ts'
 import { composeSystemPrompt } from './index.ts'
 import type { PersonaPromptLoader } from './persona-loader.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 
 /**
@@ -105,7 +105,6 @@ export function buildAgentWatcherLlmCall(
     return null
   }
   const substrate = input.substrate
-  const model = input.model ?? BEST_MODEL
   const personaLoader = input.personaLoader ?? null
 
   // Tests cover the no-persona path by passing personaLoader: null —
@@ -144,7 +143,9 @@ export function buildAgentWatcherLlmCall(
     const spec: AgentSpec = {
       prompt,
       tools: [],
-      model_preference: [model],
+      // Resolve PER-CALL through the dynamic accessor so a watchdog model flip
+      // reaches new dispatches; an explicit `input.model` still wins.
+      model_preference: [input.model ?? getBestModel()],
       max_tokens: call.max_tokens,
     }
 

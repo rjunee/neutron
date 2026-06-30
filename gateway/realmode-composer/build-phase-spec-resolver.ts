@@ -51,7 +51,7 @@ import {
   type PhaseSpecResolver,
 } from '../../onboarding/interview/phase-spec-resolver.ts'
 import type { WebChatSenderRegistry } from '../http/chat-bridge.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 import { collectTokensToString } from './build-llm-call-substrate.ts'
 import { loadSkills } from './skills-loader.ts'
@@ -246,7 +246,9 @@ export async function buildPhaseSpecResolver(
 
   const baseLlm = buildAnthropicLlmCall({
     substrate: input.substrate,
-    model: input.model ?? BEST_MODEL,
+    // Pass an explicit override through; otherwise `buildAnthropicLlmCall`
+    // resolves `getBestModel()` PER-CALL so a watchdog flip reaches dispatches.
+    ...(input.model !== undefined ? { model: input.model } : {}),
   })
 
   // Sprint A — GBrain methodology integration v2 (2026-05-12).
@@ -422,7 +424,8 @@ export async function buildPhaseSpecResolver(
  */
 export function buildAnthropicLlmCall(input: {
   substrate: Substrate
-  model: string
+  /** Explicit model override. Omit to resolve `getBestModel()` PER-CALL. */
+  model?: string
 }): LlmCallFn {
   return async (call): Promise<string> => {
     const prompt =
@@ -433,7 +436,7 @@ export function buildAnthropicLlmCall(input: {
     const spec: AgentSpec = {
       prompt,
       tools: [],
-      model_preference: [input.model],
+      model_preference: [input.model ?? getBestModel()],
       max_tokens: call.max_tokens,
     }
     try {

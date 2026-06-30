@@ -27,7 +27,7 @@ import type {
   ProjectDocComposer,
 } from '../../onboarding/wow-moment/project-materializer.ts'
 import type { AnthropicMessagesClient } from '../../onboarding/interview/llm-router.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 
 /** Output budget per doc — a README/summary is 1-2 screens, not a book. */
 export const DOC_MAX_TOKENS = 2_000
@@ -54,7 +54,7 @@ export function buildProjectDocComposer(
     const timer = setTimeout(() => controller.abort(), timeout_ms)
     try {
       const response = await input.client.messages.create({
-        model: input.model ?? BEST_MODEL,
+        model: input.model ?? getBestModel(),
         system: systemPrompt(doc.kind),
         messages: [{ role: 'user', content: userPrompt(doc) }],
         max_tokens,

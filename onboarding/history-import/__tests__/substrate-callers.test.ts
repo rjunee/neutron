@@ -9,9 +9,9 @@
  * deterministic Substrate stub. Verifies:
  *
  *   1. Pass-1 caller invokes `substrate.start` with model_preference[0] =
- *      claude-opus-4-7 AND the supplied pass1Prompt as a system message.
+ *      claude-opus-4-8 AND the supplied pass1Prompt as a system message.
  *   2. Pass-2 caller invokes `substrate.start` with model_preference[0] =
- *      claude-opus-4-7 AND the supplied pass2Prompt as a system message.
+ *      claude-opus-4-8 AND the supplied pass2Prompt as a system message.
  *   3. Both callers return `{result, dollars_billed}` matching the
  *      Pass1LlmCall / Pass2LlmCall interfaces.
  *   4. Markdown-fenced JSON output is extracted correctly (extractJsonObject).
@@ -25,7 +25,7 @@ import {
   buildPass2SubstrateCaller,
   extractJsonObject,
 } from '../substrate-callers.ts'
-import { FAST_MODEL, BEST_MODEL } from '../../../runtime/models.ts'
+import { FAST_MODEL, BEST_MODEL, setBestModelOverride } from '../../../runtime/models.ts'
 import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
 import type { Event } from '../../../runtime/events.ts'
 import type { SessionHandle } from '../../../runtime/session-handle.ts'
@@ -96,7 +96,7 @@ describe('buildPass1SubstrateCaller — Opus 4.7 dispatch (2026-05-31 Sam-locked
     // 2026-05-31 — Pass-1 default is Opus 4.7, not Haiku 4.5. See
     // substrate-callers.ts file header for the Sam-locked rationale.
     expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
-    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-7')
+    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-8')
     // Codex r3 P1 (T7 forge-fix r3): system + user are combined into one
     // user-turn `prompt` because the Anthropic Messages API doesn't
     // accept `role:'system'` inside messages. No `messages` array shipped.
@@ -201,7 +201,7 @@ describe('buildPass2SubstrateCaller — § 2.3 Opus 4.7 dispatch', () => {
     const out = await pass2({ aggregated: makeAggregated(), prompt: 'PASS-2 PROMPT BODY' })
     expect(calls.length).toBe(1)
     expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
-    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-7')
+    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-8')
     // Codex r3 P1: single user-turn body, no messages array.
     expect(calls[0]!.spec.messages).toBeUndefined()
     expect(calls[0]!.spec.prompt).toContain('PASS-2 PROMPT BODY')
@@ -397,5 +397,86 @@ describe('extractJsonObject — defensive parsing', () => {
 
   test('garbage → null', () => {
     expect(extractJsonObject('this is not JSON at all')).toBeNull()
+  })
+})
+
+describe('always-latest (2026-06-30) — import survives a watchdog-adopted UNPRICED model', () => {
+  // Regression for the Codex cross-model review finding: the import default is
+  // now the dynamic getBestModel(); when the model-update watchdog adopts a
+  // brand-new top-tier id BEFORE a pricing row exists, the caller must NOT throw
+  // at construction (that would break onboarding/imports). dollars_billed is
+  // telemetry-only, so it degrades to $0 (with a one-time warn) instead.
+  const UNPRICED = 'claude-opus-9-9' // not in MODEL_PRICING_TABLE
+
+  test('buildPass1SubstrateCaller constructs + runs, billing $0 on an unpriced latest model', async () => {
+    setBestModelOverride(UNPRICED)
+    try {
+      const { substrate, calls } = makeSubstrateStub([
+        { kind: 'token', text: '{"candidate_entities":[]}' },
+        { kind: 'completion', usage: { input_tokens: 100, output_tokens: 50 }, substrate_instance_id: 'cc' },
+      ])
+      // Must NOT throw at construction (the regression).
+      const pass1 = buildPass1SubstrateCaller({ substrate })
+      const out = await pass1({ chunk: makeChunk(), prompt: 'P1' })
+      // The import RAN on the latest (unpriced) model…
+      expect(calls[0]!.spec.model_preference[0]).toBe(UNPRICED)
+      // …and billing degraded to $0 rather than crashing.
+      expect(out.dollars_billed).toBe(0)
+    } finally {
+      setBestModelOverride(undefined)
+    }
+  })
+
+  test('buildPass2SubstrateCaller constructs + runs on an unpriced latest model', async () => {
+    setBestModelOverride(UNPRICED)
+    try {
+      const { substrate, calls } = makeSubstrateStub([
+        { kind: 'token', text: '{"projects":[]}' },
+        { kind: 'completion', usage: { input_tokens: 10, output_tokens: 5 }, substrate_instance_id: 'cc' },
+      ])
+      const pass2 = buildPass2SubstrateCaller({ substrate })
+      const out = await pass2({ aggregated: makeAggregated(), prompt: 'P2' })
+      expect(calls[0]!.spec.model_preference[0]).toBe(UNPRICED)
+      expect(out.dollars_billed).toBe(0)
+    } finally {
+      setBestModelOverride(undefined)
+    }
+  })
+
+  test('the dynamic default resolves PER-CALL — a watchdog flip after construction reaches the next import', async () => {
+    // The import callers are built once at gateway wire-up; a build-time capture
+    // would pin the boot model. Construct on the boot default, then flip the
+    // runtime override and dispatch AGAIN on the SAME caller — the 2nd dispatch
+    // must carry the newly-adopted model. (Codex cross-model review #2.)
+    setBestModelOverride(undefined)
+    try {
+      const ev = [
+        { kind: 'token', text: '{}' } as const,
+        { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'cc' } as const,
+      ]
+      const calls: RecordedCall[] = []
+      const substrate: Substrate = {
+        start(spec) {
+          calls.push({ spec })
+          const it = (async function* () { for (const e of ev) yield e })()
+          return { events: it, respondToTool: () => Promise.reject(new Error('x')), cancel: async () => undefined, tool_resolution: 'internal' }
+        },
+      }
+      const pass1 = buildPass1SubstrateCaller({ substrate })
+      const out0 = await pass1({ chunk: makeChunk(), prompt: 'p' }) // boot default
+      expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
+      // The env/default base (== BEST_MODEL) keeps STRICT pricing — billed at the
+      // real registered opus-4-8 rate ($5/$25 per MTok), NOT degraded to $0. Only
+      // a watchdog-adopted *different* id degrades (Codex review #3).
+      expect(out0.dollars_billed).toBeCloseTo((1 * 5 + 1 * 25) / 1_000_000, 10)
+      setBestModelOverride('claude-opus-9-9') // watchdog adopts a newer model
+      const out1 = await pass1({ chunk: makeChunk(), prompt: 'p' }) // SAME caller, later import
+      expect(calls[1]!.spec.model_preference[0]).toBe('claude-opus-9-9')
+      expect(calls[1]!.spec.model_preference[0]).not.toBe(BEST_MODEL)
+      // The watchdog-adopted UNPRICED id degrades billing to $0 (telemetry-only).
+      expect(out1.dollars_billed).toBe(0)
+    } finally {
+      setBestModelOverride(undefined)
+    }
   })
 })

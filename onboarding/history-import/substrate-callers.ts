@@ -59,7 +59,7 @@ import type { Substrate } from '../../runtime/substrate.ts'
 import type { Event } from '../../runtime/events.ts'
 import type { Pass1LlmCall } from './pass1-triage.ts'
 import type { Pass2LlmCall, AggregatedPass1 } from './pass2-synthesis.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { BEST_MODEL, getBestModel } from '../../runtime/models.ts'
 import { resolveModelPricing } from '../../runtime/model-pricing.ts'
 import { ImportError, type Chunk } from './types.ts'
 
@@ -240,19 +240,26 @@ export interface BuildPass2SubstrateCallerDeps {
 export function buildPass1SubstrateCaller(
   deps: BuildPass1SubstrateCallerDeps,
 ): Pass1LlmCall {
-  const modelPref =
+  const explicitPref =
     deps.model_preference !== undefined && deps.model_preference.length > 0
       ? [...deps.model_preference]
-      : [BEST_MODEL]
+      : null
   const maxTokens = deps.max_tokens ?? 1500
   // P2-v2 S23 — pricing is derived from the model id actually dispatched.
-  // resolveModelPricing throws at build time if `model_preference[0]` (or
-  // an env override like `NEUTRON_BEST_MODEL`) names an unregistered
-  // model, so an operator typo can't silently bill at the wrong rate.
-  // Tests pass an explicit `pricing` override to keep dollar-billing
-  // assertions deterministic without depending on the real price table.
-  const pricing = deps.pricing ?? resolvePricingFor(modelPref[0] ?? BEST_MODEL)
+  // An EXPLICIT `model_preference` is captured + priced ONCE here so a typo
+  // loud-fails at build (resolvePricingFor). The DYNAMIC always-latest default
+  // is resolved PER-CALL inside the returned closure (below) so a post-boot
+  // model-update-watchdog flip reaches later imports — the import callers are
+  // built once at gateway wire-up, so a build-time capture would pin the
+  // boot-time model (Codex cross-model review). `deps.pricing` overrides either.
+  const explicitPricing =
+    explicitPref !== null ? (deps.pricing ?? resolvePricingFor(explicitPref[0]!)) : null
   return async (input: { chunk: Chunk; prompt: string }) => {
+    const modelPref = explicitPref ?? [getBestModel()]
+    // Dynamic default degrades to $0 telemetry instead of crashing the import
+    // when the watchdog adopts a not-yet-priced model.
+    const pricing =
+      deps.pricing ?? explicitPricing ?? resolvePricingForDynamicDefault(modelPref[0]!)
     const handle = deps.substrate.start({
       prompt: composeSystemPlusUser(input.prompt, renderChunkUserTurn(input.chunk)),
       tools: [],
@@ -279,35 +286,37 @@ export function buildPass1SubstrateCaller(
 export function buildPass2SubstrateCaller(
   deps: BuildPass2SubstrateCallerDeps,
 ): Pass2LlmCall {
-  const modelPref =
+  const explicitPref =
     deps.model_preference !== undefined && deps.model_preference.length > 0
       ? [...deps.model_preference]
-      : [BEST_MODEL]
+      : null
   const fallbackPref =
     deps.fallback_model_preference !== undefined && deps.fallback_model_preference.length > 0
       ? [...deps.fallback_model_preference]
       : null
   const maxTokens = deps.max_tokens ?? 4096
-  const primaryModel = modelPref[0] ?? BEST_MODEL
-  // P2-v2 S23 — pricing derived from each dispatched model id via the
-  // registry. Fixes the S21 R2 follow-up: pre-S23 a `NEUTRON_SONNET_MODEL`
-  // env override could silently mis-bill because the fallback `pricing`
-  // block hard-coded Sonnet 4.6 rates regardless of which Sonnet variant
-  // the operator actually configured. Now the per-model lookup happens
-  // at build time and an unknown model id throws a descriptive error at
-  // startup (`resolveModelPricing`) instead of silently overstating /
-  // understating cost.
-  const pricing = deps.pricing ?? resolvePricingFor(primaryModel)
-  // Resolve the fallback model + its pricing eagerly at build time so an
-  // unregistered `NEUTRON_SONNET_MODEL` typo fails fast at composer wiring
-  // rather than at the first 429.
-  const fallbackModel: string | null =
-    fallbackPref !== null ? (fallbackPref[0] ?? primaryModel) : null
+  // P2-v2 S23 — pricing derived from each dispatched model id via the registry
+  // (fixes the S21 R2 silent-mis-bill). An EXPLICIT primary is captured + priced
+  // ONCE here so a typo loud-fails at build; the DYNAMIC always-latest default
+  // resolves PER-CALL inside the closure (below) so a post-boot watchdog flip
+  // reaches later imports (Codex cross-model review). `deps.pricing` overrides.
+  const explicitPricing =
+    explicitPref !== null ? (deps.pricing ?? resolvePricingFor(explicitPref[0]!)) : null
+  // The fallback is ALWAYS an explicit operator opt-in (`fallback_model_preference`),
+  // so resolve its model + pricing eagerly at build time — an unregistered
+  // `NEUTRON_SONNET_MODEL` typo fails fast at composer wiring, not at the first 429.
+  const fallbackModel: string | null = fallbackPref !== null ? fallbackPref[0]! : null
   const fallbackPricing =
     fallbackModel !== null
       ? (deps.fallback_pricing ?? resolvePricingFor(fallbackModel))
       : null
   return async (input: { aggregated: AggregatedPass1; prompt: string; source?: string }) => {
+    const modelPref = explicitPref ?? [getBestModel()]
+    const primaryModel = modelPref[0]!
+    // Dynamic default degrades to $0 telemetry instead of crashing on a
+    // not-yet-priced watchdog-adopted model.
+    const pricing =
+      deps.pricing ?? explicitPricing ?? resolvePricingForDynamicDefault(primaryModel)
     const body = composeSystemPlusUser(input.prompt, renderAggregatedUserTurn(input.aggregated))
     try {
       const handle = deps.substrate.start({
@@ -525,8 +534,11 @@ async function drainSubstrateEvents(
  *
  * Throws via `resolveModelPricing` when the id isn't registered — the
  * substrate caller will fail to construct at composer wire-up, which is
- * the desired loud-fail behavior. See `runtime/model-pricing.ts` for the
- * full rationale.
+ * the desired loud-fail behavior for an EXPLICIT operator model pick (a
+ * typo'd `NEUTRON_BEST_MODEL` / `model_preference` / `fallback_model_preference`
+ * must not silently bill at the wrong rate). See `runtime/model-pricing.ts`.
+ * The DYNAMIC always-latest default uses {@link resolvePricingForDynamicDefault}
+ * instead, which degrades rather than throws.
  */
 function resolvePricingFor(
   model_id: string,
@@ -535,6 +547,52 @@ function resolvePricingFor(
   return {
     input_usd_per_m: entry.input_usd_per_m,
     output_usd_per_m: entry.output_usd_per_m,
+  }
+}
+
+/** Models we've already warned about (one warn per id, avoids log spam). */
+const UNPRICED_MODEL_WARNED = new Set<string>()
+
+/**
+ * always-latest (2026-06-30) — pricing for the DYNAMIC default model
+ * (`getBestModel()`), which DEGRADES instead of throwing on an unregistered id.
+ *
+ * The import default is now the dynamic `getBestModel()` (always-latest
+ * directive), so when the model-update watchdog adopts a brand-new top-tier id
+ * BEFORE a verified pricing row exists, a strict `resolveModelPricing` would
+ * throw — and because pricing resolves at `buildPass{1,2}SubstrateCaller`
+ * CONSTRUCTION (import-job-runner wire-up), that throw would break
+ * onboarding/imports entirely (Codex cross-model review). `dollars_billed` is
+ * TELEMETRY-ONLY (nothing reads it for control flow — see the cost-accounting
+ * note at the top of this file), so the right trade-off for the auto-adopted
+ * default is: keep the import RUNNING on the latest model and degrade only the
+ * cost ESTIMATE to $0, logging once so an operator still sees a row should be
+ * added. EXPLICIT operator picks keep the strict {@link resolvePricingFor}
+ * loud-fail (typo protection) — only the auto-adopted default degrades.
+ */
+function resolvePricingForDynamicDefault(
+  model_id: string,
+): { input_usd_per_m: number; output_usd_per_m: number } {
+  // Only a WATCHDOG-adopted model degrades. `getBestModel()` returns
+  // `runtimeBestModel ?? BEST_MODEL`; when it equals the env/default base
+  // (`BEST_MODEL` — i.e. the operator's `NEUTRON_BEST_MODEL` pin or the seed),
+  // it is an EXPLICIT config and keeps the strict loud-fail so a typo'd /
+  // unpriced `NEUTRON_BEST_MODEL` still fails fast (Codex cross-model review #3).
+  // Only the auto-adopted override (model !== BEST_MODEL) degrades to $0.
+  if (model_id === BEST_MODEL) return resolvePricingFor(model_id)
+  try {
+    return resolvePricingFor(model_id)
+  } catch (err) {
+    if (!UNPRICED_MODEL_WARNED.has(model_id)) {
+      UNPRICED_MODEL_WARNED.add(model_id)
+      console.warn(
+        `[import] no pricing registered for auto-adopted latest model ` +
+          `"${model_id}" — import runs but dollars_billed (telemetry-only) is ` +
+          `estimated at $0 until a row is added to runtime/model-pricing.ts. ` +
+          `(${err instanceof Error ? err.message : String(err)})`,
+      )
+    }
+    return { input_usd_per_m: 0, output_usd_per_m: 0 }
   }
 }
 

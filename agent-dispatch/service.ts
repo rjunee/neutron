@@ -180,8 +180,12 @@ export interface DispatchServiceDeps {
   instance_key: string
   /** Default working dir for a dispatch when the request omits `repo_path`. */
   repo_path: string
-  /** Default model id. */
-  default_model: string
+  /**
+   * Default model id, or a thunk resolving it. A thunk is resolved PER-DISPATCH
+   * so the model-update watchdog's adopted id reaches new runs (pass the
+   * `getBestModel` accessor); a plain string pins a fixed model.
+   */
+  default_model: string | (() => string)
   /** Default wall-clock budget (ms). Defaults to 30 min. */
   timeout_ms?: number
   /** Default delivery target for report-back when a request omits one. */
@@ -304,7 +308,11 @@ export class DispatchService {
   ): DispatchHandle {
     const run_id = record.run_id
     const repo_path = req.repo_path ?? this.deps.repo_path
-    const model = req.model ?? this.deps.default_model
+    const model =
+      req.model ??
+      (typeof this.deps.default_model === 'function'
+        ? this.deps.default_model()
+        : this.deps.default_model)
     const timeout_ms = req.timeout_ms ?? this.timeout_ms
     const role = this.systemFor(kind)
     const user_message = `${role}\n\n---\n\nYour task:\n\n${req.task}`

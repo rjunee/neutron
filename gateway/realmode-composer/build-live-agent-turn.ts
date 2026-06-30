@@ -59,7 +59,7 @@ import { randomUUID } from 'node:crypto'
 import type { ButtonStore } from '../../channels/button-store.ts'
 import { buildButtonPrompt } from '../../channels/button-primitive.ts'
 import type { ChatOutbound } from '../../landing/server.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import { assembleSystemPrompt } from '../../runtime/system-prompt.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 import type { ToolDef } from '../../core-sdk/types.ts'
@@ -310,7 +310,6 @@ export function buildLiveAgentTurn(
   input: BuildLiveAgentTurnInput,
 ): (turn: LiveAgentTurnRequest) => Promise<LiveAgentTurnResult> {
   const now = input.now ?? ((): number => Date.now())
-  const model = input.model ?? BEST_MODEL
   const timeout_ms = input.timeout_ms ?? DEFAULT_TIMEOUT_MS
   const ack_delay_ms = input.ack_delay_ms ?? DEFAULT_COLD_START_ACK_DELAY_MS
   const tool_names = input.tool_names ?? DEFAULT_TOOL_NAMES
@@ -514,6 +513,13 @@ export function buildLiveAgentTurn(
 
     // ── 3. Dispatch over the substrate (CC-spawn only — no direct API).
     const scope = turn.project_id ?? 'general'
+    // Resolve the model PER-TURN through the dynamic accessor (NOT a constant
+    // captured when this runner was built once at gateway boot): the
+    // model-update watchdog flips `getBestModel()` at runtime, so a turn that
+    // arrives after a flip — or the very first onboarding turn on a fresh
+    // install — spawns the latest served model, never a retired id that would
+    // hang for the full per-turn timeout. An explicit `input.model` still wins.
+    const model = input.model ?? getBestModel()
     const spec: AgentSpec = {
       prompt,
       tools,

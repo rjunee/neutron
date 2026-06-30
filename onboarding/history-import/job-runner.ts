@@ -545,6 +545,13 @@ export class ImportJobRunner {
           !result.partial &&
           job.result.synthesizer_model === undefined
         ) {
+          // ATTRIBUTION, not selection: this stamps the synthesizer for a
+          // legacy/pre-S21 row that ALREADY completed without the field. It must
+          // be the STABLE default (`BEST_MODEL` seed), NOT the live
+          // `getBestModel()` — a watchdog flip after the row completed would
+          // otherwise mislabel old results with a model that never produced them
+          // (Codex cross-model review). Live always-latest applies to DISPATCH
+          // sites, not historical attribution.
           job.result.synthesizer_model = BEST_MODEL
         }
       }
