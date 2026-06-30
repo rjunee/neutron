@@ -83,6 +83,16 @@ const ONBOARDING_CLOSING_MESSAGE =
   "You're all set. I've created your projects - they're in the left rail. Open one to find its Plan, Documents, and Chat, and we can dig in whenever you're ready."
 
 /**
+ * No-projects variant of the closing (item 6). The finalizer intentionally
+ * completes even when the owner named no projects (or every one was
+ * skipped/failed), so the default copy ("I've created your projects ... in the
+ * left rail") would be a lie + point at an empty rail. This honest fallback makes
+ * no claim about a populated rail (Codex P2, 2026-06-30). Em-dash-free.
+ */
+const ONBOARDING_CLOSING_MESSAGE_NO_PROJECTS =
+  "You're all set, and I've got what I need to start helping. Tell me what you'd like to work on - or say \"create a project\" - and I'll take it from there."
+
+/**
  * The persona composer surface `finalize` consumes. Matches the public
  * methods of `PersonaComposer` we use; declared as a structural seam so tests
  * can inject a fake without standing up the archetype/cringe pipeline. When
@@ -253,10 +263,16 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       if (deps.emitChatMessage !== undefined) {
         await emitProjectOpenings(deps, input.user_id, materialized, import_result, log)
         try {
+          // Only claim a populated rail when projects actually landed; otherwise
+          // an honest no-projects close (the finalizer completes even with zero
+          // materialized projects).
           await deps.emitChatMessage({
             user_id: input.user_id,
             project_id: null,
-            body: ONBOARDING_CLOSING_MESSAGE,
+            body:
+              materialized.length > 0
+                ? ONBOARDING_CLOSING_MESSAGE
+                : ONBOARDING_CLOSING_MESSAGE_NO_PROJECTS,
             dedupe_key: 'onboarding_closing',
           })
         } catch (err) {

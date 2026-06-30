@@ -522,6 +522,35 @@ test('finalize emits a General closing message + one per-project opening (items 
   h.db.close()
 })
 
+test('finalize with NO projects emits an honest closing (no "I created your projects" claim)', async () => {
+  const h = makeHarness()
+  const emitted: Array<{ project_id: string | null; body: string }> = []
+  const deps: OnboardingFinalizeDeps = {
+    ...h.deps,
+    emitChatMessage: (input): void => void emitted.push(input),
+  }
+  // No primary_projects → nothing materializes.
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: [] },
+  })
+  const finalizer = buildOnboardingFinalize(deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // No per-project openings, and the closing must NOT claim projects were created.
+  expect(emitted.filter((e) => e.project_id !== null)).toHaveLength(0)
+  const closings = emitted.filter((e) => e.project_id === null)
+  expect(closings).toHaveLength(1)
+  expect(closings[0]!.body).not.toMatch(/created your projects/i)
+  expect(closings[0]!.body).not.toMatch(/left rail/i)
+  // Still a usable, real handoff.
+  expect(closings[0]!.body.trim().length).toBeGreaterThan(0)
+
+  h.db.close()
+})
+
 test('finalize without an emitChatMessage seam still completes (no closing/opening)', async () => {
   const h = makeHarness() // deps has NO emitChatMessage
   const seeded = await h.stateStore.upsert({
