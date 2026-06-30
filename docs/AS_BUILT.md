@@ -32,10 +32,23 @@ high-water seq but NO client code read it.
 - `app/lib/ws-envelope.ts` — added `last_seen_seq?` to `AppWsOutboundSessionReady`
   for type parity with the server envelope (`channels/adapters/app-ws/envelope.ts`).
 
-**Not changed.** No server changes — `gateway/http/app-ws-surface.ts` already
-stamps `session_ready.last_seen_seq = adapter.currentMaxSeq(topic)` (>0), and
-`open/composer.ts` wires the durable `AppChatStore` chat_log, so the signal is
-already present. No new local-store namespace keyed on a server instance id (the
+**Server change (Codex P1a).** `gateway/http/app-ws-surface.ts` now ALWAYS sends
+`session_ready.last_seen_seq` when a durable log is wired, **including 0**.
+Previously it omitted the field on 0, so a freshly reinstalled server whose log
+was still empty at connect time (the welcome messages persist AFTER
+`session_ready`) sent no signal → the stale client never reset on its first
+post-reinstall load. A present `0` is now an affirmative "this server has nothing
+for the topic" signal; the field stays ABSENT only when there is no durable log
+at all (where `null` → never clear, protecting the only copy). `open/composer.ts`
+wires the durable `AppChatStore` chat_log, so Open always reports the real value.
+
+**No-data-loss on reset (Codex P1b).** `reconcileServerReset` preserves un-acked
+local sends (status `queued`/`sent`, no server seq) across the wipe — it drops
+only the stale ACKED transcript — so a reset re-drives the user's
+typed-but-undelivered messages against the fresh server (idempotent on
+`client_msg_id`) instead of silently losing them.
+
+**Not changed.** No new local-store namespace keyed on a server instance id (the
 frame exposes no per-install id today; the seq-regression heuristic is the
 pragmatic detector per the bug note).
 

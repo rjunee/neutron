@@ -244,6 +244,24 @@ describe('WebChatSession — stale-store reset on server reinstall (M1)', () => 
     expect(msgs.some((m) => m.body.startsWith('stale:'))).toBe(false)
   })
 
+  it('preserves a queued offline send across the reset and re-drives it on the fresh server', async () => {
+    const { session, sockets, store } = await seededSession()
+    session.start()
+    // User types a message while offline (queued, never delivered to old server).
+    await session.send('please keep me', { client_msg_id: 'cmid-keep' })
+    sockets[0]!.open()
+    // Fresh server announces a regressed seq → reset.
+    sockets[0]!.deliver(readyFrame(2))
+    await new Promise((r) => setTimeout(r, 0))
+    // Stale acked rows gone, but the queued send survives the wipe …
+    const msgs = await session.messages()
+    expect(msgs.some((m) => m.body.startsWith('stale:'))).toBe(false)
+    expect(msgs.map((m) => m.body)).toContain('please keep me')
+    // … and is re-driven to the fresh server (idempotent on client_msg_id).
+    expect(await store.lastSeenSeq(TOPIC)).toBe(0)
+    expect(sockets[0]!.sentUserMessages().map((e) => e['body'])).toContain('please keep me')
+  })
+
   it('does NOT clear on a normal reconnect (server seq >= local cursor)', async () => {
     const { session, sockets, store } = await seededSession()
     session.start()
