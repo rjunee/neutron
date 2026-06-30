@@ -557,6 +557,22 @@ describe('ChatApp render (happy-dom)', () => {
       await tick()
     })
 
+    // Codex r1 — with NO import affordance (normal chat), the surface drag
+    // handler is STILL active (dragging an image must keep working): a dragover
+    // shows the subtle outline, and NOT the import overlay.
+    const mainEarly = container.querySelector('.car-main') as HTMLElement
+    await act(async () => {
+      mainEarly.dispatchEvent(new window.Event('dragover', { bubbles: true, cancelable: true }))
+      await tick()
+    })
+    expect(mainEarly.classList.contains('car-dragover')).toBe(true)
+    expect(container.querySelector('.car-dropzone')).toBeNull()
+    // Leave the surface to reset drag state before the import-affordance leg.
+    await act(async () => {
+      mainEarly.dispatchEvent(new window.Event('dragleave', { bubbles: true }))
+      await tick()
+    })
+
     // An agent message with an active upload affordance (uploads accepted).
     await act(async () => {
       sockets[0]!.deliver({

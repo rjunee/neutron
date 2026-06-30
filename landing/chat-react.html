@@ -209,6 +209,9 @@
   @media (max-width: 720px) { .car-rail { display: none; } }
   /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
   .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+  /* Subtle drag feedback for a PLAIN image drag (no import affordance) — the
+     import drag gets the prominent .car-dropzone overlay instead (Codex r1). */
+  .car-main.car-dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
   .car-banner {
     text-align: center; font-size: 13px; padding: 6px 12px;
     background: #2a2410; color: #ffd479; border-bottom: 1px solid var(--border);

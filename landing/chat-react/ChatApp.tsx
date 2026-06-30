@@ -933,25 +933,29 @@ function ChatSurface({
     if (files !== undefined && files.length > 0) handleFiles(files)
   }
 
-  // Surface-wide drag affordance — only armed while uploads are accepted, so a
-  // stray image/file drag during steady-state chat doesn't flash the overlay.
-  const dragProps = importActive
-    ? {
-        onDragOver: (e: React.DragEvent): void => {
-          e.preventDefault()
-          setDragOver(true)
-        },
-        // Only clear when the pointer genuinely leaves the surface (not when it
-        // crosses between child elements) to avoid overlay flicker.
-        onDragLeave: (e: React.DragEvent): void => {
-          if (!(e.currentTarget as Node).contains(e.relatedTarget as Node | null)) setDragOver(false)
-        },
-        onDrop,
-      }
-    : {}
+  // Surface-wide drag-and-drop is ALWAYS armed (Codex r1) — dropping an image
+  // anywhere on the chat attaches it to the draft, exactly as the composer used
+  // to. `importActive` gates only the PROMINENT import overlay + ZIP→import
+  // routing (handled inside handleFiles): a plain image drag shows a subtle
+  // outline (`car-dragover`), an import drag shows the DropZoneOverlay.
+  const dragProps = {
+    onDragOver: (e: React.DragEvent): void => {
+      e.preventDefault()
+      setDragOver(true)
+    },
+    // Only clear when the pointer genuinely leaves the surface (not when it
+    // crosses between child elements) to avoid flicker.
+    onDragLeave: (e: React.DragEvent): void => {
+      if (!(e.currentTarget as Node).contains(e.relatedTarget as Node | null)) setDragOver(false)
+    },
+    onDrop,
+  }
 
   return (
-    <main className="car-main" {...dragProps}>
+    <main
+      className={`car-main${dragOver && !importActive ? ' car-dragover' : ''}`}
+      {...dragProps}
+    >
       <ConnectionBanner status={vm.status} />
       <WebDropZoneOverlay visible={dragOver && importActive} source={importSourceLabel(uploadAffordance)} />
       <ThreadPrimitive.Root className="car-thread">
