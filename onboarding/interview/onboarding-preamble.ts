@@ -14,10 +14,26 @@
  * ≥1 non-work interest, the agent's personality, and the agent's name.
  */
 
+import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-character-suggester.ts'
+
 export interface OnboardingPreambleInput {
   /** Whether an AI history-import (ChatGPT/Claude) is offered on this box. */
   import_offered: boolean
 }
+
+/**
+ * The DEFINED personality-archetype menu the agent offers at the personality
+ * step (item 1, 2026-06-30). Before this, the preamble told the model to "offer
+ * a couple of concrete flavors" and it improvised a fresh, inconsistent trio
+ * every run. We instead inject a stable, curated set of NAMED characters (the
+ * voice anchors `personality-character-suggester.ts` was built around) so every
+ * owner sees the same recognisable choices — rendered as tappable buttons via
+ * the `[[OPTIONS]]` protocol below. The owner can still describe their own.
+ */
+const DEFINED_PERSONALITY_CHARACTERS: ReadonlyArray<{ name: string; why: string }> = [
+  ...STATIC_PERSONALITY_CHARACTER_FALLBACK.personalized,
+  ...STATIC_PERSONALITY_CHARACTER_FALLBACK.wild,
+]
 
 export function buildOnboardingPreamble(input: OnboardingPreambleInput): string {
   const lines: string[] = []
@@ -60,22 +76,59 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   )
   lines.push('  3. At least one thing they care about OUTSIDE work (a hobby / interest).')
   lines.push(
-    '  4. The personality they want from YOU — how should you talk to them? (e.g. warm',
-    '     and encouraging, blunt and concise, a sharp technical peer). Offer a couple of',
-    '     concrete flavors if they\'re unsure.',
+    '  4. The personality they want from YOU — whose voice should you take on? Offer the',
+    '     DEFINED set of character archetypes below as tappable options (emit them with',
+    '     the [[OPTIONS]] block — see "Offering choices"). Each is a recognisable figure',
+    '     whose vibe anchors how you talk. Always include a "Something else (I\'ll describe',
+    '     it)" option so they can give their own flavor (warm, blunt, a sharp technical',
+    '     peer, …) in free text. Offer THESE — do not invent a different list:',
   )
+  for (const c of DEFINED_PERSONALITY_CHARACTERS) {
+    lines.push(`       - ${c.name} — ${c.why}`)
+  }
   lines.push(
-    '  5. A name for you, their assistant. Suggest a few that fit the personality they',
-    '     picked, and let them choose or invent one.',
+    '  5. A name for you, their assistant. Suggest a few short names that fit the',
+    '     personality they picked, offered as tappable [[OPTIONS]] (plus a "You pick" /',
+    '     "I\'ll choose my own" option). CRITICAL: accept ANY name they give — typed OR',
+    '     tapped — verbatim, exactly as written, even if it is not one you suggested',
+    '     (e.g. "Ferin"). The moment they clearly give a name, confirm it warmly and',
+    '     move on. NEVER re-ask for a name they already gave, and never reject an',
+    '     unfamiliar name.',
+  )
+  lines.push('')
+  lines.push('Offering choices (tappable buttons):')
+  lines.push(
+    'When you offer the owner a set of choices — the personality archetypes, name',
+    'suggestions, or a yes/no like the history-import offer — give them tappable buttons',
+    'by appending a block in EXACTLY this format at the very END of your message, after',
+    'your prose question:',
+  )
+  lines.push('')
+  lines.push('  [[OPTIONS]]')
+  lines.push('  - First choice')
+  lines.push('  - Second choice')
+  lines.push('  - Something else (I\'ll describe it)')
+  lines.push('  [[/OPTIONS]]')
+  lines.push('')
+  lines.push(
+    'Rules: write your normal conversational question FIRST, then the block. Keep each',
+    'option SHORT (a name or a few words) — the option\'s text is exactly what gets sent',
+    'back when they tap it, so make it self-explanatory. Use the block ONLY for genuine',
+    'choice steps (personality, name, a clear yes/no), at most ~6 options, and always',
+    'leave room for a free-text answer (they can ignore the buttons and just type). Do',
+    'NOT use it for open questions like "what do you work on?". Never show the literal',
+    '[[OPTIONS]] markers in prose — they are stripped before the owner sees the message.',
   )
   lines.push('')
   lines.push(
     'You do NOT need to collect these in order, and a single answer may cover several. Do',
     'not re-ask something they already told you. When you have a good sense of all five,',
-    'briefly reflect back what you learned, tell them you\'re all set and ready to help,',
-    'and then simply continue as their assistant — from that point on, just be the helpful',
-    'personal assistant you were set up to be. Do not announce phases or "completing',
-    'onboarding"; the transition should feel seamless.',
+    'briefly reflect back what you learned and tell them you\'re all set. Mention that',
+    'you\'ve set up their projects in the left rail and that each one has its own Plan,',
+    'Documents, and Chat — they can open one any time. Then simply continue as their',
+    'assistant. Do not announce phases or "completing onboarding"; the transition should',
+    'feel seamless. (A confirmation message naming the projects is also sent',
+    'automatically once they are created, so keep your wrap-up brief.)',
   )
   lines.push('</onboarding>')
   return lines.join('\n')

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 
 import { NEUTRON_SCHEME, VAULT_REDIRECTOR_BASE, WEB_APP_BASE } from '@neutronai/runtime'
 import type { IncomingEvent, OutgoingMessage, Topic } from '../../../types.ts'
-import { AppWsAdapter } from '../adapter.ts'
+import { AppWsAdapter, optionsToInlineChoices } from '../adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../session-registry.ts'
 import {
   appWsTopicId,
@@ -90,6 +90,39 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
       { label: 'No', body: 'No', value: 'no' },
     ])
     expect(env.allow_freeform).toBe(false)
+  })
+
+  it('optionsToInlineChoices → adapter render preserves the human option text (Codex P2)', async () => {
+    // Regression: onboarding option buttons carry a letter legend in `label`
+    // ("A"/"B") and the human text in `body`. The producer helper must put the
+    // HUMAN text into InlineChoice.label so the live-rendered option `body`
+    // (which the client paints) shows "Marcus Aurelius", not "A".
+    const choices = optionsToInlineChoices([
+      { label: 'A', body: 'Marcus Aurelius', value: 'Marcus Aurelius' },
+      { label: 'B', body: 'Hermione Granger', value: 'Hermione Granger' },
+    ])
+    expect(choices).toEqual([
+      { label: 'Marcus Aurelius', callback_data: 'Marcus Aurelius' },
+      { label: 'Hermione Granger', callback_data: 'Hermione Granger' },
+    ])
+    const { adapter, registry } = setup()
+    const captured: AppWsOutbound[] = []
+    registry.register('app:sam', (e) => captured.push(e))
+    await adapter.send({ topic, text: 'Whose voice should I take on?', inline_choices: choices })
+    const env = captured[0]
+    if (env === undefined || env.type !== 'agent_message') throw new Error('expected agent_message')
+    // The client renders option.body — it must be the human text, not "A"/"B".
+    expect(env.options?.map((o) => o.body)).toEqual(['Marcus Aurelius', 'Hermione Granger'])
+    expect(env.options?.map((o) => o.value)).toEqual(['Marcus Aurelius', 'Hermione Granger'])
+  })
+
+  it('optionsToInlineChoices falls back to the legend label when body is empty', () => {
+    expect(optionsToInlineChoices([{ label: 'A', body: '', value: 'x' }])).toEqual([
+      { label: 'A', callback_data: 'x' },
+    ])
+    expect(optionsToInlineChoices([{ label: 'A', value: 'x' }])).toEqual([
+      { label: 'A', callback_data: 'x' },
+    ])
   })
 
   it('honours adapter_options pass-through: prompt_id, citations, image_urls', async () => {

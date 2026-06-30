@@ -41,10 +41,11 @@
  *      session. Credentials resolve per dispatch through the substrate's
  *      `resolveLlmCredentials` pool (owner Max OAuth first) — NO direct
  *      api.anthropic.com (HARD RULE).
- *   4. REPLY — collect the turn's tokens, persist the reply as a
- *      `button_prompts` row (options: [], allow_freeform: true, long TTL so
- *      history never ghosts it; the `messages` table is unwired by design —
- *      do NOT target it), THEN send the live `agent_message` envelope.
+ *   4. REPLY — collect the turn's tokens, parse any onboarding `[[OPTIONS]]`
+ *      choice block out of the text (`extractAgentOptions`), persist the reply
+ *      as a `button_prompts` row (the parsed options, allow_freeform: true, long
+ *      TTL so history never ghosts it; the `messages` table is unwired by design
+ *      — do NOT target it), THEN send the live `agent_message` envelope.
  *      Persist-before-send: if the socket died mid-turn the row is durable
  *      and the existing reconnect re-emit (`reEmitActiveSeedPromptIfAny`)
  *      recovers it.
@@ -57,7 +58,12 @@
 import { randomUUID } from 'node:crypto'
 
 import type { ButtonStore } from '../../channels/button-store.ts'
-import { buildButtonPrompt } from '../../channels/button-primitive.ts'
+import {
+  buildButtonPrompt,
+  MAX_OPTIONS_TELEGRAM,
+  RESERVED_OPTION_VALUES,
+  VALUE_BYTE_CAP,
+} from '../../channels/button-primitive.ts'
 import type { ChatOutbound } from '../../landing/server.ts'
 import { getBestModel } from '../../runtime/models.ts'
 import { assembleSystemPrompt } from '../../runtime/system-prompt.ts'
@@ -79,6 +85,99 @@ const DEFAULT_TIMEOUT_MS = 240_000
  * Ten years ≈ never, without a schema change.
  */
 const REPLY_ROW_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1_000
+
+/**
+ * Path 1 onboarding option buttons (2026-06-30). The live onboarding agent
+ * conducts a free-form interview, but choice steps (personality archetype, agent
+ * name, yes/no confirmations) read far better as TAPPABLE buttons than as a wall
+ * of prose the owner must re-type. The React client already renders an
+ * `agent_message`'s `options[]` as buttons (ChatApp.tsx) and routes a tap back
+ * as the owner's next turn (`on_button_choice` → `user_text = option.value`), so
+ * the ONLY missing piece was the live turn EMITTING options — it hardcoded
+ * `options: []`.
+ *
+ * The mechanism is server-side structured-choice detection (NOT a tool-surface
+ * change — the warm REPL's `--tools` allow-list must stay constant per the reuse
+ * guard): the onboarding preamble instructs the agent to append a machine-
+ * readable block AFTER its prose question when offering choices:
+ *
+ *     [[OPTIONS]]
+ *     - Marcus Aurelius
+ *     - Hermione Granger
+ *     - Something else (I'll describe it)
+ *     [[/OPTIONS]]
+ *
+ * `extractAgentOptions` parses that block out of the collected reply, STRIPS it
+ * from the rendered body, and turns each line into a render-ready `ButtonOption`
+ * (label legend + display body + a routing `value` that is the line text itself,
+ * so a tap feeds the agent the owner's choice verbatim). `allow_freeform` stays
+ * true — a typed reply always works. Onboarding-only (gated on `onboardingActive`)
+ * so a steady-state reply that happens to contain the literal sentinel never
+ * sprouts buttons.
+ */
+const OPTIONS_BLOCK_RE = /\n*\[\[OPTIONS\]\]\s*\n([\s\S]*?)\n?\s*\[\[\/OPTIONS\]\]\s*/i
+
+/** Option legend faces (Telegram text-render parity; the web client shows the
+ *  option's `body`, not this letter). Capped to the inline-keyboard limit. */
+const OPTION_LABELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as const
+
+/** Upper bound on an option's rendered display text — a runaway line is clamped
+ *  so the keyboard stays readable; the routing value is independently byte-capped. */
+const OPTION_DISPLAY_MAX_CHARS = 80
+
+export interface ParsedAgentOptions {
+  /** The reply body with the `[[OPTIONS]]` block removed. */
+  body: string
+  /** Sanitized, render-ready options — guaranteed to pass `validateButtonPrompt`
+   *  (non-empty unique labels, unique non-reserved ≤VALUE_BYTE_CAP values). May
+   *  be empty when there was no block or nothing survived sanitisation. */
+  options: Array<{ label: string; body: string; value: string }>
+}
+
+/**
+ * Truncate a string to at most `maxBytes` UTF-8 bytes WITHOUT splitting a
+ * multi-byte codepoint (a mid-codepoint cut decodes to U+FFFD, which we trim).
+ */
+function truncateUtf8(s: string, maxBytes: number): string {
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s
+  const sliced = Buffer.from(s, 'utf8').subarray(0, maxBytes).toString('utf8')
+  return sliced.replace(/�+$/u, '').trim()
+}
+
+/**
+ * Parse the `[[OPTIONS]]` block (if any) out of a live onboarding reply.
+ * Returns the body with the block stripped + the render-ready options. When the
+ * block is the WHOLE message (no prose survives), options are dropped and the
+ * original text is returned as the body — a zero-body button prompt is invalid
+ * and a bare button wall reads worse than plain text.
+ *
+ * Exported for unit testing.
+ */
+export function extractAgentOptions(text: string): ParsedAgentOptions {
+  const match = OPTIONS_BLOCK_RE.exec(text)
+  if (match === null) return { body: text, options: [] }
+  const body = text.replace(OPTIONS_BLOCK_RE, '\n').trim()
+  if (body.length === 0) return { body: text.trim(), options: [] }
+  const rawLines = (match[1] ?? '')
+    .split('\n')
+    .map((l) => l.replace(/^\s*[-*•]\s+/u, '').trim())
+    .filter((l) => l.length > 0)
+  const options: Array<{ label: string; body: string; value: string }> = []
+  const seenValues = new Set<string>()
+  for (const line of rawLines) {
+    if (options.length >= MAX_OPTIONS_TELEGRAM) break
+    const value = truncateUtf8(line, VALUE_BYTE_CAP)
+    if (value.length === 0 || RESERVED_OPTION_VALUES.has(value)) continue
+    if (seenValues.has(value)) continue
+    seenValues.add(value)
+    const display =
+      line.length > OPTION_DISPLAY_MAX_CHARS
+        ? `${line.slice(0, OPTION_DISPLAY_MAX_CHARS - 1)}…`
+        : line
+    options.push({ label: OPTION_LABELS[options.length] ?? String(options.length + 1), body: display, value })
+  }
+  return { body, options }
+}
 
 /**
  * Built-in CC tool surface for the live agent. Read access over the REPL's cwd /
@@ -565,12 +664,23 @@ export function buildLiveAgentTurn(
     // the warm session — a failed first turn retries with full context.
     contextSent.add(topicKey)
 
+    // Path 1 — choice-step option buttons. While onboarding, parse a trailing
+    // `[[OPTIONS]]` block out of the reply, strip it from the rendered body, and
+    // emit the lines as tappable buttons (the client routes a tap back as the
+    // owner's next turn). Steady-state replies never carry the sentinel, so they
+    // stay plain text. `allow_freeform` is always true — typing still works.
+    const parsed = onboardingActive
+      ? extractAgentOptions(text)
+      : { body: text, options: [] as Array<{ label: string; body: string; value: string }> }
+    const replyBody = parsed.body
+    const replyOptions = parsed.options
+
     // ── 4. Persist the reply, then send it live.
     let reply_prompt_id: string | null = null
     try {
       const replyPrompt = buildButtonPrompt({
-        body: text,
-        options: [],
+        body: replyBody,
+        options: replyOptions,
         allow_freeform: true,
         expires_in_ms: REPLY_ROW_TTL_MS,
         uuid: randomUUID,
@@ -588,13 +698,14 @@ export function buildLiveAgentTurn(
     }
     const envelope: ChatOutbound = {
       type: 'agent_message',
-      body: text,
+      body: replyBody,
       // Item 15 — stamp the owning topic so the client routes this reply to
       // ITS topic, not whatever is focused now. A slow (cold) reply can land
       // after the user switched topics; without this the client painted it
       // into the focused topic (cross-project bleed).
       topic_id: turn.topic_id,
-      options: [],
+      // Path 1 — choice-step buttons (onboarding only; empty otherwise).
+      options: replyOptions,
       allow_freeform: true,
       ...(reply_prompt_id !== null ? { prompt_id: reply_prompt_id } : {}),
     }
@@ -608,7 +719,7 @@ export function buildLiveAgentTurn(
     try {
       input.transcript?.append({
         role: 'agent',
-        body: text,
+        body: replyBody,
         phase: 'completed',
         ...(reply_prompt_id !== null ? { button_prompt_id: reply_prompt_id } : {}),
       })

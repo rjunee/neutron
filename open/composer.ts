@@ -83,6 +83,7 @@ import {
 import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
 import { resolveOnboardingOpenAiKey } from '../gateway/realmode-composer/resolve-onboarding-openai-key.ts'
 import { DocSearchIndex } from '../doc-search/store.ts'
@@ -153,7 +154,7 @@ import type { CreateProjectToolService } from '../gateway/realmode-composer/crea
 import { createAppTasksSurface } from '../gateway/http/app-tasks-surface.ts'
 import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
 import { TaskStore } from '../tasks/store.ts'
-import { AppWsAdapter } from '../channels/adapters/app-ws/adapter.ts'
+import { AppWsAdapter, optionsToInlineChoices } from '../channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
 import {
   appWsTopicId,
@@ -180,6 +181,7 @@ import {
 } from '../persistence/index.ts'
 import { InMemoryConsumedTokens } from '../runtime/consumed-tokens-in-memory.ts'
 import type { ButtonChoice, ButtonPrompt } from '../channels/button-primitive.ts'
+import { buildButtonPrompt } from '../channels/button-primitive.ts'
 import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
@@ -2026,9 +2028,26 @@ export function buildOpenGraphComposer(
         createProjectAndRefresh({ name, user_id: speaker_user_id }),
     }
 
+    // Path-1 closing + per-project opening delivery (items 6/7, 2026-06-30).
+    // `buildOnboardingFinalize` runs fire-and-forget from the post-turn extractor
+    // (constructed below) and from the import-completion watcher; the live agent
+    // message delivery path (`buildAppWsSendReply`) is defined much later in this
+    // closure. A late-bound holder forward-references it without a use-before-init
+    // hazard: `.emit` is assigned right after `buildAppWsSendReply` exists, and is
+    // only ever CALLED at finalize time (long after boot). Mirrors the
+    // `importWatchHolder` / `appWsButtonPromptRouter` late-binding pattern.
+    const onboardingMsgHolder: {
+      emit?: (input: {
+        user_id: string
+        project_id: string | null
+        body: string
+        dedupe_key: string
+      }) => Promise<void>
+    } = {}
     // Path 1 finalize seam: persona compose+commit + project materialization
-    // (DB rows + topics + docs + gbrain) + mark completed + rail refresh. Wired
-    // only when the box has an LLM path (onboarding can't run LLM-less anyway).
+    // (DB rows + topics + docs + gbrain) + mark completed + rail refresh +
+    // per-project opening + closing handoff message. Wired only when the box has
+    // an LLM path (onboarding can't run LLM-less anyway).
     const onboardingFinalizer =
       onboardingAnthropicClient !== null
         ? buildOnboardingFinalize({
@@ -2040,6 +2059,8 @@ export function buildOpenGraphComposer(
             ...(projectDocComposer !== null ? { projectDocComposer } : {}),
             gbrainSyncHook,
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
+            emitChatMessage: (input): Promise<void> =>
+              onboardingMsgHolder.emit?.(input) ?? Promise.resolve(),
           })
         : null
     // Authoritative in-flight-import probe — gates onboarding completion against
@@ -2289,7 +2310,11 @@ export function buildOpenGraphComposer(
           text: out.body,
         }
         if (out.options !== undefined && out.options.length > 0) {
-          msg.inline_choices = out.options.map((o) => ({ label: o.label, callback_data: o.value }))
+          // Carry the HUMAN-READABLE option text into `InlineChoice.label` (the
+          // adapter renders the button's `body` from it) — NOT the "A"/"B"
+          // legend, which would paint live onboarding buttons as bare letters
+          // (Codex P2, 2026-06-30). Shared, unit-tested helper.
+          msg.inline_choices = optionsToInlineChoices(out.options)
         }
         const adapter_options: Record<string, unknown> = {}
         if (project_id !== undefined) adapter_options['project_id'] = project_id
@@ -2302,6 +2327,64 @@ export function buildOpenGraphComposer(
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
         void appWsHolder.adapter?.send(msg)
       }
+    // Path-1 closing + per-project opening delivery (items 6/7). Deliver a
+    // finalize-composed agent message the SAME way a live-agent reply is
+    // delivered: persist a durable `button_prompts` history row on the topic
+    // (`app:<user>` for the General closing, `app:<user>:<project>` for a
+    // project opening) — the topic `chat_history_surface` hydrates from — AND
+    // fan it live via `buildAppWsSendReply` (→ adapter durable chat_log + socket
+    // push). So the message renders live when the owner is connected and
+    // hydrates on reload, exactly like every other agent turn. Best-effort: a
+    // persistence failure still ships the live message; nothing throws back into
+    // finalize. NOTE (sibling client PR coordination): the React client reads a
+    // project's chat off this `app:<user>:<project>` topic — the same key the
+    // live-agent reply path uses — so the opening lands where the client subscribes.
+    onboardingMsgHolder.emit = async ({ user_id, project_id, body, dedupe_key }): Promise<void> => {
+      const channelTopic = appWsTopicId(user_id)
+      const turnTopic =
+        project_id !== null && project_id.length > 0
+          ? `${channelTopic}:${project_id}`
+          : channelTopic
+      let prompt_id: string | undefined
+      // Idempotency: finalize is reachable from several overlapping recovery
+      // paths, so key the durable row on (instance, topic, dedupe_key). A
+      // re-finalize collapses onto the SAME row (was_new=false) and we SKIP the
+      // live re-send below — no duplicate closing / opening bubble. Default to
+      // sending (fail-open) only when persistence itself failed (no key written).
+      let wasNew = true
+      try {
+        const prompt = buildButtonPrompt({
+          body,
+          options: [],
+          allow_freeform: true,
+          // Long TTL so the history row never hits the unresolved-prompt ghost
+          // filter (mirrors the live-agent reply row's REPLY_ROW_TTL_MS).
+          expires_in_ms: 10 * 365 * 24 * 60 * 60 * 1_000,
+          idempotency: { project_slug, topic_id: turnTopic, seed: dedupe_key },
+          uuid: randomUUID,
+        })
+        const emitted = await landing.buttonStore.emit(prompt, { topic_id: turnTopic })
+        prompt_id = emitted.prompt_id
+        wasNew = emitted.was_new
+      } catch (err) {
+        console.warn(
+          `[open] event=onboarding_msg_persist_failed project=${project_slug} topic=${turnTopic} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+      // A duplicate finalize already delivered this message — don't re-post it live.
+      if (!wasNew) return
+      const out: ChatOutbound = {
+        type: 'agent_message',
+        body,
+        topic_id: turnTopic,
+        options: [],
+        allow_freeform: true,
+        ...(prompt_id !== undefined ? { prompt_id } : {}),
+      }
+      buildAppWsSendReply(channelTopic, project_id ?? undefined)(out)
+    }
     // Chat transport — server-authoritative typing indicator. Fan an ephemeral
     // `agent_typing` frame (start/end) directly to the socket topic's live
     // devices around every live-agent turn. NOT routed through the adapter's
