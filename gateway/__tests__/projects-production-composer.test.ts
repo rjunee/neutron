@@ -8,8 +8,9 @@
  * the production composition mounts:
  *
  *   1. `GET   /api/app/projects`              (list endpoint, ISSUES #9)
- *   2. `GET   /api/app/projects/<id>/settings` (drawer read)
- *   3. `PATCH /api/app/projects/<id>/settings` (drawer flip)
+ *   2. `POST  /api/app/projects`              (create endpoint — rail Create Project)
+ *   3. `GET   /api/app/projects/<id>/settings` (drawer read)
+ *   4. `PATCH /api/app/projects/<id>/settings` (drawer flip)
  *
  * Against a real `ProjectDb` + the migrated `projects` +
  * `project_members` tables (migration 0038) + the
@@ -39,6 +40,7 @@ import {
   buildDefaultSettings,
   type ProjectSettings,
 } from '../http/app-projects-surface.ts'
+import { createProjectRow } from '../realmode-composer/project-create.ts'
 import { SqliteProjectSettingsStore } from '../projects/sqlite-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
@@ -78,7 +80,17 @@ async function startHarness(): Promise<Harness> {
     buildDefaultSettings('acme'),
     buildDefaultSettings('northwind'),
   ])
-  const surface = createAppProjectsSurface({ store, auth })
+  // Wire the create-project binding the same way the composer does: the
+  // owner-scoped shared `createProjectRow` over the SAME ProjectDb (the
+  // row-only half — no on-disk materialization in the reachability test).
+  const surface = createAppProjectsSurface({
+    store,
+    auth,
+    createProject: async ({ name }) => {
+      const row = await createProjectRow({ owner_home: tmp, project_slug: OWNER, db }, { name })
+      return { project_id: row.project_id, name: row.name, outcome: row.outcome }
+    },
+  })
 
   // Boot the production graph with the surface threaded through.
   // If a future CompositionInput field rename / removal drops
@@ -212,15 +224,52 @@ test('production composer mounts PATCH /api/app/projects/<id>/settings + write s
   expect(reread!.privacy_mode).toBe('public')
 })
 
-test('production composer rejects POST /api/app/projects with 405', async () => {
+test('production composer mounts POST /api/app/projects (create) + new project survives store re-init', async () => {
+  // POST through the full composition + surface + shared create path + SQLite.
   const res = await authedFetch(harness.base, '/api/app/projects', {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify({ name: 'Test Project' }),
   })
-  expect(res.status).toBe(405)
+  expect(res.status).toBe(201)
+  const body = (await res.json()) as {
+    ok: boolean
+    project: { id: string; label: string }
+    created: boolean
+  }
+  expect(body.ok).toBe(true)
+  expect(body.created).toBe(true)
+  expect(body.project.id).toBe('test-project') // slugified name
+  expect(body.project.label).toBe('Test Project')
+
+  // Re-init the store against the SAME DB and confirm the new project row
+  // persisted (mirrors the PATCH-survives-re-init guard). The create wrote a
+  // real on-disk `projects` row, so a fresh store reads it back.
+  const freshStore = new SqliteProjectSettingsStore(harness.db)
+  const reread = await freshStore.get(OWNER, 'test-project')
+  expect(reread).not.toBeNull()
+  expect(reread!.name).toBe('Test Project')
+
+  // …and it's visible in the list endpoint alongside the seeded shells.
+  const listRes = await authedFetch(harness.base, '/api/app/projects')
+  const listBody = (await listRes.json()) as ListResponse
+  expect(listBody.projects.map((p) => p.id).sort()).toEqual([
+    'acme',
+    'neutron',
+    'northwind',
+    'test-project',
+  ])
+})
+
+test('POST /api/app/projects requires a Bearer token (401 missing_bearer)', async () => {
+  const res = await fetch(`${harness.base}/api/app/projects`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Nope' }),
+  })
+  expect(res.status).toBe(401)
   const body = (await res.json()) as { ok: boolean; code: string }
   expect(body.ok).toBe(false)
-  expect(body.code).toBe('method_not_allowed')
+  expect(body.code).toBe('missing_bearer')
 })
 
 test('list endpoint requires a Bearer token (401 missing_bearer)', async () => {
