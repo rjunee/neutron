@@ -90,8 +90,16 @@ const DEFAULT_TIMEOUT_MS = 240_000
  * keep the tight default (a genuinely wedged warm turn still fails fast). Wired
  * BOTH to the composer's own AbortController AND to the substrate's per-turn
  * timer via `AgentSpec.turn_timeout_ms`, so neither layer kills the turn early.
+ *
+ * 2026-06-30 (fresh-install verify follow-up) — raised 360s → 600s. #138 set 360s
+ * but a real onboarding work-question turn STILL hard-failed at ~5.5min under
+ * fleet/dogfood load (the cold CC spawn + dev-channel bind + large onboarding
+ * prompt is genuinely slow when the machine is busy). 10 minutes leaves
+ * comfortable headroom over the observed worst case so a slow-but-completing
+ * onboarding turn finishes instead of erroring; the seed-failure self-heal +
+ * reload regeneration still cover the rare turn that exceeds even this.
  */
-const COLD_TURN_TIMEOUT_MS = 360_000
+const COLD_TURN_TIMEOUT_MS = 600_000
 
 /**
  * Reply rows are HISTORY, not pending questions — they must never hit the

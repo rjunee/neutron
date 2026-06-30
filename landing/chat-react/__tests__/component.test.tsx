@@ -874,4 +874,100 @@ describe('ChatApp render (happy-dom)', () => {
       root.unmount()
     })
   })
+
+  // ── Item 2 (2026-06-30 fresh-install fix) — the "Setting things up…" onboarding
+  // loader is gated on the GENERAL topic only. `config.onboardingActive` is a
+  // page-global bootstrap flag; without the `vm.projectId === null` guard an
+  // empty PROJECT topic painted the infinite loader forever. ──────────────────
+  const renderEmpty = async (
+    projectId: string | null,
+  ): Promise<{ text: string; unmount: () => Promise<void> }> => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const makeSocket = () =>
+      ({
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send() {},
+        close() {},
+      }) as never
+
+    const topicId = projectId === null ? 'app:sam' : `app:sam:${projectId}`
+    const controller = new NeutronChatController({
+      projectId,
+      createSession: (sinks, scope) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: scope.topicId,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId,
+      userId: 'sam',
+      projectId,
+      projects: [{ id: 'proj-a', label: 'Proj A' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+      // Page-global: the owner is mid/just-finished onboarding.
+      onboardingActive: true,
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+        </AssistantRuntimeProvider>
+      )
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      await tick()
+    })
+    const text = container.textContent ?? ''
+    return {
+      text,
+      unmount: async (): Promise<void> => {
+        await act(async () => {
+          root.unmount()
+        })
+      },
+    }
+  }
+
+  it('empty PROJECT topic does NOT show the onboarding loader, even while onboardingActive', async () => {
+    const { text, unmount } = await renderEmpty('proj-a')
+    expect(text).not.toContain('Setting things up')
+    // Resolves to a usable empty state instead of an infinite loader.
+    expect(text).toContain('Send a message to begin.')
+    await unmount()
+  })
+
+  it('empty GENERAL topic DOES still show the onboarding loader while onboardingActive', async () => {
+    const { text, unmount } = await renderEmpty(null)
+    expect(text).toContain('Setting things up')
+    await unmount()
+  })
 })

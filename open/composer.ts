@@ -47,11 +47,18 @@ import { buildLiveAgentTurn } from '../gateway/realmode-composer/build-live-agen
 import type { LiveAgentOnboardingSeam } from '../gateway/realmode-composer/build-live-agent-turn.ts'
 import { buildProjectDocComposer } from '../gateway/realmode-composer/build-project-doc-composer.ts'
 import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
+import {
+  buildProjectDocReader,
+  buildDeterministicProjectOpening,
+  finalizeOpeningBody,
+  type ProjectOpeningDocs,
+} from '../gateway/realmode-composer/build-onboarding-handoff.ts'
 import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
 import { auditRequiredFields } from '../onboarding/interview/required-fields-audit.ts'
 import {
   buildImportAnalysisContextFragment,
   buildOnboardingPreamble,
+  buildOnboardingStepGuardFragment,
 } from '../onboarding/interview/onboarding-preamble.ts'
 import type { ImportResult } from '../onboarding/history-import/types.ts'
 import {
@@ -2234,23 +2241,39 @@ export function buildOpenGraphComposer(
               try {
                 const st = await onboardingStateStore.get(project_slug, user_id)
                 if (st === null) return null
+                // Two per-turn grounding fragments, joined:
+                //  1. REQUIRED-STEP GUARD (item 3, 2026-06-30) — re-injected EVERY
+                //     onboarding turn so the personality archetype + name steps are
+                //     reliably presented as `[[OPTIONS]]` buttons (not LLM-whim).
+                //     Driven by the durable phase_state audit; null once both
+                //     fields are settled.
+                //  2. IMPORT-ANALYSIS grounding — only when an import ran (re-injects
+                //     the proposed/curated project set so the warm session honors
+                //     "drop X" / "keep the rest").
+                const stepGuard = buildOnboardingStepGuardFragment(st.phase_state)
                 const ir = st.phase_state['import_result']
                 const importResult =
                   ir !== null && typeof ir === 'object' ? (ir as ImportResult) : null
-                if (importResult === null) return null
-                const activeRaw = st.phase_state['primary_projects']
-                const active_project_names = Array.isArray(activeRaw)
-                  ? activeRaw.filter((s): s is string => typeof s === 'string')
-                  : []
-                const fn = st.phase_state['user_first_name']
-                return buildImportAnalysisContextFragment({
-                  proposed_projects: importResult.proposed_projects.map((p) => ({
-                    name: p.name,
-                    rationale: p.rationale,
-                  })),
-                  active_project_names,
-                  user_first_name: typeof fn === 'string' ? fn : null,
-                })
+                let importFragment: string | null = null
+                if (importResult !== null) {
+                  const activeRaw = st.phase_state['primary_projects']
+                  const active_project_names = Array.isArray(activeRaw)
+                    ? activeRaw.filter((s): s is string => typeof s === 'string')
+                    : []
+                  const fn = st.phase_state['user_first_name']
+                  importFragment = buildImportAnalysisContextFragment({
+                    proposed_projects: importResult.proposed_projects.map((p) => ({
+                      name: p.name,
+                      rationale: p.rationale,
+                    })),
+                    active_project_names,
+                    user_first_name: typeof fn === 'string' ? fn : null,
+                  })
+                }
+                const parts = [stepGuard, importFragment].filter(
+                  (p): p is string => p !== null && p.length > 0,
+                )
+                return parts.length > 0 ? parts.join('\n\n') : null
               } catch {
                 return null
               }
@@ -2383,7 +2406,88 @@ export function buildOpenGraphComposer(
         allow_freeform: true,
         ...(prompt_id !== undefined ? { prompt_id } : {}),
       }
-      buildAppWsSendReply(channelTopic, project_id ?? undefined)(out)
+      // Live-fan on the SAME topic the durable row landed on: a per-project opening
+      // must reach the PROJECT socket (`app:<user>:<project>`), not General — the
+      // app-ws adapter routes + appends chat_log by `topic.channel_topic_id`, and a
+      // project tab is registered under the project topic (Codex r1 P2, 2026-06-30).
+      // Sending on General delivered the durable row but NEVER live-rendered to the
+      // just-connected project socket, so the project-opening RECOVERY (which fires
+      // from a project-topic `on_session_open`, AFTER its `session_ready` history
+      // replay) left the tab empty until yet another reload. The General closing
+      // (`project_id === null`) still fans on the General channel, unchanged.
+      const liveChannel =
+        project_id !== null && project_id.length > 0 ? turnTopic : channelTopic
+      buildAppWsSendReply(liveChannel, project_id ?? undefined)(out)
+    }
+    // Item 1 / 4b (2026-06-30 fresh-install fix) — make a materialized project's
+    // deterministic OPENING a reliable property of ENTERING the project, not a
+    // fire-once side effect of finalize. finalize emits each opening eagerly at
+    // onboarding completion, but that emit can race the project-tab socket, be
+    // swallowed, or (under cold-turn load) the whole finalize can be delayed —
+    // leaving the project topic with ZERO history rows (DB-confirmed on the live
+    // box: 6 projects, 0 `app:<user>:<project>` rows) so the client wedges on its
+    // empty state and a reload never recovers it (reload only regenerated the
+    // GENERAL welcome). On every steady-state connect to a PROJECT topic that has
+    // no message yet, regenerate + persist the SAME deterministic opening
+    // (STATUS.md / README summary + one next move) finalize would have produced.
+    // Idempotent: keyed on `onboarding_opening:<project_id>`, so if finalize (or a
+    // prior entry) already delivered it, `buttonStore.emit` collapses onto the
+    // existing row and nothing double-posts. Best-effort + non-throwing — a
+    // project chat must NEVER be blocked by opening recovery.
+    const onboardingOpeningDocReader = buildProjectDocReader({ owner_home })
+    const ensureProjectOpeningOnEntry = async (
+      user_id: string,
+      channel_topic_id: string,
+    ): Promise<void> => {
+      try {
+        const prefix = `${appWsTopicId(user_id)}:`
+        // Only a per-project topic (`app:<user>:<project_id>`) — the General topic
+        // has no per-project opening.
+        if (!channel_topic_id.startsWith(prefix)) return
+        const project_id = channel_topic_id.slice(prefix.length)
+        if (project_id.length === 0) return
+        // Only for a MATERIALIZED, non-deleted project — never seed an arbitrary
+        // or soft-deleted topic. `readProjectRows` is the same `projects`-table
+        // snapshot the rail + bootstrap use, so the id + name align exactly.
+        const row = readProjectRows().find((p) => p.id === project_id)
+        if (row === undefined) return
+        // Only when the topic has NO message yet — never retro-inject an opening
+        // above an existing conversation.
+        const now = Date.now()
+        const latest = await landing.buttonStore.latestTurnByTopic({
+          topic_id: channel_topic_id,
+          before: now,
+          now,
+        })
+        if (latest !== null) return
+        // Compose the SAME deterministic opening finalize uses, from the
+        // materialized docs (STATUS.md is the highest-signal source; README is the
+        // fallback; the composer degrades to a usable "added to your projects"
+        // line when neither exists — so the body is NEVER empty).
+        const docs: ProjectOpeningDocs = {
+          readme: onboardingOpeningDocReader(project_id, 'README.md'),
+          transcript_summary: onboardingOpeningDocReader(
+            project_id,
+            joinPath('docs', 'transcript-summary.md'),
+          ),
+          status_md: onboardingOpeningDocReader(project_id, 'STATUS.md'),
+        }
+        const composition = buildDeterministicProjectOpening(row.label, null, docs)
+        const body = finalizeOpeningBody(composition.body)
+        if (body.trim().length === 0) return
+        await onboardingMsgHolder.emit?.({
+          user_id,
+          project_id,
+          body,
+          dedupe_key: `onboarding_opening:${project_id}`,
+        })
+      } catch (err) {
+        console.warn(
+          `[open] event=project_opening_recovery_failed project=${project_slug} topic=${channel_topic_id} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
     }
     // Chat transport — server-authoritative typing indicator. Fan an ephemeral
     // `agent_typing` frame (start/end) directly to the socket topic's live
@@ -2813,6 +2917,12 @@ export function buildOpenGraphComposer(
               emitAppWsTyping(channel_topic_id, 'end')
             }
           }
+        } else {
+          // STEADY STATE (onboarding done). If this connect is to a materialized
+          // PROJECT topic that has no message yet, regenerate + persist its
+          // deterministic opening (item 1 / 4b). No-op for the General topic, an
+          // unmaterialized topic, or a project that already has chat history.
+          await ensureProjectOpeningOnEntry(user_id, channel_topic_id)
         }
         // Emit if the seed turn (or anything since the pre-seed) changed the set.
         emitProjectsChangedIfChanged(user_id)

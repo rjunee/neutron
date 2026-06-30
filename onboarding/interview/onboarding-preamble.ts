@@ -15,6 +15,7 @@
  */
 
 import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-character-suggester.ts'
+import { auditRequiredFields } from './required-fields-audit.ts'
 
 export interface OnboardingPreambleInput {
   /** Whether an AI history-import (ChatGPT/Claude) is offered on this box. */
@@ -131,6 +132,76 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     'automatically once they are created, so keep your wrap-up brief.)',
   )
   lines.push('</onboarding>')
+  return lines.join('\n')
+}
+
+/**
+ * DETERMINISTIC step guard (item 3, 2026-06-30 fresh-install fix) — a per-turn
+ * fragment re-injected on EVERY onboarding turn (the same mechanism the
+ * `<import_analysis>` grounding uses) that FORCES the two button-driven steps to
+ * actually happen.
+ *
+ * THE BUG this fixes: the personality/archetype + name steps lived only as soft
+ * prose in the first-turn preamble ("offer the DEFINED set ... as tappable
+ * options"), and the preamble ALSO says "you do NOT need to collect these in
+ * order." So whether the archetype buttons ever appeared was pure LLM whim — a
+ * fresh-install verify saw a whole onboarding run with ZERO option buttons (the
+ * agent settled personality/name by free text, or inferred them, and skipped the
+ * choice UI entirely). The preamble alone cannot GUARANTEE the step.
+ *
+ * THE FIX (stays inside Path-1 live-session — no phase-machine revival): audit
+ * the durable `phase_state` for the two button-backed required fields. While
+ * `agent_personality` is still unset, this fragment HARD-REQUIRES the agent to
+ * present the named archetypes as a `[[OPTIONS]]` block (it cannot be settled by
+ * free text alone, and the agent may not finalize without it); once personality
+ * is set but `agent_name` is unset, it HARD-REQUIRES the name-suggestion
+ * `[[OPTIONS]]` block. Returns null once both are settled (nothing to force).
+ *
+ * Because it re-injects every turn, the agent cannot drift past the personality
+ * step without rendering the buttons — making the step reliable rather than
+ * LLM-whim — while still leaving room for a free-text answer (the [[OPTIONS]]
+ * block always carries a "Something else" / "I'll choose my own" escape and the
+ * owner can ignore the buttons and type).
+ */
+export function buildOnboardingStepGuardFragment(
+  phase_state: Readonly<Record<string, unknown>>,
+): string | null {
+  const audit = auditRequiredFields(phase_state)
+  const missing = new Set(audit.missing)
+  const needsPersonality = missing.has('agent_personality')
+  const needsName = missing.has('agent_name')
+  if (!needsPersonality && !needsName) return null
+  const lines: string[] = []
+  lines.push('<onboarding_required_steps>')
+  lines.push(
+    'REQUIRED-STEP GUARD: two onboarding steps are button-driven and MUST be',
+    'presented as a `[[OPTIONS]]` block (see "Offering choices") — never settled by',
+    'free text alone and never silently skipped. You may not wrap up / finalize',
+    'onboarding until BOTH are settled.',
+  )
+  if (needsPersonality) {
+    lines.push('')
+    lines.push(
+      'STILL OPEN - PERSONALITY: you have NOT yet settled the personality/voice the owner',
+      'wants from you. The next time it is natural in the conversation (and BEFORE you',
+      'wrap up), you MUST ask which voice they want and present THESE named archetypes as',
+      'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
+      'Do not invent a different list, and do not skip the buttons:',
+    )
+    for (const c of DEFINED_PERSONALITY_CHARACTERS) {
+      lines.push(`  - ${c.name}`)
+    }
+  }
+  if (needsName) {
+    lines.push('')
+    lines.push(
+      'STILL OPEN - NAME: you have NOT yet settled the name the owner wants to call you.',
+      'When you reach it (after personality), suggest a few short names that fit the',
+      'chosen personality as a tappable [[OPTIONS]] block (plus a "I\'ll choose my own"',
+      'option). Accept ANY name they give, typed or tapped, verbatim.',
+    )
+  }
+  lines.push('</onboarding_required_steps>')
   return lines.join('\n')
 }
 

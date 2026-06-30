@@ -546,13 +546,57 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   the topic seeded BEFORE running, so a reload replayed the persisted failure
 >   forever. New additive `AgentSpec.turn_timeout_ms` (read by the persistent CC
 >   adapter as `spec.turn_timeout_ms ?? turnTimeoutMs`) lets the composer raise a
->   COLD/onboarding turn's budget to `COLD_TURN_TIMEOUT_MS` (360s) on BOTH the
->   AbortController and the substrate timer; warm steady-state turns keep the
->   tight default (a wedged warm turn still fails fast). And a FAILED `seed_turn`
->   now stays SILENT (no `FAILURE_BODY` persisted to chat_log) while
->   `on_session_open` clears the per-process `seededOnboardingTopics` mark — so a
->   reload/re-subscribe RE-FIRES the welcome instead of showing a stuck error. A
->   failed REAL user turn still gets the anti-silence bubble.
+>   COLD/onboarding turn's budget to `COLD_TURN_TIMEOUT_MS` (600s — raised from an
+>   initial 360s; see the reliability follow-up below) on BOTH the AbortController
+>   and the substrate timer; warm steady-state turns keep the tight default (a
+>   wedged warm turn still fails fast). And a FAILED `seed_turn` now stays SILENT
+>   (no `FAILURE_BODY` persisted to chat_log) while `on_session_open` clears the
+>   per-process `seededOnboardingTopics` mark — so a reload/re-subscribe RE-FIRES
+>   the welcome instead of showing a stuck error. A failed REAL user turn still
+>   gets the anti-silence bubble.
+
+> **Onboarding reliability — opening recovery, empty-project loader, deterministic
+> archetype step, larger cold budget (#136+#138 fresh-install verify, 2026-06-30).**
+> A full fresh-install walk of #136+#138 surfaced four reliability gaps; all fixed
+> WITHIN Path-1 (no flags, live-session locked):
+> - **Per-project opening is now a property of ENTERING a project, not a fire-once
+>   finalize side effect (item 1).** `build-onboarding-finalize.ts` emits each
+>   project's deterministic opening eagerly at completion, but that emit can race
+>   the project-tab socket, be swallowed, or (cold-turn) be delayed — leaving the
+>   `app:<user>:<project>` topic with ZERO `button_prompts` rows (DB-confirmed on
+>   the live box: 6 projects, 0 project-topic rows) and the client wedged on its
+>   empty state, with no reload recovery (reload only regenerated the GENERAL
+>   welcome). `open/composer.ts` `on_session_open` now, on every STEADY-STATE
+>   connect to a materialized PROJECT topic with no message yet, regenerates +
+>   persists the SAME deterministic opening (`buildDeterministicProjectOpening`
+>   over the materialized `STATUS.md`/`README.md`) via the idempotent
+>   `onboardingMsgHolder.emit` (`dedupe_key: onboarding_opening:<project_id>`), so
+>   it collapses onto finalize's row if that already landed and never double-posts.
+>   This single mechanism makes the opening reliable AND recovers a stuck/missing
+>   one on re-entry (item 4b).
+> - **An empty project chat never shows the infinite onboarding loader (item 2).**
+>   `chat-react/ChatApp.tsx` gated the "Setting things up…" loader on the
+>   page-global `config.onboardingActive` ALONE, so opening an empty project tab
+>   while onboarding (or just after) painted the loader forever. The loader now
+>   requires `config.onboardingActive && vm.projectId === null` — onboarding is a
+>   General-topic-only mode, so only the General topic shows it; a project topic
+>   resolves to the usable "Send a message to begin." empty state.
+> - **The personality archetype + name steps are DETERMINISTICALLY presented
+>   (item 3).** They lived only as soft preamble prose ("offer the DEFINED set …"),
+>   and the preamble also says "you do NOT need to collect these in order" — so a
+>   fresh-install run showed ZERO option buttons (the agent settled them by free
+>   text). New `onboarding-preamble.ts:buildOnboardingStepGuardFragment` audits the
+>   durable `phase_state` and, while `agent_personality`/`agent_name` are unset,
+>   HARD-REQUIRES the named-archetype / name `[[OPTIONS]]` block (never settle by
+>   free text alone, never finalize without it). It is injected EVERY onboarding
+>   turn via the `LiveAgentOnboardingSeam.onboardingContext` seam (joined with the
+>   import-analysis grounding), so the agent cannot drift past the personality step
+>   without rendering the buttons — reliable, not LLM-whim, still inside Path-1.
+> - **Cold-turn budget raised 360s → 600s (item 4a).** #138's 360s still hard-failed
+>   a real onboarding work-question turn at ~5.5min under fleet/dogfood load; 10
+>   minutes leaves comfortable headroom over the observed worst case, with the
+>   seed-failure self-heal + the project-opening regeneration above covering the
+>   rarer turn that exceeds even this.
 
 The React web client (`landing/chat-react/`) is **registry-driven** too, and
 since the 2026-06-30 rework `chat-react/ProjectShell.tsx` is the **APP SHELL**:
