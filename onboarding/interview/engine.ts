@@ -554,6 +554,18 @@ export class InterviewEngine implements EngineInternals {
    */
   readonly deploymentMode: OnboardingDeploymentMode
 
+  /**
+   * Per-(project_slug, user_id) serialization tail for `notifyImportUpload`.
+   * Single-owner Open runs in ONE process, so chaining same-user upload
+   * notifications here fully eliminates the upload-vs-upload race in the
+   * no-state import-start path (Codex r1 P2): two simultaneous fresh-install
+   * uploads can no longer both observe `state===null` and start duplicate /
+   * mutually-downgrading import jobs — the second runs only after the first has
+   * committed `import_running`, so it takes the `alreadyHasImportJob` guard.
+   * Mirrors the post-turn extractor's per-user `chains` map.
+   */
+  private readonly importUploadSerial = new Map<string, Promise<unknown>>()
+
   constructor(deps: InterviewEngineDeps) {
     this.deps = deps
     this.now = deps.now ?? ((): number => Date.now())
@@ -2284,7 +2296,15 @@ export class InterviewEngine implements EngineInternals {
    *   - `outcome: 'advanced'` + `prompt_id` when the runner started AND
    *     the engine emitted the `import_running` status prompt.
    *   - `outcome: 'noop_no_state'` when the instance has no onboarding
-   *     state (upload landed before `engine.start(...)`).
+   *     state AND the upload is NOT a solicited open-mode Path-1 upload
+   *     (managed mode, or open mode with the affordance not offered).
+   *   - In open mode with the upload affordance offered, a NO-state upload is
+   *     a solicited Path-1 export (the live flow seeds the row lazily/async via
+   *     the post-turn extractor, and #130 offers the import right after the
+   *     name — so the upload can beat the row): the engine SEEDS the
+   *     onboarding_state row at `work_interview_gap_fill` and starts the import
+   *     (same outcome shape as the non-null open-mode solicited path) rather
+   *     than returning `noop_no_state` and orphaning the export.
    *   - `outcome: 'advanced'` ALSO when a late upload races a freeform
    *     reroute: the user typed at `import_upload_pending`, flipping phase
    *     to `ai_substrate_offered` (non-destructive — `ai_substrate_used`
@@ -2311,10 +2331,118 @@ export class InterviewEngine implements EngineInternals {
     source: 'chatgpt' | 'claude'
     observed_at?: number
   }): Promise<AdvanceResult> {
+    // Serialize per (project_slug, user_id) so concurrent uploads for the same
+    // fresh-install owner can't race the no-state import-start path (Codex r1
+    // P2). The body (`notifyImportUploadLocked`) is the real logic; the recheck
+    // re-entry inside it calls the locked body DIRECTLY (not this wrapper) so it
+    // never re-acquires this tail and deadlocks.
+    const key = `${input.project_slug}:${input.user_id}`
+    const prev = this.importUploadSerial.get(key) ?? Promise.resolve()
+    const run = prev
+      .catch(() => undefined)
+      .then(() => this.notifyImportUploadLocked(input))
+    this.importUploadSerial.set(key, run)
+    try {
+      return await run
+    } finally {
+      if (this.importUploadSerial.get(key) === run) this.importUploadSerial.delete(key)
+    }
+  }
+
+  private async notifyImportUploadLocked(input: {
+    project_slug: string
+    topic_id: string
+    user_id: string
+    channel_kind: ChannelKindForButton
+    source: 'chatgpt' | 'claude'
+    observed_at?: number
+  }): Promise<AdvanceResult> {
     this.clearResolvedSpecCache()
     const observed_at = input.observed_at ?? this.now()
     const state = await this.deps.stateStore.get(input.project_slug, input.user_id)
-    if (state === null) return { outcome: 'noop_no_state', state: null }
+    if (state === null) {
+      // M1 (#130 regression) — open-mode Path-1 upload with NO onboarding_state
+      // row yet. The open-mode live-agent onboarding (open/composer.ts) NEVER
+      // calls `engine.start()` (managed mode's row-seeding entry, :676). The
+      // row is instead created LAZILY + ASYNCHRONOUSLY by the fire-and-forget
+      // post-turn extractor (`post-turn-extractor.ts` — a multi-second
+      // background LLM call that only upserts the row once it extracts a field).
+      // #130 moved the history-import offer to immediately after the name, so a
+      // fresh-install owner can upload their export BEFORE that background
+      // extractor has created the row. Pre-fix this hit the `noop_no_state`
+      // early-return below → the upload handler returned `job_id: null` and the
+      // client showed "Couldn't start the import — no import job started": the
+      // banned silent-no-op-that-looks-like-success.
+      //
+      // The upload is genuinely SOLICITED — we key on the SAME signal as the
+      // non-null open-mode gate below (`deploymentMode === 'open'` AND
+      // `importAffordanceOffered`, the exact condition under which the live-agent
+      // seam renders the 📎 affordance). So seed the onboarding_state row at the
+      // conversational interview marker and start the import here, rather than
+      // orphaning the staged export. A STRAY upload (affordance NOT offered, e.g.
+      // no synthesis substrate) still falls through to `noop_no_state`.
+      //
+      // We seed the row ourselves (rather than letting
+      // `startImportAndAdvanceToRunning`'s own upsert create it) so the
+      // import-running cron's channel-context invariant holds on disk: it needs
+      // `signup_via` to advance `import_running`, and the open Path-1 flow has no
+      // `engine.start` to stamp it — the post-turn extractor stamps the same
+      // `signup_via='web'` default (ND-A, post-turn-extractor.ts).
+      if (this.deploymentMode === 'open' && this.deps.importAffordanceOffered === true) {
+        // Concurrency + downgrade guard (Codex r1 P2). Between the `state===null`
+        // read above and here, a concurrent fresh-install upload (double-submit /
+        // client retry) — or the post-turn extractor — may have created the row.
+        // Re-read; if it now exists, RE-ENTER the normal flow so every non-null
+        // guard applies: `noop_terminal`, and crucially `alreadyHasImportJob`
+        // (the non-null open-mode gate) — so we never start a DUPLICATE job and
+        // never let our `work_interview_gap_fill` seed below DOWNGRADE a live
+        // `import_running` row off the import cron. The row now exists, so the
+        // re-entry takes the non-null path, never this branch again (bounded —
+        // no unbounded recursion). The residual truly-simultaneous window (both
+        // requests read null twice before either writes) matches the non-null
+        // path's own non-atomic `alreadyHasImportJob` check.
+        const recheck = await this.deps.stateStore.get(input.project_slug, input.user_id)
+        if (recheck !== null) {
+          // Call the LOCKED body, not the public wrapper — we already hold the
+          // per-user serialization tail; re-acquiring it would deadlock.
+          return await this.notifyImportUploadLocked({ ...input, observed_at })
+        }
+        const advanceInput: AdvanceInput = {
+          project_slug: input.project_slug,
+          topic_id: input.topic_id,
+          user_id: input.user_id,
+          channel_kind: input.channel_kind,
+          observed_at,
+        }
+        const seeded = await this.deps.stateStore.upsert({
+          project_slug: input.project_slug,
+          user_id: input.user_id,
+          // Same non-terminal conversational marker the extractor creates the
+          // row at (so `isOnboardingActive` stays true and persona-gen reads it
+          // identically). `startImportAndAdvanceToRunning` upserts straight to
+          // `import_running` from here.
+          phase: 'work_interview_gap_fill',
+          phase_state_patch: {
+            topic_id: input.topic_id,
+            user_id: input.user_id,
+            signup_via: input.channel_kind === 'telegram' ? 'telegram' : 'web',
+          },
+          advanced_at: observed_at,
+        })
+        this.deps.transcript.append({
+          role: 'system',
+          body: `import: solicited Path-1 upload source=${input.source} landed with NO onboarding_state row (open-mode live flow seeds it lazily/async; #130 offers import right after the name); seeded row at work_interview_gap_fill + starting import rather than orphaning the export`,
+          phase: seeded.phase,
+        })
+        return await this.startImportAndAdvanceToRunning(
+          advanceInput,
+          seeded,
+          observed_at,
+          input.source,
+        )
+      }
+      return { outcome: 'noop_no_state', state: null }
+    }
     if (TERMINAL_PHASES.has(state.phase)) return { outcome: 'noop_terminal', state }
     const advanceInput: AdvanceInput = {
       project_slug: input.project_slug,
