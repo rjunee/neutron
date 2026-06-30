@@ -1,0 +1,207 @@
+/**
+ * @neutronai/app — project-scoped WORK BOARD API client (Work Board Phase 1b).
+ *
+ * The mobile twin of the web `landing/chat-react/work-board-client.ts`. A thin
+ * fetch wrapper for the gateway's Work Board surface (Phase 1a,
+ * `gateway/http/work-board-surface.ts`):
+ *
+ *   GET    /api/app/projects/<id>/work-board                     list
+ *   POST   /api/app/projects/<id>/work-board                     create
+ *   PATCH  /api/app/projects/<id>/work-board/<item_id>           update
+ *   POST   /api/app/projects/<id>/work-board/<item_id>/complete  complete
+ *   POST   /api/app/projects/<id>/work-board/<item_id>/reorder   reorder
+ *   DELETE /api/app/projects/<id>/work-board/<item_id>           delete
+ *
+ * Mirrors the `TasksClient` shape: pass the bearer at construction, each call
+ * returns the canonical server view (server-authoritative). The board comes back
+ * active+next first (by `sort_order`) then completed (reverse-chron) — the store
+ * is the single source of truth, so the screen NEVER re-sorts. A live
+ * `work_board_changed` frame carries the SAME snapshot (minus `project_slug`).
+ *
+ * `fetchImpl` is injectable for unit tests; it defaults to the global `fetch`.
+ */
+
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done';
+
+export interface WorkBoardItem {
+  id: string;
+  /** Server-only; absent on the live `work_board_changed` frame. */
+  project_slug?: string;
+  title: string;
+  status: WorkBoardStatus;
+  sort_order: number;
+  design_doc_ref: string | null;
+  /** Lightweight in-topic ("inline") work marker. */
+  inline_active: boolean;
+  /** Bound `code_trident_runs.id` when a sub-agent run works this item. */
+  linked_run_id: string | null;
+  created_at: string;
+  updated_at: string;
+  /** ISO-8601 UTC; null until status='done'. */
+  completed_at: string | null;
+}
+
+export interface CreateWorkBoardItemInput {
+  title: string;
+  status?: WorkBoardStatus;
+  design_doc_ref?: string | null;
+}
+
+export interface UpdateWorkBoardItemInput {
+  title?: string;
+  status?: WorkBoardStatus;
+  design_doc_ref?: string | null;
+}
+
+export interface ReorderTarget {
+  before?: string;
+  after?: string;
+}
+
+type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>;
+
+export interface WorkBoardClientOptions {
+  base_url: string;
+  token: string;
+  /** Injected in tests; defaults to the global `fetch`. */
+  fetchImpl?: FetchImpl;
+}
+
+interface ListResponse {
+  ok: boolean;
+  items: WorkBoardItem[];
+  project_id: string;
+}
+
+interface ItemResponse {
+  ok: boolean;
+  item: WorkBoardItem;
+}
+
+export class WorkBoardClientError extends Error {
+  readonly code: string;
+  readonly status: number;
+  constructor(code: string, message: string, status: number) {
+    super(`${code}: ${message}`);
+    this.name = 'WorkBoardClientError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export class WorkBoardClient {
+  private readonly base_url: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchImpl;
+
+  constructor(opts: WorkBoardClientOptions) {
+    this.base_url = opts.base_url.replace(/\/+$/, '');
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+  }
+
+  /** The full board: active+next first (board order), then completed (reverse-chron). */
+  async list(project_id: string): Promise<WorkBoardItem[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`;
+    const res = await this.req<ListResponse>(path);
+    return res.items;
+  }
+
+  async create(project_id: string, input: CreateWorkBoardItemInput): Promise<WorkBoardItem> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`;
+    const res = await this.req<ItemResponse>(path, { method: 'POST', body: input });
+    return res.item;
+  }
+
+  async update(
+    project_id: string,
+    item_id: string,
+    input: UpdateWorkBoardItemInput,
+  ): Promise<WorkBoardItem> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`;
+    const res = await this.req<ItemResponse>(path, { method: 'PATCH', body: input });
+    return res.item;
+  }
+
+  async complete(project_id: string, item_id: string): Promise<WorkBoardItem> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/complete`;
+    const res = await this.req<ItemResponse>(path, { method: 'POST' });
+    return res.item;
+  }
+
+  async reorder(
+    project_id: string,
+    item_id: string,
+    target: ReorderTarget,
+  ): Promise<WorkBoardItem[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/reorder`;
+    const res = await this.req<ListResponse>(path, { method: 'POST', body: target });
+    return res.items;
+  }
+
+  async delete(project_id: string, item_id: string): Promise<void> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`;
+    await this.req<{ ok: boolean; deleted: string }>(path, { method: 'DELETE' });
+  }
+
+  private async req<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+    const method = init.method ?? 'GET';
+    const headers: Record<string, string> = { authorization: `Bearer ${this.token}` };
+    let body: string | undefined;
+    if (init.body !== undefined) {
+      headers['content-type'] = 'application/json';
+      body = JSON.stringify(init.body);
+    }
+    const res = await this.fetchImpl(`${this.base_url}${path}`, {
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+    });
+    let json: unknown = null;
+    try {
+      json = await res.json();
+    } catch {
+      // fall through to the status-coded error below
+    }
+    if (!res.ok) {
+      const code = (json as { code?: string } | null)?.code ?? 'request_failed';
+      const message = (json as { message?: string } | null)?.message ?? `HTTP ${res.status}`;
+      throw new WorkBoardClientError(code, message, res.status);
+    }
+    return json as T;
+  }
+}
+
+/**
+ * Parse a raw `work_board_changed` frame's `items` array into typed
+ * {@link WorkBoardItem}s, dropping malformed entries. Shared by the live
+ * subscriber so a garbled frame can't crash the screen.
+ */
+export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WorkBoardItem[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const r = entry as Record<string, unknown>;
+    const id = r['id'];
+    const title = r['title'];
+    const status = r['status'];
+    if (typeof id !== 'string' || id.length === 0) continue;
+    if (typeof title !== 'string') continue;
+    if (status !== 'upcoming' && status !== 'in_progress' && status !== 'done') continue;
+    out.push({
+      id,
+      title,
+      status,
+      sort_order: typeof r['sort_order'] === 'number' ? (r['sort_order'] as number) : 0,
+      design_doc_ref:
+        typeof r['design_doc_ref'] === 'string' ? (r['design_doc_ref'] as string) : null,
+      inline_active: r['inline_active'] === true,
+      linked_run_id: typeof r['linked_run_id'] === 'string' ? (r['linked_run_id'] as string) : null,
+      created_at: typeof r['created_at'] === 'string' ? (r['created_at'] as string) : '',
+      updated_at: typeof r['updated_at'] === 'string' ? (r['updated_at'] as string) : '',
+      completed_at: typeof r['completed_at'] === 'string' ? (r['completed_at'] as string) : null,
+    });
+  }
+  return out;
+}

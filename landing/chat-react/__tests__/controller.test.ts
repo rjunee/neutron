@@ -745,3 +745,106 @@ describe('NeutronChatController — server-authoritative typing (agent_typing)',
     controller.stop()
   })
 })
+
+describe('NeutronChatController — live work_board_changed (Work Board Phase 1b)', () => {
+  const boardItem = (over: Record<string, unknown> = {}) => ({
+    id: 'w1',
+    title: 'Ship the board',
+    status: 'upcoming',
+    sort_order: 1,
+    design_doc_ref: null,
+    inline_active: false,
+    linked_run_id: null,
+    created_at: '2026-06-20T00:00:00Z',
+    updated_at: '2026-06-20T00:00:00Z',
+    completed_at: null,
+    ...over,
+  })
+  const changed = (items: Array<Record<string, unknown>>) => ({
+    v: 1,
+    type: 'work_board_changed',
+    items,
+    project_id: 'p1',
+    ts: 1,
+  })
+
+  it('fans a parsed snapshot + the frame project_id to subscribers', async () => {
+    const { controller, sockets } = setup('p1')
+    const seen: Array<Array<{ id: string; title: string }>> = []
+    const seenPids: Array<string | undefined> = []
+    controller.onWorkBoardChanged((items, pid) => {
+      seen.push(items.map((i) => ({ id: i.id, title: i.title })))
+      seenPids.push(pid)
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a', title: 'One' }), boardItem({ id: 'b', title: 'Two' })]))
+    await tick()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toEqual([
+      { id: 'a', title: 'One' },
+      { id: 'b', title: 'Two' },
+    ])
+    // The frame's project_id rides along so the tab can drop a sibling project.
+    expect(seenPids).toEqual(['p1'])
+    controller.stop()
+  })
+
+  it('replays the last snapshot to a late subscriber', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a', title: 'Cached' })]))
+    await tick()
+    // Subscribe AFTER the frame — must be replayed the cached snapshot.
+    let replayed: string[] = []
+    controller.onWorkBoardChanged((items) => {
+      replayed = items.map((i) => i.title)
+    })
+    expect(replayed).toEqual(['Cached'])
+    controller.stop()
+  })
+
+  it('drops malformed board entries (no crash, valid rows kept)', async () => {
+    const { controller, sockets } = setup('p1')
+    let last: Array<{ id: string }> = []
+    controller.onWorkBoardChanged((items) => {
+      last = items.map((i) => ({ id: i.id }))
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(
+      changed([
+        boardItem({ id: 'ok', title: 'Good' }),
+        { id: '', title: 'no id' },
+        { id: 'bad', status: 'nope' },
+        'not an object' as unknown as Record<string, unknown>,
+      ]),
+    )
+    await tick()
+    expect(last).toEqual([{ id: 'ok' }])
+    controller.stop()
+  })
+
+  it('does NOT touch the chat view model on a board frame', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.onWorkBoardChanged(() => {})
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    const before = controller.getViewModel()
+    sockets[0]!.deliver(changed([boardItem()]))
+    await tick()
+    const after = controller.getViewModel()
+    // The board is out-of-band of chat state — the vm reference is unchanged.
+    expect(after.messages).toBe(before.messages)
+    controller.stop()
+  })
+})

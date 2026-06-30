@@ -18,10 +18,10 @@ import {
 } from '../registry.ts'
 
 describe('tab registry — project scope', () => {
-  it('returns the three builtin project tabs in order', () => {
+  it('returns the builtin project tabs in order', () => {
     const tabs = resolveProjectTabs()
-    expect(tabs.map((t) => t.key)).toEqual(['chat', 'documents', 'tasks'])
-    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Documents', 'Tasks'])
+    expect(tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'tasks'])
+    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Work Board', 'Documents', 'Tasks'])
   })
 
   it('marks every project tab scope=project, source=builtin, mount.kind=builtin', () => {
@@ -39,6 +39,7 @@ describe('tab registry — project scope', () => {
   it('maps builtin keys to their existing client route targets', () => {
     const byKey = Object.fromEntries(resolveProjectTabs().map((t) => [t.key, t.mount.target]))
     expect(byKey['chat']).toBe('chat')
+    expect(byKey['work_board']).toBe('workboard')
     expect(byKey['documents']).toBe('docs')
     expect(byKey['tasks']).toBe('tasks')
   })
@@ -50,7 +51,7 @@ describe('tab registry — project scope', () => {
       expect(orders[i]!).toBeGreaterThan(orders[i - 1]!)
     }
     // gaps > 1 so a Core tab can slot BETWEEN builtins without renumbering
-    expect(orders).toEqual([0, 10, 20])
+    expect(orders).toEqual([0, 5, 10, 20])
   })
 })
 
@@ -93,7 +94,7 @@ describe('tab registry — resolveTabs(scope) parity + immutability', () => {
     })
 
     const second = resolveProjectTabs()
-    expect(second.map((t) => t.key)).toEqual(['chat', 'documents', 'tasks'])
+    expect(second.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'tasks'])
     expect(second[0]!.label).toBe('Chat')
     expect(second[0]!.mount.target).toBe('chat')
   })
@@ -120,6 +121,7 @@ describe('tab registry — Core union (PR-2)', () => {
     const tabs = resolveProjectTabs([notes, calendar])
     expect(tabs.map((t) => t.key)).toEqual([
       'chat',
+      'work_board',
       'documents',
       'tasks',
       'core:notes',

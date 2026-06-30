@@ -545,9 +545,33 @@ has finished. The board is **instance-scoped by the server-derived
   `instance_fragments` is assembled ONLY on the cold turn, a fragment-only
   wiring would re-ground once per session, not every turn.
 
+- **Tab UI (Phase 1b)** — a first-class per-project **Work Board** tab on both
+  clients. The tab is registered ONCE in `tabs/registry.ts` (`BUILTIN_TABS` key
+  `work_board`, label "Work Board", target `workboard`, **order 5** — between
+  Chat=0 and Documents=10); both clients fetch the registry, so no client
+  tab-list edits. **Web**: `landing/chat-react/WorkBoardTab.tsx` (a
+  `tab.mount.target === 'workboard'` branch in `ProjectShell.tsx`'s `TabContent`)
+  over `landing/chat-react/work-board-client.ts` (`WebWorkBoardClient`, the twin
+  of `tasks-client.ts`); `cwb-`-prefixed styles in `chat-react.html` (reusing
+  `--accent`/`#6cf` + `car-blink`, motion gated by `prefers-reduced-motion`).
+  Live `work_board_changed` frames are applied via `controller.onWorkBoardChanged`
+  (a board-only subscription, out-of-band of the chat ViewModel, mirroring the
+  `projects_changed` apply). **Mobile**: route `app/app/projects/[id]/workboard.tsx`
+  + `app/components/WorkBoardRow.tsx` over `app/lib/work-board-client.ts`, with a
+  lightweight read-only socket `app/lib/work-board-live.ts` applying live frames;
+  pure derivations in `app/lib/work-board-helpers.ts`; `StyleSheet` + `theme.ts`
+  tokens only (`link:#5fb6ff` for "running", never the gray `accent`). The board
+  renders FLAT one-line rows (NOT cards — distinct from Tasks): a status dot
+  (hollow=upcoming / filled live-blue=in_progress / quiet=done), an activity glyph
+  (fork `⑂`=sub-agent via `linked_run_id` / caret `›`=inline via `inline_active`,
+  distinguished by glyph + a11y label, not color), and the completed history in a
+  collapsed `▸ Completed · N` disclosure (dimmed, mono datestamp, reverse-chron,
+  forever). HUMAN read+WRITE (add / inline-edit / advance status / reorder /
+  delete) goes through the same `POST/PATCH/DELETE` surface the agent tools use.
+
 Phase 2 (later) binds each `/code` trident run to a board item (the
-`linked_run_id` correlation key + its partial index are landed here) and adds
-the activity-icon push; the UI tab is Phase 1b. See
+`linked_run_id` correlation key + its partial index are landed here) and feeds
+the activity glyph from the real run state. See
 `docs/plans/2026-06-29-001-feat-work-board-master-plan.md`.
 
 ## Tasks — canonical store + LLM-primary prioritization (`tasks/`)

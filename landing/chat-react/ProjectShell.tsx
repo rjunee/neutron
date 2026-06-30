@@ -37,6 +37,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChatApp } from './ChatApp.tsx'
 import { DocumentsTab } from './DocumentsTab.tsx'
 import { TasksTab } from './TasksTab.tsx'
+import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
@@ -101,11 +102,14 @@ function TabContent({
   tab,
   projectId,
   config,
+  controller,
   fetchImpl,
 }: {
   tab: TabDescriptor
   projectId: string
   config: BootstrapConfig
+  /** Live-frame source for the Work Board tab (`work_board_changed`). */
+  controller: NeutronChatController
   fetchImpl?: FetchImpl
 }): React.JSX.Element {
   if (tab.mount.kind === 'webview') {
@@ -135,6 +139,18 @@ function TabContent({
       <DocumentsTab
         projectId={projectId}
         config={config}
+        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+      />
+    )
+  }
+  // Builtin Work Board — the live work-tracker (active+next, completed history),
+  // human read+WRITE, applying live `work_board_changed` frames off the controller.
+  if (tab.mount.target === 'workboard') {
+    return (
+      <WorkBoardTab
+        projectId={projectId}
+        config={config}
+        liveSource={controller}
         {...(fetchImpl !== undefined ? { fetchImpl } : {})}
       />
     )
@@ -273,6 +289,7 @@ export function ProjectShell({
               tab={activeTab}
               projectId={projectId}
               config={config}
+              controller={controller}
               {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             />
           </div>

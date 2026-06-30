@@ -2,6 +2,50 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Work Board — Phase 1b tab UI (web + mobile)
+
+**What shipped.** The first-class per-project **Work Board** tab on both clients,
+consuming the Phase-1a backend (store + `GET/POST/PATCH/DELETE /work-board` +
+`work_board_changed` push). No feature flags — on by default. Scope was the tab
+UI only; trident binding / parallel runs / activity-from-real-runs stay Phase 2.
+
+- **Registry** — one `BUILTIN_TABS` entry in `tabs/registry.ts`: key `work_board`,
+  label "Work Board", target `workboard`, **order 5** (between Chat=0 and
+  Documents=10). Both clients fetch the registry, so no client tab-list edits.
+  Registry + `app-tabs-surface` tests updated for the new tab.
+- **Web** — `landing/chat-react/WorkBoardTab.tsx` + a `target === 'workboard'`
+  branch in `ProjectShell.tsx`'s `TabContent` (threading the controller as the
+  live source); `landing/chat-react/work-board-client.ts` (`WebWorkBoardClient`,
+  twin of `tasks-client.ts`, + a defensive `parseWorkBoardItems`); `cwb-`-prefixed
+  styles in `chat-react.html` reusing `--accent`/`#6cf` + `car-blink`, motion gated
+  by `prefers-reduced-motion`. Live `work_board_changed` frames apply via a new
+  `controller.onWorkBoardChanged` subscription (board-only, out-of-band of the
+  chat ViewModel, mirroring the `projects_changed` apply + replaying the last
+  snapshot to a late subscriber).
+- **Mobile** — route `app/app/projects/[id]/workboard.tsx` (structure like
+  `tasks.tsx`) + `app/components/WorkBoardRow.tsx` (flat rows + dimmed completed
+  variant) over `app/lib/work-board-client.ts`; live `work_board_changed` applied
+  by a lightweight read-only socket `app/lib/work-board-live.ts` (injectable
+  `WebSocket` + reconnect); pure derivations in `app/lib/work-board-helpers.ts`.
+  `StyleSheet` + `theme.ts` tokens only — `link:#5fb6ff` for "running" (never the
+  gray `accent`); a11y labels on the dot, activity glyph, and reorder/delete.
+- **UI** (per the master-plan §9/§6 frontend-design review) — FLAT one-line rows,
+  NOT cards: a status dot (hollow=upcoming / filled live-blue=in_progress /
+  quiet=done), an activity glyph only when active (fork `⑂`=sub-agent via
+  `linked_run_id`, caret `›`=inline via `inline_active`; distinguished by glyph +
+  a11y label, not color), the completed history in a collapsed `▸ Completed · N`
+  disclosure (dimmed rows, right-aligned mono datestamp from `completed_at`,
+  reverse-chron, stays forever, own scroll region), and a quiet empty state.
+  HUMAN read+WRITE: add input, inline title edit, status advance, up/down reorder,
+  delete — all through the same surface the agent tools use.
+- **Tests** — web: `work-board-tab.test.tsx` (render / dot+glyph derivation / add
+  / status-advance / delete / live-apply / empty), `work-board-client.test.ts`,
+  `controller.test.ts` (live `work_board_changed` apply + replay + malformed-drop
+  + chat-vm untouched). Mobile: `work-board-client.test.ts`, `work-board-live.test.ts`
+  (decode / project-filter / reconnect / stop), `work-board-helpers.test.ts`.
+  All affected suites green (122 across the touched files); `tsc --noEmit` clean
+  for both `landing/chat-react` and `app`.
+
 ## Work Board — Phase 1a backend (store + agent tools + read/write API + per-turn injection)
 
 **What shipped.** The backend half of the Work Board: a per-project, on-disk
