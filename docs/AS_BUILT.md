@@ -2,6 +2,58 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-30 — M1 onboarding/UI cleanup batch (3 minor verify-pass fixes)
+
+Three minor, non-architectural polish fixes surfaced during the M1
+browser-verification passes. No feature flags, no migration, no new endpoint.
+
+**(a) Import "Reading through…" status bubble floated to the chat bottom.** The
+`import_running` `status` prompt ("Reading through your export now: entities,
+topics, recurring threads…") was fanned ephemerally via `emitOnboardingPrompt`,
+so it carried no chat_log `seq` and `compareForDisplay` (seq-less sorts to the
+tail) pinned it BELOW every later real-seq message — it stayed at the bottom even
+after the import completed and the analysis + later turns arrived. This is the
+same ordering seam #130 fixed for the analysis body. **Fix** (`open/composer.ts`):
+new pure, unit-tested `resolveImportRunningStatusDelivery` — the FIRST plain
+buttonless status bubble is persisted through the durable adapter (chat_log
+`seq` → chronological order), and the engine cron's RE-EMITS
+(`import_running_attempt_count > 1`) are suppressed so they don't stack duplicate
+durable bubbles (the live `import_progress` banner already shows ongoing
+progress). Failure / rate-limit / resume prompts (real buttons) stay ephemeral.
+
+**(b) Locked-in project set could include a project never shown to the user.**
+The presentation caps the proposal at `MAX_ANALYSIS_PROJECTS` (7), but Pass-2 /
+synthesis only caps via a prompt instruction (NOT enforced in code). A >7
+synthesis therefore stamped the FULL list into `phase_state.import_result` AND
+merged all N names into `primary_projects`, so the per-turn `onboardingContext`
+seam, persona-gen, and finalize all locked in projects 8+ the user never saw and
+could not drop. **Fix**: `capProposedProjects` (single source of truth in
+`phase-prompts.ts`, used by the presentation too) is applied at the engine STAMP
+chokepoint (`advanceFromImportRunningOnComplete` caps both `import_result` and
+the `primary_projects` merge), so everything downstream agrees with the displayed
+slice. `build-onboarding-finalize.resolveProjects` caps the IMPORT contribution to
+the displayed set as a finalize-layer guard but TRUSTS `primary_projects` verbatim
+(only displayed names + explicit adds, since the engine merge is capped) — it does
+not filter primary against the overflow, which would wrongly drop an explicit add
+whose name collides with an unshown overflow proposal (fixed per Codex review).
+The GAP1 "no-narrowing" invariant is preserved (finalize = displayed − dropped +
+adds).
+
+**(c) Create Project used the native `window.prompt()`.** Replaced the blocking,
+unstyleable native dialog (which also blocks E2E/CDP automation) at
+`landing/chat-react/ChatApp.tsx` with an INLINE name input in the rail
+(`.car-rail-input`), mirroring the mobile `app/app/projects` pattern: Enter
+submits, Esc cancels, an empty name shows an inline error, and a failed POST
+renders inline (no `window.alert`). Same `POST /api/app/projects` + bearer +
+`controller.setProject(newId)` navigate-in flow; CSS in `landing/chat-react.html`.
+
+**Tests.** New unit tests for `resolveImportRunningStatusDelivery`
+(`open/__tests__/open-import-analysis-delivery.test.ts`), `capProposedProjects` +
+the finalize >7 reconciliation (`gap1-project-no-narrowing.test.ts` +
+`build-onboarding-finalize.test.ts`), and the inline create-project flow incl.
+Enter/Esc/empty-name (`landing/chat-react/__tests__/component.test.tsx`). tsc
+clean; leak-gate SILENT.
+
 ## 2026-06-29 — M1 CRITICAL: open-mode history import wouldn't START (#130 regression) — upload right after the name now seeds the row + starts the job
 
 **Symptom.** On a fresh Open install, the reworked onboarding (#130) offers

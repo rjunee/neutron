@@ -20,6 +20,7 @@ import { ProjectDb } from '../../../persistence/index.ts'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { SqliteOnboardingStateStore } from '../../../onboarding/interview/sqlite-state-store.ts'
 import { slugifyProjectId } from '../../../onboarding/wow-moment/project-identity.ts'
+import { MAX_ANALYSIS_PROJECTS } from '../../../onboarding/interview/phase-prompts.ts'
 import {
   buildOnboardingFinalize,
   type OnboardingFinalizeDeps,
@@ -355,6 +356,114 @@ test('finalize honors a curation DROP — a dropped project is never materialize
   // proposed_projects (the defensive union would otherwise have re-added it).
   expect(names).toEqual(['Acme', 'Book', 'Topline Revenue'])
   expect(names).not.toContain('Infra')
+
+  h.db.close()
+})
+
+const NINE_PROPOSED = [
+  'Topline',
+  'Northwind',
+  'Acme Studio',
+  'Acme',
+  'Info Product Playbooks',
+  'Functional Chocolate',
+  'Home Finances',
+  'Phantom Eight', // beyond the cap — never displayed to the user
+  'Phantom Nine', // beyond the cap — never displayed to the user
+]
+
+test('finalize caps the IMPORT contribution to the displayed set — proposed projects beyond MAX_ANALYSIS_PROJECTS are never materialized (M1, 2026-06-30)', async () => {
+  const h = makeHarness()
+  // A >7 synthesis. The presentation only ever showed the user the first
+  // MAX_ANALYSIS_PROJECTS (7); the engine now caps import_result + primary_projects
+  // at the stamp chokepoint, so primary carries no phantoms. Drive finalize with
+  // the displayed primary set (the engine-capped 7) AND a still-uncapped
+  // import_result (9 proposed) and assert the import OVERFLOW (8th/9th) is not
+  // materialized.
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      primary_projects: NINE_PROPOSED.slice(0, MAX_ANALYSIS_PROJECTS),
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      entities: [],
+      topics: [],
+      proposed_projects: NINE_PROPOSED.map((name) => ({
+        name,
+        rationale: 'Seen across the export.',
+        suggested_topics: [],
+      })),
+      proposed_tasks: [],
+      proposed_reminders: [],
+    } as never,
+  })
+
+  const names = h.db
+    .prepare<{ name: string }, []>(`SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name`)
+    .all()
+    .map((r) => r.name)
+  // Exactly the displayed 7 — no phantoms.
+  expect(names.length).toBe(MAX_ANALYSIS_PROJECTS)
+  expect(names.sort()).toEqual([...NINE_PROPOSED.slice(0, MAX_ANALYSIS_PROJECTS)].sort())
+  expect(names).not.toContain('Phantom Eight')
+  expect(names).not.toContain('Phantom Nine')
+
+  h.db.close()
+})
+
+test('finalize preserves an EXPLICIT user add even when its name collides with an unshown import overflow (Codex P2)', async () => {
+  const h = makeHarness()
+  // The owner explicitly named "Phantom Eight" in conversation (so it lives in
+  // primary_projects as a real add). It also happens to be the 8th import
+  // proposal — beyond the displayed cap. The cap reconciliation must NOT drop the
+  // owner's explicit add: finalized = displayed ∪ explicit-adds, so it is created.
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      primary_projects: [...NINE_PROPOSED.slice(0, MAX_ANALYSIS_PROJECTS), 'Phantom Eight'],
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      entities: [],
+      topics: [],
+      proposed_projects: NINE_PROPOSED.map((name) => ({
+        name,
+        rationale: 'Seen across the export.',
+        suggested_topics: [],
+      })),
+      proposed_tasks: [],
+      proposed_reminders: [],
+    } as never,
+  })
+
+  const names = h.db
+    .prepare<{ name: string }, []>(`SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name`)
+    .all()
+    .map((r) => r.name)
+  // Displayed 7 + the explicit add = 8; the explicit add survives the cap.
+  expect(names).toContain('Phantom Eight')
+  expect(names.length).toBe(MAX_ANALYSIS_PROJECTS + 1)
+  // The truly-unshown overflow (never added) is still excluded.
+  expect(names).not.toContain('Phantom Nine')
 
   h.db.close()
 })

@@ -24,6 +24,7 @@ import {
 } from './phase.ts'
 import {
   buildImportRunningPromptSpec,
+  capProposedProjects,
   IMPORT_RESUME_CHOICE_VALUE,
   IMPORT_RUNNING_RETRY,
   IMPORT_RUNNING_SKIP,
@@ -1541,9 +1542,22 @@ export async function advanceFromImportRunningOnComplete(
       typeof state.phase_state['import_job_id'] === 'string'
         ? (state.phase_state['import_job_id'] as string)
         : null
+    // Reconcile the persisted set to EXACTLY what the user is shown. The
+    // presentation caps the proposal at MAX_ANALYSIS_PROJECTS, but synthesis can
+    // overshoot that cap (it's a prompt instruction, not enforced in code), so a
+    // >7 import would otherwise stamp the FULL list into `import_result` AND
+    // merge all N names into `primary_projects` — locking in projects the user
+    // never saw nor could drop (M1 verify, 2026-06-30). Cap here at the durable
+    // chokepoint so `import_result` (→ the per-turn onboarding seam),
+    // `primary_projects`, and build-onboarding-finalize all agree with the
+    // displayed slice.
+    const capped_import_result: ImportResult | null =
+      import_result !== null
+        ? { ...import_result, proposed_projects: capProposedProjects(import_result.proposed_projects) }
+        : null
     const phase_state_patch: Record<string, unknown> = {
       active_prompt_id: null,
-      import_result,
+      import_result: capped_import_result,
       import_partial: partial,
       import_failure_reason: failure_reason,
       import_failed: failure_reason !== null,
@@ -1552,8 +1566,8 @@ export async function advanceFromImportRunningOnComplete(
         ? { last_import_job_id: prior_import_job_id }
         : {}),
     }
-    if (import_result !== null) {
-      const project_names = import_result.proposed_projects
+    if (capped_import_result !== null) {
+      const project_names = capped_import_result.proposed_projects
         .map((p) => p.name)
         .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
       if (project_names.length > 0) {
@@ -1568,7 +1582,7 @@ export async function advanceFromImportRunningOnComplete(
         const merged = dedupeStringsCaseInsensitive([...prior, ...project_names])
         phase_state_patch['primary_projects'] = merged
       }
-      const interests = (import_result.inferred_interests ?? []).filter(
+      const interests = (capped_import_result.inferred_interests ?? []).filter(
         (i): i is { name: string; basis?: string; cadence_hint?: 'weekly' | 'monthly' | 'occasional' } =>
           typeof i === 'object' && i !== null && typeof i.name === 'string' && i.name.trim().length > 0,
       )

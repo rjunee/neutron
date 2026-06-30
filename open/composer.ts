@@ -320,6 +320,48 @@ export function resolveOpenImportPromptEmission(
   return prompt
 }
 
+export type ImportRunningStatusDelivery = 'durable' | 'suppress' | 'ephemeral'
+
+/**
+ * Open-mode delivery decision for the ephemeral import_running "Reading through
+ * your export now…" STATUS bubble.
+ *
+ * Emitted via `emitOnboardingPrompt` it carries NO chat_log `seq`, so chat-core
+ * `compareForDisplay` sorts it to the TAIL — it floats below every later
+ * real-seq message and stays pinned at the bottom even after the import
+ * completes and the analysis + later turns arrive (M1 verify, 2026-06-30; the
+ * same ordering seam #130 fixed for the analysis body). The decision:
+ *   - 'durable'   — persist the FIRST status bubble through the durable adapter
+ *                   (chat_log → monotonic seq) so it orders chronologically,
+ *                   mirroring the `import_analysis_presented` body.
+ *   - 'suppress'  — drop the engine cron's RE-EMITS (attempt_count > 1): a fresh
+ *                   prompt is built each poll, so persisting every one would stack
+ *                   duplicate durable bubbles. The single durable bubble plus the
+ *                   live `import_progress` banner already cover the running state.
+ *   - 'ephemeral' — everything else (failure / rate-limit / resume prompts the
+ *                   user must act on, and non-import_running prompts) keeps the
+ *                   existing ephemeral path; the engine owns their durability +
+ *                   reconnect re-emit.
+ *
+ * Only the plain no-button progress bubble (`sub_step === 'status'`, zero
+ * options) is ever persisted/suppressed; a status variant carrying a button
+ * falls through to 'ephemeral'. Pure + exported for unit coverage.
+ */
+export function resolveImportRunningStatusDelivery(args: {
+  phase: string | null
+  sub_step: unknown
+  attempt_count: unknown
+  option_count: number
+}): ImportRunningStatusDelivery {
+  const { phase, sub_step, attempt_count, option_count } = args
+  if (phase !== 'import_running') return 'ephemeral'
+  if (sub_step !== 'status') return 'ephemeral'
+  if (option_count !== 0) return 'ephemeral'
+  const attempts =
+    typeof attempt_count === 'number' && Number.isFinite(attempt_count) ? attempt_count : 1
+  return attempts <= 1 ? 'durable' : 'suppress'
+}
+
 /**
  * Build the single-owner Open graph composer. The returned closure is what
  * `boot({ composer })` invokes after migrations — it receives the live
@@ -2363,6 +2405,36 @@ export function buildOpenGraphComposer(
           toEmit.options.length === 0 &&
           appWsHolder.adapter !== undefined
         ) {
+          const msg: OutgoingMessage = {
+            topic: {
+              topic_id: '',
+              channel_kind: 'app_socket',
+              channel_topic_id: topic_id,
+              project_id: null,
+              privacy_mode: 'regular',
+            },
+            text: toEmit.body,
+          }
+          const id = await appWsHolder.adapter.send(msg)
+          return { message_id: prompt.prompt_id, was_new: !id.startsWith('app-ws:dropped:') }
+        }
+        // Ordering + de-dupe fix (import_running status bubble, M1 2026-06-30):
+        // the "Reading through your export now…" progress bubble is buttonless
+        // and ephemeral, so it sorts to the chat tail and floats below later
+        // messages (same seam as the analysis body above). Persist the FIRST one
+        // durably (chronological seq); suppress the engine cron's re-emits so we
+        // don't stack duplicates — the live import_progress banner covers ongoing
+        // progress and the durable analysis body lands after on completion.
+        const statusDelivery = resolveImportRunningStatusDelivery({
+          phase: st?.phase ?? null,
+          sub_step: st?.phase_state?.['import_running_sub_step'],
+          attempt_count: st?.phase_state?.['import_running_attempt_count'],
+          option_count: toEmit.options.length,
+        })
+        if (statusDelivery === 'suppress') {
+          return { message_id: prompt.prompt_id, was_new: false }
+        }
+        if (statusDelivery === 'durable' && appWsHolder.adapter !== undefined) {
           const msg: OutgoingMessage = {
             topic: {
               topic_id: '',

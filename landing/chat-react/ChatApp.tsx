@@ -695,9 +695,43 @@ function TopicRail({
   projects: ProjectTab[]
   activeId: string | null
   onSelect: (id: string | null) => void
-  onCreate: () => void
+  /** POSTs the new project; resolves to an error string to show inline, or null on success. */
+  onCreate: (name: string) => Promise<string | null>
   creating: boolean
 }): React.JSX.Element {
+  // Inline create-project input (mirrors mobile `app/app/projects`): a closed
+  // "+ Create Project" button toggles to a name field with Enter→submit /
+  // Esc→cancel, replacing the native window.prompt. `createError` renders the
+  // failure inline instead of a blocking window.alert.
+  const [createOpen, setCreateOpen] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [createError, setCreateError] = useState<string | null>(null)
+
+  const cancelCreate = (): void => {
+    setCreateOpen(false)
+    setNewName('')
+    setCreateError(null)
+  }
+  const submitCreate = (): void => {
+    if (creating) return
+    const name = newName.trim()
+    if (name.length === 0) {
+      setCreateError('Enter a project name.')
+      return
+    }
+    setCreateError(null)
+    void (async () => {
+      const err = await onCreate(name)
+      if (err !== null) {
+        setCreateError(err)
+        return
+      }
+      // Success: navigation is driven by onCreate (controller.setProject); reset.
+      setNewName('')
+      setCreateOpen(false)
+    })()
+  }
+
   return (
     <aside className="car-rail" aria-label="Projects">
       <div className="car-rail-title">Projects</div>
@@ -718,18 +752,69 @@ function TopicRail({
           {p.label}
         </button>
       ))}
-      {/* Pinned to the bottom (the rail is a flex column; this button has
-          `margin-top:auto`). Always visible, even when only General exists, so a
-          skip-import owner can jump straight into a fresh project + its tabs. */}
-      <button
-        type="button"
-        className="car-rail-create"
-        onClick={onCreate}
-        disabled={creating}
-        aria-label="Create a new project"
-      >
-        {creating ? 'Creating…' : '+ Create Project'}
-      </button>
+      {/* Pinned to the bottom (the rail is a flex column; the closed button /
+          open form both carry `margin-top:auto`). Always visible, even when only
+          General exists, so a skip-import owner can jump straight into a fresh
+          project + its tabs. */}
+      {createOpen ? (
+        <div className="car-rail-create-form">
+          <input
+            type="text"
+            className="car-rail-input"
+            placeholder="Project name"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                submitCreate()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                cancelCreate()
+              }
+            }}
+            disabled={creating}
+            autoFocus
+            aria-label="New project name"
+          />
+          {createError !== null ? (
+            <div className="car-rail-create-error" role="alert">
+              {createError}
+            </div>
+          ) : null}
+          <div className="car-rail-create-actions">
+            <button
+              type="button"
+              className="car-rail-create-cancel"
+              onClick={cancelCreate}
+              disabled={creating}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="car-rail-create-confirm"
+              onClick={submitCreate}
+              disabled={creating}
+            >
+              {creating ? 'Creating…' : 'Create'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="car-rail-create"
+          onClick={() => {
+            setCreateError(null)
+            setCreateOpen(true)
+          }}
+          disabled={creating}
+          aria-label="Create a new project"
+        >
+          + Create Project
+        </button>
+      )}
     </aside>
   )
 }
@@ -1050,19 +1135,20 @@ export function ChatApp({
     ? { token: config.token, origin: config.origin, fetchImpl }
     : { token: config.token, origin: config.origin }
 
-  // Create-project flow (rail button): prompt for a name, POST to the
-  // bearer-gated create endpoint, then navigate into the new project. The live
+  // Create-project flow (rail button): the rail owns an INLINE name input
+  // (mirrors the mobile `app/app/projects` pattern — no native window.prompt,
+  // which is unstyleable and blocks E2E/CDP automation). This callback does the
+  // POST to the bearer-gated create endpoint, navigates into the new project on
+  // success, and RETURNS an error string (or null) so the rail can render the
+  // failure inline instead of a blocking window.alert. The live
   // `projects_changed` frame refreshes the rail list; `setProject` makes the
   // navigation immediate (and is a no-op duplicate of the 0→N auto-select).
   const [creatingProject, setCreatingProject] = useState(false)
-  const onCreateProject = useCallback(() => {
-    if (creatingProject) return
-    const raw = typeof window !== 'undefined' ? window.prompt('New project name') : null
-    const name = (raw ?? '').trim()
-    if (name.length === 0) return
-    setCreatingProject(true)
-    const doFetch: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
-    void (async () => {
+  const onCreateProject = useCallback(
+    async (name: string): Promise<string | null> => {
+      if (creatingProject) return null
+      setCreatingProject(true)
+      const doFetch: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
       try {
         const res = await doFetch(`${config.origin}/api/app/projects`, {
           method: 'POST',
@@ -1076,16 +1162,17 @@ export function ChatApp({
           const data = (await res.json()) as { project?: { id?: unknown } }
           const id = data.project?.id
           if (typeof id === 'string' && id.length > 0) controller.setProject(id)
-        } else if (typeof window !== 'undefined') {
-          window.alert(`Could not create project (${res.status}).`)
+          return null
         }
+        return `Could not create project (${res.status}).`
       } catch {
-        if (typeof window !== 'undefined') window.alert('Could not create project.')
+        return 'Could not create project.'
       } finally {
         setCreatingProject(false)
       }
-    })()
-  }, [creatingProject, fetchImpl, config.origin, config.token, controller])
+    },
+    [creatingProject, fetchImpl, config.origin, config.token, controller],
+  )
 
   return (
     <UploadsContext.Provider value={uploadsCtx}>
