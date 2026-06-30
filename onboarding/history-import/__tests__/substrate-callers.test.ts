@@ -9,9 +9,9 @@
  * deterministic Substrate stub. Verifies:
  *
  *   1. Pass-1 caller invokes `substrate.start` with model_preference[0] =
- *      claude-opus-4-7 AND the supplied pass1Prompt as a system message.
+ *      claude-opus-4-8 AND the supplied pass1Prompt as a system message.
  *   2. Pass-2 caller invokes `substrate.start` with model_preference[0] =
- *      claude-opus-4-7 AND the supplied pass2Prompt as a system message.
+ *      claude-opus-4-8 AND the supplied pass2Prompt as a system message.
  *   3. Both callers return `{result, dollars_billed}` matching the
  *      Pass1LlmCall / Pass2LlmCall interfaces.
  *   4. Markdown-fenced JSON output is extracted correctly (extractJsonObject).
@@ -96,7 +96,7 @@ describe('buildPass1SubstrateCaller — Opus 4.7 dispatch (2026-05-31 Sam-locked
     // 2026-05-31 — Pass-1 default is Opus 4.7, not Haiku 4.5. See
     // substrate-callers.ts file header for the Sam-locked rationale.
     expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
-    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-7')
+    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-8')
     // Codex r3 P1 (T7 forge-fix r3): system + user are combined into one
     // user-turn `prompt` because the Anthropic Messages API doesn't
     // accept `role:'system'` inside messages. No `messages` array shipped.
@@ -201,7 +201,7 @@ describe('buildPass2SubstrateCaller — § 2.3 Opus 4.7 dispatch', () => {
     const out = await pass2({ aggregated: makeAggregated(), prompt: 'PASS-2 PROMPT BODY' })
     expect(calls.length).toBe(1)
     expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
-    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-7')
+    expect(calls[0]!.spec.model_preference[0]).toBe('claude-opus-4-8')
     // Codex r3 P1: single user-turn body, no messages array.
     expect(calls[0]!.spec.messages).toBeUndefined()
     expect(calls[0]!.spec.prompt).toContain('PASS-2 PROMPT BODY')

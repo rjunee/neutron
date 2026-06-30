@@ -59,7 +59,7 @@ import type { Substrate } from '../../runtime/substrate.ts'
 import type { Event } from '../../runtime/events.ts'
 import type { Pass1LlmCall } from './pass1-triage.ts'
 import type { Pass2LlmCall, AggregatedPass1 } from './pass2-synthesis.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import { resolveModelPricing } from '../../runtime/model-pricing.ts'
 import { ImportError, type Chunk } from './types.ts'
 
@@ -243,7 +243,7 @@ export function buildPass1SubstrateCaller(
   const modelPref =
     deps.model_preference !== undefined && deps.model_preference.length > 0
       ? [...deps.model_preference]
-      : [BEST_MODEL]
+      : [getBestModel()]
   const maxTokens = deps.max_tokens ?? 1500
   // P2-v2 S23 — pricing is derived from the model id actually dispatched.
   // resolveModelPricing throws at build time if `model_preference[0]` (or
@@ -251,7 +251,7 @@ export function buildPass1SubstrateCaller(
   // model, so an operator typo can't silently bill at the wrong rate.
   // Tests pass an explicit `pricing` override to keep dollar-billing
   // assertions deterministic without depending on the real price table.
-  const pricing = deps.pricing ?? resolvePricingFor(modelPref[0] ?? BEST_MODEL)
+  const pricing = deps.pricing ?? resolvePricingFor(modelPref[0] ?? getBestModel())
   return async (input: { chunk: Chunk; prompt: string }) => {
     const handle = deps.substrate.start({
       prompt: composeSystemPlusUser(input.prompt, renderChunkUserTurn(input.chunk)),
@@ -282,13 +282,13 @@ export function buildPass2SubstrateCaller(
   const modelPref =
     deps.model_preference !== undefined && deps.model_preference.length > 0
       ? [...deps.model_preference]
-      : [BEST_MODEL]
+      : [getBestModel()]
   const fallbackPref =
     deps.fallback_model_preference !== undefined && deps.fallback_model_preference.length > 0
       ? [...deps.fallback_model_preference]
       : null
   const maxTokens = deps.max_tokens ?? 4096
-  const primaryModel = modelPref[0] ?? BEST_MODEL
+  const primaryModel = modelPref[0] ?? getBestModel()
   // P2-v2 S23 — pricing derived from each dispatched model id via the
   // registry. Fixes the S21 R2 follow-up: pre-S23 a `NEUTRON_SONNET_MODEL`
   // env override could silently mis-bill because the fallback `pricing`

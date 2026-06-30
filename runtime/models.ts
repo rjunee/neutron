@@ -36,10 +36,21 @@
 
 /**
  * The user's Max-subscription best model. Override via `NEUTRON_BEST_MODEL`.
- * Defaults to Claude Opus 4.7.
+ * Defaults to Claude Opus 4.8.
+ *
+ * **This constant is the FRESH-INSTALL SEED, not the live runtime value.** It
+ * is bound ONCE at module load and a runtime model upgrade cannot mutate a
+ * `const`. Every code path that SPAWNS a live REPL / dispatches a live-agent or
+ * onboarding turn MUST resolve the model through {@link getBestModel} (the
+ * dynamic accessor) so the model-update watchdog's adopted id reaches new
+ * spawns — NOT through this frozen literal. A stale literal here rots into a
+ * hang the moment Anthropic retires the pinned model (the opus-4-7 incident,
+ * 2026-06-30): a fresh install, before the first watchdog tick, would spawn a
+ * dead model and the turn produces zero tokens → the 180s per-turn timeout.
+ * Keep the seed current AND route live spawns through {@link getBestModel}.
  */
 export const BEST_MODEL: string =
-  process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-4-7'
+  process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-4-8'
 
 /**
  * P2-v2 S21 (2026-05-17) — Pass-2 Sonnet fallback model.

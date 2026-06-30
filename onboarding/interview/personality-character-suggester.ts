@@ -37,7 +37,7 @@
  * better, more varied set of picks.
  */
 
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import { SUGGESTER_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
 
 // Re-export so existing importers/tests keep resolving the symbol from here.
@@ -284,7 +284,9 @@ export function buildPersonalityCharacterSuggester(
   deps: BuildPersonalityCharacterSuggesterDeps,
 ): PersonalityCharacterSuggester {
   const opts = deps.options ?? {}
-  const model = opts.model ?? BEST_MODEL
+  // Dynamic accessor (not the frozen BEST_MODEL constant): this suggester is
+  // rebuilt per onboarding session, so it tracks the watchdog's adopted model.
+  const model = opts.model ?? getBestModel()
   const timeout_ms = positiveInt(
     opts.timeout_ms ?? SUGGESTER_TIMEOUT_MS_DEFAULT,
     SUGGESTER_TIMEOUT_MS_DEFAULT,

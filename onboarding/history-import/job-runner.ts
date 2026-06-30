@@ -48,7 +48,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '../../persistence/index.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import type { CredentialKind } from '../../runtime/credential-pool.ts'
 import { aggregatePass1, pass2Synthesize, type Pass2LlmCall } from './pass2-synthesis.ts'
 import { pass1Triage, type Pass1LlmCall } from './pass1-triage.ts'
@@ -545,7 +545,7 @@ export class ImportJobRunner {
           !result.partial &&
           job.result.synthesizer_model === undefined
         ) {
-          job.result.synthesizer_model = BEST_MODEL
+          job.result.synthesizer_model = getBestModel()
         }
       }
     }

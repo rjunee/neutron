@@ -42,7 +42,7 @@ import {
 } from '../../onboarding/interview/llm-router.ts'
 import { maybeBuildFixtureClientFromEnv } from '../../onboarding/interview/fixture-anthropic-client.ts'
 import type { OnboardingTelemetry } from '../../onboarding/telemetry/event-emitter.ts'
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 import {
   collectTokensToString,
@@ -280,7 +280,6 @@ export interface BuildGatewayAnthropicMessagesClientInput {
 export function buildGatewayAnthropicMessagesClient(
   input: BuildGatewayAnthropicMessagesClientInput,
 ): AnthropicMessagesClient {
-  const default_model = input.default_model ?? BEST_MODEL
   return {
     messages: {
       async create(args) {
@@ -300,7 +299,10 @@ export function buildGatewayAnthropicMessagesClient(
           // Caller-supplied `args.model` wins; factory default is the
           // fallback for callers that omit the field. Pinned by
           // `build-llm-router-cc-substrate.test.ts` (Argus r1 BLOCKING #1).
-          model_preference: [args.model ?? default_model],
+          // The ULTIMATE fallback resolves PER-CALL via `getBestModel()` so a
+          // model-update watchdog flip reaches new dispatches — never a frozen
+          // module-load constant.
+          model_preference: [args.model ?? input.default_model ?? getBestModel()],
           max_tokens: args.max_tokens,
         }
         const handle = input.substrate.start(spec)

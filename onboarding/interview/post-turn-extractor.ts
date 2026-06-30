@@ -28,7 +28,7 @@
  * `buildComposeInput` and `auditRequiredFields` read our output unchanged.
  */
 
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import type { AnthropicMessagesClient } from './agent-name-suggester.ts'
 import type { ExtractedFields } from './extracted-fields.ts'
 import { sanitizeUserFirstName } from './extracted-fields.ts'
@@ -128,7 +128,7 @@ export interface PostTurnExtractor {
 }
 
 export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExtractor {
-  const model = deps.model ?? BEST_MODEL
+  const model = deps.model ?? getBestModel()
   const timeout_ms = deps.timeout_ms ?? DEFAULT_TIMEOUT_MS
   const max_tokens = deps.max_tokens ?? DEFAULT_MAX_TOKENS
   const log = deps.log ?? defaultLog

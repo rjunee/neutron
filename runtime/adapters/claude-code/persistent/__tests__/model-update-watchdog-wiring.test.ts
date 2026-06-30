@@ -25,7 +25,7 @@ import {
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
-import { getBestModel, setBestModelOverride } from '../../../../models.ts'
+import { BEST_MODEL, getBestModel, setBestModelOverride } from '../../../../models.ts'
 import type { ProbeResult } from '../model-update-watchdog.ts'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -165,7 +165,7 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
       await wd!.tick()
 
       // 1. The notice fired once (edge).
-      expect(notices).toEqual([{ newModel: 'claude-opus-4-9', oldModel: 'claude-opus-4-7' }])
+      expect(notices).toEqual([{ newModel: 'claude-opus-4-9', oldModel: BEST_MODEL }])
       // 2. The model was adopted as the runtime default.
       expect(getBestModel()).toBe('claude-opus-4-9')
 
@@ -215,7 +215,7 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
       await Bun.sleep(50) // give any (erroneous) async upgrade a chance to fire
 
       expect(notices).toEqual([])
-      expect(getBestModel()).toBe('claude-opus-4-7') // NOT downgraded to Haiku
+      expect(getBestModel()).toBe(BEST_MODEL) // NOT downgraded to Haiku
       const newSpawns = spawns().slice(spawnsBefore)
       expect(newSpawns.filter((argv) => argv.includes('--resume'))).toEqual([])
     } finally {

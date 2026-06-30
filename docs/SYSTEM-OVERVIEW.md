@@ -2332,9 +2332,33 @@ loop, started once per instance alongside the wedge watchdog
   process-level `setBestModelOverride(newModel)` in `runtime/models.ts`, so every
   **fresh** persistent-REPL spawn resolves `--model` through `getBestModel()` and
   comes up on the new model — no redeploy, no env change ("auto-upgrade like
-  Claude Code, applied to the model"). The two former hardcoded `'claude-opus-4-7'`
-  spawn fallbacks now read `getBestModel()` so the override actually reaches fresh
-  spawns.
+  Claude Code, applied to the model").
+- **Always-latest model resolution (2026-06-30 — the opus-4-7 hang fix).**
+  `runtime/models.ts` exposes ONE dynamic accessor, `getBestModel()` (the
+  watchdog override when adopted, else the env/default seed). The frozen
+  `BEST_MODEL` *constant* is the fresh-install **seed only** (bumped from the
+  retired `claude-opus-4-7` to `claude-opus-4-8`) — it is bound once at module
+  load and a runtime upgrade cannot mutate a `const`. **Every site that spawns a
+  live REPL or dispatches a live-agent / onboarding turn now resolves the model
+  through `getBestModel()` at the latest feasible point (per-turn / per-call, NOT
+  captured when a runner is built once at boot):** the onboarding warm-pool
+  pre-warm (`open/composer.ts` `prewarmSubstrate` — the spawn that HEATS the REPL
+  and stamps `record.model`), the live-agent turn runner
+  (`build-live-agent-turn.ts`, resolved inside the per-turn body), the LLM router
+  default (`build-llm-router.ts`), the project-opening / project-doc / phase-spec
+  / agent-watcher composers, the one-shot Core LLM (`mount-open-cores.ts`), the
+  onboarding suggesters + post-turn extractor, the synthesis/scribe/reflection
+  defaults, and the import Pass-1/Pass-2 callers. The agent-dispatch
+  `default_model` accepts a thunk so the Open composer passes the `getBestModel`
+  accessor (resolved per-dispatch). **Why it matters:** a stale frozen id is a
+  latent hang — the moment Anthropic retires the pinned model, a fresh install
+  spawns a dead model, the turn produces zero tokens, and the persistent-REPL
+  180s per-turn timeout fires (onboarding "Setting things up…" never resolves).
+  The watchdog detecting the new model is necessary but not sufficient; the spawn
+  sites reading `getBestModel()` is what closes the loop so the adoption actually
+  reaches new/cold spawns. `claude-opus-4-8` is also added to
+  `runtime/model-pricing.ts` (same Opus rates) so `resolvePricingFor(getBestModel())`
+  at import-build time does not throw on the new default.
 - **Graceful upgrade (idle-gated, never hard-bounce an active turn).** A
   round-robin `runGracefulUpgrade` loop moves each EXISTING warm session: each
   round checks every still-pending session once, respawning any that are idle and

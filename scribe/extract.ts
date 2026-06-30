@@ -19,7 +19,7 @@
 import type { Substrate } from '../runtime/substrate.ts'
 import type { Event } from '../runtime/events.ts'
 import type { SessionHandle } from '../runtime/session-handle.ts'
-import { BEST_MODEL } from '../runtime/models.ts'
+import { getBestModel } from '../runtime/models.ts'
 
 export type ExtractedEntityKind = 'person' | 'company' | 'concept'
 
@@ -109,7 +109,7 @@ export async function runExtraction(
     model_preference:
       deps.model_preference !== undefined && deps.model_preference.length > 0
         ? [...deps.model_preference]
-        : [BEST_MODEL],
+        : [getBestModel()],
     max_tokens: deps.max_tokens ?? 2048,
   })
   const raw = await drainToString(handle, signal)

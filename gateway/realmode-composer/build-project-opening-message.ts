@@ -46,7 +46,7 @@
  * over lazy-on-open (no first-open spinner).
  */
 
-import { BEST_MODEL } from '../../runtime/models.ts'
+import { getBestModel } from '../../runtime/models.ts'
 import type { AnthropicMessagesClient } from '../../onboarding/interview/llm-router.ts'
 import {
   OPENING_MESSAGE_MAX_CHARS,
@@ -116,10 +116,13 @@ const SYSTEM_PROMPT = [
 export function buildProjectOpeningMessageComposer(
   opts: BuildProjectOpeningMessageComposerOptions,
 ): ComposeProjectOpeningFn {
-  const model = opts.model ?? BEST_MODEL
   const timeout_ms = opts.timeout_ms ?? PROJECT_OPENING_COMPOSER_TIMEOUT_MS_DEFAULT
   const max_tokens = opts.max_tokens ?? PROJECT_OPENING_COMPOSER_MAX_TOKENS_DEFAULT
   return async (input: ComposeProjectOpeningInput): Promise<ProjectOpeningComposition> => {
+    // Resolve the model PER-CALL (not at builder-build) so the model-update
+    // watchdog's adopted id reaches this onboarding-path composer; an explicit
+    // `opts.model` still wins. Frozen capture here would strand a post-boot flip.
+    const model = opts.model ?? getBestModel()
     const userContent = buildOpeningUserContent(input)
     const controller = new AbortController()
     const timeoutHandle = setTimeout(() => controller.abort(), timeout_ms)
