@@ -29,6 +29,7 @@
 import { groupReactions } from '@neutron/chat-core'
 
 import type { ProjectTab } from './config.ts'
+import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
 import type {
   ChatMessage,
   ChatMessageOption,
@@ -226,6 +227,15 @@ export class NeutronChatController {
   /** FIX 1 — reactive project list (seeded from bootstrap, updated on frame). */
   private projects: ProjectTab[]
   private readonly listeners = new Set<(vm: ChatViewModel) => void>()
+  /**
+   * Work Board live-frame subscribers (the `WorkBoardTab`). Kept SEPARATE from
+   * the `vm` listeners so a `work_board_changed` frame re-renders only the board
+   * tab, never the whole chat view — mirrors the `projects_changed` apply but
+   * out-of-band of the chat ViewModel (the board isn't chat state).
+   */
+  private readonly workBoardListeners = new Set<(items: WorkBoardItem[]) => void>()
+  /** Last board snapshot seen on a frame, replayed to a late subscriber. */
+  private lastWorkBoard: WorkBoardItem[] | null = null
   private vm: ChatViewModel
   private seq = 0
   /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
@@ -290,6 +300,23 @@ export class NeutronChatController {
     this.listeners.add(fn)
     return () => {
       this.listeners.delete(fn)
+    }
+  }
+
+  /**
+   * Subscribe to live Work Board snapshots (`work_board_changed` frames). The
+   * callback fires with the full board (active+next first, then completed) on
+   * every committed board mutation — agent tool OR human HTTP write, both ride
+   * the same server push. If a snapshot has already arrived, the new subscriber
+   * is replayed it synchronously so a tab mounted AFTER the frame doesn't miss
+   * it. Returns an unsubscribe fn. Full-snapshot + idempotent, so the tab can
+   * replace its list outright (no delta merge).
+   */
+  onWorkBoardChanged(fn: (items: WorkBoardItem[]) => void): () => void {
+    this.workBoardListeners.add(fn)
+    if (this.lastWorkBoard !== null) fn(this.lastWorkBoard)
+    return () => {
+      this.workBoardListeners.delete(fn)
     }
   }
 
@@ -444,6 +471,21 @@ export class NeutronChatController {
     // live without a reload. We only auto-select on this 0→active transition, so
     // a user who deliberately navigated to General after having projects isn't
     // hijacked.
+    // Work Board live snapshot — the server fans the FULL board after every
+    // committed mutation (agent tool or human HTTP write). Parse + cache it and
+    // fan it to the board-tab subscribers ONLY (out-of-band of the chat vm).
+    if (type === 'work_board_changed') {
+      const items = parseWorkBoardItems(f['items'])
+      this.lastWorkBoard = items
+      for (const fn of this.workBoardListeners) {
+        try {
+          fn(items)
+        } catch {
+          /* a throwing tab callback must not wedge the frame loop */
+        }
+      }
+      return
+    }
     if (type === 'projects_changed') {
       const raw = Array.isArray(f['projects']) ? (f['projects'] as unknown[]) : []
       const projects: ProjectTab[] = []

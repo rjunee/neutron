@@ -81,9 +81,15 @@ export interface TabDescriptor {
 }
 
 /**
- * The static builtin tab set. Per-project tabs first (Chat/Documents/Tasks),
- * then the global Admin tab. `target` keys match the existing client routes:
- * mobile `app/app/projects/[id]/{chat,docs,tasks}.tsx` + the Admin surface.
+ * The static builtin tab set. Per-project tabs first
+ * (Chat/Work Board/Documents/Tasks), then the global Admin tab. `target` keys
+ * match the existing client routes: mobile
+ * `app/app/projects/[id]/{chat,workboard,docs,tasks}.tsx` + the Admin surface.
+ *
+ * Order is spaced by 10 so a tab can slot between two existing ones without
+ * renumbering; the Work Board sits at **order 5** — right after Chat, before
+ * Documents — per the Work Board master plan §1/§9 (the live work-tracker is the
+ * orchestrator's external memory, so it ranks just below the conversation).
  */
 const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
   {
@@ -93,6 +99,14 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     source: 'builtin',
     order: 0,
     mount: { kind: 'builtin', target: 'chat' },
+  },
+  {
+    key: 'work_board',
+    label: 'Work Board',
+    scope: 'project',
+    source: 'builtin',
+    order: 5,
+    mount: { kind: 'builtin', target: 'workboard' },
   },
   {
     key: 'documents',

@@ -1,0 +1,244 @@
+/**
+ * landing/chat-react — web WORK BOARD API client (Work Board Phase 1b).
+ *
+ * The web twin of the mobile `app/lib/work-board-client.ts`. A thin fetch
+ * wrapper over the gateway's project-scoped Work Board surface
+ * (`gateway/http/work-board-surface.ts`, Phase 1a):
+ *
+ *   GET    /api/app/projects/<id>/work-board                     list
+ *   POST   /api/app/projects/<id>/work-board                     create
+ *   PATCH  /api/app/projects/<id>/work-board/<item_id>           update
+ *   POST   /api/app/projects/<id>/work-board/<item_id>/complete  complete
+ *   POST   /api/app/projects/<id>/work-board/<item_id>/reorder   reorder
+ *   DELETE /api/app/projects/<id>/work-board/<item_id>           delete
+ *
+ * ── Board order is the engine's, not the client's ───────────────────────────
+ * The list comes back active+next first (by `sort_order`) then the completed
+ * history (reverse-chron) — the store is the single source of truth, so the tab
+ * NEVER re-sorts. Live `work_board_changed` frames carry the SAME full-snapshot
+ * shape (minus the server-only `project_slug`), so the controller's frame parse
+ * and this client's `list()` produce the SAME {@link WorkBoardItem} the tab
+ * renders, and a live apply is a drop-in replacement for a re-fetch.
+ *
+ * ── Agent + human parity ────────────────────────────────────────────────────
+ * Every action here (add / edit / complete / reorder / delete) hits the SAME
+ * canonical `WorkBoardStore` the agent's `work_board_*` tools + the per-turn
+ * injection use — one code path, so a human write fires the same
+ * `work_board_changed` push the agent's does.
+ *
+ * Wire shapes mirror the gateway types but are re-declared here (rather than
+ * imported across the workspace boundary) so the browser bundle stays free of a
+ * gateway dependency — the same convention `tasks-client.ts` / `docs-client.ts`
+ * follow. Pure given an injected `fetchImpl`, so it unit-tests without a DOM or
+ * a live server.
+ */
+
+/* ─── wire types (mirror work-board/store.ts) ─── */
+
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done'
+
+/**
+ * One board item, in the shape the tab renders. `project_slug` is server-only
+ * (present on the HTTP GET row, absent on the live `work_board_changed` frame),
+ * so it is OPTIONAL here — that lets a parsed live frame item and a fetched row
+ * satisfy the SAME type without the tab caring which path produced it.
+ */
+export interface WorkBoardItem {
+  id: string
+  project_slug?: string
+  title: string
+  status: WorkBoardStatus
+  sort_order: number
+  design_doc_ref: string | null
+  /** Lightweight in-topic ("inline") work marker. */
+  inline_active: boolean
+  /** Bound `code_trident_runs.id` when a sub-agent run works this item. */
+  linked_run_id: string | null
+  created_at: string
+  updated_at: string
+  /** ISO-8601 UTC; null until status='done'. */
+  completed_at: string | null
+}
+
+export interface CreateWorkBoardItemInput {
+  title: string
+  status?: WorkBoardStatus
+  design_doc_ref?: string | null
+}
+
+export interface UpdateWorkBoardItemInput {
+  title?: string
+  status?: WorkBoardStatus
+  design_doc_ref?: string | null
+}
+
+interface ListResponse {
+  ok: boolean
+  items: WorkBoardItem[]
+  project_id: string
+}
+interface ItemResponse {
+  ok: boolean
+  item: WorkBoardItem
+}
+interface ErrorBody {
+  ok?: boolean
+  code?: string
+  message?: string
+}
+
+export class WorkBoardClientError extends Error {
+  readonly code: string
+  readonly status: number
+  constructor(code: string, message: string, status: number) {
+    super(`${code}: ${message}`)
+    this.name = 'WorkBoardClientError'
+    this.code = code
+    this.status = status
+  }
+}
+
+type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
+
+export interface WorkBoardClientOptions {
+  /** Page origin (`https://host`); the surface lives at `/api/app/...`. */
+  base_url: string
+  /** App-ws bearer token (`config.token`). */
+  token: string
+  /** Injected in tests; defaults to the global `fetch`. */
+  fetchImpl?: FetchImpl
+}
+
+export class WebWorkBoardClient {
+  private readonly base_url: string
+  private readonly token: string
+  private readonly fetchImpl: FetchImpl
+
+  constructor(opts: WorkBoardClientOptions) {
+    this.base_url = opts.base_url.replace(/\/+$/, '')
+    this.token = opts.token
+    this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init))
+  }
+
+  /** The full board: active+next first (board order), then completed (reverse-chron). */
+  async list(project_id: string): Promise<WorkBoardItem[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`
+    const res = await this.req<ListResponse>(path)
+    return res.items
+  }
+
+  /** Append a new item at the end of the board (the "add" affordance). */
+  async create(project_id: string, input: CreateWorkBoardItemInput): Promise<WorkBoardItem> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`
+    const res = await this.req<ItemResponse>(path, { method: 'POST', body: input })
+    return res.item
+  }
+
+  /** Patch a board item — used for inline title edits + status changes. */
+  async update(
+    project_id: string,
+    item_id: string,
+    input: UpdateWorkBoardItemInput,
+  ): Promise<WorkBoardItem> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`
+    const res = await this.req<ItemResponse>(path, { method: 'PATCH', body: input })
+    return res.item
+  }
+
+  /** Mark an item done (stamps `completed_at`, moves it to the completed history). */
+  async complete(project_id: string, item_id: string): Promise<WorkBoardItem> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/complete`
+    const res = await this.req<ItemResponse>(path, { method: 'POST' })
+    return res.item
+  }
+
+  /** Move an active item before/after a sibling; returns the renumbered board. */
+  async reorder(
+    project_id: string,
+    item_id: string,
+    target: { before?: string; after?: string },
+  ): Promise<WorkBoardItem[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/reorder`
+    const res = await this.req<ListResponse>(path, { method: 'POST', body: target })
+    return res.items
+  }
+
+  /** Delete an item (the human board is full-CRUD for the owner). */
+  async delete(project_id: string, item_id: string): Promise<void> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`
+    await this.req<{ ok: boolean; deleted: string }>(path, { method: 'DELETE' })
+  }
+
+  private async req<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+    const method = init.method ?? 'GET'
+    const headers: Record<string, string> = { authorization: `Bearer ${this.token}` }
+    let body: string | undefined
+    if (init.body !== undefined) {
+      headers['content-type'] = 'application/json'
+      body = JSON.stringify(init.body)
+    }
+    let res: Response
+    try {
+      res = await this.fetchImpl(`${this.base_url}${path}`, {
+        method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+      })
+    } catch (err) {
+      throw new WorkBoardClientError(
+        'network',
+        err instanceof Error ? err.message : 'network error',
+        0,
+      )
+    }
+    let json: unknown = null
+    try {
+      json = await res.json()
+    } catch {
+      // fall through to the status-coded error below
+    }
+    if (!res.ok) {
+      const errBody = (json ?? {}) as ErrorBody
+      const code = errBody.code ?? 'request_failed'
+      const message = errBody.message ?? `HTTP ${res.status}`
+      throw new WorkBoardClientError(code, message, res.status)
+    }
+    return json as T
+  }
+}
+
+/**
+ * Parse a raw `work_board_changed` frame's `items` array into typed
+ * {@link WorkBoardItem}s, dropping any malformed entry. Shared by the
+ * controller's live-frame apply path so a hostile/garbled frame can't crash the
+ * tab. Field-for-field the same shape the HTTP GET returns (minus the
+ * server-only `project_slug`), so a live apply is interchangeable with a
+ * re-fetch.
+ */
+export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
+  if (!Array.isArray(raw)) return []
+  const out: WorkBoardItem[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const r = entry as Record<string, unknown>
+    const id = r['id']
+    const title = r['title']
+    const status = r['status']
+    if (typeof id !== 'string' || id.length === 0) continue
+    if (typeof title !== 'string') continue
+    if (status !== 'upcoming' && status !== 'in_progress' && status !== 'done') continue
+    out.push({
+      id,
+      title,
+      status,
+      sort_order: typeof r['sort_order'] === 'number' ? (r['sort_order'] as number) : 0,
+      design_doc_ref: typeof r['design_doc_ref'] === 'string' ? (r['design_doc_ref'] as string) : null,
+      inline_active: r['inline_active'] === true,
+      linked_run_id: typeof r['linked_run_id'] === 'string' ? (r['linked_run_id'] as string) : null,
+      created_at: typeof r['created_at'] === 'string' ? (r['created_at'] as string) : '',
+      updated_at: typeof r['updated_at'] === 'string' ? (r['updated_at'] as string) : '',
+      completed_at: typeof r['completed_at'] === 'string' ? (r['completed_at'] as string) : null,
+    })
+  }
+  return out
+}
