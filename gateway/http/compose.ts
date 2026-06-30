@@ -199,6 +199,16 @@ export interface AppTabsHandler {
 }
 
 /**
+ * Work Board (Phase 1a) — Expo-app project Work Board surface. Owns
+ * `/api/app/projects/<id>/work-board[/<item_id>[/<verb>]]` (GET +
+ * POST/PATCH/DELETE). Disclaims non-owned paths via `null` so the chain stays
+ * composable. Surface factory: `gateway/http/work-board-surface.ts`.
+ */
+export interface AppWorkBoardHandler {
+  handler: (req: Request) => Promise<Response | null>
+}
+
+/**
  * P7.4 restore UI — Expo-app project-backups + restore surface.
  * Owns `/api/app/projects/<id>/backups[...]` + `/api/app/projects/<id>/restore`.
  * Same disclaiming-null contract as the docs surface.
@@ -557,6 +567,13 @@ export interface ComposeHttpHandlerInput {
    */
   appTabs?: AppTabsHandler
   /**
+   * Work Board (Phase 1a) — Expo-app project Work Board surface. When
+   * supplied, the composed handler routes `/api/app/projects/<id>/work-board`
+   * (GET + POST/PATCH/DELETE) ahead of `appProjects`, mirroring the
+   * launcher/tasks/tabs precedence.
+   */
+  appWorkBoard?: AppWorkBoardHandler
+  /**
    * P7.4 restore UI — Expo-app project-backups + restore surface. When
    * supplied, the composed HTTP chain mounts:
    *
@@ -832,6 +849,7 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
     appDevices,
     appDocs,
     appTabs,
+    appWorkBoard,
     appBackups,
     cores,
     coresOAuth,
@@ -1097,6 +1115,15 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       if (appTabs !== undefined) {
         const tabsRes = await appTabs.handler(req)
         if (tabsRes !== null) return tabsRes
+      }
+      // 0h1b. Work Board (Phase 1a) — Expo-app project Work Board surface.
+      //       Owns `/api/app/projects/<id>/work-board[/<item_id>[/<verb>]]`
+      //       (GET + POST/PATCH/DELETE). Mounted BEFORE appProjects so the
+      //       per-project `/work-board` path is unambiguously owned, mirroring
+      //       the tasks/tabs precedence. Disclaims (null) non-owned paths.
+      if (appWorkBoard !== undefined) {
+        const wbRes = await appWorkBoard.handler(req)
+        if (wbRes !== null) return wbRes
       }
       // 0h2. Expo-app project-settings + project-list surface — P5.2
       //      + ISSUES #9. Owns:

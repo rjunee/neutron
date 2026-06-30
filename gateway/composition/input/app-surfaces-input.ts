@@ -258,6 +258,15 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Work Board (Phase 1a) — the human read+WRITE board surface. Owns
+   * `/api/app/projects/<id>/work-board[/<item_id>[/<verb>]]`. Dispatches the
+   * SAME `WorkBoardStore` the agent tools + per-turn injection use. Surface
+   * factory: `gateway/http/work-board-surface.ts:createWorkBoardSurface`.
+   */
+  app_work_board_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P7.4 restore UI — optional project-backups + restore surface.
    * Owns `/api/app/projects/<id>/backups[...]` +
    * `/api/app/projects/<id>/restore`. Surface factory:

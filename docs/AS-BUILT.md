@@ -2,6 +2,55 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Work Board — Phase 1a backend (store + agent tools + read/write API + per-turn injection)
+
+**What shipped.** The backend half of the Work Board: a per-project, on-disk
+work tracker that doubles as the orchestrator's EXTERNAL memory (so the chat
+conversation stops juggling several features in a rotting context window). No
+feature flags — on by default. UI (the tab) is Phase 1b.
+
+- **Migration `0090_work_board_items.sql`** (STRICT, forward-only): `id` ULID,
+  `project_slug`, `title`, `status CHECK(upcoming|in_progress|done)`,
+  `sort_order` (simple INTEGER, gap-renumber — not fractional REAL),
+  `design_doc_ref`, `inline_active` 0/1, `linked_run_id`, ISO-8601 TEXT
+  `created_at/updated_at/completed_at`. Indexes: `(project_slug, status,
+  sort_order)` for the list path + a partial `(linked_run_id) WHERE NOT NULL`
+  for the Phase-2 harvest. `expected-schema.txt` regenerated (snapshot gate).
+- **`work-board/store.ts` `WorkBoardStore`** (mirrors `trident/store.ts`): full
+  CRUD + `complete`/`reorder`/`setInlineActive`/`bindRun`/`clearRun`/`delete`.
+  Append-at-end + reorder run inside `db.transaction()` (the `.get()` write-mutex
+  bypass would race under N-parallel). Title newline-stripped + capped at the
+  store; `design_doc_ref` scheme allow-listed (https + in-app docs only;
+  javascript:/data:/file: throw `WorkBoardValidationError`). `completed_at`
+  nulled on any re-open off done. An `onChange` hook fires after every committed
+  mutation.
+- **Agent tools** `work-board/agent-tool.ts` — `work_board_list/_add/_update/
+  _complete/_reorder` on the `ToolRegistry` (non-hidden, `auto`,
+  `read|write:project_data`), surfaced as `mcp__neutron__work_board_*`.
+  `project_slug` is server-injected via `ToolCallContext` (un-spoofable), never
+  an agent arg.
+- **HTTP surface** `gateway/http/work-board-surface.ts` (human read+WRITE) —
+  `GET` + `POST/PATCH/DELETE /api/app/projects/<id>/work-board[/<item>[/<verb>]]`,
+  bearer-gated like the tabs surface, dispatching the SAME canonical store as
+  the tools. Threaded composer → `composition.ts` → `compose.ts`.
+- **Live push** — a `work_board_changed` full-snapshot `AppWsOutbound` variant,
+  pushed from the store's `onChange` to `appWsTopicId(OWNER_USER_ID)` (mirrors
+  `projects_changed`), so both an agent tool write and a human HTTP write fan
+  out live through one code path. Best-effort.
+- **Per-turn injection** — `work-board/fragment.ts` builds a compact, escaped,
+  length-capped `<work_board>` DATA block (+ drift-guard). `build-live-agent-
+  turn.ts` injects it on EVERY turn via the new `workBoardSnapshot` seam: cold
+  turn → `instance_fragments`; warm turn → spliced before the user's message
+  (since `instance_fragments` assembles only on the cold turn).
+- **Tests** (per surface): migration/snapshot, store CRUD + the txn reorder
+  (incl. a concurrency test) + onChange + scheme allow-list, tool authz +
+  server-derived slug, HTTP bearer-gate + scheme 400, fragment escaping, and the
+  every-turn injection (present in BOTH turn 1 & 2). `tsc` clean (root + trident
+  project), adjacent suites green, leak-gate SILENT.
+
+Scope NOT in this PR (later phases): the UI tab (1b), trident binding / parallel
+runs / harvest (Phase 2), TodoWrite ingestion + Layer-B context-reset.
+
 ## Chat — collapsed the two native chat surfaces into ONE Telegram-grade surface
 
 **What shipped.** The Expo app had TWO chat surfaces under `app/projects/[id]/`:

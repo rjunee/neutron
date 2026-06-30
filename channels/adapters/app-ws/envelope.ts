@@ -435,6 +435,41 @@ export interface AppWsOutboundEditUpdate {
   project_id?: string
 }
 
+/**
+ * One Work Board row, in wire shape. Decoupled from `work-board/store.ts`'s
+ * `WorkBoardItem` (the envelope module stays dependency-free); the composer's
+ * push helper maps the store rows onto this shape.
+ */
+export interface AppWsWorkBoardItem {
+  id: string
+  title: string
+  status: 'upcoming' | 'in_progress' | 'done'
+  sort_order: number
+  design_doc_ref: string | null
+  inline_active: boolean
+  linked_run_id: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+}
+
+/**
+ * Work Board (Phase 1a) — the FULL current board snapshot for one project,
+ * fanned out to every device on the owner's topic after a committed board
+ * mutation (agent tool OR HTTP write — both ride the one shared store's
+ * `onChange`). Full snapshot (not a delta) so the client apply is idempotent
+ * + order-independent, mirroring `projects_changed`.
+ */
+export interface AppWsOutboundWorkBoardChanged {
+  v: 1
+  type: 'work_board_changed'
+  /** The board, active+next first (board order) then completed (reverse-chron). */
+  items: ReadonlyArray<AppWsWorkBoardItem>
+  /** Server-derived project the board belongs to (P5.2 parity). */
+  project_id?: string
+  ts: number
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
@@ -444,6 +479,7 @@ export type AppWsOutbound =
   | AppWsOutboundReactionUpdate
   | AppWsOutboundEditUpdate
   | AppWsOutboundProjectsChanged
+  | AppWsOutboundWorkBoardChanged
   | AppWsOutboundAgentTyping
   | AppWsOutboundError
 

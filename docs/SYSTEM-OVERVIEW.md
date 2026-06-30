@@ -493,6 +493,63 @@ lives on `CoreInstallationsStore` (`recordGlobal` / `getGlobal` / `listGlobal`
 project data namespace or secrets prompt — those still flow through the
 per-project `installCore`).
 
+## Work Board — orchestrator external memory + live work tracker (`work-board/`)
+
+Phase 1a (backend). The Work Board moves the orchestrator's per-feature state
+**onto disk** (`work_board_items`, migration `0090`, STRICT) so the chat
+conversation becomes a thin, disposable query layer instead of a rotting
+context window — and it doubles as a first-class per-project tab (UI = Phase
+1b). One row == one thing the owner (or the agent) is working on / about to /
+has finished. The board is **instance-scoped by the server-derived
+`project_slug`** (no `project_id` column; `ctx.project_slug` /
+`resolved.project_slug` / `turn.project_slug` are all the one instance slug).
+
+- **Store** — `work-board/store.ts` `WorkBoardStore` (mirrors `trident/store.ts`,
+  a typed `ProjectDb` wrapper). `sort_order` is a SIMPLE INTEGER with
+  gap-renumber on reorder (not a fractional REAL). The append-at-end
+  (`MAX(sort_order)+1`) and `reorder` (load-renumber) read-compute-writes run
+  inside `db.transaction()` (a bare `.get()` bypasses the write mutex → race
+  under N-parallel). `title` is newline-stripped + capped (256) at the store;
+  `design_doc_ref` schemes are allow-listed at write (`https:` + an in-app docs
+  link only — `javascript:`/`data:`/`file:` throw `WorkBoardValidationError`).
+  `completed_at` is stamped on →done and NULLed on any re-open off done.
+  Sub-agent activity is DERIVED via the `linked_run_id` join to
+  `code_trident_runs` (Phase 2), NOT duplicated; only a lightweight
+  `inline_active` marker is stored. ISO-8601 TEXT timestamps.
+- **One canonical instance, one push.** The composer (`open/composer.ts`)
+  constructs the SINGLE `WorkBoardStore` with an `onChange` hook and threads
+  that same instance into (a) the agent tools, (b) the HTTP surface, and (c)
+  the per-turn injection — so an agent mutation and a human HTTP write share
+  one code path and fire one `work_board_changed` full-snapshot push to the
+  owner's app-ws topic (`appWsTopicId(OWNER_USER_ID)`), mirroring
+  `projects_changed`. Push is best-effort (never rolls back a committed write).
+- **Agent tools** — `work-board/agent-tool.ts` registers `work_board_list /
+  _add / _update / _complete / _reorder` on the `ToolRegistry` (non-hidden,
+  `approval_policy:'auto'`, `read|write:project_data`); they ride the #87
+  tools-bridge as `mcp__neutron__work_board_*`. `project_slug` is taken from the
+  server-injected `ToolCallContext` (un-spoofable via `mcp/server.ts`), NEVER an
+  agent arg — the schemas expose only `title/status/design_doc_ref/id/before|
+  after`.
+- **HTTP surface** — `gateway/http/work-board-surface.ts` (human read+WRITE):
+  `GET` + `POST/PATCH/DELETE /api/app/projects/<id>/work-board[/<item>[/<verb>]]`,
+  bearer-gated exactly like the tabs surface (own `resolveBearer` +
+  `sanitizeProjectId`), dispatching the same canonical store. Threaded
+  composer → `composition.ts` (`app_work_board_surface`) → `compose.ts`
+  (`appWorkBoard`, mounted ahead of `appProjects`).
+- **Per-turn injection** — `work-board/fragment.ts` `formatWorkBoardFragment`
+  builds a compact `<work_board>` DATA block (active+next items, escaped +
+  length-capped, + an advisory drift-guard line). `build-live-agent-turn.ts`
+  injects it on EVERY turn via the `workBoardSnapshot` seam: the COLD first
+  turn folds it into `instance_fragments` (the cacheable system prefix), and
+  the WARM path splices it before the user's message — because
+  `instance_fragments` is assembled ONLY on the cold turn, a fragment-only
+  wiring would re-ground once per session, not every turn.
+
+Phase 2 (later) binds each `/code` trident run to a board item (the
+`linked_run_id` correlation key + its partial index are landed here) and adds
+the activity-icon push; the UI tab is Phase 1b. See
+`docs/plans/2026-06-29-001-feat-work-board-master-plan.md`.
+
 ## Tasks — canonical store + LLM-primary prioritization (`tasks/`)
 
 The `tasks` table (migration `0032`) is the single source of truth for tasks

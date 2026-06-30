@@ -243,6 +243,18 @@ export interface BuildLiveAgentTurnInput {
    * + post-turn scribe). Omitted → the live agent is steady-state only.
    */
   onboarding?: LiveAgentOnboardingSeam
+  /**
+   * Work Board (Phase 1a) — the orchestrator's external-memory re-grounding
+   * seam. Returns a COMPACT, ALREADY-FORMATTED `<work_board>` DATA block for
+   * the given `project_slug` (active+next items + the drift-guard advisory), or
+   * null when there is nothing to inject / the read failed. Injected on EVERY
+   * turn: the cold first turn adds it as an unconditional `instance_fragments`
+   * entry; warm turns splice it before the user's message (since
+   * `instance_fragments` is assembled only on the cold turn, a fragment-only
+   * wiring would re-ground once per session, not every turn). Best-effort: a
+   * throwing/absent seam degrades to no block, never kills the turn.
+   */
+  workBoardSnapshot?: (project_slug: string) => string | null
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -391,16 +403,39 @@ export function buildLiveAgentTurn(
 
     // ── 2. Compose the prompt.
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    // Work Board (Phase 1a) — resolve the compact board DATA block ONCE for this
+    // turn. Injected on EVERY turn so the orchestrator re-grounds on disk-truth
+    // instead of a rotting transcript: the cold first turn folds it into
+    // `instance_fragments` (the cacheable system prefix), and the warm path
+    // splices it before the user's message (because `instance_fragments` is
+    // assembled ONLY on the cold turn — a fragment-only wiring would re-ground
+    // once per session, not every turn). Best-effort: a throwing/absent seam
+    // degrades to no block, never kills the turn.
+    let workBoardFragment: string | null = null
+    if (input.workBoardSnapshot !== undefined) {
+      try {
+        workBoardFragment = input.workBoardSnapshot(turn.project_slug)
+      } catch (err) {
+        console.warn(
+          `${LOG_TAG} event=work_board_snapshot_failed project=${turn.project_slug} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
     let prompt: string
     const isColdFirstTurn = !contextSent.has(topicKey)
     if (!isColdFirstTurn) {
-      prompt = turn.user_text
+      // Warm turn: the system prefix is already cached in the REPL's transcript;
+      // re-ground by splicing the FRESH board block before the user's message.
+      prompt =
+        workBoardFragment !== null ? `${workBoardFragment}\n\n${turn.user_text}` : turn.user_text
     } else {
       // While onboarding, splice the interview preamble into the first-turn
       // system prompt so the warm session conducts the interview conversationally.
       const onboardingPreamble =
         onboardingActive && input.onboarding !== undefined ? input.onboarding.systemPreamble() : null
-      prompt = await composeFirstTurnPrompt(input, turn, now(), onboardingPreamble)
+      prompt = await composeFirstTurnPrompt(input, turn, now(), onboardingPreamble, workBoardFragment)
     }
 
     // Item 12 — cold-start ack. On the first turn into this topic the warm
@@ -660,6 +695,7 @@ async function composeFirstTurnPrompt(
   turn: LiveAgentTurnRequest,
   wall_now: number,
   onboardingPreamble?: string | null,
+  boardFragment?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -719,10 +755,17 @@ async function composeFirstTurnPrompt(
     typeof onboardingPreamble === 'string' && onboardingPreamble.trim().length > 0
       ? onboardingPreamble
       : null
+  // Work Board (Phase 1a) — the board DATA block is an UNCONDITIONAL fragment
+  // so the cold turn folds the orchestrator's external memory into the
+  // cacheable system prefix (warm turns re-splice the fresh board before the
+  // user message). Already `<work_board>`-delimited + escaped at the seam.
+  const workBoardFragment =
+    typeof boardFragment === 'string' && boardFragment.trim().length > 0 ? boardFragment : null
   const instance_fragments = [
     doctrineFragment,
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,
+    ...(workBoardFragment !== null ? [workBoardFragment] : []),
     ...(onboardingFragment !== null ? [onboardingFragment] : []),
   ]
   let system: string
