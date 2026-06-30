@@ -208,6 +208,17 @@ describe('Open per-project opening recovery on entry', () => {
     expect(body as string).toContain('Acme is the flagship infra rebuild')
     expect(body as string).toMatch(/Here's where Acme stands/)
 
+    // Codex r1 P2 — the opening must also LIVE-render on the just-connected PROJECT
+    // socket (not just hydrate on a future reload): an `agent_message` frame
+    // carrying the opening reaches THIS socket after session_ready.
+    await waitFor(() =>
+      events.some(
+        (e) =>
+          e.type === 'agent_message' &&
+          JSON.stringify(e).includes('Acme is the flagship infra rebuild'),
+      ),
+    )
+
     ws.close()
     await sleep(50)
   }, 30_000)

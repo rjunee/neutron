@@ -2406,7 +2406,18 @@ export function buildOpenGraphComposer(
         allow_freeform: true,
         ...(prompt_id !== undefined ? { prompt_id } : {}),
       }
-      buildAppWsSendReply(channelTopic, project_id ?? undefined)(out)
+      // Live-fan on the SAME topic the durable row landed on: a per-project opening
+      // must reach the PROJECT socket (`app:<user>:<project>`), not General — the
+      // app-ws adapter routes + appends chat_log by `topic.channel_topic_id`, and a
+      // project tab is registered under the project topic (Codex r1 P2, 2026-06-30).
+      // Sending on General delivered the durable row but NEVER live-rendered to the
+      // just-connected project socket, so the project-opening RECOVERY (which fires
+      // from a project-topic `on_session_open`, AFTER its `session_ready` history
+      // replay) left the tab empty until yet another reload. The General closing
+      // (`project_id === null`) still fans on the General channel, unchanged.
+      const liveChannel =
+        project_id !== null && project_id.length > 0 ? turnTopic : channelTopic
+      buildAppWsSendReply(liveChannel, project_id ?? undefined)(out)
     }
     // Item 1 / 4b (2026-06-30 fresh-install fix) — make a materialized project's
     // deterministic OPENING a reliable property of ENTERING the project, not a
