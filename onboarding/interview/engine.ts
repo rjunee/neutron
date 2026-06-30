@@ -2351,6 +2351,22 @@ export class InterviewEngine implements EngineInternals {
       // `engine.start` to stamp it — the post-turn extractor stamps the same
       // `signup_via='web'` default (ND-A, post-turn-extractor.ts).
       if (this.deploymentMode === 'open' && this.deps.importAffordanceOffered === true) {
+        // Concurrency + downgrade guard (Codex r1 P2). Between the `state===null`
+        // read above and here, a concurrent fresh-install upload (double-submit /
+        // client retry) — or the post-turn extractor — may have created the row.
+        // Re-read; if it now exists, RE-ENTER the normal flow so every non-null
+        // guard applies: `noop_terminal`, and crucially `alreadyHasImportJob`
+        // (the non-null open-mode gate) — so we never start a DUPLICATE job and
+        // never let our `work_interview_gap_fill` seed below DOWNGRADE a live
+        // `import_running` row off the import cron. The row now exists, so the
+        // re-entry takes the non-null path, never this branch again (bounded —
+        // no unbounded recursion). The residual truly-simultaneous window (both
+        // requests read null twice before either writes) matches the non-null
+        // path's own non-atomic `alreadyHasImportJob` check.
+        const recheck = await this.deps.stateStore.get(input.project_slug, input.user_id)
+        if (recheck !== null) {
+          return await this.notifyImportUpload({ ...input, observed_at })
+        }
         const advanceInput: AdvanceInput = {
           project_slug: input.project_slug,
           topic_id: input.topic_id,

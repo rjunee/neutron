@@ -38,7 +38,7 @@ import {
   type ImportPayloadResolver,
 } from '../engine.ts'
 import type { ImportJob } from '../../history-import/types.ts'
-import { InMemoryOnboardingStateStore } from '../state-store.ts'
+import { InMemoryOnboardingStateStore, type OnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
 import type { OnboardingDeploymentMode, OnboardingPhase } from '../phase.ts'
 
@@ -354,5 +354,106 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
     })
     expect(out.outcome).toBe('noop_terminal')
     expect(stack.startedSources).toEqual([])
+  })
+
+  test('no-state, sequential double-submit → only ONE job (the 2nd takes the non-null guarded path)', async () => {
+    const stack = stubImportStack()
+    const engine = buildEngine({ deploymentMode: 'open', importAffordanceOffered: true, ...stack })
+
+    const first = await engine.notifyImportUpload({
+      project_slug: OWNER,
+      topic_id: TOPIC,
+      user_id: USER,
+      channel_kind: 'app-socket',
+      source: 'claude',
+      observed_at: NOW_MS + 1_000,
+    })
+    expect(first.outcome).not.toBe('noop_no_state')
+
+    // Same fresh-install user re-submits (client retry). The row now exists at
+    // import_running with a job, so this hits the non-null `alreadyHasImportJob`
+    // guard — no duplicate job.
+    const second = await engine.notifyImportUpload({
+      project_slug: OWNER,
+      topic_id: TOPIC,
+      user_id: USER,
+      channel_kind: 'app-socket',
+      source: 'claude',
+      observed_at: NOW_MS + 2_000,
+    })
+    expect(second.outcome).toBe('no_active_prompt')
+    expect(stack.startedSources).toEqual(['claude-zip']) // exactly one job
+  })
+
+  test('no-state, a concurrent upload lands a job between the two reads → recheck re-enters the guarded path (no duplicate, no downgrade)', async () => {
+    // Codex r1 P2: simulate the truly-concurrent window. A get()-hooked store
+    // returns null on the engine's FIRST read (state===null branch entered), but
+    // a concurrent fresh-install upload lands an `import_running` row + job in
+    // that instant — so the engine's RE-READ inside the open-mode branch sees a
+    // live import. The fix re-enters the normal flow, which `alreadyHasImportJob`
+    // guards: NO duplicate job started, and the live `import_running` is NOT
+    // downgraded by our work_interview_gap_fill seed.
+    const stack = stubImportStack()
+    let firstGetDone = false
+    const hooked: OnboardingStateStore = {
+      get: async (p, u) => {
+        if (!firstGetDone) {
+          firstGetDone = true
+          // The engine's initial read observes no row...
+          return null
+        }
+        // ...but by the recheck, a concurrent upload has landed a job.
+        return stateStore.get(p, u)
+      },
+      upsert: (i) => stateStore.upsert(i),
+      rekey: (a, b, c) => stateStore.rekey(a, b, c),
+      delete: (p, u) => stateStore.delete(p, u),
+      deleteByOwner: (p) => stateStore.deleteByOwner(p),
+    }
+    const engine = new InterviewEngine({
+      buttonStore,
+      stateStore: hooked,
+      transcript,
+      deploymentMode: 'open',
+      importAffordanceOffered: true,
+      sendButtonPrompt: async (input) => {
+        sentPrompts.push(input)
+        return { message_id: `msg-${sentPrompts.length}`, was_new: true }
+      },
+      ...stack,
+    })
+
+    // The "concurrent" upload's effect: a real import_running row + job already
+    // in the underlying store (what the recheck will observe).
+    await stateStore.upsert({
+      user_id: USER,
+      project_slug: OWNER,
+      phase: 'import_running',
+      phase_state_patch: {
+        topic_id: TOPIC,
+        user_id: USER,
+        signup_via: 'web',
+        import_job_id: 'concurrent-job',
+        import_source: 'claude-zip',
+      },
+      advanced_at: NOW_MS,
+    })
+
+    const out = await engine.notifyImportUpload({
+      project_slug: OWNER,
+      topic_id: TOPIC,
+      user_id: USER,
+      channel_kind: 'app-socket',
+      source: 'claude',
+      observed_at: NOW_MS + 1_000,
+    })
+
+    // Re-entered the non-null guarded path: no duplicate runner.start, and the
+    // live import_running row (with the concurrent job) is preserved.
+    expect(out.outcome).toBe('no_active_prompt')
+    expect(stack.startedSources).toEqual([])
+    const final = await stateStore.get(OWNER, USER)
+    expect(final?.phase).toBe('import_running')
+    expect(final?.phase_state['import_job_id']).toBe('concurrent-job')
   })
 })

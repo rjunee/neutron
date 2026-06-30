@@ -32,6 +32,14 @@ on disk — then start the import via the existing
 synthesis substrate) and managed mode both still `noop_no_state`. The #130
 offer-first / live-progress / ordering / curation-context handoff are untouched.
 
+**Concurrency guard (Codex r1 P2).** Before seeding, the no-state branch re-reads
+the row; if a concurrent fresh-install upload (double-submit / retry) or the
+post-turn extractor created it in the meantime, the engine re-enters the normal
+flow so the existing non-null guards apply (`alreadyHasImportJob` → no duplicate
+job; no downgrading a live `import_running` off the cron). Covered by two added
+concurrency tests (sequential double-submit; a get-hooked store simulating the
+truly-concurrent window).
+
 **Test (forbidden-pattern fixed).** The passing acceptance test
 `tests/integration/nd2-real-export-path1-import-runs.test.ts` SQL-SEEDED an
 onboarding_state row before uploading — manufacturing the precondition the live
