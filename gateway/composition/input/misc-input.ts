@@ -33,29 +33,30 @@ export interface MiscCompositionInput {
    */
   realmode_cleanups?: Array<() => void>
   /**
-   * Trident v2 (Phase 2 hard cutover) — drive the foundational
-   * Forge→Argus→merge loop live. When `launch_inner_workflow` is supplied, the
+   * Trident v2 (Work Board Phase 2a exec-model) — drive the foundational
+   * Forge→Argus→merge loop live. When `fire_inner_workflow` is supplied, the
    * `trident` module wires the REAL orchestrator `step`
-   * (`buildTridentOrchestrator` + `buildWorkflowInnerLoop`) so every
-   * non-terminal `code_trident_runs` row (created by `/code <task>` or a
-   * governed Ralph run) is advanced end-to-end by the tick loop: launch the
-   * inner CC Dynamic Workflow (Forge build → parallel Argus review → synthesis
-   * → bounded fix loop) → on APPROVE merge (per git-mode) → done. When omitted,
-   * the module falls back to `stubAdvanceDeps` (classify always "running") so
-   * the loop is live + restart-safe but advances nothing — the unchanged Open
-   * dev/default behaviour.
+   * (`buildTridentOrchestrator` + `buildWorkflowFirer`) so every non-terminal
+   * `code_trident_runs` row (created by `/code <task>` or a governed Ralph run)
+   * is advanced end-to-end by the tick loop: FIRE the inner CC Dynamic Workflow
+   * (Forge build → parallel Argus review → synthesis → bounded fix loop) → on a
+   * server-gated APPROVE merge (per git-mode) → done. When omitted, the module
+   * falls back to `stubAdvanceDeps` (classify always "running") so the loop is
+   * live + restart-safe but advances nothing — the unchanged Open dev/default
+   * behaviour.
    *
-   * `launch_inner_workflow(input)` runs the inner-workflow launcher as a BLOCKING
-   * `claude -p` print-mode subprocess that drains the background `Workflow` tool
-   * (`trident/inner-workflow.mjs`) to completion and prints `TRIDENT_RESULT`
-   * (the production composer passes `buildClaudePrintLauncher` over the
-   * per-instance Anthropic credential pool). It is NOT a persistent-REPL turn —
-   * a REPL turn settles on the first reply, BEFORE the background workflow
-   * drains, which aborted the workflow on every real run (the bug this fixes).
-   * `run_host` runs the git/gh host commands (defaults to a `Bun.spawn` runner).
+   * `fire_inner_workflow(input)` invokes the `Workflow` tool on a WARM substrate
+   * and SETTLES the launching turn immediately (the production composer passes
+   * `buildSubstrateWorkflowFire` over a non-ephemeral `cc-trident-fire-*`
+   * substrate on the per-instance Max-OAuth pool). It is billing-exempt — NOT a
+   * per-build `claude -p`. The workflow then runs DETACHED in the background and
+   * persists its TYPED terminal result to `code_trident_runs.inner_result`, which
+   * the durable tick loop HARVESTS by runId (the fire seam carries NO build
+   * result). `run_host` runs the git/gh host commands (defaults to a `Bun.spawn`
+   * runner).
    */
   trident?: {
-    launch_inner_workflow: import('../../../trident/inner-loop.ts').LaunchInnerWorkflow
+    fire_inner_workflow: import('../../../trident/inner-loop.ts').FireInnerWorkflow
     run_host?: import('../../../trident/merge.ts').RunHostCommand
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**

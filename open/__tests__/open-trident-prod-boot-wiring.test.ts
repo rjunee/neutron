@@ -8,20 +8,20 @@
  * trident tick loop fell back to `stubAdvanceDeps()` (advances nothing) and
  * `/code` could not dispatch a real build.
  *
- * THE FIX (Trident v2): `open/composer.ts` builds a blocking `claude -p`
- * print-mode LAUNCHER (`buildClaudePrintLauncher`, over the single-owner
- * credential pool) and threads `trident: { launch_inner_workflow }` onto the
- * returned `CompositionInput`, so `build-core-modules.ts` wires the REAL
- * `buildWorkflowInnerLoop` + `buildTridentOrchestrator` step (the inner loop is
- * now a CC Dynamic Workflow, driven to a terminal result by the print-mode
- * launcher which DRAINS the background `Workflow` before exit).
+ * THE FIX (Trident v2 · Phase 2a exec-model): `open/composer.ts` builds a warm
+ * FIRE seam (`buildSubstrateWorkflowFire`, over a non-ephemeral `cc-trident-fire-*`
+ * substrate on the single-owner credential pool) and threads
+ * `trident: { fire_inner_workflow }` onto the returned `CompositionInput`, so
+ * `build-core-modules.ts` wires the REAL `buildWorkflowFirer` +
+ * `buildTridentOrchestrator` step (the inner loop is a CC Dynamic Workflow, FIRED
+ * on the warm substrate + harvested from the DB — billing-exempt, no `claude -p`).
  *
  * Per CLAUDE.md (the 2026-05-13 "built but never invoked" incident class) this
  * asserts the wiring ACTUALLY produces a working runner — it boots the REAL Open
  * composer with a SYNTHETIC credential, then:
- *   1. `composition.trident.launch_inner_workflow` is a wired function (not
- *      skeleton/stub). The live `claude -p` exercise is the real-run acceptance,
- *      not this unit test.
+ *   1. `composition.trident.fire_inner_workflow` is a wired function (not
+ *      skeleton/stub). The live `Workflow`-fire exercise is the real-run
+ *      acceptance, not this unit test.
  *   2. With NO credential the runner degrades cleanly: `composition.trident` is
  *      unset (the loop stays on its restart-safe no-op).
  */
@@ -113,13 +113,14 @@ function recordingSubstrate(prompts: string[]): Substrate {
 }
 
 describe('Open foundational-Trident prod-boot wiring', () => {
-  test('a credentialed boot wires composition.trident.launch_inner_workflow to a REAL print-mode launcher', async () => {
+  test('a credentialed boot wires composition.trident.fire_inner_workflow to a REAL warm-substrate fire seam', async () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
     const prompts: string[] = []
     const composer = buildOpenGraphComposer({
       env: process.env,
-      // Mock the conversational/dispatch substrates (no real `claude`); the
-      // trident path no longer routes through this factory — it spawns `claude -p`.
+      // Mock every substrate the composer builds (no real `claude`) — including
+      // the warm `cc-trident-fire-*` substrate the fire seam runs its launching
+      // turn on.
       substrateFactory: ((_opts: { cwd?: string }) => {
         return recordingSubstrate(prompts)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -127,13 +128,14 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     })
     const composition = await composer({ db, project_slug: 'owner' })
 
-    // The runner is wired — not the skeleton/stub. v2 threads a blocking
-    // `claude -p` print-mode LAUNCHER that drains the inner Workflow to a
-    // terminal result. The launcher closure is built eagerly (no spawn until a
-    // real run), so a credentialed boot exposes it as a function. The live
-    // `claude -p` round-trip is the real-run acceptance, not this unit test.
+    // The runner is wired — not the skeleton/stub. Phase 2a threads a warm
+    // FIRE seam that invokes the `Workflow` tool + settles the launching turn;
+    // the workflow's result is harvested from the DB. The fire closure is built
+    // eagerly (no turn until a real run), so a credentialed boot exposes it as a
+    // function. The live `Workflow`-fire round-trip is the real-run acceptance,
+    // not this unit test.
     expect(composition.trident).toBeDefined()
-    expect(typeof composition.trident!.launch_inner_workflow).toBe('function')
+    expect(typeof composition.trident!.fire_inner_workflow).toBe('function')
 
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {

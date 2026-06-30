@@ -22,7 +22,7 @@ import {
   type TridentCodeContext,
 } from './code-command.ts'
 import type { HostCommandResult } from './git-mode.ts'
-import type { TridentInnerLoop } from './inner-loop.ts'
+import { buildSimFirer } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
@@ -152,20 +152,15 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     const run_id = (res!.data as { run_id: string }).run_id
 
     // 2. The foundational tick loop (the SAME one the gateway runs) sweeps the
-    //    row and drives it with a mocked inner loop (the CC Dynamic Workflow that
-    //    the launcher invokes in production), which returns an APPROVE verdict.
-    const inner_loop: TridentInnerLoop = async () => ({
-      status: 'completed',
-      verdict: 'APPROVE',
-      pr_number: 101,
-      branch: 'trident/wire-the-widget',
-      round: 1,
-      checkpoint: 'argus-approved',
-      raw: '',
-    })
+    //    row and drives it with a mocked FIRER (the CC Dynamic Workflow exec
+    //    model): the fire settles + the simulated workflow writes a server-gated
+    //    APPROVE result to the DB, which the tick loop harvests + merges.
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 101, branch: 'trident/wire-the-widget' },
+    }))
     const hostCalls: string[][] = []
     const orch = buildTridentOrchestrator({
-      inner_loop,
+      fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
@@ -179,7 +174,7 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     let final = store.get(run_id)!
     for (let i = 0; i < 40 && !isTerminalPhase(final.phase); i++) {
       await loop.runOnce()
-      await orch.drain()
+      await sim.drain() // simulate the detached workflow finishing
       final = store.get(run_id)!
     }
 

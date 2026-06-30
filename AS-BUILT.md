@@ -2,6 +2,73 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+> NOTE (Work Board Phase 2a author): the `<<<<<<< HEAD … >>>>>>> origin/main`
+> conflict markers a few entries below are **pre-existing on `origin/main`** (a
+> prior botched merge committed upstream — not introduced by this PR). Left
+> untouched to keep this PR scoped to the trident exec-model; flagged in
+> `STATUS.md` for a dedicated cleanup.
+
+## 2026-06-29 — Trident exec-model rearchitecture (Work Board Phase 2a): FIRE the inner Workflow + harvest the typed result from the DB (no `claude -p`)
+
+**What shipped.** The trident inner-loop launcher no longer spawns a blocking
+`claude -p` print-mode subprocess to drain the background `Workflow` and parse
+`TRIDENT_RESULT` from stdout. Instead the orchestrator FIRES the `Workflow` tool
+on a **warm, non-ephemeral** substrate and the launching turn SETTLES
+immediately; the inner workflow runs DETACHED in the background and persists its
+TYPED terminal result to `code_trident_runs.inner_result` (new migration
+`0091`); the durable `TridentTickLoop` HARVESTS that row by `runId` each tick —
+deterministic TS, never an LLM-parsed stdout line. This makes the inner loop
+**billing-exempt** (the warm substrate runs on the owner's Max-OAuth pool, not a
+per-build API-billed `claude -p`) and crash-safe (the result lives in the DB, so
+a harvest survives a process restart).
+
+**Why.** Master plan §7 + Enhancement Summary: the `claude -p` model is
+API-billed / not Max-exempt and blocks a process for the whole multi-hour build;
+its result provenance was a self-asserted stdout line, and harvest/crash-state
+lived in an in-memory map (lost on restart). #123's sibling+held-open variant is
+superseded.
+
+**The changes (no flags, no dual path — the `claude -p` launcher is DELETED).**
+- `migrations/0091_code_trident_runs_inner_result.sql` — `inner_result TEXT`
+  (the typed harvest signal); `expected-schema.txt` regenerated. `store.ts` carries
+  the column but **excludes it from `save()`** (workflow-owned: only the workflow
+  writes it, the orchestrator only reads it, so a launch `save()` can't clobber the
+  detached workflow's out-of-band write).
+- `trident/inner-loop.ts` — rewritten: `FireInnerWorkflow` / `buildWorkflowFirer`
+  (fire + settle) + `buildSubstrateWorkflowFire` (the warm-substrate fire seam) +
+  `parseInnerResult` (decode the typed column) + `WORKFLOW_FIRE_TOOL_NAMES =
+  ['Workflow']`. Deleted: `buildClaudePrintLauncher` / `buildClaudePrintArgs` /
+  `parseTridentResult` / `buildLauncherMessage` / the `LaunchInnerWorkflow` stdout
+  types.
+- `trident/inner-workflow.mjs` — adds `writeTerminalResult()`: on every terminal
+  path it `printf`s the result JSON to a temp file and `readfile()`s it (CAST AS
+  TEXT) into `inner_result` (dodging the JSON's double quotes vs the sqlite shell
+  argument). Mirrors the existing `checkpoint()` Bash mechanism.
+- `trident/orchestrator.ts` — `step` now FIRES (launch), HARVESTS `inner_result`
+  by `runId`, and **server-gates** a merge-eligible `APPROVE` against the recorded
+  `inner_checkpoint='argus-approved'` (a self-asserted APPROVE with no recorded
+  provenance is rejected to `failed`). Crash recovery re-derives in-flight runs
+  from the DB + re-fires idempotently (orphan = persisted `subagent_run_id` this
+  process never fired + no `inner_result`); a workflow silent past `max_inflight_ms`
+  (2 h) is reaped as stalled; harvest takes priority over orphan recovery so a
+  completed-before-restart run never re-fires / double-merges.
+- `gateway/realmode-composer/build-live-agent-turn.ts` — `Workflow` added to the
+  constant `DEFAULT_TOOL_NAMES` (orchestrator can fire background tridents + stay
+  responsive; readies Phase 2b board-bound direct-fire).
+- `open/composer.ts` + `build-core-modules.ts` + `misc-input.ts` — the composer
+  threads `trident.fire_inner_workflow` built over a memoized per-cwd warm
+  `cc-trident-fire-*` substrate (one warm pool entry per repo, since the
+  persistent pool keys on instance not cwd and the workflow's `isolation:'worktree'`
+  forks from the fire turn's git cwd).
+
+**Verification.** `tsc` clean (root + gateway + `trident/tsconfig.json`); the full
+trident suite is green (263 tests incl. new server-gate, crash-safe-harvest,
+stall-guard, and fire-seam tests); migration snapshot gate green; prod-boot wiring
++ build-live-agent surface tests updated + green. A new `trident/inner-loop-sim.ts`
+test helper simulates the fire→detached-write→harvest timing race-free. OUT OF
+SCOPE (Phase 2b): `board_item_id` dispatch binding, N-parallel-on-board, activity
+icons, ask-before-acting.
+
 <<<<<<< HEAD
 ## 2026-06-29 — `update_agent_name` / `update_personality` actually work on Open (no more "Settings backend unavailable")
 

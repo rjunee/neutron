@@ -22,7 +22,8 @@ import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
 import { ProjectDb } from '../persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
-import type { InnerLoopInput, InnerLoopResult } from './inner-loop.ts'
+import type { InnerLoopInput } from './inner-loop.ts'
+import { buildSimFirer } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -47,27 +48,24 @@ afterEach(() => {
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 
 interface Spy {
-  inner_loop: (input: InnerLoopInput) => Promise<InnerLoopResult>
+  fire_workflow: ReturnType<typeof buildSimFirer>['fire_workflow']
+  drain: () => Promise<void>
   inputs: InnerLoopInput[]
 }
 
 function spy(verdict: 'APPROVE' | 'REQUEST_CHANGES' = 'APPROVE'): Spy {
-  const inputs: InnerLoopInput[] = []
-  return {
-    inputs,
-    inner_loop: async (input) => {
-      inputs.push(input)
-      return { status: 'completed', verdict, pr_number: 42, branch: 'feat-x', round: 1, checkpoint: verdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', raw: '' }
-    },
-  }
+  const sim = buildSimFirer(store, () => ({
+    result: { verdict, prNumber: 42, branch: 'feat-x' },
+  }))
+  return { fire_workflow: sim.fire_workflow, drain: sim.drain, inputs: sim.inputs }
 }
 
 function freshBoot(
   s: Spy,
   opts: { on_orphaned_session?: 'redispatch' | 'wait' | 'fail' } = {},
-): { loop: TridentTickLoop; drain: () => Promise<void> } {
+): { loop: TridentTickLoop; complete: () => Promise<void> } {
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
-    inner_loop: s.inner_loop,
+    fire_workflow: s.fire_workflow,
     db_path: join(tmp, 'project.db'),
     run_host: async () => ok(),
     base_branch: 'main',
@@ -75,17 +73,17 @@ function freshBoot(
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   const orch = buildTridentOrchestrator(o)
-  return { loop: new TridentTickLoop({ store, step: orch.step }), drain: orch.drain }
+  return { loop: new TridentTickLoop({ store, step: orch.step }), complete: s.drain }
 }
 
 async function runToTerminal(
-  boot: { loop: TridentTickLoop; drain: () => Promise<void> },
+  boot: { loop: TridentTickLoop; complete: () => Promise<void> },
   run_id: string,
   max_ticks = 20,
 ): Promise<TridentRun> {
   for (let i = 0; i < max_ticks; i++) {
     await boot.loop.runOnce()
-    await boot.drain()
+    await boot.complete()
     const r = store.get(run_id)
     if (r !== null && isTerminalPhase(r.phase)) return r
   }
@@ -132,15 +130,11 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
     })
     await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
 
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
-    const inputs: InnerLoopInput[] = []
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' },
+    }))
     const orch = buildTridentOrchestrator({
-      inner_loop: async (input) => {
-        inputs.push(input)
-        await gate
-        return { status: 'completed', verdict: 'APPROVE', pr_number: 7, branch: 'feat-x', round: 1, checkpoint: 'argus-approved', raw: '' }
-      },
+      fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       run_host: async () => ok(),
       base_branch: 'main',
@@ -148,15 +142,15 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
     })
     const loop = new TridentTickLoop({ store, step: orch.step })
 
+    // Orphan redispatch fires a FRESH dispatch (the stale id is replaced) but the
+    // simulated workflow has not written its result yet (we have not drained).
     await loop.runOnce()
     const mid = store.get(run.id)
     expect(mid?.subagent_run_id).not.toBe('STALE')
     expect(mid?.subagent_run_id).not.toBeNull()
-    expect(inputs).toHaveLength(1)
+    expect(sim.inputs).toHaveLength(1)
 
-    release()
-    await orch.drain()
-    const final = await runToTerminal({ loop, drain: orch.drain }, run.id)
+    const final = await runToTerminal({ loop, complete: sim.drain }, run.id)
     expect(final.phase).toBe('done')
   })
 })
@@ -169,7 +163,7 @@ describe('restart-resume — alternate orphan policies', () => {
     const boot = freshBoot(s, { on_orphaned_session: 'wait' })
 
     await boot.loop.runOnce()
-    await boot.drain()
+    await boot.complete()
     const after = store.get(run.id)
     expect(after?.subagent_run_id).toBe('STALE')
     expect(s.inputs).toHaveLength(0)

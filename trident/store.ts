@@ -101,6 +101,17 @@ export interface TridentRun {
    * Null while in flight.
    */
   inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  /**
+   * Work Board Phase 2a (migration 0091) — the inner workflow's TYPED terminal
+   * result (`{ok, prNumber, branch, verdict, round, checkpoint}` as compact
+   * JSON), written EXACTLY ONCE by the workflow's own Bash step on its terminal
+   * path. The EXEC-MODEL rearchitecture fires the `Workflow` tool + settles the
+   * launching turn immediately (no `claude -p` draining stdout), so there is no
+   * process capturing a `TRIDENT_RESULT=` line; the OUTER loop HARVESTS this
+   * column by `runId` instead — non-null is the harvest-ready signal. Null while
+   * in flight (or pre-launch). See `parseInnerResult` (`inner-loop.ts`).
+   */
+  inner_result: string | null
   /** ISO-8601 UTC. */
   started_at: string
   /** ISO-8601 UTC; re-stamped on every state-machine transition. */
@@ -151,6 +162,8 @@ export interface TridentRunUpdate {
   workflow_run_id?: string | null
   inner_checkpoint?: string | null
   inner_verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
+  /** Phase 2a (0091) — the inner workflow's typed terminal result (compact JSON). */
+  inner_result?: string | null
 }
 
 interface TridentRunDbRow {
@@ -178,6 +191,7 @@ interface TridentRunDbRow {
   workflow_run_id: string | null
   inner_checkpoint: string | null
   inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  inner_result: string | null
   started_at: string
   last_advanced_at: string
 }
@@ -186,7 +200,7 @@ const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
-  'workflow_run_id, inner_checkpoint, inner_verdict, ' +
+  'workflow_run_id, inner_checkpoint, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at'
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
@@ -227,12 +241,13 @@ export class TridentRunStore {
       workflow_run_id: null,
       inner_checkpoint: null,
       inner_verdict: null,
+      inner_result: null,
       started_at: ts,
       last_advanced_at: ts,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.slug,
@@ -258,6 +273,7 @@ export class TridentRunStore {
         run.workflow_run_id,
         run.inner_checkpoint,
         run.inner_verdict,
+        run.inner_result,
         run.started_at,
         run.last_advanced_at,
       ],
@@ -326,6 +342,7 @@ export class TridentRunStore {
     if (patch.workflow_run_id !== undefined) push('workflow_run_id', patch.workflow_run_id)
     if (patch.inner_checkpoint !== undefined) push('inner_checkpoint', patch.inner_checkpoint)
     if (patch.inner_verdict !== undefined) push('inner_verdict', patch.inner_verdict)
+    if (patch.inner_result !== undefined) push('inner_result', patch.inner_result)
     // Always advance the cursor timestamp.
     push('last_advanced_at', this.now())
     params.push(id)
@@ -341,6 +358,14 @@ export class TridentRunStore {
    * Re-stamps `last_advanced_at`. Mutable columns only — `id`, `slug`,
    * `project_slug`, `repo_path`, `task`, `started_at`, the caps, and
    * `chat_id`/`thread_id` are write-once at create time.
+   *
+   * `inner_result` is DELIBERATELY NOT written here (Phase 2a): it is
+   * WORKFLOW-OWNED — only the inner workflow's own Bash step writes it (the
+   * harvest-ready signal), and the OUTER loop only ever READS it. Excluding it
+   * from this full-snapshot save means an orchestrator `save()` (e.g. the launch
+   * persist, whose in-memory run still carries a stale null) can never clobber a
+   * result the detached workflow wrote out-of-band. Use `update({inner_result})`
+   * for the workflow-sim write in tests.
    */
   async save(run: TridentRun): Promise<void> {
     await this.db.run(
@@ -402,6 +427,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     workflow_run_id: row.workflow_run_id,
     inner_checkpoint: row.inner_checkpoint,
     inner_verdict: row.inner_verdict,
+    inner_result: row.inner_result,
     started_at: row.started_at,
     last_advanced_at: row.last_advanced_at,
   }

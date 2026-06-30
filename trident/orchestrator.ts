@@ -1,35 +1,44 @@
 /**
- * @neutronai/trident — the orchestration step (Trident v2 hard cutover).
+ * @neutronai/trident — the orchestration step (Trident v2 · Work Board Phase 2a
+ * EXEC-MODEL rearchitecture).
  *
  * The durable OUTER loop (`tick.ts` + the `code_trident_runs` SQLite table)
- * calls `step(run)` for every non-terminal run. As of Trident v2 the INNER
+ * calls `step(run)` for every non-terminal run. As of Phase 2a the INNER
  * Forge→Argus→fix loop is ONE native CC Dynamic Workflow
- * (`trident/inner-workflow.mjs`), launched once per run via a `TridentInnerLoop`
- * (`trident/inner-loop.ts`). The v1 substrate-per-phase inner mechanism
- * (`session.spawn`/`spawnForPhase`/the per-phase state graph) is REMOVED from
- * this prod step — the workflow owns the Forge build, the parallel Argus review,
- * the synthesis, and the bounded fix loop internally.
+ * (`trident/inner-workflow.mjs`), FIRED per run via a `TridentWorkflowFirer`
+ * (`trident/inner-loop.ts`) on a WARM substrate whose launching turn settles
+ * immediately. The workflow then runs DETACHED in the background and persists
+ * its TYPED terminal result to the run row (`inner_result`); this step HARVESTS
+ * that result from the DB by `runId` — deterministic TS, never an LLM-parsed
+ * stdout line, never an in-memory build-result map.
  *
- * What this step still owns (the OUTER concerns):
+ * What this step owns (the OUTER concerns):
  *
  *   1. LAUNCH-IF-NEEDED. A live run with no in-flight dispatch
- *      (`subagent_run_id === null`) gets the inner loop launched now: mint a
- *      uuid, persist it + `subagent_status='running'`, and run the workflow in
- *      the BACKGROUND. Idempotent crash-resume: before launch, fold any existing
- *      PR/branch + the last `inner_checkpoint` into the dispatch so the workflow
- *      REUSES the PR (no duplicate) and skips finished phases.
+ *      (`subagent_run_id === null`) gets the workflow FIRED now: mint a tracking
+ *      uuid, FIRE the workflow (the launching turn settles in seconds), and on a
+ *      clean fire persist the id + `subagent_status='running'`. Idempotent
+ *      crash-resume: before firing, fold any existing PR/branch + the last
+ *      `inner_checkpoint` into the args so the workflow REUSES the PR (no
+ *      duplicate) and skips finished phases.
  *
- *   2. ORPHAN RECOVERY. A persisted `subagent_run_id` this process does NOT track
- *      (lost on restart) is recovered per `on_orphaned_session` (redispatch /
- *      wait / fail). Redispatch relaunches a FRESH workflow that resumes from the
- *      persisted checkpoint — never a double-launch, bounded to one per process.
+ *   2. HARVEST. With a workflow in flight, read the run's `inner_result` each
+ *      tick. Once the workflow has written its TYPED terminal result, decode it
+ *      (`parseInnerResult`), SERVER-GATE a merge-eligible `APPROVE` against the
+ *      Argus-phase-recorded `inner_checkpoint='argus-approved'` (never a
+ *      self-asserted result line), then on APPROVE → phase `done`
+ *      (persist pr/branch/inner_verdict) + merge (`cleanupAfterMerge`, the
+ *      outer/human gate); on REQUEST_CHANGES / failed-provenance → phase `failed`
+ *      with a named reason (recoverable: re-run), never a silent success.
  *
- *   3. POLL + TERMINATE. With a dispatch in flight, defer until it settles. On
- *      `APPROVE` → phase `done` (persist pr/branch/inner_checkpoint/inner_verdict)
- *      then merge + cleanup (`cleanupAfterMerge`, the outer/human gate). On
- *      `REQUEST_CHANGES` (maxRounds exhausted) or a crashed/timed-out dispatch →
- *      phase `failed` with a named reason (recoverable: re-run), never a silent
- *      success.
+ *   3. CRASH RECOVERY. The durable row is authoritative; harvest works across a
+ *      process restart because the result lives in the DB, not in memory. A
+ *      persisted `subagent_run_id` this process did NOT fire (lost on restart)
+ *      AND no `inner_result` yet is an ORPHAN — re-fired per
+ *      `on_orphaned_session` (a redispatch resumes from `inner_checkpoint`,
+ *      bounded to one per process; a workflow that already merged is terminal so
+ *      never re-fired → no double-merge). A workflow that fired but goes silent
+ *      past `max_inflight_ms` with no checkpoint is reaped as a stalled run.
  *
  * `state-machine.ts` (`computeTransition`/`advanceTridentRun`) is intentionally
  * KEPT intact (its unit tests + one-commit revertibility) even though this prod
@@ -37,7 +46,12 @@
  */
 
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
-import type { InnerLoopResult, TridentInnerLoop } from './inner-loop.ts'
+import {
+  parseInnerResult,
+  type FireOutcome,
+  type InnerResult,
+  type TridentWorkflowFirer,
+} from './inner-loop.ts'
 import { buildMergeCleanupDeps, detectBaseBranch, type RunHostCommand } from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
@@ -48,10 +62,11 @@ export interface TridentStep {
 }
 
 export interface BuildTridentOrchestratorOptions {
-  /** The inner-loop launcher (Trident v2). Drives Forge→Argus→fix as one CC
-   *  Dynamic Workflow; see `buildWorkflowInnerLoop`. */
-  inner_loop: TridentInnerLoop
-  /** Absolute sqlite file path threaded to the workflow's checkpoint Bash steps. */
+  /** The inner-workflow FIRER (Phase 2a). Fires the inner CC Dynamic Workflow on
+   *  a warm substrate + settles the launching turn; see `buildWorkflowFirer`. */
+  fire_workflow: TridentWorkflowFirer
+  /** Absolute sqlite file path threaded to the workflow's checkpoint +
+   *  terminal-result Bash steps. */
   db_path: string
   /** Host command runner — base-branch detect, existing-PR probe, merge. */
   run_host: RunHostCommand
@@ -64,12 +79,20 @@ export interface BuildTridentOrchestratorOptions {
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
   mint_run_id?: () => string
   /**
+   * How long a FIRED workflow may run with no terminal `inner_result` AND no
+   * fresh checkpoint before it is reaped as stalled (the build runs detached, so
+   * the tick loop owns build liveness). Measured from `last_advanced_at`, which
+   * the workflow re-stamps on every checkpoint — so a healthy, checkpointing
+   * build never trips this. Default 2 h.
+   */
+  max_inflight_ms?: number
+  /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
-   * `subagent_run_id` is persisted but which THIS process no longer tracks (the
-   * restart case: the inner-loop dispatch was launched by a prior control-plane
-   * process and lost when this one booted).
+   * `subagent_run_id` is persisted but which THIS process never fired (the
+   * restart case: the workflow was fired by a prior control-plane process and
+   * died with it) AND which has not yet written an `inner_result`.
    *
-   *   • `'redispatch'` (default) — RESUME by relaunching a FRESH workflow that
+   *   • `'redispatch'` (default) — RESUME by re-firing a FRESH workflow that
    *     reads `inner_checkpoint`/`pr`/`branch` and idempotently skips finished
    *     phases + reuses the PR. Bounded to one redispatch per run per process.
    *   • `'wait'` — leave untouched, keep polling (operator can `/trident stop`).
@@ -111,26 +134,30 @@ export async function computeDiffLineCount(
   return total
 }
 
-/** In-process tracking of the ONE inner-loop dispatch per run, keyed by the
- *  minted `subagent_run_id`. Mirrors `TridentSessionManager`'s spawn/classify
- *  but with a single dispatch per run (the workflow owns the inner phases). */
-type InnerDispatch = { status: 'running' } | { status: 'done'; result: InnerLoopResult }
+const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
 
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
   const now = opts.now ?? (() => new Date().toISOString())
-  const inner_loop = opts.inner_loop
+  const fireWorkflow = opts.fire_workflow
   const db_path = opts.db_path
   const merge_deps = opts.merge_deps ?? buildMergeCleanupDeps(opts.run_host)
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
+  const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
 
-  const dispatches = new Map<string, InnerDispatch>()
-  const inflight = new Set<Promise<void>>()
+  // This-process liveness: run ids whose workflow THIS process fired (and whose
+  // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
+  // in this set is an orphan from a prior process. Crash-safe: lost on restart
+  // (so all prior-process dispatches become orphans + re-fire idempotently).
+  const fired = new Set<string>()
   // Run ids redispatched in THIS process — the per-process bound on orphan
   // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
+  // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
+  // seconds; the build itself runs detached and is NOT tracked here.
+  const inflight = new Set<Promise<void>>()
 
   async function resolveBase(run: TridentRun): Promise<string> {
     if (opts.base_branch !== undefined) return opts.base_branch
@@ -168,8 +195,10 @@ export function buildTridentOrchestrator(
     }
   }
 
-  /** Launch the inner loop in the background; persist the tracking id. Folds any
-   *  existing PR + the last checkpoint into the dispatch for idempotent resume. */
+  /** Fire the inner workflow on the warm substrate; the launching turn settles
+   *  immediately and the workflow runs detached. Persists the tracking id on a
+   *  clean fire. Folds any existing PR + the last checkpoint into the args for
+   *  idempotent resume. */
   async function launch(run: TridentRun): Promise<AdvanceOutcome> {
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
@@ -185,74 +214,91 @@ export function buildTridentOrchestrator(
         note: `${run.phase} → failed (empty dispatch id)`,
       }
     }
-    dispatches.set(id, { status: 'running' })
-    const p = (async (): Promise<void> => {
-      let result: InnerLoopResult
-      try {
-        result = await inner_loop({
-          run: launchRun,
-          base_branch: base,
-          db_path,
-          max_rounds: run.max_rounds,
-          resume_checkpoint,
-        })
-      } catch (err) {
-        result = {
-          status: 'failed',
-          verdict: null,
-          pr_number: null,
-          branch: null,
-          round: 0,
-          checkpoint: null,
-          raw: err instanceof Error ? err.message : String(err),
-        }
-      }
-      dispatches.set(id, { status: 'done', result })
-    })()
-    inflight.add(p)
-    void p.finally(() => inflight.delete(p))
 
+    // FIRE the workflow. The launching turn settles in seconds; the build runs
+    // detached in the background and persists its own result to the DB. Tracked
+    // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
+    const firePromise = fireWorkflow({
+      run: launchRun,
+      base_branch: base,
+      db_path,
+      max_rounds: run.max_rounds,
+      resume_checkpoint,
+    })
+    const tracked = firePromise.then(
+      () => undefined,
+      () => undefined,
+    )
+    inflight.add(tracked)
+    let outcome: FireOutcome
+    try {
+      outcome = await firePromise
+    } catch (e) {
+      // `buildWorkflowFirer` already converts throws to a `failed` outcome, but
+      // stay defensive: a rejecting firer is a crashed launcher, never a success.
+      outcome = { status: 'failed', error: e instanceof Error ? e.message : String(e) }
+    } finally {
+      inflight.delete(tracked)
+    }
+
+    if (outcome.status !== 'fired') {
+      // The launching turn never settled cleanly — the workflow was NOT fired.
+      // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
+      return {
+        run: failedRun(run, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (fire did not settle)`,
+      }
+    }
+
+    fired.add(run.id)
     const next: TridentRun = {
       ...launchRun,
       subagent_run_id: id,
       subagent_status: 'running',
+      workflow_run_id: launchRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {
       run: next,
       changed: true,
       waiting: true,
-      note: `launched inner loop ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
+      note: `fired inner workflow ${id}${resume_checkpoint !== null ? ` (resume ${resume_checkpoint})` : ''}`,
     }
   }
 
-  /** Apply a settled inner-loop result to the run (merge on APPROVE, else fail). */
-  async function applyResult(run: TridentRun, id: string, result: InnerLoopResult): Promise<AdvanceOutcome> {
-    dispatches.delete(id)
+  /** Apply a harvested, decoded inner result to the run (merge on a SERVER-GATED
+   *  APPROVE, else fail). */
+  async function applyResult(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
+    fired.delete(run.id)
+    redispatched.delete(run.id)
 
-    if (result.status !== 'completed') {
-      // Crashed / timed_out inner loop → fail LOUDLY (never a silent success).
-      const failed = failedRun(run, `inner loop ${result.status}`, true)
-      return { run: failed, changed: true, waiting: false, note: `inner loop ${result.status} → failed` }
-    }
+    const pr = result.pr_number ?? run.pr
+    const branch = result.branch ?? run.branch
 
-    if (result.verdict === 'APPROVE') {
+    // SERVER-GATED verdict provenance: a merge-eligible APPROVE must be backed by
+    // the Argus phase's OWN recorded checkpoint (`inner_checkpoint='argus-approved'`,
+    // written by the workflow's synthesis-phase Bash step), NEVER just the
+    // self-asserted verdict in the harvested result line. A result claiming
+    // APPROVE without that recorded provenance is rejected — failed, not merged.
+    const argusApproved = run.inner_checkpoint === 'argus-approved'
+
+    if (result.verdict === 'APPROVE' && argusApproved) {
       const doneRun: TridentRun = {
         ...run,
         phase: 'done',
-        pr: result.pr_number ?? run.pr,
-        branch: result.branch ?? run.branch,
+        pr,
+        branch,
         inner_checkpoint: result.checkpoint ?? 'argus-approved',
         inner_verdict: 'APPROVE',
-        workflow_run_id: run.workflow_run_id ?? id,
-        subagent_run_id: id,
         subagent_status: 'completed',
         failure_reason: null,
         last_advanced_at: now(),
       }
       try {
         const res = await cleanupAfterMerge(doneRun, merge_deps)
-        return { run: doneRun, changed: true, waiting: false, note: `inner loop APPROVE → done; ${res.note}` }
+        return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}` }
       } catch (err) {
         const reason = err instanceof Error ? err.message : 'merge failed'
         return {
@@ -264,35 +310,71 @@ export function buildTridentOrchestrator(
       }
     }
 
-    // REQUEST_CHANGES — the inner loop exhausted maxRounds without an APPROVE.
+    if (result.verdict === 'APPROVE' && !argusApproved) {
+      // Provenance gate tripped — a self-asserted APPROVE with no recorded
+      // argus-approved checkpoint. Never merge on an unverified verdict.
+      const failed: TridentRun = {
+        ...failedRun(
+          run,
+          'inner workflow reported APPROVE but no recorded argus-approved checkpoint (provenance gate)',
+          true,
+        ),
+        pr,
+        branch,
+        inner_verdict: 'REQUEST_CHANGES',
+      }
+      return { run: failed, changed: true, waiting: false, note: 'APPROVE rejected (provenance gate) → failed' }
+    }
+
+    // REQUEST_CHANGES / null — the inner loop exhausted maxRounds without an APPROVE.
     const failed: TridentRun = {
       ...failedRun(run, `inner loop exhausted ${run.max_rounds} round(s) without Argus APPROVE`, true),
-      pr: result.pr_number ?? run.pr,
-      branch: result.branch ?? run.branch,
-      inner_checkpoint: result.checkpoint ?? 'argus-request-changes',
+      pr,
+      branch,
+      inner_checkpoint: run.inner_checkpoint ?? result.checkpoint ?? 'argus-request-changes',
       inner_verdict: 'REQUEST_CHANGES',
-      workflow_run_id: run.workflow_run_id ?? id,
     }
     return { run: failed, changed: true, waiting: false, note: 'inner loop REQUEST_CHANGES (max rounds) → failed' }
   }
 
+  /** Elapsed ms since the run last advanced (checkpoint / launch). Conservative
+   *  on an unparseable timestamp: returns 0 (never falsely reaps a run). */
+  function elapsedSinceAdvance(run: TridentRun): number {
+    const t = Date.parse(run.last_advanced_at)
+    if (!Number.isFinite(t)) return 0
+    const n = Date.parse(now())
+    if (!Number.isFinite(n)) return 0
+    return Math.max(0, n - t)
+  }
+
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
     if (isTerminalPhase(run.phase)) {
+      fired.delete(run.id)
+      redispatched.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
-    // (0) Orphan recovery. A persisted dispatch id this process does NOT track is
-    //     an orphan (lost on restart). Recover per policy BEFORE launch/poll.
-    if (run.subagent_run_id !== null && !dispatches.has(run.subagent_run_id)) {
+    // (1) HARVEST FIRST — a written terminal result wins over orphan recovery, so
+    //     a run whose workflow finished before a restart harvests (never re-fires
+    //     → never double-merges). Deterministic TS read of the typed DB column.
+    if (run.subagent_run_id !== null) {
+      const result = parseInnerResult(run.inner_result)
+      if (result !== null) {
+        return applyResult(run, result)
+      }
+    }
+
+    // (2) ORPHAN RECOVERY. A persisted dispatch id this process never fired AND no
+    //     terminal result yet → the workflow died with a prior process. Recover
+    //     per policy.
+    if (run.subagent_run_id !== null && !fired.has(run.id)) {
       const orphanId = run.subagent_run_id
       if (on_orphaned === 'fail') {
-        // Loud reap — keep the 'crashed' sub-status (an orphan is a lost agent,
-        // distinct from a clean self-failure), so the audit trail reads truthfully.
         const reaped: TridentRun = {
           ...run,
           phase: 'failed',
           subagent_status: 'crashed',
-          failure_reason: `orphaned inner-loop dispatch ${orphanId} (lost after restart / never became ready)`,
+          failure_reason: `orphaned inner-loop dispatch ${orphanId} (lost after restart / never wrote a result)`,
           last_advanced_at: now(),
         }
         return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (orphaned dispatch reaped)` }
@@ -300,29 +382,35 @@ export function buildTridentOrchestrator(
       if (on_orphaned === 'wait' || redispatched.has(run.id)) {
         return { run, changed: false, waiting: true, note: `waiting on orphaned inner-loop dispatch ${orphanId}` }
       }
-      // redispatch (default): clear the slot so the launch path relaunches a
-      // FRESH workflow that resumes from the persisted checkpoint.
+      // redispatch (default): clear the slot so the launch path re-fires a FRESH
+      // workflow that resumes from the persisted checkpoint.
       redispatched.add(run.id)
       run = { ...run, subagent_run_id: null, subagent_status: null }
     }
 
-    // (1) Launch-if-needed — the single launch site (null-guarded).
+    // (3) Launch-if-needed — the single fire site (null-guarded).
     if (run.subagent_run_id === null) {
       return launch(run)
     }
 
-    // (2) Poll the in-flight dispatch.
-    const d = dispatches.get(run.subagent_run_id)
-    if (d === undefined || d.status === 'running') {
-      return { run, changed: false, waiting: true, note: `waiting on inner-loop dispatch ${run.subagent_run_id}` }
+    // (4) In flight (fired by THIS process, no result yet). Reap a stalled
+    //     workflow that has gone silent past the budget (no checkpoint refresh);
+    //     otherwise keep waiting for it to write its result.
+    if (elapsedSinceAdvance(run) > maxInflightMs) {
+      fired.delete(run.id)
+      const reaped = failedRun(
+        run,
+        `inner workflow stalled (no terminal result within ${Math.round(maxInflightMs / 60_000)} min)`,
+        false,
+      )
+      return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (stalled)` }
     }
-
-    // (3) Settled — apply the result (merge-on-APPROVE or fail).
-    return applyResult(run, run.subagent_run_id, d.result)
+    return { run, changed: false, waiting: true, note: `waiting on inner-loop dispatch ${run.subagent_run_id}` }
   }
 
-  /** Resolve once every in-flight background inner-loop dispatch has settled
-   *  (tests + graceful shutdown). */
+  /** Resolve once every in-flight FIRE turn has settled (tests + graceful
+   *  shutdown). The detached builds are NOT awaited here — the tick loop harvests
+   *  their results from the DB. */
   async function drain(): Promise<void> {
     while (inflight.size > 0) {
       await Promise.all([...inflight])

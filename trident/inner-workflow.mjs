@@ -244,6 +244,46 @@ sqlite3 "${dbPath}" "UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id='$
   )
 }
 
+// Wrap a value as a SINGLE-QUOTED shell word, escaping embedded single quotes
+// the POSIX way (`'\''`). Used to embed the JSON result safely in a `printf`.
+function shSingleQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'"
+}
+
+// TERMINAL-RESULT WRITE — the EXEC-MODEL harvest signal (Work Board Phase 2a).
+// The launching turn has already settled, so NO process is capturing this
+// workflow's stdout; the durable OUTER loop harvests `code_trident_runs.
+// inner_result` by runId instead. Persist the TYPED result + the synthesised
+// verdict in ONE idempotent sqlite UPDATE so a non-null `inner_result` is the
+// atomic harvest-ready signal. The verdict's merge-eligibility is SERVER-GATED
+// by the OUTER loop against the `inner_checkpoint='argus-approved'` that the
+// synthesis-phase `checkpoint()` already wrote — this row is only the typed
+// payload, never the provenance of record. The JSON is written to a temp file
+// and pulled in via `readfile()` (CAST AS TEXT) so the JSON's own double quotes
+// can never break the double-quoted sqlite shell argument. No-ops when the
+// launcher did not thread a dbPath/runId (a dry source check).
+async function writeTerminalResult(result) {
+  if (!dbPath || !runId) return
+  const verdict = result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
+  const json = JSON.stringify(result)
+  const tmp = `/tmp/trident-terminal-${runId}.json`
+  const sets = [
+    `inner_result=CAST(readfile('${tmp}') AS TEXT)`,
+    `inner_verdict='${verdict}'`,
+    `subagent_status='completed'`,
+    `branch='${forgeBranch}'`,
+  ]
+  if (result.prNumber !== undefined && result.prNumber !== null) {
+    sets.push(`pr=${Number(result.prNumber)}`)
+  }
+  sets.push(`last_advanced_at='$(date -u +%FT%TZ)'`)
+  await agent(
+    `Terminal-result step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "terminal-result ok":
+printf '%s' ${shSingleQuote(json)} > ${tmp} && sqlite3 "${dbPath}" "UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id='${runId}'"`,
+    { label: 'terminal-result', phase: 'Synthesis' },
+  )
+}
+
 // Normalise a reviewer verdict enum to the two terminal verdicts the OUTER loop
 // acts on (APPROVE → merge; anything else → another fix round / failed).
 function normalizeVerdict(v) {
@@ -302,7 +342,12 @@ try {
   if (resumeCheckpoint === 'argus-approved') {
     log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} — skipping build+review`)
     finalVerdict = 'APPROVE'
-    return { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
+    const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
+    // Re-write the terminal result so a re-fired run whose prior process crashed
+    // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
+    // — the merge gate downstream is a no-op once the run is already terminal).
+    await writeTerminalResult(resumeResult)
+    return resumeResult
   }
 
   phase('Build')
@@ -367,10 +412,14 @@ ${task}`,
 
   log(`trident-v2 inner DONE: verdict=${finalVerdict} round=${round} pr=${pr}`)
   // The inner workflow RETURNS {PR#, verdict}; the OUTER/human layer does the
-  // irreversible merge (merge.ts stays outer — defense in depth). This top-level
-  // `return` is the Workflow runtime's result API (it wraps the body in an async
-  // context). `node --check` flags it as an illegal top-level return — EXPECTED.
-  return {
+  // irreversible merge (merge.ts stays outer — defense in depth). In the Phase-2a
+  // EXEC model the launching turn has already settled, so the return value is NOT
+  // captured by any process — the OUTER loop harvests `inner_result` from the DB.
+  // Persist the TYPED terminal result HERE (the harvest-ready signal) BEFORE
+  // returning. This top-level `return` is the Workflow runtime's result API (it
+  // wraps the body in an async context). `node --check` flags it as an illegal
+  // top-level return — EXPECTED.
+  const terminalResult = {
     ok: true,
     prNumber: pr,
     branch: forgeBranch,
@@ -378,6 +427,8 @@ ${task}`,
     round,
     checkpoint: finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes',
   }
+  await writeTerminalResult(terminalResult)
+  return terminalResult
 } finally {
   // (A) MANDATORY WORKTREE CLEANUP — runs on success, REQUEST_CHANGES, throw, or
   // abort. The harness removes a worktree ONLY IF UNCHANGED, and a Forge build
