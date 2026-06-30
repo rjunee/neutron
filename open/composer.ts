@@ -149,6 +149,7 @@ import {
   appWsTopicId,
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentTyping,
+  type AppWsOutboundImportProgress,
   type AppWsOutboundProjectsChanged,
   type AppWsOutboundWorkBoardChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
@@ -2207,11 +2208,35 @@ export function buildOpenGraphComposer(
       const ok = emitOnboardingPrompt(topic_id, prompt)
       return { message_id: prompt.prompt_id, was_new: ok }
     }
-    // Import-progress over app-ws: dropped for now (the terminal-state prompt
-    // still lands via the button-prompt path). Left as an explicit no-op holder
-    // so the router prefix is recognised (no "unknown-channel" warn). A future
-    // pass can translate progress → an `agent_message_partial`-style update.
-    void appWsImportProgressRouter
+    // Import-progress over app-ws (2026-06-29): the engine's import-running cron
+    // emits an `import_progress` event every ~5s while a history import runs, and
+    // `buildRoutedSendImportProgress` routes `app:<user>` topics to this holder.
+    // Fan it to the owner's live socket as an ephemeral `import_progress` frame
+    // (mirrors `emitAppWsTyping` / `work_board_changed`): the React client renders
+    // a live spinner + per-pass progress line off it, so a long import visibly
+    // works instead of stalling on the one-shot "received" banner. UI-only — NOT
+    // persisted, no `seq`, never replayed on `resume`. Terminal statuses still
+    // deliver their analysis body via the button-prompt path above; a terminal
+    // frame here just clears the client's spinner defensively. Best-effort: a
+    // closed socket / registry miss is a silent non-delivery (re-emitted next tick).
+    appWsImportProgressRouter.send = async ({ topic_id, event }) => {
+      const env: AppWsOutboundImportProgress = {
+        v: 1,
+        type: 'import_progress',
+        job_id: event.job_id,
+        status: event.status,
+        pass: event.pass,
+        pct: event.pct,
+        chunks_total_known: event.chunks_total_known,
+        ts: Date.now(),
+      }
+      if (event.body !== undefined) env.body = event.body
+      try {
+        return { delivered: appWsRegistry.send(topic_id, env) }
+      } catch {
+        return { delivered: false }
+      }
+    }
 
     const appWsReceiver = {
       receive: async (event: IncomingEvent): Promise<void> => {

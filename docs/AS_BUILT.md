@@ -2,6 +2,63 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-29 — M1: onboarding import offered FIRST + real live import progress
+
+**Problem (two live-test bugs).** Ryan hit two issues on a fresh M1 install:
+1. The ChatGPT/Claude history import was **not offered early/explicitly**. After
+   the #126 fix removed a premature always-on hint, the offer swung too far the
+   other way — the agent only mentioned import after probing the user's work, so
+   it felt buried. The intent (and the onboarding-experience spec) is: offer the
+   import as the EXPLICIT first step right after the name, so the rest of the
+   interview is informed by the analysis.
+2. There was **no real import-progress indicator**. A large import (~8 min for
+   173 conversations) showed only a one-shot "Export received — reading through
+   your history now." line and then looked dead for minutes.
+
+**Root cause.**
+- Bug 1: Path-1 (Open) onboarding is prompt-driven — the engine runs only the
+  import subsystem, so onboarding ordering lives entirely in the `<onboarding>`
+  preamble (`onboarding/interview/onboarding-preamble.ts`). The import block sat
+  after all five learning goals + was gated "after you have their name AND a
+  sense of their work", biasing the model to defer it past the work-interview.
+- Bug 2: the engine's `import-running-cron` already emits an `import_progress`
+  event every ~5s and `buildRoutedSendImportProgress` already routes `app:<user>`
+  topics to a composer holder — but that holder's `.send` was a documented NO-OP
+  (`open/composer.ts`), so every progress frame was dropped. The React client
+  (`controller.ts`) already consumed `import_progress` and rendered a spinner +
+  per-pass line (`ChatApp.tsx` `ImportStatus`); only the server-side app-ws emit
+  was missing.
+
+**Fix (no flags, Option A in-chat for Bug 1).**
+- `onboarding/interview/onboarding-preamble.ts` — moved the import-offer block to
+  between goal #1 (name) and goal #2 (work) and reworded it to an EXPLICIT,
+  prominent ask made RIGHT AFTER the name and BEFORE the work questions (mentions
+  the drag-and-drop/📎 affordance + that it runs in the background with live
+  progress; "only ask this once"). No new phase/modal — a pure preamble
+  reposition. The managed-mode phase machine already routes import right after
+  name, so it was untouched.
+- `channels/adapters/app-ws/envelope.ts` — new `AppWsOutboundImportProgress`
+  envelope (`{v,type:'import_progress',job_id,status,pass,pct,chunks_total_known,
+  body?,ts}`) added to the `AppWsOutbound` union; mirrors `agent_typing` /
+  `work_board_changed` (ephemeral, UI-only, not persisted, never replayed).
+- `open/composer.ts` — filled the no-op `appWsImportProgressRouter.send` to fan
+  the new frame via `appWsRegistry.send(app:<user>, env)` (best-effort; terminal
+  frames clear the client spinner defensively, the analysis body still lands via
+  the button-prompt path). Engine, cron, routing, and client render were already
+  built.
+- Tests: `onboarding/interview/__tests__/onboarding-preamble.test.ts` (pins the
+  import offer present + positioned name→import→work, absent when not offered,
+  asked once); `channels/adapters/app-ws/__tests__/import-progress.test.ts`
+  (envelope is a union member, body optional, fans through `registry.send`).
+- Docs: `docs/SYSTEM-OVERVIEW.md` updated (onboarding import-offer-first note +
+  app-ws frame `#7 live import progress`).
+
+**Why it's safe.** Additive: a server-only union member (the Expo subset union +
+parity test are untouched and still green). The #126 fixes (import RESULT renders,
+centered column, no reactions) are unaffected — the analysis body still lands via
+the existing path; this only un-drops the intermediate progress frames. tsc clean
+(root + chat-react leaf); app-ws (107) + onboarding-interview (912) suites green.
+
 ## 2026-06-29 — M1: stale-client-store auto-reset on server reinstall
 
 **Problem.** A fresh Neutron Open server reinstall showed a STALE chat: the web

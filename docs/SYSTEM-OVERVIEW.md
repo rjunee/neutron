@@ -362,6 +362,18 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > `signup_via='web'` onto its first real extraction write when absent, so the
 > invariant holds on disk too. Root-caused in
 > `docs/research/fullpipe-e2e-2026-06-28.md` § Stage 3.
+>
+> **Import is offered FIRST + explicitly (M1 live-test, 2026-06-29).** Path-1
+> onboarding is prompt-driven (the engine runs only the import subsystem), so the
+> import offer's ordering lives entirely in the `<onboarding>` preamble
+> (`onboarding/interview/onboarding-preamble.ts`). The offer used to sit after all
+> five learning goals + was gated "after you have their name AND a sense of their
+> work", so the model deferred it past the work-interview ("import is buried").
+> It now renders between goal #1 (name) and goal #2 (work) and is reworded to an
+> EXPLICIT, prominent ask made RIGHT AFTER the name and BEFORE the work questions —
+> matching the onboarding-experience spec (upload precedes the informed interview)
+> and the always-on 📎 drop-zone affordance. No new phase/modal: a pure preamble
+> reposition (Option A, in-chat).
 
 The React web client (`landing/chat-react/`) is now **registry-driven** too.
 `chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
@@ -1100,6 +1112,22 @@ indicator. No feature flags — one live path.
   a real "replying…" affordance for their full duration. The legacy `web:` path's
   `agent_typing_start`/`agent_typing_end` is the prior art; this collapses it into
   one app-ws envelope with a `state` discriminator.
+- **#7 live history-import progress (`AppWsOutboundImportProgress`).** A long
+  ChatGPT/Claude import (minutes, for hundreds of conversations) previously showed
+  no live progress on the app-ws surface: the engine's `import-running-cron` emits
+  an `import_progress` event every ~5s, `buildRoutedSendImportProgress` routes
+  `app:<user>` topics to a composer holder — but that holder's `.send` was a
+  documented NO-OP (`open/composer.ts`), so every frame was dropped and the chat
+  stalled on a one-shot "received" banner. The holder now fans an ephemeral
+  `{v:1,type:'import_progress',job_id,status,pass,pct,chunks_total_known,body?,ts}`
+  frame via `appWsRegistry.send` (NOT persisted, no seq, never replayed — mirrors
+  `agent_typing`/`work_board_changed`). The React client already consumed it
+  (`controller.ts`) and renders a live spinner + per-pass progress line
+  (`ChatApp.tsx` `ImportStatus`), so a long import visibly works, then the
+  proposed-projects analysis renders. Engine/cron/client-render were already built
+  — this fix was wiring the dropped `app:` route + defining the wire envelope (M1
+  live-test, 2026-06-29). The legacy `web:` path's `import_progress` `ChatOutbound`
+  frame is the prior art.
 - **Clients render it on both surfaces.** Web (React/assistant-ui via chat-core
   `web-session` → `controller.ts`) already resumed + rendered receipts/reactions/
   edits; it now drives its `car-typing` indicator off the authoritative

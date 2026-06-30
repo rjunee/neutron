@@ -32,6 +32,28 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   lines.push('')
   lines.push('Over the course of the conversation, naturally learn:')
   lines.push('  1. Their first name (what they\'d like you to call them).')
+  if (input.import_offered) {
+    // The import offer is the EXPLICIT, EARLY first step — right after the name
+    // and BEFORE the work questions — so the box can analyse their real history
+    // and the rest of the interview is informed by it (onboarding-experience
+    // spec: upload precedes the guided interview). Positioned here, between goal
+    // #1 and goal #2, on purpose: placed at the end the model defers it past the
+    // work-interview, which is the "import is buried" bug this fixes.
+    lines.push('')
+    lines.push(
+      'RIGHT AFTER they tell you their name — as your very FIRST move, and BEFORE you ask',
+      'what they work on — EXPLICITLY and prominently offer to import their existing ChatGPT',
+      'or Claude history, so you start out already knowing their projects and context. Make',
+      'this a clear, up-front ask (not a throwaway aside): tell them they can export their',
+      'data from ChatGPT/Claude settings and then drag-and-drop or attach the .zip right here',
+      'in the chat — there is an attach (📎) / drop-zone control for exactly this. If they',
+      'attach one, acknowledge it warmly; the import runs in the background and shows live',
+      'progress while you keep talking, then you\'ll share what you found. If they decline or',
+      'don\'t have an export handy, that is completely fine — just move on to the questions',
+      'below. Either way, only ask this once.',
+    )
+    lines.push('')
+  }
   lines.push(
     '  2. What they work on — get at least three concrete projects, focus areas, or',
     '     things currently on their plate. Probe gently for more if they give only one.',
@@ -46,18 +68,6 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     '  5. A name for you, their assistant. Suggest a few that fit the personality they',
     '     picked, and let them choose or invent one.',
   )
-  if (input.import_offered) {
-    lines.push('')
-    lines.push(
-      'EARLY in the conversation (after you have their name and a sense of their work),',
-      'OFFER to import their existing ChatGPT or Claude history so you start already',
-      'knowing their projects and context. Tell them they can export their data from',
-      'ChatGPT/Claude settings and attach the .zip right here in the chat — there is an',
-      'attach (📎) control for it. If they attach one, acknowledge it warmly; the import',
-      'runs in the background and you can keep talking while it processes. If they decline',
-      'or don\'t have one, that is completely fine — just continue.',
-    )
-  }
   lines.push('')
   lines.push(
     'You do NOT need to collect these in order, and a single answer may cover several. Do',
