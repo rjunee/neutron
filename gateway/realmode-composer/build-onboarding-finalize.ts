@@ -52,12 +52,35 @@ import { PersonaComposer } from '../../onboarding/persona-gen/compose.ts'
 import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts'
 import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
 import { buildComposeInput } from '../../onboarding/interview/engine-internals.ts'
-import { slugifyProjectId } from '../../onboarding/wow-moment/project-identity.ts'
+import {
+  slugifyProjectId,
+  findRelatedImportSignal,
+} from '../../onboarding/wow-moment/project-identity.ts'
 import { capProposedProjects } from '../../onboarding/interview/phase-prompts.ts'
 import {
   buildScaffoldMaterializer,
   ensureProjectRow,
 } from './project-create.ts'
+import {
+  buildProjectDocReader,
+  buildDeterministicProjectOpening,
+  finalizeOpeningBody,
+  indexProposedProjects,
+  synthesizeMatchFromSignal,
+  type ProjectOpeningDocs,
+} from './build-onboarding-handoff.ts'
+
+/**
+ * Item 6 (Path-1 closing handoff, 2026-06-30) — the deterministic closing
+ * message emitted into the owner's General topic right after onboarding
+ * finalizes + the project rail refreshes. Path-1 finalize previously emitted NO
+ * closing, so the interview just went quiet after the last answer with no signal
+ * that projects had been created or where to find them. Points the owner at the
+ * populated left rail; uses "Plan" (the user-facing name for the per-project
+ * work board) per the 2026-06-30 rename. Em-dash-free (Sam hard rule).
+ */
+const ONBOARDING_CLOSING_MESSAGE =
+  "You're all set. I've created your projects - they're in the left rail. Open one to find its Plan, Documents, and Chat, and we can dig in whenever you're ready."
 
 /**
  * The persona composer surface `finalize` consumes. Matches the public
@@ -86,6 +109,22 @@ export interface OnboardingFinalizeDeps {
   gbrainSyncHook?: SyncHook
   /** Fire a projects_changed app-ws frame for the owner after projects are created. */
   emitProjectsChanged: (user_id: string) => void
+  /**
+   * Item 6/7 (Path-1 closing + per-project opening, 2026-06-30) — deliver a
+   * deterministic agent message into a chat topic. `project_id === null` targets
+   * the owner's General topic (the closing handoff); a non-null `project_id`
+   * targets THAT project's topic (its opening message). The composer wires this
+   * to the SAME durable-history + live-fan path a live-agent reply uses (persist
+   * a `button_prompts` row on `app:<user>[:<project>]` + push to the socket), so
+   * the message both renders live and hydrates on reload. Best-effort + non-
+   * throwing by contract; omitted on the LLM-less path → no closing/opening
+   * (onboarding can't run LLM-less anyway). NEVER blocks finalize.
+   */
+  emitChatMessage?: (input: {
+    user_id: string
+    project_id: string | null
+    body: string
+  }) => void | Promise<void>
   now?: () => number
   log?: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void
   /**
@@ -160,7 +199,16 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       await commitPersona(deps, input.state, log)
 
       // (3) Projects — DB rows + topic bindings + on-disk materialization.
-      await materializeProjects(deps, input.state, import_result, now, log)
+      // Returns the projects that actually landed (created/existing, not the
+      // soft-deleted skips) so the per-project opening step below can seed each
+      // one's chat.
+      const materialized = await materializeProjects(
+        deps,
+        input.state,
+        import_result,
+        now,
+        log,
+      )
 
       // (4) Terminal state — flip to `completed`. This is the load-bearing
       // write: even if persona/projects partially failed, the user must not
@@ -183,7 +231,79 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       } catch (err) {
         log('warn', 'finalize: emitProjectsChanged failed', { err: errStr(err) })
       }
+
+      // (6) Per-project opening messages (item 7) — seed each newly-materialized
+      // project's chat with a content-aware opening (a summary + ONE next move),
+      // composed from the materialized docs (STATUS.md / README) with the import
+      // signal as fallback. Best-effort + isolated: one project's failure never
+      // blocks the others or the closing message.
+      // (7) Closing handoff message (item 6) — a deterministic General message
+      // pointing the owner at the populated rail. Emitted AFTER emitProjectsChanged
+      // so the projects are guaranteed present in the rail when it lands.
+      // Both run only when an emit seam is wired (LLM path).
+      if (deps.emitChatMessage !== undefined) {
+        await emitProjectOpenings(deps, input.user_id, materialized, import_result, log)
+        try {
+          await deps.emitChatMessage({
+            user_id: input.user_id,
+            project_id: null,
+            body: ONBOARDING_CLOSING_MESSAGE,
+          })
+        } catch (err) {
+          log('warn', 'finalize: closing message emit failed', { err: errStr(err) })
+        }
+      }
     },
+  }
+}
+
+/**
+ * Compose + emit the per-project opening message for each materialized project.
+ * Reuses the SAME deterministic opening composer + doc reader the legacy
+ * phase-machine handoff (`build-onboarding-handoff.ts`) used, so Path-1 and the
+ * legacy path produce identical opening prose. Each project is isolated; a doc-
+ * read or emit failure for one project is logged and skipped.
+ */
+async function emitProjectOpenings(
+  deps: OnboardingFinalizeDeps,
+  user_id: string,
+  materialized: MaterializedProject[],
+  import_result: ImportResult | null,
+  log: NonNullable<OnboardingFinalizeDeps['log']>,
+): Promise<void> {
+  if (materialized.length === 0 || deps.emitChatMessage === undefined) return
+  const readProjectDoc = buildProjectDocReader({ owner_home: deps.owner_home })
+  const proposedByName = indexProposedProjects(import_result)
+  for (const project of materialized) {
+    try {
+      const docs: ProjectOpeningDocs = {
+        readme: readProjectDoc(project.project_id, 'README.md'),
+        transcript_summary: readProjectDoc(
+          project.project_id,
+          join('docs', 'transcript-summary.md'),
+        ),
+        status_md: readProjectDoc(project.project_id, 'STATUS.md'),
+      }
+      // Match the import signal the same way the handoff hook does: a direct
+      // `proposed_projects` row by name, else a cross-project synthesized
+      // stand-in, else null (the composer then leans on the materialized docs).
+      const matched = proposedByName.get(project.name.toLowerCase()) ?? null
+      const effectiveMatch =
+        matched ?? synthesizeMatchFromSignal(project.name, findRelatedImportSignal(project.name, import_result))
+      const composition = buildDeterministicProjectOpening(project.name, effectiveMatch, docs)
+      const body = finalizeOpeningBody(composition.body)
+      if (body.trim().length === 0) continue
+      await deps.emitChatMessage({
+        user_id,
+        project_id: project.project_id,
+        body,
+      })
+    } catch (err) {
+      log('warn', 'finalize: per-project opening emit failed; continuing', {
+        project: project.name,
+        err: errStr(err),
+      })
+    }
   }
 }
 
@@ -247,12 +367,21 @@ function defaultArchetypeDataDirFromRepo(): string {
 // Projects
 // ---------------------------------------------------------------------------
 
+/** A project that actually landed a DB row this finalize (created or pre-
+ *  existing, NOT a soft-deleted skip) — the set the per-project opening step
+ *  seeds. `project_id` is the canonical bind id the topic + on-disk repo key on. */
+interface MaterializedProject {
+  project_id: string
+  name: string
+}
+
 /**
  * For each named project (or each `import_result.proposed_projects` entry when
  * an import drives finalize), create the real `projects` row + its cli
  * wow-shell `topics` binding, then materialize the on-disk doc set + memory
  * page. Each project is isolated: one project's failure never blocks its
  * siblings, and a materialization failure never rolls back the committed rows.
+ * Returns the projects that landed a row (skips excluded) for the opening step.
  */
 async function materializeProjects(
   deps: OnboardingFinalizeDeps,
@@ -260,12 +389,13 @@ async function materializeProjects(
   import_result: ImportResult | null,
   now: () => number,
   log: NonNullable<OnboardingFinalizeDeps['log']>,
-): Promise<void> {
+): Promise<MaterializedProject[]> {
   const projects = resolveProjects(state, import_result)
   if (projects.length === 0) {
     log('info', 'no projects to materialize', {})
-    return
+    return []
   }
+  const materialized: MaterializedProject[] = []
 
   // Shared materializer — the SAME CC-substrate doc composer (optional) +
   // GBrain page indexer the user-initiated create-project capability uses
@@ -303,6 +433,9 @@ async function materializeProjects(
         slug: bind_id,
         import_result,
       })
+      // Record the landed project so the opening-message step can seed its
+      // chat. Keyed on the resolved bind id (matches the topic + on-disk repo).
+      materialized.push({ project_id: bind_id, name: project.name.trim() })
     } catch (err) {
       // Isolate: log this project's failure and continue with the rest.
       log('warn', 'project materialize failed; continuing', {
@@ -311,6 +444,7 @@ async function materializeProjects(
       })
     }
   }
+  return materialized
 }
 
 /** The names the user gave conversationally — `phase_state.primary_projects`

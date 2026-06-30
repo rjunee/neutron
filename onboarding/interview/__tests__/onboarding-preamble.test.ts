@@ -58,6 +58,45 @@ describe('buildOnboardingPreamble — import offer ordering', () => {
   })
 })
 
+describe('buildOnboardingPreamble — defined archetypes + options + name + closing (2026-06-30)', () => {
+  it('injects the DEFINED named-character set at the personality step (not "improvise flavors")', () => {
+    const out = buildOnboardingPreamble({ import_offered: false })
+    // The stable curated figures from the personality-character suggester.
+    expect(out).toContain('Sherlock Holmes')
+    expect(out).toContain('Marcus Aurelius')
+    expect(out).toContain('Yoda')
+    // It must tell the agent to offer THESE, not invent a different list.
+    expect(out).toContain('do not invent a different list')
+    // The old improvise instruction is gone.
+    expect(out).not.toContain('Offer a couple of')
+  })
+
+  it('documents the [[OPTIONS]] protocol for tappable choice steps', () => {
+    const out = buildOnboardingPreamble({ import_offered: false })
+    expect(out).toContain('[[OPTIONS]]')
+    expect(out).toContain('[[/OPTIONS]]')
+    // The agent is told the option text routes back verbatim + freeform still works.
+    expect(out).toContain('exactly what gets sent')
+    expect(out.toLowerCase()).toContain('just type')
+  })
+
+  it('mandates verbatim custom-name acceptance and no re-asking', () => {
+    const out = buildOnboardingPreamble({ import_offered: false })
+    expect(out).toContain('accept ANY name they give')
+    expect(out).toContain('NEVER re-ask for a name they already gave')
+    // The concrete example from the live regression.
+    expect(out).toContain('Ferin')
+  })
+
+  it('wrap-up points the owner at the left rail + Plan (closing handoff, secondary)', () => {
+    const out = buildOnboardingPreamble({ import_offered: false })
+    expect(out).toContain('left rail')
+    expect(out).toContain('Plan')
+    // Mentions the automatic confirmation so the agent keeps the wrap-up brief.
+    expect(out).toContain('sent')
+  })
+})
+
 describe('buildImportAnalysisContextFragment — curation handoff', () => {
   const PROPOSED = [
     { name: 'Amascence launch', rationale: 'biggest open thread' },

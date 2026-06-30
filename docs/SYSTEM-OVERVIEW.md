@@ -481,6 +481,48 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > "no-narrowing" invariant (present every proposed project the user could confirm)
 > is preserved.
 
+> **Onboarding live-path content fixes — archetypes, option buttons, closing +
+> per-project openings (2026-06-30).** Five Path-1 onboarding regressions Ryan hit
+> live-testing, all wired INTO the live CC session (no phase-machine revival, no
+> flags):
+> - **Defined archetypes (item 1).** `onboarding-preamble.ts` no longer tells the
+>   model to "offer a couple of concrete flavors" (which it improvised
+>   inconsistently). It injects the DEFINED named-character set
+>   (`STATIC_PERSONALITY_CHARACTER_FALLBACK` from
+>   `personality-character-suggester.ts` — Sherlock / Marcus Aurelius / Miyagi /
+>   Yoda / Atticus) at the personality step and offers THOSE.
+> - **Option buttons (item 2).** The live onboarding turn used to emit
+>   `options: []` always, so the React client (which already renders an
+>   `agent_message`'s `options[]` as buttons + routes a tap back via
+>   `on_button_choice → user_text = option.value`) never got any. The preamble now
+>   instructs the agent to append a `[[OPTIONS]] … [[/OPTIONS]]` block on choice
+>   steps; `build-live-agent-turn.ts:extractAgentOptions` parses it out of the
+>   collected reply ON ONBOARDING TURNS ONLY, strips it from the body, and emits
+>   the lines as buttons (label legend + display body + a routing `value` that is
+>   the line text, byte-capped to the wire budget). `allow_freeform` stays true.
+>   Server-side structured-choice detection — NOT a tool-surface change (the warm
+>   REPL `--tools` allow-list must stay constant per the reuse guard).
+> - **Custom-name capture (item 3).** The preamble mandates accepting ANY typed
+>   name verbatim and never re-asking a name already given (the "Ferin got
+>   re-asked" regression); name suggestions are offered as `[[OPTIONS]]`.
+> - **Closing handoff (item 6).** `build-onboarding-finalize.ts` previously emitted
+>   NO closing — the interview went silent after the last answer. It now takes an
+>   `emitChatMessage` dep (wired in `open/composer.ts` to the SAME durable-history
+>   + live-fan path a live-agent reply uses: a `button_prompts` row on
+>   `app:<user>[:<project>]` that `chat_history_surface` hydrates + a
+>   `buildAppWsSendReply` socket push) and, AFTER `emitProjectsChanged`, emits a
+>   deterministic General closing pointing at the populated left rail ("open one to
+>   find its Plan, Documents, and Chat" — "Plan", not "Work Board").
+> - **Per-project opening (item 7).** Finalize now seeds each materialized
+>   project's chat with a content-aware opening (summary + ONE next move) composed
+>   by the SAME deterministic composer the legacy handoff used
+>   (`build-onboarding-handoff.ts:buildDeterministicProjectOpening`, reading the
+>   materialized `STATUS.md`/`README.md`), delivered into the project's app-ws
+>   topic `app:<user>:<project>` (the key the live-agent reply path + the client's
+>   per-project chat read from). SIBLING-PR COORDINATION: the web-client PR is
+>   making the client read per-project topics; the opening lands on the project's
+>   canonical app-ws topic, reconciled at merge.
+
 The React web client (`landing/chat-react/`) is **registry-driven** too, and
 since the 2026-06-30 rework `chat-react/ProjectShell.tsx` is the **APP SHELL**:
 a persistent `TopicRail` left column (lifted out of `ChatApp`) + a content pane

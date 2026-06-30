@@ -83,6 +83,7 @@ import {
 import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
 import { resolveOnboardingOpenAiKey } from '../gateway/realmode-composer/resolve-onboarding-openai-key.ts'
 import { DocSearchIndex } from '../doc-search/store.ts'
@@ -180,6 +181,7 @@ import {
 } from '../persistence/index.ts'
 import { InMemoryConsumedTokens } from '../runtime/consumed-tokens-in-memory.ts'
 import type { ButtonChoice, ButtonPrompt } from '../channels/button-primitive.ts'
+import { buildButtonPrompt } from '../channels/button-primitive.ts'
 import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
@@ -2026,9 +2028,21 @@ export function buildOpenGraphComposer(
         createProjectAndRefresh({ name, user_id: speaker_user_id }),
     }
 
+    // Path-1 closing + per-project opening delivery (items 6/7, 2026-06-30).
+    // `buildOnboardingFinalize` runs fire-and-forget from the post-turn extractor
+    // (constructed below) and from the import-completion watcher; the live agent
+    // message delivery path (`buildAppWsSendReply`) is defined much later in this
+    // closure. A late-bound holder forward-references it without a use-before-init
+    // hazard: `.emit` is assigned right after `buildAppWsSendReply` exists, and is
+    // only ever CALLED at finalize time (long after boot). Mirrors the
+    // `importWatchHolder` / `appWsButtonPromptRouter` late-binding pattern.
+    const onboardingMsgHolder: {
+      emit?: (input: { user_id: string; project_id: string | null; body: string }) => Promise<void>
+    } = {}
     // Path 1 finalize seam: persona compose+commit + project materialization
-    // (DB rows + topics + docs + gbrain) + mark completed + rail refresh. Wired
-    // only when the box has an LLM path (onboarding can't run LLM-less anyway).
+    // (DB rows + topics + docs + gbrain) + mark completed + rail refresh +
+    // per-project opening + closing handoff message. Wired only when the box has
+    // an LLM path (onboarding can't run LLM-less anyway).
     const onboardingFinalizer =
       onboardingAnthropicClient !== null
         ? buildOnboardingFinalize({
@@ -2040,6 +2054,8 @@ export function buildOpenGraphComposer(
             ...(projectDocComposer !== null ? { projectDocComposer } : {}),
             gbrainSyncHook,
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
+            emitChatMessage: (input): Promise<void> =>
+              onboardingMsgHolder.emit?.(input) ?? Promise.resolve(),
           })
         : null
     // Authoritative in-flight-import probe — gates onboarding completion against
@@ -2302,6 +2318,54 @@ export function buildOpenGraphComposer(
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
         void appWsHolder.adapter?.send(msg)
       }
+    // Path-1 closing + per-project opening delivery (items 6/7). Deliver a
+    // finalize-composed agent message the SAME way a live-agent reply is
+    // delivered: persist a durable `button_prompts` history row on the topic
+    // (`app:<user>` for the General closing, `app:<user>:<project>` for a
+    // project opening) — the topic `chat_history_surface` hydrates from — AND
+    // fan it live via `buildAppWsSendReply` (→ adapter durable chat_log + socket
+    // push). So the message renders live when the owner is connected and
+    // hydrates on reload, exactly like every other agent turn. Best-effort: a
+    // persistence failure still ships the live message; nothing throws back into
+    // finalize. NOTE (sibling client PR coordination): the React client reads a
+    // project's chat off this `app:<user>:<project>` topic — the same key the
+    // live-agent reply path uses — so the opening lands where the client subscribes.
+    onboardingMsgHolder.emit = async ({ user_id, project_id, body }): Promise<void> => {
+      const channelTopic = appWsTopicId(user_id)
+      const turnTopic =
+        project_id !== null && project_id.length > 0
+          ? `${channelTopic}:${project_id}`
+          : channelTopic
+      let prompt_id: string | undefined
+      try {
+        const prompt = buildButtonPrompt({
+          body,
+          options: [],
+          allow_freeform: true,
+          // Long TTL so the history row never hits the unresolved-prompt ghost
+          // filter (mirrors the live-agent reply row's REPLY_ROW_TTL_MS).
+          expires_in_ms: 10 * 365 * 24 * 60 * 60 * 1_000,
+          uuid: randomUUID,
+        })
+        const emitted = await landing.buttonStore.emit(prompt, { topic_id: turnTopic })
+        prompt_id = emitted.prompt_id
+      } catch (err) {
+        console.warn(
+          `[open] event=onboarding_msg_persist_failed project=${project_slug} topic=${turnTopic} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+      const out: ChatOutbound = {
+        type: 'agent_message',
+        body,
+        topic_id: turnTopic,
+        options: [],
+        allow_freeform: true,
+        ...(prompt_id !== undefined ? { prompt_id } : {}),
+      }
+      buildAppWsSendReply(channelTopic, project_id ?? undefined)(out)
+    }
     // Chat transport — server-authoritative typing indicator. Fan an ephemeral
     // `agent_typing` frame (start/end) directly to the socket topic's live
     // devices around every live-agent turn. NOT routed through the adapter's

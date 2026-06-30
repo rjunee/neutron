@@ -170,6 +170,65 @@ green; leak-gate SILENT. Files: `gateway/http/app-ws-surface.ts`,
 `tabs/registry.ts`, `landing/chat-react/{ProjectShell,ChatApp,DocumentsTab,
 controller,config,main,Markdown}.tsx?`, `landing/chat-react.html`,
 `landing/package.json`.
+## 2026-06-30 — Onboarding live-path: archetypes + option buttons + custom-name + closing + per-project openings
+
+Five Path-1 onboarding content/flow regressions Ryan hit live-testing, all wired
+INTO the live CC session (no phase-machine revival, no feature flags, one path).
+
+**(1) Defined personality archetypes instead of improvised "flavors."**
+`onboarding/interview/onboarding-preamble.ts` told the model to "offer a couple of
+concrete flavors" at the personality step → it improvised a different trio every
+run. It now injects the DEFINED named-character set
+(`STATIC_PERSONALITY_CHARACTER_FALLBACK` from `personality-character-suggester.ts`
+— Sherlock Holmes / Marcus Aurelius / Mr. Miyagi / Yoda / Atticus Finch) and tells
+the agent to offer THOSE, presented as buttons (item 2).
+
+**(2) Quick-select OPTION BUTTONS on choice steps.** The live onboarding turn
+always emitted `options: []`, so the React client — which already renders an
+`agent_message`'s `options[]` as tappable buttons and routes a tap back through
+`on_button_choice` (`open/composer.ts`) as the next turn's `user_text = option.value`
+— never received any. The preamble now instructs the agent to append a
+`[[OPTIONS]] … [[/OPTIONS]]` block AFTER its prose question on genuine choice
+steps; `build-live-agent-turn.ts:extractAgentOptions` parses the block out of the
+collected reply ON ONBOARDING TURNS ONLY, strips it from the rendered body, and
+emits the lines as buttons (letter-legend label + display body + a routing `value`
+that is the line text itself, deduped + byte-capped to the 37-byte wire budget).
+`allow_freeform` stays true (typing always works). Server-side structured-choice
+detection — NOT a `--tools` surface change (the warm REPL's allow-list must stay
+constant per the reuse guard).
+
+**(3) Reliable custom-name capture.** The preamble now mandates accepting ANY name
+the owner gives — typed OR tapped — verbatim, confirming and moving on, and NEVER
+re-asking a name already given (the "Ferin got re-asked" regression). Name
+suggestions are offered as `[[OPTIONS]]` per #2.
+
+**(6) Closing handoff message.** `build-onboarding-finalize.ts` emitted NO closing
+— the interview went silent after the last answer. It now takes an `emitChatMessage`
+dep (wired in `open/composer.ts` to the SAME durable-history + live-fan path a
+live-agent reply uses: a `button_prompts` row on `app:<user>[:<project>]` that the
+topic `chat_history_surface` hydrates + a `buildAppWsSendReply` socket push) and,
+AFTER `emitProjectsChanged`, emits a deterministic General closing pointing at the
+populated left rail ("open one to find its Plan, Documents, and Chat" — uses "Plan",
+not "Work Board"). Emitted from finalize (not just the preamble) so the projects
+are guaranteed in the rail when it lands.
+
+**(7) Per-project opening message.** Path-1 finalize materialized projects with
+rich docs but seeded no opening chat message. `materializeProjects` now returns the
+landed projects, and finalize composes each one's opening (summary + ONE next move)
+via the SAME deterministic composer the legacy phase-machine handoff used
+(`build-onboarding-handoff.ts:buildDeterministicProjectOpening`, reading the
+materialized `STATUS.md`/`README.md` with the import signal as fallback), delivering
+it into the project's app-ws topic `app:<user>:<project>` — the key the live-agent
+reply path and the client's per-project chat read from. SIBLING-PR COORDINATION:
+the concurrent web-client PR is making the client read per-project topics; the
+opening lands on the project's canonical app-ws topic, reconciled at merge.
+
+Tests: `extractAgentOptions` parsing + onboarding-vs-steady-state emission
+(`build-live-agent-turn-options.test.ts`); finalize closing + per-project openings
++ no-seam-still-completes (`build-onboarding-finalize.test.ts`); preamble archetypes
+/ options protocol / custom-name / rail+Plan wrap-up (`onboarding-preamble.test.ts`).
+`tsc` clean; existing live-agent-turn / handoff / chat-bridge / production-composer
+suites still green.
 
 ## 2026-06-30 — M1 onboarding/UI cleanup batch (3 minor verify-pass fixes)
 

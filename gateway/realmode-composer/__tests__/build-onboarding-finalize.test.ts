@@ -467,3 +467,62 @@ test('finalize preserves an EXPLICIT user add even when its name collides with a
 
   h.db.close()
 })
+
+test('finalize emits a General closing message + one per-project opening (items 6/7)', async () => {
+  const h = makeHarness()
+  // Capture every emitChatMessage call.
+  const emitted: Array<{ user_id: string; project_id: string | null; body: string }> = []
+  const deps: OnboardingFinalizeDeps = {
+    ...h.deps,
+    emitChatMessage: (input): void => void emitted.push(input),
+  }
+
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      agent_name: 'Atlas',
+      primary_projects: ['Topline Revenue', 'Home Assistant'],
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // Exactly one General closing (project_id === null) pointing at the rail + Plan.
+  const closings = emitted.filter((e) => e.project_id === null)
+  expect(closings).toHaveLength(1)
+  expect(closings[0]!.user_id).toBe(USER_ID)
+  expect(closings[0]!.body).toMatch(/left rail/i)
+  expect(closings[0]!.body).toMatch(/Plan/)
+  // No em dashes leaked into the closing (Sam hard rule).
+  expect(closings[0]!.body).not.toContain('—')
+
+  // One opening per materialized project, keyed on the project's slug id.
+  const openings = emitted.filter((e) => e.project_id !== null)
+  const openingIds = openings.map((e) => e.project_id).sort()
+  expect(openingIds).toEqual(
+    [slugifyProjectId('Topline Revenue'), slugifyProjectId('Home Assistant')].sort(),
+  )
+  // Each opening has a non-empty body.
+  for (const o of openings) expect(o.body.trim().length).toBeGreaterThan(0)
+
+  h.db.close()
+})
+
+test('finalize without an emitChatMessage seam still completes (no closing/opening)', async () => {
+  const h = makeHarness() // deps has NO emitChatMessage
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { primary_projects: ['Topline Revenue'] },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+  const after = await h.stateStore.get(PROJECT_SLUG, USER_ID)
+  expect(after?.phase).toBe('completed')
+  h.db.close()
+})
