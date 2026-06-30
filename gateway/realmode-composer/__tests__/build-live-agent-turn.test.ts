@@ -245,6 +245,8 @@ describe('build-live-agent-turn — reply path', () => {
     await run(makeTurn({ sent }))
     // P1-5: the live agent surface now includes `Skill` (native skill discovery +
     // invocation) plus the file/exec tools the bundled skills need to run.
+    // Work Board Phase 2a adds `Workflow` (fire background tridents + stay
+    // responsive) — a constant-surface addition.
     expect(specs[0]!.tools.map((t) => t.name)).toEqual([
       'Read',
       'Glob',
@@ -253,6 +255,7 @@ describe('build-live-agent-turn — reply path', () => {
       'Edit',
       'Bash',
       'Skill',
+      'Workflow',
     ])
   })
 })

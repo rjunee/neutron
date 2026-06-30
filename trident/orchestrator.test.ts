@@ -5,17 +5,21 @@ import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
 import { ProjectDb } from '../persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
-import type { InnerLoopInput, InnerLoopResult, TridentInnerLoop } from './inner-loop.ts'
+import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
+import { buildSimFirer, type SimPlan } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
 
 /**
- * Trident v2 — the orchestrator step is now INNER-LOOP-driven: it launches one
- * CC Dynamic Workflow per run via an injected `TridentInnerLoop`, then merges on
- * APPROVE / fails on REQUEST_CHANGES (maxRounds) or a crashed dispatch. These
- * tests inject a FAKE `TridentInnerLoop` (no live claude / Workflow tool).
+ * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
+ * one CC Dynamic Workflow per run (the launching turn settles immediately) and
+ * HARVESTS the workflow's TYPED terminal result from `code_trident_runs.
+ * inner_result` by runId, server-gating a merge-eligible APPROVE against the
+ * recorded `inner_checkpoint='argus-approved'`. These tests inject a FAKE firer
+ * (`buildSimFirer`) whose simulated workflow writes its result to the DB on a
+ * `complete()` drain — no live `claude` / `Workflow` tool.
  */
 
 let tmp: string
@@ -36,58 +40,55 @@ afterEach(() => {
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 
-const result = (over: Partial<InnerLoopResult> = {}): InnerLoopResult => ({
-  status: 'completed',
-  verdict: 'APPROVE',
-  pr_number: 42,
-  branch: 'feat-x',
-  round: 1,
-  checkpoint: 'argus-approved',
-  raw: '',
-  ...over,
-})
-
 interface Harness {
   loop: TridentTickLoop
-  drain: () => Promise<void>
+  /** Flush queued workflow completions (write their `inner_result` to the DB). */
+  complete: () => Promise<void>
   hostCalls: string[][]
   inputs: InnerLoopInput[]
 }
 
 function buildHarness(opts: {
-  inner_loop: TridentInnerLoop
+  plan: (input: InnerLoopInput) => SimPlan
   hostResponder?: (cmd: string[]) => HostCommandResult
   on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
   mint_run_id?: () => string
+  now?: () => string
+  max_inflight_ms?: number
 }): Harness {
   const hostCalls: string[][] = []
-  const inputs: InnerLoopInput[] = []
-  const inner_loop: TridentInnerLoop = (input) => {
-    inputs.push(input)
-    return opts.inner_loop(input)
-  }
+  const now = opts.now ?? (() => new Date(0).toISOString())
+  // Bind the store to the SAME clock as the orchestrator so `last_advanced_at`
+  // (re-stamped by store.save) and the orchestrator's stall computation share one
+  // time base — production runs both on wall-clock; the tests run both on the
+  // fake clock (mismatched clocks would make `elapsedSinceAdvance` meaningless).
+  store = new TridentRunStore(db, now)
+  const sim = buildSimFirer(store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
     return opts.hostResponder ? opts.hostResponder(cmd) : ok()
   }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
-    inner_loop,
+    fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),
     run_host: host,
     base_branch: 'main',
-    now: () => new Date(0).toISOString(),
+    now,
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
+  if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({ store, step: orch.step })
-  return { loop, drain: orch.drain, hostCalls, inputs }
+  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs }
 }
 
+/** Tick, then simulate the in-flight workflow finishing (write its result), so a
+ *  fired run reaches its harvest on the next tick. */
 async function runToTerminal(h: Harness, run_id: string, max_ticks = 20): Promise<TridentRun> {
   for (let i = 0; i < max_ticks; i++) {
     await h.loop.runOnce()
-    await h.drain()
+    await h.complete()
     const r = store.get(run_id)
     if (r !== null && isTerminalPhase(r.phase)) return r
   }
@@ -106,9 +107,11 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
   })
 }
 
-describe('orchestrator — APPROVE → done → merge', () => {
-  test('pr mode: launches the inner loop, merges PR, persists inner_verdict', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ verdict: 'APPROVE', pr_number: 42 }) })
+describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
+  test('pr mode: fires, harvests inner_result, merges PR, persists inner_verdict', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+    })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
     const final = await runToTerminal(h, run.id)
@@ -119,12 +122,12 @@ describe('orchestrator — APPROVE → done → merge', () => {
     expect(final.inner_checkpoint).toBe('argus-approved')
     expect(final.workflow_run_id).not.toBeNull()
     expect(h.hostCalls.map((c) => c.join(' '))).toContain('gh pr merge 42 --squash')
-    // exactly one inner-loop dispatch.
+    // exactly one fire.
     expect(h.inputs.length).toBe(1)
   })
 
   test('local mode: merges branch into base locally, never calls gh merge', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ branch: 'feat-x' }) })
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
     const run = await createRun({ merge_mode: 'local' as MergeMode })
 
     const final = await runToTerminal(h, run.id)
@@ -136,9 +139,31 @@ describe('orchestrator — APPROVE → done → merge', () => {
   })
 })
 
+describe('orchestrator — server-gated verdict provenance', () => {
+  test('a self-asserted APPROVE with no recorded argus-approved checkpoint is REJECTED → failed (no merge)', async () => {
+    // The workflow's result claims APPROVE, but the recorded provenance checkpoint
+    // is argus-request-changes — the merge gate must NOT trust the result line.
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' },
+        argusCheckpoint: 'argus-request-changes',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('provenance gate')
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
+  })
+})
+
 describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', () => {
   test('a REQUEST_CHANGES inner result fails the run without merging', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ verdict: 'REQUEST_CHANGES', round: 3 }) })
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', round: 3, prNumber: 7, branch: 'feat-x' } }),
+    })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
     const final = await runToTerminal(h, run.id)
@@ -149,47 +174,36 @@ describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', ()
   })
 })
 
-describe('orchestrator — crashed / timed-out inner loop → failed', () => {
-  test('a crashed inner loop fails the run (no silent success)', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ status: 'failed', verdict: null }) })
+describe('orchestrator — fire did not settle → failed', () => {
+  test('a fire that fails to settle fails the run (no silent success)', async () => {
+    const fail: FireOutcome = { status: 'failed', error: 'fire turn closed without a completion event' }
+    const h = buildHarness({ plan: () => ({ fire: fail }) })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
-    const final = await runToTerminal(h, run.id)
-    expect(final.phase).toBe('failed')
-    expect(final.subagent_status).toBe('failed')
-    expect(final.failure_reason).toContain('failed')
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('fire failed')
   })
 
-  test('a timed-out inner loop fails the run', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ status: 'timed_out', verdict: null }) })
+  test('a failed fire outcome fails the run', async () => {
+    const h = buildHarness({ plan: () => ({ fire: { status: 'failed', error: 'boom' } }) })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
-    const final = await runToTerminal(h, run.id)
-    expect(final.phase).toBe('failed')
-    expect(final.failure_reason).toContain('timed_out')
-  })
-
-  test('an inner loop that THROWS is caught and fails the run', async () => {
-    const h = buildHarness({
-      inner_loop: async () => {
-        throw new Error('boom in the workflow')
-      },
-    })
-    const run = await createRun({ merge_mode: 'pr' as MergeMode })
-    const final = await runToTerminal(h, run.id)
-    expect(final.phase).toBe('failed')
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).toBe('failed')
   })
 })
 
 describe('orchestrator — idempotent crash-resume', () => {
   test('a prior partial run threads resume_checkpoint + reuses the existing PR (no dup)', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ verdict: 'APPROVE', pr_number: 7 }) })
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' } }) })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     // Simulate a crash that left a checkpoint + an opened PR on the row.
     await store.update(run.id, { pr: 7, inner_checkpoint: 'argus-request-changes' })
 
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
-    // The inner loop was launched with the resume checkpoint + the existing PR.
+    // The workflow was fired with the resume checkpoint + the existing PR.
     expect(h.inputs).toHaveLength(1)
     expect(h.inputs[0]!.resume_checkpoint).toBe('argus-request-changes')
     expect(h.inputs[0]!.run.pr).toBe(7)
@@ -197,24 +211,78 @@ describe('orchestrator — idempotent crash-resume', () => {
 
   test('when the row has no PR but gh finds one, it is folded in (no duplicate open)', async () => {
     const h = buildHarness({
-      inner_loop: async () => result({ verdict: 'APPROVE', pr_number: 99 }),
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 99, branch: 'feat-x' } }),
       hostResponder: (cmd) => (cmd.includes('pr') && cmd.includes('list') ? ok('99') : ok()),
     })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
-    // gh pr list was consulted and the discovered PR threaded into the dispatch.
     expect(h.hostCalls.some((c) => c.join(' ').includes('gh pr list --head feat-x'))).toBe(true)
     expect(h.inputs[0]!.run.pr).toBe(99)
   })
 })
 
-describe('orchestrator — orphan recovery', () => {
-  test('redispatch (default) relaunches a lost dispatch exactly once, resuming from the checkpoint', async () => {
-    const h = buildHarness({ inner_loop: async () => result({ verdict: 'APPROVE' }) })
+describe('orchestrator — crash-safe harvest (result survives a restart)', () => {
+  test('a run whose workflow wrote inner_result before a restart HARVESTS (never re-fires)', async () => {
+    // A run dispatched by a PRIOR process (subagent_run_id set, NOT in this
+    // process's `fired` set) that already wrote a terminal result must harvest,
+    // not orphan-redispatch — the durable result, not the lost dispatch, wins.
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'REQUEST_CHANGES' } }) /* unused */ })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
-    // A run whose dispatch was lost on restart (stale id, persisted checkpoint).
+    await store.update(run.id, {
+      subagent_run_id: 'lost-dispatch-from-prior-process',
+      subagent_status: 'running',
+      pr: 5,
+      inner_checkpoint: 'argus-approved',
+      inner_verdict: 'APPROVE',
+      inner_result: JSON.stringify({
+        ok: true,
+        prNumber: 5,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 1,
+        checkpoint: 'argus-approved',
+      }),
+    })
+
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('done')
+    expect(after?.pr).toBe(5)
+    // No fire happened — the result was harvested straight from the DB.
+    expect(h.inputs).toHaveLength(0)
+  })
+})
+
+describe('orchestrator — stalled workflow guard', () => {
+  test('a fired workflow that never writes a result past max_inflight_ms is reaped', async () => {
+    let t = 0
+    const h = buildHarness({
+      // Fire settles, but the workflow NEVER writes a result (result null).
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      max_inflight_ms: 1_000,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce() // launch + fire (last_advanced_at = t=0)
+    expect(store.get(run.id)?.subagent_run_id).not.toBeNull()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    t = 5_000 // advance past max_inflight_ms with no checkpoint/result
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('stalled')
+  })
+})
+
+describe('orchestrator — orphan recovery', () => {
+  test('redispatch (default) re-fires a lost dispatch exactly once, resuming from the checkpoint', async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // A run whose dispatch was lost on restart (stale id, persisted checkpoint, no result).
     await store.update(run.id, {
       subagent_run_id: 'stale-id-from-prior-process',
       subagent_status: 'running',
@@ -224,21 +292,16 @@ describe('orchestrator — orphan recovery', () => {
 
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
-    // Exactly one (re)dispatch, carrying the persisted resume checkpoint.
     expect(h.inputs).toHaveLength(1)
     expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
   })
 
-  test("'wait' policy leaves the orphan untouched (no dispatch, no advance)", async () => {
-    const h = buildHarness({
-      inner_loop: async () => result(),
-      on_orphaned_session: 'wait',
-    })
+  test("'wait' policy leaves the orphan untouched (no fire, no advance)", async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE' } }), on_orphaned_session: 'wait' })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
 
     await h.loop.runOnce()
-    await h.drain()
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('done')
     expect(after?.subagent_run_id).toBe('STALE')
@@ -246,10 +309,7 @@ describe('orchestrator — orphan recovery', () => {
   })
 
   test("'fail' policy reaps the orphan loudly", async () => {
-    const h = buildHarness({
-      inner_loop: async () => result(),
-      on_orphaned_session: 'fail',
-    })
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE' } }), on_orphaned_session: 'fail' })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
 
@@ -262,33 +322,26 @@ describe('orchestrator — orphan recovery', () => {
   })
 })
 
-describe('orchestrator — resume safety (no double-launch)', () => {
-  test('a re-entrant tick while the inner loop is in flight does NOT launch again', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((r) => (release = r))
-    let calls = 0
-    const h = buildHarness({
-      inner_loop: async () => {
-        calls++
-        await gate
-        return result({ verdict: 'APPROVE' })
-      },
-    })
+describe('orchestrator — resume safety (no double-fire)', () => {
+  test('a re-entrant tick while the workflow is in flight does NOT fire again', async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' } }) })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
+    // Launch tick fires once; do NOT complete the workflow yet.
     await h.loop.runOnce()
     const afterLaunch = store.get(run.id)
     expect(afterLaunch?.subagent_run_id).not.toBeNull()
-    expect(calls).toBe(1)
+    expect(h.inputs).toHaveLength(1)
 
-    // Re-enter twice while the dispatch is still pending — must poll, not relaunch.
+    // Re-enter twice while the workflow is still in flight — must wait, not re-fire.
     await h.loop.runOnce()
     await h.loop.runOnce()
-    expect(calls).toBe(1)
+    expect(h.inputs).toHaveLength(1)
 
-    release()
-    await h.drain()
+    // Now let the workflow finish and harvest.
+    await h.complete()
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
+    expect(h.inputs).toHaveLength(1)
   })
 })

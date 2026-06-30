@@ -96,11 +96,20 @@ const REPLY_ROW_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1_000
  * `tools: []` default-deny (`--tools ""`), so neither gets `Skill` nor exec
  * access (the prompt-injection gate from Codex-r1-P1 is untouched).
  *
+ * `Workflow` (Work Board Phase 2a) exposes the native CC Dynamic Workflow tool
+ * on the orchestrator surface so the owner's live-chat agent can FIRE background
+ * tridents (and other workflows) directly + stay responsive while they run
+ * detached — the same exec-model the trident inner loop uses (the dedicated
+ * `cc-trident-fire-*` substrate fires the inner workflow; this grant readies the
+ * orchestrator itself to fire board-bound tridents in Phase 2b). Adding it is a
+ * CONSTANT-surface change: it is present on EVERY turn, so the reuse guard below
+ * is satisfied (a constant surface, just a larger one).
+ *
  * Constant across turns (the persistent substrate's reuse guard refuses to serve
  * a turn whose `--tools` surface differs from the warm REPL's, so a varying
  * surface would thrash the pool).
  */
-const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash', 'Skill'] as const
+const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash', 'Skill', 'Workflow'] as const
 
 /**
  * Fallback persona when the owner's persona files are missing (persona-gen

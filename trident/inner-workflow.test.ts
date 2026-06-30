@@ -220,3 +220,32 @@ describe('inner-workflow.mjs — mandatory worktree cleanup on ALL paths', () =>
     expect(SRC).toContain('node --check')
   })
 })
+
+// Work Board Phase 2a exec-model: the workflow runs DETACHED + the OUTER loop
+// harvests `inner_result` from the DB (no process/stdout). So the workflow must
+// persist its TYPED terminal result on EVERY terminal path — incl. a throw.
+describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () => {
+  test('writes inner_result via readfile() CAST AS TEXT (JSON-safe sqlite write)', () => {
+    expect(SRC).toContain('async function writeTerminalResult(')
+    // readfile()+CAST dodges the JSON double-quotes vs the sqlite shell argument.
+    expect(SRC).toContain("inner_result=CAST(readfile(")
+    expect(SRC).toContain('AS TEXT)')
+    // The harvest-ready signal is written on the SUCCESS path before returning.
+    expect(SRC).toContain('await writeTerminalResult(terminalResult)')
+    // …and on the RESUME-approved short-circuit.
+    expect(SRC).toContain('await writeTerminalResult(resumeResult)')
+  })
+
+  test('a THROWN workflow persists a terminal FAILURE result so the run fails PROMPTLY (Codex [P2])', () => {
+    // Without this, a crashed build writes no inner_result and the outer loop
+    // leaves it `running` until the 2 h stall guard. The catch writes a
+    // REQUEST_CHANGES failure result the next harvest tick fails on.
+    expect(SRC).toContain('} catch (err) {')
+    expect(SRC).toContain('trident-v2 inner THREW')
+    expect(SRC).toMatch(/const failureResult = \{[\s\S]*?verdict: 'REQUEST_CHANGES'/)
+    expect(SRC).toContain("checkpoint: 'inner-error'")
+    expect(SRC).toContain('await writeTerminalResult(failureResult)')
+    // Best-effort: a failure-write that itself throws falls back to the stall guard.
+    expect(SRC).toContain('terminal-failure write ALSO failed')
+  })
+})

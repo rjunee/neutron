@@ -25,7 +25,10 @@ import {
   renderForgePrompt,
 } from './prompts.ts'
 import { buildTridentOrchestrator, computeDiffLineCount } from './orchestrator.ts'
-import { buildClaudePrintArgs } from './inner-loop.ts'
+import { buildSubstrateWorkflowFire, type TridentWorkflowFirer } from './inner-loop.ts'
+import type { Event } from '../runtime/events.ts'
+import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
+import type { SessionHandle } from '../runtime/session-handle.ts'
 import { TridentSessionManager, type TridentDispatch } from './session.ts'
 import { computeTransition } from './state-machine.ts'
 import type { MergeMode, TridentRun } from './store.ts'
@@ -59,6 +62,7 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     workflow_run_id: null,
     inner_checkpoint: null,
     inner_verdict: null,
+    inner_result: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
     ...over,
@@ -124,14 +128,15 @@ describe('FIX 1 — spawn validation (no phantom in-flight)', () => {
 describe('FIX 2 — reap → bounded re-dispatch', () => {
   test('an untracked in-flight id re-dispatches exactly once, then waits (bounded)', async () => {
     let calls = 0
-    // The inner loop never settles, so the run stays in flight and the SAME run
-    // re-enters the orphan path on the next tick.
+    // The fire settles (the launching turn replies) but the simulated workflow
+    // writes NO result, so the run stays in flight — yet, now tracked in the
+    // process's `fired` set, it must NOT re-dispatch a second time.
+    const fire_workflow: TridentWorkflowFirer = async () => {
+      calls++
+      return { status: 'fired', error: null }
+    }
     const { step } = buildTridentOrchestrator({
-      inner_loop: async () => {
-        calls++
-        await new Promise<void>(() => {})
-        return { status: 'failed', verdict: null, pr_number: null, branch: null, round: 0, checkpoint: null, raw: '' }
-      },
+      fire_workflow,
       db_path: '/tmp/db',
       run_host: async () => ok(),
       base_branch: 'main',
@@ -146,7 +151,7 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     expect(run.subagent_run_id).not.toBeNull()
     expect(calls).toBe(1)
 
-    // Tracked now → the next step polls it (waiting), never a 2nd re-dispatch.
+    // Tracked now (in `fired`) → the next step waits, never a 2nd re-dispatch.
     const t2 = await step(run)
     expect(t2.waiting).toBe(true)
     expect(t2.run.subagent_run_id).toBe(run.subagent_run_id)
@@ -154,8 +159,9 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
   })
 
   test("'wait' policy never re-dispatches an orphan (operator-driven recovery)", async () => {
+    const fire_workflow: TridentWorkflowFirer = async () => ({ status: 'fired', error: null })
     const { step } = buildTridentOrchestrator({
-      inner_loop: async () => ({ status: 'completed', verdict: 'APPROVE', pr_number: 1, branch: 'feat-x', round: 1, checkpoint: 'argus-approved', raw: '' }),
+      fire_workflow,
       db_path: '/tmp/db',
       run_host: async () => ok(),
       base_branch: 'main',
@@ -351,19 +357,37 @@ describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
 // and the Fable opt-in was removed (export-control). Trident v2 analog: per-phase
 // model routing MOVED into the inner workflow's own agent() calls (the
 // orchestrator no longer carries forge_model/argus_model). The v2 invariant is
-// (a) the `claude -p` LAUNCHER pins a NON-Fable model (default `opus`) for the
-// print-mode process, while per-phase routing still lives in the workflow's own
-// agent() calls, and (b) export-control holds — the workflow never hard-pins a
-// Fable id.
+// (a) the FIRE seam pins a NON-Fable model (default `opus`) for the launching
+// turn, while per-phase routing still lives in the workflow's own agent() calls,
+// and (b) export-control holds — the workflow never hard-pins a Fable id.
 // ---------------------------------------------------------------------------
 describe('FIX 8 — model routing delegated to the workflow (export-control holds)', () => {
-  test('the inner-loop launcher pins a non-Fable model (default opus; per-phase routing lives in the workflow)', () => {
-    const args = buildClaudePrintArgs('launcher prompt', 'opus')
-    const mi = args.indexOf('--model')
-    expect(mi).toBeGreaterThanOrEqual(0)
-    expect(args[mi + 1]).toBe('opus')
-    // Export-control: the launcher argv never hard-pins a Fable model id.
-    expect(args.join(' ').toLowerCase()).not.toContain('fable')
+  test('the inner-loop FIRE seam pins a non-Fable model (default opus; per-phase routing lives in the workflow)', async () => {
+    const specs: AgentSpec[] = []
+    const substrate: Substrate = {
+      start(spec: AgentSpec): SessionHandle {
+        specs.push(spec)
+        const ev: Event = {
+          kind: 'completion',
+          usage: { input_tokens: 1, output_tokens: 1 } as never,
+          substrate_instance_id: 'cc-trident-fire-test',
+        }
+        return {
+          events: (async function* () {
+            yield ev
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ substrate })
+    await fire({ prompt: 'launcher prompt', cwd: '/repo', settle_timeout_ms: 1000 })
+    const pref = specs[0]!.model_preference
+    expect(pref[0]).toBe('opus')
+    // Export-control: the fire turn never pins a Fable model id.
+    expect(pref.join(' ').toLowerCase()).not.toContain('fable')
   })
 
   test('export-control: the inner workflow source never hard-pins a Fable model id', () => {

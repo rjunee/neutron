@@ -1,0 +1,37 @@
+-- 0091_code_trident_runs_inner_result.sql
+--
+-- Work Board Phase 2a — the trident inner-loop EXEC-MODEL rearchitecture.
+--
+-- The inner Forge→Argus→fix loop is one native CC Dynamic Workflow
+-- (`trident/inner-workflow.mjs`). The PRE-2a launcher spawned a BLOCKING
+-- `claude -p` print-mode subprocess that drained the background `Workflow` to
+-- completion, printed `TRIDENT_RESULT=<json>` to STDOUT, and the orchestrator
+-- parsed that stdout line into an IN-MEMORY dispatch map. That model is
+-- replaced: the dispatch now FIRES the `Workflow` tool on a WARM substrate and
+-- the launching turn SETTLES immediately (billing-exempt — Max-OAuth, NOT a
+-- per-build `claude -p` process), and the workflow itself runs in the
+-- BACKGROUND. There is no longer a process capturing stdout, so the workflow
+-- must persist its TYPED terminal result to the durable row, and the OUTER loop
+-- (`TridentTickLoop`) HARVESTS it from the DB by `runId` — deterministic TS,
+-- never an LLM-parsed stdout line.
+--
+-- * `inner_result` — the inner workflow's TYPED terminal result, written EXACTLY
+--   ONCE on its terminal path (`{ok, prNumber, branch, verdict, round,
+--   checkpoint}` as compact JSON) by its own `agent()` Bash step
+--   (`sqlite3 … UPDATE`), the same mechanism that writes `inner_checkpoint`
+--   mid-run. NON-NULL is the harvest-ready signal: the OUTER loop reads this
+--   row each tick and, once `inner_result` is set, parses the typed object,
+--   SERVER-GATES the merge-eligible verdict against the Argus-phase-recorded
+--   `inner_checkpoint` (an `APPROVE` is honoured only when
+--   `inner_checkpoint='argus-approved'`, never a self-asserted result line),
+--   advances the state machine, and merges. NULL while the workflow is in
+--   flight (or never launched).
+--
+-- STRICT-table-safe: a single nullable TEXT ADD COLUMN (SQLite forbids multiple
+-- ADD COLUMNs per ALTER; a STRICT table requires an added column to be nullable
+-- or carry a literal default — this is nullable).
+--
+-- Forward-only; no down-migration (Neutron OSS contract).
+
+ALTER TABLE code_trident_runs
+    ADD COLUMN inner_result TEXT;

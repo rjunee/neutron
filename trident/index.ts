@@ -126,25 +126,28 @@ export type {
   BuildTridentOrchestratorOptions,
 } from './orchestrator.ts'
 
-// Trident v2 — the inner Forge→Argus→fix loop as ONE native CC Dynamic Workflow
-// (`inner-workflow.mjs`), launched per run by `buildWorkflowInnerLoop`.
+// Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix loop as
+// ONE native CC Dynamic Workflow (`inner-workflow.mjs`), FIRED per run by
+// `buildWorkflowFirer` on a warm substrate (`buildSubstrateWorkflowFire`); the
+// launching turn settles immediately + the typed result is harvested from the DB.
 export {
-  buildWorkflowInnerLoop,
-  buildClaudePrintLauncher,
-  buildClaudePrintArgs,
-  buildLauncherMessage,
-  parseTridentResult,
+  buildWorkflowFirer,
+  buildSubstrateWorkflowFire,
+  buildFireWorkflowPrompt,
+  buildWorkflowArgs,
+  parseInnerResult,
   DEFAULT_INNER_WORKFLOW_PATH,
+  WORKFLOW_FIRE_TOOL_NAMES,
 } from './inner-loop.ts'
 export type {
-  TridentInnerLoop,
+  TridentWorkflowFirer,
   InnerLoopInput,
-  InnerLoopResult,
-  BuildWorkflowInnerLoopOptions,
-  LaunchInnerWorkflow,
-  LaunchInnerWorkflowInput,
-  LaunchInnerWorkflowResult,
-  ClaudePrintLauncherOptions,
+  InnerResult,
+  FireOutcome,
+  FireInnerWorkflow,
+  FireInnerWorkflowInput,
+  BuildWorkflowFirerOptions,
+  BuildSubstrateWorkflowFireOptions,
 } from './inner-loop.ts'
 
 // PR-5 — the thin `/code` entry into foundational Trident (retires the

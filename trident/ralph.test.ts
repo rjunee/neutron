@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
 import { ProjectDb } from '../persistence/index.ts'
 import { detectRalphMode, defaultRalphModeProbe, type HostCommandResult } from './git-mode.ts'
-import type { InnerLoopInput, InnerLoopResult } from './inner-loop.ts'
+import { buildSimFirer } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
@@ -72,14 +72,13 @@ describe('Ralph mode threads through to the inner loop', () => {
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  test('a governed run launches the inner loop with run.ralph === true', async () => {
-    const inputs: InnerLoopInput[] = []
-    const inner_loop = async (input: InnerLoopInput): Promise<InnerLoopResult> => {
-      inputs.push(input)
-      return { status: 'completed', verdict: 'APPROVE', pr_number: 5, branch: 'feat-governed', round: 1, checkpoint: 'argus-approved', raw: '' }
-    }
+  test('a governed run fires the inner workflow with run.ralph === true', async () => {
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 5, branch: 'feat-governed' },
+    }))
+    const inputs = sim.inputs
     const orch = buildTridentOrchestrator({
-      inner_loop,
+      fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       run_host: async () => ok(),
       base_branch: 'main',
@@ -98,7 +97,7 @@ describe('Ralph mode threads through to the inner loop', () => {
 
     for (let i = 0; i < 10; i++) {
       await loop.runOnce()
-      await orch.drain()
+      await sim.drain() // simulate the detached workflow finishing
       const r = store.get(run.id)
       if (r !== null && isTerminalPhase(r.phase)) break
     }
