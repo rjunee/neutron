@@ -58,6 +58,17 @@ assertions (assert against `BEST_MODEL` not a literal), and the import
 substrate-caller default assertions. tsc clean (root + trident); leak-gate
 SILENT; models/substrate/onboarding/cores/realmode-composer suites green.
 
+**Codex cross-model review follow-up.** Making the import default dynamic meant
+that, after the watchdog adopts a brand-new top-tier id with no pricing row yet,
+`resolvePricingFor(getBestModel())` (eager, at `buildPass{1,2}SubstrateCaller`
+construction) would throw and break onboarding/imports. Fixed by splitting the
+resolver: an EXPLICIT operator `model_preference`/`fallback_model_preference`
+keeps the strict loud-fail (typo protection), while the DYNAMIC always-latest
+default degrades to a $0 estimate (`dollars_billed` is telemetry-only) with a
+one-time warn — the import runs on the latest model regardless. Regression test
+added (`buildPass1/Pass2SubstrateCaller` construct + run on an unpriced
+watchdog-adopted model, billing $0).
+
 NOTE: `open/__tests__/open-projects-changed-wiring.test.ts` (one live-refresh
 timing test) fails on unmodified `origin/main` too — a pre-existing flake, not a
 regression from this change.

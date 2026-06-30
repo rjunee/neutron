@@ -25,7 +25,7 @@ import {
   buildPass2SubstrateCaller,
   extractJsonObject,
 } from '../substrate-callers.ts'
-import { FAST_MODEL, BEST_MODEL } from '../../../runtime/models.ts'
+import { FAST_MODEL, BEST_MODEL, setBestModelOverride } from '../../../runtime/models.ts'
 import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
 import type { Event } from '../../../runtime/events.ts'
 import type { SessionHandle } from '../../../runtime/session-handle.ts'
@@ -397,5 +397,49 @@ describe('extractJsonObject — defensive parsing', () => {
 
   test('garbage → null', () => {
     expect(extractJsonObject('this is not JSON at all')).toBeNull()
+  })
+})
+
+describe('always-latest (2026-06-30) — import survives a watchdog-adopted UNPRICED model', () => {
+  // Regression for the Codex cross-model review finding: the import default is
+  // now the dynamic getBestModel(); when the model-update watchdog adopts a
+  // brand-new top-tier id BEFORE a pricing row exists, the caller must NOT throw
+  // at construction (that would break onboarding/imports). dollars_billed is
+  // telemetry-only, so it degrades to $0 (with a one-time warn) instead.
+  const UNPRICED = 'claude-opus-9-9' // not in MODEL_PRICING_TABLE
+
+  test('buildPass1SubstrateCaller constructs + runs, billing $0 on an unpriced latest model', async () => {
+    setBestModelOverride(UNPRICED)
+    try {
+      const { substrate, calls } = makeSubstrateStub([
+        { kind: 'token', text: '{"candidate_entities":[]}' },
+        { kind: 'completion', usage: { input_tokens: 100, output_tokens: 50 }, substrate_instance_id: 'cc' },
+      ])
+      // Must NOT throw at construction (the regression).
+      const pass1 = buildPass1SubstrateCaller({ substrate })
+      const out = await pass1({ chunk: makeChunk(), prompt: 'P1' })
+      // The import RAN on the latest (unpriced) model…
+      expect(calls[0]!.spec.model_preference[0]).toBe(UNPRICED)
+      // …and billing degraded to $0 rather than crashing.
+      expect(out.dollars_billed).toBe(0)
+    } finally {
+      setBestModelOverride(undefined)
+    }
+  })
+
+  test('buildPass2SubstrateCaller constructs + runs on an unpriced latest model', async () => {
+    setBestModelOverride(UNPRICED)
+    try {
+      const { substrate, calls } = makeSubstrateStub([
+        { kind: 'token', text: '{"projects":[]}' },
+        { kind: 'completion', usage: { input_tokens: 10, output_tokens: 5 }, substrate_instance_id: 'cc' },
+      ])
+      const pass2 = buildPass2SubstrateCaller({ substrate })
+      const out = await pass2({ aggregated: makeAggregated(), prompt: 'P2' })
+      expect(calls[0]!.spec.model_preference[0]).toBe(UNPRICED)
+      expect(out.dollars_billed).toBe(0)
+    } finally {
+      setBestModelOverride(undefined)
+    }
   })
 })
