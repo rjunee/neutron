@@ -2762,12 +2762,26 @@ export function buildOpenGraphComposer(
               importWatchHolder.watch(user_id)
             }
           }
-          if (appWsChatTurn !== null && !seededOnboardingTopics.has(channel_topic_id)) {
+          // Onboarding is a GENERAL-TOPIC-ONLY mode: the welcome seed belongs to
+          // the owner's General topic (`app:<user>`). The web client opens a
+          // fresh socket per PROJECT tab (`app:<user>:<project>`), which also
+          // lands here — and a project tab opened while `isOnboardingActive` is
+          // still true (fire-and-forget finalize slow, or its terminal
+          // `completed` upsert raced/failed) would otherwise seed the generic
+          // "…what should I call you?" welcome INTO the project topic, masking
+          // the deterministic per-project opening finalize already delivered. A
+          // materialized project is always steady-state, so never seed it.
+          const isGeneralTopic = channel_topic_id === appWsTopicId(user_id)
+          if (
+            isGeneralTopic &&
+            appWsChatTurn !== null &&
+            !seededOnboardingTopics.has(channel_topic_id)
+          ) {
             seededOnboardingTopics.add(channel_topic_id)
             // Typing while the agent composes its onboarding opener.
             emitAppWsTyping(channel_topic_id, 'start')
             try {
-              await appWsChatTurn({
+              const seedResult = await appWsChatTurn({
                 project_slug,
                 user_id,
                 topic_id: channel_topic_id,
@@ -2777,6 +2791,24 @@ export function buildOpenGraphComposer(
                 observed_at: Date.now(),
                 seed_turn: true,
               })
+              // Self-heal a FAILED welcome seed (e.g. a cold spawn that still
+              // timed out): the live runner stays silent on a seed failure (no
+              // persisted error bubble), so CLEAR the per-process seeded mark
+              // here too — otherwise this topic stays "seeded" for the process
+              // and a reload/re-subscribe would skip re-firing, stranding the
+              // owner on the empty "Setting things up…" loader. Dropping the mark
+              // makes the next on_session_open regenerate the welcome.
+              if (
+                seedResult !== null &&
+                typeof seedResult === 'object' &&
+                (seedResult as { outcome?: unknown }).outcome === 'failed'
+              ) {
+                seededOnboardingTopics.delete(channel_topic_id)
+              }
+            } catch {
+              // A throw (defensive — the runner owns its failures) must also not
+              // leave the topic falsely marked seeded; let reload re-fire.
+              seededOnboardingTopics.delete(channel_topic_id)
             } finally {
               emitAppWsTyping(channel_topic_id, 'end')
             }

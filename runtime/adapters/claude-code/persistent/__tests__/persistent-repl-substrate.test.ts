@@ -331,6 +331,76 @@ describe('PersistentReplSubstrate — failure + status', () => {
   })
 })
 
+describe('PersistentReplSubstrate — per-turn timeout override (AgentSpec.turn_timeout_ms)', () => {
+  it('a per-spec turn_timeout_ms overrides a long construction-time turnTimeoutMs', async () => {
+    // The conversational composer raises the budget ONLY for a cold/onboarding
+    // turn, via spec.turn_timeout_ms. Here construction sets a LONG ceiling
+    // (60s) but the spec requests a SHORT one (120ms): the turn must abandon at
+    // ~120ms, proving the per-spec value (not the construction default) drives
+    // the timer. Without the override the drain would hang for 60s.
+    const silentHost: PtyHost = {
+      spawn(argv) {
+        const sid = extractSessionId(argv)
+        const { port: sinkPort, token } = getReplSinkInfo()
+        let hasExited = false
+        let exitResolve: (c: number | null) => void = () => {}
+        const exited = new Promise<number | null>((r) => {
+          exitResolve = r
+        })
+        const server = Bun.serve({
+          port: 0,
+          hostname: '127.0.0.1',
+          async fetch(req) {
+            const url = new URL(req.url)
+            if (url.pathname === '/health') return Response.json({ ok: true })
+            if (req.method === 'POST' && url.pathname === '/message') {
+              return Response.json({ status: 'delivered' }) // never replies
+            }
+            return new Response('nf', { status: 404 })
+          },
+        })
+        void fetch(`http://127.0.0.1:${sinkPort}/channel-ready`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify({ session_id: sid, channel_port: server.port, pid: 999 }),
+        }).catch(() => undefined)
+        void fetch(`http://127.0.0.1:${sinkPort}/channel-bound`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify({ session_id: sid, pid: 999 }),
+        }).catch(() => undefined)
+        return {
+          pid: 999,
+          write() {},
+          resize() {},
+          kill() {
+            if (hasExited) return
+            hasExited = true
+            try {
+              server.stop(true)
+            } catch {
+              /* ignore */
+            }
+            exitResolve(143)
+          },
+          exited,
+          hasExited: () => hasExited,
+        }
+      },
+    }
+    // Long construction ceiling; short per-turn override on the spec.
+    const sub = createPersistentReplSubstrate(
+      baseOptions(silentHost, { turnTimeoutMs: 60_000, idleQuietMs: 0, idleMaxMs: 50 }),
+    )
+    const started = performance.now()
+    await expect(
+      drain(sub.start({ ...spec('hang please'), turn_timeout_ms: 120 })),
+    ).rejects.toThrow(/turn timeout/)
+    // Comfortably under the 60s construction ceiling → the override drove it.
+    expect(performance.now() - started).toBeLessThan(10_000)
+  })
+})
+
 describe('PersistentReplSubstrate — a delayed reply from a timed-out turn does not complete the NEXT turn (Codex GPT-5 r4 P2)', () => {
   it('a stale /reply that lands while the next turn is parked pre-inject is dropped, not misattributed', async () => {
     // Reproduces the real race: turn 1 times out (REPL still chewing on it), the

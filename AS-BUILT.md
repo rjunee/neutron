@@ -2,6 +2,59 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-30 — Onboarding robustness: project openings stay deterministic + cold-turn timeout self-heals (#136 verify gaps)
+
+**What shipped.** Two fixes for the gaps the #136 fresh-install verify surfaced
+(3/4 gates passed; these are the rest):
+
+1. **Onboarding is now a GENERAL-topic-only mode** — a materialized PROJECT
+   topic always shows its deterministic per-project opening (summary + one next
+   move), never a generic "…what should I call you?" intro. Two guards:
+   - `gateway/realmode-composer/build-live-agent-turn.ts` — `onboardingActive`
+     is computed only when `turn.project_id === undefined` (General). A
+     project-topic turn is therefore always steady-state: no interview preamble
+     spliced, no `[[OPTIONS]]` buttons parsed, even while `isActive(user)` still
+     reads true.
+   - `open/composer.ts` `on_session_open` — the auto-start welcome SEED fires
+     only for the General topic (`channel_topic_id === appWsTopicId(user)`). The
+     web client opens a fresh socket per project tab, so a project tab opened
+     while `isOnboardingActive` is still true (fire-and-forget finalize slow, or
+     its terminal `completed` upsert raced/failed) no longer seeds the generic
+     welcome INTO the project topic on top of the deterministic opening finalize
+     already delivered.
+
+2. **Cold-turn timeout no longer hard-fails-and-persists** under machine load:
+   - New additive `AgentSpec.turn_timeout_ms` (`runtime/substrate.ts`), read by
+     the persistent CC REPL adapter
+     (`runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts`:
+     `spec.turn_timeout_ms ?? turnTimeoutMs`). The conversational composer raises
+     it to `COLD_TURN_TIMEOUT_MS` (360s) for a COLD first turn / onboarding turn
+     — wired to BOTH the composer AbortController AND the substrate timer so
+     neither layer kills a slow-but-fine cold spawn (was a fixed 180s
+     `DEFAULT_TURN_TIMEOUT_MS`). Warm steady-state turns send no override and
+     keep the snappy default.
+   - A FAILED `seed_turn` (the synthetic welcome/opening) stays SILENT — no
+     `FAILURE_BODY` bubble is sent/persisted into the durable chat_log — and
+     `on_session_open` clears the per-process `seededOnboardingTopics` mark on a
+     failed seed, so a reload/re-subscribe RE-FIRES the welcome (now on the
+     larger budget) instead of replaying a stuck error. A failed REAL user turn
+     still gets the anti-silence bubble.
+
+**Why.** A cold onboarding spawn under load (CC cold spawn + MCP bind + heavy
+onboarding system prompt) routinely ran past the 180s steady-state ceiling →
+`FAILURE_BODY`, and the welcome seed marked the topic seeded BEFORE running so a
+reload skipped re-seeding and replayed the persisted failure forever. Separately,
+onboarding was decided per-USER but applied per-TOPIC, so a project tab opened
+during the finalize race ran the interview on the project topic.
+
+**No flags / no dual paths; live-session architecture untouched; honors #129
+(loader holds during a legit cold spawn).** Does not regress #136
+(archetypes-as-buttons / custom-name / closing) or #137 (per-project chat / rail
+/ Plan / markdown). Tests:
+`gateway/realmode-composer/__tests__/build-live-agent-turn-onboarding-scope-timeout.test.ts`
+(7 cases) + a per-spec-override case in
+`runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts`.
+
 > NOTE (Work Board Phase 2a author): the `<<<<<<< HEAD … >>>>>>> origin/main`
 > conflict markers a few entries below are **pre-existing on `origin/main`** (a
 > prior botched merge committed upstream — not introduced by this PR). Left
