@@ -50,6 +50,29 @@ export type RenderRole = 'user' | 'agent'
  */
 export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read'
 
+/**
+ * BUG 3 (live history-import progress) — the in-flight state of a ChatGPT/Claude
+ * history import, derived from the server's `import_progress` frame (emitted
+ * every ~5s while the job runs). Drives a live spinner + progress line so a long
+ * import visibly works instead of stalling at a one-shot "received" banner.
+ * Null when no import is in flight. There is NO terminal `import_progress` frame
+ * — the engine advances the onboarding phase + sends the analysis `agent_message`
+ * on completion — so the controller clears this on a terminal status (defensive)
+ * OR when frames go stale (no tick for {@link NeutronChatControllerOptions.importProgressStaleMs}).
+ */
+export interface ImportProgressVM {
+  /** `import_jobs.job_id` — correlates to the upload that started the import. */
+  jobId: string
+  /** Raw job status: queued | pass1-running | pass2-running | rate_limit_* . */
+  status: string
+  /** Pass 1 (scan) or Pass 2 (synthesis). */
+  pass: 1 | 2
+  /** 0..1 completion estimate for the current pass. */
+  pct: number
+  /** Human-readable line, e.g. "Pass 1: 47/57 batches · ~3 min remaining". */
+  body: string
+}
+
 export interface RenderMessage {
   /** Stable identity: client_msg_id for user sends, message_id for agent /
    *  streaming bubbles. Drives assistant-ui's message keying. */
@@ -119,6 +142,8 @@ export interface ChatViewModel {
   /** Track B Phase 4 — delivery state of the most recent user message, for a
    *  Telegram-style status line under the thread. Null when none sent. */
   latestUserDelivery: DeliveryState | null
+  /** BUG 3 — live history-import progress (null when no import is in flight). */
+  importProgress: ImportProgressVM | null
 }
 
 /** The slice of `WebChatSession` the controller depends on (injectable). */
@@ -162,6 +187,14 @@ export interface NeutronChatControllerOptions {
   projectId?: string | null
   /** Initial project list from the page bootstrap (FIX 1 — kept reactive). */
   projects?: ProjectTab[]
+  /**
+   * BUG 3 — how long (ms) a live import-progress indicator persists after the
+   * LAST `import_progress` frame before it auto-clears. Frames arrive every ~5s
+   * while the job runs (including during rate-limit pauses), so a gap this long
+   * means `import_running` ended (the analysis message has/will land). Defaults
+   * to 12000 (≈2 missed ticks). Injectable so tests don't wait on a real timer.
+   */
+  importProgressStaleMs?: number
 }
 
 interface StreamEntry {
@@ -199,10 +232,16 @@ export class NeutronChatController {
   private readonly chosen = new Map<string, string>()
   /** This client's device id (for read-tick self-exclusion). */
   private readonly deviceId: string
+  /** BUG 3 — live import progress (null when no import is in flight). */
+  private importProgress: ImportProgressVM | null = null
+  /** BUG 3 — staleness timer that clears {@link importProgress} when frames stop. */
+  private importProgressTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly importProgressStaleMs: number
 
   constructor(opts: NeutronChatControllerOptions) {
     this.projectId = opts.projectId ?? null
     this.projects = opts.projects ?? []
+    this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
     this.session = opts.createSession({
       onChange: () => {
         void this.handleChange()
@@ -225,6 +264,10 @@ export class NeutronChatController {
   }
 
   stop(): void {
+    if (this.importProgressTimer !== null) {
+      clearTimeout(this.importProgressTimer)
+      this.importProgressTimer = null
+    }
     this.session.stop()
   }
 
@@ -369,6 +412,28 @@ export class NeutronChatController {
           : ''
       const body = text.length > 0 ? text : errMsg.length > 0 ? errMsg : 'Command completed.'
       this.pushNotice(body)
+      return
+    }
+    if (type === 'import_progress') {
+      // BUG 3 — live history-import progress. The engine emits this every ~5s
+      // while the import job runs; render a live spinner + progress line off it.
+      // Terminal statuses normally DON'T arrive here (the engine advances the
+      // phase + sends the analysis agent_message instead), but clear defensively
+      // if one does. Otherwise refresh the progress + (re)arm the staleness timer.
+      const status = typeof f['status'] === 'string' ? (f['status'] as string) : ''
+      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        this.clearImportProgress()
+        return
+      }
+      const jobId = typeof f['job_id'] === 'string' ? (f['job_id'] as string) : ''
+      const pass: 1 | 2 = f['pass'] === 2 ? 2 : 1
+      const rawPct = f['pct']
+      const pct =
+        typeof rawPct === 'number' && Number.isFinite(rawPct) ? Math.min(1, Math.max(0, rawPct)) : 0
+      const body = typeof f['body'] === 'string' ? (f['body'] as string) : ''
+      this.importProgress = { jobId, status, pass, pct, body }
+      this.armImportProgressStaleTimer()
+      this.publish()
       return
     }
     // FIX 1 — a live project-list refresh (projects created/changed mid-session,
@@ -525,6 +590,31 @@ export class NeutronChatController {
     this.publish()
   }
 
+  /** BUG 3 — (re)arm the timer that clears stale import progress once frames
+   *  stop arriving (job ended / socket gap). */
+  private armImportProgressStaleTimer(): void {
+    if (this.importProgressTimer !== null) clearTimeout(this.importProgressTimer)
+    this.importProgressTimer = setTimeout(() => {
+      this.importProgressTimer = null
+      if (this.importProgress !== null) {
+        this.importProgress = null
+        this.publish()
+      }
+    }, this.importProgressStaleMs)
+  }
+
+  /** BUG 3 — clear live import progress + cancel its staleness timer. */
+  private clearImportProgress(): void {
+    if (this.importProgressTimer !== null) {
+      clearTimeout(this.importProgressTimer)
+      this.importProgressTimer = null
+    }
+    if (this.importProgress !== null) {
+      this.importProgress = null
+      this.publish()
+    }
+  }
+
   private publish(): void {
     this.vm = this.computeVm()
     for (const fn of this.listeners) fn(this.vm)
@@ -610,6 +700,7 @@ export class NeutronChatController {
       projectId: this.projectId,
       projects: this.projects,
       latestUserDelivery,
+      importProgress: this.importProgress,
     }
   }
 
