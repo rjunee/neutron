@@ -21,6 +21,7 @@ import {
   slugifyTask,
   type TridentCodeContext,
 } from './code-command.ts'
+import type { TridentBoardBinder } from './board-dispatch.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import { buildSimFirer } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
@@ -31,12 +32,14 @@ import { TridentTickLoop } from './tick.ts'
 let tmp: string
 let db: ProjectDb
 let store: TridentRunStore
+let attached: Array<{ id: string; run_id: string }>
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-code-'))
   db = ProjectDb.open(join(tmp, 'project.db'))
   applyMigrations(db.raw())
   store = new TridentRunStore(db)
+  attached = []
 })
 
 afterEach(() => {
@@ -46,9 +49,30 @@ afterEach(() => {
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 
+/** A board binder with one READY item ('item-1', a detailed title → passes the
+ *  ask-gate), a doc-backed item ('item-doc'), and a terse UNDERSPECIFIED item
+ *  ('item-terse'). Records bindings into the module-level `attached`. */
+function boardStub(over: Partial<TridentBoardBinder> = {}): TridentBoardBinder {
+  return {
+    get: (_slug, id) =>
+      id === 'item-1'
+        ? { id: 'item-1', title: 'wire the export button to the new CSV endpoint with tests', design_doc_ref: null }
+        : id === 'item-doc'
+          ? { id: 'item-doc', title: 'auth', design_doc_ref: 'https://docs/auth' }
+          : id === 'item-terse'
+            ? { id: 'item-terse', title: 'auth', design_doc_ref: null }
+            : null,
+    attachRun: async (_slug, id, run_id) => {
+      attached.push({ id, run_id })
+    },
+    ...over,
+  }
+}
+
 function ctx(over: Partial<TridentCodeContext> = {}): TridentCodeContext {
   return {
     store,
+    work_board: boardStub(),
     project_slug: 'proj-1',
     repo_path: '/repo',
     resolveMergeMode: async () => 'pr',
@@ -65,6 +89,19 @@ describe('/code parser parity with the Code-Gen Core surface', () => {
     expect(parseCodeCommand('/code add a dark mode toggle')).toEqual({
       kind: 'dispatch',
       task: 'add a dark mode toggle',
+    })
+  })
+  test('/code --item <id> <task> → dispatch with board_item_id (flag stripped from task)', () => {
+    expect(parseCodeCommand('/code --item item-1 add a dark mode toggle')).toEqual({
+      kind: 'dispatch',
+      task: 'add a dark mode toggle',
+      board_item_id: 'item-1',
+    })
+    // flag may appear after the task text too
+    expect(parseCodeCommand('/code add dark mode --item=ABC')).toEqual({
+      kind: 'dispatch',
+      task: 'add dark mode',
+      board_item_id: 'ABC',
     })
   })
   test('/code stop and /code cancel <id>', () => {
@@ -86,7 +123,7 @@ describe('/code parser parity with the Code-Gen Core surface', () => {
 
 describe('/code <task> creates a code_trident_runs row', () => {
   test('dispatch persists a forge-init row with detected mode + ralph flag', async () => {
-    const res = await parseAndExecuteCodeCommand('/code add a thing', ctx({ resolveRalph: async () => false }))
+    const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', ctx({ resolveRalph: async () => false }))
     expect(res).not.toBeNull()
     const data = res!.data as { run_id: string; ralph: boolean; merge_mode: string }
     const row = store.get(data.run_id)!
@@ -101,7 +138,7 @@ describe('/code <task> creates a code_trident_runs row', () => {
   })
 
   test('a governed repo (SPEC.md) creates a ralph run', async () => {
-    const res = await parseAndExecuteCodeCommand('/code build the spec', ctx({ resolveRalph: async () => true }))
+    const res = await parseAndExecuteCodeCommand('/code --item item-1 build the spec', ctx({ resolveRalph: async () => true }))
     const data = res!.data as { run_id: string }
     expect(store.get(data.run_id)!.ralph).toBe(true)
     expect(res!.text).toContain('Ralph')
@@ -109,7 +146,7 @@ describe('/code <task> creates a code_trident_runs row', () => {
 
   test('#317 threads the originating channel_kind onto the run row', async () => {
     const res = await parseAndExecuteCodeCommand(
-      '/code build from the app',
+      '/code --item item-1 build from the app',
       ctx({ chat_id: 'web:u1', channel_kind: 'app_socket' }),
     )
     const data = res!.data as { run_id: string }
@@ -117,14 +154,14 @@ describe('/code <task> creates a code_trident_runs row', () => {
   })
 
   test('#317 defaults the run channel_kind to telegram when the context omits it', async () => {
-    const res = await parseAndExecuteCodeCommand('/code a telegram build', ctx({ chat_id: '-100' }))
+    const res = await parseAndExecuteCodeCommand('/code --item item-1 a telegram build', ctx({ chat_id: '-100' }))
     const data = res!.data as { run_id: string }
     expect(store.get(data.run_id)!.channel_kind).toBe('telegram')
   })
 
   test('/code stop marks the most-recent in-flight run stopped', async () => {
-    const a = (await parseAndExecuteCodeCommand('/code first', ctx()))!.data as { run_id: string }
-    const b = (await parseAndExecuteCodeCommand('/code second', ctx()))!.data as { run_id: string }
+    const a = (await parseAndExecuteCodeCommand('/code --item item-1 first', ctx()))!.data as { run_id: string }
+    const b = (await parseAndExecuteCodeCommand('/code --item item-1 second', ctx()))!.data as { run_id: string }
     const stop = await parseAndExecuteCodeCommand('/code stop', ctx())
     expect((stop!.data as { run_id: string }).run_id).toBe(b.run_id)
     expect(store.get(b.run_id)!.phase).toBe('stopped')
@@ -132,7 +169,7 @@ describe('/code <task> creates a code_trident_runs row', () => {
   })
 
   test('/code stop <prefix> targets a specific run', async () => {
-    const a = (await parseAndExecuteCodeCommand('/code only one', ctx()))!.data as { run_id: string }
+    const a = (await parseAndExecuteCodeCommand('/code --item item-1 only one', ctx()))!.data as { run_id: string }
     const stop = await parseAndExecuteCodeCommand(`/code stop ${a.run_id.slice(0, 8)}`, ctx())
     expect((stop!.data as { run_id: string }).run_id).toBe(a.run_id)
     expect(store.get(a.run_id)!.phase).toBe('stopped')
@@ -145,10 +182,51 @@ describe('/code <task> creates a code_trident_runs row', () => {
   })
 })
 
+describe('Phase 2b — board-binding chokepoint (required item + ask-gate + bind)', () => {
+  test('a /code build with NO --item is REJECTED (no untracked dispatches, no row)', async () => {
+    const res = await parseAndExecuteCodeCommand('/code add a thing', ctx())
+    expect(res!.error?.code).toBe('malformed')
+    expect(res!.text).toContain('--item')
+    expect(res!.data).toBeUndefined()
+    // No run row was created.
+    expect(store.listNonTerminal().length).toBe(0)
+    expect(attached.length).toBe(0)
+  })
+
+  test('a /code build against an UNKNOWN item is rejected (no row)', async () => {
+    const res = await parseAndExecuteCodeCommand('/code --item nope build a thing', ctx())
+    expect(res!.error).toBeDefined()
+    expect(res!.text).toContain('nope')
+    expect(store.listNonTerminal().length).toBe(0)
+  })
+
+  test('ask-before-acting: an UNDERSPECIFIED item BLOCKS the dispatch (no row)', async () => {
+    const res = await parseAndExecuteCodeCommand('/code --item item-terse do the auth thing', ctx())
+    expect(res!.error?.code).toBe('malformed')
+    expect(res!.text.toLowerCase()).toContain('underspecified')
+    expect(store.listNonTerminal().length).toBe(0)
+    expect(attached.length).toBe(0)
+  })
+
+  test('an item WITH a design_doc_ref passes the ask-gate even with a terse title', async () => {
+    const res = await parseAndExecuteCodeCommand('/code --item item-doc build per the doc', ctx())
+    expect(res!.error).toBeUndefined()
+    const data = res!.data as { run_id: string }
+    expect(store.get(data.run_id)).not.toBeNull()
+  })
+
+  test('a successful dispatch BINDS the created run to its board item', async () => {
+    const res = await parseAndExecuteCodeCommand('/code --item item-1 wire the widget', ctx())
+    const data = res!.data as { run_id: string }
+    expect(attached).toEqual([{ id: 'item-1', run_id: data.run_id }])
+    expect(res!.text).toContain('Plan item')
+  })
+})
+
 describe('end-to-end — /code → tick loop drives the run to done (mocked substrate)', () => {
   test('a /code dispatch is built + reviewed + merged by the foundational loop', async () => {
     // 1. The user types /code — only a row is created, no orchestrator.
-    const res = await parseAndExecuteCodeCommand('/code wire the widget', ctx({ resolveMergeMode: async () => 'pr' }))
+    const res = await parseAndExecuteCodeCommand('/code --item item-1 wire the widget', ctx({ resolveMergeMode: async () => 'pr' }))
     const run_id = (res!.data as { run_id: string }).run_id
 
     // 2. The foundational tick loop (the SAME one the gateway runs) sweeps the

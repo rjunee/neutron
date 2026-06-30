@@ -33,6 +33,12 @@ function recordingService(calls: DispatchRequest[]): DispatchService {
     report: () => {},
     instance_key: 'inst-a',
     repo_path: '/home/owner',
+    board: {
+      get: (_slug: string, id: string) => ({ id, title: 'a fully specified plan item with plenty of detail here', design_doc_ref: null }),
+      attachRun: async () => undefined,
+      clearRun: async () => undefined,
+    },
+    project_slug: 'proj-1',
     default_model: 'm',
     persona_loader: () => ({ content: 'ROLE', source: 'fallback' }),
     mint_run_id: () => `run-${++seq}`,
@@ -47,7 +53,7 @@ describe('dispatch_agent tool', () => {
     expect(tool).toBeDefined()
     expect(tool!.capability_required).toBe('agent:dispatch_subagent')
     expect(tool!.approval_policy).toBe('prompt-user')
-    expect(tool!.input_schema.required).toEqual(['kind', 'task'])
+    expect(tool!.input_schema.required).toEqual(['kind', 'task', 'board_item_id'])
   })
 
   test('handler dispatches via the service and returns a run id', async () => {
@@ -63,14 +69,14 @@ describe('dispatch_agent tool', () => {
     registerDispatchToolSurface(reg, svc)
     const tool = reg.get(DISPATCH_AGENT_TOOL)!
     const out = (await tool.handler(
-      { kind: 'research', task: 'dig into X' },
+      { kind: 'research', task: 'dig into X', board_item_id: 'it1' },
       { project_slug: 'p', topic_id: null, call_id: 'c1', speaker_user_id: null },
     )) as Record<string, unknown>
     expect(out.status).toBe('dispatched')
     expect(out.kind).toBe('research')
     expect(out.agent_kind).toBe('atlas')
     expect(typeof out.run_id).toBe('string')
-    expect(calls).toEqual([{ kind: 'research', task: 'dig into X' }])
+    expect(calls).toEqual([{ kind: 'research', task: 'dig into X', board_item_id: 'it1' }])
   })
 
   test('handler rejects an unknown kind + an empty task', async () => {
@@ -78,8 +84,46 @@ describe('dispatch_agent tool', () => {
     registerDispatchToolSurface(reg, recordingService([]))
     const tool = reg.get(DISPATCH_AGENT_TOOL)!
     const ctx = { project_slug: 'p', topic_id: null, call_id: 'c', speaker_user_id: null }
-    await expect(tool.handler({ kind: 'nope', task: 't' }, ctx)).rejects.toThrow(/kind/)
-    await expect(tool.handler({ kind: 'research', task: '   ' }, ctx)).rejects.toThrow(/task/)
+    await expect(tool.handler({ kind: 'nope', task: 't', board_item_id: 'it1' }, ctx)).rejects.toThrow(/kind/)
+    await expect(tool.handler({ kind: 'research', task: '   ', board_item_id: 'it1' }, ctx)).rejects.toThrow(
+      /task/,
+    )
+  })
+
+  test('Phase 2b — handler rejects a missing board_item_id (no untracked dispatches)', async () => {
+    const reg = new ToolRegistry()
+    registerDispatchToolSurface(reg, recordingService([]))
+    const tool = reg.get(DISPATCH_AGENT_TOOL)!
+    const ctx = { project_slug: 'p', topic_id: null, call_id: 'c', speaker_user_id: null }
+    await expect(tool.handler({ kind: 'research', task: 'do a thing' }, ctx)).rejects.toThrow(
+      /board_item_id/,
+    )
+  })
+
+  test('Phase 2b — the service blocks an underspecified item (ask-before-acting)', async () => {
+    const registry = new SubagentRegistry()
+    const control = newControlState(registry)
+    const svc = new DispatchService({
+      registry,
+      control,
+      dispatch: () => Promise.resolve({ result: 'ok', status: 'completed' as const }),
+      report: () => {},
+      instance_key: 'inst-a',
+      // A board whose item is terse + has no design doc → underspecified.
+      board: {
+        get: (_slug, id) => ({ id, title: 'auth', design_doc_ref: null }),
+        attachRun: async () => undefined,
+        clearRun: async () => undefined,
+      },
+      project_slug: 'proj-1',
+      repo_path: '/home/owner',
+      default_model: 'm',
+      persona_loader: () => ({ content: 'ROLE', source: 'fallback' }),
+      mint_run_id: () => 'run-u',
+    })
+    await expect(svc.dispatch({ kind: 'adhoc', task: 'go', board_item_id: 'terse' })).rejects.toThrow(
+      /underspecified/,
+    )
   })
 })
 
@@ -131,7 +175,7 @@ describe('agent-native parity — tool + command share one backend', () => {
     }
 
     // Path A: the chat command.
-    const cmdRes = await parseAndExecuteDispatchCommand('/dispatch research trace the leak', {
+    const cmdRes = await parseAndExecuteDispatchCommand('/dispatch research --item it1 trace the leak', {
       service: svc,
       delivery_target: { channel: 'app_socket', binding_id: 'b1' },
     })
@@ -144,7 +188,7 @@ describe('agent-native parity — tool + command share one backend', () => {
     await reg
       .get(DISPATCH_AGENT_TOOL)!
       .handler(
-        { kind: 'research', task: 'trace the leak' },
+        { kind: 'research', task: 'trace the leak', board_item_id: 'it1' },
         { project_slug: 'p', topic_id: null, call_id: 'c', speaker_user_id: null },
       )
 
@@ -167,11 +211,17 @@ describe('agent-native parity — tool + command share one backend', () => {
       report: () => {},
       instance_key: 'inst-a',
       repo_path: '/home/owner',
-      default_model: 'm',
+      board: {
+      get: (_slug: string, id: string) => ({ id, title: 'a fully specified plan item with plenty of detail here', design_doc_ref: null }),
+      attachRun: async () => undefined,
+      clearRun: async () => undefined,
+    },
+    project_slug: 'proj-1',
+    default_model: 'm',
       persona_loader: () => ({ content: 'ROLE', source: 'fallback' }),
       mint_run_id: () => 'run-stopme-1234',
     })
-    const handle = await svc.dispatch({ kind: 'adhoc', task: 'long task' })
+    const handle = await svc.dispatch({ kind: 'adhoc', task: 'long task', board_item_id: 'it1' })
     const res = await executeDispatchCommand(
       { kind: 'stop', run_ref: handle.run_id.slice(0, 6) },
       { service: svc },

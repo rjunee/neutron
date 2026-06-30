@@ -137,6 +137,35 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(composition.trident).toBeDefined()
     expect(typeof composition.trident!.fire_inner_workflow).toBe('function')
 
+    // Phase 2b — the agent-native board-bound build dispatch is wired on the
+    // SAME credential gate, backed by a TridentRunStore + the shared board.
+    // Reachability (anti "built-but-not-wired"): boot → create a ready Plan item
+    // → dispatch via the wired surface → a code_trident_runs row exists, BOUND.
+    expect(composition.trident_build_dispatch).toBeDefined()
+    const tbd = composition.trident_build_dispatch!
+    expect(typeof tbd.repo_path).toBe('string')
+    const { dispatchBoardBoundBuild } = await import('../../trident/board-dispatch.ts')
+    const { WorkBoardStore } = await import('../../work-board/store.ts')
+    const board = new WorkBoardStore(db)
+    const item = await board.create('owner', {
+      title: 'wire the export button to the new CSV endpoint with tests',
+    })
+    const res = await dispatchBoardBoundBuild(
+      { board_item_id: item.id, task: 'build the export' },
+      {
+        store: tbd.store,
+        board: tbd.work_board,
+        project_slug: 'owner',
+        repo_path: tbd.repo_path,
+        resolveMergeMode: async () => 'local',
+        resolveRalph: async () => false,
+      },
+    )
+    expect(res.ok).toBe(true)
+    // The run row exists and the Plan item is bound (fork ⑂ lit).
+    expect(board.get('owner', item.id)?.linked_run_id).toBe(res.ok ? res.run.id : '')
+    expect(board.get('owner', item.id)?.status).toBe('in_progress')
+
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
         cleanup()
@@ -152,6 +181,7 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     const composition = await composer({ db, project_slug: 'owner' })
 
     expect(composition.trident).toBeUndefined()
+    expect(composition.trident_build_dispatch).toBeUndefined()
 
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {

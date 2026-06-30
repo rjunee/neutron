@@ -95,6 +95,7 @@ interface UpdateArgs {
   title?: unknown
   status?: unknown
   design_doc_ref?: unknown
+  inline_active?: unknown
 }
 interface IdArg {
   id?: unknown
@@ -187,7 +188,10 @@ export function registerWorkBoardToolSurface(
     name: WORK_BOARD_UPDATE_TOOL,
     description:
       'Update a Work Board item by id: change its title, move its status (upcoming/in_progress/done), ' +
-      'or set/replace its design_doc_ref. Re-opening off done clears the completion datestamp.',
+      'set/replace its design_doc_ref, or flag inline_active when YOU are working the item INLINE in ' +
+      'this topic (shows a caret › on the board; a bound sub-agent shows a fork ⑂ instead — that is ' +
+      'set automatically when a build is dispatched). Clear inline_active when you stop. Re-opening ' +
+      'off done clears the completion datestamp.',
     input_schema: {
       type: 'object',
       properties: {
@@ -195,6 +199,12 @@ export function registerWorkBoardToolSurface(
         title: { type: 'string' },
         status: statusProp,
         design_doc_ref: designDocRefProp,
+        inline_active: {
+          type: 'boolean',
+          description:
+            'Set true while you work this item directly (inline) in the topic; set false when done. ' +
+            'Sub-agent/trident activity is tracked separately and automatically.',
+        },
       },
       required: ['id'],
       additionalProperties: false,
@@ -213,6 +223,7 @@ export function registerWorkBoardToolSurface(
       if (title !== undefined) patch.title = title
       if (status !== undefined) patch.status = status
       if (ref !== undefined) patch.design_doc_ref = ref
+      if (typeof a.inline_active === 'boolean') patch.inline_active = a.inline_active
       try {
         return ok(await store.update(ctx.project_slug, id, patch))
       } catch (err) {

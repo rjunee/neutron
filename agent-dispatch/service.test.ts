@@ -66,6 +66,19 @@ function makeHarness(over: Partial<DispatchServiceDeps> = {}): Harness {
       reports.push(r)
     },
     instance_key: 'inst-a',
+    // Phase 2b — a board binder that returns a READY item for any id (detailed
+    // title → passes the ask-gate) and records bindings; tests that exercise the
+    // gate/rejection override `board`.
+    board: {
+      get: (_slug: string, id: string) => ({
+        id,
+        title: 'a fully specified plan item with plenty of detail to act on',
+        design_doc_ref: null,
+      }),
+      attachRun: async () => undefined,
+      clearRun: async () => undefined,
+    },
+    project_slug: 'proj-1',
     repo_path: '/home/owner',
     default_model: 'claude-sonnet-4-6',
     persona_loader: stubPersona,
@@ -86,7 +99,7 @@ function makeHarness(over: Partial<DispatchServiceDeps> = {}): Harness {
 describe('DispatchService — register → spawn → report wiring', () => {
   test('research dispatch registers a record, spawns the substrate, reports back', async () => {
     const h = makeHarness()
-    const handle = await h.service.dispatch({ kind: 'research', task: 'survey the auth flow' })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'research', task: 'survey the auth flow' })
 
     // Registry record exists + is running while the turn is in flight.
     expect(handle.run_id).toBe('run-1')
@@ -125,7 +138,7 @@ describe('DispatchService — register → spawn → report wiring', () => {
 
   test('review dispatch maps to sentinel + folds the sentinel persona', async () => {
     const h = makeHarness()
-    const handle = await h.service.dispatch({ kind: 'review', task: 'check the brief' })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'review', task: 'check the brief' })
     expect(h.registry.byRunId('run-1')?.agent_kind).toBe('sentinel')
     expect(h.calls[0]!.user_message).toContain('SENTINEL-ROLE')
     h.resolveTurn({ result: 'looks good', status: 'completed' })
@@ -134,7 +147,7 @@ describe('DispatchService — register → spawn → report wiring', () => {
 
   test('adhoc dispatch maps to the generic core kind + the inline role', async () => {
     const h = makeHarness()
-    const handle = await h.service.dispatch({ kind: 'adhoc', task: 'rename the widget' })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'rename the widget' })
     expect(h.registry.byRunId('run-1')?.agent_kind).toBe('core')
     expect(h.calls[0]!.user_message).toContain('background agent')
     expect(h.calls[0]!.user_message).toContain('rename the widget')
@@ -144,7 +157,7 @@ describe('DispatchService — register → spawn → report wiring', () => {
 
   test('a failed substrate turn is reflected as crashed in the registry + report', async () => {
     const h = makeHarness()
-    const handle = await h.service.dispatch({ kind: 'adhoc', task: 'x' })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'x' })
     h.resolveTurn({ result: '', status: 'failed' })
     const outcome = await handle.completion
     expect(outcome.status).toBe('crashed')
@@ -154,7 +167,7 @@ describe('DispatchService — register → spawn → report wiring', () => {
 
   test('a timed-out turn is crashed with failure_reason=stuck', async () => {
     const h = makeHarness()
-    const handle = await h.service.dispatch({ kind: 'adhoc', task: 'x' })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'x' })
     h.resolveTurn({ result: '', status: 'timed_out' })
     await handle.completion
     const rec = h.registry.byRunId('run-1')
@@ -175,11 +188,17 @@ describe('DispatchService — register → spawn → report wiring', () => {
       },
       instance_key: 'inst-a',
       repo_path: '/home/owner',
+      board: {
+        get: (_slug: string, id: string) => ({ id, title: 'a fully specified plan item with plenty of detail', design_doc_ref: null }),
+        attachRun: async () => undefined,
+        clearRun: async () => undefined,
+      },
+      project_slug: 'proj-1',
       default_model: 'm',
       persona_loader: stubPersona,
       mint_run_id: () => 'run-x',
     })
-    const handle = await service.dispatch({ kind: 'adhoc', task: 'x' })
+    const handle = await service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'x' })
     const outcome = await handle.completion
     expect(outcome.status).toBe('crashed')
     expect(reports[0]!.status).toBe('crashed')
@@ -192,19 +211,19 @@ describe('DispatchService — caps + guards (shared with the Trident registry)',
     // Fill the concurrency budget with live dispatches.
     for (let i = 0; i < MAX_CONCURRENT_SUBAGENTS; i++) {
       // eslint-disable-next-line no-await-in-loop
-      await h.service.dispatch({ kind: 'adhoc', task: `t${i}` })
+      await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: `t${i}` })
     }
     expect(h.registry.live()).toHaveLength(MAX_CONCURRENT_SUBAGENTS)
     // The next one is refused by the shared spawn cap.
-    await expect(h.service.dispatch({ kind: 'adhoc', task: 'overflow' })).rejects.toThrow(
+    await expect(h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'overflow' })).rejects.toThrow(
       /concurrency cap/,
     )
   })
 
   test('a spawn_key collision coalesces onto the in-flight run (one process)', async () => {
     const h = makeHarness()
-    const first = await h.service.dispatch({ kind: 'research', task: 'a', spawn_key: 'k1' })
-    const dup = await h.service.dispatch({ kind: 'research', task: 'a', spawn_key: 'k1' })
+    const first = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'research', task: 'a', spawn_key: 'k1' })
+    const dup = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'research', task: 'a', spawn_key: 'k1' })
     expect(dup.run_id).toBe(first.run_id)
     // Only ONE substrate turn was fired despite two dispatch calls.
     expect(h.calls).toHaveLength(1)
@@ -214,7 +233,7 @@ describe('DispatchService — caps + guards (shared with the Trident registry)',
 describe('DispatchService — stop + supervision', () => {
   test('stop drives the record to cancelled; the late turn result is discarded', async () => {
     const h = makeHarness()
-    const handle = await h.service.dispatch({ kind: 'adhoc', task: 'x' })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'x' })
     expect(await h.service.stop('run-1')).toBe(true)
     expect(h.registry.byRunId('run-1')?.status).toBe('cancelled')
     // The substrate turn settles late — must NOT clobber the cancelled status.
@@ -243,11 +262,17 @@ describe('DispatchService — stop + supervision', () => {
       report: () => {},
       instance_key: 'inst-a',
       repo_path: '/home/owner',
+      board: {
+        get: (_slug: string, id: string) => ({ id, title: 'a fully specified plan item with plenty of detail', design_doc_ref: null }),
+        attachRun: async () => undefined,
+        clearRun: async () => undefined,
+      },
+      project_slug: 'proj-1',
       default_model: 'm',
       persona_loader: stubPersona,
       mint_run_id: () => 'run-cancel-1',
     })
-    const handle = await service.dispatch({ kind: 'adhoc', task: 'long' })
+    const handle = await service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'long' })
     expect(receivedSignal).toBeInstanceOf(AbortSignal)
     expect(receivedSignal!.aborted).toBe(false)
     await service.stop('run-cancel-1')
@@ -258,13 +283,13 @@ describe('DispatchService — stop + supervision', () => {
 
   test('liveDispatches excludes terminal + foreign-instance records', async () => {
     const h = makeHarness()
-    await h.service.dispatch({ kind: 'research', task: 'a' })
+    await h.service.dispatch({ board_item_id: 'it-svc', kind: 'research', task: 'a' })
     expect(h.service.liveDispatches().map((r) => r.run_id)).toEqual(['run-1'])
   })
 
   test('the shared watchdog reaps a stuck dispatch + the registry shows crashed', async () => {
     const h = makeHarness()
-    await h.service.dispatch({ kind: 'adhoc', task: 'x' })
+    await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'x' })
     // Force staleness: backdate last_event_at well past the stuck threshold.
     h.registry.update('run-1', { last_event_at: 0 })
     const res = await runAgentWatchdog({

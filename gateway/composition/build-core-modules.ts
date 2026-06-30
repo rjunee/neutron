@@ -23,6 +23,7 @@ import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts
 import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerGBrainSearchToolSurface } from '../../gbrain-memory/agent-tool.ts'
 import { registerWorkBoardToolSurface } from '../../work-board/agent-tool.ts'
+import { registerTridentBuildToolSurface } from '../../trident/work-board-build-tool.ts'
 import { registerCreateProjectToolSurface } from '../realmode-composer/create-project-tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
@@ -52,13 +53,14 @@ import {
 import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
 import { ReminderStore } from '../../reminders/store.ts'
 import { ReminderTickLoop } from '../../reminders/tick.ts'
-import { TridentRunStore } from '../../trident/store.ts'
+import { TridentRunStore, type TridentRun } from '../../trident/store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from '../../trident/tick.ts'
 import { stubAdvanceDeps } from '../../trident/state-machine.ts'
 import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
 import { buildWorkflowFirer } from '../../trident/inner-loop.ts'
 import { buildTridentDelivery } from '../../trident/delivery.ts'
 import { withTerminalObserver } from '../../trident/terminal-observer.ts'
+import { buildBoardReconcileObserver } from '../../trident/board-reconcile.ts'
 import { spawnCapture } from '../../trident/git-mode.ts'
 import { TaskStore } from '../../tasks/store.ts'
 import {
@@ -192,6 +194,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // the #87 tools-bridge as `mcp__neutron__work_board_*`.
       if (input.work_board !== undefined) {
         registerWorkBoardToolSurface(reg, input.work_board.store)
+      }
+      // Work Board Phase 2b — register the agent-native board-bound build
+      // dispatch (`work_board_dispatch_build`) when the composer wired it (live
+      // credential present). The orchestrator fires N of these for N parallel
+      // trident builds, each bound to a Plan item; the durable loop harvests by
+      // runId. Enforces the required-item + ask-before-acting chokepoint.
+      if (input.trident_build_dispatch !== undefined) {
+        registerTridentBuildToolSurface(reg, input.trident_build_dispatch)
       }
       // Create-project (project-rail Create Project parity) — register the
       // `create_project` agent tool when the composer wired the service, so the
@@ -328,10 +338,37 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // won't re-fire the hook. Observer errors are logged, never propagated;
       // a delivery error is still re-thrown so the loop's try/catch logs it.
       const runTerminalObserver = tridentWiring?.on_run_terminal
+      // Work Board Phase 2b — RECONCILE the bound board item on a terminal run:
+      // clear its run binding (fork `⑂` goes dark) and set the lane from the
+      // outcome (done → completed history; failed/stopped → back to upcoming).
+      // Keyed off `linked_run_id` via `detachRun` (idempotent + a no-op for an
+      // unbound run). Best-effort observer — a board write outage must never
+      // skip delivery nor un-terminate the run (the loop already transitioned
+      // it). Composed with any skill-forge observer into one observer fn.
+      const boardReconcile = buildBoardReconcileObserver(input.work_board?.store) ?? undefined
+      const observers = [boardReconcile, runTerminalObserver].filter(
+        (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
+      )
+      const combinedObserver =
+        observers.length === 0
+          ? undefined
+          : async (run: TridentRun): Promise<void> => {
+              for (const obs of observers) {
+                try {
+                  await obs(run)
+                } catch (err) {
+                  console.warn(
+                    `[trident] terminal observer failed for run ${run.id}: ${
+                      err instanceof Error ? err.message : String(err)
+                    }`,
+                  )
+                }
+              }
+            }
       const on_terminal: TridentTerminalHook =
-        runTerminalObserver === undefined
+        combinedObserver === undefined
           ? delivery
-          : withTerminalObserver(delivery, runTerminalObserver)
+          : withTerminalObserver(delivery, combinedObserver)
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
         // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
