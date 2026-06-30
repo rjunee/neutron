@@ -75,6 +75,42 @@ describe('WorkBoardStore', () => {
     expect(reopened?.completed_at).toBeNull()
   })
 
+  test('re-opening a done item re-appends it to the END of the active lane (no stale sort_order collision)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'A' }) // sort 1
+    const b = await store.create(SLUG, { title: 'B' }) // sort 2
+    const c = await store.create(SLUG, { title: 'C' }) // sort 3
+    // Complete A (its sort_order 1 is now a stale done-row value), then reorder
+    // the active lane so B/C renumber to 1,2 — A's stale 1 would collide.
+    await store.complete(SLUG, a.id)
+    await store.reorder(SLUG, c.id, { before: b.id }) // active: C(1), B(2)
+    // Re-open A — it must land at the END of the active lane, not at sort 1.
+    const reopened = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(reopened?.completed_at).toBeNull()
+    const active = store.listActive(SLUG)
+    expect(active.map((it) => it.title)).toEqual(['C', 'B', 'A'])
+    // No duplicate sort_order values across the active lane.
+    const orders = active.map((it) => it.sort_order)
+    expect(new Set(orders).size).toBe(orders.length)
+    expect(orders[orders.length - 1]).toBe(Math.max(...orders))
+  })
+
+  test('re-completing an already-done item does NOT refresh completed_at or reorder history', async () => {
+    let tick = 0
+    const store = new WorkBoardStore(db, {
+      now: () => new Date(Date.UTC(2026, 5, 29, 0, 0, ++tick)).toISOString(),
+    })
+    const item = await store.create(SLUG, { title: 'done thing' })
+    const first = await store.complete(SLUG, item.id)
+    const stamp = first?.completed_at
+    expect(stamp).not.toBeNull()
+    // Idempotent: completing again (or PATCH status=done) must preserve it.
+    const again = await store.complete(SLUG, item.id)
+    expect(again?.completed_at).toBe(stamp!)
+    const viaUpdate = await store.update(SLUG, item.id, { status: 'done' })
+    expect(viaUpdate?.completed_at).toBe(stamp!)
+  })
+
   test('list orders active by sort_order then completed reverse-chron', async () => {
     // Monotonic clock so completed_at strictly increases (wall-clock ms can tie).
     let tick = 0

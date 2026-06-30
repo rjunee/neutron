@@ -326,58 +326,83 @@ export class WorkBoardStore {
   }
 
   /**
-   * Patch title / status / design_doc_ref. Stamps `updated_at`; on a status
-   * transition it stamps `completed_at` (-> done) or NULLs it (any re-open
-   * OFF done). Scoped by `project_slug`.
+   * Patch title / status / design_doc_ref. Stamps `updated_at`. A `status`
+   * change is treated as a REAL transition (loads the current row): it stamps
+   * `completed_at` only on a genuine →done transition (a repeated `done` does
+   * NOT refresh it / re-sort the completed history), and on a re-open OFF done
+   * it NULLs `completed_at` AND re-appends the item to the END of the active
+   * lane (a `sort_order` = MAX+1) so its stale completed-row position can't
+   * collide with the renumbered active items. The status path runs in a
+   * transaction because the reopen read-compute-write (MAX `sort_order`) must
+   * be atomic. Scoped by `project_slug`.
    */
   async update(
     project_slug: string,
     id: string,
     patch: WorkBoardItemUpdate,
   ): Promise<WorkBoardItem | null> {
-    const sets: string[] = []
-    const params: (string | number | null)[] = []
-    const push = (col: string, val: string | number | null): void => {
-      sets.push(`${col} = ?`)
-      params.push(val)
-    }
+    // Validate eagerly so a bad design_doc_ref throws before any DB work.
+    let title: string | undefined
     if (patch.title !== undefined) {
-      const title = sanitizeTitle(patch.title)
+      title = sanitizeTitle(patch.title)
       if (title.length === 0) {
         throw new WorkBoardValidationError('invalid_title', 'title must be a non-empty string')
       }
-      push('title', title)
     }
-    if (patch.status !== undefined) {
-      push('status', patch.status)
-      // Stamp/clear the completion datestamp on the lane transition.
-      push('completed_at', patch.status === 'done' ? this.now() : null)
-    }
+    let designDocRef: string | null | undefined
     if (patch.design_doc_ref !== undefined) {
-      push('design_doc_ref', validateDesignDocRef(patch.design_doc_ref))
+      designDocRef = validateDesignDocRef(patch.design_doc_ref)
     }
-    if (sets.length === 0) return this.get(project_slug, id)
-    push('updated_at', this.now())
-    params.push(project_slug, id)
-    await this.db.run(
-      `UPDATE work_board_items SET ${sets.join(', ')} WHERE project_slug = ? AND id = ?`,
-      params,
-    )
-    this.emitChange()
-    return this.get(project_slug, id)
+
+    const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
+      const current = this.get(project_slug, id)
+      if (current === null) return null
+      const sets: string[] = []
+      const params: (string | number | null)[] = []
+      const push = (col: string, val: string | number | null): void => {
+        sets.push(`${col} = ?`)
+        params.push(val)
+      }
+      if (title !== undefined) push('title', title)
+      if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
+      if (patch.status !== undefined && patch.status !== current.status) {
+        push('status', patch.status)
+        if (patch.status === 'done') {
+          // Genuine completion — stamp the datestamp ONCE.
+          push('completed_at', this.now())
+        } else if (current.status === 'done') {
+          // Re-open OFF done: clear the completion + re-append to the active
+          // lane end so the stale done-row sort_order can't collide.
+          push('completed_at', null)
+          const max = tx
+            .prepare<{ next: number }, [string]>(
+              `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
+                 FROM work_board_items WHERE project_slug = ?`,
+            )
+            .get(project_slug)
+          push('sort_order', max?.next ?? 1)
+        }
+        // active→active (e.g. upcoming→in_progress): no completed_at/sort_order change.
+      }
+      if (sets.length === 0) return current // nothing actually changed
+      push('updated_at', this.now())
+      params.push(project_slug, id)
+      await tx.run(
+        `UPDATE work_board_items SET ${sets.join(', ')} WHERE project_slug = ? AND id = ?`,
+        params,
+      )
+      return this.get(project_slug, id)
+    })
+    if (result !== null) this.emitChange()
+    return result
   }
 
-  /** Mark an item done: status=done + stamp `completed_at`. */
+  /**
+   * Mark an item done. Idempotent: re-completing an already-done item does NOT
+   * refresh `completed_at` (it routes through the same transition logic).
+   */
   async complete(project_slug: string, id: string): Promise<WorkBoardItem | null> {
-    const ts = this.now()
-    await this.db.run(
-      `UPDATE work_board_items
-          SET status = 'done', completed_at = ?, updated_at = ?
-        WHERE project_slug = ? AND id = ?`,
-      [ts, ts, project_slug, id],
-    )
-    this.emitChange()
-    return this.get(project_slug, id)
+    return this.update(project_slug, id, { status: 'done' })
   }
 
   /**
