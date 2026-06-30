@@ -601,9 +601,11 @@ function buildEditIndex(
       text: m.text,
       edited: m.edited,
       deleted: m.deleted,
-      // Author-only: the web client owns the `user` messages on its topic; the
-      // agent's are immutable here (server rejects a cross-author mutation).
-      canMutate: m.role === 'user' && !m.streaming,
+      // Edit/Delete UI hidden (Ryan 2026-06-30): editing/deleting a message
+      // already sent to the REPL isn't meaningful, and the affordance clutters
+      // the bubble. Forcing canMutate=false makes MessageActions render null for
+      // every bubble (the edit/delete store + server endpoints stay intact).
+      canMutate: false,
     })
   }
   return map
