@@ -523,6 +523,37 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   making the client read per-project topics; the opening lands on the project's
 >   canonical app-ws topic, reconciled at merge.
 
+> **Onboarding is a GENERAL-topic-only mode + cold-turn timeout self-heals
+> (#136 verify gaps, 2026-06-30).** Two robustness fixes for gaps the #136
+> fresh-install verify left open:
+> - **Project topics never run the interview.** Onboarding was decided per-USER
+>   (`isOnboardingActive`) but applied per-TOPIC, and the web client opens a fresh
+>   socket per project tab. So a project tab opened while the fire-and-forget
+>   finalize was still running (or after its terminal `completed` upsert raced /
+>   was swallowed) seeded the generic welcome ("…what should I call you?") INTO
+>   the project topic — masking the deterministic per-project opening finalize had
+>   already delivered. Now onboarding is GENERAL-only: `build-live-agent-turn.ts`
+>   computes `onboardingActive` only when `turn.project_id === undefined` (so a
+>   project-topic turn is always steady-state — no preamble, no `[[OPTIONS]]`),
+>   and `open/composer.ts` `on_session_open` fires the auto-start welcome seed
+>   only for the General topic (`channel_topic_id === appWsTopicId(user)`). A
+>   materialized project only EXISTS post-onboarding, so this is the correct
+>   invariant, not a heuristic.
+> - **A slow cold turn completes instead of hard-failing-and-persisting.** A cold
+>   onboarding spawn under machine load (CC cold spawn + MCP bind + heavy
+>   onboarding system prompt) routinely exceeded the persistent REPL's snappy
+>   180s `DEFAULT_TURN_TIMEOUT_MS` → `FAILURE_BODY`, and the welcome seed marked
+>   the topic seeded BEFORE running, so a reload replayed the persisted failure
+>   forever. New additive `AgentSpec.turn_timeout_ms` (read by the persistent CC
+>   adapter as `spec.turn_timeout_ms ?? turnTimeoutMs`) lets the composer raise a
+>   COLD/onboarding turn's budget to `COLD_TURN_TIMEOUT_MS` (360s) on BOTH the
+>   AbortController and the substrate timer; warm steady-state turns keep the
+>   tight default (a wedged warm turn still fails fast). And a FAILED `seed_turn`
+>   now stays SILENT (no `FAILURE_BODY` persisted to chat_log) while
+>   `on_session_open` clears the per-process `seededOnboardingTopics` mark — so a
+>   reload/re-subscribe RE-FIRES the welcome instead of showing a stuck error. A
+>   failed REAL user turn still gets the anti-silence bubble.
+
 The React web client (`landing/chat-react/`) is **registry-driven** too, and
 since the 2026-06-30 rework `chat-react/ProjectShell.tsx` is the **APP SHELL**:
 a persistent `TopicRail` left column (lifted out of `ChatApp`) + a content pane

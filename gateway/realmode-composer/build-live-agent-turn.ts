@@ -79,6 +79,21 @@ const LOG_TAG = '[live-agent-turn]'
 const DEFAULT_TIMEOUT_MS = 240_000
 
 /**
+ * Cold-spawn / onboarding-turn wall-clock budget (2026-06-30). A COLD first turn
+ * into a topic — and EVERY onboarding turn (the welcome seed + per-project
+ * opening + each interview answer) — pays a one-time heavy load: a fresh CC REPL
+ * spawn, MCP/dev-channel bind, plugin load, and a large onboarding system prompt.
+ * Under machine load that routinely runs past the persistent REPL's snappy
+ * steady-state `DEFAULT_TURN_TIMEOUT_MS` (180s), which hard-failed a
+ * slow-but-would-succeed cold turn into the `FAILURE_BODY` bubble. Give those
+ * turns a generous budget so the cold spawn completes; warm steady-state turns
+ * keep the tight default (a genuinely wedged warm turn still fails fast). Wired
+ * BOTH to the composer's own AbortController AND to the substrate's per-turn
+ * timer via `AgentSpec.turn_timeout_ms`, so neither layer kills the turn early.
+ */
+const COLD_TURN_TIMEOUT_MS = 360_000
+
+/**
  * Reply rows are HISTORY, not pending questions — they must never hit the
  * `expires_at` ghost filter in `listHistoryByTopic` (an expired unresolved
  * row vanishes from hydration AND gets sweep-resolved `__timeout__`).
@@ -488,8 +503,20 @@ export function buildLiveAgentTurn(
     // Path 1 — is the owner still onboarding? Consulted once per turn so the
     // first-turn preamble, the upload affordance, and the post-turn scribe all
     // agree. A throwing seam degrades to steady-state (never kills the turn).
+    //
+    // Onboarding is a GENERAL-TOPIC-ONLY mode (2026-06-30). The interview, its
+    // welcome seed, and the `[[OPTIONS]]` choice buttons belong to the owner's
+    // General topic; a PROJECT topic only ever EXISTS after onboarding
+    // materialized it, so a project-topic turn must always be steady-state and
+    // must never improvise the generic onboarding intro ("…what should I call
+    // you?") on top of the deterministic per-project opening finalize already
+    // seeded. The web client opens a fresh socket per project tab, so a project
+    // tab opened while `isActive(user)` still reads true (fire-and-forget
+    // finalize slow, or its terminal `completed` upsert raced/failed) would
+    // otherwise run the interview on the project topic. Gate on
+    // `turn.project_id === undefined` (General) so it cannot.
     let onboardingActive = false
-    if (input.onboarding !== undefined) {
+    if (input.onboarding !== undefined && turn.project_id === undefined) {
       try {
         onboardingActive = await input.onboarding.isActive(turn.user_id)
       } catch {
@@ -619,6 +646,18 @@ export function buildLiveAgentTurn(
     // install — spawns the latest served model, never a retired id that would
     // hang for the full per-turn timeout. An explicit `input.model` still wins.
     const model = input.model ?? getBestModel()
+    // Per-turn wall-clock budget. A COLD first turn into this topic OR any
+    // onboarding turn pays the one-time cold-spawn load that routinely runs past
+    // the substrate's snappy 180s steady-state ceiling under machine load, so
+    // give those turns the generous `COLD_TURN_TIMEOUT_MS`; warm steady-state
+    // turns keep the tight default. The budget is wired to BOTH the composer's
+    // AbortController (below) AND the substrate's own per-turn timer (via
+    // `spec.turn_timeout_ms`) so neither layer abandons the turn early — without
+    // the spec override the substrate's 180s would still kill a slow cold turn.
+    const isColdOrOnboardingTurn = isColdFirstTurn || onboardingActive
+    const turnBudgetMs = isColdOrOnboardingTurn
+      ? Math.max(timeout_ms, COLD_TURN_TIMEOUT_MS)
+      : timeout_ms
     const spec: AgentSpec = {
       prompt,
       tools,
@@ -630,12 +669,16 @@ export function buildLiveAgentTurn(
       metering_context: { project_id: scope },
     }
     if (input.max_tokens !== undefined) spec.max_tokens = input.max_tokens
+    // Only override the substrate ceiling for the cold/onboarding path; leave a
+    // warm steady-state turn on the substrate default so a wedged warm turn
+    // still trips the snappy timeout.
+    if (isColdOrOnboardingTurn) spec.turn_timeout_ms = turnBudgetMs
     let text: string
     const started = now()
     try {
       const handle = input.substrate.start(spec)
       const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(), timeout_ms)
+      const timer = setTimeout(() => ac.abort(), turnBudgetMs)
       try {
         text = await collectTokensToString(handle, ac.signal)
       } finally {
@@ -650,14 +693,27 @@ export function buildLiveAgentTurn(
           err instanceof Error ? err.message : String(err)
         }`,
       )
-      sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
+      // A failed SEED turn (the synthetic auto-start welcome / opening) must NOT
+      // leave a `FAILURE_BODY` bubble: the app-ws reply path persists it into the
+      // durable chat_log, so reloading would replay the stuck error forever
+      // instead of re-firing the welcome. Stay silent on a seed failure — the
+      // receiver clears its per-process seeded-topic mark on the 'failed' result
+      // so the next reload/re-subscribe regenerates the seed (now on the larger
+      // cold-turn budget). A real user turn still gets the anti-silence bubble.
+      if (turn.seed_turn !== true) {
+        sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
+      }
       return { outcome: 'failed', reply_prompt_id: null }
     }
     if (text.trim().length === 0) {
       console.warn(
         `${LOG_TAG} event=empty_reply project=${turn.project_slug} topic=${turn.topic_id} scope=${scope}`,
       )
-      sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
+      // Same seed-failure discipline as the catch above — never persist an error
+      // bubble for a synthetic seed turn; let reload regenerate it.
+      if (turn.seed_turn !== true) {
+        sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
+      }
       return { outcome: 'failed', reply_prompt_id: null }
     }
     // Only mark the context as delivered once a turn actually completed on

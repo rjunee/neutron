@@ -72,6 +72,15 @@ export interface Message {
  *
  * - `max_tokens?: number` — upper bound on completion tokens.
  *
+ * - `turn_timeout_ms?: number` — per-turn wall-clock budget BEFORE the substrate
+ *   abandons the turn with a retryable error. Optional + additive (mirrors
+ *   `max_tokens`): when unset the substrate uses its own construction-time
+ *   default (180s on the persistent CC REPL). The conversational composer raises
+ *   it for a COLD first turn / onboarding turn — a cold CC spawn + heavy
+ *   onboarding system prompt + MCP bind can take >180s under machine load, and
+ *   the snappy steady-state ceiling would hard-fail a slow-but-fine cold turn.
+ *   Only the persistent-REPL adapter reads it; other substrates ignore it.
+ *
  * - `metering_context?: { project_id }` — populated ONLY for the
  *   Private substrate (per-instance rented H100), where gpt-5-5-api carries
  *   it for the meter writer. The CC adapter does NOT meter off it (Anthropic
@@ -89,6 +98,10 @@ export interface AgentSpec {
   tools: ToolDef[]
   model_preference: string[]
   max_tokens?: number
+  /** Per-turn wall-clock budget (ms) before the substrate abandons with a
+   *  retryable error. Optional; unset → the substrate's construction default.
+   *  Read by the persistent CC REPL adapter only. See the doc-comment above. */
+  turn_timeout_ms?: number
   metering_context?: { project_id: string }
 }
 

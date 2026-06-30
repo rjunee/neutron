@@ -2674,6 +2674,17 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // one-shot purposes never collapse into one shared transcript. A dispatch
       // carrying a real `spec.session` (a multi-turn resume) always pools.
       const ephemeral = options.ephemeral === true && spec.session === undefined
+      // Per-turn timeout override (additive `AgentSpec.turn_timeout_ms`): a cold
+      // first turn / onboarding turn pays a one-time heavy load (CC cold spawn +
+      // MCP bind + big onboarding system prompt) that can exceed the snappy
+      // steady-state ceiling under machine load, so the conversational composer
+      // raises the budget for those turns. Steady-state warm turns send no
+      // override and keep the construction-time `turnTimeoutMs` (a wedged warm
+      // turn still fails fast). Ignore a non-positive value defensively.
+      const perTurnTimeoutMs =
+        typeof spec.turn_timeout_ms === 'number' && spec.turn_timeout_ms > 0
+          ? spec.turn_timeout_ms
+          : turnTimeoutMs
 
       const driver = (async (): Promise<void> => {
        try {
@@ -2870,7 +2881,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
             channel.close()
             turn.settle()
           }
-        }, turnTimeoutMs)
+        }, perTurnTimeoutMs)
 
         await settledP
         clearTimeout(timer)
