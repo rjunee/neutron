@@ -59,7 +59,7 @@ import type { Substrate } from '../../runtime/substrate.ts'
 import type { Event } from '../../runtime/events.ts'
 import type { Pass1LlmCall } from './pass1-triage.ts'
 import type { Pass2LlmCall, AggregatedPass1 } from './pass2-synthesis.ts'
-import { getBestModel } from '../../runtime/models.ts'
+import { BEST_MODEL, getBestModel } from '../../runtime/models.ts'
 import { resolveModelPricing } from '../../runtime/model-pricing.ts'
 import { ImportError, type Chunk } from './types.ts'
 
@@ -573,6 +573,13 @@ const UNPRICED_MODEL_WARNED = new Set<string>()
 function resolvePricingForDynamicDefault(
   model_id: string,
 ): { input_usd_per_m: number; output_usd_per_m: number } {
+  // Only a WATCHDOG-adopted model degrades. `getBestModel()` returns
+  // `runtimeBestModel ?? BEST_MODEL`; when it equals the env/default base
+  // (`BEST_MODEL` — i.e. the operator's `NEUTRON_BEST_MODEL` pin or the seed),
+  // it is an EXPLICIT config and keeps the strict loud-fail so a typo'd /
+  // unpriced `NEUTRON_BEST_MODEL` still fails fast (Codex cross-model review #3).
+  // Only the auto-adopted override (model !== BEST_MODEL) degrades to $0.
+  if (model_id === BEST_MODEL) return resolvePricingFor(model_id)
   try {
     return resolvePricingFor(model_id)
   } catch (err) {

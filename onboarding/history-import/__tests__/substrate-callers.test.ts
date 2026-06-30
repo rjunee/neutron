@@ -463,12 +463,18 @@ describe('always-latest (2026-06-30) — import survives a watchdog-adopted UNPR
         },
       }
       const pass1 = buildPass1SubstrateCaller({ substrate })
-      await pass1({ chunk: makeChunk(), prompt: 'p' }) // boot default
+      const out0 = await pass1({ chunk: makeChunk(), prompt: 'p' }) // boot default
       expect(calls[0]!.spec.model_preference[0]).toBe(BEST_MODEL)
+      // The env/default base (== BEST_MODEL) keeps STRICT pricing — billed at the
+      // real registered opus-4-8 rate ($5/$25 per MTok), NOT degraded to $0. Only
+      // a watchdog-adopted *different* id degrades (Codex review #3).
+      expect(out0.dollars_billed).toBeCloseTo((1 * 5 + 1 * 25) / 1_000_000, 10)
       setBestModelOverride('claude-opus-9-9') // watchdog adopts a newer model
-      await pass1({ chunk: makeChunk(), prompt: 'p' }) // SAME caller, later import
+      const out1 = await pass1({ chunk: makeChunk(), prompt: 'p' }) // SAME caller, later import
       expect(calls[1]!.spec.model_preference[0]).toBe('claude-opus-9-9')
       expect(calls[1]!.spec.model_preference[0]).not.toBe(BEST_MODEL)
+      // The watchdog-adopted UNPRICED id degrades billing to $0 (telemetry-only).
+      expect(out1.dollars_billed).toBe(0)
     } finally {
       setBestModelOverride(undefined)
     }
