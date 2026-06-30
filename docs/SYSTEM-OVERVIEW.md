@@ -259,12 +259,18 @@ their tabs. `tabs/registry.ts` exposes a `TabDescriptor` (`key`, `label`,
 `scope: 'project'|'global'`, `source: 'builtin'|'core'`, `order`,
 `mount: { kind: 'builtin'|'webview', target }`) and a
 `resolveTabs(scope, cores)` resolver. **BUILTIN descriptors** — Chat /
-Documents / Tasks per-project, Admin global — are unioned with
-**CORE-contributed tabs** (PR-2): the `project_tab` surfaces of installed
+**Plan** (`work_board`, label "Plan") / Documents per-project, Admin global — are
+unioned with **CORE-contributed tabs** (PR-2): the `project_tab` surfaces of installed
 Cores, shaped as `source:'core'`, `key:'core:<slug>'`,
 `mount:{kind:'webview', target}` and sorted AFTER the builtins. The registry
 stays **pure** (no DB / no package loading) — the HTTP layer resolves which
 Cores are installed and passes a `CoreTabContribution[]` in.
+
+> **Tasks is NOT a builtin tab** (Ryan directive, 2026-06-30). The `tasks`
+> `BUILTIN_TABS` entry + the engine web tasks-tab UI (`TasksTab.tsx`,
+> `tasks-client.ts`) were removed; Tasks returns in WAVE 3 as a **Core-contributed
+> webview tab** through the same `CoreTabContribution` union. Per-project builtins
+> are now **Chat / Plan / Documents** (orders 0/5/10).
 
 Two read-only HTTP routes (Bearer-auth, shared `AppWsAuthResolver` contract):
 - `GET /api/app/projects/<project_id>/tabs` → builtins ∪ per-project Cores
@@ -286,16 +292,17 @@ on mount it fetches `GET /api/app/projects/<id>/tabs` via `app/lib/tabs-client.t
 and feeds the resolved descriptors into `ProjectTabBar`'s `tabs` prop — no
 hardcoded set. `app/lib/project-tabs.ts` (RN-free, unit-tested) maps each
 descriptor to a route + active-highlight key: **builtin** descriptors render the
-native expo-router leaf (`mount.target` = `chat`/`docs`/`tasks`); **Core**
+native expo-router leaf (`mount.target` = `chat`/`workboard`/`docs`); **Core**
 (`mount.kind:'webview'`) descriptors route to the generic
 `app/app/projects/[id]/cores/[slug].tsx` webview (inline `<iframe>` on web,
 system browser via `expo-web-browser` on native — no `react-native-webview`
 dep). The legacy `PROJECT_TABS` const survives ONLY as the pre-fetch loading
 default (and the on-error fallback) — not a flag-gated path. Consequence: the
-registry's project builtins are Chat/Documents/Tasks, so the old **Apps
-(launcher)** + **Reminders** tabs are no longer top-level mobile tabs once the
-fetch resolves (their routes remain, reachable by deep-link); re-adding them is
-a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4.
+registry's project builtins are Chat/Plan/Documents, so the old **Apps
+(launcher)** + **Reminders** + **Tasks** tabs are no longer top-level mobile tabs
+once the fetch resolves (their routes remain, reachable by deep-link); re-adding a
+builtin is a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell
+consumption is PR-4 (reworked 2026-06-30 — see below).
 
 ### Web client consumption (WAVE 3 PR-4)
 
@@ -303,10 +310,39 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > `landing/chat.ts`/`chat.html` surface and the `NEUTRON_WEB_CHAT_CLIENT` /
 > `?client=` flag (`landing/web-chat-flag.ts`) were **deleted** (no feature flags,
 > no dual path). `GET /chat` now unconditionally serves `chat-react.html`
-> (ProjectShell → ChatApp with the Documents/Tasks tabs); `chat-react.html` is
+> (ProjectShell → persistent rail + tabbed content); `chat-react.html` is
 > required at boot (`landing/server.ts` + `landing/boot.ts` throw if missing) and
 > `/chat-react.js` is the only served client bundle (`compose.ts` `LANDING_PATHS`).
 > A fresh single-owner Open install serves the tabbed React UI with no env var.
+
+> **Web-client rework (2026-06-30) — per-project chat + rail/tab layout +
+> markdown.** Five linked changes to `landing/chat-react/`:
+> 1. **Real per-project chat.** Each project owns its OWN app-ws topic. The
+>    server (`app-ws-surface.ts`) binds a `platform=web` socket carrying a
+>    `project_id` to the PER-PROJECT topic `app:<user>:<project>`
+>    (`appWsProjectTopicId`, `channels/adapters/app-ws/envelope.ts`); General omits
+>    `project_id` → bare `app:<user>`. Persistence + seq + resume + fan-out all
+>    key on that topic string, while the agent loop scopes off the `project_id`
+>    field (`open/composer.ts`), so each project gets an independent transcript. The
+>    client (`controller.ts setProject`) RE-SCOPES on a project switch: it tears
+>    down the socket and stands up a fresh one bound to the new topic, hydrating
+>    that topic's transcript from the shared OPFS store (`main.tsx topicForProject`
+>    / `wsUrlFor`). **Gated on `platform === 'web'`** — mobile keeps its single
+>    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
+>    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
+>    General (durable rows under `app:<user>`), not the per-project chats.
+> 2. **Persistent rail + tab layout.** `TopicRail` is lifted OUT of `ChatApp`
+>    (which is now just the Chat-tab body) to a persistent left column in
+>    `ProjectShell`; the `TabBar` renders in the content pane for BOTH views.
+>    **General** = Chat + Admin (global tabs); **project** = Chat / Plan /
+>    Documents (NO Admin fold-in — the old bug).
+> 3. **"Work Board" → "Plan"** user-facing label (`tabs/registry.ts`); internal
+>    `work_board_*` / `cwb-` / DB table keep their identifiers.
+> 4. **Tasks tab removed** from the engine (see the Tasks note above).
+> 5. **Markdown** — agent chat bodies (`ChatApp` `TextPart`) + the Documents
+>    viewer render sanitized GitHub-flavored markdown via `react-markdown` +
+>    `remark-gfm` + `rehype-sanitize` (shared `Markdown.tsx`). The Documents tab
+>    keeps a Rendered↔Source toggle so comment anchors still map to RAW offsets.
 
 > **Onboarding/chat parity fixes (2026-06-27).** Six React-client regressions vs
 > the old vanilla chat were fixed: (1) a fresh onboarding auto-starts — the
@@ -445,28 +481,30 @@ a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell consumption is PR-4
 > "no-narrowing" invariant (present every proposed project the user could confirm)
 > is preserved.
 
-The React web client (`landing/chat-react/`) is now **registry-driven** too.
-`chat-react/ProjectShell.tsx` wraps the existing `ChatApp` as the **Chat** tab
-and renders the project's tab bar from the same resolver: on the active project
-(`vm.projectId`) it fetches `GET /api/app/projects/<id>/tabs` via
-`chat-react/tabs-client.ts` (`WebTabsClient` — the web twin of `app/lib/`'s
-client, bearer-authed off `config.token`, base URL `config.origin`). `main.tsx`
-mounts `ProjectShell` inside the `AssistantRuntimeProvider` (so the chat session
-survives tab switches) instead of `ChatApp` directly. Tab content: **Chat** =
-the existing `ChatApp`, kept MOUNTED (hidden via `hidden`) across switches;
-**Documents** (PR-5) + **Tasks** (PR-8) (builtin) = their real views; any
-not-yet-built builtin tab = a "coming soon" placeholder (unbuilt content, NOT a
-flag); **Core** (`mount.kind:'webview'`)
-= the Core's `project_tab` surface in a sandboxed `<iframe>`, URL scheme-validated
-(`sanitizeCoreTabUrl`, http(s) only) before it reaches `src`. The General
-(no-project) view has no project tabs, so it stays chat-only. No feature flag —
-the resolved tabs render directly; an unreachable resolver degrades to the
-guaranteed Chat tab (graceful fallback, not a toggle). CSS lives in
-`chat-react.html` (`car-projectshell` / `car-tab*` / `car-tab-frame`). Tests:
+The React web client (`landing/chat-react/`) is **registry-driven** too, and
+since the 2026-06-30 rework `chat-react/ProjectShell.tsx` is the **APP SHELL**:
+a persistent `TopicRail` left column (lifted out of `ChatApp`) + a content pane
+holding the `TabBar` over the active tab body. The tab set comes from the same
+resolver — **General** (no project) fetches `GET /api/app/tabs` (Chat + Admin +
+global Cores); a **project** fetches `GET /api/app/projects/<id>/tabs` (Chat /
+Plan / Documents + project Cores, NO Admin) via `chat-react/tabs-client.ts`
+(`WebTabsClient`, bearer-authed off `config.token`). `main.tsx` mounts
+`ProjectShell` inside the `AssistantRuntimeProvider` (so the chat session
+survives tab switches). Tab content: **Chat** = `ChatApp` (the chat body), kept
+MOUNTED (hidden via `hidden`) across switches; **Plan** (`workboard`) +
+**Documents** (builtin) = their real views; **Admin** (`mount.target==='admin'`,
+General only) = the integrations surface; **Core** (`mount.kind:'webview'`) =
+the Core's `project_tab` in a sandboxed `<iframe>`, URL scheme-validated
+(`sanitizeCoreTabUrl`, http(s) only). The rail is always visible (General + every
+project, all tabs) so a project switch — which RE-SCOPES the chat to that
+project's topic (see the per-project-chat note above) — and Create-Project are
+reachable from anywhere. No feature flag; an unreachable resolver degrades to the
+guaranteed Chat tab. CSS lives in `chat-react.html` (`car-app` / `car-content` /
+`car-rail*` / `car-tab*` / `car-md`). Tests:
 `chat-react/__tests__/tabs-client.test.ts` (pure client + URL sanitize) +
-`project-shell.test.tsx` (happy-dom: bar renders the resolved set, Chat shows
-`ChatApp`, switching to **Documents** mounts the real `DocumentsTab` (PR-5),
-switching to a Core tab renders the iframe at the resolved URL).
+`project-shell.test.tsx` (happy-dom: project view renders Chat/Plan/Documents/Core
++ the rail; General view renders Chat + Admin) + `controller.test.ts` (per-project
+re-scope + transcript hydration on switch).
 
 ### Web Documents tab (WAVE 3 PR-5 + PR-6)
 

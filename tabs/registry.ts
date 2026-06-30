@@ -9,8 +9,9 @@
  *
  * ── Scope (PR-1 + PR-2) ─────────────────────────────────────────────────
  * BUILTIN tabs:
- *   - per-project (scope='project'): Chat, Documents, Tasks
+ *   - per-project (scope='project'): Chat, Plan (work_board), Documents
  *   - global      (scope='global'):  Admin
+ * (Tasks is no longer a builtin — it returns as a Core webview tab, WAVE 3.)
  * PR-2 adds the CORE union: installed Cores' `project_tab` surfaces are
  * folded in as `source='core'` descriptors. This file STAYS PURE — it does
  * NOT read the DB or load packages. The HTTP layer resolves which Cores are
@@ -64,7 +65,7 @@ export interface TabMount {
 }
 
 export interface TabDescriptor {
-  /** Stable identity. Builtin: `'chat' | 'documents' | 'tasks' | 'admin'`. */
+  /** Stable identity. Builtin: `'chat' | 'work_board' | 'documents' | 'admin'`. */
   key: string
   /** Human label rendered on the tab. */
   label: string
@@ -82,14 +83,16 @@ export interface TabDescriptor {
 
 /**
  * The static builtin tab set. Per-project tabs first
- * (Chat/Work Board/Documents/Tasks), then the global Admin tab. `target` keys
- * match the existing client routes: mobile
- * `app/app/projects/[id]/{chat,workboard,docs,tasks}.tsx` + the Admin surface.
+ * (Chat / Plan / Documents), then the global Admin tab. `target` keys match the
+ * existing client routes: mobile `app/app/projects/[id]/{chat,workboard,docs}.tsx`
+ * + the Admin surface.
  *
  * Order is spaced by 10 so a tab can slot between two existing ones without
- * renumbering; the Work Board sits at **order 5** — right after Chat, before
- * Documents — per the Work Board master plan §1/§9 (the live work-tracker is the
- * orchestrator's external memory, so it ranks just below the conversation).
+ * renumbering; the Plan (work_board) tab sits at **order 5** — right after Chat,
+ * before Documents — per the Work Board master plan §1/§9 (the live work-tracker
+ * is the orchestrator's external memory, so it ranks just below the
+ * conversation). Tasks is intentionally absent — it returns as a Core-contributed
+ * webview tab (WAVE 3), NOT an engine builtin.
  */
 const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
   {
@@ -101,8 +104,11 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     mount: { kind: 'builtin', target: 'chat' },
   },
   {
+    // User-facing label is "Plan" (Ryan directive). The internal key, target,
+    // tool names (`work_board_*`), CSS (`cwb-`), and DB table keep the
+    // `work_board` identifier — only the visible label reads "Plan".
     key: 'work_board',
-    label: 'Work Board',
+    label: 'Plan',
     scope: 'project',
     source: 'builtin',
     order: 5,
@@ -116,14 +122,9 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     order: 10,
     mount: { kind: 'builtin', target: 'docs' },
   },
-  {
-    key: 'tasks',
-    label: 'Tasks',
-    scope: 'project',
-    source: 'builtin',
-    order: 20,
-    mount: { kind: 'builtin', target: 'tasks' },
-  },
+  // NOTE: the builtin `tasks` tab was REMOVED (Ryan directive, WAVE 3) — Tasks
+  // returns as a Core-contributed webview tab via the `CoreTabContribution`
+  // union, NOT as an engine builtin. Do not re-add a hardcoded tasks tab.
   {
     key: 'admin',
     label: 'Admin',
@@ -154,7 +155,7 @@ export interface CoreTabContribution {
 }
 
 /**
- * Base `order` for Core-contributed tabs. Builtins occupy 0/10/20 (project)
+ * Base `order` for Core-contributed tabs. Builtins occupy 0/5/10 (project)
  * and 0 (global); Cores slot AFTER them. Install order is preserved by adding
  * the contribution index, so two Cores keep a stable relative order.
  */
@@ -210,7 +211,7 @@ export function resolveTabs(
   return [...builtins, ...coreTabs].sort((a, b) => a.order - b.order)
 }
 
-/** Per-project tab descriptors: Chat/Documents/Tasks + per-project Core tabs. */
+/** Per-project tab descriptors: Chat/Plan/Documents + per-project Core tabs. */
 export function resolveProjectTabs(
   cores: readonly CoreTabContribution[] = [],
 ): TabDescriptor[] {

@@ -18,7 +18,13 @@ import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import { WebChatSession, createWebStore } from '@neutron/chat-core'
 
 import { ProjectShell } from './ProjectShell.tsx'
-import { resolveBootstrapConfig, type BootstrapConfig, type WindowLike } from './config.ts'
+import {
+  buildWsUrl,
+  resolveBootstrapConfig,
+  topicForProject,
+  type BootstrapConfig,
+  type WindowLike,
+} from './config.ts'
 import { NeutronChatController } from './controller.ts'
 import { useNeutronChat } from './useNeutronChat.ts'
 import { useAttachmentDraft } from './useAttachmentDraft.ts'
@@ -61,17 +67,29 @@ async function boot(): Promise<void> {
     return
   }
   // OPFS store with graceful in-memory fallback (createWebStore handles the
-  // feature-detect); the transcript is durable so cold-open is instant.
+  // feature-detect); the transcript is durable so cold-open is instant. ONE
+  // store is shared across per-project sessions — it's keyed internally by
+  // topic_id, so each project's transcript stays isolated under its own topic.
   const store = await createWebStore()
+  // Per-project chat: derive the socket URL for a given scope. `project_id` on
+  // the URL tells the server to bind the PER-PROJECT topic (`app:<user>:<id>`);
+  // General omits it. An explicit `__neutron_app_ws_url` override (dev/test)
+  // wins verbatim — a single fixed socket, no per-project query.
+  const wsUrlFor = (projectId: string | null): string => {
+    if (config.wsUrlOverride !== undefined) return config.wsUrlOverride
+    const u = new URL(config.origin)
+    return buildWsUrl(u.protocol, u.host, config.token, projectId, config.deviceId)
+  }
   const controller = new NeutronChatController({
     projectId: config.projectId,
     // FIX 1 — seed the rail from the bootstrap, then keep it reactive so
     // projects created mid-onboarding appear live (a `projects_changed` frame).
     projects: config.projects,
-    createSession: (sinks) =>
+    topicForProject: (projectId) => topicForProject(config.userId, projectId),
+    createSession: (sinks, scope) =>
       new WebChatSession({
-        url: config.wsUrl,
-        topic_id: config.topicId,
+        url: wsUrlFor(scope.projectId),
+        topic_id: scope.topicId,
         store,
         device_id: config.deviceId,
         onChange: sinks.onChange,

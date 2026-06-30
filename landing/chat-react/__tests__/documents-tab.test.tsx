@@ -127,6 +127,23 @@ function jsonRes(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
+/** Switch the open doc from the default Rendered (markdown) view to the raw
+ *  Source `<pre>` — needed before any selection→offset comment flow or any
+ *  assertion over the raw `.cdoc-content` text. */
+async function clickSource(
+  container: HTMLElement,
+  act: (cb: () => void | Promise<void>) => Promise<void>,
+): Promise<void> {
+  const toggle = Array.from(container.querySelectorAll('.cdoc-view-toggle')).find(
+    (b) => (b.textContent ?? '') === 'Source',
+  ) as HTMLButtonElement | undefined
+  if (toggle === undefined) throw new Error('Source toggle not found')
+  await act(async () => {
+    toggle.click()
+    await tick()
+  })
+}
+
 describe('DocumentsTab (happy-dom)', () => {
   it('renders the doc list, opens a doc, and lists its comments', async () => {
     let threadsServed = false
@@ -175,8 +192,8 @@ describe('DocumentsTab (happy-dom)', () => {
       await tick()
     })
 
-    // Content + comment thread render.
-    expect(container.querySelector('.cdoc-content')?.textContent).toContain('quick brown fox')
+    // Content (rendered markdown) + comment thread render.
+    expect(container.querySelector('.cdoc-md')?.textContent).toContain('quick brown fox')
     expect(threadsServed).toBe(true)
     expect(container.textContent).toContain('nice phrase')
     expect(container.textContent).toContain('“quick”')
@@ -216,6 +233,8 @@ describe('DocumentsTab (happy-dom)', () => {
       await tick()
     })
 
+    // Commenting maps to RAW offsets, so switch to the Source view first.
+    await clickSource(container, act)
     // Select "brown" (offsets 10-15) inside the raw-content <pre>.
     const pre = container.querySelector('.cdoc-content') as HTMLElement
     const textNode = pre.firstChild as Node
@@ -293,8 +312,10 @@ describe('DocumentsTab (happy-dom)', () => {
       await tick()
     })
 
-    // The doc still views; comments pane shows the graceful note; no composer.
-    expect(container.querySelector('.cdoc-content')?.textContent).toContain('quick brown fox')
+    // The doc still views (rendered markdown); comments pane shows the graceful
+    // note; no composer. (The Comment affordance is also hidden because it only
+    // appears in Source mode, but here the 503 gate independently suppresses it.)
+    expect(container.querySelector('.cdoc-md')?.textContent).toContain('quick brown fox')
     expect(container.textContent).toContain('Comments aren’t available on this server.')
     expect(container.querySelector('.cdoc-comment-btn')).toBeNull()
 
@@ -386,6 +407,8 @@ describe('DocumentsTab (happy-dom)', () => {
     })
     // Back to the read view, now showing the saved content; comments reloaded.
     expect(container.querySelector('.cdoc-editor')).toBeNull()
+    // Switch to Source to assert on the raw saved markdown ('# Rewritten').
+    await clickSource(container, act)
     expect(container.querySelector('.cdoc-content')?.textContent).toContain('# Rewritten')
     expect(commentReloads).toBeGreaterThan(reloadsAfterOpen)
 

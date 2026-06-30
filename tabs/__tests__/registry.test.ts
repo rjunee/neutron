@@ -20,8 +20,10 @@ import {
 describe('tab registry — project scope', () => {
   it('returns the builtin project tabs in order', () => {
     const tabs = resolveProjectTabs()
-    expect(tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'tasks'])
-    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Work Board', 'Documents', 'Tasks'])
+    // Tasks is NOT a builtin (Ryan directive — Core-contributed, WAVE 3); the
+    // work_board tab's user-facing label reads "Plan".
+    expect(tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents'])
+    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Plan', 'Documents'])
   })
 
   it('marks every project tab scope=project, source=builtin, mount.kind=builtin', () => {
@@ -41,7 +43,7 @@ describe('tab registry — project scope', () => {
     expect(byKey['chat']).toBe('chat')
     expect(byKey['work_board']).toBe('workboard')
     expect(byKey['documents']).toBe('docs')
-    expect(byKey['tasks']).toBe('tasks')
+    expect(byKey['tasks']).toBeUndefined()
   })
 
   it('orders ascending by `order` with gaps left for PR-2 core tabs', () => {
@@ -51,7 +53,7 @@ describe('tab registry — project scope', () => {
       expect(orders[i]!).toBeGreaterThan(orders[i - 1]!)
     }
     // gaps > 1 so a Core tab can slot BETWEEN builtins without renumbering
-    expect(orders).toEqual([0, 5, 10, 20])
+    expect(orders).toEqual([0, 5, 10])
   })
 })
 
@@ -94,7 +96,7 @@ describe('tab registry — resolveTabs(scope) parity + immutability', () => {
     })
 
     const second = resolveProjectTabs()
-    expect(second.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'tasks'])
+    expect(second.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents'])
     expect(second[0]!.label).toBe('Chat')
     expect(second[0]!.mount.target).toBe('chat')
   })
@@ -123,7 +125,6 @@ describe('tab registry — Core union (PR-2)', () => {
       'chat',
       'work_board',
       'documents',
-      'tasks',
       'core:notes',
       'core:calendar',
     ])
@@ -136,8 +137,8 @@ describe('tab registry — Core union (PR-2)', () => {
     expect(tab.label).toBe('Notes')
     expect(tab.scope).toBe('project')
     expect(tab.mount).toEqual({ kind: 'webview', target: '/projects/p1/notes' })
-    // Core tabs sort after the order=20 Tasks builtin.
-    expect(tab.order).toBeGreaterThan(20)
+    // Core tabs sort after the last builtin (documents, order=10).
+    expect(tab.order).toBeGreaterThan(10)
   })
 
   it('unions Core tabs into the GLOBAL scope too (scope stamped global)', () => {

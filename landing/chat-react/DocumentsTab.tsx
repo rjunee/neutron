@@ -29,6 +29,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { Markdown } from './Markdown.tsx'
 import type { BootstrapConfig } from './config.ts'
 import {
   WebDocsClient,
@@ -110,6 +111,13 @@ export function DocumentsTab({
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [commentsUnavailable, setCommentsUnavailable] = useState(false)
   const [commentsError, setCommentsError] = useState<string | null>(null)
+
+  // Viewer mode — RENDERED (pretty sanitized markdown, the default) vs SOURCE
+  // (raw `<pre>`). Comment anchors are character offsets into the RAW content,
+  // so a selection→offset map only works over the source `<pre>`; commenting is
+  // therefore offered only in Source mode, while Rendered gives the readable
+  // view. Resets to Rendered whenever a different doc opens.
+  const [viewMode, setViewMode] = useState<'rendered' | 'source'>('rendered')
 
   // Edit mode (PR-6) — swaps the read-only viewer for a textarea bound to a
   // draft of the raw markdown. Saving writes the whole file over the existing
@@ -204,6 +212,7 @@ export function DocumentsTab({
       setOpenThread(null)
       setOpenThreadId(null)
       setEditing(false)
+      setViewMode('rendered')
       setDraft('')
       setSaveError(null)
       // A new doc invalidates any in-flight save's continuation; clear `saving`
@@ -461,10 +470,31 @@ export function DocumentsTab({
                 </div>
               ) : (
                 <div className="cdoc-edit-actions">
+                  {/* Rendered (pretty markdown) ↔ Source (raw, comment-able). */}
+                  <button
+                    type="button"
+                    className="cdoc-view-toggle"
+                    aria-pressed={viewMode === 'source'}
+                    onClick={() => {
+                      // Leaving Source drops any pending selection so the Comment
+                      // affordance can't linger over the now-hidden raw text.
+                      setSelection(null)
+                      setViewMode((m) => (m === 'rendered' ? 'source' : 'rendered'))
+                    }}
+                    title={
+                      viewMode === 'rendered'
+                        ? 'Show the raw markdown source (needed to comment)'
+                        : 'Show the rendered markdown'
+                    }
+                  >
+                    {viewMode === 'rendered' ? 'Source' : 'Rendered'}
+                  </button>
                   <button type="button" className="cdoc-edit-btn" onClick={startEdit}>
                     Edit
                   </button>
-                  {!commentsUnavailable ? (
+                  {/* Comment anchors map to RAW offsets, so commenting is only
+                      offered over the Source view's selectable `<pre>`. */}
+                  {!commentsUnavailable && viewMode === 'source' ? (
                     <button
                       type="button"
                       className="cdoc-comment-btn"
@@ -494,6 +524,8 @@ export function DocumentsTab({
                 />
                 {saveError !== null ? <div className="cdoc-comments-error">{saveError}</div> : null}
               </>
+            ) : viewMode === 'rendered' ? (
+              <Markdown text={file.content} className="cdoc-md" />
             ) : (
               <pre
                 ref={contentRef}

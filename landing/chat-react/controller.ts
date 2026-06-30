@@ -183,8 +183,29 @@ export interface ControllerSinks {
   onFrame: (frame: unknown) => void
 }
 
+/**
+ * The active conversation scope a session is bound to: the durable store key +
+ * WS topic (`topicId`) and the project it represents (`projectId`, null =
+ * General). The controller hands this to the session factory so each project
+ * gets its OWN socket + transcript; switching projects recreates the session
+ * with a new scope.
+ */
+export interface SessionScope {
+  topicId: string
+  projectId: string | null
+}
+
 export interface NeutronChatControllerOptions {
-  createSession: (sinks: ControllerSinks) => ControllerSession
+  /** Build a session bound to `scope` (its topic + project). Called once at
+   *  construction and again on every project switch (a fresh per-project
+   *  socket). */
+  createSession: (sinks: ControllerSinks, scope: SessionScope) => ControllerSession
+  /** Map an active project (null = General) to its durable store key + WS topic
+   *  (`app:<user>` for General, `app:<user>:<project>` for a project). Optional:
+   *  when omitted, a deterministic per-project fallback is used (sufficient for
+   *  tests that inject their own fake session; production wires the real one in
+   *  `main.tsx`). */
+  topicForProject?: (projectId: string | null) => string
   projectId?: string | null
   /** Initial project list from the page bootstrap (FIX 1 — kept reactive). */
   projects?: ProjectTab[]
@@ -204,7 +225,18 @@ interface StreamEntry {
 }
 
 export class NeutronChatController {
-  private readonly session: ControllerSession
+  /** The live session — REPLACED on every project switch (not readonly). */
+  private session: ControllerSession
+  /** Factory + topic mapper retained so a project switch can stand up a fresh
+   *  per-project session bound to the new scope. */
+  private readonly createSessionFn: (sinks: ControllerSinks, scope: SessionScope) => ControllerSession
+  private readonly topicForProject: (projectId: string | null) => string
+  /** The observer sinks, built ONCE and reused across session recreations. */
+  private readonly sinks: ControllerSinks
+  /** Lifecycle latches so a project switch revives the new session in the same
+   *  started/active state as the one it replaced. */
+  private started = false
+  private activeState = true
   private msgs: ChatMessage[] = []
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
@@ -257,18 +289,28 @@ export class NeutronChatController {
     this.projectId = opts.projectId ?? null
     this.projects = opts.projects ?? []
     this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
-    this.session = opts.createSession({
+    this.createSessionFn = opts.createSession
+    this.topicForProject =
+      opts.topicForProject ??
+      ((projectId) =>
+        projectId !== null && projectId.length > 0 ? `app:${projectId}` : 'app')
+    this.sinks = {
       onChange: () => {
         void this.handleChange()
       },
       onStatus: (status) => this.handleStatus(status),
       onFrame: (frame) => this.handleFrame(frame),
+    }
+    this.session = this.createSessionFn(this.sinks, {
+      projectId: this.projectId,
+      topicId: this.topicForProject(this.projectId),
     })
     this.deviceId = this.session.device_id ?? ''
     this.vm = this.computeVm()
   }
 
   start(): void {
+    this.started = true
     this.session.start()
     // Cold-open hydration: a durable Store (OPFS) may already hold the
     // transcript + queued offline sends from a previous session. Read it
@@ -279,6 +321,7 @@ export class NeutronChatController {
   }
 
   stop(): void {
+    this.started = false
     if (this.importProgressTimer !== null) {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
@@ -287,6 +330,7 @@ export class NeutronChatController {
   }
 
   setActive(active: boolean): void {
+    this.activeState = active
     this.session.setActive(active)
   }
 
@@ -294,11 +338,50 @@ export class NeutronChatController {
     return this.vm
   }
 
-  /** Active project tag carried on subsequent sends. */
+  /**
+   * Switch the active project. With per-project chat each project owns its OWN
+   * app-ws topic + durable transcript, so a switch RE-SCOPES the session: the
+   * current socket is torn down and a fresh one is bound to the new project's
+   * topic (General = the user-scoped topic), then the new topic's history
+   * hydrates from the shared store. The previous conversation's ephemeral state
+   * (streaming bubble, typing bracket, command/error notices, import progress,
+   * optimistic button choices) is reset so it can't bleed across. A no-op when
+   * the project is unchanged.
+   */
   setProject(projectId: string | null): void {
     if (projectId === this.projectId) return
+    // Tear down the outgoing per-project socket.
+    this.session.stop()
     this.projectId = projectId
+    // Reset per-CONVERSATION state — the new topic hydrates its own transcript.
+    this.streaming.clear()
+    this.notices.length = 0
+    this.chosen.clear()
+    this.awaitingReply = false
+    this.msgs = []
+    this.pending = 0
+    this.lastWorkBoard = null
+    this.lastWorkBoardProjectId = undefined
+    if (this.importProgressTimer !== null) {
+      clearTimeout(this.importProgressTimer)
+      this.importProgressTimer = null
+    }
+    this.importProgress = null
+    // Stand up the session bound to the new scope, mirroring the current
+    // started/active lifecycle so the new socket opens iff the controller is
+    // running.
+    this.session = this.createSessionFn(this.sinks, {
+      projectId,
+      topicId: this.topicForProject(projectId),
+    })
+    if (this.started) {
+      this.session.start()
+      this.session.setActive(this.activeState)
+    }
+    // Publish the empty/scoped VM immediately (instant switch feel), then
+    // hydrate the new topic's durable transcript.
     this.publish()
+    void this.handleChange()
   }
 
   subscribe(fn: (vm: ChatViewModel) => void): () => void {
@@ -475,13 +558,13 @@ export class NeutronChatController {
       return
     }
     // FIX 1 — a live project-list refresh (projects created/changed mid-session,
-    // e.g. during onboarding). Replace the rail's list. When we currently have
-    // NO active project (General) and projects just appeared, auto-select the
-    // server's suggested first project — mirroring the page bootstrap's
-    // `active_project_id` so the per-project Documents/Tasks/Admin tabs render
-    // live without a reload. We only auto-select on this 0→active transition, so
-    // a user who deliberately navigated to General after having projects isn't
-    // hijacked.
+    // e.g. during onboarding). Replace the RAIL's list only — projects appear in
+    // the persistent left rail the moment onboarding mints them. With per-project
+    // chat we deliberately do NOT auto-switch the chat into the new project on
+    // this 0→N transition: the onboarding conversation runs on the General topic,
+    // and re-scoping the socket mid-onboarding would yank the user into an empty
+    // project chat and drop the still-arriving onboarding messages. The user
+    // enters a project by tapping it in the rail (an explicit `setProject`).
     // Work Board live snapshot — the server fans the FULL board after every
     // committed mutation (agent tool or human HTTP write). Parse + cache it and
     // fan it to the board-tab subscribers ONLY (out-of-band of the chat vm).
@@ -514,24 +597,24 @@ export class NeutronChatController {
           projects.push({ id, label })
         }
       }
-      // Auto-select ONLY on a genuine 0→N transition (the list was empty and a
-      // first project just appeared) — the brand-new-owner case the bug
-      // describes. A user who deliberately navigated to General while projects
-      // already existed is left in General.
-      const hadNoProjects = this.projects.length === 0
+      // Refresh the rail list; the active conversation is NOT changed here (see
+      // the note above — per-project chat enters a project only via an explicit
+      // `setProject`, which re-scopes the socket).
       this.projects = projects
-      if (hadNoProjects && this.projectId === null && projects.length > 0) {
-        const suggested = f['active_project_id']
-        const activeId =
-          typeof suggested === 'string' && suggested.length > 0 ? suggested : projects[0]!.id
-        this.projectId = activeId
-      }
       this.publish()
     }
   }
 
   private async handleChange(): Promise<void> {
-    const [msgs, pending] = await Promise.all([this.session.messages(), this.session.pendingCount()])
+    // Capture the session this read belongs to. A project switch (`setProject`)
+    // can REPLACE `this.session` while we await a slow store read (OPFS), so the
+    // resolved msgs/pending may belong to the PREVIOUS topic. Bail if the session
+    // changed underfoot, else a stale read would clobber the newly-scoped
+    // transcript AND `markVisibleAgentRead` would route old-topic read receipts
+    // through the new project's socket (Codex P2).
+    const session = this.session
+    const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
+    if (this.session !== session) return
     this.msgs = msgs
     this.pending = pending
     // Drop any streaming buffer whose final message has now persisted, so the

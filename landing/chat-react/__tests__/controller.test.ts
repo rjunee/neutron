@@ -7,9 +7,9 @@
 
 import { describe, expect, it } from 'bun:test'
 import { InMemoryStore, WebChatSession } from '@neutron/chat-core'
-import type { SocketLike } from '@neutron/chat-core'
+import type { ChatMessage, SocketLike } from '@neutron/chat-core'
 
-import { NeutronChatController } from '../controller.ts'
+import { NeutronChatController, type ControllerSession } from '../controller.ts'
 
 const TOPIC = 'app:sam'
 
@@ -139,17 +139,24 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(controller.getViewModel().status).toBe('open')
   })
 
-  it('tags sends with the active project after setProject', async () => {
+  it('re-scopes to a fresh per-project socket on setProject and tags its sends', async () => {
     const { controller, sockets } = setup()
     controller.start()
     sockets[0]!.open()
     sockets[0]!.deliver(ready())
     await tick()
+    // Per-project chat: switching re-scopes the session — a NEW socket is opened
+    // for the project's own topic (the General socket is torn down).
     controller.setProject('proj-7')
     expect(controller.getViewModel().projectId).toBe('proj-7')
+    expect(sockets.length).toBe(2)
+    sockets[1]!.open()
+    sockets[1]!.deliver(ready())
+    await tick()
     await controller.send('tagged')
     await tick()
-    const env = sockets[0]!.userMessages().at(-1)
+    // The send rode the NEW (project) socket, tagged with the active project.
+    const env = sockets[1]!.userMessages().at(-1)
     expect(env?.['project_id']).toBe('proj-7')
   })
 
@@ -434,14 +441,13 @@ describe('NeutronChatController — live projects_changed (FIX 1)', () => {
     expect(controller.getViewModel().projects).toEqual([{ id: 'seed', label: 'Seed' }])
   })
 
-  it('refreshes the rail AND auto-selects the first project on a 0→N transition', async () => {
+  it('refreshes the rail on a 0→N transition but does NOT auto-switch the chat', async () => {
     const { controller, sockets } = setup(null)
     controller.start()
     sockets[0]!.open()
     sockets[0]!.deliver(ready())
     await tick()
-    // Brand-new owner: empty rail, General (no active project) — the bug's
-    // starting state.
+    // Brand-new owner: empty rail, General (no active project).
     expect(controller.getViewModel().projects).toEqual([])
     expect(controller.getViewModel().projectId).toBeNull()
 
@@ -449,10 +455,62 @@ describe('NeutronChatController — live projects_changed (FIX 1)', () => {
     sockets[0]!.deliver(projectsChanged([{ id: 'p1', label: 'Acme' }], 'p1'))
     await tick()
     const vm = controller.getViewModel()
+    // The project appears in the rail...
     expect(vm.projects).toEqual([{ id: 'p1', label: 'Acme' }])
-    // Auto-selected so the per-project Documents/Tasks/Admin tabs render live
-    // (mirrors the page bootstrap's active_project_id — no reload needed).
+    // ...but with per-project chat we do NOT auto-switch the socket mid-onboarding
+    // (that would yank the user into an empty project chat and drop the
+    // still-arriving onboarding messages). Stays on General; no new socket.
+    expect(vm.projectId).toBeNull()
+    expect(sockets.length).toBe(1)
+  })
+
+  it('re-scopes to a per-project topic + hydrates that topic’s transcript on switch', async () => {
+    // A SHARED store holds each topic's transcript under its own topic_id, so a
+    // switch re-scopes the session and the new topic's history hydrates.
+    const store = new InMemoryStore()
+    await store.upsert({
+      topic_id: 'app:sam:p1',
+      client_msg_id: '',
+      message_id: 'm-p1',
+      seq: 1,
+      role: 'agent',
+      body: 'project one history',
+      project_id: 'p1',
+      attachments: null,
+      created_at: 1,
+      status: 'acked',
+    })
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      projects: [{ id: 'p1', label: 'Acme' }],
+      topicForProject: (projectId) => (projectId !== null ? `app:sam:${projectId}` : 'app:sam'),
+      createSession: (sinks, scope) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: scope.topicId,
+          store,
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    controller.start()
+    sockets[0]!.open()
+    await tick()
+    // General is empty.
+    expect(controller.getViewModel().messages.map((m) => m.text)).toEqual([])
+    // Switch into the project → the project topic's transcript hydrates.
+    controller.setProject('p1')
+    await tick()
+    const vm = controller.getViewModel()
     expect(vm.projectId).toBe('p1')
+    expect(vm.messages.map((m) => m.text)).toEqual(['project one history'])
   })
 
   it('does NOT hijack a user already viewing General once projects exist', async () => {
@@ -481,13 +539,18 @@ describe('NeutronChatController — live projects_changed (FIX 1)', () => {
     sockets[0]!.open()
     sockets[0]!.deliver(ready())
     await tick()
-    // User is on an active project; deliberately switch to General.
+    // User is on an active project; deliberately switch to General — this
+    // re-scopes onto a fresh General socket.
     controller.setProject(null)
     expect(controller.getViewModel().projectId).toBeNull()
+    expect(sockets.length).toBe(2)
+    sockets[1]!.open()
+    sockets[1]!.deliver(ready())
+    await tick()
 
-    // A later refresh updates the list but must NOT auto-select (no 0→N: the
-    // user chose General on purpose).
-    sockets[0]!.deliver(
+    // A later refresh updates the list but must NOT auto-switch the chat (the
+    // user chose General on purpose); the frame arrives on the live socket.
+    sockets[1]!.deliver(
       projectsChanged(
         [
           { id: 'p1', label: 'Acme' },
@@ -630,13 +693,17 @@ describe('NeutronChatController — server-authoritative typing (agent_typing)',
     sockets[0]!.open()
     sockets[0]!.deliver(ready())
     await tick()
+    // setProject re-scopes onto a fresh per-project socket; frames arrive there.
     controller.setProject('proj-A')
+    sockets[1]!.open()
+    sockets[1]!.deliver(ready())
+    await tick()
     // A stray typing frame for ANOTHER project must not light this surface.
-    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 1, project_id: 'proj-B' })
+    sockets[1]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 1, project_id: 'proj-B' })
     await tick()
     expect(controller.getViewModel().isRunning).toBe(false)
     // The same project's frame DOES drive it.
-    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 2, project_id: 'proj-A' })
+    sockets[1]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 2, project_id: 'proj-A' })
     await tick()
     expect(controller.getViewModel().isRunning).toBe(true)
   })
@@ -845,6 +912,73 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     const after = controller.getViewModel()
     // The board is out-of-band of chat state — the vm reference is unchanged.
     expect(after.messages).toBe(before.messages)
+    controller.stop()
+  })
+})
+
+describe('NeutronChatController — per-project re-scope hydration race (Codex P2)', () => {
+  /** Minimal fake session so we can control when `messages()` resolves. */
+  function fakeSession(messages: () => Promise<ChatMessage[]>): ControllerSession {
+    return {
+      start: () => {},
+      stop: () => {},
+      setActive: () => {},
+      status: () => 'open',
+      send: async () => {},
+      messages,
+      pendingCount: async () => 0,
+      device_id: 'dev-test',
+    }
+  }
+  function chatMsg(body: string): ChatMessage {
+    return {
+      topic_id: 'app:sam',
+      client_msg_id: '',
+      message_id: 'm-old',
+      seq: 1,
+      role: 'agent',
+      body,
+      project_id: null,
+      attachments: null,
+      created_at: 1,
+      status: 'sent',
+      reactions: null,
+    } as ChatMessage
+  }
+
+  it('drops a stale handleChange from the stopped session after a project switch', async () => {
+    // The General session's store read is SLOW: hold its `messages()` promise
+    // open so it resolves AFTER we switch projects.
+    let resolveGeneral: (m: ChatMessage[]) => void = () => {}
+    const generalRead = new Promise<ChatMessage[]>((r) => {
+      resolveGeneral = r
+    })
+    const controller = new NeutronChatController({
+      projectId: null,
+      topicForProject: (p) => (p !== null ? `app:sam:${p}` : 'app:sam'),
+      createSession: (_sinks, scope) =>
+        scope.projectId === null
+          ? fakeSession(() => generalRead) // General: read never resolves until we say so
+          : fakeSession(() => Promise.resolve([])), // project p1: empty transcript
+    })
+    controller.start() // kicks off handleChange on the General session (awaiting generalRead)
+    await tick()
+
+    // Switch into p1 BEFORE the General read resolves — re-scopes onto a fresh
+    // (empty) session; p1's own handleChange resolves immediately.
+    controller.setProject('p1')
+    await tick()
+    expect(controller.getViewModel().projectId).toBe('p1')
+    expect(controller.getViewModel().messages.map((m) => m.text)).toEqual([])
+
+    // Now the stale General read finally lands with the General transcript.
+    resolveGeneral([chatMsg('stale general message')])
+    await tick()
+    await tick()
+
+    // It MUST NOT clobber p1's view — the session-identity guard drops it.
+    expect(controller.getViewModel().projectId).toBe('p1')
+    expect(controller.getViewModel().messages.map((m) => m.text)).toEqual([])
     controller.stop()
   })
 })

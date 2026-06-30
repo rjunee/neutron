@@ -38,8 +38,10 @@
     -webkit-font-smoothing: antialiased;
   }
   #root { height: 100dvh; }
-  /* WAVE 3 PR-4 — web project tab shell wrapping the chat client. */
-  .car-projectshell { display: flex; flex-direction: column; height: 100dvh; min-height: 0; }
+  /* Web app shell (rail/tab rework 2026-06-30): persistent project rail (left)
+     + content column (tab bar over the active tab body). */
+  .car-app { display: flex; height: 100dvh; min-height: 0; width: 100%; }
+  .car-content { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .car-tabs {
     display: flex; gap: 2px; flex: 0 0 auto; overflow-x: auto;
     padding: 0 8px; background: var(--surface); border-bottom: 1px solid var(--border);
@@ -60,6 +62,41 @@
   }
   .car-tab-placeholder-title { font-size: 20px; color: var(--fg); margin-bottom: 6px; }
   .car-tab-placeholder-sub { font-size: 14px; }
+  /* Sanitized markdown (react-markdown + remark-gfm) — shared by agent chat
+     bubbles + the Documents viewer. Dark theme; tight vertical rhythm so a chat
+     bubble doesn't balloon. */
+  .car-md { color: inherit; overflow-wrap: anywhere; }
+  .car-md > :first-child { margin-top: 0; }
+  .car-md > :last-child { margin-bottom: 0; }
+  .car-md p { margin: 0 0 8px; line-height: 1.5; }
+  .car-md h1, .car-md h2, .car-md h3, .car-md h4 { margin: 14px 0 6px; line-height: 1.25; font-weight: 700; }
+  .car-md h1 { font-size: 1.4em; } .car-md h2 { font-size: 1.25em; } .car-md h3 { font-size: 1.1em; }
+  .car-md ul, .car-md ol { margin: 0 0 8px; padding-left: 22px; }
+  .car-md li { margin: 2px 0; }
+  .car-md li > input[type="checkbox"] { margin-right: 6px; }
+  .car-md a { color: var(--accent); text-decoration: underline; }
+  .car-md strong { font-weight: 700; }
+  .car-md em { font-style: italic; }
+  .car-md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+    background: rgba(255,255,255,.08); border-radius: 4px; padding: 1px 5px;
+  }
+  .car-md pre {
+    background: #0c0e12; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; margin: 0 0 8px;
+  }
+  .car-md pre code { background: none; padding: 0; font-size: .85em; }
+  .car-md blockquote {
+    margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--border); color: var(--muted);
+  }
+  .car-md table { border-collapse: collapse; margin: 0 0 8px; display: block; overflow-x: auto; }
+  .car-md th, .car-md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+  .car-md th { background: rgba(255,255,255,.04); font-weight: 700; }
+  .car-md hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+  .car-md img { max-width: 100%; border-radius: 6px; }
+  /* Documents viewer markdown: scrollable, roomier line-height than chat. */
+  .cdoc-md { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px 20px; }
+  .cdoc-md p, .cdoc-md li { line-height: 1.6; }
   /* WAVE 3 PR-5 — web Documents tab (list · viewer · comments). */
   .cdoc { display: flex; flex: 1 1 auto; min-height: 0; width: 100%; }
   .cdoc-list {
@@ -88,10 +125,11 @@
   }
   .cdoc-comment-btn:disabled { opacity: .45; cursor: default; }
   .cdoc-edit-actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
-  .cdoc-edit-btn {
+  .cdoc-edit-btn, .cdoc-view-toggle {
     appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--fg);
     border-radius: 8px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; flex: 0 0 auto;
   }
+  .cdoc-view-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   .cdoc-content {
     flex: 1 1 auto; overflow-y: auto; margin: 0; padding: 16px 18px;
     white-space: pre-wrap; word-break: break-word; font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -260,7 +298,6 @@
     .cwb-dot-active { animation: none; }
     .cwb-flash { animation: none; }
   }
-  .car-shell { display: flex; height: 100%; width: 100%; }
   .car-rail {
     width: 220px;
     flex: 0 0 220px;
@@ -305,7 +342,9 @@
   }
   .car-rail-create-confirm { border-color: var(--accent); color: var(--accent); }
   .car-rail-create-cancel:disabled, .car-rail-create-confirm:disabled { opacity: .6; cursor: default; }
-  @media (max-width: 720px) { .car-rail { display: none; } }
+  /* The rail is the sole project navigation (persistent left column), so keep it
+     visible on narrow screens — just slimmer — rather than hiding it. */
+  @media (max-width: 720px) { .car-rail { width: 140px; flex-basis: 140px; padding: 12px 6px; } }
   /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
   .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
   /* Subtle drag feedback for a PLAIN image drag (no import affordance) — the

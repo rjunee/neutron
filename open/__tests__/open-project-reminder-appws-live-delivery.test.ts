@@ -12,14 +12,24 @@
  * topic the client never replays → the reminder VANISHED entirely.
  *
  * THE FIX: all fired reminders/briefs resolve to the owner's bare `app:<user>`
- * topic — the one surface the client binds + hydrates.
+ * topic — the General inbox surface the client binds + hydrates.
+ *
+ * Per-project chat (2026-06-30): the web client now opens ONE socket per active
+ * project, bound to a PER-PROJECT topic `app:<user>:<project>`; only the General
+ * (no-project) socket binds the bare `app:<user>` topic. Reminders/briefs remain
+ * an INBOX concern — they still fan to the bare `app:<user>` topic (General), so
+ * the surface that receives them live is the GENERAL socket (a user viewing a
+ * project sees them on switching back to General; the durable rows always live
+ * under `app:<user>`). This test therefore connects a GENERAL socket and asserts
+ * a PROJECT-stamped reminder still (a) live-pushes to it and (b) persists under
+ * the bare `app:<owner>` topic — the #105 guarantee, unchanged.
  *
  * This boots the REAL Open composition over a live `Bun.serve`, opens the
- * unified `/ws/app/chat` socket, inserts a PROJECT-scoped reminder
+ * unified `/ws/app/chat` socket (General), inserts a PROJECT-scoped reminder
  * (`topic_id = app-project:<id>`, exactly what `app-reminders-surface` stamps),
  * fires it via the REAL tick loop, and asserts the composed body is (a) live-
  * pushed to the connected socket and (b) persisted under the bare `app:<owner>`
- * topic the client reads. FAILS pre-fix (suffixed topic → live drop + durable
+ * topic the client reads. FAILS pre-#105 (suffixed topic → live drop + durable
  * row under `app:owner:<id>`), PASSES with the fix.
  */
 
@@ -135,10 +145,13 @@ describe('Open project-scoped reminder app-ws live delivery', () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-proj-reminder-live'
     harness = await startHarness()
     const wsUrl = harness.base.replace(/^http/, 'ws')
-    // Connect with a project context, exactly as the app does when viewing a project.
-    const ws = new WebSocket(
-      `${wsUrl}/ws/app/chat?token=dev:owner&platform=web&project_id=${PROJECT_ID}`,
-    )
+    // Connect the GENERAL socket (no project_id → bare `app:owner` topic). With
+    // per-project chat a project socket binds `app:owner:<project>`, but
+    // reminders/briefs fan to the bare `app:owner` inbox topic — so General is
+    // the surface that receives them live. The reminder below is still
+    // PROJECT-stamped (`app-project:<id>`); the test asserts it still resolves to
+    // the bare `app:owner` topic this socket binds.
+    const ws = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
     const frames: Array<Record<string, unknown>> = []
     ws.onmessage = (e) => { try { frames.push(JSON.parse(String(e.data))) } catch { /* */ } }
     await new Promise<void>((resolve, reject) => {

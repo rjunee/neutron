@@ -39,6 +39,7 @@ import {
   decodeAppWsReceipt,
   decodeAppWsResume,
   appWsTopicId,
+  appWsProjectTopicId,
   AGENT_DEVICE_ID,
   MAX_USER_MESSAGE_LEN,
   payloadIsEmpty,
@@ -59,15 +60,23 @@ export interface AppWsSocketData {
   surface: 'app_ws'
   user_id: string
   project_slug: string
+  /**
+   * The topic this socket reads/writes/resumes against. For a WEB client that
+   * connected with a `project_id`, this is the PER-PROJECT topic
+   * `app:<user>:<project>` (so persistence + seq + resume + fan-out scope to the
+   * project); otherwise the user-scoped `app:<user>`. Fixed for the socket's
+   * lifetime — the web client reconnects to switch projects.
+   */
   channel_topic_id: string
   /**
    * P5.2 — project_id captured at upgrade time from the query string.
    * Stashed here so subsequent outbound envelopes can echo it back
-   * without the client having to re-send on every message. Mutable
-   * because the inbound `user_message` envelope may carry a different
-   * project_id (e.g. the client switched tabs without reconnecting);
-   * we update on every inbound and use the most recent value when
-   * emitting the echo.
+   * without the client having to re-send on every message, and so the
+   * live-agent turn scopes to the right project. For WEB it also selects the
+   * per-project `channel_topic_id` bind above. Mutable because a P5.1/mobile
+   * inbound `user_message` may carry a different project_id (the mobile client
+   * switches tabs WITHOUT reconnecting on its single `app:<user>` socket); we
+   * update on every inbound and use the most recent value when emitting the echo.
    */
   project_id?: string
   /**
@@ -230,11 +239,23 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         const device_id =
           (raw_device_id !== null ? sanitizeDeviceId(raw_device_id) : null) ??
           `conn-${crypto.randomUUID()}`
+        // Per-project chat (web): bind the socket to a PER-PROJECT topic
+        // `app:<user>:<project>` so persistence + seq + resume + fan-out all
+        // scope to that project, and the agent loop picks the project up from
+        // the `project_id` field. The web React client reconnects (one socket
+        // per active project) on a project switch; General omits `project_id`
+        // and stays on the user-scoped `app:<user>` topic. Gated on
+        // `platform === 'web'` — mobile keeps its single `app:<user>` socket +
+        // `project_id`-field switch model, so its transcript is unchanged.
+        const channel_topic_id =
+          platform === 'web' && project_id !== null
+            ? appWsProjectTopicId(resolved.user_id, project_id)
+            : appWsTopicId(resolved.user_id)
         const data: AppWsSocketData = {
           surface: 'app_ws',
           user_id: resolved.user_id,
           project_slug: resolved.project_slug,
-          channel_topic_id: appWsTopicId(resolved.user_id),
+          channel_topic_id,
           device_id,
         }
         if (project_id !== null) data.project_id = project_id

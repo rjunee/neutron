@@ -1,12 +1,14 @@
 /**
- * Component test for the web project TAB SHELL (WAVE 3 PR-4). Renders
+ * Component test for the web APP SHELL (rail/tab rework 2026-06-30). Renders
  * `ProjectShell` in happy-dom over a real chat-core `WebChatSession` (fake
  * socket) with an injected `fetchImpl` serving the tab resolver. Asserts:
- *   - the bar renders the engine-resolved tab set (Chat + Documents + Tasks +
- *     a Core tab), not a hardcoded list;
- *   - the Chat tab shows the existing `ChatApp` and is active by default;
- *   - switching to a builtin tab reveals its "coming soon" placeholder;
- *   - switching to a Core tab renders a sandboxed iframe at the resolved URL.
+ *   - PROJECT view: the bar renders the engine-resolved set (Chat + Plan +
+ *     Documents + a Core tab), NO Tasks (removed) and NO Admin (global);
+ *   - the persistent project rail renders alongside the tab content;
+ *   - the Chat tab shows `ChatApp` and is active by default;
+ *   - switching to a builtin tab reveals its real view; switching to a Core tab
+ *     renders a sandboxed iframe at the resolved URL;
+ *   - GENERAL view: the bar shows Chat + Admin (the global tabs), NOT chat-only.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
@@ -52,8 +54,8 @@ const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TO
 
 const RESOLVED_TABS = [
   { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
+  { key: 'work_board', label: 'Plan', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
   { key: 'documents', label: 'Documents', scope: 'project', source: 'builtin', order: 10, mount: { kind: 'builtin', target: 'docs' } },
-  { key: 'tasks', label: 'Tasks', scope: 'project', source: 'builtin', order: 20, mount: { kind: 'builtin', target: 'tasks' } },
   {
     key: 'core:analytics',
     label: 'Analytics',
@@ -63,6 +65,10 @@ const RESOLVED_TABS = [
     order: 100,
     mount: { kind: 'webview', target: 'https://core.example/analytics/acme' },
   },
+]
+
+const GLOBAL_TABS = [
+  { key: 'admin', label: 'Admin', scope: 'global', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'admin' } },
 ]
 
 describe('ProjectShell render (happy-dom)', () => {
@@ -165,10 +171,14 @@ describe('ProjectShell render (happy-dom)', () => {
     // The resolver was hit for the active project's tabs.
     expect(fetchCalls.some((u) => u.endsWith(`/api/app/projects/${PROJECT}/tabs`))).toBe(true)
 
-    // The bar renders the engine-resolved set, not a hardcoded list.
+    // The bar renders the engine-resolved set, not a hardcoded list — Plan (not
+    // "Work Board"), no Tasks (removed), no Admin (global, not folded in).
     const tabButtons = () =>
       Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
-    expect(tabButtons()).toEqual(['Chat', 'Documents', 'Tasks', 'Analytics'])
+    expect(tabButtons()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+
+    // The persistent project rail renders alongside the tab content.
+    expect(container.querySelector('.car-rail')).not.toBeNull()
 
     // Chat is active by default → ChatApp is rendered (composer Send button).
     expect(container.textContent).toContain('Send')
@@ -207,7 +217,7 @@ describe('ProjectShell render (happy-dom)', () => {
     })
   })
 
-  it('stays chat-only (no tab strip) for the General / no-project view', async () => {
+  it('shows Chat + Admin (global tabs) for the General / no-project view', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
     const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
@@ -238,10 +248,17 @@ describe('ProjectShell render (happy-dom)', () => {
       return s as never
     }
 
-    // No project ⇒ the shell must NOT hit the resolver at all.
-    let resolverHits = 0
+    // General ⇒ the shell resolves the GLOBAL tabs (Admin), never the
+    // per-project resolver.
+    let projectResolverHits = 0
     const fetchImpl = async (url: string): Promise<Response> => {
-      if (url.includes('/tabs')) resolverHits++
+      if (/\/api\/app\/projects\/[^/]+\/tabs$/.test(url)) projectResolverHits++
+      if (url.endsWith('/api/app/tabs')) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'global', tabs: GLOBAL_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
       return new Response('not found', { status: 404 })
     }
 
@@ -293,10 +310,24 @@ describe('ProjectShell render (happy-dom)', () => {
       await tick()
     })
 
-    // No tab strip, no resolver call — just the chat.
-    expect(container.querySelectorAll('button[role="tab"]')).toHaveLength(0)
-    expect(resolverHits).toBe(0)
+    // General shows the global tab set (Chat + Admin) in the SAME content pane;
+    // the per-project resolver is never hit, and the persistent rail renders.
+    const tabButtons = () =>
+      Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
+    expect(tabButtons()).toEqual(['Chat', 'Admin'])
+    expect(projectResolverHits).toBe(0)
+    expect(container.querySelector('.car-rail')).not.toBeNull()
     expect(container.textContent).toContain('Send')
+
+    // Admin tab switches to the integrations surface (Chat panel hidden).
+    const adminBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
+      (b) => b.textContent === 'Admin',
+    ) as HTMLButtonElement
+    await act(async () => {
+      adminBtn.click()
+      await tick()
+    })
+    expect((container.querySelector('.car-tabpanel') as HTMLElement).hasAttribute('hidden')).toBe(true)
 
     await act(async () => {
       root.unmount()
