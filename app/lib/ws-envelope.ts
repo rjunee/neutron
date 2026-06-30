@@ -65,6 +65,15 @@ export interface AppWsOutboundSessionReady {
   topic_id: string;
   ts: number;
   project_id?: string;
+  /**
+   * Chat-sync foundation — the server's high-water `seq` (`MAX(seq)` for the
+   * topic) at connect. Absent when 0 (fresh topic / no durable log). The client
+   * resumes only when its local cursor < this; a value STRICTLY LOWER than the
+   * client's cursor signals a server reset/reinstall (seq regressed), triggering
+   * a stale-store wipe + full re-sync (M1). Mirrors
+   * `channels/adapters/app-ws/envelope.ts` `AppWsOutboundSessionReady`.
+   */
+  last_seen_seq?: number;
 }
 
 export interface AppWsOutboundUserMessageEcho {

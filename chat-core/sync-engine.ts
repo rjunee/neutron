@@ -190,6 +190,42 @@ export class SyncEngine {
     return { v: 1, type: 'resume', after_seq }
   }
 
+  /**
+   * Stale-store reset detection (M1). Compare the server's reported high-water
+   * `seq` (from `session_ready.last_seen_seq`, parsed by
+   * {@link parseSessionReadyMaxSeq}) against our local resume cursor. When the
+   * server's value is a known number STRICTLY LOWER than a non-zero local
+   * cursor, the per-topic seq counter regressed — the server was wiped or
+   * reinstalled under us (a fresh install restarts seq at 1) — so the locally
+   * cached transcript belongs to a dead server and must be dropped. Clearing the
+   * topic resets the cursor to 0, so the `resume` that follows re-syncs the
+   * whole fresh transcript (`after_seq: 0`) from the new server.
+   *
+   * Deliberately conservative — it NEVER clears when:
+   *   - the server didn't report a seq (`serverMaxSeq === null`): a fresh topic
+   *     or a no-durable-log deployment omits `last_seen_seq`, and clearing there
+   *     would wipe the only copy of the transcript;
+   *   - the server seq is >= the local cursor: the ordinary reconnect / cold-open
+   *     / first-connect case (the server is at or ahead of us — just resume
+   *     forward), so a normal reconnect can never false-trigger a wipe;
+   *   - the local cursor is 0: there is nothing cached that could be stale.
+   *
+   * Returns whether a reset was detected (and the topic cleared) so the caller
+   * can emit a UI change immediately, before the resume replay arrives.
+   */
+  async reconcileServerReset(
+    topic_id: string,
+    serverMaxSeq: number | null,
+  ): Promise<{ reset: boolean }> {
+    if (serverMaxSeq === null) return { reset: false }
+    const localCursor = await this.store.lastSeenSeq(topic_id)
+    if (localCursor > 0 && serverMaxSeq < localCursor) {
+      await this.store.clear(topic_id)
+      return { reset: true }
+    }
+    return { reset: false }
+  }
+
   /** Current resume cursor (max applied seq) for a topic. */
   async cursor(topic_id: string): Promise<number> {
     return this.store.lastSeenSeq(topic_id)

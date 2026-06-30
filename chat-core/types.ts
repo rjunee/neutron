@@ -395,6 +395,31 @@ export interface OutboundButtonChoice {
 }
 
 /**
+ * Stale-store reset detection (M1) — extract the server's reported high-water
+ * `seq` from a `session_ready` control frame, or `null` when it's absent /
+ * malformed / not a `session_ready` frame.
+ *
+ * The app-ws surface stamps `last_seen_seq` = `MAX(seq)` for the topic at
+ * connect, OMITTING it when 0 (a fresh topic, or a deployment with no durable
+ * log). A client compares this against its local resume cursor: a server value
+ * STRICTLY LOWER than the cursor means the per-topic seq counter regressed — the
+ * server was wiped / reinstalled under us (a fresh install restarts seq at 1) —
+ * so the stale local transcript must be cleared + re-synced. `null` is NEVER a
+ * reset signal: an absent field can't distinguish a fresh wipe from a no-durable-
+ * log deployment, where clearing would destroy the only copy of the transcript.
+ *
+ * Defensive (return `null`, never throw), matching the other frame decoders.
+ */
+export function parseSessionReadyMaxSeq(raw: unknown): number | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'session_ready') return null
+  const v = e['last_seen_seq']
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  return Math.trunc(v)
+}
+
+/**
  * Normalize a parsed server frame into an {@link InboundChatMessage}, or
  * `null` when the frame is not a renderable message (control frame, wrong
  * shape, missing required fields). Defensive by design: a malformed field

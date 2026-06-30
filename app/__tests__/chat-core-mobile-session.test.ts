@@ -503,3 +503,61 @@ describe('MobileChatSession — rich agent metadata survives the inbound path (C
     expect(m?.deep_link).toBe('neutron://docs/d');
   });
 });
+
+describe('MobileChatSession — stale-store reset on server reinstall (M1)', () => {
+  /** Seed the on-device store with an old transcript (cursor at seq 40). */
+  async function seeded(): Promise<SqliteChatStore> {
+    const store = await freshStore();
+    await store.upsert({
+      topic_id: TOPIC, client_msg_id: '', message_id: 'old1', seq: 39, role: 'agent',
+      body: 'stale a', project_id: null, attachments: null, created_at: 1, status: 'acked',
+    });
+    await store.upsert({
+      topic_id: TOPIC, client_msg_id: '', message_id: 'old2', seq: 40, role: 'agent',
+      body: 'stale b', project_id: null, attachments: null, created_at: 2, status: 'acked',
+    });
+    return store;
+  }
+
+  it('clears the on-device transcript + resumes from 0 when the fresh server seq regressed', async () => {
+    const store = await seeded();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    // Reinstalled server announces a LOWER high-water seq.
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1, last_seen_seq: 2 });
+    await tick();
+    expect(await store.lastSeenSeq(TOPIC)).toBe(0);
+    const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
+    expect(resume).toMatchObject({ type: 'resume', after_seq: 0 });
+    // The fresh transcript then replays cleanly with no stale rows.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'new1', seq: 1, body: 'fresh welcome', ts: 3 });
+    await tick();
+    const bodies = (await session.messages()).map((m) => m.body);
+    expect(bodies).toEqual(['fresh welcome']);
+  });
+
+  it('does NOT clear on a normal reconnect (server seq >= local cursor)', async () => {
+    const store = await seeded();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1, last_seen_seq: 40 });
+    await tick();
+    expect(await store.lastSeenSeq(TOPIC)).toBe(40);
+    expect((await session.messages()).length).toBe(2);
+    const resume = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'resume').at(-1);
+    expect(resume).toMatchObject({ type: 'resume', after_seq: 40 });
+  });
+
+  it('does NOT clear when the server omits last_seen_seq (absent → never a wipe)', async () => {
+    const store = await seeded();
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+    expect(await store.lastSeenSeq(TOPIC)).toBe(40);
+    expect((await session.messages()).length).toBe(2);
+  });
+});
