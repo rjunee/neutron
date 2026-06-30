@@ -768,10 +768,14 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     ts: 1,
   })
 
-  it('fans a parsed snapshot to onWorkBoardChanged subscribers', async () => {
+  it('fans a parsed snapshot + the frame project_id to subscribers', async () => {
     const { controller, sockets } = setup('p1')
     const seen: Array<Array<{ id: string; title: string }>> = []
-    controller.onWorkBoardChanged((items) => seen.push(items.map((i) => ({ id: i.id, title: i.title }))))
+    const seenPids: Array<string | undefined> = []
+    controller.onWorkBoardChanged((items, pid) => {
+      seen.push(items.map((i) => ({ id: i.id, title: i.title })))
+      seenPids.push(pid)
+    })
     controller.start()
     sockets[0]!.open()
     sockets[0]!.deliver(ready())
@@ -783,6 +787,8 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
       { id: 'a', title: 'One' },
       { id: 'b', title: 'Two' },
     ])
+    // The frame's project_id rides along so the tab can drop a sibling project.
+    expect(seenPids).toEqual(['p1'])
     controller.stop()
   })
 

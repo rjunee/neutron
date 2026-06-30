@@ -62,10 +62,12 @@ type Handler = (url: string, init?: RequestInit) => Response | null
 
 /** A controllable live source: tests grab `emit` to push a snapshot. */
 function fakeLive(): {
-  source: { onWorkBoardChanged(fn: (items: WorkBoardItem[]) => void): () => void }
-  emit: (items: WorkBoardItem[]) => void
+  source: {
+    onWorkBoardChanged(fn: (items: WorkBoardItem[], pid: string | undefined) => void): () => void
+  }
+  emit: (items: WorkBoardItem[], pid?: string) => void
 } {
-  let cb: ((items: WorkBoardItem[]) => void) | null = null
+  let cb: ((items: WorkBoardItem[], pid: string | undefined) => void) | null = null
   return {
     source: {
       onWorkBoardChanged(fn) {
@@ -75,15 +77,17 @@ function fakeLive(): {
         }
       },
     },
-    emit: (items) => {
-      if (cb !== null) cb(items)
+    emit: (items, pid) => {
+      if (cb !== null) cb(items, pid)
     },
   }
 }
 
 async function mount(
   handler: Handler,
-  live?: { onWorkBoardChanged(fn: (items: WorkBoardItem[]) => void): () => void },
+  live?: {
+    onWorkBoardChanged(fn: (items: WorkBoardItem[], pid: string | undefined) => void): () => void
+  },
 ): Promise<{
   container: HTMLElement
   root: { unmount: () => void }
@@ -335,6 +339,32 @@ describe('WorkBoardTab (happy-dom)', () => {
       await tick()
     })
     expect(container.textContent).toContain('Pushed live')
+
+    await act(async () => root.unmount())
+  })
+
+  it('drops a live snapshot for a DIFFERENT project', async () => {
+    const { source, emit } = fakeLive()
+    const { container, root, act } = await mount(
+      listOf([item({ id: 'a', title: 'Mine' })]),
+      source,
+    )
+    expect(container.textContent).toContain('Mine')
+
+    // A frame tagged for another project must NOT overwrite this tab's board.
+    await act(async () => {
+      emit([item({ id: 'z', title: 'Other project leak' })], 'some-other-project')
+      await tick()
+    })
+    expect(container.textContent).toContain('Mine')
+    expect(container.textContent).not.toContain('Other project leak')
+
+    // A frame for THIS project (PROJECT) still applies.
+    await act(async () => {
+      emit([item({ id: 'b', title: 'My update' })], PROJECT)
+      await tick()
+    })
+    expect(container.textContent).toContain('My update')
 
     await act(async () => root.unmount())
   })

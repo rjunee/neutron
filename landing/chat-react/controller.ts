@@ -233,9 +233,14 @@ export class NeutronChatController {
    * tab, never the whole chat view — mirrors the `projects_changed` apply but
    * out-of-band of the chat ViewModel (the board isn't chat state).
    */
-  private readonly workBoardListeners = new Set<(items: WorkBoardItem[]) => void>()
+  private readonly workBoardListeners = new Set<
+    (items: WorkBoardItem[], projectId: string | undefined) => void
+  >()
   /** Last board snapshot seen on a frame, replayed to a late subscriber. */
   private lastWorkBoard: WorkBoardItem[] | null = null
+  /** The project the cached snapshot belongs to (the frame's `project_id`), so a
+   *  late subscriber for a DIFFERENT project isn't replayed the wrong board. */
+  private lastWorkBoardProjectId: string | undefined = undefined
   private vm: ChatViewModel
   private seq = 0
   /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
@@ -305,16 +310,22 @@ export class NeutronChatController {
 
   /**
    * Subscribe to live Work Board snapshots (`work_board_changed` frames). The
-   * callback fires with the full board (active+next first, then completed) on
-   * every committed board mutation — agent tool OR human HTTP write, both ride
-   * the same server push. If a snapshot has already arrived, the new subscriber
-   * is replayed it synchronously so a tab mounted AFTER the frame doesn't miss
-   * it. Returns an unsubscribe fn. Full-snapshot + idempotent, so the tab can
-   * replace its list outright (no delta merge).
+   * callback fires with the full board (active+next first, then completed) AND
+   * the frame's `project_id` (or `undefined` when the frame omits it) on every
+   * committed board mutation — agent tool OR human HTTP write, both ride the same
+   * server push. The subscriber MUST drop a snapshot whose project_id doesn't
+   * match the tab it's mounted for (the app-ws topic is per-user, so a sibling
+   * project's board can arrive on this socket). If a snapshot has already
+   * arrived, the new subscriber is replayed it synchronously (with its
+   * project_id) so a tab mounted AFTER the frame doesn't miss it. Returns an
+   * unsubscribe fn. Full-snapshot + idempotent, so the tab can replace its list
+   * outright (no delta merge).
    */
-  onWorkBoardChanged(fn: (items: WorkBoardItem[]) => void): () => void {
+  onWorkBoardChanged(
+    fn: (items: WorkBoardItem[], projectId: string | undefined) => void,
+  ): () => void {
     this.workBoardListeners.add(fn)
-    if (this.lastWorkBoard !== null) fn(this.lastWorkBoard)
+    if (this.lastWorkBoard !== null) fn(this.lastWorkBoard, this.lastWorkBoardProjectId)
     return () => {
       this.workBoardListeners.delete(fn)
     }
@@ -476,10 +487,15 @@ export class NeutronChatController {
     // fan it to the board-tab subscribers ONLY (out-of-band of the chat vm).
     if (type === 'work_board_changed') {
       const items = parseWorkBoardItems(f['items'])
+      const framePid =
+        typeof f['project_id'] === 'string' && (f['project_id'] as string).length > 0
+          ? (f['project_id'] as string)
+          : undefined
       this.lastWorkBoard = items
+      this.lastWorkBoardProjectId = framePid
       for (const fn of this.workBoardListeners) {
         try {
-          fn(items)
+          fn(items, framePid)
         } catch {
           /* a throwing tab callback must not wedge the frame loop */
         }

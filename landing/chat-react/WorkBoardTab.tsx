@@ -50,7 +50,9 @@ type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
  * tab unit-tests with a tiny fake — or `null` for the no-live-source case.
  */
 export interface WorkBoardLiveSource {
-  onWorkBoardChanged(fn: (items: WorkBoardItem[]) => void): () => void
+  onWorkBoardChanged(
+    fn: (items: WorkBoardItem[], projectId: string | undefined) => void,
+  ): () => void
 }
 
 /** Cycle an item's status forward: upcoming → in_progress → done. */
@@ -169,13 +171,17 @@ export function WorkBoardTab({
   // an in-flight initial fetch from clobbering a fresher live snapshot.
   useEffect(() => {
     if (liveSource === undefined || liveSource === null) return
-    const unsub = liveSource.onWorkBoardChanged((next) => {
+    const unsub = liveSource.onWorkBoardChanged((next, framePid) => {
+      // The app-ws topic is per-user, so a sibling project's board can arrive on
+      // this socket; drop a snapshot that names a DIFFERENT project (a frame with
+      // no project_id is treated as "this project" — single-project instances).
+      if (framePid !== undefined && framePid.length > 0 && framePid !== projectId) return
       listSeq.current += 1
       setItems(next)
       setLoading(false)
     })
     return unsub
-  }, [liveSource, listSeq])
+  }, [liveSource, projectId, listSeq])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()
