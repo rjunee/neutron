@@ -606,7 +606,15 @@ export class NeutronChatController {
   }
 
   private async handleChange(): Promise<void> {
-    const [msgs, pending] = await Promise.all([this.session.messages(), this.session.pendingCount()])
+    // Capture the session this read belongs to. A project switch (`setProject`)
+    // can REPLACE `this.session` while we await a slow store read (OPFS), so the
+    // resolved msgs/pending may belong to the PREVIOUS topic. Bail if the session
+    // changed underfoot, else a stale read would clobber the newly-scoped
+    // transcript AND `markVisibleAgentRead` would route old-topic read receipts
+    // through the new project's socket (Codex P2).
+    const session = this.session
+    const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
+    if (this.session !== session) return
     this.msgs = msgs
     this.pending = pending
     // Drop any streaming buffer whose final message has now persisted, so the

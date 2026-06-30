@@ -7,9 +7,9 @@
 
 import { describe, expect, it } from 'bun:test'
 import { InMemoryStore, WebChatSession } from '@neutron/chat-core'
-import type { SocketLike } from '@neutron/chat-core'
+import type { ChatMessage, SocketLike } from '@neutron/chat-core'
 
-import { NeutronChatController } from '../controller.ts'
+import { NeutronChatController, type ControllerSession } from '../controller.ts'
 
 const TOPIC = 'app:sam'
 
@@ -912,6 +912,73 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     const after = controller.getViewModel()
     // The board is out-of-band of chat state — the vm reference is unchanged.
     expect(after.messages).toBe(before.messages)
+    controller.stop()
+  })
+})
+
+describe('NeutronChatController — per-project re-scope hydration race (Codex P2)', () => {
+  /** Minimal fake session so we can control when `messages()` resolves. */
+  function fakeSession(messages: () => Promise<ChatMessage[]>): ControllerSession {
+    return {
+      start: () => {},
+      stop: () => {},
+      setActive: () => {},
+      status: () => 'open',
+      send: async () => {},
+      messages,
+      pendingCount: async () => 0,
+      device_id: 'dev-test',
+    }
+  }
+  function chatMsg(body: string): ChatMessage {
+    return {
+      topic_id: 'app:sam',
+      client_msg_id: '',
+      message_id: 'm-old',
+      seq: 1,
+      role: 'agent',
+      body,
+      project_id: null,
+      attachments: null,
+      created_at: 1,
+      status: 'sent',
+      reactions: null,
+    } as ChatMessage
+  }
+
+  it('drops a stale handleChange from the stopped session after a project switch', async () => {
+    // The General session's store read is SLOW: hold its `messages()` promise
+    // open so it resolves AFTER we switch projects.
+    let resolveGeneral: (m: ChatMessage[]) => void = () => {}
+    const generalRead = new Promise<ChatMessage[]>((r) => {
+      resolveGeneral = r
+    })
+    const controller = new NeutronChatController({
+      projectId: null,
+      topicForProject: (p) => (p !== null ? `app:sam:${p}` : 'app:sam'),
+      createSession: (_sinks, scope) =>
+        scope.projectId === null
+          ? fakeSession(() => generalRead) // General: read never resolves until we say so
+          : fakeSession(() => Promise.resolve([])), // project p1: empty transcript
+    })
+    controller.start() // kicks off handleChange on the General session (awaiting generalRead)
+    await tick()
+
+    // Switch into p1 BEFORE the General read resolves — re-scopes onto a fresh
+    // (empty) session; p1's own handleChange resolves immediately.
+    controller.setProject('p1')
+    await tick()
+    expect(controller.getViewModel().projectId).toBe('p1')
+    expect(controller.getViewModel().messages.map((m) => m.text)).toEqual([])
+
+    // Now the stale General read finally lands with the General transcript.
+    resolveGeneral([chatMsg('stale general message')])
+    await tick()
+    await tick()
+
+    // It MUST NOT clobber p1's view — the session-identity guard drops it.
+    expect(controller.getViewModel().projectId).toBe('p1')
+    expect(controller.getViewModel().messages.map((m) => m.text)).toEqual([])
     controller.stop()
   })
 })
