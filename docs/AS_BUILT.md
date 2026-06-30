@@ -55,6 +55,43 @@ Claude export → job started). Added two engine-level repros in
 (no-state solicited → seeds row + starts; no-state affordance-off / managed →
 no-op, no row manufactured). Negative control: reverting the engine fix fails
 exactly these no-state tests.
+## 2026-06-29 — Create Project affordance (project rail + create-project capability + agent tool)
+
+A skip-import owner had no user-initiated way to create a project (projects only
+materialized at onboarding finalize; reaching one otherwise needed the ≥3-project
+gap-fill quota). Added a Create Project affordance across all surfaces, all
+reusing ONE project-creation code path.
+
+- **Shared primitives (`gateway/realmode-composer/project-create.ts`).** Extracted
+  `ensureProjectRow` + `resolveBindTarget` (the `projects` row + cli wow-shell
+  `topics` binding — idempotent, duplicate-safe, soft-delete-respecting) out of
+  `build-onboarding-finalize.ts` into a shared module, plus `createProjectRow`
+  (fast row-only half), `buildScaffoldMaterializer` + `materializeProjectScaffold`
+  (on-disk docs + git + GBrain page). The finalizer now IMPORTS these — no second
+  path. (Onboarding finalize tests unchanged + green.)
+- **HTTP `POST /api/app/projects`** (`gateway/http/app-projects-surface.ts`,
+  bearer-gated). `{ name }` → `{ project: { id, label }, created }` (201/200);
+  optional `createProject` binding → `501 create_not_configured` where unwired.
+- **Open wiring (`open/composer.ts`).** Mounts the whole app-projects surface
+  (also gives mobile `fetchProjects` a real backend — previously unmounted in
+  Open) + the `create_project` tool, both bound to one `createProjectAndRefresh`
+  (row → fire-and-forget materialize → `emitProjectsChangedNow`, an unconditional
+  `projects_changed` fan so a skip-import owner's first action refreshes the rail).
+- **`create_project` agent tool** (`create-project-tool.ts`, registered in
+  `build-core-modules.ts`; `auto` approval, `write:project_data`, non-hidden) —
+  agent-native parity; `project_slug`/`speaker_user_id` server-injected.
+- **Web rail** (`landing/chat-react/ChatApp.tsx` `TopicRail` + `chat-react.html`):
+  `+ Create Project` pinned at the rail bottom (`margin-top:auto`), always visible;
+  the rail now always mounts. Click → prompt → POST → `setProject` navigates in.
+- **Mobile rail** (`app/app/projects/index.tsx` + `lib/projects.ts` `createProject`
+  / `lib/projects-client.ts` `create`): bottom-pinned bar → inline name input →
+  POST → `router.push('/projects/<id>')`.
+- No migration (the `projects` table already exists, `0038`); Work Board tab is
+  automatic per-project. tsc clean (root + chat-react + app); leak-gate SILENT.
+  Tests: surface POST (`gateway/__tests__/app-projects-surface.test.ts`), shared
+  primitives + tool (`gateway/realmode-composer/__tests__/project-create.test.ts`),
+  web rail click (`landing/chat-react/__tests__/component.test.tsx`), mobile client
+  (`app/__tests__/projects-client.test.ts`).
 
 ## 2026-06-29 — M1: onboarding import flow rework — offered FIRST + live progress + curation handoff + ordering
 

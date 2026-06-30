@@ -620,6 +620,61 @@ Phase 2 (later) binds each `/code` trident run to a board item (the
 the activity glyph from the real run state. See
 `docs/plans/2026-06-29-001-feat-work-board-master-plan.md`.
 
+## Create Project affordance — project rail + create-project capability
+
+On a fresh install a skip-import owner had **no user-initiated way to create a
+project** — projects only materialized at onboarding finalize, and reaching one
+otherwise required the onboarding gap-fill quota (≥3 projects). The Create
+Project affordance closes that: a button pinned at the **bottom** of the project
+rail (rail order: **General → projects → Create Project**), plus a backend
+create capability and an agent tool, so the owner (or the agent) can spin up a
+fresh project + its tabs (Chat / Work Board / Documents) on demand.
+
+**One code path (`gateway/realmode-composer/project-create.ts`).** The shared
+primitives `ensureProjectRow` (the real `projects` row + cli wow-shell `topics`
+binding, idempotent, duplicate-safe, soft-delete-respecting) and
+`buildScaffoldMaterializer`/`materializeProjectScaffold` (the on-disk
+`Projects/<slug>/` docs + git repo + GBrain page) are the SAME functions the
+onboarding finalizer (`build-onboarding-finalize.ts`) calls — the finalizer was
+refactored to import them, so there is no second project-creation path. The row
+write (fast, deterministic) is split from materialization (git + optional LLM
+doc synth) so the create path awaits the row, fans the live rail refresh, and
+kicks materialization fire-and-forget (failure-isolated; the materializer never
+throws), exactly as finalize is itself dispatched.
+
+**Backend HTTP — `POST /api/app/projects`** (`gateway/http/app-projects-surface.ts`,
+bearer-gated like the rest of the surface). Body `{ name }` → `{ project: { id,
+label }, created }` (201 fresh / 200 idempotent-existing). The optional
+`createProject` binding degrades to `501 create_not_configured` where unwired
+(read-only / Managed). Open wires the whole surface (`open/composer.ts`) — which
+ALSO gives the mobile app's `fetchProjects` list a real backend (previously
+unmounted in Open) — binding `createProject` + `create_project` to a single
+`createProjectAndRefresh` that runs `createProjectRow`, the fire-and-forget
+materialize, and `emitProjectsChangedNow` (an UNCONDITIONAL `projects_changed`
+fan — unlike the diff-gated post-turn probe, so a skip-import owner's first
+action still refreshes the rail). `project_slug` / `user_id` come from the
+resolved bearer / `ToolCallContext`, never client/agent input.
+
+**Agent-native parity — `create_project` tool** (`create-project-tool.ts`,
+registered in `build-core-modules.ts` from the `create_project` composition
+input; `approval_policy:'auto'`, `write:project_data`, non-`agent_hidden`). The
+agent can create a project mid-turn through the same `createProjectAndRefresh`.
+
+**Web rail** (`landing/chat-react/ChatApp.tsx` `TopicRail` + `chat-react.html`
+`.car-rail-create`). The rail is a flex column with the `+ Create Project`
+button pinned via `margin-top:auto`, ALWAYS visible (even with only General);
+the rail itself always mounts now (previously hidden at zero projects). Click →
+`window.prompt` for a name → `POST /api/app/projects` with the bearer →
+`controller.setProject(newId)` navigates in; the live `projects_changed` frame
+refreshes the list (and 0→N auto-selects the new project).
+
+**Mobile rail** (`app/app/projects/index.tsx` + `app/lib/projects.ts`
+`createProject` / `projects-client.ts` `create`). A bottom-pinned `+ Create
+Project` bar reveals an inline name input → `POST /api/app/projects` →
+`router.push('/projects/<id>')`. No migration (the `projects` table already
+exists, `0038`); the Work Board tab is automatic per-project
+(`tabs/registry.ts`).
+
 ## Tasks — canonical store + LLM-primary prioritization (`tasks/`)
 
 The `tasks` table (migration `0032`) is the single source of truth for tasks

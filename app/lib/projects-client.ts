@@ -84,6 +84,14 @@ interface ListResponse {
   source_errors?: ProjectSourceError[];
 }
 
+/** Result of `POST /api/app/projects` (Create Project). */
+interface CreateResponse {
+  ok: boolean;
+  project: { id: string; label: string };
+  /** true on a fresh create, false when an existing project was resolved. */
+  created?: boolean;
+}
+
 /** Result of `ProjectsClient.list()` — the unified list plus any
  *  per-workspace failures the caller renders as "unavailable". */
 export interface ProjectListResult {
@@ -188,6 +196,26 @@ export class ProjectsClient {
       invite_url: res.invite_url,
       jti: res.jti,
       expires_at_ms: res.expires_at_ms,
+    };
+  }
+
+  /**
+   * Create a new project from `name` (the project-rail / list "Create Project"
+   * affordance). POSTs `{ name }` to `/api/app/projects`; the gateway creates
+   * the row + topic + materialized scaffold and returns the new project's id +
+   * label. Idempotent on the name (an existing project resolves with
+   * `created:false`). Throws `ProjectsClientError` on any non-2xx (e.g.
+   * `invalid_name`, `create_not_configured`).
+   */
+  async create(name: string): Promise<{ id: string; label: string; created: boolean }> {
+    const res = await this.req<CreateResponse>('/api/app/projects', {
+      method: 'POST',
+      body: { name },
+    });
+    return {
+      id: res.project.id,
+      label: res.project.label,
+      created: res.created ?? false,
     };
   }
 

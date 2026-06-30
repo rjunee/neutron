@@ -12,7 +12,7 @@
  * CSS framework is bundled.
  */
 
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
@@ -689,10 +689,14 @@ function TopicRail({
   projects,
   activeId,
   onSelect,
+  onCreate,
+  creating,
 }: {
   projects: ProjectTab[]
   activeId: string | null
   onSelect: (id: string | null) => void
+  onCreate: () => void
+  creating: boolean
 }): React.JSX.Element {
   return (
     <aside className="car-rail" aria-label="Projects">
@@ -714,6 +718,18 @@ function TopicRail({
           {p.label}
         </button>
       ))}
+      {/* Pinned to the bottom (the rail is a flex column; this button has
+          `margin-top:auto`). Always visible, even when only General exists, so a
+          skip-import owner can jump straight into a fresh project + its tabs. */}
+      <button
+        type="button"
+        className="car-rail-create"
+        onClick={onCreate}
+        disabled={creating}
+        aria-label="Create a new project"
+      >
+        {creating ? 'Creating…' : '+ Create Project'}
+      </button>
     </aside>
   )
 }
@@ -1033,19 +1049,57 @@ export function ChatApp({
   const uploadsCtx: UploadsCtx = fetchImpl !== undefined
     ? { token: config.token, origin: config.origin, fetchImpl }
     : { token: config.token, origin: config.origin }
+
+  // Create-project flow (rail button): prompt for a name, POST to the
+  // bearer-gated create endpoint, then navigate into the new project. The live
+  // `projects_changed` frame refreshes the rail list; `setProject` makes the
+  // navigation immediate (and is a no-op duplicate of the 0→N auto-select).
+  const [creatingProject, setCreatingProject] = useState(false)
+  const onCreateProject = useCallback(() => {
+    if (creatingProject) return
+    const raw = typeof window !== 'undefined' ? window.prompt('New project name') : null
+    const name = (raw ?? '').trim()
+    if (name.length === 0) return
+    setCreatingProject(true)
+    const doFetch: FetchImpl = fetchImpl ?? ((input, init) => fetch(input, init))
+    void (async () => {
+      try {
+        const res = await doFetch(`${config.origin}/api/app/projects`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${config.token}`,
+          },
+          body: JSON.stringify({ name }),
+        })
+        if (res.ok) {
+          const data = (await res.json()) as { project?: { id?: unknown } }
+          const id = data.project?.id
+          if (typeof id === 'string' && id.length > 0) controller.setProject(id)
+        } else if (typeof window !== 'undefined') {
+          window.alert(`Could not create project (${res.status}).`)
+        }
+      } catch {
+        if (typeof window !== 'undefined') window.alert('Could not create project.')
+      } finally {
+        setCreatingProject(false)
+      }
+    })()
+  }, [creatingProject, fetchImpl, config.origin, config.token, controller])
+
   return (
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
     <ButtonsContext.Provider value={buttonsCtx}>
     <div className="car-shell">
-      {vm.projects.length > 0 && (
-        <TopicRail
-          projects={vm.projects}
-          activeId={vm.projectId}
-          onSelect={(id) => controller.setProject(id)}
-        />
-      )}
+      <TopicRail
+        projects={vm.projects}
+        activeId={vm.projectId}
+        onSelect={(id) => controller.setProject(id)}
+        onCreate={onCreateProject}
+        creating={creatingProject}
+      />
       <ChatSurface
         vm={vm}
         controller={controller}

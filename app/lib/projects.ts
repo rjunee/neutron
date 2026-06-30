@@ -201,6 +201,19 @@ export async function fetchProjects(opts: FetchProjectsOptions): Promise<FetchPr
   };
 }
 
+/**
+ * Create a project from `name` via `POST /api/app/projects` and return its id +
+ * label (the project-list "Create Project" affordance). Idempotent on the name.
+ * Throws `ProjectsClientError` on any non-2xx so the caller can surface the
+ * precise reason.
+ */
+export async function createProject(
+  opts: FetchProjectsOptions & { name: string },
+): Promise<{ id: string; label: string; created: boolean }> {
+  const client = new ProjectsClient({ base_url: opts.base_url, token: opts.token });
+  return client.create(opts.name);
+}
+
 function listItemToProject(p: ProjectListItem, now: number): Project {
   return {
     id: p.id,
