@@ -200,6 +200,37 @@ describe('app-projects surface — PATCH /settings', () => {
     expect(json.project.agent_engagement_mode).toBe('tag_gated')
   })
 
+  it('PATCH emoji persists + round-trips (rail-redesign)', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ emoji: '🎯' }),
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SettingsResponse
+    expect(json.project.emoji).toBe('🎯')
+    const reread = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`)
+    expect(((await reread.json()) as SettingsResponse).project.emoji).toBe('🎯')
+  })
+
+  it('PATCH rejects a non-emoji (plain text) emoji value', async () => {
+    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ emoji: 'sparkles' }),
+    })
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { code: string; field?: string }
+    expect(json.code).toBe('invalid_emoji')
+    expect(json.field).toBe('emoji')
+  })
+
+  it('GET /settings returns a resolved default emoji for a fresh project', async () => {
+    // 'neutron' → the ⚛️ keyword default (buildDefaultSettings).
+    const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`)
+    const json = (await res.json()) as SettingsResponse
+    expect(typeof json.project.emoji).toBe('string')
+    expect(json.project.emoji.length).toBeGreaterThan(0)
+  })
+
   it('PATCH rejects invalid agent_engagement_mode values', async () => {
     const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/settings`, {
       method: 'PATCH',
@@ -289,7 +320,7 @@ describe('app-projects surface — store isolation', () => {
 
 interface ListResponse {
   ok: boolean
-  projects: ProjectSettings[]
+  projects: Array<ProjectSettings & { last_activity_at: string; unread_count: number }>
   project_slug: string
 }
 
@@ -328,6 +359,18 @@ describe('app-projects surface — GET /api/app/projects (list)', () => {
     const json = (await res.json()) as ListResponse
     const ids = json.projects.map((p) => p.id).sort()
     expect(ids).toEqual(['acme', 'neutron'])
+  })
+
+  it('list items carry the rail-redesign fields (emoji, unread_count, last_activity_at)', async () => {
+    await authedFetch(harness.base, `/api/app/projects/neutron/settings`)
+    const res = await authedFetch(harness.base, `/api/app/projects`)
+    const json = (await res.json()) as ListResponse
+    const neutron = json.projects.find((p) => p.id === 'neutron')
+    expect(neutron).toBeDefined()
+    expect(typeof neutron!.emoji).toBe('string')
+    expect(neutron!.emoji.length).toBeGreaterThan(0)
+    expect(neutron!.unread_count).toBe(0)
+    expect(typeof neutron!.last_activity_at).toBe('string')
   })
 
   it('returns 501 create_not_configured for POST when no create binding is wired', async () => {

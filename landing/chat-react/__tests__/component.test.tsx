@@ -971,3 +971,80 @@ describe('ChatApp render (happy-dom)', () => {
     await unmount()
   })
 })
+
+describe('TopicRail render (rail-redesign)', () => {
+  it('renders per-project emoji + unread badge, and hides the badge on the active project', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const React = await import('react')
+    const { TopicRail } = await import('../ChatApp.tsx')
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        React.createElement(TopicRail, {
+          projects: [
+            { id: 'p1', label: 'Fitness', emoji: '🏋️', unread: 4 },
+            // The ACTIVE project — its badge must be suppressed (the user is viewing it).
+            { id: 'p2', label: 'Reading', emoji: '📚', unread: 7 },
+            // No emoji from the server → generic fallback glyph, no badge at 0.
+            { id: 'p3', label: 'Misc', unread: 0 },
+          ],
+          activeId: 'p2',
+          onSelect: () => {},
+          onCreate: async () => null,
+          creating: false,
+        }),
+      )
+    })
+
+    const items = Array.from(container.querySelectorAll('.car-rail-item'))
+    // General + 3 projects.
+    expect(items.length).toBe(4)
+    const emojis = Array.from(container.querySelectorAll('.car-rail-emoji')).map((e) => e.textContent)
+    expect(emojis).toEqual(['💬', '🏋️', '📚', '📁'])
+
+    const badges = Array.from(container.querySelectorAll('.car-rail-badge')).map((e) => e.textContent)
+    // Only p1's badge shows: General(0) hidden, p2 active→hidden, p3(0) hidden.
+    expect(badges).toEqual(['4'])
+
+    // The active project carries the active class, not the unread class.
+    const active = container.querySelector('.car-rail-item-active') as HTMLElement
+    expect(active.textContent).toContain('Reading')
+    expect(active.className).not.toContain('car-rail-item-unread')
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('caps a very large unread count at 99+', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const React = await import('react')
+    const { TopicRail } = await import('../ChatApp.tsx')
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        React.createElement(TopicRail, {
+          projects: [{ id: 'p1', label: 'Busy', emoji: '📥', unread: 250 }],
+          activeId: null,
+          onSelect: () => {},
+          onCreate: async () => null,
+          creating: false,
+        }),
+      )
+    })
+    expect(container.querySelector('.car-rail-badge')!.textContent).toBe('99+')
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+})

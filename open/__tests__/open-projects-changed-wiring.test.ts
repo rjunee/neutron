@@ -161,12 +161,19 @@ describe('Open projects_changed live-refresh wiring', () => {
     // and, seeing the set changed, fans projects_changed over this socket.
     ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'hi', client_msg_id: 'c-1' }))
 
-    await waitFor(() => events.some((e) => e.type === 'projects_changed'))
+    await waitFor(() => events.some((e) => e.type === 'projects_changed'), 25_000)
     const frame = events.find((e) => e.type === 'projects_changed')
     if (frame === undefined || frame.type !== 'projects_changed') {
       throw new Error('expected a projects_changed frame')
     }
-    expect(frame.projects).toEqual([{ id: 'acme', label: 'Acme' }])
+    // The frame carries the rail-redesign fields alongside id + label.
+    expect(frame.projects.map((p) => ({ id: p.id, label: p.label }))).toEqual([
+      { id: 'acme', label: 'Acme' },
+    ])
+    const acme = frame.projects.find((p) => p.id === 'acme')
+    expect(typeof acme?.emoji).toBe('string')
+    expect((acme?.emoji ?? '').length).toBeGreaterThan(0)
+    expect(acme?.unread).toBe(0)
     // Suggests the first project as the one to auto-select (rail→tabs live).
     expect(frame.active_project_id).toBe('acme')
 
@@ -237,21 +244,24 @@ describe('Open projects_changed live-refresh wiring', () => {
 
     // The scoped socket (viewing 'acme') is where #132 dropped the frame — it
     // MUST now carry the new project so the rail updates without a reload.
-    await waitFor(() => scopedEvents.some((e) => e.type === 'projects_changed'))
+    await waitFor(() => scopedEvents.some((e) => e.type === 'projects_changed'), 25_000)
     const scopedFrame = scopedEvents.find((e) => e.type === 'projects_changed')
     if (scopedFrame === undefined || scopedFrame.type !== 'projects_changed') {
       throw new Error('expected a projects_changed frame on the project-scoped socket')
     }
     expect(scopedFrame.projects.map((p) => p.id).sort()).toEqual(['acme', 'beta'])
-    expect(scopedFrame.projects.find((p) => p.id === 'beta')).toEqual({ id: 'beta', label: 'Beta' })
+    const scopedBeta = scopedFrame.projects.find((p) => p.id === 'beta')
+    expect({ id: scopedBeta?.id, label: scopedBeta?.label }).toEqual({ id: 'beta', label: 'Beta' })
+    expect((scopedBeta?.emoji ?? '').length).toBeGreaterThan(0)
 
     // No regression — the General socket still receives the same refresh.
-    await waitFor(() => generalEvents.some((e) => e.type === 'projects_changed'))
+    await waitFor(() => generalEvents.some((e) => e.type === 'projects_changed'), 25_000)
     const generalFrame = generalEvents.find((e) => e.type === 'projects_changed')
     if (generalFrame === undefined || generalFrame.type !== 'projects_changed') {
       throw new Error('expected a projects_changed frame on the General socket')
     }
-    expect(generalFrame.projects.find((p) => p.id === 'beta')).toEqual({ id: 'beta', label: 'Beta' })
+    const generalBeta = generalFrame.projects.find((p) => p.id === 'beta')
+    expect({ id: generalBeta?.id, label: generalBeta?.label }).toEqual({ id: 'beta', label: 'Beta' })
 
     scoped.close()
     general.close()

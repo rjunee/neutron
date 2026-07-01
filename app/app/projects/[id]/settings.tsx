@@ -11,8 +11,8 @@
  *      control removes then refetches. Token VALUES are never displayed —
  *      the wire records are metadata-only (see `project-credentials-client.ts`).
  *   2. Project — the editable project name (rename via the settings PATCH
- *      `{ name }`). The emoji control is a disabled SEAM: no emoji backend
- *      exists yet, so it renders a note rather than inventing one.
+ *      `{ name }`) plus the editable rail emoji (PATCH `{ emoji }` through the
+ *      same surface).
  *   3. Collaborators — DISPLAY-ONLY and M2-gated: the owner plus a visibly
  *      disabled Invite / Remove affordance. No write calls.
  *
@@ -153,10 +153,14 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
   // ── Project + Collaborators ─────────────────────────────────────────────────
   const [name, setName] = useState('');
   const [nameDraft, setNameDraft] = useState('');
+  const [emoji, setEmoji] = useState('');
+  const [emojiDraft, setEmojiDraft] = useState('');
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [projectLoading, setProjectLoading] = useState(true);
   const [renaming, setRenaming] = useState(false);
+  const [savingEmoji, setSavingEmoji] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
+  const [emojiError, setEmojiError] = useState<string | null>(null);
 
   const refreshProject = useCallback((): void => {
     setProjectLoading(true);
@@ -165,6 +169,8 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
       .then((settings) => {
         setName(settings.name);
         setNameDraft(settings.name);
+        setEmoji(settings.emoji);
+        setEmojiDraft(settings.emoji);
         setMembers(settings.members);
         setProjectLoading(false);
       })
@@ -192,6 +198,24 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
       });
   }, [projectsClient, projectId, nameDraft, name, renaming]);
 
+  const saveEmoji = useCallback((): void => {
+    const next = emojiDraft.trim();
+    if (next.length === 0 || next === emoji || savingEmoji) return;
+    setSavingEmoji(true);
+    setEmojiError(null);
+    projectsClient
+      .setEmoji(projectId, next)
+      .then((settings) => {
+        setEmoji(settings.emoji);
+        setEmojiDraft(settings.emoji);
+        setSavingEmoji(false);
+      })
+      .catch((err: unknown) => {
+        setSavingEmoji(false);
+        setEmojiError(err instanceof Error ? err.message : 'failed to save emoji');
+      });
+  }, [projectsClient, projectId, emojiDraft, emoji, savingEmoji]);
+
   useEffect(() => {
     refreshCreds();
     refreshProject();
@@ -199,6 +223,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
 
   const owner = members.find((m) => m.role === 'owner') ?? null;
   const nameDirty = nameDraft.trim().length > 0 && nameDraft.trim() !== name;
+  const emojiDirty = emojiDraft.trim().length > 0 && emojiDraft.trim() !== emoji;
 
   return (
     <ScrollView
@@ -353,16 +378,44 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
             <Text style={styles.primaryBtnText}>{renaming ? 'Saving…' : 'Save name'}</Text>
           </Pressable>
 
-          {/* Emoji — disabled SEAM. No emoji backend exists yet; the rail
-              emoji work will supply one, so we surface an inert placeholder
-              rather than inventing an API. */}
-          <View style={styles.seamRow} testID="settings-emoji-seam">
+          {/* Emoji — the project's rail glyph. Edits PATCH `{ emoji }` through
+              the same settings surface the name rename uses. */}
+          <View style={styles.emojiRow}>
             <Text style={styles.fieldLabel}>Emoji</Text>
-            <View style={styles.seamControl}>
-              <Text style={styles.seamGlyph}>🙂</Text>
-              <Text style={styles.seamNote}>Coming with rail emoji</Text>
-            </View>
+            <TextInput
+              style={[styles.input, styles.emojiInput]}
+              placeholder="📁"
+              placeholderTextColor={THEME.text_muted}
+              value={emojiDraft}
+              onChangeText={setEmojiDraft}
+              onSubmitEditing={saveEmoji}
+              maxLength={16}
+              autoCapitalize="none"
+              autoCorrect={false}
+              accessibilityLabel="Project emoji"
+              testID="settings-emoji-input"
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Save project emoji"
+              disabled={!emojiDirty || savingEmoji}
+              onPress={saveEmoji}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                styles.saveBtn,
+                pressed && styles.pressed,
+                (!emojiDirty || savingEmoji) && styles.btnDisabled,
+              ]}
+              testID="settings-emoji-save"
+            >
+              <Text style={styles.primaryBtnText}>{savingEmoji ? 'Saving…' : 'Save emoji'}</Text>
+            </Pressable>
           </View>
+          {emojiError !== null ? (
+            <Text style={styles.error} testID="settings-emoji-error">
+              {emojiError}
+            </Text>
+          ) : null}
 
           {projectError !== null ? (
             <Text style={styles.error} testID="settings-project-error">
@@ -596,25 +649,8 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.xs,
   },
   saveBtn: { marginTop: SPACING.sm, alignSelf: 'flex-start' },
-  seamRow: { marginTop: SPACING.lg },
-  seamControl: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    borderRadius: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface,
-    opacity: 0.6,
-  },
-  seamGlyph: { fontSize: TYPOGRAPHY.h3.fontSize },
-  seamNote: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontStyle: 'italic',
-  },
+  emojiRow: { marginTop: SPACING.lg },
+  emojiInput: { alignSelf: 'flex-start', minWidth: 96, fontSize: TYPOGRAPHY.h3.fontSize },
 
   // Collaborators
   collabRow: {

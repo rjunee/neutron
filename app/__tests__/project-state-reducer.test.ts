@@ -20,6 +20,7 @@ function makeProject(overrides: Partial<ProjectSettings> = {}): ProjectSettings 
     name: 'Neutron',
     description: 'Build Neutron itself',
     persona: 'Forge — pragmatic build agent',
+    emoji: '⚛️',
     privacy_mode: 'private',
     billing_mode: 'personal',
     agent_engagement_mode: 'all_messages',

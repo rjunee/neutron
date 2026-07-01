@@ -351,8 +351,22 @@ export interface AppWsOutboundAgentTyping {
 export interface AppWsOutboundProjectsChanged {
   v: 1
   type: 'projects_changed'
-  /** Fresh canonical project list (id + label), mirroring the boot bootstrap. */
-  projects: ReadonlyArray<{ id: string; label: string }>
+  /**
+   * Fresh canonical project list, mirroring the boot bootstrap. Each entry
+   * carries the rail-redesign fields alongside id + label:
+   *   - `emoji`   — the resolved rail glyph (never empty; a default when unset).
+   *   - `unread`  — count of unread agent messages on this project (0 = caught
+   *                 up; honest, never a fabricated badge).
+   *   - `last_activity_at` — ISO activity sort key; the list is already ordered
+   *                 most-recent-first, but the client keeps it for local re-sort.
+   */
+  projects: ReadonlyArray<{
+    id: string
+    label: string
+    emoji: string
+    unread: number
+    last_activity_at: string
+  }>
   /**
    * The project the client should make active when it currently has none — the
    * first project, mirroring the page bootstrap's `active_project_id`. Null when

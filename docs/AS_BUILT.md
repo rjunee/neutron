@@ -2,6 +2,92 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Project rail redesign: per-project emoji, activity-reorder, unread badge
+
+**Why.** The left project rail (`landing/chat-react` + the mobile `app/` project
+list) was a flat list of plain text buttons in a fixed order with no signal of
+which project had new activity. Ryan asked for a materially upgraded rail:
+per-project emoji, most-recent-activity-first ordering (an active project pops to
+the top), and a Telegram-style unread count badge — in BOTH the light + dark
+themes from the #153 toggle, with NO feature flag.
+
+**Framing.** ONE code path, theme-var-driven (no hardcoded colours), no flag.
+Emoji + activity are real columns on the canonical `projects` table; unread is
+computed HONESTLY from the existing chat-log read cursor (never a fabricated
+badge).
+
+**Schema (migrations 0093 + 0094).** Two nullable `TEXT` columns added to the
+STRICT `projects` table via plain `ALTER TABLE ... ADD COLUMN` (mirrors 0088):
+- `emoji` — the per-project rail glyph. NULL on legacy rows; the serve-time path
+  resolves NULL to a deterministic default from the name, so the rail always
+  shows a glyph. New rows persist a concrete default at create/materialize time.
+- `last_activity_at` — ISO activity sort key; stamped at create (= created_at)
+  and bumped to now on each message fan to the project's topic.
+`migrations/runner.test.ts` applied-versions array + `expected-schema.txt`
+snapshot regenerated.
+
+**Default emoji (`gateway/projects/default-emoji.ts`, NEW).** Pure, deterministic
+picker: a keyword table maps common project themes to a glyph (fitness→🏋️,
+read→📚, code→💻, budget→💰, …); an un-keyworded name falls back to a stable
+FNV-1a hash over a neutral palette. `resolveProjectEmoji(stored, name)` prefers an
+explicit emoji, else the default. `normaliseEmojiInput` bounds + validates a
+user-supplied emoji (short, non-ASCII). `GENERAL_EMOJI` (💬) for the General scope.
+
+**Server.**
+- `gateway/http/app-projects-surface.ts` — `ProjectSettings` gains `emoji`; the
+  list rows gain `last_activity_at` + `unread_count` (new `ProjectListEntry`
+  type); PATCH whitelist adds `emoji` with validation (`invalid_emoji`);
+  `buildDefaultSettings` + the shared-item projection carry a default emoji.
+- `gateway/projects/sqlite-store.ts` — `list()` orders by
+  `COALESCE(last_activity_at, updated_at) DESC`, resolves emoji, and computes
+  per-project `unread_count` = agent messages on the project topic
+  (`app:<user>:<project>`) beyond the owner's highest READ receipt seq
+  (`app_chat_messages` ⋈ `app_chat_receipts`; best-effort → 0). New
+  `touchActivity(project_id)` stamps the activity key; emoji is written only when
+  explicitly patched (so a name edit never freezes a resolved default).
+- `open/composer.ts` — `readProjectRows()` (page bootstrap + `projects_changed`
+  frame) now serializes `emoji` + `unread` + `last_activity_at`, ordered by
+  activity; an agent reply on a PROJECT topic stamps `last_activity_at` and
+  re-fans `projects_changed` so connected rails reorder + re-badge live.
+- `channels/adapters/app-ws/envelope.ts` — `AppWsOutboundProjectsChanged` per-item
+  shape extended with `emoji` / `unread` / `last_activity_at`.
+- A settings PATCH that changes a RAIL-VISIBLE field (name or emoji) fans a fresh
+  `projects_changed` via the surface's new `onRailFieldChanged` hook (bound to the
+  composer's `emitProjectsChangedNow`), so the rail re-renders the glyph/label live
+  with no reload — this also fixes the pre-existing "rename doesn't refresh the
+  rail" staleness (Codex r1 P2).
+- Materialize + create-project INSERTs (`onboarding/wow-moment/actions/
+  03-project-shells.ts`, `gateway/realmode-composer/project-create.ts`) stamp a
+  default emoji + `last_activity_at`.
+
+**Web client.** `config.ts` `ProjectTab` gains optional `emoji`/`unread`/
+`last_activity_at`; `controller.ts` parses them off the frame (unread clamped ≥0).
+`ChatApp.tsx` `TopicRail` redesigned: a shared `RailItem` (emoji "avatar" chip ·
+label · unread pill); the ACTIVE project's badge is locally zeroed (you're viewing
+it). `chat-react.html` rail CSS reworked — emoji chip, accent-lit active row,
+bolder unread rows, count pill — entirely `var(--…)`-driven so it reskins with the
+light/dark toggle. `SettingsTab.tsx` — the disabled emoji SEAM is now a real
+editable control (PATCH `{ emoji }`, like the name rename).
+
+**Mobile (`app/`).** Project list wired for parity: `ProjectListItem`/`Project`
+carry `emoji` + `unread_count` + real `last_activity_ms` (parsed from
+`last_activity_at`, replacing the fake now-stamp); `ProjectCard` renders the emoji
++ an unread badge; the list sorts most-recent-activity-first; the settings emoji
+SEAM becomes an editable field (PATCH `{ emoji }`).
+
+**Unread semantics.** Honest + best-effort. Unread only counts agent messages
+beyond the read cursor; a caught-up project reads 0. The active project shows no
+badge (viewing = read). No fake counts (the existing `chat-topics-surface`
+no-fake-unread contract is untouched — this feature computes real values for the
+rail only).
+
+**Follow-up (noted, out of sprint scope).** Agent-native emoji edit — the
+`agent-settings` Core exposes `rename_project` but not yet a `set_project_emoji`
+tool. The HTTP PATCH surface + mobile client already accept `emoji`; adding a 10th
+tool to that Core's manifest/capability-guard/test contract is deferred to a
+follow-up so this sprint stays focused on the rail. Per-project unread on the
+General scope is also not badged (onboarding lives there; low value).
+
 ## 2026-07-01 — Light/dark theme toggle for the web chat UI
 
 **Why.** The web chat (`landing/chat-react`) shipped dark-only. Ryan asked for a

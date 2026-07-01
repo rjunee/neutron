@@ -41,6 +41,7 @@ import {
 } from '../../onboarding/wow-moment/project-identity.ts'
 import { buildProjectMaterializer } from '../../onboarding/wow-moment/project-materializer.ts'
 import { buildProjectPageIndexer } from './build-project-page-indexer.ts'
+import { defaultProjectEmoji } from '../projects/default-emoji.ts'
 
 /**
  * The dependency surface for materializing a project. A structural subset of
@@ -148,10 +149,10 @@ export async function ensureProjectRow(
       // `description`; persona is a post-onboarding settings concern.
       await tx.run(
         `INSERT OR IGNORE INTO projects
-           (id, name, description, persona, privacy_mode, billing_mode,
-            created_at, updated_at)
-         VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
-        [bind_id, name, description, iso, iso],
+           (id, name, description, persona, emoji, privacy_mode, billing_mode,
+            created_at, updated_at, last_activity_at)
+         VALUES (?, ?, ?, NULL, ?, 'private', 'personal', ?, ?, ?)`,
+        [bind_id, name, description, defaultProjectEmoji(name), iso, iso, iso],
       )
     }
     // The wow-shell topic IS the durable binding marker; INSERT OR IGNORE on

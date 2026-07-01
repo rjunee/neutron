@@ -24,6 +24,16 @@
 export interface ProjectTab {
   id: string
   label: string
+  /** Per-project rail glyph. Always a non-empty emoji from the server (an
+   *  explicit choice, or a deterministic default from the name). Optional on the
+   *  wire for back-compat; the rail falls back to a generic glyph if absent. */
+  emoji?: string
+  /** Unread agent-message count for this project (Telegram-style badge). 0 =
+   *  caught up. Optional for back-compat (absent ⇒ no badge). */
+  unread?: number
+  /** ISO-8601 activity sort key. The server already orders the list
+   *  most-recent-first; kept for optional client-side re-sort. */
+  last_activity_at?: string
 }
 
 export interface BootstrapConfig {
