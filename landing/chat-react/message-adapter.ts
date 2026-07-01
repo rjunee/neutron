@@ -28,6 +28,23 @@ function looksLikeImage(url: string): boolean {
   return IMAGE_EXT.test(url)
 }
 
+/**
+ * Strip the stray leading/trailing NEWLINES that make a one-line bubble render
+ * ~2x tall. Both bubble paths preserve newlines — the user `<p class="car-text">`
+ * renders `white-space: pre-line` and the agent `.car-bubble` has
+ * `white-space: pre-wrap` — so a trailing (or leading) `\n` on a one-line message
+ * shows as an extra EMPTY line.
+ *
+ * Deliberately narrow: only leading newlines and all trailing whitespace are
+ * removed. Leading horizontal whitespace (spaces) is PRESERVED so a Markdown
+ * agent message that opens with an indented code block (e.g. `"    npm test"`)
+ * still renders as code. Internal blank lines (a real multi-line message) are
+ * untouched, so intentional line breaks still render.
+ */
+export function normalizeBody(text: string): string {
+  return text.replace(/^\n+/, '').replace(/\s+$/, '')
+}
+
 type ContentPart =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'image'; readonly image: string }
@@ -46,7 +63,8 @@ export function toThreadMessage(m: RenderMessage, origin = ''): ThreadMessageLik
     const tomb = { id: m.id, role, content: [{ type: 'text', text: '🚫 This message was deleted' }] } as const
     return role === 'assistant' ? { ...tomb, status: { type: 'complete', reason: 'stop' } } : tomb
   }
-  if (m.text.length > 0) parts.push({ type: 'text', text: m.text })
+  const body = normalizeBody(m.text)
+  if (body.length > 0) parts.push({ type: 'text', text: body })
   if (m.attachments !== null) {
     for (const raw of m.attachments) {
       const url = absolutize(raw, origin)
