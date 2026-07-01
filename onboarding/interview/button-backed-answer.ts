@@ -24,17 +24,18 @@
  * else").
  *
  * It is deliberately conservative: it only fires when the PRIOR agent message
- * carried an `[[OPTIONS]]` choice block (a genuine choice step), and it anchors
- * the personality step on the DEFINED archetype names actually presented — so an
+ * carried a persisted option set (a genuine choice step), and it anchors the
+ * personality step on the DEFINED archetype names actually presented — so an
  * early yes/no like the import offer can never be mis-captured as a personality.
+ *
+ * IMPORTANT (Codex r1 P1): the caller MUST pass the prior agent row's DURABLE
+ * options (`ButtonStore` `options[].value`), NOT the row body. Live-agent replies
+ * persist the `[[OPTIONS]]` block STRIPPED from `body` (it lives in
+ * `options_json`), so re-parsing the body would find no block and this would
+ * never fire in production.
  */
 
 import { DEFINED_PERSONALITY_CHARACTER_NAMES } from './onboarding-preamble.ts'
-
-/** The `[[OPTIONS]] … [[/OPTIONS]]` block the agent appends at a choice step —
- *  mirrors `build-live-agent-turn.ts`'s `OPTIONS_BLOCK_RE` (kept local so this
- *  onboarding-layer helper takes no gateway import edge). */
-const OPTIONS_BLOCK_RE = /\[\[OPTIONS\]\]\s*\n([\s\S]*?)\n?\s*\[\[\/OPTIONS\]\]/i
 
 /**
  * Escape-hatch option lines that must NEVER settle a field — the owner is
@@ -66,8 +67,13 @@ export interface CaptureButtonBackedInput {
   phase_state: Readonly<Record<string, unknown>>
   /** The owner's answer this turn — a tapped option's value OR typed text. */
   user_text: string
-  /** The agent's previous message (the question being answered), or null. */
-  prior_agent_text: string | null
+  /**
+   * The DURABLE option values (`ButtonStore` prompt `options[].value`) of the
+   * prior agent question — the choice lines the owner could tap. Empty when the
+   * prior turn was not a choice step (or there was no prior turn). This is the
+   * signal, NOT the row body (which has the `[[OPTIONS]]` block stripped).
+   */
+  prior_agent_options: ReadonlyArray<string>
 }
 
 export interface CapturedButtonBackedField {
@@ -81,14 +87,6 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isEscapeChoice(text: string): boolean {
   return ESCAPE_PATTERNS.some((re) => re.test(text))
-}
-
-/** Split an `[[OPTIONS]]` block body into its option lines (bullets stripped). */
-function parseOptionLines(block: string): string[] {
-  return block
-    .split('\n')
-    .map((l) => l.replace(/^\s*[-*•]\s+/u, '').trim())
-    .filter((l) => l.length > 0)
 }
 
 function looksLikeName(value: string): boolean {
@@ -120,13 +118,11 @@ export function captureButtonBackedRequiredField(
   if (value.length === 0) return null
   if (isEscapeChoice(value)) return null
 
-  // Only a genuine choice step (the agent appended an [[OPTIONS]] block last
-  // turn) is eligible — this is what keeps arbitrary conversational turns from
-  // ever being mis-captured.
-  const optionsMatch =
-    input.prior_agent_text !== null ? OPTIONS_BLOCK_RE.exec(input.prior_agent_text) : null
-  if (optionsMatch === null) return null
-  const optionLines = parseOptionLines(optionsMatch[1] ?? '')
+  // Only a genuine choice step (the prior agent question carried a persisted
+  // option set) is eligible — this is what keeps arbitrary conversational turns
+  // from ever being mis-captured.
+  const optionLines = input.prior_agent_options.map((o) => o.trim()).filter((o) => o.length > 0)
+  if (optionLines.length === 0) return null
   const optionBody = optionLines.join('\n').toLowerCase()
 
   const personalityMissing = !isNonEmptyString(input.phase_state['agent_personality'])

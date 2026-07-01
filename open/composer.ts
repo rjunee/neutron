@@ -2340,7 +2340,7 @@ export function buildOpenGraphComposer(
             captureRequiredAnswer: async ({
               user_id,
               user_text,
-              prior_agent_text,
+              prior_agent_options,
             }): Promise<{ finalized: boolean }> => {
               try {
                 const st = await onboardingStateStore.get(project_slug, user_id)
@@ -2348,7 +2348,7 @@ export function buildOpenGraphComposer(
                 const captured = captureButtonBackedRequiredField({
                   phase_state: st.phase_state,
                   user_text,
-                  prior_agent_text,
+                  prior_agent_options,
                 })
                 if (captured === null) return { finalized: false }
                 // Persist the settled field (shallow-merge; phase unchanged).

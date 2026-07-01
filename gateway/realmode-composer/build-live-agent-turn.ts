@@ -350,7 +350,10 @@ export interface LiveAgentOnboardingSeam {
   captureRequiredAnswer?(input: {
     user_id: string
     user_text: string
-    prior_agent_text: string | null
+    /** The DURABLE option values of the prior agent question (its persisted
+     *  `options[].value`), NOT the row body — live-agent replies strip the
+     *  `[[OPTIONS]]` block out of `body`, so the body alone would never match. */
+    prior_agent_options: ReadonlyArray<string>
   }): Promise<{ finalized: boolean }>
   /** Fire-and-forget post-turn scribe — never blocks, never throws into the turn. */
   onTurnComplete(input: {
@@ -551,6 +554,29 @@ export function buildLiveAgentTurn(
         onboardingActive = false
       }
     }
+    // BUG 1 fix — read the prior agent question's DURABLE options BEFORE the
+    // resolve below mutates the row (and before an inert user-turn row can become
+    // "latest"). Live-agent replies persist the `[[OPTIONS]]` block stripped from
+    // `body` (it lives in `options_json`), so the deterministic capture must key
+    // off these persisted option values, not the stripped body text. Onboarding-
+    // only + best-effort: a read failure degrades to no capture.
+    let priorAgentOptions: string[] = []
+    if (
+      onboardingActive &&
+      turn.seed_turn !== true &&
+      input.onboarding?.captureRequiredAnswer !== undefined
+    ) {
+      try {
+        const priorPrompt = await input.buttonStore.latestPromptByTopic({
+          topic_id: turn.topic_id,
+          before: now(),
+          now: now(),
+        })
+        priorAgentOptions = priorPrompt?.options.map((o) => o.value) ?? []
+      } catch {
+        priorAgentOptions = []
+      }
+    }
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
     // Capture that previous agent reply: the owner's message THIS turn is a
     // response to the PRIOR reply, so correction detection must judge (prior
@@ -590,7 +616,7 @@ export function buildLiveAgentTurn(
         const capture = await input.onboarding.captureRequiredAnswer({
           user_id: turn.user_id,
           user_text: turn.user_text,
-          prior_agent_text: priorAgentReply,
+          prior_agent_options: priorAgentOptions,
         })
         // BUG 2 fix — this answer settled the LAST required field and finalize
         // fired. Suppress the live agent's own wrap-up so the ONE closing is the

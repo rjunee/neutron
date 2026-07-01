@@ -24,6 +24,8 @@ import { join } from 'node:path'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
 import { ButtonStore } from '../../../channels/button-store.ts'
+import { buildButtonPrompt } from '../../../channels/button-primitive.ts'
+import { randomUUID } from 'node:crypto'
 import type { ChatOutbound } from '../../../landing/server.ts'
 import type { Event } from '../../../runtime/events.ts'
 import type { AgentSpec, Substrate } from '../../../runtime/substrate.ts'
@@ -76,12 +78,12 @@ function makeStubSubstrate(reply: string, specs: AgentSpec[]): Substrate {
 interface SeamProbe {
   seam: LiveAgentOnboardingSeam
   order: string[]
-  captureCalls: Array<{ user_text: string; prior_agent_text: string | null }>
+  captureCalls: Array<{ user_text: string; prior_agent_options: ReadonlyArray<string> }>
 }
 
 function makeSeam(opts: { finalized: boolean }): SeamProbe {
   const order: string[] = []
-  const captureCalls: Array<{ user_text: string; prior_agent_text: string | null }> = []
+  const captureCalls: Array<{ user_text: string; prior_agent_options: ReadonlyArray<string> }> = []
   const seam: LiveAgentOnboardingSeam = {
     isActive: async (): Promise<boolean> => true,
     systemPreamble: (): string => '<onboarding>preamble</onboarding>',
@@ -92,7 +94,10 @@ function makeSeam(opts: { finalized: boolean }): SeamProbe {
     },
     captureRequiredAnswer: async (input): Promise<{ finalized: boolean }> => {
       order.push('capture')
-      captureCalls.push({ user_text: input.user_text, prior_agent_text: input.prior_agent_text })
+      captureCalls.push({
+        user_text: input.user_text,
+        prior_agent_options: input.prior_agent_options,
+      })
       return { finalized: opts.finalized }
     },
     onTurnComplete: (): void => {},
@@ -186,6 +191,37 @@ describe('build-live-agent-turn — wrap-up suppression on finalize (BUG 2)', ()
       .map((t) => t.resolution_text)
       .filter((t): t is string => typeof t === 'string' && t.length > 0)
     expect(texts.some((t) => t.includes('Agamotto'))).toBe(true)
+  })
+})
+
+describe('build-live-agent-turn — durable options wiring (Codex r1 P1 regression)', () => {
+  test('the seam receives the prior row PERSISTED options, not the stripped body', async () => {
+    // Persist an agent question the SAME way a live reply does: body has the
+    // [[OPTIONS]] block STRIPPED, options live in options_json. If the runner
+    // keyed off the body it would see no options and never capture (the bug).
+    const prompt = buildButtonPrompt({
+      body: 'What should I call you?', // note: NO [[OPTIONS]] block in the body
+      options: [
+        { label: 'A', body: 'Sage', value: 'Sage' },
+        { label: 'B', body: 'Atlas', value: 'Atlas' },
+        { label: 'C', body: "I'll choose my own", value: "I'll choose my own" },
+      ],
+      allow_freeform: true,
+      expires_in_ms: 10_000,
+      uuid: randomUUID,
+    })
+    await store.emit(prompt, { topic_id: 'app:u-1' })
+
+    const probe = makeSeam({ finalized: false })
+    const run = makeRunner('Great choice.', probe.seam, [])
+    await run(makeTurn([], { user_text: 'Sage' }))
+
+    expect(probe.captureCalls).toHaveLength(1)
+    expect(probe.captureCalls[0]!.prior_agent_options).toEqual([
+      'Sage',
+      'Atlas',
+      "I'll choose my own",
+    ])
   })
 })
 

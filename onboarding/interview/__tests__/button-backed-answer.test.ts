@@ -23,16 +23,19 @@ const BASE = {
   non_work_interests: ['climbing'],
 } as const
 
-/** A realistic personality-archetype `[[OPTIONS]]` message (matches what the
- *  step guard forces the agent to render — the DEFINED archetype names). */
-function personalityQuestion(): string {
-  const opts = DEFINED_PERSONALITY_CHARACTER_NAMES.map((n) => `- ${n} — some vibe`).join('\n')
-  return `Whose voice should I take on?\n\n[[OPTIONS]]\n${opts}\n- Something else (I'll describe it)\n[[/OPTIONS]]`
+/** The DURABLE option values (ButtonStore `options[].value`) of a realistic
+ *  personality-archetype question — the DEFINED archetype names (with the agent's
+ *  "— why" gloss) plus the escape hatch. This is what the runner reads off the
+ *  prior prompt row, NOT the stripped body. */
+function personalityOptions(): string[] {
+  return [
+    ...DEFINED_PERSONALITY_CHARACTER_NAMES.map((n) => `${n} — some vibe`),
+    "Something else (I'll describe it)",
+  ]
 }
 
-/** A realistic name-suggestion `[[OPTIONS]]` message. */
-const NAME_QUESTION =
-  "What should you call me? Here are a few that fit:\n\n[[OPTIONS]]\n- Sage\n- Atlas\n- Nova\n- I'll choose my own\n[[/OPTIONS]]"
+/** The DURABLE option values of a realistic name-suggestion question. */
+const NAME_OPTIONS = ['Sage', 'Atlas', 'Nova', "I'll choose my own"]
 
 describe('captureButtonBackedRequiredField — personality step', () => {
   const firstArchetype = DEFINED_PERSONALITY_CHARACTER_NAMES[0]!
@@ -41,7 +44,7 @@ describe('captureButtonBackedRequiredField — personality step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: firstArchetype,
-      prior_agent_text: personalityQuestion(),
+      prior_agent_options: personalityOptions(),
     })
     expect(out).toEqual({ field: 'agent_personality', value: firstArchetype })
   })
@@ -51,7 +54,7 @@ describe('captureButtonBackedRequiredField — personality step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: line,
-      prior_agent_text: personalityQuestion(),
+      prior_agent_options: personalityOptions(),
     })
     expect(out).toEqual({ field: 'agent_personality', value: line })
   })
@@ -60,7 +63,7 @@ describe('captureButtonBackedRequiredField — personality step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: 'warm but blunt, a sharp technical peer',
-      prior_agent_text: personalityQuestion(),
+      prior_agent_options: personalityOptions(),
     })
     expect(out).toEqual({
       field: 'agent_personality',
@@ -72,7 +75,7 @@ describe('captureButtonBackedRequiredField — personality step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: "Something else (I'll describe it)",
-      prior_agent_text: personalityQuestion(),
+      prior_agent_options: personalityOptions(),
     })
     expect(out).toBeNull()
   })
@@ -81,7 +84,7 @@ describe('captureButtonBackedRequiredField — personality step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: 'yes',
-      prior_agent_text: personalityQuestion(),
+      prior_agent_options: personalityOptions(),
     })
     expect(out).toBeNull()
   })
@@ -94,7 +97,7 @@ describe('captureButtonBackedRequiredField — name step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: withPersonality,
       user_text: 'Sage',
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     expect(out).toEqual({ field: 'agent_name', value: 'Sage' })
   })
@@ -103,7 +106,7 @@ describe('captureButtonBackedRequiredField — name step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: withPersonality,
       user_text: 'Agamotto',
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     expect(out).toEqual({ field: 'agent_name', value: 'Agamotto' })
   })
@@ -112,7 +115,7 @@ describe('captureButtonBackedRequiredField — name step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: withPersonality,
       user_text: "I'll choose my own",
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     expect(out).toBeNull()
   })
@@ -121,7 +124,7 @@ describe('captureButtonBackedRequiredField — name step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: withPersonality,
       user_text: 'Hmm, what do each of those names actually mean to you?',
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     expect(out).toBeNull()
   })
@@ -130,7 +133,7 @@ describe('captureButtonBackedRequiredField — name step', () => {
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: 'Sage',
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     // personality missing + a non-archetype choice block → neither branch fires.
     expect(out).toBeNull()
@@ -139,12 +142,10 @@ describe('captureButtonBackedRequiredField — name step', () => {
 
 describe('captureButtonBackedRequiredField — guards against mis-capture', () => {
   it('an EARLY yes/no (import offer) never settles personality', () => {
-    const importOffer =
-      'Want to import your ChatGPT history?\n\n[[OPTIONS]]\n- Yes, import it\n- No thanks\n[[/OPTIONS]]'
     const out = captureButtonBackedRequiredField({
       phase_state: { user_first_name: 'Sam' }, // early: projects/interests not yet filled
       user_text: 'Yes, import it',
-      prior_agent_text: importOffer,
+      prior_agent_options: ['Yes, import it', 'No thanks'],
     })
     expect(out).toBeNull()
   })
@@ -153,7 +154,7 @@ describe('captureButtonBackedRequiredField — guards against mis-capture', () =
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: 'Marcus Aurelius',
-      prior_agent_text: 'Tell me, what do you work on these days?',
+      prior_agent_options: [],
     })
     expect(out).toBeNull()
   })
@@ -162,7 +163,7 @@ describe('captureButtonBackedRequiredField — guards against mis-capture', () =
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE },
       user_text: 'Sage',
-      prior_agent_text: null,
+      prior_agent_options: [],
     })
     expect(out).toBeNull()
   })
@@ -171,7 +172,7 @@ describe('captureButtonBackedRequiredField — guards against mis-capture', () =
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE, agent_personality: 'Yoda', agent_name: 'Sage' },
       user_text: 'Sage',
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     expect(out).toBeNull()
   })
@@ -180,7 +181,7 @@ describe('captureButtonBackedRequiredField — guards against mis-capture', () =
     const out = captureButtonBackedRequiredField({
       phase_state: { ...BASE, agent_personality: 'Yoda' },
       user_text: '   ',
-      prior_agent_text: NAME_QUESTION,
+      prior_agent_options: NAME_OPTIONS,
     })
     expect(out).toBeNull()
   })
