@@ -24,7 +24,7 @@
 const STORAGE_KEY_PREFIX = 'neutron.project.';
 const STORAGE_KEY_SUFFIX = '.lastTab';
 
-export type LastTabValue = 'chat' | 'launcher' | 'tasks' | 'reminders' | 'docs';
+export type LastTabValue = 'chat' | 'launcher' | 'tasks' | 'reminders' | 'docs' | 'settings';
 
 export const LEGAL_TABS: readonly LastTabValue[] = [
   'chat',
@@ -32,6 +32,7 @@ export const LEGAL_TABS: readonly LastTabValue[] = [
   'tasks',
   'reminders',
   'docs',
+  'settings',
 ];
 
 /**

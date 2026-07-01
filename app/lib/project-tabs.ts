@@ -47,6 +47,7 @@ export const PROJECT_TABS: readonly ProjectTabSpec[] = [
   { key: 'tasks', label: 'Tasks' },
   { key: 'reminders', label: 'Reminders' },
   { key: 'docs', label: 'Docs' },
+  { key: 'settings', label: 'Settings' },
 ];
 
 /** A registry tab resolved to everything the mobile shell needs to render it. */

@@ -90,15 +90,16 @@ describe('descriptorsToResolvedTabs', () => {
 });
 
 describe('loadingTabsForProject (pre-fetch default)', () => {
-  it('returns the legacy 5-tab set resolved to native routes', () => {
+  it('returns the legacy tab set (+ Settings) resolved to native routes', () => {
     const tabs = loadingTabsForProject(PID);
-    expect(tabs.map((t) => t.key)).toEqual(['chat', 'launcher', 'tasks', 'reminders', 'docs']);
+    expect(tabs.map((t) => t.key)).toEqual(['chat', 'launcher', 'tasks', 'reminders', 'docs', 'settings']);
     expect(tabs.map((t) => t.route)).toEqual([
       '/projects/proj_1/chat',
       '/projects/proj_1/launcher',
       '/projects/proj_1/tasks',
       '/projects/proj_1/reminders',
       '/projects/proj_1/docs',
+      '/projects/proj_1/settings',
     ]);
   });
 

@@ -2,6 +2,70 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-01 — Per-project Settings tab + credential system (FOUNDATION)
+
+**What shipped.** A per-project **Settings** tab (Chat / Plan / Documents /
+**Settings**) on web + mobile, plus the credential store + scope + CRUD +
+resolver + agent awareness it hosts. A credential (a static, long-lived service
+token — Meta Ads, Google Ads, Apify, …) can be set at **per-project** or
+**global** scope; resolution is **per-project → global → unset**. No feature
+flags; on by default.
+
+- **Settings tab (registry-driven, NOT hardcoded).** One `TabDescriptor` added to
+  `tabs/registry.ts` `BUILTIN_TABS` — `key:'settings'`, `order:15` (after
+  Documents=10, before Core base=100), `mount:{kind:'builtin', target:'settings'}`.
+  Web: `landing/chat-react/SettingsTab.tsx` + a `mount.target==='settings'` branch
+  in `ProjectShell.tsx`'s `TabContent`. Mobile: expo file-route
+  `app/app/projects/[id]/settings.tsx` + `'settings'` added to
+  `app/lib/last-tab-storage.ts` `LEGAL_TABS`/`LastTabValue` and
+  `app/lib/project-tabs.ts` `PROJECT_TABS`. Both clients consume the ONE engine
+  registry, so neither hardcodes the tab (heeds the #137 Tasks-tab lesson).
+- **Credential store + the composite key.** New migration
+  `0092_project_credentials.sql` (STRICT + CHECK + ISO-8601 TEXT). The store
+  (`project-credentials/store.ts`) keys every row on a **composite**:
+  `owner_slug` (the SERVER-derived instance handle from the bearer — the owner
+  boundary, NEVER client-supplied) **+** `project_id` (the REAL per-project id,
+  `''` sentinel for global) **+** `service`. This deliberately differs from the
+  Work Board (which keys purely on the instance slug and ignores the URL
+  project id): credentials are genuinely per-project, so the real project id is
+  part of the key, gated underneath the server-derived owner boundary — no
+  caller can read another owner's credentials. Ciphertext reuses the `secrets`
+  AES-256-GCM envelope (shared `.neutron-aes-key`); `list` returns metadata
+  only, never the token.
+- **CRUD surface + resolver + awareness.** Bearer-gated
+  `gateway/http/project-credentials-surface.ts` owns
+  `/api/app/projects/<id>/credentials[/<service>]` (GET/POST/DELETE), wired into
+  the composer + `composition.ts` + `compose.ts` ahead of `appProjects`
+  (mirrors work-board precedence). `ProjectCredentialStore.resolve(owner_slug,
+  project_id, service)` implements per-project → global → unset (expired rows
+  resolve as unset). Agent awareness (`project-credentials/fragment.ts`): a
+  per-turn `<available_services>` DATA block, keyed on the real per-turn
+  `project_id` (chat-bridge parses it from the topic), spliced by
+  `build-live-agent-turn.ts` exactly like the Work Board block — so the agent
+  knows which services it can use in THIS project and gracefully refuses the
+  rest, and switching projects flips availability within one turn.
+- **Project rename.** The existing settings PATCH
+  (`/api/app/projects/<id>/settings`) now accepts `name` (rename); the `name`
+  column already existed on `projects`, threaded through both
+  `InMemoryProjectSettingsStore` and `SqliteProjectSettingsStore`. Emoji is a
+  documented SEAM (no column yet — waits on the rail-emoji feature).
+- **Collaborators.** Display-only, M2-gated scaffold on both clients (owner row +
+  disabled "Invite / Remove — available in M2"). No membership-mutation
+  endpoint exists (grep-confirmed).
+- **Tests.** `project-credentials/store.test.ts` (CRUD + the per-project→global→
+  unset fallback + two-project distinct tokens + expiry + the owner leak-gate +
+  validation), `project-credentials/fragment.test.ts` (awareness block + tag
+  escaping), `gateway/__tests__/project-credentials-production-composer.test.ts`
+  (reachability + CRUD + scope + 401/400 through the real composed graph),
+  migration `runner.test.ts` applied-list + regenerated `expected-schema.txt`,
+  registry test (settings tab registered), sqlite-store rename test.
+- **OUT OF SCOPE (named follow-ups).** Wiring the existing Cores
+  (Email/Calendar/Drive/Scraping) to CALL the resolver — that needs the per-call
+  `project_id` threaded into each Core's token provider (the deferred Phase-3
+  Cores rework), so it is NOT a cheap PoC and is left for the follow-up. Actual
+  collaborator invite/remove is M2-gated. Per-project OAuth grants for the Google
+  Cores stay deferred (the instance grant remains the global default).
+
 ## 2026-06-30 — Work Board Phase 2b: trident/agent dispatch BOUND to board items + parallel + ask-before-acting
 
 **What shipped.** The dispatch→board binding that Phase 1a/2a left as forward-prep.

@@ -156,14 +156,18 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
   async update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode },
+    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode; name?: string },
   ): Promise<ProjectSettings | null> {
     // Resolve-or-seed so callers always get a coherent doc back. The
     // surface's PATCH never fabricates a value on the client — an
     // undefined field in `patch` leaves the existing column in place.
     const existing = await this.get(project_slug, project_id)
     if (existing === null) return null
-    if (patch.privacy_mode === undefined && patch.agent_engagement_mode === undefined) {
+    if (
+      patch.privacy_mode === undefined &&
+      patch.agent_engagement_mode === undefined &&
+      patch.name === undefined
+    ) {
       return existing
     }
     const ts = nowIso()
@@ -171,13 +175,15 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
     // optional), mirroring privacy_mode's coalesce-on-undefined contract.
     const next_privacy = patch.privacy_mode ?? existing.privacy_mode
     const next_engagement = patch.agent_engagement_mode ?? existing.agent_engagement_mode
+    const next_name = patch.name ?? existing.name
     await this.db.run(
       `UPDATE projects
-          SET privacy_mode = ?,
+          SET name = ?,
+              privacy_mode = ?,
               agent_engagement_mode = ?,
               updated_at = ?
         WHERE id = ?`,
-      [next_privacy, next_engagement, ts, project_id],
+      [next_name, next_privacy, next_engagement, ts, project_id],
     )
     const row = this.readRow(project_id)
     if (row === null) return null
