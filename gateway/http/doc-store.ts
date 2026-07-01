@@ -479,11 +479,13 @@ export class DocStore {
     const projectRoot = dirname(docsRoot)
     const extra: DocTreeNode[] = []
     for (const name of ROOT_SURFACED_DOCS) {
-      // A valid contained docs/ copy is already in `tree` (surfaced by the
-      // walker) → skip. An escaping-symlink docs/STATUS.md the walker filtered
-      // out is NOT in the tree, so we still surface the safe project-root copy
-      // rather than let the bad entry mask it (Codex).
-      if (tree.some((n) => n.path === name)) continue
+      // A valid contained docs/ FILE copy is already in `tree` (surfaced by the
+      // walker) → skip. Gate on `kind === 'file'` so a folder/binary named
+      // STATUS.md doesn't suppress the root copy while `baseDirForDoc` still
+      // routes reads to root (they must agree). An escaping-symlink
+      // docs/STATUS.md the walker filtered out is NOT in the tree either, so we
+      // still surface the safe project-root copy rather than let it be masked.
+      if (tree.some((n) => n.path === name && n.kind === 'file')) continue
       const abs = join(projectRoot, name)
       let st
       try {

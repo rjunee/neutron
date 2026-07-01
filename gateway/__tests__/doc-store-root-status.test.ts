@@ -202,6 +202,23 @@ describe('DocStore — project-root STATUS.md surfacing (P-B)', () => {
     expect((await store.readDoc(PROJECT, 'STATUS.md')).content).toBe('REAL ROOT STATUS\n')
   })
 
+  it('a docs/ FOLDER named STATUS.md does not hide the root STATUS.md', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    // A directory literally named STATUS.md inside docs/ (with a child doc).
+    mkdirSync(join(projectRoot, 'docs', 'STATUS.md'), { recursive: true })
+    writeFileSync(join(projectRoot, 'docs', 'STATUS.md', 'child.md'), '# child\n')
+    writeFileSync(join(projectRoot, 'STATUS.md'), 'REAL ROOT STATUS\n')
+    const store = new DocStore({ owner_home: home })
+
+    // The root STATUS.md is still surfaced + first (the folder node doesn't mask it)…
+    const tree = await store.tree(PROJECT)
+    expect(tree[0]?.path).toBe('STATUS.md')
+    expect(tree[0]?.kind).toBe('file')
+    // …and reads of "STATUS.md" resolve to the root file (consistent with surfacing).
+    expect((await store.readDoc(PROJECT, 'STATUS.md')).content).toBe('REAL ROOT STATUS\n')
+  })
+
   it('prefers a real docs/STATUS.md over the project-root copy (no ambiguity)', async () => {
     const home = makeHome()
     const projectRoot = join(home, 'Projects', PROJECT)
