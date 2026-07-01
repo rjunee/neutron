@@ -51,6 +51,11 @@ user-supplied emoji (short, non-ASCII). `GENERAL_EMOJI` (💬) for the General s
   re-fans `projects_changed` so connected rails reorder + re-badge live.
 - `channels/adapters/app-ws/envelope.ts` — `AppWsOutboundProjectsChanged` per-item
   shape extended with `emoji` / `unread` / `last_activity_at`.
+- A settings PATCH that changes a RAIL-VISIBLE field (name or emoji) fans a fresh
+  `projects_changed` via the surface's new `onRailFieldChanged` hook (bound to the
+  composer's `emitProjectsChangedNow`), so the rail re-renders the glyph/label live
+  with no reload — this also fixes the pre-existing "rename doesn't refresh the
+  rail" staleness (Codex r1 P2).
 - Materialize + create-project INSERTs (`onboarding/wow-moment/actions/
   03-project-shells.ts`, `gateway/realmode-composer/project-create.ts`) stamp a
   default emoji + `last_activity_at`.

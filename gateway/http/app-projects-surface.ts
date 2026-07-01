@@ -322,6 +322,15 @@ export interface AppProjectsSurfaceOptions {
   store: ProjectSettingsStore
   auth: AppWsAuthResolver
   /**
+   * Rail-redesign — invoked after a settings PATCH that changed a RAIL-VISIBLE
+   * field (name or emoji) so the caller can fan a fresh `projects_changed`
+   * frame and every connected rail re-renders live (no reload). Production binds
+   * this to the composer's `emitProjectsChangedNow`; omit for the read-only /
+   * test surfaces (the PATCH still persists, it just doesn't push a live
+   * refresh). Best-effort — a throw here must not fail the PATCH response.
+   */
+  onRailFieldChanged?: (input: { user_id: string }) => void
+  /**
    * In-app invite generation deps (M2.4). When omitted, the
    * `POST /api/app/projects/<id>/invite` route returns 501
    * `invite_not_configured` — parity with the landing server's
@@ -424,7 +433,7 @@ const MAX_PROJECT_NAME_LEN = 120
 const ALLOWED_PATCH_FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_PATCH_FIELDS)
 
 export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppProjectsSurface {
-  const { store, auth, invite, sharedProjects, connect, createProject } = opts
+  const { store, auth, invite, sharedProjects, connect, createProject, onRailFieldChanged } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -556,7 +565,7 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
         return handleGet(store, resolved.project_slug, project_id)
       }
       if (method === 'PATCH') {
-        return handlePatch(req, store, resolved.project_slug, project_id)
+        return handlePatch(req, store, resolved.project_slug, project_id, resolved.user_id, onRailFieldChanged)
       }
       return jsonError(
         405,
@@ -713,6 +722,8 @@ async function handlePatch(
   store: ProjectSettingsStore,
   project_slug: string,
   project_id: string,
+  user_id: string,
+  onRailFieldChanged?: (input: { user_id: string }) => void,
 ): Promise<Response> {
   const body = await readJsonBody(req)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -803,6 +814,16 @@ async function handlePatch(
   const updated = await store.update(project_slug, project_id, patch)
   if (updated === null) {
     return jsonError(404, 'project_not_found', `project_id=${project_id}`)
+  }
+  // Rail-redesign: a name/emoji change is rail-visible — fan a fresh
+  // `projects_changed` so connected rails re-render the label/glyph live (no
+  // reload). privacy/engagement don't touch the rail, so skip the fan there.
+  if ((hasName || hasEmoji) && onRailFieldChanged !== undefined) {
+    try {
+      onRailFieldChanged({ user_id })
+    } catch {
+      /* a live-refresh push must never fail the persisted PATCH */
+    }
   }
   return jsonOk({ project: updated, project_id, project_slug })
 }

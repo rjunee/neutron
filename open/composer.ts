@@ -2202,6 +2202,10 @@ export function buildOpenGraphComposer(
       store: new SqliteProjectSettingsStore(db),
       auth: appOwnerAuth,
       createProject: ({ name, user_id }) => createProjectAndRefresh({ name, user_id }),
+      // Rail-redesign: a Settings PATCH that changes the project name or emoji is
+      // rail-visible — fan a fresh `projects_changed` so every connected rail
+      // re-renders the label/glyph live (no reload).
+      onRailFieldChanged: ({ user_id }) => emitProjectsChangedNow(user_id),
     })
     // Agent-tool service (`create_project`) — same path, owner as the refresh
     // target when the turn has no explicit speaker (solo/system).

@@ -254,7 +254,8 @@ export function SettingsTab({
           throw new Error(body?.message ?? `HTTP ${res.status}`)
         }
         // Read back the server-normalised emoji so the field reflects what was
-        // actually stored (the live rail refreshes off the projects_changed frame).
+        // actually stored. The live rail refreshes off the `projects_changed`
+        // frame the surface fans on this rail-visible PATCH (onRailFieldChanged).
         const data = (await res.json().catch(() => null)) as { project?: { emoji?: unknown } } | null
         const saved = typeof data?.project?.emoji === 'string' ? data.project.emoji : next
         setEmoji(saved)

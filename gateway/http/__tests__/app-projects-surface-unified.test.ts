@@ -140,3 +140,51 @@ describe('GET /api/app/projects (M2.3 unified list)', () => {
     expect(neutrons[0]!.kind).toBe('solo') // local wins
   })
 })
+
+describe('PATCH /settings — rail-refresh hook (rail-redesign)', () => {
+  function patchReq(id: string, body: Record<string, unknown>): Request {
+    return new Request(`http://t/api/app/projects/${id}/settings`, {
+      method: 'PATCH',
+      headers: { authorization: 'Bearer dev:u-1', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  }
+
+  test('fires onRailFieldChanged for an emoji or name PATCH, NOT for privacy', async () => {
+    const store = await seededStore('alice', ['neutron'])
+    const calls: Array<{ user_id: string }> = []
+    const surface = createAppProjectsSurface({
+      store,
+      auth: fixedAuth('u-1', 'alice'),
+      onRailFieldChanged: (input) => calls.push(input),
+    })
+
+    // emoji → fires.
+    const r1 = await surface.handler(patchReq('neutron', { emoji: '🎯' }))
+    expect(r1!.status).toBe(200)
+    expect(calls).toEqual([{ user_id: 'u-1' }])
+
+    // name → fires.
+    const r2 = await surface.handler(patchReq('neutron', { name: 'Neutron Prime' }))
+    expect(r2!.status).toBe(200)
+    expect(calls).toHaveLength(2)
+
+    // privacy_mode → rail-invisible, does NOT fire.
+    const r3 = await surface.handler(patchReq('neutron', { privacy_mode: 'public' }))
+    expect(r3!.status).toBe(200)
+    expect(calls).toHaveLength(2)
+  })
+
+  test('a rejected emoji PATCH does not fire the hook', async () => {
+    const store = await seededStore('alice', ['neutron'])
+    const calls: Array<{ user_id: string }> = []
+    const surface = createAppProjectsSurface({
+      store,
+      auth: fixedAuth('u-1', 'alice'),
+      onRailFieldChanged: (input) => calls.push(input),
+    })
+    const res = await surface.handler(patchReq('neutron', { emoji: 'not-an-emoji' }))
+    expect(res!.status).toBe(400)
+    expect(calls).toHaveLength(0)
+  })
+})
