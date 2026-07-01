@@ -107,10 +107,17 @@ describe('toThreadMessage', () => {
 })
 
 describe('normalizeBody', () => {
-  it('trims leading and trailing whitespace/newlines', () => {
+  it('strips leading newlines and all trailing whitespace', () => {
     expect(normalizeBody('Ryan\n')).toBe('Ryan')
     expect(normalizeBody('\n\nRyan')).toBe('Ryan')
-    expect(normalizeBody('  hi  ')).toBe('hi')
+    expect(normalizeBody('Ryan  \n')).toBe('Ryan')
+  })
+
+  it('preserves LEADING horizontal whitespace (Markdown indented code block)', () => {
+    // A response opening with a 4-space indent is a Markdown code block — must
+    // survive normalization (Codex P2). Only newlines/trailing space are stray.
+    expect(normalizeBody('    npm test')).toBe('    npm test')
+    expect(normalizeBody('\n    npm test\n')).toBe('    npm test')
   })
 
   it('preserves intentional INTERNAL blank lines (real multi-line message)', () => {

@@ -26,13 +26,15 @@ is exactly why it missed Ryan's user-message evidence.
   rule — zeroes the inherited UA `<p>` margin and matches the agent paragraph
   line-height so a single-line user message hugs its text (bubble height = 5px +
   one line + 5px).
-- **`landing/chat-react/message-adapter.ts`.** New `normalizeBody()` trims
-  leading/trailing whitespace/newlines from a message body in `toThreadMessage`
-  (the single display seam for both bubble types). Both paths preserve newlines
-  (`white-space: pre-line` on the user `<p>`, `pre-wrap` on `.car-bubble`), so a
-  stray trailing `\n` on a one-line message would otherwise render as an extra
-  empty line. Trimming only the ends leaves intentional INTERNAL blank lines
-  (real multi-line messages) untouched.
+- **`landing/chat-react/message-adapter.ts`.** New `normalizeBody()` strips the
+  stray leading newlines + all trailing whitespace from a message body in
+  `toThreadMessage` (the single display seam for both bubble types). Both paths
+  preserve newlines (`white-space: pre-line` on the user `<p>`, `pre-wrap` on
+  `.car-bubble`), so a stray trailing `\n` on a one-line message would otherwise
+  render as an extra empty line. Deliberately narrow (Codex P2): leading
+  horizontal whitespace is PRESERVED so a Markdown agent message opening with an
+  indented code block (`"    npm test"`) still renders as code; INTERNAL blank
+  lines (real multi-line messages) are untouched.
 
 **Tests.** `landing/chat-react/__tests__/message-adapter.test.ts` — trailing/
 leading-newline strip on user + agent bodies, whitespace-only → empty, and a

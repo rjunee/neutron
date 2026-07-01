@@ -29,16 +29,20 @@ function looksLikeImage(url: string): boolean {
 }
 
 /**
- * Strip leading/trailing whitespace (incl. newlines) from a message body before
- * it reaches the bubble. Both bubble paths preserve newlines — the user `<p
- * class="car-text">` renders `white-space: pre-line` and the agent `.car-bubble`
- * has `white-space: pre-wrap` — so a stray trailing (or leading) `\n` on a
- * one-line message renders as an extra EMPTY line, making the bubble ~2x tall.
- * Trimming only the ends leaves intentional INTERNAL blank lines (a user's
- * multi-line message) untouched, so real line breaks still render.
+ * Strip the stray leading/trailing NEWLINES that make a one-line bubble render
+ * ~2x tall. Both bubble paths preserve newlines — the user `<p class="car-text">`
+ * renders `white-space: pre-line` and the agent `.car-bubble` has
+ * `white-space: pre-wrap` — so a trailing (or leading) `\n` on a one-line message
+ * shows as an extra EMPTY line.
+ *
+ * Deliberately narrow: only leading newlines and all trailing whitespace are
+ * removed. Leading horizontal whitespace (spaces) is PRESERVED so a Markdown
+ * agent message that opens with an indented code block (e.g. `"    npm test"`)
+ * still renders as code. Internal blank lines (a real multi-line message) are
+ * untouched, so intentional line breaks still render.
  */
 export function normalizeBody(text: string): string {
-  return text.replace(/^\s+|\s+$/g, '')
+  return text.replace(/^\n+/, '').replace(/\s+$/, '')
 }
 
 type ContentPart =
