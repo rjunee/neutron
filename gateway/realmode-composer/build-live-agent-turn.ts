@@ -1067,6 +1067,15 @@ async function composeFirstTurnPrompt(
           `You are chatting with the user inside the "${turn.project_id}" project topic.`,
           'Scope your answers to this project unless the user clearly asks wider.',
           `Project files (when materialized) live under Projects/${turn.project_id}/ in your working directory.`,
+          // Doc references: announce any doc you draft or edit as a TAPPABLE link,
+          // never a raw filesystem path. The client linkifies this exact marker and
+          // opens it in the Documents tab (runtime/doc-links.ts rewriteDocRefsInBody).
+          'When you tell the user about a doc you drafted or edited, reference it as a tappable link',
+          `using the exact marker [friendly-name](docs:/${turn.project_id}/<path>), where friendly-name is`,
+          "the filename without its .md extension and <path> is the doc's path relative to the project's",
+          `docs/ folder — e.g. Projects/${turn.project_id}/docs/brief.md → [brief](docs:/${turn.project_id}/brief.md),`,
+          `and the project's STATUS.md → [STATUS](docs:/${turn.project_id}/STATUS.md).`,
+          'Never announce a raw Projects/… filesystem path; always use the docs:/ marker so the reference opens in the Documents tab.',
           'This is a live chat turn: answer the user directly and concisely.',
           '</live_agent_context>',
         ].join('\n')
@@ -1074,6 +1083,11 @@ async function composeFirstTurnPrompt(
           '<live_agent_context>',
           'You are chatting with the user in their General topic — the cross-project assistant surface.',
           'Their workspace (persona/, entities/, Projects/) is your working directory; read from it when recall helps.',
+          // Doc references: same tappable-link convention, with the project id spelled out per doc.
+          'When you tell the user about a doc in a project, reference it as a tappable link using the exact',
+          "marker [friendly-name](docs:/<project_id>/<path>), where friendly-name is the filename without its",
+          ".md extension and <path> is relative to that project's docs/ folder — e.g. [brief](docs:/<project_id>/brief.md).",
+          'Never announce a raw Projects/… filesystem path; always use the docs:/ marker so it opens in the Documents tab.',
           'This is a live chat turn: answer the user directly and concisely.',
           '</live_agent_context>',
         ].join('\n')

@@ -40,8 +40,9 @@
  * concurrency without needing a CRDT.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -52,7 +53,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises'
-import { join, normalize, relative, sep } from 'node:path'
+import { dirname, join, normalize, relative, sep } from 'node:path'
 
 import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
 import type {
@@ -94,6 +95,67 @@ const MARKDOWN_EXTENSION_RE = new RegExp(
  */
 export function isMarkdownLeaf(name: string): boolean {
   return MARKDOWN_EXTENSION_RE.test(name)
+}
+
+/**
+ * Files that live at the PROJECT ROOT (`Projects/<id>/<name>`, a SIBLING of
+ * `docs/`) but are surfaced into the Documents tree as top-level entries.
+ *
+ * Exactly `STATUS.md` today — the standard per-project state doc the
+ * materializer writes to `Projects/<id>/STATUS.md`
+ * (`onboarding/wow-moment/project-materializer.ts`), which sits OUTSIDE the
+ * `docs/` root that the tree/read/write surface is otherwise confined to. Ryan
+ * wants STATUS.md to be a first-class Document pinned to the top of the list,
+ * so the store surfaces it here.
+ *
+ * The exception is deliberately a fixed, hard-coded BASENAME set with NO
+ * user-supplied path component, NO subpaths, and NO `..`, so it cannot widen
+ * path traversal: a redirect only ever resolves to `<project_root>/STATUS.md`,
+ * one level above `docs/`, for the exact string `STATUS.md`.
+ */
+export const ROOT_SURFACED_DOCS = Object.freeze(['STATUS.md']) as readonly string[]
+
+/** True when a validated (cleaned) relative path is a root-surfaced doc name. */
+function isRootSurfacedDoc(cleanedRelPath: string): boolean {
+  return ROOT_SURFACED_DOCS.includes(cleanedRelPath)
+}
+
+/**
+ * True iff `abs` is a REGULAR file (NOT a symlink). Uses `lstatSync` so a
+ * symlink resolves to `isFile() === false` — used to gate the project-root
+ * STATUS.md surfacing + read/write redirect. A symlinked STATUS.md must NOT be
+ * surfaced or routed to (it could point at another in-project file, letting a
+ * `STATUS.md` read/write reach/overwrite it); such a symlink is left to normal
+ * docs-root resolution (where realpath containment governs it).
+ */
+function isRealFileSync(abs: string): boolean {
+  try {
+    return lstatSync(abs).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True iff `<docsRoot>/<name>` exists AND is a regular file whose realpath is
+ * CONTAINED under `docsRoot` — i.e. a docs file the tree walker would actually
+ * surface. A broken/absent path, a non-file, or an ESCAPING symlink (realpath
+ * outside docsRoot, which the walker filters out) all return false, so such an
+ * entry never masks the safe project-root surfaced copy. Used to gate the
+ * "docs/ copy wins" decision for a root-surfaced doc.
+ */
+function docsHasContainedFile(docsRoot: string, name: string): boolean {
+  const p = join(docsRoot, name)
+  try {
+    // Realpath BOTH sides so an intermediate symlink on the root itself (e.g.
+    // macOS /var → /private/var under tmpdir) doesn't break the string compare.
+    const realRoot = realpathSync(docsRoot)
+    const real = realpathSync(p)
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) return false
+    return statSync(p).isFile()
+  } catch {
+    return false
+  }
 }
 
 /** Maximum allowed relative path length (segments + separators). */
@@ -331,6 +393,19 @@ export class DocStore {
    */
   async tree(project_id: string): Promise<DocTreeNode[]> {
     const root = this.assertProjectId(project_id)
+    const tree = await this.buildTreeUnderRoot(project_id, root)
+    // P-B — surface the project-root STATUS.md (sibling of docs/) as a
+    // top-level entry, LEADING the tree so it sits at the top of the Documents
+    // list. The client also pins it in `flattenDocFiles` as defense-in-depth.
+    return this.prependRootSurfacedDocs(root, tree)
+  }
+
+  /** Build the tree of markdown (+ binary) files strictly UNDER the docs
+   *  root. `tree()` wraps this to prepend any surfaced project-root docs. */
+  private async buildTreeUnderRoot(
+    project_id: string,
+    root: string,
+  ): Promise<DocTreeNode[]> {
     let markdownTree: DocTreeNode[] = []
     if (existsSync(root)) {
       // Resolve the canonical docs root once and thread it through the
@@ -391,6 +466,83 @@ export class DocStore {
   }
 
   /**
+   * P-B — prepend any {@link ROOT_SURFACED_DOCS} that live at the project root
+   * (a sibling of `docs/`) so they appear at the TOP of the Documents tree.
+   * Only surfaces a root copy when the tree has no top-level entry of that name
+   * (a real `docs/STATUS.md` wins, keeping the read/write path unambiguous) and
+   * the root file actually exists + is a regular file.
+   */
+  private async prependRootSurfacedDocs(
+    docsRoot: string,
+    tree: DocTreeNode[],
+  ): Promise<DocTreeNode[]> {
+    const projectRoot = dirname(docsRoot)
+    const extra: DocTreeNode[] = []
+    for (const name of ROOT_SURFACED_DOCS) {
+      // A valid contained docs/ FILE copy is already in `tree` (surfaced by the
+      // walker) → skip. Gate on `kind === 'file'` so a folder/binary named
+      // STATUS.md doesn't suppress the root copy while `baseDirForDoc` still
+      // routes reads to root (they must agree). An escaping-symlink
+      // docs/STATUS.md the walker filtered out is NOT in the tree either, so we
+      // still surface the safe project-root copy rather than let it be masked.
+      if (tree.some((n) => n.path === name && n.kind === 'file')) continue
+      const abs = join(projectRoot, name)
+      let st
+      try {
+        // lstat (not stat) so a SYMLINK at the project root doesn't get
+        // surfaced with its target's size/mtime — that would leak metadata
+        // about an out-of-project file into the tree (the same leak the docs
+        // walker guards against). A symlink fails the isFile() check below and
+        // is skipped; reads of it are rejected by realpath containment anyway.
+        st = await lstat(abs)
+      } catch {
+        continue
+      }
+      if (!st.isFile()) continue
+      extra.push({
+        kind: 'file',
+        path: name,
+        name,
+        size_bytes: st.size,
+        modified_at: Math.floor(st.mtimeMs),
+        content_type: null,
+        referenced_by_count: null,
+        origin: null,
+        children: [],
+      })
+    }
+    if (extra.length === 0) return tree
+    return [...extra, ...tree]
+  }
+
+  /**
+   * P-B — resolve the base directory a validated (cleaned) relative path is
+   * contained against. Normally the project's `docs/` root. For a
+   * {@link ROOT_SURFACED_DOCS} basename (exactly `STATUS.md`) that exists at the
+   * project root and NOT under `docs/`, the base is the project root so the
+   * surfaced top-level entry reads/writes the real state doc. The redirect only
+   * ever fires for the exact fixed basename (no path component), so the
+   * containment guarantee can't widen — `<project_root>/STATUS.md` is the only
+   * reachable out-of-`docs/` target.
+   */
+  private baseDirForDoc(docsRoot: string, cleanedRelPath: string): string {
+    if (
+      isRootSurfacedDoc(cleanedRelPath) &&
+      // A valid CONTAINED docs/ copy wins; an escaping-symlink / non-file
+      // docs/STATUS.md must NOT mask the safe project-root copy (raw existsSync
+      // would — Codex regression). Redirect to root when there's no such copy.
+      !docsHasContainedFile(docsRoot, cleanedRelPath) &&
+      // Regular file only — a SYMLINK at the project root is NOT routed to (it
+      // could point at another in-project file), matching the tree-surfacing
+      // gate. Such a path falls back to docs-root resolution.
+      isRealFileSync(join(dirname(docsRoot), cleanedRelPath))
+    ) {
+      return dirname(docsRoot)
+    }
+    return docsRoot
+  }
+
+  /**
    * Lightweight stat for a markdown file at `relPath`. Realpath-checks
    * the same way `readDoc` does, but skips the body read — used by the
    * P7.2 comments surface to OCC-check `based_on_modified_at` without
@@ -403,7 +555,8 @@ export class DocStore {
     relPath: string,
   ): Promise<{ size_bytes: number; modified_at: number } | null> {
     const root = this.assertProjectId(project_id)
-    const abs = await assertContainedFile(root, relPath)
+    const cleaned = validateRelativePath(relPath, { requireMd: true })
+    const abs = await assertContainedFile(this.baseDirForDoc(root, cleaned), cleaned)
     let st
     try {
       st = await stat(abs)
@@ -420,7 +573,8 @@ export class DocStore {
   /** Read a markdown file at `relPath`. */
   async readDoc(project_id: string, relPath: string): Promise<ReadFileResult> {
     const root = this.assertProjectId(project_id)
-    const abs = await assertContainedFile(root, relPath)
+    const cleaned = validateRelativePath(relPath, { requireMd: true })
+    const abs = await assertContainedFile(this.baseDirForDoc(root, cleaned), cleaned)
     let st
     try {
       st = await stat(abs)
@@ -457,7 +611,17 @@ export class DocStore {
         `content exceeds ${MAX_DOC_BYTES} bytes (got ${byte_len})`,
       )
     }
-    const abs = await assertContainedFileForWrite(root, input.path)
+    // P-B — route the exact top-level `STATUS.md` to the project root (where
+    // the state doc lives) so an Edit of the surfaced doc overwrites the real
+    // file in place, not a phantom `docs/STATUS.md`. Any other path stays under
+    // the docs root.
+    const cleanedWritePath = validateRelativePath(input.path, { requireMd: true })
+    const writeBase = this.baseDirForDoc(root, cleanedWritePath)
+    const abs = await assertContainedFileForWrite(writeBase, input.path)
+    // A surfaced project-root doc (STATUS.md) lives outside the docs/ git
+    // worktree + binary graph, so skip the version commit + binary-link sync
+    // below (they'd `git add` a path not in the worktree — no usable history).
+    const writeRootSurfaced = writeBase !== root
     // Record whether this is a create or overwrite BEFORE the rename so
     // the version store's commit message (`create:` vs `edit:` / `revert:`)
     // reflects the user's intent. The check is purely advisory — the
@@ -527,19 +691,21 @@ export class DocStore {
     // and the next successful write picks up the staged changes.
     // Callers can opt in to a revert-shaped commit by passing
     // `input.revert_target_sha`.
-    await this.recordCommit(input.project_id, {
-      op: input.revert_target_sha !== undefined ? 'revert' : was_create ? 'create' : 'edit',
-      path: input.path,
-      ...(input.revert_target_sha !== undefined
-        ? { target_sha: input.revert_target_sha }
-        : {}),
-    } as CommitKind)
+    if (!writeRootSurfaced) {
+      await this.recordCommit(input.project_id, {
+        op: input.revert_target_sha !== undefined ? 'revert' : was_create ? 'create' : 'edit',
+        path: input.path,
+        ...(input.revert_target_sha !== undefined
+          ? { target_sha: input.revert_target_sha }
+          : {}),
+      } as CommitKind)
+    }
     // P7.5 — recompute the binary refcount table for this markdown
     // file. Best-effort; the markdown write has already landed atomically
     // so a binary-store hiccup must not roll it back. Round-2 IMPORTANT
     // #4 — wire the store's structured-event logger in so refcount drift
     // is observable in ops dashboards instead of vanishing silently.
-    if (this.binaryStore !== null) {
+    if (this.binaryStore !== null && !writeRootSurfaced) {
       try {
         this.binaryStore.syncMarkdownLinks(
           input.project_id,
@@ -557,13 +723,19 @@ export class DocStore {
     }
     // P7.2 S2 — fire the re-anchor walker after every successful
     // write. Best-effort; failures are swallowed (see
-    // `invokeMutationHook` doc).
-    await this.invokeMutationHook({
-      op: 'write',
-      project_id: input.project_id,
-      path: input.path,
-      new_modified_at: Math.floor(st.mtimeMs),
-    })
+    // `invokeMutationHook` doc). Skipped for a surfaced project-root doc: the
+    // walker resolves doc paths under the docs/ root, so it can't read the root
+    // file — running it would misread the edit as a delete and mark any
+    // STATUS.md comment anchors dead. STATUS.md is outside the docs/ comment
+    // graph (comments on it stay at their prior offsets rather than re-anchor).
+    if (!writeRootSurfaced) {
+      await this.invokeMutationHook({
+        op: 'write',
+        project_id: input.project_id,
+        path: input.path,
+        new_modified_at: Math.floor(st.mtimeMs),
+      })
+    }
     return {
       path: input.path,
       size_bytes: st.size,
@@ -577,7 +749,10 @@ export class DocStore {
     opts: { expected_modified_at?: number } = {},
   ): Promise<void> {
     const root = this.assertProjectId(project_id)
-    const abs = await assertContainedFile(root, relPath)
+    const cleaned = validateRelativePath(relPath, { requireMd: true })
+    const base = this.baseDirForDoc(root, cleaned)
+    const rootSurfaced = base !== root
+    const abs = await assertContainedFile(base, cleaned)
     // Codex r2 IMPORTANT #2 — optimistic-concurrency check. Without
     // this, the `/docs/revert` delete branch silently clobbered any
     // concurrent edit that landed between the user opening the history
@@ -625,12 +800,16 @@ export class DocStore {
     // after our unlink will fstat a mtime > delete_time (same wall
     // clock on a sane host), and the writer's event wins.
     const delete_time = Date.now()
-    await this.recordCommit(project_id, { op: 'delete', path: relPath })
+    // Skip version/binary side-effects for a surfaced project-root doc — it
+    // lives outside the docs/ git worktree + binary graph.
+    if (!rootSurfaced) {
+      await this.recordCommit(project_id, { op: 'delete', path: relPath })
+    }
     // P7.5 — drop the markdown_link rows for this file so the linked
     // binaries' refcounts reflect the deletion. Round-2 IMPORTANT #4 —
     // log instead of silently swallowing so silent refcount drift can't
     // hide a stuck blob from GC visibility.
-    if (this.binaryStore !== null) {
+    if (this.binaryStore !== null && !rootSurfaced) {
       try {
         this.binaryStore.dropMarkdownLinks(project_id, relPath)
       } catch (err) {
@@ -647,13 +826,16 @@ export class DocStore {
     // Argus r1 IMPORTANT — pass a finite "delete time" instead of null
     // so the materialiser's stale-event filter participates in
     // delete-vs-write races. See `delete_time` sampling above and
-    // anchor-walker.ts:handleDelete docblock.
-    await this.invokeMutationHook({
-      op: 'delete',
-      project_id,
-      path: relPath,
-      new_modified_at: delete_time,
-    })
+    // anchor-walker.ts:handleDelete docblock. Skipped for a surfaced
+    // project-root doc (outside the docs/ comment graph — see writeDoc).
+    if (!rootSurfaced) {
+      await this.invokeMutationHook({
+        op: 'delete',
+        project_id,
+        path: relPath,
+        new_modified_at: delete_time,
+      })
+    }
   }
 
   async moveDoc(
@@ -662,8 +844,15 @@ export class DocStore {
     to: string,
   ): Promise<WriteFileResult> {
     const root = this.assertProjectId(project_id)
-    const absFrom = await assertContainedFile(root, from)
-    const absTo = await assertContainedFileForWrite(root, to)
+    const cleanedFrom = validateRelativePath(from, { requireMd: true })
+    const cleanedTo = validateRelativePath(to, { requireMd: true })
+    const baseFrom = this.baseDirForDoc(root, cleanedFrom)
+    const baseTo = this.baseDirForDoc(root, cleanedTo)
+    // A move touching the surfaced project-root doc crosses the docs/ worktree
+    // boundary, so skip the version commit + binary-link rename below.
+    const moveRootSurfaced = baseFrom !== root || baseTo !== root
+    const absFrom = await assertContainedFile(baseFrom, from)
+    const absTo = await assertContainedFileForWrite(baseTo, to)
     // Guard against destination already existing — refuse to clobber
     // an unrelated file via a rename. Caller can DELETE the target
     // first if they really mean overwrite.
@@ -684,11 +873,13 @@ export class DocStore {
       throw err
     }
     const st = await stat(absTo)
-    await this.recordCommit(project_id, { op: 'rename', from, to })
+    if (!moveRootSurfaced) {
+      await this.recordCommit(project_id, { op: 'rename', from, to })
+    }
     // P7.5 — keep the markdown_link table aligned with the new path so
     // refcount-by-markdown-link stays correct after a rename. Round-2
     // IMPORTANT #4 — log on failure rather than swallowing silently.
-    if (this.binaryStore !== null) {
+    if (this.binaryStore !== null && !moveRootSurfaced) {
       try {
         this.binaryStore.renameMarkdownLinks(project_id, from, to)
       } catch (err) {
@@ -704,14 +895,18 @@ export class DocStore {
     // P7.2 S2 — fire the re-anchor walker; the walker emits
     // `anchor_relocated` events on the destination path carrying
     // `to_doc_path` metadata so the materialised anchor row moves
-    // with the file (brief § 9.9 / § 10.2 row 9).
-    await this.invokeMutationHook({
-      op: 'move',
-      project_id,
-      path: to,
-      from_path: from,
-      new_modified_at: Math.floor(st.mtimeMs),
-    })
+    // with the file (brief § 9.9 / § 10.2 row 9). Skipped when the move
+    // touches a surfaced project-root doc (outside the docs/ comment graph —
+    // see writeDoc).
+    if (!moveRootSurfaced) {
+      await this.invokeMutationHook({
+        op: 'move',
+        project_id,
+        path: to,
+        from_path: from,
+        new_modified_at: Math.floor(st.mtimeMs),
+      })
+    }
     return {
       path: to,
       size_bytes: st.size,

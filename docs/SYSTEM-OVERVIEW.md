@@ -352,6 +352,27 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    `remark-gfm` + `rehype-sanitize` (shared `Markdown.tsx`). The Documents tab
 >    keeps a Rendered↔Source toggle so comment anchors still map to RAW offsets.
 
+> **Doc references are tappable in-app (P-A).** The live agent announces a doc it
+> drafts/edits with the marker `[friendly-name](docs:/<project_id>/<path>)`
+> (instructed in `build-live-agent-turn.ts`'s `<live_agent_context>`), which the
+> app-ws adapter rewrites — for a `platform=web` client — to the web doc-link URL
+> `/projects/<id>/docs?path=…` (`runtime/doc-links.ts`). Tapping that link in
+> chat does NOT open a new tab: `Markdown.tsx` recognises the href
+> (`doc-link-nav.ts` `parseWebDocLinkHref`) and, via `onDocLink` threaded
+> `ProjectShell → ChatApp` `DocLinkContext` → `TextPart`, switches to the
+> Documents tab and opens that doc (`DocumentsTab` `openRequest`). Cross-project
+> links `controller.setProject(...)` first. Mobile native resolves `neutron://`
+> doc links via `app/lib/doc-links.ts`.
+
+> **STATUS.md leads the Documents list (P-B).** The standard per-project
+> `STATUS.md` lives at the PROJECT ROOT (`Projects/<id>/STATUS.md`), a sibling of
+> `docs/` — outside the docs root the surface is otherwise confined to. `DocStore`
+> (`gateway/http/doc-store.ts`) surfaces it as a top-level tree entry LEADING the
+> tree and routes read/write/stat for the exact top-level path `STATUS.md` to the
+> project root (`ROOT_SURFACED_DOCS`, a tight single-basename exception; a real
+> `docs/STATUS.md` wins). The web client also pins a top-level STATUS.md first in
+> `flattenDocFiles` (`PINNED_DOC_PATHS`).
+
 > **Onboarding/chat parity fixes (2026-06-27).** Six React-client regressions vs
 > the old vanilla chat were fixed: (1) a fresh onboarding auto-starts — the
 > server pushes the first prompt on connect and the client shows a "Setting

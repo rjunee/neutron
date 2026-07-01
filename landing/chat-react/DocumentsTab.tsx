@@ -81,15 +81,25 @@ function authorLabel(kind: string, id: string): string {
   return id.length > 0 ? id : 'You'
 }
 
+/** P-A — a request to open a specific doc, e.g. from a tapped chat doc link.
+ *  `nonce` changes on each request so re-tapping the same doc re-opens it. */
+export interface DocOpenRequest {
+  path: string
+  nonce: number
+}
+
 export function DocumentsTab({
   projectId,
   config,
   fetchImpl,
+  openRequest,
 }: {
   projectId: string
   config: BootstrapConfig
   /** Injected in tests; defaults to the global fetch inside WebDocsClient. */
   fetchImpl?: FetchImpl
+  /** P-A — when this changes, open the requested doc (a tapped chat doc link). */
+  openRequest?: DocOpenRequest
 }): React.JSX.Element {
   const client = useMemo(
     () =>
@@ -239,6 +249,18 @@ export function DocumentsTab({
     },
     [client, projectId, loadComments],
   )
+
+  // P-A — open the doc requested by a tapped chat doc link. Keyed on the
+  // request's `nonce` so re-tapping the same doc (after navigating elsewhere)
+  // re-opens it. Runs after the project-reset effect above, so a cross-project
+  // link that first switches project still lands on the right doc.
+  const openRequestNonce = openRequest?.nonce
+  const openRequestPath = openRequest?.path
+  useEffect(() => {
+    if (openRequestPath === undefined || openRequestPath.length === 0) return
+    openDoc(openRequestPath)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequestNonce, openRequestPath])
 
   // Track the live selection inside the viewer so the "Comment" affordance only
   // lights up for a real range over the raw content.

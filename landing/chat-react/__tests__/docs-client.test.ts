@@ -297,6 +297,28 @@ describe('flattenDocFiles', () => {
     const flat = flattenDocFiles(tree)
     expect(flat.map((n) => n.path)).toEqual(['top.md', 'sub/a.md', 'sub/b.md'])
   })
+
+  it('pins a top-level STATUS.md to the FRONT of the list (P-B)', () => {
+    // STATUS.md appears AFTER other files in the tree; it must still lead.
+    const tree = [
+      fileNode('history.md'),
+      folderNode('sub', [fileNode('sub/a.md')]),
+      fileNode('STATUS.md'),
+    ]
+    const flat = flattenDocFiles(tree)
+    expect(flat.map((n) => n.path)).toEqual(['STATUS.md', 'history.md', 'sub/a.md'])
+  })
+
+  it('is a no-op when there is no STATUS.md', () => {
+    const tree = [fileNode('a.md'), fileNode('b.md')]
+    expect(flattenDocFiles(tree).map((n) => n.path)).toEqual(['a.md', 'b.md'])
+  })
+
+  it('only pins a TOP-LEVEL STATUS.md, not a nested one', () => {
+    const tree = [fileNode('a.md'), folderNode('sub', [fileNode('sub/STATUS.md')])]
+    // The nested sub/STATUS.md is not the project state doc → order preserved.
+    expect(flattenDocFiles(tree).map((n) => n.path)).toEqual(['a.md', 'sub/STATUS.md'])
+  })
 })
 
 describe('clampUtf8', () => {

@@ -47,7 +47,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { ChatApp, TopicRail } from './ChatApp.tsx'
-import { DocumentsTab } from './DocumentsTab.tsx'
+import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
@@ -118,6 +118,7 @@ function TabContent({
   config,
   controller,
   fetchImpl,
+  docOpenRequest,
 }: {
   tab: TabDescriptor
   projectId: string
@@ -125,6 +126,8 @@ function TabContent({
   /** Live-frame source for the Work Board tab (`work_board_changed`). */
   controller: NeutronChatController
   fetchImpl?: FetchImpl
+  /** P-A — a pending "open this doc" request forwarded to the Documents tab. */
+  docOpenRequest?: DocOpenRequest
 }): React.JSX.Element {
   if (tab.mount.kind === 'webview') {
     const safeUrl = sanitizeCoreTabUrl(tab.mount.target)
@@ -154,6 +157,7 @@ function TabContent({
         projectId={projectId}
         config={config}
         {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+        {...(docOpenRequest !== undefined ? { openRequest: docOpenRequest } : {})}
       />
     )
   }
@@ -224,6 +228,26 @@ export function ProjectShell({
   const projectId = vm.projectId
   const isGeneral = projectId === null || projectId.length === 0
 
+  // P-A — in-app doc-link navigation state. A tapped chat doc link records a
+  // pending {project, path}; once the shell is scoped to that project AND its
+  // Documents tab has resolved, we activate that tab and hand the path to
+  // `DocumentsTab` via a nonce-stamped {@link DocOpenRequest}.
+  const docNonce = useRef(0)
+  const [pendingDoc, setPendingDoc] = useState<{ projectId: string; path: string } | null>(null)
+  // The open request is SCOPED to the project that produced it, so a stale
+  // request can never open project A's doc after the user switches to project B.
+  const [docOpenRequest, setDocOpenRequest] =
+    useState<{ projectId: string; req: DocOpenRequest } | null>(null)
+  const onOpenDocLink = useCallback(
+    (linkProjectId: string, path: string): void => {
+      // Cross-project link (e.g. tapped from the General onboarding chat): switch
+      // project first; the resolver effect opens the doc once its tabs resolve.
+      if (linkProjectId !== (vm.projectId ?? '')) controller.setProject(linkProjectId)
+      setPendingDoc({ projectId: linkProjectId, path })
+    },
+    [vm.projectId, controller],
+  )
+
   // Resolve the tab set for the current scope:
   //   - General  → Chat + the GLOBAL tabs (builtin Admin + global Core tabs).
   //   - Project  → the project tabs (Chat / Plan / Documents + project Core
@@ -231,43 +255,91 @@ export function ProjectShell({
   // A stale in-flight fetch (rapid switches, StrictMode double-invoke) is
   // ignored via the `cancelled` latch. Switching scope resets the active tab to
   // Chat so we never land on a tab that doesn't exist in the new set.
+  // Which project (`''` = General) the current `tabs` were RESOLVED for. Null
+  // while a fetch is in flight. The doc-link resolver waits for this to match
+  // the pending link's project, so a cross-project link never consumes the
+  // previous project's stale tab set (Codex).
+  const [tabsScope, setTabsScope] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
     setActiveKey(CHAT_KEY)
     setTabs([CHAT_TAB])
+    setTabsScope(null)
     if (isGeneral) {
       void client
         .listGlobalTabs()
         .then((globalTabs) => {
           if (cancelled) return
           setTabs([CHAT_TAB, ...globalTabs])
+          setTabsScope('')
         })
         .catch(() => {
-          if (!cancelled) setTabs([CHAT_TAB])
+          if (cancelled) return
+          setTabs([CHAT_TAB])
+          setTabsScope('')
         })
       return () => {
         cancelled = true
       }
     }
+    const scope = projectId as string
     void client
-      .listProjectTabs(projectId as string)
+      .listProjectTabs(scope)
       .then((projectTabs) => {
         if (cancelled) return
         setTabs(projectTabs.length > 0 ? projectTabs : [CHAT_TAB])
+        setTabsScope(scope)
       })
       .catch(() => {
-        if (!cancelled) setTabs([CHAT_TAB])
+        if (cancelled) return
+        setTabs([CHAT_TAB])
+        setTabsScope(scope)
       })
     return () => {
       cancelled = true
     }
   }, [client, projectId, isGeneral])
 
+  // P-A — resolve a pending doc-link tap: once the shell is scoped to the
+  // link's project AND that project's tabs have RESOLVED (not the previous
+  // project's stale set) AND its Documents tab exists, activate that tab and
+  // hand the path to `DocumentsTab`.
+  useEffect(() => {
+    if (pendingDoc === null) return
+    if ((projectId ?? '') !== pendingDoc.projectId) return
+    // Wait until the loaded tab set actually belongs to the pending project —
+    // after a cross-project setProject, `tabs` briefly still holds the old set.
+    if (tabsScope === null || tabsScope !== pendingDoc.projectId) return
+    const docsTab = tabs.find((t) => t.mount.target === 'docs')
+    if (docsTab === undefined) return
+    setActiveKey(docsTab.key)
+    docNonce.current += 1
+    setDocOpenRequest({
+      projectId: pendingDoc.projectId,
+      req: { path: pendingDoc.path, nonce: docNonce.current },
+    })
+    setPendingDoc(null)
+  }, [pendingDoc, projectId, tabs, tabsScope])
+
   // The previous active tab can vanish when the set changes (scope switch / Core
   // uninstall). Fall back to Chat so we never highlight a missing tab.
   const hasActive = tabs.some((t) => t.key === activeKey)
   const resolvedActiveKey = hasActive ? activeKey : CHAT_KEY
   const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
+
+  // P-A — a doc-open request is ONE-SHOT: clear it once the user leaves the
+  // Documents tab so revisiting Documents (or a `DocumentsTab` remount on a
+  // project switch) can't replay the old linked doc.
+  const activeTarget = activeTab.mount.target
+  useEffect(() => {
+    if (activeTarget !== 'docs' && docOpenRequest !== null) setDocOpenRequest(null)
+  }, [activeTarget, docOpenRequest])
+  // Only forward the request to the Documents tab of the project that produced
+  // it (never a different project's Documents mount).
+  const docReqForTab =
+    docOpenRequest !== null && docOpenRequest.projectId === (projectId ?? '')
+      ? docOpenRequest.req
+      : undefined
 
   // assistant-ui's composer autofocus tries to scroll the focused input into
   // view on mount; keep the panels container as the scroll parent.
@@ -335,6 +407,7 @@ export function ProjectShell({
               controller={controller}
               config={config}
               draft={draft}
+              onOpenDocLink={onOpenDocLink}
               {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             />
           </div>
@@ -346,6 +419,7 @@ export function ProjectShell({
                 config={config}
                 controller={controller}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+                {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
               />
             </div>
           ) : null}
