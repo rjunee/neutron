@@ -47,7 +47,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { ChatApp, TopicRail } from './ChatApp.tsx'
-import { DocumentsTab } from './DocumentsTab.tsx'
+import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
@@ -118,6 +118,7 @@ function TabContent({
   config,
   controller,
   fetchImpl,
+  docOpenRequest,
 }: {
   tab: TabDescriptor
   projectId: string
@@ -125,6 +126,8 @@ function TabContent({
   /** Live-frame source for the Work Board tab (`work_board_changed`). */
   controller: NeutronChatController
   fetchImpl?: FetchImpl
+  /** P-A — a pending "open this doc" request forwarded to the Documents tab. */
+  docOpenRequest?: DocOpenRequest
 }): React.JSX.Element {
   if (tab.mount.kind === 'webview') {
     const safeUrl = sanitizeCoreTabUrl(tab.mount.target)
@@ -154,6 +157,7 @@ function TabContent({
         projectId={projectId}
         config={config}
         {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+        {...(docOpenRequest !== undefined ? { openRequest: docOpenRequest } : {})}
       />
     )
   }
@@ -224,6 +228,23 @@ export function ProjectShell({
   const projectId = vm.projectId
   const isGeneral = projectId === null || projectId.length === 0
 
+  // P-A — in-app doc-link navigation state. A tapped chat doc link records a
+  // pending {project, path}; once the shell is scoped to that project AND its
+  // Documents tab has resolved, we activate that tab and hand the path to
+  // `DocumentsTab` via a nonce-stamped {@link DocOpenRequest}.
+  const docNonce = useRef(0)
+  const [pendingDoc, setPendingDoc] = useState<{ projectId: string; path: string } | null>(null)
+  const [docOpenRequest, setDocOpenRequest] = useState<DocOpenRequest | null>(null)
+  const onOpenDocLink = useCallback(
+    (linkProjectId: string, path: string): void => {
+      // Cross-project link (e.g. tapped from the General onboarding chat): switch
+      // project first; the resolver effect opens the doc once its tabs resolve.
+      if (linkProjectId !== (vm.projectId ?? '')) controller.setProject(linkProjectId)
+      setPendingDoc({ projectId: linkProjectId, path })
+    },
+    [vm.projectId, controller],
+  )
+
   // Resolve the tab set for the current scope:
   //   - General  → Chat + the GLOBAL tabs (builtin Admin + global Core tabs).
   //   - Project  → the project tabs (Chat / Plan / Documents + project Core
@@ -262,6 +283,22 @@ export function ProjectShell({
       cancelled = true
     }
   }, [client, projectId, isGeneral])
+
+  // P-A — resolve a pending doc-link tap: once the shell is scoped to the
+  // link's project AND its Documents tab has loaded, activate that tab and hand
+  // the path to `DocumentsTab`. Runs after the tab-set effect above, which
+  // resets to Chat on a project switch — so a cross-project link lands on the
+  // doc, not Chat.
+  useEffect(() => {
+    if (pendingDoc === null) return
+    if ((projectId ?? '') !== pendingDoc.projectId) return
+    const docsTab = tabs.find((t) => t.mount.target === 'docs')
+    if (docsTab === undefined) return
+    setActiveKey(docsTab.key)
+    docNonce.current += 1
+    setDocOpenRequest({ path: pendingDoc.path, nonce: docNonce.current })
+    setPendingDoc(null)
+  }, [pendingDoc, projectId, tabs])
 
   // The previous active tab can vanish when the set changes (scope switch / Core
   // uninstall). Fall back to Chat so we never highlight a missing tab.
@@ -335,6 +372,7 @@ export function ProjectShell({
               controller={controller}
               config={config}
               draft={draft}
+              onOpenDocLink={onOpenDocLink}
               {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             />
           </div>
@@ -346,6 +384,7 @@ export function ProjectShell({
                 config={config}
                 controller={controller}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+                {...(docOpenRequest !== null ? { docOpenRequest } : {})}
               />
             </div>
           ) : null}

@@ -52,7 +52,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises'
-import { join, normalize, relative, sep } from 'node:path'
+import { dirname, join, normalize, relative, sep } from 'node:path'
 
 import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
 import type {
@@ -94,6 +94,29 @@ const MARKDOWN_EXTENSION_RE = new RegExp(
  */
 export function isMarkdownLeaf(name: string): boolean {
   return MARKDOWN_EXTENSION_RE.test(name)
+}
+
+/**
+ * Files that live at the PROJECT ROOT (`Projects/<id>/<name>`, a SIBLING of
+ * `docs/`) but are surfaced into the Documents tree as top-level entries.
+ *
+ * Exactly `STATUS.md` today — the standard per-project state doc the
+ * materializer writes to `Projects/<id>/STATUS.md`
+ * (`onboarding/wow-moment/project-materializer.ts`), which sits OUTSIDE the
+ * `docs/` root that the tree/read/write surface is otherwise confined to. Ryan
+ * wants STATUS.md to be a first-class Document pinned to the top of the list,
+ * so the store surfaces it here.
+ *
+ * The exception is deliberately a fixed, hard-coded BASENAME set with NO
+ * user-supplied path component, NO subpaths, and NO `..`, so it cannot widen
+ * path traversal: a redirect only ever resolves to `<project_root>/STATUS.md`,
+ * one level above `docs/`, for the exact string `STATUS.md`.
+ */
+export const ROOT_SURFACED_DOCS = Object.freeze(['STATUS.md']) as readonly string[]
+
+/** True when a validated (cleaned) relative path is a root-surfaced doc name. */
+function isRootSurfacedDoc(cleanedRelPath: string): boolean {
+  return ROOT_SURFACED_DOCS.includes(cleanedRelPath)
 }
 
 /** Maximum allowed relative path length (segments + separators). */
@@ -331,6 +354,19 @@ export class DocStore {
    */
   async tree(project_id: string): Promise<DocTreeNode[]> {
     const root = this.assertProjectId(project_id)
+    const tree = await this.buildTreeUnderRoot(project_id, root)
+    // P-B — surface the project-root STATUS.md (sibling of docs/) as a
+    // top-level entry, LEADING the tree so it sits at the top of the Documents
+    // list. The client also pins it in `flattenDocFiles` as defense-in-depth.
+    return this.prependRootSurfacedDocs(root, tree)
+  }
+
+  /** Build the tree of markdown (+ binary) files strictly UNDER the docs
+   *  root. `tree()` wraps this to prepend any surfaced project-root docs. */
+  private async buildTreeUnderRoot(
+    project_id: string,
+    root: string,
+  ): Promise<DocTreeNode[]> {
     let markdownTree: DocTreeNode[] = []
     if (existsSync(root)) {
       // Resolve the canonical docs root once and thread it through the
@@ -391,6 +427,67 @@ export class DocStore {
   }
 
   /**
+   * P-B — prepend any {@link ROOT_SURFACED_DOCS} that live at the project root
+   * (a sibling of `docs/`) so they appear at the TOP of the Documents tree.
+   * Only surfaces a root copy when the tree has no top-level entry of that name
+   * (a real `docs/STATUS.md` wins, keeping the read/write path unambiguous) and
+   * the root file actually exists + is a regular file.
+   */
+  private async prependRootSurfacedDocs(
+    docsRoot: string,
+    tree: DocTreeNode[],
+  ): Promise<DocTreeNode[]> {
+    const projectRoot = dirname(docsRoot)
+    const extra: DocTreeNode[] = []
+    for (const name of ROOT_SURFACED_DOCS) {
+      if (tree.some((n) => n.path === name)) continue
+      if (existsSync(join(docsRoot, name))) continue
+      const abs = join(projectRoot, name)
+      let st
+      try {
+        st = await stat(abs)
+      } catch {
+        continue
+      }
+      if (!st.isFile()) continue
+      extra.push({
+        kind: 'file',
+        path: name,
+        name,
+        size_bytes: st.size,
+        modified_at: Math.floor(st.mtimeMs),
+        content_type: null,
+        referenced_by_count: null,
+        origin: null,
+        children: [],
+      })
+    }
+    if (extra.length === 0) return tree
+    return [...extra, ...tree]
+  }
+
+  /**
+   * P-B — resolve the base directory a validated (cleaned) relative path is
+   * contained against. Normally the project's `docs/` root. For a
+   * {@link ROOT_SURFACED_DOCS} basename (exactly `STATUS.md`) that exists at the
+   * project root and NOT under `docs/`, the base is the project root so the
+   * surfaced top-level entry reads/writes the real state doc. The redirect only
+   * ever fires for the exact fixed basename (no path component), so the
+   * containment guarantee can't widen — `<project_root>/STATUS.md` is the only
+   * reachable out-of-`docs/` target.
+   */
+  private baseDirForDoc(docsRoot: string, cleanedRelPath: string): string {
+    if (
+      isRootSurfacedDoc(cleanedRelPath) &&
+      !existsSync(join(docsRoot, cleanedRelPath)) &&
+      existsSync(join(dirname(docsRoot), cleanedRelPath))
+    ) {
+      return dirname(docsRoot)
+    }
+    return docsRoot
+  }
+
+  /**
    * Lightweight stat for a markdown file at `relPath`. Realpath-checks
    * the same way `readDoc` does, but skips the body read — used by the
    * P7.2 comments surface to OCC-check `based_on_modified_at` without
@@ -403,7 +500,8 @@ export class DocStore {
     relPath: string,
   ): Promise<{ size_bytes: number; modified_at: number } | null> {
     const root = this.assertProjectId(project_id)
-    const abs = await assertContainedFile(root, relPath)
+    const cleaned = validateRelativePath(relPath, { requireMd: true })
+    const abs = await assertContainedFile(this.baseDirForDoc(root, cleaned), cleaned)
     let st
     try {
       st = await stat(abs)
@@ -420,7 +518,8 @@ export class DocStore {
   /** Read a markdown file at `relPath`. */
   async readDoc(project_id: string, relPath: string): Promise<ReadFileResult> {
     const root = this.assertProjectId(project_id)
-    const abs = await assertContainedFile(root, relPath)
+    const cleaned = validateRelativePath(relPath, { requireMd: true })
+    const abs = await assertContainedFile(this.baseDirForDoc(root, cleaned), cleaned)
     let st
     try {
       st = await stat(abs)
@@ -457,7 +556,13 @@ export class DocStore {
         `content exceeds ${MAX_DOC_BYTES} bytes (got ${byte_len})`,
       )
     }
-    const abs = await assertContainedFileForWrite(root, input.path)
+    // P-B — route the exact top-level `STATUS.md` to the project root (where
+    // the state doc lives) so an Edit of the surfaced doc overwrites the real
+    // file in place, not a phantom `docs/STATUS.md`. Any other path stays under
+    // the docs root.
+    const cleanedWritePath = validateRelativePath(input.path, { requireMd: true })
+    const writeBase = this.baseDirForDoc(root, cleanedWritePath)
+    const abs = await assertContainedFileForWrite(writeBase, input.path)
     // Record whether this is a create or overwrite BEFORE the rename so
     // the version store's commit message (`create:` vs `edit:` / `revert:`)
     // reflects the user's intent. The check is purely advisory — the

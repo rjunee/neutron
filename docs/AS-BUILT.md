@@ -2,6 +2,55 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Friendly tappable doc references in chat + STATUS.md pinned to the top of Documents
+
+Two Documents-surface improvements from Ryan's live test.
+
+**Part A — the agent references a drafted doc as a FRIENDLY tappable link, not a
+raw path.** The linkifier already existed (`runtime/doc-links.ts`
+`rewriteDocRefsInBody`: the agent writes `[label](docs:/<project_id>/<path>)`
+and the app-ws adapter rewrites it, for a `platform=web` client, to the web
+doc-link URL `/projects/<id>/docs?path=…`). Two gaps closed:
+
+- *Guidance.* Nothing told the agent to USE that convention, so it announced raw
+  `Projects/<id>/docs/x.md` paths. The live-agent first-turn `<live_agent_context>`
+  fragment (`gateway/realmode-composer/build-live-agent-turn.ts`, project +
+  General variants) now instructs it to reference any doc it drafts/edits as
+  `[friendly-name](docs:/<project_id>/<path-relative-to-docs/>)` (friendly-name =
+  filename without `.md`), never a raw `Projects/…` path.
+- *Web click handling.* `landing/chat-react/Markdown.tsx` rendered the link
+  `target=_blank` with NO click handler → tapping opened a dead new tab. A new
+  pure parser (`landing/chat-react/doc-link-nav.ts` `parseWebDocLinkHref`)
+  recognises the web doc-link href (root-relative or absolute same-origin);
+  `Markdown` accepts an `onDocLink` callback and intercepts the click. The
+  callback threads `ProjectShell` → `ChatApp` (a new `DocLinkContext`) →
+  `TextPart` → `Markdown`. `ProjectShell` switches to the Documents tab
+  (`setActiveKey`) and hands the path to `DocumentsTab` via a nonce-stamped
+  `openRequest` prop, which opens the doc. Cross-project links first
+  `controller.setProject(...)`, then open once that project's tabs resolve.
+  Mobile native already resolves `neutron://docs/…` via `app/lib/doc-links.ts`.
+
+**Part B — STATUS.md pinned to the TOP of the Documents list.** Finding: the
+standard per-project `STATUS.md` lives at the PROJECT ROOT
+(`Projects/<id>/STATUS.md`, a sibling of `docs/`; written by
+`onboarding/wow-moment/project-materializer.ts`), OUTSIDE the docs root the
+Documents surface is confined to — so it was NOT in the list at all (a
+client-only sort would pin nothing on a fresh install). So:
+
+- *Gateway* (`gateway/http/doc-store.ts`) surfaces the project-root STATUS.md as
+  a top-level tree entry LEADING the tree, and routes `readDoc`/`writeDoc`/
+  `statDoc` for the exact top-level path `STATUS.md` to the project root via a
+  tight single-basename exception (`ROOT_SURFACED_DOCS`; no path component, no
+  `..`, so containment can't widen). A real `docs/STATUS.md` still wins.
+- *Client* (`landing/chat-react/docs-client.ts` `flattenDocFiles`) pins a
+  top-level STATUS.md to the front (`PINNED_DOC_PATHS`) as defense-in-depth; the
+  mobile tree shares the server ordering, so it leads there too.
+
+No feature flags. Tests: `gateway/__tests__/doc-store-root-status.test.ts`
+(surface + first + read/write-in-place + docs/-wins), `docs-client.test.ts`
+(pin), `doc-link-nav.test.ts` (parser), `doc-link-open.test.tsx` (chat link tap
+→ Documents opens the doc), `build-live-agent-turn-doc-refs.test.ts` (guidance).
+
 ## Web history-import upload is chunked + shows an upload progress bar
 
 **The bug.** The web React client uploaded the ChatGPT/Claude export as a

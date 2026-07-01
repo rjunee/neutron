@@ -409,9 +409,20 @@ export class WebDocsClient {
 /* ─── pure helpers ─── */
 
 /**
+ * Top-level doc paths pinned to the FRONT of the Documents list, in order.
+ * `STATUS.md` — the standard per-project state doc — always leads the list so
+ * it's the first thing the user sees (Ryan directive). The gateway already
+ * surfaces + leads the project-root STATUS.md in the tree; this pin is
+ * defense-in-depth so the list stays correct regardless of tree/folder order.
+ */
+export const PINNED_DOC_PATHS = Object.freeze(['STATUS.md']) as readonly string[]
+
+/**
  * Flatten a doc tree into an ordered list of MARKDOWN file leaves (folders +
  * binaries dropped). Folder order is preserved depth-first so the list reads
- * top-to-bottom like the tree. Used by the Documents tab's flat doc list.
+ * top-to-bottom like the tree, EXCEPT the pinned docs ({@link PINNED_DOC_PATHS},
+ * i.e. STATUS.md) are hoisted to the front. Used by the Documents tab's flat
+ * doc list.
  */
 export function flattenDocFiles(nodes: readonly DocTreeNode[]): DocTreeNode[] {
   const out: DocTreeNode[] = []
@@ -423,7 +434,25 @@ export function flattenDocFiles(nodes: readonly DocTreeNode[]): DocTreeNode[] {
     }
   }
   walk(nodes)
-  return out
+  return pinDocsFirst(out)
+}
+
+/** Hoist {@link PINNED_DOC_PATHS} (by exact `path`) to the front of `files`, in
+ *  pin order; everything else keeps its relative order. */
+function pinDocsFirst(files: DocTreeNode[]): DocTreeNode[] {
+  if (files.length < 2) return files
+  const pinnedIdx = new Set<number>()
+  const pinned: DocTreeNode[] = []
+  for (const p of PINNED_DOC_PATHS) {
+    const i = files.findIndex((f, idx) => f.path === p && !pinnedIdx.has(idx))
+    if (i >= 0) {
+      pinned.push(files[i] as DocTreeNode)
+      pinnedIdx.add(i)
+    }
+  }
+  if (pinned.length === 0) return files
+  const rest = files.filter((_, idx) => !pinnedIdx.has(idx))
+  return [...pinned, ...rest]
 }
 
 /** Truncate `s` so its UTF-8 encoding is at most `maxBytes`, keeping whole code

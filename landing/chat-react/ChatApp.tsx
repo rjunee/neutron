@@ -126,11 +126,30 @@ function AttachmentImagePart({ image }: { image: string }): React.JSX.Element {
  * branch disables assistant-ui's typewriter (`smooth={false}`); the markdown
  * branch reads the live part text directly (`useMessagePartText`), so a streamed
  * agent reply re-renders its markdown per token with no extra smoothing layer. */
+/**
+ * P-A — in-app doc-link navigation. Carries the page origin + an "open this
+ * doc" callback down to the message-bubble markdown (which only reaches the
+ * render tree via context, like {@link ButtonsContext}). When present, a tap on
+ * an agent's `[name](docs:/<id>/<path>)` link (rewritten to the web doc-link
+ * URL) switches to the Documents tab + opens that doc instead of opening a new
+ * browser tab.
+ */
+interface DocLinkCtx {
+  origin: string
+  onOpenDoc: (projectId: string, path: string) => void
+}
+const DocLinkContext = createContext<DocLinkCtx | null>(null)
+
 function TextPart(): React.JSX.Element {
   const message = useMessage()
   const part = useMessagePartText()
+  const docLink = useContext(DocLinkContext)
   if (message.role === 'assistant') {
-    return <Markdown text={part.text} />
+    return docLink !== null ? (
+      <Markdown text={part.text} onDocLink={docLink.onOpenDoc} origin={docLink.origin} />
+    ) : (
+      <Markdown text={part.text} />
+    )
   }
   return (
     <p className="car-text" style={{ whiteSpace: 'pre-line' }}>
@@ -1130,6 +1149,7 @@ export function ChatApp({
   config,
   draft,
   fetchImpl,
+  onOpenDocLink,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -1137,6 +1157,9 @@ export function ChatApp({
   draft: AttachmentDraft
   /** Injected in tests; the authed image renderer falls back to global fetch. */
   fetchImpl?: FetchImpl
+  /** P-A — open a doc referenced by an agent chat link in the Documents tab.
+   *  Supplied by `ProjectShell`; omit to leave doc links as plain anchors. */
+  onOpenDocLink?: (projectId: string, path: string) => void
 }): React.JSX.Element {
   const reactionsCtx: ReactionsCtx = {
     byRenderId: buildReactionIndex(vm.messages),
@@ -1156,6 +1179,10 @@ export function ChatApp({
   const uploadsCtx: UploadsCtx = fetchImpl !== undefined
     ? { token: config.token, origin: config.origin, fetchImpl }
     : { token: config.token, origin: config.origin }
+  const docLinkCtx: DocLinkCtx | null =
+    onOpenDocLink !== undefined
+      ? { origin: config.origin, onOpenDoc: onOpenDocLink }
+      : null
 
   // ChatApp is now JUST the Chat-tab body (`ChatSurface` + its message-bubble
   // contexts). The persistent project rail + the tab bar live one level up in
@@ -1163,6 +1190,7 @@ export function ChatApp({
   // surface is only the chat pane). `ChatApp` stays mounted across tab switches
   // so the live session, stream, and scroll state survive.
   return (
+    <DocLinkContext.Provider value={docLinkCtx}>
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
@@ -1178,6 +1206,7 @@ export function ChatApp({
     </EditsContext.Provider>
     </ReactionsContext.Provider>
     </UploadsContext.Provider>
+    </DocLinkContext.Provider>
   )
 }
 
