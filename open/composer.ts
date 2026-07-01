@@ -1908,6 +1908,27 @@ export function buildOpenGraphComposer(
         ts: Date.now(),
       }
     }
+    // The project rail is a CROSS-PROJECT concern, but the served web client
+    // opens ONE socket scoped to whichever project it is viewing
+    // (`app:<user>:<project>` — `appWsProjectTopicId`); General stays on the
+    // user-scoped `app:<user>` topic. A rail refresh fanned ONLY to the
+    // user-scoped topic therefore never reaches a client that is currently
+    // inside a project — the new project would only appear after a reload. This
+    // is exactly the "Create Project from inside a project → rail doesn't update
+    // until reload" bug (#132 wired the fan, but only to `app:<user>`; onboarding
+    // masked it because onboarding runs on General). Fan the frame to the base
+    // topic AND every live per-project topic for this user so the rail updates
+    // live regardless of which project socket is active. The registry is keyed by
+    // exact topic string and each web socket lives on exactly one topic, so no
+    // socket receives the frame twice.
+    const fanProjectsChanged = (user_id: string, frame: AppWsOutboundProjectsChanged): void => {
+      const base = appWsTopicId(user_id)
+      const scopedPrefix = `${base}:`
+      appWsRegistry.send(base, frame)
+      for (const topic of appWsRegistry.topics()) {
+        if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+      }
+    }
     const emitProjectsChangedIfChanged = (user_id: string): void => {
       const frame = buildProjectsChangedFrame()
       const snapshot = JSON.stringify(frame.projects)
@@ -1917,7 +1938,7 @@ export function buildOpenGraphComposer(
       }
       if (snapshot === lastProjectsSnapshot) return
       lastProjectsSnapshot = snapshot
-      appWsRegistry.send(appWsTopicId(user_id), frame)
+      fanProjectsChanged(user_id, frame)
     }
     // Unconditional fan — a KNOWN mutation (the create-project capability) just
     // changed the project set, so always push the fresh snapshot (and reseed the
@@ -1927,7 +1948,7 @@ export function buildOpenGraphComposer(
     const emitProjectsChangedNow = (user_id: string): void => {
       const frame = buildProjectsChangedFrame()
       lastProjectsSnapshot = JSON.stringify(frame.projects)
-      appWsRegistry.send(appWsTopicId(user_id), frame)
+      fanProjectsChanged(user_id, frame)
     }
 
     // Work Board (Phase 1a) — the per-project live work-tracking board that

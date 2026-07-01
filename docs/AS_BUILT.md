@@ -2,6 +2,29 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-06-30 — Create Project rail refresh reaches a project-scoped socket (not just General)
+
+**Bug.** #132's "Create Project" fan emitted its `projects_changed` app-ws frame
+only to the user-scoped General topic `app:<user>`. The served web client opens
+ONE socket scoped to the project it is viewing (`app:<user>:<project>`), so
+creating a project **from inside a project** never refreshed the left rail until
+a page reload. Onboarding was unaffected because it runs on the General topic.
+
+**Fix.** `open/composer.ts` adds `fanProjectsChanged(user_id, frame)` — fans the
+rail-refresh frame to the base topic AND every live per-project topic for the
+user (enumerated via `appWsRegistry.topics()` with the `app:<user>:` prefix).
+Both `emitProjectsChangedNow` (the create-project HTTP endpoint + the
+`create_project` agent tool, via the shared `createProjectAndRefresh`) and
+`emitProjectsChangedIfChanged` (onboarding) route through it. Each web socket is
+on exactly one topic so there is no double-delivery; the frame carries the full
+`readProjectRows()` list (`deleted_at IS NULL`) so it always includes the new
+project. No flags.
+
+**Tests.** `open/__tests__/open-projects-changed-wiring.test.ts` adds an e2e test
+that opens both a project-scoped socket and a General socket, drives the real
+`POST /api/app/projects`, and asserts the new project reaches both live.
+Confirmed red before the fix, green after; leak-gate silent; `tsc` clean.
+
 ## 2026-06-30 — Onboarding reliability: per-project opening recovery + empty-project loader + deterministic archetype step + larger cold budget
 
 **P0 — four reliability gaps from a full fresh-install verify of #136+#138.** All
