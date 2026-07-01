@@ -45,6 +45,14 @@ const matchInput = (body: string) => ({
 function ctxFor(): TridentCodeContext {
   return {
     store,
+    // Phase 2b — a board binder with one ready item ('it1', detailed title).
+    work_board: {
+      get: (_slug, id) =>
+        id === 'it1'
+          ? { id: 'it1', title: 'wire the export button to the new CSV endpoint with tests', design_doc_ref: null }
+          : null,
+      attachRun: async () => undefined,
+    },
     project_slug: 'proj-1',
     repo_path: '/repo',
     resolveMergeMode: async () => 'local',
@@ -55,7 +63,7 @@ function ctxFor(): TridentCodeContext {
 describe('buildTridentCodeChatCommandFilter', () => {
   test('/code <task> creates a code_trident_runs row and claims the command', async () => {
     const filter = buildTridentCodeChatCommandFilter({ resolve_context: () => ctxFor() })
-    const res = await filter.match(matchInput('/code add a feature flag'))
+    const res = await filter.match(matchInput('/code --item it1 add a feature flag'))
     expect(res).not.toBeNull()
     const run_id = (res!.data as { run_id: string }).run_id
     const row = store.get(run_id)!
@@ -69,7 +77,7 @@ describe('buildTridentCodeChatCommandFilter', () => {
   // terminal delivery routes back here, not to Telegram.
   test('#317 stamps app_socket as the run channel by default', async () => {
     const filter = buildTridentCodeChatCommandFilter({ resolve_context: () => ctxFor() })
-    const res = await filter.match(matchInput('/code build from the app'))
+    const res = await filter.match(matchInput('/code --item it1 build from the app'))
     const run_id = (res!.data as { run_id: string }).run_id
     expect(store.get(run_id)!.channel_kind).toBe('app_socket')
   })
@@ -78,7 +86,7 @@ describe('buildTridentCodeChatCommandFilter', () => {
     const filter = buildTridentCodeChatCommandFilter({
       resolve_context: () => ({ ...ctxFor(), channel_kind: 'webhook' }),
     })
-    const res = await filter.match(matchInput('/code via webhook'))
+    const res = await filter.match(matchInput('/code --item it1 via webhook'))
     const run_id = (res!.data as { run_id: string }).run_id
     expect(store.get(run_id)!.channel_kind).toBe('webhook')
   })
@@ -88,7 +96,7 @@ describe('buildTridentCodeChatCommandFilter', () => {
       resolve_context: () => ctxFor(),
       channel_kind: 'telegram',
     })
-    const res = await filter.match(matchInput('/code telegram surface'))
+    const res = await filter.match(matchInput('/code --item it1 telegram surface'))
     const run_id = (res!.data as { run_id: string }).run_id
     expect(store.get(run_id)!.channel_kind).toBe('telegram')
   })
@@ -125,7 +133,7 @@ describe('buildTridentCodeChatCommandFilter', () => {
     const filter = buildTridentCodeChatCommandFilter({
       resolve_context: async () => ctxFor(),
     })
-    const res = await filter.match(matchInput('/code async path'))
+    const res = await filter.match(matchInput('/code --item it1 async path'))
     expect((res!.data as { run_id: string }).run_id).toBeDefined()
   })
 })

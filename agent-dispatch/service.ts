@@ -60,11 +60,41 @@ import {
   type DispatchKind,
   type DispatchPersonaKind,
 } from './prompts.ts'
+import {
+  assessDispatchReadiness,
+  type DispatchReadinessTarget,
+} from '../work-board/dispatch-readiness.ts'
 
 /** Where a dispatch result should be delivered back. */
 export interface DeliveryTarget {
   channel: string
   binding_id: string
+}
+
+/**
+ * Work Board Phase 2b — the minimal board surface the dispatch chokepoint needs
+ * to enforce the no-untracked-dispatches + ask-before-acting rules and to bind
+ * the spawned run to its Plan item (fork `⑂`). `WorkBoardStore` satisfies it
+ * structurally (`get` / `attachRun` / `clearRun`).
+ */
+export interface DispatchBoardBinder {
+  get(project_slug: string, id: string): (DispatchReadinessTarget & { id: string }) | null
+  /** Bind a run to the item (linked_run_id + status=in_progress). */
+  attachRun(project_slug: string, id: string, run_id: string): Promise<unknown>
+  /** Clear the run binding on terminal (fork icon goes dark; status untouched). */
+  clearRun(project_slug: string, id: string, run_id: string): Promise<unknown>
+}
+
+/** Thrown when a dispatch violates the board-binding chokepoint rules. The
+ *  tool / command surfaces map it to a clean rejection (incl. the ask-gate
+ *  clarifying-question guidance) rather than a crashed dispatch. */
+export class DispatchValidationError extends Error {
+  readonly code: 'missing_board_item' | 'unknown_board_item' | 'underspecified'
+  constructor(code: DispatchValidationError['code'], message: string) {
+    super(message)
+    this.name = 'DispatchValidationError'
+    this.code = code
+  }
 }
 
 /**
@@ -135,6 +165,13 @@ export interface DispatchRequest {
   kind: DispatchKind
   /** The task / instructions handed to the agent. */
   task: string
+  /**
+   * Work Board Phase 2b — the Plan item this dispatch is bound to. REQUIRED:
+   * a dispatch with no board_item_id is REJECTED at the chokepoint (no
+   * untracked dispatches, Ryan-locked). The item must exist + be specified
+   * enough (the ask-before-acting gate); on success the run is bound to it.
+   */
+  board_item_id: string
   /** Working dir the agent runs in. Defaults to the service's bound path. */
   repo_path?: string
   /** Model id. Defaults to the service's bound default. */
@@ -178,6 +215,11 @@ export interface DispatchServiceDeps {
   report: DispatchReporter
   /** Instance this dispatcher belongs to (registry scoping + caps). */
   instance_key: string
+  /** Work Board Phase 2b — the board binder (the dispatch chokepoint's
+   *  existence + ask-gate lookups + the run binding/clear). */
+  board: DispatchBoardBinder
+  /** Project the bound board items live under (server-derived instance slug). */
+  project_slug: string
   /** Default working dir for a dispatch when the request omits `repo_path`. */
   repo_path: string
   /**
@@ -236,6 +278,29 @@ export class DispatchService {
    * (no twin process, same completion promise).
    */
   async dispatch(req: DispatchRequest): Promise<DispatchHandle> {
+    // ── Board-binding chokepoint (Phase 2b) — enforced BEFORE any spawn so a
+    //    rejected dispatch costs nothing. No untracked dispatches.
+    const board_item_id = typeof req.board_item_id === 'string' ? req.board_item_id.trim() : ''
+    if (board_item_id.length === 0) {
+      throw new DispatchValidationError(
+        'missing_board_item',
+        'Every dispatch must be bound to a Plan item — no board_item_id was supplied. Add the ' +
+          'work to the Plan first (work_board_add), then dispatch against that item id.',
+      )
+    }
+    const item = this.deps.board.get(this.deps.project_slug, board_item_id)
+    if (item === null) {
+      throw new DispatchValidationError(
+        'unknown_board_item',
+        `No Plan item "${board_item_id}" on this project's board. Use work_board_list to find the id.`,
+      )
+    }
+    const readiness = assessDispatchReadiness(item)
+    if (!readiness.ready) {
+      // The ask-before-acting gate. The dispatch is BLOCKED; the caller asks.
+      throw new DispatchValidationError('underspecified', readiness.reason ?? 'Plan item is underspecified.')
+    }
+
     const agent_kind = AGENT_KIND_BY_DISPATCH_KIND[req.kind]
     const delivery_target = req.delivery_target ?? this.deps.delivery_target
 
@@ -261,9 +326,18 @@ export class DispatchService {
     const existing = this.inflight.get(record.run_id)
     if (existing !== undefined) return existing
 
+    // BIND the run to its Plan item (linked_run_id + status=in_progress → fork
+    // `⑂`). The terminal report clears it. Best-effort: a board write outage
+    // must not turn a valid dispatch into a rejected one.
+    try {
+      await this.deps.board.attachRun(this.deps.project_slug, board_item_id, record.run_id)
+    } catch {
+      // swallow — the dispatch still proceeds; the icon just won't light.
+    }
+
     // Fresh run → flip to running + launch the substrate turn in the background.
     const running = this.deps.registry.update(record.run_id, { status: 'running' })
-    const handle = this.launch(running, req.kind, agent_kind, req, delivery_target)
+    const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id)
     this.inflight.set(record.run_id, handle)
     return handle
   }
@@ -305,6 +379,7 @@ export class DispatchService {
     agent_kind: AgentKind,
     req: DispatchRequest,
     delivery_target: DeliveryTarget | undefined,
+    board_item_id: string,
   ): DispatchHandle {
     const run_id = record.run_id
     const repo_path = req.repo_path ?? this.deps.repo_path
@@ -355,7 +430,7 @@ export class DispatchService {
         cur !== undefined &&
         (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled')
       ) {
-        return this.report(cur, kind, agent_kind, turn.result, delivery_target)
+        return this.report(cur, kind, agent_kind, turn.result, delivery_target, board_item_id)
       }
 
       // Normally cancellation runs through cancelRun/failRun (which set the
@@ -375,7 +450,7 @@ export class DispatchService {
       if (turn.status === 'timed_out') patch.failure_reason = 'stuck'
       const updated = this.deps.registry.update(run_id, patch)
       this.deps.control.cancellers.delete(run_id)
-      return this.report(updated, kind, agent_kind, turn.result, delivery_target)
+      return this.report(updated, kind, agent_kind, turn.result, delivery_target, board_item_id)
     })()
 
     // The completion promise can never reject (every path is caught), so a
@@ -389,7 +464,17 @@ export class DispatchService {
     agent_kind: AgentKind,
     result: string,
     delivery_target: DeliveryTarget | undefined,
+    board_item_id: string,
   ): Promise<DispatchOutcome> {
+    // Terminal reconcile — clear the run binding so the item's fork `⑂` icon
+    // goes dark. Status is left as-is (the orchestrator decides completion via
+    // work_board_complete); a non-build dispatch finishing ≠ the item being
+    // done. Best-effort: a board write outage never breaks the report path.
+    try {
+      await this.deps.board.clearRun(this.deps.project_slug, board_item_id, record.run_id)
+    } catch {
+      // swallow
+    }
     const summary = summarize(result, record.status)
     const formatInput: Parameters<typeof formatAnnouncement>[0] = { record, summary }
     const deliverables = extractDeliverables(result)

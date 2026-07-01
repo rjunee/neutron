@@ -23,11 +23,11 @@
  */
 
 import type { Topic } from '../channels/types.ts'
-import { detectMergeMode, defaultGitModeProbe, detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
 
 export type CodeCommand =
-  | { kind: 'dispatch'; task: string }
+  | { kind: 'dispatch'; task: string; board_item_id?: string }
   | { kind: 'stop'; run_ref?: string }
   | { kind: 'help' }
   | { kind: 'unrecognized'; reason: string }
@@ -80,8 +80,28 @@ export function parseCodeCommand(raw: string): CodeCommand {
           reason: `\`${sub}\` is no longer a /code sub-command — just type \`/code <your task description>\` to kick off an autonomous build, or \`/code stop\` to cancel.`,
         }
       }
-      return { kind: 'dispatch', task: body }
+      return parseDispatch(body)
   }
+}
+
+/**
+ * Parse a dispatch body, pulling an optional `--item <id>` / `--item=<id>`
+ * flag (the Work Board item the build binds to) out of the free-form task
+ * text. The flag may appear anywhere; the remaining text is the task. Phase 2b:
+ * the executor REJECTS a dispatch with no board_item_id (no untracked builds).
+ */
+function parseDispatch(body: string): Extract<CodeCommand, { kind: 'dispatch' }> {
+  let board_item_id: string | undefined
+  const stripped = body
+    .replace(/(?:^|\s)--item[=\s]+(\S+)/, (_m, id: string) => {
+      board_item_id = id
+      return ' '
+    })
+    .replace(/\s+/g, ' ')
+    .trim()
+  return board_item_id !== undefined
+    ? { kind: 'dispatch', task: stripped, board_item_id }
+    : { kind: 'dispatch', task: stripped }
 }
 
 /**
@@ -104,6 +124,13 @@ export function slugifyTask(task: string): string {
 export interface TridentCodeContext {
   /** The run store the `/code` row is written to (instance-scoped). */
   store: TridentRunStore
+  /**
+   * The Work Board binder (Phase 2b). Every `/code` build MUST bind to a Plan
+   * item: the executor looks the item up here for the existence + ask-gate
+   * checks and binds the created run to it (`attachRun`). Satisfied by the
+   * shared `WorkBoardStore` at the composition root.
+   */
+  work_board: TridentBoardBinder
   /** Project this `/code` belongs to → the run's `project_slug`. */
   project_slug: string
   /** Absolute repo path the run builds in. */
@@ -172,44 +199,53 @@ async function executeDispatch(
   cmd: Extract<CodeCommand, { kind: 'dispatch' }>,
   ctx: TridentCodeContext,
 ): Promise<CodeCommandResponse> {
-  const slug = slugifyTask(cmd.task)
-  let merge_mode: MergeMode
-  let ralph: boolean
-  try {
-    merge_mode = await (ctx.resolveMergeMode ?? (() => detectMergeMode(ctx.repo_path, defaultGitModeProbe())))()
-    ralph = await (ctx.resolveRalph ?? (() => detectRalphMode(ctx.repo_path, defaultRalphModeProbe())))()
-  } catch (err) {
+  if (cmd.task.length === 0) {
     return {
-      text: `\`/code\` could not inspect the repo at \`${ctx.repo_path}\`: ${err instanceof Error ? err.message : String(err)}`,
-      error: { code: 'backend_error', message: err instanceof Error ? err.message : String(err) },
+      text: '`/code` needs a task description: `/code --item <plan-item-id> <what to build>`.',
+      error: { code: 'malformed', message: 'empty task' },
+    }
+  }
+  const deps = {
+    store: ctx.store,
+    board: ctx.work_board,
+    project_slug: ctx.project_slug,
+    repo_path: ctx.repo_path,
+    ...(ctx.resolveMergeMode !== undefined ? { resolveMergeMode: ctx.resolveMergeMode } : {}),
+    ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
+    ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
+    ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),
+    ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
+    ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
+    ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
+  }
+  const result = await dispatchBoardBoundBuild({ task: cmd.task, board_item_id: cmd.board_item_id }, deps)
+
+  if (!result.ok) {
+    if (result.code === 'missing_board_item') {
+      return {
+        text:
+          '`/code` builds must be bound to a Plan item — pass `--item <plan-item-id>`. ' +
+          'Add the work to the Plan first, then `/code --item <id> <task>`.',
+        error: { code: 'malformed', message: result.message },
+      }
+    }
+    if (result.code === 'unknown_board_item') {
+      return { text: `\`/code\`: ${result.message}`, error: { code: 'unknown_run', message: result.message } }
+    }
+    if (result.code === 'underspecified') {
+      // The ask-before-acting gate. The dispatch is BLOCKED; the caller asks.
+      return { text: `🛠 ${result.message}`, error: { code: 'malformed', message: result.message } }
+    }
+    return {
+      text: `\`/code\` ${result.message}`,
+      error: { code: 'backend_error', message: result.message },
     }
   }
 
-  try {
-    const run = await ctx.store.create({
-      slug,
-      project_slug: ctx.project_slug,
-      repo_path: ctx.repo_path,
-      task: cmd.task,
-      merge_mode,
-      ralph,
-      branch: `trident/${slug}`,
-      ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
-      ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
-      ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
-      ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),
-      ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
-    })
-    const mode = ralph ? 'governed (Ralph)' : merge_mode === 'pr' ? 'PR' : 'local'
-    return {
-      text: `🛠 Building \`${truncate(cmd.task, 60)}\` — Trident run \`${run.id.slice(0, 8)}\` (${mode} mode). The build loop runs Forge → Argus → merge autonomously; I'll surface the result. Send \`/code stop\` to cancel.`,
-      data: { run_id: run.id, slug, merge_mode, ralph },
-    }
-  } catch (err) {
-    return {
-      text: `\`/code\` failed to start a build: ${err instanceof Error ? err.message : String(err)}`,
-      error: { code: 'backend_error', message: err instanceof Error ? err.message : String(err) },
-    }
+  const mode = result.ralph ? 'governed (Ralph)' : result.merge_mode === 'pr' ? 'PR' : 'local'
+  return {
+    text: `🛠 Building \`${truncate(cmd.task, 60)}\` — Trident run \`${result.run.id.slice(0, 8)}\` (${mode} mode), bound to Plan item \`${cmd.board_item_id}\`. Forge → Argus → merge runs autonomously; I'll surface the result. Send \`/code stop\` to cancel.`,
+    data: { run_id: result.run.id, slug: result.run.slug, merge_mode: result.merge_mode, ralph: result.ralph },
   }
 }
 

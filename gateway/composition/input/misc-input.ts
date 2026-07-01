@@ -166,6 +166,27 @@ export interface MiscCompositionInput {
     store: import('../../../work-board/store.ts').WorkBoardStore
   }
   /**
+   * Work Board Phase 2b — when supplied, the `tools` module registers the
+   * agent-native `work_board_dispatch_build` tool: the orchestrator's handle on
+   * the trident loop, starting an autonomous Forge→Argus→merge build BOUND to a
+   * Plan item (agent-native parity with `/code --item`). It enforces the
+   * required-board_item_id + ask-before-acting chokepoint
+   * (`dispatchBoardBoundBuild`) and writes a `code_trident_runs` row the durable
+   * `TridentTickLoop` then fires + harvests. The `store` here is a thin
+   * `TridentRunStore` over the SAME `db` the loop reads; `work_board` is the
+   * shared board store (existence + ask-gate lookups + the run binding).
+   */
+  trident_build_dispatch?: {
+    store: import('../../../trident/store.ts').TridentRunStore
+    work_board: import('../../../trident/board-dispatch.ts').TridentBoardBinder
+    repo_path: string
+    resolveMergeMode?: () => Promise<import('../../../trident/store.ts').MergeMode>
+    resolveRalph?: () => Promise<boolean>
+    channel_kind?: import('../../../channels/types.ts').Topic['channel_kind']
+    max_rounds?: number
+    max_ralph_rounds?: number
+  }
+  /**
    * Create-project capability — when supplied, the `tools` module registers the
    * `create_project` agent tool (agent-native parity with the project-rail
    * "Create Project" button). The bound service runs the SAME owner-scoped

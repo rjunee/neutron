@@ -44,11 +44,18 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
   if (activeItems.length === 0) {
     lines.push('(no active or upcoming items yet)')
   } else {
-    lines.push('Active + upcoming items, in order:')
+    lines.push('Active + upcoming items, in order (id in parens — use it to dispatch a build):')
     for (const item of activeItems.slice(0, MAX_ITEMS_INJECTED)) {
       const title = escapeData(item.title).slice(0, MAX_TITLE_CHARS)
-      const inline = item.inline_active ? ' ·inline' : ''
-      lines.push(`- [${statusLabel(item.status)}${inline}] ${title}`)
+      // A bound sub-agent/trident run (·building, fork ⑂) supersedes the inline
+      // marker; activity is DERIVED from linked_run_id, not a manual field.
+      const activity =
+        item.linked_run_id !== null && item.linked_run_id.length > 0
+          ? ' ·building'
+          : item.inline_active
+            ? ' ·inline'
+            : ''
+      lines.push(`- [${statusLabel(item.status)}${activity}] (${escapeData(item.id)}) ${title}`)
     }
     if (activeItems.length > MAX_ITEMS_INJECTED) {
       lines.push(`- …and ${activeItems.length - MAX_ITEMS_INJECTED} more`)

@@ -229,3 +229,85 @@ describe('WorkBoardStore', () => {
     expect(sanitizeTitle('a\n\nb   c')).toBe('a b c')
   })
 })
+
+describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
+  test('inline_active is settable via update (the caret writer)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'work inline on me' })
+    const updated = await store.update(SLUG, a.id, { inline_active: true })
+    expect(updated?.inline_active).toBe(true)
+    expect((await store.update(SLUG, a.id, { inline_active: false }))?.inline_active).toBe(false)
+  })
+
+  test('attachRun binds linked_run_id, moves to in_progress, clears inline, fires onChange', async () => {
+    let pushes = 0
+    const store = new WorkBoardStore(db, { onChange: () => (pushes += 1) })
+    const a = await store.create(SLUG, { title: 'build me' })
+    await store.update(SLUG, a.id, { inline_active: true })
+    pushes = 0
+    const bound = await store.attachRun(SLUG, a.id, 'run-1')
+    expect(bound?.linked_run_id).toBe('run-1')
+    expect(bound?.status).toBe('in_progress')
+    expect(bound?.inline_active).toBe(false)
+    expect(pushes).toBe(1)
+  })
+
+  test('getByRunId finds the bound item (project-scoped)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'find me by run' })
+    await store.attachRun(SLUG, a.id, 'run-xyz')
+    expect(store.getByRunId(SLUG, 'run-xyz')?.id).toBe(a.id)
+    expect(store.getByRunId('other-project', 'run-xyz')).toBeNull()
+    expect(store.getByRunId(SLUG, 'no-such-run')).toBeNull()
+  })
+
+  test('detachRun(done) clears the binding + completes (datestamped history)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'finish me' })
+    await store.attachRun(SLUG, a.id, 'run-done')
+    const done = await store.detachRun(SLUG, 'run-done', 'done')
+    expect(done?.status).toBe('done')
+    expect(done?.linked_run_id).toBeNull()
+    expect(done?.completed_at).not.toBeNull()
+  })
+
+  test('detachRun(failed) clears the binding + returns to upcoming (retryable, no datestamp)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'fail me' })
+    await store.attachRun(SLUG, a.id, 'run-fail')
+    const failed = await store.detachRun(SLUG, 'run-fail', 'failed')
+    expect(failed?.status).toBe('upcoming')
+    expect(failed?.linked_run_id).toBeNull()
+    expect(failed?.completed_at).toBeNull()
+  })
+
+  test('detachRun is a safe no-op when no item is bound to the run', async () => {
+    const store = new WorkBoardStore(db)
+    expect(await store.detachRun(SLUG, 'ghost-run', 'done')).toBeNull()
+  })
+
+  test('clearRun only clears when run_id is still the bound run (concurrent-safe)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'shared item' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.attachRun(SLUG, a.id, 'run-2') // run-2 supersedes run-1's binding
+    // run-1 finishing must NOT clear run-2's still-live marker.
+    await store.clearRun(SLUG, a.id, 'run-1')
+    expect(store.get(SLUG, a.id)?.linked_run_id).toBe('run-2')
+    // run-2 finishing clears it (it IS the bound run).
+    await store.clearRun(SLUG, a.id, 'run-2')
+    expect(store.get(SLUG, a.id)?.linked_run_id).toBeNull()
+  })
+
+  test('attachRun re-opening a done item clears completed_at + re-appends to the active lane', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'reopen me' })
+    await store.create(SLUG, { title: 'other active' })
+    await store.complete(SLUG, a.id)
+    expect(store.get(SLUG, a.id)?.completed_at).not.toBeNull()
+    const reopened = await store.attachRun(SLUG, a.id, 'run-reopen')
+    expect(reopened?.status).toBe('in_progress')
+    expect(reopened?.completed_at).toBeNull()
+    expect(reopened?.linked_run_id).toBe('run-reopen')
+  })
+})

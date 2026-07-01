@@ -20,7 +20,9 @@ export {
 
 export {
   DispatchService,
+  DispatchValidationError,
   type DispatchServiceDeps,
+  type DispatchBoardBinder,
   type DispatchRequest,
   type DispatchHandle,
   type DispatchOutcome,

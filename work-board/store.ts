@@ -61,7 +61,14 @@ export interface WorkBoardItemUpdate {
   title?: string
   status?: WorkBoardStatus
   design_doc_ref?: string | null
+  /** Phase 2b — the lightweight inline (in-topic) work marker. The agent flags
+   *  an item it is working INLINE in the main topic (caret `›`) vs via a bound
+   *  sub-agent/trident run (fork `⑂`, derived from `linked_run_id`). */
+  inline_active?: boolean
 }
+
+/** Outcome of a bound run reaching a terminal phase (drives the reconcile). */
+export type RunReconcileOutcome = 'done' | 'failed'
 
 /** Where to drop the moved item relative to a sibling. */
 export interface ReorderTarget {
@@ -365,6 +372,7 @@ export class WorkBoardStore {
       }
       if (title !== undefined) push('title', title)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
+      if (patch.inline_active !== undefined) push('inline_active', patch.inline_active ? 1 : 0)
       if (patch.status !== undefined && patch.status !== current.status) {
         push('status', patch.status)
         if (patch.status === 'done') {
@@ -465,14 +473,117 @@ export class WorkBoardStore {
     this.emitChange()
   }
 
-  /** Clear a bound trident run. */
-  async clearRun(project_slug: string, id: string): Promise<void> {
+  /** Clear a bound trident run — but ONLY if `run_id` is still the run bound to
+   *  this item. Two concurrent dispatches can bind the same item in turn (the
+   *  later `attachRun` supersedes the earlier `linked_run_id`); when the earlier
+   *  run finishes it must NOT clear the still-live later run's marker. Guarding
+   *  on `linked_run_id = run_id` makes the clear a no-op in that race. Leaves the
+   *  lane/status untouched (a non-build dispatch finishing ≠ the item done). */
+  async clearRun(project_slug: string, id: string, run_id: string): Promise<void> {
     await this.db.run(
       `UPDATE work_board_items SET linked_run_id = NULL, updated_at = ?
-        WHERE project_slug = ? AND id = ?`,
-      [this.now(), project_slug, id],
+        WHERE project_slug = ? AND id = ? AND linked_run_id = ?`,
+      [this.now(), project_slug, id, run_id],
     )
     this.emitChange()
+  }
+
+  /** Look up the item a run is bound to (the partial `linked_run_id` index).
+   *  Used by the terminal-reconcile path to find the item from a finished run.
+   *  Scoped by `project_slug` so a run id can never cross instances. */
+  getByRunId(project_slug: string, run_id: string): WorkBoardItem | null {
+    const row = this.db
+      .prepare<WorkBoardItemDbRow, [string, string]>(
+        `SELECT ${COLS} FROM work_board_items
+          WHERE project_slug = ? AND linked_run_id = ?
+          LIMIT 1`,
+      )
+      .get(project_slug, run_id)
+    return row === null ? null : rowToItem(row)
+  }
+
+  /**
+   * Phase 2b — BIND a dispatched run to an item AND light it up live: set
+   * `linked_run_id` (→ the fork `⑂` icon) and move the item to `in_progress`,
+   * all in ONE transaction with ONE `onChange` push. A sub-agent supersedes
+   * any inline marker, so `inline_active` is cleared. Re-opening a `done` item
+   * (re-dispatch) nulls `completed_at` + re-appends it to the active lane so
+   * its stale completed-row `sort_order` can't collide. Returns the bound row
+   * (or null if the id no longer exists).
+   */
+  async attachRun(
+    project_slug: string,
+    id: string,
+    run_id: string,
+  ): Promise<WorkBoardItem | null> {
+    const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
+      const current = this.get(project_slug, id)
+      if (current === null) return null
+      const sets = ['linked_run_id = ?', 'inline_active = 0', "status = 'in_progress'"]
+      const params: (string | number | null)[] = [run_id]
+      if (current.status === 'done') {
+        // Re-open OFF done: clear the datestamp + re-append to the active lane.
+        sets.push('completed_at = NULL')
+        const max = tx
+          .prepare<{ next: number }, [string]>(
+            `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
+               FROM work_board_items WHERE project_slug = ?`,
+          )
+          .get(project_slug)
+        sets.push('sort_order = ?')
+        params.push(max?.next ?? 1)
+      }
+      sets.push('updated_at = ?')
+      params.push(this.now(), project_slug, id)
+      await tx.run(
+        `UPDATE work_board_items SET ${sets.join(', ')} WHERE project_slug = ? AND id = ?`,
+        params,
+      )
+      return this.get(project_slug, id)
+    })
+    if (result !== null) this.emitChange()
+    return result
+  }
+
+  /**
+   * Phase 2b — RECONCILE a bound run that reached a terminal phase. Finds the
+   * item by `run_id`, clears `linked_run_id` (→ fork icon goes dark), and sets
+   * the lane from the outcome: `done` → completed (datestamped history),
+   * `failed` → back to `upcoming` (re-actionable, no active marker). One
+   * transaction, one push. No-op (returns null) when no item is bound to the
+   * run — terminal reconcile is idempotent + safe for unbound dispatches.
+   */
+  async detachRun(
+    project_slug: string,
+    run_id: string,
+    outcome: RunReconcileOutcome,
+  ): Promise<WorkBoardItem | null> {
+    const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
+      const current = this.getByRunId(project_slug, run_id)
+      if (current === null) return null
+      const sets = ['linked_run_id = NULL', 'inline_active = 0']
+      const params: (string | number | null)[] = []
+      if (outcome === 'done') {
+        sets.push("status = 'done'")
+        // Stamp the datestamp only on a genuine →done transition.
+        if (current.status !== 'done') {
+          sets.push('completed_at = ?')
+          params.push(this.now())
+        }
+      } else {
+        // Failed/stopped — return to the backlog so the owner can retry.
+        sets.push("status = 'upcoming'", 'completed_at = NULL')
+      }
+      sets.push('updated_at = ?')
+      params.push(this.now(), project_slug, current.id)
+      await tx.run(
+        `UPDATE work_board_items SET ${sets.join(', ')} WHERE project_slug = ? AND id = ?`,
+        params,
+      )
+      return this.get(project_slug, current.id)
+    })
+    if (result !== null) this.emitChange()
+    return result
   }
 
   /** Delete an item (human board is full-CRUD for the owner). */

@@ -78,6 +78,7 @@ import {
   DispatchService,
   buildCancellableDispatchTurn,
   defaultPersonaLoader,
+  type DispatchBoardBinder,
 } from '../agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -113,7 +114,7 @@ import {
   provisionAgentSkills,
   resolveAgentSkillsDir,
 } from '../runtime/adapters/claude-code/persistent/agent-skills.ts'
-import type { TridentRun } from '../trident/store.ts'
+import { TridentRunStore, type TridentRun } from '../trident/store.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
@@ -629,6 +630,22 @@ export function buildOpenGraphComposer(
     // turn is CANCELLABLE (`buildCancellableDispatchTurn`): a `/dispatch stop` or
     // a watchdog reap actually terminates the subprocess. Gated on the same
     // credential availability as Trident (no credential → unregistered; no flag).
+    // Work Board Phase 2b — the dispatch board binder. The canonical
+    // `workBoardStore` is constructed later (it needs `appWsRegistry`), so the
+    // dispatch service reaches it through this late-bound holder (same pattern
+    // as the onboarding routers above). Set once below, after the store exists;
+    // every runtime dispatch happens long after composition, so the store is
+    // always populated by the time `dispatch()` runs.
+    const dispatchBoardHolder: { store: WorkBoardStore | null } = { store: null }
+    const dispatchBoardBinder: DispatchBoardBinder = {
+      get: (slug, id) => dispatchBoardHolder.store?.get(slug, id) ?? null,
+      attachRun: async (slug, id, run_id) => {
+        await dispatchBoardHolder.store?.attachRun(slug, id, run_id)
+      },
+      clearRun: async (slug, id, run_id) => {
+        await dispatchBoardHolder.store?.clearRun(slug, id, run_id)
+      },
+    }
     const dispatchService = ((): DispatchService | null => {
       if (llmPool === null) return null
       const registry = new SubagentRegistry()
@@ -648,6 +665,11 @@ export function buildOpenGraphComposer(
           )
         },
         instance_key: internal_handle,
+        // Phase 2b — the board-binding chokepoint: every dispatch must carry a
+        // valid, sufficiently-specified board_item_id (else rejected) and is
+        // bound to its Plan item for the duration of the run.
+        board: dispatchBoardBinder,
+        project_slug,
         repo_path: owner_home,
         // Pass the dynamic accessor (thunk) so each dispatch resolves the live
         // best model — the watchdog's adopted id reaches new agent-dispatch runs.
@@ -1947,6 +1969,9 @@ export function buildOpenGraphComposer(
       },
     })
     const workBoardSurface = createWorkBoardSurface({ store: workBoardStore, auth: appOwnerAuth })
+    // Phase 2b — late-bind the dispatch board binder (declared above, before the
+    // store could exist) to the canonical store now that it's constructed.
+    dispatchBoardHolder.store = workBoardStore
 
     // ── Onboarding-as-CC-session → Path 1 (2026-06-27): ONE live-session path ─
     // Onboarding is NOT a separate engine/socket and NO LONGER a per-turn phase
@@ -3100,6 +3125,19 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: skillForgeOnRunTerminal,
+            },
+            // Work Board Phase 2b — the agent-native board-bound build dispatch
+            // (`work_board_dispatch_build`). Gated on the SAME live-credential
+            // predicate as the trident loop (a build can only run when the loop
+            // can fire it). `store` is a thin TridentRunStore over the SAME `db`
+            // the loop reads, so a row created by the tool is fired + harvested
+            // by the loop. `work_board` is the shared board store (the run
+            // binding + the ask-gate lookups). repo_path = the owner's repo.
+            trident_build_dispatch: {
+              store: new TridentRunStore(db),
+              work_board: workBoardStore,
+              repo_path: owner_home,
+              channel_kind: 'app_socket' as const,
             },
           }
         : {}),

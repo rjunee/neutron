@@ -35,13 +35,21 @@ describe('formatWorkBoardFragment', () => {
     expect(frag.toLowerCase()).toContain('add one first')
   })
 
-  test('renders status labels + the inline marker', () => {
+  test('renders status labels + the inline marker + the item id', () => {
     const frag = formatWorkBoardFragment([
-      item({ title: 'A', status: 'in_progress', inline_active: true }),
-      item({ title: 'B', status: 'upcoming' }),
+      item({ id: 'wb-A', title: 'A', status: 'in_progress', inline_active: true }),
+      item({ id: 'wb-B', title: 'B', status: 'upcoming' }),
     ])
-    expect(frag).toContain('[in progress ·inline] A')
-    expect(frag).toContain('[upcoming] B')
+    expect(frag).toContain('[in progress ·inline] (wb-A) A')
+    expect(frag).toContain('[upcoming] (wb-B) B')
+  })
+
+  test('a bound run shows the ·building (sub-agent) marker, superseding inline', () => {
+    const frag = formatWorkBoardFragment([
+      item({ id: 'wb-C', title: 'C', status: 'in_progress', linked_run_id: 'run-9', inline_active: true }),
+    ])
+    expect(frag).toContain('[in progress ·building] (wb-C) C')
+    expect(frag).not.toContain('·inline')
   })
 
   test('escapes a title that tries to break out of the tag (no breakout)', () => {

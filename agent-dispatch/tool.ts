@@ -43,8 +43,15 @@ const inputSchema: JsonSchemaDocument = {
         'The full task / instructions for the dispatched agent. It runs autonomously in its ' +
         'own session and reports the result back to this chat when done.',
     },
+    board_item_id: {
+      type: 'string',
+      description:
+        'The Plan (Work Board) item this dispatch is bound to — REQUIRED. Get it from ' +
+        'work_board_list / work_board_add. A dispatch with no bound item is rejected; if the ' +
+        'item is underspecified you must ask the owner a clarifying question before dispatching.',
+    },
   },
-  required: ['kind', 'task'],
+  required: ['kind', 'task', 'board_item_id'],
   additionalProperties: false,
 }
 
@@ -62,6 +69,7 @@ const outputSchema: JsonSchemaDocument = {
 interface DispatchArgs {
   kind?: unknown
   task?: unknown
+  board_item_id?: unknown
 }
 
 function isDispatchKind(v: unknown): v is DispatchKind {
@@ -98,7 +106,17 @@ export function registerDispatchToolSurface(
       if (task.length === 0) {
         throw new Error('dispatch_agent: "task" is required and must be a non-empty string')
       }
-      const req: DispatchRequest = { kind: a.kind, task }
+      const board_item_id = typeof a.board_item_id === 'string' ? a.board_item_id.trim() : ''
+      if (board_item_id.length === 0) {
+        throw new Error(
+          'dispatch_agent: "board_item_id" is required — bind the dispatch to a Plan item ' +
+            '(work_board_add / work_board_list). No untracked dispatches.',
+        )
+      }
+      // The service enforces the existence + ask-before-acting gate and throws a
+      // DispatchValidationError (incl. the clarifying-question guidance) which
+      // propagates to the agent as the tool error — exactly the intended block.
+      const req: DispatchRequest = { kind: a.kind, task, board_item_id }
       const handle = await service.dispatch(req)
       return {
         run_id: handle.run_id,

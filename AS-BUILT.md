@@ -2,6 +2,51 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-06-30 — Work Board Phase 2b: trident/agent dispatch BOUND to board items + parallel + ask-before-acting
+
+**What shipped.** The dispatch→board binding that Phase 1a/2a left as forward-prep.
+Every autonomous build / background agent now MUST bind to a Plan (Work Board)
+item; the board reflects each run's live state with the activity icons the UI
+already renders; and an underspecified item is BLOCKED from dispatch until the
+owner is asked. No feature flags; on by default. No new migration — `0090`
+already ships `linked_run_id` + `inline_active` + the partial index, and reconcile
+keys off `linked_run_id` (no reverse column needed).
+
+- **The chokepoint + ask-gate.** `trident/board-dispatch.ts:dispatchBoardBoundBuild`
+  is the single trident dispatch chokepoint, shared by the human `/code --item <id>`
+  grammar (`trident/code-command.ts`) and the agent-native `work_board_dispatch_build`
+  tool (`trident/work-board-build-tool.ts`). `agent-dispatch/service.ts:DispatchService.dispatch`
+  is the same chokepoint for `dispatch_agent` / `/dispatch --item`. All enforce, in
+  order: (1) **required board_item_id** — a dispatch without one is REJECTED (no
+  untracked dispatches, Ryan-locked); (2) the item must EXIST; (3) **ask-before-acting**
+  — `work-board/dispatch-readiness.ts:assessDispatchReadiness` blocks an item with no
+  `design_doc_ref` AND a terse title (< 8 words), returning clarifying-question guidance
+  the agent must act on rather than dispatching on assumptions.
+- **Binding + N-parallel + reconcile.** A successful dispatch calls
+  `WorkBoardStore.attachRun` (sets `linked_run_id` + `status=in_progress`, clears the
+  inline marker → the fork `⑂` lights). N builds = N board-bound `code_trident_runs`
+  rows the durable `TridentTickLoop` fires + harvests independently (2a's model). On a
+  terminal run the loop's `on_terminal` observer (`trident/board-reconcile.ts`, composed
+  in `build-core-modules.ts`) calls `WorkBoardStore.detachRun`: `done` → completed
+  (datestamped history), `failed`/`stopped` → back to `upcoming`; binding cleared (fork
+  goes dark). `dispatch_agent` runs clear the binding on terminal but leave status to the
+  orchestrator. Every mutation fires the existing `work_board_changed` push.
+  `WorkBoardStore.clearRun` (the `dispatch_agent` terminal path) guards on
+  `linked_run_id = run_id`, so when two dispatches bind the same item in turn the
+  earlier one finishing can never clear the still-live later run's fork marker
+  (Codex [P2] concurrent-clear fix).
+- **Activity icons DERIVED, not manual.** The web `WorkBoardTab` + mobile
+  `WorkBoardRow` already derive fork `⑂` from `linked_run_id` and caret `›` from
+  `inline_active`; Phase 2b is purely the WRITERS (`attachRun`/`detachRun` for the
+  fork; `work_board_update {inline_active}` for the caret). The per-turn fragment
+  (`work-board/fragment.ts`) now surfaces each item's id + a `·building` marker so the
+  orchestrator can re-ground and dispatch against the right item.
+- **Tests.** Unit: `dispatch-readiness`, store `attachRun/detachRun/getByRunId` + the
+  `inline_active` update, `work_board_dispatch_build`, `board-reconcile`. Integration:
+  `/code --item` + `/dispatch --item` chokepoint (reject missing/unknown/underspecified,
+  bind on success), the tick-loop reconcile end-to-end, and a production-composer
+  reachability assertion that `composition.trident_build_dispatch` boots wired.
+
 ## 2026-06-30 — Onboarding robustness: project openings stay deterministic + cold-turn timeout self-heals (#136 verify gaps)
 
 **What shipped.** Two fixes for the gaps the #136 fresh-install verify surfaced

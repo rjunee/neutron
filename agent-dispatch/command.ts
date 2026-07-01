@@ -20,10 +20,27 @@ import type { DispatchKind } from './prompts.ts'
 import type { DispatchService } from './service.ts'
 
 export type DispatchCommand =
-  | { kind: 'dispatch'; dispatch_kind: DispatchKind; task: string }
+  | { kind: 'dispatch'; dispatch_kind: DispatchKind; task: string; board_item_id?: string }
   | { kind: 'stop'; run_ref?: string }
   | { kind: 'help' }
   | { kind: 'unrecognized'; reason: string }
+
+/**
+ * Pull an optional `--item <id>` / `--item=<id>` flag (the Plan item the
+ * dispatch binds to) out of free-form text. Returns the id + the remaining
+ * text. Phase 2b: the service REJECTS a dispatch with no board_item_id.
+ */
+function extractItemFlag(text: string): { board_item_id?: string; rest: string } {
+  let board_item_id: string | undefined
+  const rest = text
+    .replace(/(?:^|\s)--item[=\s]+(\S+)/, (_m, id: string) => {
+      board_item_id = id
+      return ' '
+    })
+    .replace(/\s+/g, ' ')
+    .trim()
+  return board_item_id !== undefined ? { board_item_id, rest } : { rest }
+}
 
 export type DispatchCommandErrorCode = 'malformed' | 'unknown_run' | 'backend_error'
 
@@ -62,17 +79,23 @@ export function parseDispatchCommand(raw: string): DispatchCommand {
   }
   for (const named of NAMED_KINDS) {
     if (sub === named) {
-      if (rest.length === 0) {
+      const { board_item_id, rest: namedTask } = extractItemFlag(rest)
+      if (namedTask.length === 0) {
         return {
           kind: 'unrecognized',
-          reason: `\`/dispatch ${named}\` needs a task — try \`/dispatch ${named} <what to do>\`.`,
+          reason: `\`/dispatch ${named}\` needs a task — try \`/dispatch ${named} --item <plan-item-id> <what to do>\`.`,
         }
       }
-      return { kind: 'dispatch', dispatch_kind: named, task: rest }
+      return board_item_id !== undefined
+        ? { kind: 'dispatch', dispatch_kind: named, task: namedTask, board_item_id }
+        : { kind: 'dispatch', dispatch_kind: named, task: namedTask }
     }
   }
   // No recognised sub-verb → the whole body is an ad-hoc task.
-  return { kind: 'dispatch', dispatch_kind: 'adhoc', task: body }
+  const { board_item_id, rest: adhocTask } = extractItemFlag(body)
+  return board_item_id !== undefined
+    ? { kind: 'dispatch', dispatch_kind: 'adhoc', task: adhocTask, board_item_id }
+    : { kind: 'dispatch', dispatch_kind: 'adhoc', task: adhocTask }
 }
 
 export interface DispatchCommandContext {
@@ -119,10 +142,19 @@ async function executeDispatch(
   cmd: Extract<DispatchCommand, { kind: 'dispatch' }>,
   ctx: DispatchCommandContext,
 ): Promise<DispatchCommandResponse> {
+  if (cmd.board_item_id === undefined) {
+    return {
+      text:
+        '`/dispatch` must be bound to a Plan item — pass `--item <plan-item-id>`. ' +
+        'Add the work to the Plan first, then `/dispatch <kind> --item <id> <task>`.',
+      error: { code: 'malformed', message: 'missing board_item_id' },
+    }
+  }
   try {
     const req: Parameters<DispatchService['dispatch']>[0] = {
       kind: cmd.dispatch_kind,
       task: cmd.task,
+      board_item_id: cmd.board_item_id,
     }
     if (ctx.delivery_target !== undefined) req.delivery_target = ctx.delivery_target
     const handle = await ctx.service.dispatch(req)

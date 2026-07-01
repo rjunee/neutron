@@ -806,10 +806,32 @@ has finished. The board is **instance-scoped by the server-derived
   forever). HUMAN read+WRITE (add / inline-edit / advance status / reorder /
   delete) goes through the same `POST/PATCH/DELETE` surface the agent tools use.
 
-Phase 2 (later) binds each `/code` trident run to a board item (the
-`linked_run_id` correlation key + its partial index are landed here) and feeds
-the activity glyph from the real run state. See
-`docs/plans/2026-06-29-001-feat-work-board-master-plan.md`.
+**Phase 2b — board-bound dispatch + ask-before-acting (DONE).** Every autonomous
+build / background agent now binds to a board item; the activity glyphs the UI
+already renders are now LIT by real writers:
+
+- **The chokepoint.** `trident/board-dispatch.ts:dispatchBoardBoundBuild` is the
+  single trident dispatch chokepoint — shared by the human `/code --item <id>`
+  grammar (`trident/code-command.ts`) and the agent-native
+  `work_board_dispatch_build` tool (`trident/work-board-build-tool.ts`, the
+  orchestrator fires N for N parallel builds). `agent-dispatch/service.ts`'s
+  `DispatchService.dispatch` is the same chokepoint for `dispatch_agent` /
+  `/dispatch --item`. All enforce, BEFORE any run/spawn: (1) **required
+  `board_item_id`** — a dispatch without one is REJECTED (no untracked dispatches);
+  (2) the item must EXIST; (3) **ask-before-acting** — `work-board/dispatch-readiness.ts`
+  blocks an item with no `design_doc_ref` AND a terse (< 8-word) title, returning
+  clarifying-question guidance instead of dispatching on assumptions.
+- **Binding + reconcile.** Success → `WorkBoardStore.attachRun` (`linked_run_id` +
+  `status=in_progress`, clears inline → fork `⑂`). On a terminal run the durable
+  `TridentTickLoop`'s `on_terminal` observer (`trident/board-reconcile.ts`, composed
+  in `build-core-modules.ts`) calls `WorkBoardStore.detachRun`: `done` → completed
+  (datestamped), `failed`/`stopped` → back to `upcoming`; binding cleared. The fork
+  glyph is thus DERIVED from the trident row via `linked_run_id`, never a manual field;
+  the caret `›` is the `inline_active` marker, settable via `work_board_update`.
+- **No migration** — `0090`'s `linked_run_id` + `inline_active` + the partial index
+  carry it; reconcile keys off `linked_run_id`.
+
+See `docs/plans/2026-06-29-001-feat-work-board-master-plan.md` (§11 Phase 3/4).
 
 ## Create Project affordance — project rail + create-project capability
 
@@ -1626,10 +1648,16 @@ deleted, no dual path):
   `docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md`.
 - **One-commit revert runbook.** Migrations 0089/0091's columns are additive +
   nullable, so a `git revert <sha>` leaves them harmlessly unused.
-- **OUT OF SCOPE (Phase 2b):** binding each `/code` trident run to a `board_item_id`
-  on the dispatch tools, N-parallel-tridents tracked on the Work Board, per-item
-  activity-icon derivation, and the ask-before-acting hard rule. Phase 2a is purely
-  the exec-model (fire→settle→durable DB-harvest).
+- **Phase 2b (DONE):** every trident/agent dispatch is now BOUND to a Work Board
+  item at a required-`board_item_id` chokepoint (`trident/board-dispatch.ts` for
+  builds — shared by `/code --item` + the agent-native `work_board_dispatch_build`
+  tool; `agent-dispatch/service.ts` for `dispatch_agent`/`/dispatch --item`). A
+  dispatch without one is REJECTED; an underspecified item (no design doc + terse
+  title) is BLOCKED by the ask-before-acting gate (`work-board/dispatch-readiness.ts`).
+  Success binds the run (`attachRun` → `linked_run_id` + in_progress → fork `⑂`); the
+  durable loop's `on_terminal` reconcile (`trident/board-reconcile.ts`) clears the
+  binding + sets the lane (done / back-to-upcoming) on terminal. N builds = N
+  board-bound runs the loop harvests in parallel. See the Work Board section above.
 - **The `/code` command surface (NEXT PR).** Routing the literal `/code`
   keystroke from the Open landing chat into `buildTridentCodeChatCommandFilter`
   is NOT yet wired — the landing chat path (`landing/server.ts` →

@@ -164,3 +164,18 @@ export type {
   CodeCommandErrorCode,
   TridentCodeContext,
 } from './code-command.ts'
+export { dispatchBoardBoundBuild } from './board-dispatch.ts'
+export type {
+  TridentBoardBinder,
+  BoardBoundBuildInput,
+  BoardBoundBuildDeps,
+  BoardBoundBuildResult,
+  BoardBoundBuildRejectionCode,
+} from './board-dispatch.ts'
+export {
+  registerTridentBuildToolSurface,
+  WORK_BOARD_DISPATCH_BUILD_TOOL,
+} from './work-board-build-tool.ts'
+export type { TridentBuildToolDeps } from './work-board-build-tool.ts'
+export { buildBoardReconcileObserver } from './board-reconcile.ts'
+export type { TridentBoardReconciler } from './board-reconcile.ts'

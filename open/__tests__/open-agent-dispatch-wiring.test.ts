@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url'
 
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
+import { WorkBoardStore } from '../../work-board/store.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 import type { SessionHandle } from '../../runtime/session-handle.ts'
@@ -125,8 +126,18 @@ describe('Open agent-dispatch prod-boot wiring', () => {
 
     // 2) Dispatching a research agent spawns a REAL turn on the substrate with
     //    the Atlas persona folded into the user turn + the task, and registers
-    //    it in the shared SubagentRegistry.
-    const handle = await service.dispatch({ kind: 'research', task: 'audit the login flow' })
+    //    it in the shared SubagentRegistry. Phase 2b — every dispatch must bind
+    //    to a sufficiently-specified Plan item, so create one first (same db the
+    //    composed board binder reads; project_slug 'owner' matches the wiring).
+    const board = new WorkBoardStore(db)
+    const item = await board.create('owner', {
+      title: 'audit the login flow end-to-end for security regressions',
+    })
+    const handle = await service.dispatch({
+      kind: 'research',
+      task: 'audit the login flow',
+      board_item_id: item.id,
+    })
     expect(handle.run_id).toBeTruthy()
     expect(handle.record.agent_kind).toBe('atlas')
 
