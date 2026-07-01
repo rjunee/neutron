@@ -46,6 +46,10 @@ const PROJECT_ID_RE = /^[A-Za-z0-9_.-]+$/
 export function parseWebDocLinkHref(href: string, origin: string): DocLinkTarget | null {
   if (typeof href !== 'string' || href.length === 0) return null
   let rest = href
+  // Protocol-relative URL (`//host/…`) → a DIFFERENT host; never same-app. Reject
+  // up front so a lookalike like `//evil.example/projects/acme/docs?path=x.md`
+  // isn't parsed as an in-app link (a legit doc link is single-slash rooted).
+  if (rest.startsWith('//')) return null
   // Absolute URL (has a scheme) → keep only same-origin ones, stripped to a
   // root-relative path. A `neutron://…` native link or a foreign host fails
   // this and returns null (let the browser handle it).

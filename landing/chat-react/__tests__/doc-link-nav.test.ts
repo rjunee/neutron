@@ -72,6 +72,12 @@ describe('parseWebDocLinkHref', () => {
     expect(parseWebDocLinkHref('neutron://docs/acme/brief.md', ORIGIN)).toBeNull()
   })
 
+  it('rejects a protocol-relative lookalike (different host)', () => {
+    expect(
+      parseWebDocLinkHref('//evil.example/projects/acme/docs?path=x.md', ORIGIN),
+    ).toBeNull()
+  })
+
   it('rejects an ordinary external https link', () => {
     expect(parseWebDocLinkHref('https://example.com/blog', ORIGIN)).toBeNull()
   })
