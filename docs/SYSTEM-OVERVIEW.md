@@ -438,7 +438,12 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > (redirect-if-URL-present); the Managed overlay points the env at the control-plane
 > `/claim`, Open self-host leaves it unset so the client no-ops and onboarding
 > completes normally. The redirect target lives in the client config, never on the
-> frame; a `claimRedirected` latch makes it at-most-once. Pairs with the
+> frame; a `claimRedirected` latch makes it at-most-once. **Reconnect recovery:**
+> the live frame is dropped if finalize fires with no socket registered (e.g. a
+> background import-completion watcher finalizes while the tab is closed), so
+> `on_session_open`'s steady-state branch replays it to the connecting topic for
+> a completed owner when the claim URL is configured — deriving the redirect from
+> the persisted `completed` state so it can't be permanently missed. Pairs with the
 > neutron-managed personal-URL claim flow (`GET/POST /claim` → rename → 302 to the
 > owner's personal URL).
 >

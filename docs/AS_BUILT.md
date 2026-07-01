@@ -32,7 +32,16 @@ boolean, no dual path.
   `fanProjectsChanged`) and is wired into `buildOnboardingFinalize`; (2)
   `claimBootstrapScript()` injects `window.__neutron_post_onboarding_claim_url`
   into the served `/chat` React shell **only when** the env is set (`<`-escaped),
-  alongside the existing projects/onboarding bootstrap scripts.
+  alongside the existing projects/onboarding bootstrap scripts; (3) **reconnect
+  recovery** — `on_session_open`'s steady-state branch replays the
+  `onboarding_completed` frame to the connecting topic for an already-completed
+  owner when the claim URL is configured. Without this, a finalize that fires
+  with no live socket (e.g. a background import-completion watcher finalizes
+  while the tab is closed) would drop the only signal and the reconnect — seeing
+  an already-`completed` row — would never re-emit it, losing the redirect
+  (Codex P2). Gated on the env so it is a strict no-op on Open self-host; the
+  client latch keeps it at-most-once and it stops once the owner claims (they
+  move to a host without the env).
 - `landing/chat-react/config.ts` — `BootstrapConfig.postOnboardingClaimUrl` +
   `WindowLike.__neutron_post_onboarding_claim_url`; `resolveBootstrapConfig` reads
   the injected global (non-empty string only; empty ⇒ treated as absent).
@@ -55,7 +64,10 @@ boolean, no dual path.
 - `open/__tests__/open-claim-redirect-bootstrap.test.ts` — the served `/chat`
   shell injects the claim script when the env is set and injects NOTHING when
   unset (no-regression), driven through the composed graph `fetch`.
-- `tsc` clean (root + `landing/chat-react`).
+- `open/__tests__/open-claim-redirect-reconnect.test.ts` — a live `/ws/app/chat`
+  connect for a completed owner replays `onboarding_completed` when the claim URL
+  is configured, and emits NOTHING when unset (Codex-P2 recovery).
+- `tsc` clean (root + `landing/chat-react`); leak-gate SILENT.
 
 ## 2026-07-01 — DROP the agent-NAME step in onboarding (personality-only → SOUL.md)
 

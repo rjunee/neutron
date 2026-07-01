@@ -3111,6 +3111,27 @@ export function buildOpenGraphComposer(
           // deterministic opening (item 1 / 4b). No-op for the General topic, an
           // unmaterialized topic, or a project that already has chat history.
           await ensureProjectOpeningOnEntry(user_id, channel_topic_id)
+          // RECOVERY (Managed post-onboarding claim redirect) — replay the one-
+          // shot `onboarding_completed` signal on connect for an already-completed
+          // owner when a claim URL is configured. The live frame fanned at
+          // finalize is DROPPED if no socket was registered then (e.g. a
+          // background import-completion watcher finalizes while the tab is
+          // closed/reloading), and a reconnect sees an already-`completed` row so
+          // nothing re-signals — the redirect would be lost forever. Deriving it
+          // from the persisted completed state here makes it recoverable. Gated on
+          // the env so it is a strict NO-OP on Open self-host; sent only to the
+          // connecting topic. The client's `claimRedirected` latch keeps it at-
+          // most-once per load, and once the owner claims they move to a host
+          // without the env, so this never loops post-claim.
+          const claimUrl = env['NEUTRON_POST_ONBOARDING_CLAIM_URL']
+          if (typeof claimUrl === 'string' && claimUrl.length > 0) {
+            const completedFrame: AppWsOutboundOnboardingCompleted = {
+              v: 1,
+              type: 'onboarding_completed',
+              ts: Date.now(),
+            }
+            appWsRegistry.send(channel_topic_id, completedFrame)
+          }
         }
         // Emit if the seed turn (or anything since the pre-seed) changed the set.
         emitProjectsChangedIfChanged(user_id)
