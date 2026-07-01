@@ -28,6 +28,15 @@ import {
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
+/** An archived project row the Admin tab lists with a Restore button
+ *  (archived-projects sprint). Mirrors the server `ArchivedProjectItem`. */
+interface ArchivedProject {
+  id: string
+  name: string
+  emoji: string
+  archived_at: string
+}
+
 function oauthSubtitle(acc: OAuthAccountIntegration): string {
   if (!acc.connected) return 'Not connected'
   if (acc.email !== null && acc.email.length > 0) return acc.email
@@ -64,6 +73,74 @@ export function IntegrationsTab({
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [rowError, setRowError] = useState<Record<string, string>>({})
+
+  // ── archived projects (archived-projects sprint) ──
+  const [archived, setArchived] = useState<ArchivedProject[]>([])
+  const [archivedLoading, setArchivedLoading] = useState(true)
+  const [archivedError, setArchivedError] = useState<string | null>(null)
+  const [restoringId, setRestoringId] = useState<string | null>(null)
+  const doFetch: FetchImpl = useMemo(
+    () => fetchImpl ?? ((input, init) => fetch(input, init)),
+    [fetchImpl],
+  )
+
+  const loadArchived = useCallback((): void => {
+    setArchivedLoading(true)
+    setArchivedError(null)
+    void doFetch(`${config.origin}/api/app/projects/archived`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${config.token}` },
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = (await res.json().catch(() => null)) as { archived?: unknown } | null
+        const list = Array.isArray(data?.archived) ? data.archived : []
+        setArchived(
+          list.filter(
+            (p): p is ArchivedProject =>
+              typeof p === 'object' &&
+              p !== null &&
+              typeof (p as ArchivedProject).id === 'string' &&
+              typeof (p as ArchivedProject).name === 'string',
+          ),
+        )
+        setArchivedLoading(false)
+      })
+      .catch((err: unknown) => {
+        setArchived([])
+        setArchivedLoading(false)
+        setArchivedError(err instanceof Error ? err.message : 'failed to load archived projects')
+      })
+  }, [doFetch, config.origin, config.token])
+
+  useEffect(() => loadArchived(), [loadArchived])
+
+  const restoreProject = useCallback(
+    (id: string): void => {
+      if (restoringId !== null) return
+      setRestoringId(id)
+      setArchivedError(null)
+      void doFetch(`${config.origin}/api/app/projects/${encodeURIComponent(id)}/restore`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${config.token}` },
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const body = (await res.json().catch(() => null)) as { message?: string } | null
+            throw new Error(body?.message ?? `HTTP ${res.status}`)
+          }
+          // Drop it from the archived list; the rail picks it back up live off
+          // the `projects_changed` frame the restore endpoint fans.
+          setArchived((prev) => prev.filter((p) => p.id !== id))
+          setRestoringId(null)
+        })
+        .catch((err: unknown) => {
+          setRestoringId(null)
+          setArchivedError(err instanceof Error ? err.message : 'failed to restore project')
+        })
+    },
+    [doFetch, config.origin, config.token, restoringId],
+  )
 
   const load = useCallback((): (() => void) => {
     let cancelled = false
@@ -247,6 +324,46 @@ export function IntegrationsTab({
                         {err !== undefined && err.length > 0 ? (
                           <div className="cdoc-comments-error">{err}</div>
                         ) : null}
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </section>
+
+            {/* ── Archived projects ── */}
+            <section className="cint-section" aria-label="Archived projects">
+              <h3 className="cint-section-title">Archived projects</h3>
+              {archivedError !== null ? (
+                <div className="cdoc-comments-error">{archivedError}</div>
+              ) : null}
+              {archivedLoading ? (
+                <div className="cdoc-empty">Loading…</div>
+              ) : archived.length === 0 ? (
+                <div className="cdoc-empty">No archived projects.</div>
+              ) : (
+                <ul className="cint-list" aria-label="Archived projects">
+                  {archived.map((p) => {
+                    const isBusy = restoringId === p.id
+                    return (
+                      <li key={p.id} className="cint-row cint-row-archived">
+                        <div className="cint-row-main">
+                          <span className="cint-row-label">
+                            {p.emoji.length > 0 ? `${p.emoji} ` : ''}
+                            {p.name}
+                          </span>
+                          {p.archived_at.length > 0 ? (
+                            <span className="cint-row-sub">Archived {p.archived_at.slice(0, 10)}</span>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          className="cdoc-btn cdoc-btn-primary"
+                          disabled={isBusy}
+                          onClick={() => restoreProject(p.id)}
+                        >
+                          {isBusy ? 'Restoring…' : 'Restore'}
+                        </button>
                       </li>
                     )
                   })}

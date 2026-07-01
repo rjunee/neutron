@@ -98,6 +98,12 @@ export function SettingsTab({
   const [savingEmoji, setSavingEmoji] = useState(false)
   const [emojiError, setEmojiError] = useState<string | null>(null)
 
+  // ── archive (archived-projects sprint) ──
+  const [confirmingArchive, setConfirmingArchive] = useState(false)
+  const [archiving, setArchiving] = useState(false)
+  const [archived, setArchived] = useState(false)
+  const [archiveError, setArchiveError] = useState<string | null>(null)
+
   // ── collaborators (display-only) ──
   const [members, setMembers] = useState<ProjectMemberView[]>([])
 
@@ -166,6 +172,10 @@ export function SettingsTab({
     setBusyKey(null)
     setNameError(null)
     setEmojiError(null)
+    setConfirmingArchive(false)
+    setArchiving(false)
+    setArchived(false)
+    setArchiveError(null)
     setMembers([])
     loadCreds()
     loadSettings()
@@ -267,6 +277,32 @@ export function SettingsTab({
         setEmojiError(err instanceof Error ? err.message : 'failed to set emoji')
       })
   }, [doFetch, config.origin, config.token, projectId, emojiDraft, emoji, savingEmoji])
+
+  const archiveProject = useCallback((): void => {
+    if (archiving || archived) return
+    setArchiving(true)
+    setArchiveError(null)
+    void doFetch(`${config.origin}/api/app/projects/${encodeURIComponent(projectId)}/archive`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.token}` },
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { message?: string } | null
+          throw new Error(body?.message ?? `HTTP ${res.status}`)
+        }
+        // The project now drops out of the rail live (the server fans a
+        // `projects_changed`). We flip to an "archived" notice; navigation away
+        // is driven by the rail refresh + the shell's project selection.
+        setArchiving(false)
+        setArchived(true)
+        setConfirmingArchive(false)
+      })
+      .catch((err: unknown) => {
+        setArchiving(false)
+        setArchiveError(err instanceof Error ? err.message : 'failed to archive project')
+      })
+  }, [doFetch, config.origin, config.token, projectId, archiving, archived])
 
   const ownerRow =
     members.find((m) => m.role === 'owner') ?? { user_id: config.userId, name: 'You (owner)', role: 'owner' as const }
@@ -449,6 +485,53 @@ export function SettingsTab({
           </div>
           <div className="cset-note">Shown next to this project in the rail.</div>
           {emojiError !== null ? <div className="cset-error">{emojiError}</div> : null}
+        </div>
+
+        {/* Archive — remove the project from the rail without deleting it. It
+            stays in the Admin tab's "Archived projects" list and can be
+            restored any time (archived-projects sprint). */}
+        <div className="cset-field cset-archive">
+          <label className="cset-label">Archive</label>
+          {archived ? (
+            <div className="cset-note" role="status">
+              Project archived — it’s been removed from your rail. Restore it any
+              time from the Admin tab’s “Archived projects” section.
+            </div>
+          ) : confirmingArchive ? (
+            <div className="cset-inline">
+              <span className="cset-note">
+                Archive this project? It leaves the rail but can be restored later.
+              </span>
+              <button
+                type="button"
+                className="cset-btn cset-btn-danger"
+                disabled={archiving}
+                onClick={archiveProject}
+              >
+                {archiving ? 'Archiving…' : 'Confirm archive'}
+              </button>
+              <button
+                type="button"
+                className="cset-btn"
+                disabled={archiving}
+                onClick={() => setConfirmingArchive(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="cset-inline">
+              <button
+                type="button"
+                className="cset-btn"
+                onClick={() => setConfirmingArchive(true)}
+              >
+                Archive project
+              </button>
+              <span className="cset-note">Removes it from the rail (reversible).</span>
+            </div>
+          )}
+          {archiveError !== null ? <div className="cset-error">{archiveError}</div> : null}
         </div>
       </section>
 

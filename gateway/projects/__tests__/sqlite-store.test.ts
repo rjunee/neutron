@@ -430,3 +430,56 @@ describe('SqliteProjectSettingsStore — seedDefaults', () => {
     expect(all2.length).toBe(3)
   })
 })
+
+describe('SqliteProjectSettingsStore — archive + restore (0095)', () => {
+  test('archive hides a project from the rail list; listArchived surfaces it', async () => {
+    await store.get(OWNER, 'keep')
+    await store.get(OWNER, 'gone')
+    expect((await store.list(OWNER)).map((p) => p.id).sort()).toEqual(['gone', 'keep'])
+
+    expect(await store.archive(OWNER, 'gone')).toBe(true)
+    // Left the rail…
+    expect((await store.list(OWNER)).map((p) => p.id)).toEqual(['keep'])
+    // …but is listed as archived, with a concrete emoji + a timestamp.
+    const archived = await store.listArchived(OWNER)
+    expect(archived.map((p) => p.id)).toEqual(['gone'])
+    expect(archived[0]!.emoji.length).toBeGreaterThan(0)
+    expect(archived[0]!.archived_at).not.toBe('')
+    // The per-project settings GET now 404s (readRow filters archived).
+    expect(await store.get(OWNER, 'gone')).toBeNull()
+  })
+
+  test('restore returns an archived project to the rail', async () => {
+    await store.get(OWNER, 'back')
+    await store.archive(OWNER, 'back')
+    expect((await store.list(OWNER)).length).toBe(0)
+
+    expect(await store.restore(OWNER, 'back')).toBe(true)
+    expect((await store.list(OWNER)).map((p) => p.id)).toEqual(['back'])
+    expect(await store.listArchived(OWNER)).toEqual([])
+    expect(await store.get(OWNER, 'back')).not.toBeNull()
+  })
+
+  test('archive/restore are idempotent; unknown id returns false', async () => {
+    await store.get(OWNER, 'p1')
+    expect(await store.archive(OWNER, 'p1')).toBe(true)
+    expect(await store.archive(OWNER, 'p1')).toBe(true) // already archived → ok
+    expect(await store.restore(OWNER, 'p1')).toBe(true)
+    expect(await store.restore(OWNER, 'p1')).toBe(true) // already active → ok
+    // Unknown id → false (nothing to archive/restore).
+    expect(await store.archive(OWNER, 'nope')).toBe(false)
+    expect(await store.restore(OWNER, 'nope')).toBe(false)
+  })
+
+  test('a soft-deleted project can never be archived or restored', async () => {
+    await store.get(OWNER, 'del')
+    // Soft-delete it directly (mirrors delete_project / merge_projects).
+    await db.run(`UPDATE projects SET deleted_at = ? WHERE id = ?`, [
+      new Date().toISOString(),
+      'del',
+    ])
+    expect(await store.archive(OWNER, 'del')).toBe(false)
+    expect(await store.restore(OWNER, 'del')).toBe(false)
+    expect(await store.listArchived(OWNER)).toEqual([])
+  })
+})

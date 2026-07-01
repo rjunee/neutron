@@ -83,6 +83,8 @@ export const AGENT_SETTINGS_TOOLS_FRAGMENT = [
   '- list_projects() — list the current projects (call this first when the user references a project by name, so you have the exact current name).',
   '- rename_project(old_name, new_name) — rename a project (also retitles its Telegram topic). Use when the user says e.g. "rename 123 Main St to Home Base".',
   '- delete_project(name) — soft-delete a project and archive its Telegram topic. Use when the user says e.g. "delete the Old Stuff project".',
+  '- archive_project(name) — archive a project: it leaves the rail but stays in the Admin tab and can be restored later (reversible, unlike delete). Use when the user says e.g. "archive this project" or "put the Summer Trip project away".',
+  '- restore_project(name) — restore a previously archived project back to the rail. Use when the user says e.g. "restore the Summer Trip project" or "bring back the archived Foo".',
   '- merge_projects(from_name, into_name) — merge one project into another. Use when the user says e.g. "merge Side Notes into Main Work".',
   '- update_personality(new_archetype?, new_description?) — change your personality. Use when the user says e.g. "be more playful" or "switch to a calm strategist".',
   '- update_agent_name(new_name) — change your own display name. Use when the user says e.g. "call yourself Nova".',

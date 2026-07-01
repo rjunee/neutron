@@ -2,6 +2,52 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Archived projects: reversible archive via Settings/chat + global Admin restore
+
+**Why.** Projects had soft-delete only (`deleted_at`, migration 0053) — hidden
+from every surface with no user-facing way back. The M2 cutover needs a
+reversible "put this away for now": Ryan's 22 archived projects migrate as an
+archive state that stays visible + restorable. This adds a first-class ARCHIVE
+lifecycle distinct from delete (Ryan Q3, M2 Decisions Log).
+
+**What shipped.**
+
+- **Migration 0095 (`archived_at`).** A nullable ISO-8601 column on the STRICT
+  `projects` table (plain `ALTER TABLE ADD COLUMN`, mirroring 0093/0094).
+  `NULL` = active (in the rail); set = archived. Orthogonal to `deleted_at` —
+  the rail + the archived list both additionally require `deleted_at IS NULL`, so
+  a soft-delete always wins. `migrations/expected-schema.txt` regenerated;
+  `runner.test.ts` asserts the column lands.
+- **Store (`gateway/projects/sqlite-store.ts`).** `list()` (the rail) and
+  `readRow()` (settings GET/PATCH) now filter `archived_at IS NULL` alongside
+  `deleted_at`. New methods `archive` / `restore` (idempotent; a probe restricted
+  to `deleted_at IS NULL` so a deleted project is never archived/restored) +
+  `listArchived` (the Admin restorable list, newest-archived-first, emoji
+  resolved). Mirrored on `InMemoryProjectSettingsStore`.
+- **HTTP (`gateway/http/app-projects-surface.ts`).** `POST
+  /api/app/projects/<id>/archive`, `POST .../restore`, and `GET
+  /api/app/projects/archived` — all app-ws-bearer-gated. Archive/restore fan a
+  `projects_changed` (via the existing `onRailFieldChanged`) so connected rails
+  update live; unknown/deleted id → 404. The `/archived` route is an exact path,
+  so it can never collide with a project whose id is literally "archived".
+- **Settings tab (`landing/chat-react/SettingsTab.tsx`).** An "Archive project"
+  action in the Project section with a two-step confirm; on success the project
+  leaves the rail and the section shows the archived notice.
+- **Admin tab (`landing/chat-react/IntegrationsTab.tsx`).** A new "Archived
+  projects" section listing archived projects with a per-row **Restore** button
+  (POSTs `/restore`, drops the row, rail picks it back up live).
+- **Chat / agent-native (`cores/free/agent-settings`).** New `archive_project` /
+  `restore_project` tools (capability-gated, Telegram-confirmed, topic closed on
+  archive) so "archive this project" / "restore the Foo project" work in chat.
+  `findLiveByName` + `list_projects` now exclude archived rows; a new
+  `findArchivedByName` resolves the restore target. System-prompt fragment +
+  manifest + TOOL_NAMES updated (nine → eleven tools).
+
+**Tests.** Store archive/restore/listArchived + idempotency + soft-delete guard;
+HTTP archive→hide→list-archived→restore round-trip + 404 + method guards; agent
+tool archive/restore + list exclusion + honest-failure; React Settings archive
+flow + Admin restore/empty-state; migration snapshot + column assertion.
+
 ## 2026-07-01 — Project rail redesign: per-project emoji, activity-reorder, unread badge
 
 **Why.** The left project rail (`landing/chat-react` + the mobile `app/` project

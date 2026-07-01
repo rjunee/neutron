@@ -5,10 +5,13 @@
  * onboarding final-handoff makes ("you can rename / delete / merge
  * projects, switch personality, update my name later — just ask me").
  *
- * Nine MCP tools:
- *   - list_projects       — current (non-deleted) projects
+ * Eleven MCP tools:
+ *   - list_projects       — current (non-deleted, non-archived) projects
  *   - rename_project      — rename + retitle the Telegram forum topic
  *   - delete_project      — soft-delete + close/archive the topic
+ *   - archive_project     — reversible archive (0095): leave the rail, keep in
+ *                           the Admin tab; close the topic
+ *   - restore_project     — clear archived_at → back to the rail
  *   - merge_projects      — move context + soft-delete `from` + archive
  *   - update_personality  — agent archetype / description phrase
  *   - update_agent_name   — agent display name
@@ -27,7 +30,7 @@
  *
  * Wiring: registered by `gateway/cores/install-bundled.ts` via the
  * `agent_settings` `CoreBackendFactory` (built in
- * `gateway/index.ts:buildCoresBackendFactories`). The six tool names are
+ * `gateway/index.ts:buildCoresBackendFactories`). The tool names are
  * surfaced to the owner's CC subprocess via the tool-mention fragment in
  * `runtime/system-prompt.ts` (AGENT_SETTINGS_TOOLS_FRAGMENT).
  */
@@ -62,10 +65,14 @@ export {
 
 export {
   buildTools,
+  type ArchiveProjectInput,
+  type ArchiveProjectOutput,
   type BuiltTools,
   type ConnectTelegramOutput,
   type DeleteProjectInput,
   type DeleteProjectOutput,
+  type RestoreProjectInput,
+  type RestoreProjectOutput,
   type GetEngagementModeInput,
   type GetEngagementModeOutput,
   type ListProjectsOutput,

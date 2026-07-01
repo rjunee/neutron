@@ -47,6 +47,7 @@ import {
   type ProjectSettings,
   type ProjectListEntry,
   type ProjectSettingsStore,
+  type ArchivedProjectItem,
   buildDefaultSettings,
 } from '../http/app-projects-surface.ts'
 import { resolveProjectEmoji } from './default-emoji.ts'
@@ -64,6 +65,8 @@ interface ProjectRow {
   updated_at: string
   /** ISO-8601; NULL on legacy rows → sort falls back to updated_at. */
   last_activity_at: string | null
+  /** ISO-8601; NULL = active (in the rail). Set = archived (migration 0095). */
+  archived_at: string | null
 }
 
 interface MemberRow {
@@ -75,7 +78,7 @@ interface MemberRow {
 }
 
 const PROJECT_COLS =
-  'id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at'
+  'id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at, archived_at'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -245,11 +248,15 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
     // Rail-redesign: sort by ACTIVITY (`COALESCE(last_activity_at, updated_at)`
     // DESC) so a project with new messages pops to the top; a legacy row with a
     // NULL activity key falls back to updated_at rather than sinking.
+    // Archived-projects (0095): the rail additionally excludes `archived_at IS
+    // NOT NULL` rows — an archived project leaves the rail but survives in the
+    // Admin tab's restorable list. A soft-delete still wins (deleted_at filter).
     const rows = this.db
       .prepare<ProjectRow, []>(
         `SELECT ${PROJECT_COLS}
            FROM projects
           WHERE deleted_at IS NULL
+            AND archived_at IS NULL
           ORDER BY COALESCE(last_activity_at, updated_at) DESC, id ASC`,
       )
       .all()
@@ -317,7 +324,7 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
   async touchActivity(project_id: string, iso: string = nowIso()): Promise<void> {
     try {
       await this.db.run(
-        `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL`,
+        `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
         [iso, project_id],
       )
     } catch {
@@ -359,12 +366,98 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
    * `rowExistsIncludingDeleted` (existence only) or a dedicated query.
    */
   private readRow(project_id: string): ProjectRow | null {
+    // Archived-projects (0095): `archived_at IS NULL` joins the `deleted_at`
+    // filter so neither `get` nor `update` reads/mutates an ARCHIVED project —
+    // it has left the rail and the per-project Settings tab is unreachable until
+    // it is restored from the Admin tab. Archive/restore go through the
+    // dedicated methods below (which probe by id regardless of archive state).
     const row = this.db
       .prepare<ProjectRow, [string]>(
-        `SELECT ${PROJECT_COLS} FROM projects WHERE id = ? AND deleted_at IS NULL`,
+        `SELECT ${PROJECT_COLS} FROM projects WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL`,
       )
       .get(project_id)
     return row ?? null
+  }
+
+  /**
+   * Archive a project (archived-projects sprint, migration 0095). Sets
+   * `archived_at` so the project leaves the rail but stays in the Admin tab's
+   * restorable list. Idempotent: archiving an already-archived project reports
+   * success without a second write. Returns `false` only when there is no
+   * non-deleted row for `project_id` (unknown or soft-deleted → never archive a
+   * deleted project). `project_slug` is interface parity (the DB IS the scope).
+   */
+  async archive(project_slug: string, project_id: string): Promise<boolean> {
+    void project_slug
+    const state = this.archiveState(project_id)
+    if (state === 'absent') return false
+    if (state === 'archived') return true
+    await this.db.run(
+      `UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+      [nowIso(), nowIso(), project_id],
+    )
+    return true
+  }
+
+  /**
+   * Restore an archived project (migration 0095): clear `archived_at` so it
+   * returns to the rail. Idempotent: restoring an already-active project reports
+   * success. Returns `false` only when there is no non-deleted row for
+   * `project_id`. Never resurrects a soft-deleted project (the `deleted_at`
+   * guard) — restore is the inverse of archive, not of delete.
+   */
+  async restore(project_slug: string, project_id: string): Promise<boolean> {
+    void project_slug
+    const state = this.archiveState(project_id)
+    if (state === 'absent') return false
+    if (state === 'active') return true
+    await this.db.run(
+      `UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+      [nowIso(), project_id],
+    )
+    return true
+  }
+
+  /**
+   * List every ARCHIVED (non-deleted) project — backs the Admin tab's
+   * "Archived projects" section (`GET /api/app/projects/archived`). Ordered
+   * most-recently-archived first. Emoji is resolved to a concrete glyph (a
+   * legacy NULL falls back to the deterministic default from the name) so the
+   * admin row renders the same glyph the rail showed.
+   */
+  async listArchived(project_slug: string): Promise<ArchivedProjectItem[]> {
+    void project_slug
+    const rows = this.db
+      .prepare<ProjectRow, []>(
+        `SELECT ${PROJECT_COLS}
+           FROM projects
+          WHERE deleted_at IS NULL
+            AND archived_at IS NOT NULL
+          ORDER BY archived_at DESC, id ASC`,
+      )
+      .all()
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      emoji: resolveProjectEmoji(r.emoji, r.name),
+      archived_at: r.archived_at ?? '',
+    }))
+  }
+
+  /**
+   * Classify a project id for the archive/restore path: `absent` (no row, or
+   * soft-deleted — both mean "don't touch"), `active` (live, not archived), or
+   * `archived`. A single probe restricted to `deleted_at IS NULL` so a deleted
+   * project is indistinguishable from a missing one (never archive/restore it).
+   */
+  private archiveState(project_id: string): 'absent' | 'active' | 'archived' {
+    const row = this.db
+      .prepare<{ archived_at: string | null }, [string]>(
+        `SELECT archived_at FROM projects WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      )
+      .get(project_id)
+    if (row === undefined || row === null) return 'absent'
+    return row.archived_at === null ? 'active' : 'archived'
   }
 
   /**

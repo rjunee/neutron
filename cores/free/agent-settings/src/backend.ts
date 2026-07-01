@@ -161,6 +161,26 @@ export interface AgentSettingsBackend {
     success: boolean
     removed?: { name: string; context_archived_at: string | null }
   }>
+  /**
+   * Archive a project by name (migration 0095) — sets `archived_at` so it
+   * leaves the rail but stays restorable from the Admin tab. Reversible, and
+   * DISTINCT from `deleteProject` (the topic is closed either way, but archive
+   * keeps the project in the owner's Admin list). Unknown / already-archived
+   * name → `success:false`.
+   */
+  archiveProject(name: string): Promise<{
+    success: boolean
+    archived?: { name: string; archived_at: string }
+  }>
+  /**
+   * Restore an archived project by name — clears `archived_at` so it returns to
+   * the rail. Resolves against the archived set only; an unknown / not-archived
+   * name → `success:false`.
+   */
+  restoreProject(name: string): Promise<{
+    success: boolean
+    restored?: { name: string }
+  }>
   mergeProjects(
     from_name: string,
     into_name: string,
@@ -277,14 +297,35 @@ export function buildAgentSettingsBackend(
     const trimmed = name.trim()
     // Case-insensitive name match, live rows only. Returns the
     // most-recently-updated match if two live projects share a name
-    // (0038 explicitly allows duplicate names).
+    // (0038 explicitly allows duplicate names). Archived-projects (0095):
+    // `archived_at IS NULL` joins the delete filter so an archived project is
+    // not a rename/delete/merge/engagement target until it is restored — it
+    // has left every live surface. Restore resolves it via `findArchivedByName`.
     const row = projectDb
       .prepare<ProjectRow, [string]>(
         `SELECT ${SELECT_COLS}
            FROM projects
           WHERE deleted_at IS NULL
+            AND archived_at IS NULL
             AND name = ? COLLATE NOCASE
           ORDER BY updated_at DESC, id ASC
+          LIMIT 1`,
+      )
+      .get(trimmed)
+    return row ?? null
+  }
+
+  // Resolve an ARCHIVED (non-deleted) project by name — the restore target.
+  const findArchivedByName = (name: string): ProjectRow | null => {
+    const trimmed = name.trim()
+    const row = projectDb
+      .prepare<ProjectRow, [string]>(
+        `SELECT ${SELECT_COLS}
+           FROM projects
+          WHERE deleted_at IS NULL
+            AND archived_at IS NOT NULL
+            AND name = ? COLLATE NOCASE
+          ORDER BY archived_at DESC, id ASC
           LIMIT 1`,
       )
       .get(trimmed)
@@ -307,6 +348,7 @@ export function buildAgentSettingsBackend(
           `SELECT ${SELECT_COLS}
              FROM projects
             WHERE deleted_at IS NULL
+              AND archived_at IS NULL
             ORDER BY updated_at DESC, id ASC`,
         )
         .all()
@@ -356,6 +398,41 @@ export function buildAgentSettingsBackend(
         success: true,
         removed: { name: row.name, context_archived_at: ts },
       }
+    },
+
+    async archiveProject(name: string): Promise<{
+      success: boolean
+      archived?: { name: string; archived_at: string }
+    }> {
+      const row = findLiveByName(name)
+      if (row === null) return { success: false }
+      const ts = nowIso()
+      await projectDb.run(
+        `UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?`,
+        [ts, ts, row.id],
+      )
+      // Close/archive the Telegram topic (best-effort) + confirm — mirrors
+      // deleteProject, but the project stays restorable from the Admin tab.
+      await telegram.archiveTopic(row.topic_id)
+      await telegram.sendConfirmation(
+        `Archived the "${row.name}" project — it's out of your rail but you can restore it any time from the Admin tab.`,
+      )
+      return { success: true, archived: { name: row.name, archived_at: ts } }
+    },
+
+    async restoreProject(name: string): Promise<{
+      success: boolean
+      restored?: { name: string }
+    }> {
+      const row = findArchivedByName(name)
+      if (row === null) return { success: false }
+      const ts = nowIso()
+      await projectDb.run(
+        `UPDATE projects SET archived_at = NULL, updated_at = ? WHERE id = ?`,
+        [ts, row.id],
+      )
+      await telegram.sendConfirmation(`Restored the "${row.name}" project — it's back in your rail.`)
+      return { success: true, restored: { name: row.name } }
     },
 
     async mergeProjects(

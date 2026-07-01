@@ -116,6 +116,22 @@ export interface ProjectListEntry extends ProjectSettings {
 }
 
 /**
+ * A row in the Admin tab's "Archived projects" section
+ * (`GET /api/app/projects/archived`). Archived-projects sprint (migration
+ * 0095): a lightweight projection — the admin list only needs to identify the
+ * project (id + name + rail glyph) and show when it was put away, plus a
+ * Restore button that POSTs `/api/app/projects/<id>/restore`.
+ */
+export interface ArchivedProjectItem {
+  id: string
+  name: string
+  /** Resolved rail glyph (a concrete default when the column is NULL). */
+  emoji: string
+  /** ISO-8601 archive timestamp; '' when unknown. */
+  archived_at: string
+}
+
+/**
  * M2.3 unified-list discriminator. `solo` projects live in this
  * owner's own DB; `shared` projects come from a workspace instance the
  * user is a member of (fetched cross-instance). Per engineering-plan § A.3.2
@@ -203,6 +219,20 @@ export interface ProjectSettingsStore {
    * (unread degrades to 0). Returns the richer {@link ProjectListEntry} rows.
    */
   list(project_slug: string, user_id?: string): Promise<ProjectListEntry[]>
+  /**
+   * Archive a project (migration 0095) — sets `archived_at` so it leaves the
+   * rail but stays restorable from the Admin tab. Idempotent. Returns `false`
+   * only when there is no non-deleted row for `project_id` (unknown / deleted).
+   */
+  archive(project_slug: string, project_id: string): Promise<boolean>
+  /**
+   * Restore an archived project — clears `archived_at` so it returns to the
+   * rail. Idempotent. Returns `false` when there is no non-deleted row.
+   */
+  restore(project_slug: string, project_id: string): Promise<boolean>
+  /** List every archived (non-deleted) project — backs the Admin tab's
+   *  "Archived projects" restorable list. */
+  listArchived(project_slug: string): Promise<ArchivedProjectItem[]>
 }
 
 /**
@@ -247,6 +277,8 @@ function humaniseProjectId(project_id: string): string {
  */
 export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
   private readonly rows = new Map<string, ProjectSettings>()
+  /** Keys (`slug::id`) whose project is archived (migration 0095 twin). */
+  private readonly archived = new Set<string>()
 
   async get(project_slug: string, project_id: string): Promise<ProjectSettings | null> {
     const key = this.keyFor(project_slug, project_id)
@@ -286,9 +318,38 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
     const out: ProjectListEntry[] = []
     for (const [key, value] of this.rows.entries()) {
       if (!key.startsWith(prefix)) continue
+      // Archived projects leave the rail (twin of the SQLite `archived_at`
+      // filter) — they surface only via `listArchived`.
+      if (this.archived.has(key)) continue
       // The in-memory seam has no chat log, so unread degrades to 0 and there
       // is no activity timestamp — the SQLite store owns the real values.
       out.push({ ...cloneSettings(value), last_activity_at: '', unread_count: 0 })
+    }
+    out.sort((a, b) => a.id.localeCompare(b.id))
+    return out
+  }
+
+  async archive(project_slug: string, project_id: string): Promise<boolean> {
+    const key = this.keyFor(project_slug, project_id)
+    if (!this.rows.has(key)) return false
+    this.archived.add(key)
+    return true
+  }
+
+  async restore(project_slug: string, project_id: string): Promise<boolean> {
+    const key = this.keyFor(project_slug, project_id)
+    if (!this.rows.has(key)) return false
+    this.archived.delete(key)
+    return true
+  }
+
+  async listArchived(project_slug: string): Promise<ArchivedProjectItem[]> {
+    const prefix = `${project_slug}::`
+    const out: ArchivedProjectItem[] = []
+    for (const [key, value] of this.rows.entries()) {
+      if (!key.startsWith(prefix)) continue
+      if (!this.archived.has(key)) continue
+      out.push({ id: value.id, name: value.name, emoji: value.emoji, archived_at: '' })
     }
     out.sort((a, b) => a.id.localeCompare(b.id))
     return out
@@ -301,6 +362,7 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
   /** Test helper — wipe the in-memory map. */
   reset(): void {
     this.rows.clear()
+    this.archived.clear()
   }
 }
 
@@ -418,6 +480,13 @@ export interface AppProjectsSurface {
 
 const PATH_PREFIX = '/api/app/projects'
 const LIST_PATH = '/api/app/projects'
+// Archived-projects (0095). The Admin tab's restorable list is an EXACT path
+// (no per-project action segment), so it can never collide with a project whose
+// id happens to be "archived" — that project's routes are all
+// `/archived/<action>`. Archive/restore are per-project POST actions.
+const ARCHIVED_LIST_PATH = '/api/app/projects/archived'
+const ARCHIVE_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/archive$/
+const RESTORE_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/restore$/
 const PATH_RE = /^\/api\/app\/projects\/([^/]+)\/settings$/
 const INVITE_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/invite$/
 // M2.6 Ph5 — connect member-management routes.
@@ -461,6 +530,57 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
           return handleCreate(req, createProject, resolved.project_slug, resolved.user_id)
         }
         return handleList(store, resolved.project_slug, resolved.user_id, sharedProjects)
+      }
+
+      // GET /api/app/projects/archived — the Admin tab's restorable list of
+      // archived projects (archived-projects sprint, migration 0095). Exact
+      // path, checked before the per-project routes.
+      if (pathname === ARCHIVED_LIST_PATH) {
+        if (method !== 'GET') {
+          return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /archived`)
+        }
+        const resolved = await resolveBearer(req, auth)
+        if ('code' in resolved) {
+          return jsonError(401, resolved.code, resolved.message)
+        }
+        const archived = await store.listArchived(resolved.project_slug)
+        return jsonOk({ archived, project_slug: resolved.project_slug })
+      }
+
+      // POST /api/app/projects/<project_id>/archive — archive a project (it
+      // leaves the rail; still restorable from the Admin tab).
+      const archiveMatch = ARCHIVE_PATH_RE.exec(pathname)
+      if (archiveMatch !== null) {
+        if (method !== 'POST') {
+          return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /archive`)
+        }
+        const pid = sanitizeProjectId(archiveMatch[1] ?? '')
+        if (pid === null) {
+          return jsonError(400, 'invalid_project_id', 'project_id must be 1-128 chars from [A-Za-z0-9_.-]')
+        }
+        const resolved = await resolveBearer(req, auth)
+        if ('code' in resolved) {
+          return jsonError(401, resolved.code, resolved.message)
+        }
+        return handleArchive(store, resolved.project_slug, pid, resolved.user_id, onRailFieldChanged)
+      }
+
+      // POST /api/app/projects/<project_id>/restore — restore an archived
+      // project (it returns to the rail).
+      const restoreMatch = RESTORE_PATH_RE.exec(pathname)
+      if (restoreMatch !== null) {
+        if (method !== 'POST') {
+          return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /restore`)
+        }
+        const pid = sanitizeProjectId(restoreMatch[1] ?? '')
+        if (pid === null) {
+          return jsonError(400, 'invalid_project_id', 'project_id must be 1-128 chars from [A-Za-z0-9_.-]')
+        }
+        const resolved = await resolveBearer(req, auth)
+        if ('code' in resolved) {
+          return jsonError(401, resolved.code, resolved.message)
+        }
+        return handleRestore(store, resolved.project_slug, pid, resolved.user_id, onRailFieldChanged)
       }
 
       // POST /api/app/projects/<project_id>/invite — in-app invite
@@ -675,6 +795,61 @@ async function handleCreate(
     { project: { id: result.project_id, label: result.name }, created: result.outcome === 'created' },
     result.outcome === 'created' ? 201 : 200,
   )
+}
+
+/**
+ * POST /api/app/projects/<id>/archive — archive a project (migration 0095). On
+ * success it leaves the rail; we fan a fresh `projects_changed` so every
+ * connected rail drops it live (no reload). A `false` from the store means the
+ * project id is unknown or soft-deleted → 404 (never archive a deleted project).
+ */
+async function handleArchive(
+  store: ProjectSettingsStore,
+  project_slug: string,
+  project_id: string,
+  user_id: string,
+  onRailFieldChanged?: (input: { user_id: string }) => void,
+): Promise<Response> {
+  const ok = await store.archive(project_slug, project_id)
+  if (!ok) {
+    return jsonError(404, 'project_not_found', `project_id=${project_id}`)
+  }
+  fanRailRefresh(onRailFieldChanged, user_id)
+  return jsonOk({ archived: true, project_id, project_slug })
+}
+
+/**
+ * POST /api/app/projects/<id>/restore — restore an archived project. On success
+ * it returns to the rail; fan a `projects_changed` so connected rails re-render
+ * it live. `false` → 404 (unknown / soft-deleted id).
+ */
+async function handleRestore(
+  store: ProjectSettingsStore,
+  project_slug: string,
+  project_id: string,
+  user_id: string,
+  onRailFieldChanged?: (input: { user_id: string }) => void,
+): Promise<Response> {
+  const ok = await store.restore(project_slug, project_id)
+  if (!ok) {
+    return jsonError(404, 'project_not_found', `project_id=${project_id}`)
+  }
+  fanRailRefresh(onRailFieldChanged, user_id)
+  return jsonOk({ restored: true, project_id, project_slug })
+}
+
+/** Best-effort live-rail refresh — a throw here must never fail the persisted
+ *  archive/restore mutation (mirrors the PATCH `onRailFieldChanged` contract). */
+function fanRailRefresh(
+  onRailFieldChanged: ((input: { user_id: string }) => void) | undefined,
+  user_id: string,
+): void {
+  if (onRailFieldChanged === undefined) return
+  try {
+    onRailFieldChanged({ user_id })
+  } catch {
+    /* a live-refresh push must never fail the persisted mutation */
+  }
 }
 
 /** Project a cross-instance `SharedProjectItem` into the unified list shape.

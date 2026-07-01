@@ -208,4 +208,50 @@ describe('IntegrationsTab render (happy-dom)', () => {
     expect(container.textContent).toContain('unauthorized')
     root.unmount()
   })
+
+  it('lists archived projects and restores one (POST /restore) removing it from the list', async () => {
+    let restored = false
+    const archivedBody = {
+      archived: [
+        { id: 'summer', name: 'Summer Trip', emoji: '🏖️', archived_at: '2026-06-30T12:00:00.000Z' },
+      ],
+    }
+    const { container, root, act, calls } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json(archivedBody)
+      if (url.endsWith('/api/app/projects/summer/restore') && init?.method === 'POST') {
+        restored = true
+        return json({ ok: true, restored: true })
+      }
+      return null
+    })
+
+    expect(container.textContent).toContain('Archived projects')
+    expect(container.textContent).toContain('Summer Trip')
+
+    const restoreBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Restore',
+    ) as HTMLButtonElement
+    await act(async () => {
+      restoreBtn.click()
+      await tick()
+      await tick()
+    })
+
+    expect(restored).toBe(true)
+    expect(calls.some((c) => c === 'POST https://sam.neutron.test/api/app/projects/summer/restore')).toBe(true)
+    // Dropped from the archived list after a successful restore.
+    expect(container.textContent).not.toContain('Summer Trip')
+    root.unmount()
+  })
+
+  it('shows an empty state when there are no archived projects', async () => {
+    const { container, root } = await mount((url) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      return null
+    })
+    expect(container.textContent).toContain('No archived projects.')
+    root.unmount()
+  })
 })

@@ -110,6 +110,59 @@
         "capability_required": "write:agent_settings"
       },
       {
+        "name": "archive_project",
+        "description": "Archive a project by name. The project leaves the project rail but is kept in the owner's Admin tab under 'Archived projects' and can be restored any time — unlike delete_project, which hides it entirely. Its Telegram forum topic is closed. Call this when the user says e.g. 'archive this project' or 'put the Summer Trip project away'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "The display name of the project to archive." }
+          },
+          "required": ["name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "archived": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "archived_at": { "type": "string" }
+              },
+              "required": ["name", "archived_at"]
+            }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
+        "name": "restore_project",
+        "description": "Restore a previously archived project by name so it returns to the project rail. Call this when the user says e.g. 'restore the Summer Trip project' or 'bring back the archived Foo project'.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "The display name of the archived project to restore." }
+          },
+          "required": ["name"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "restored": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" }
+              },
+              "required": ["name"]
+            }
+          },
+          "required": ["success"]
+        },
+        "capability_required": "write:agent_settings"
+      },
+      {
         "name": "merge_projects",
         "description": "Merge one project into another: moves the 'from' project's context (its members + any sidecar context rows) into the 'into' project, soft-deletes 'from', and archives 'from's Telegram topic. Call this when the user says e.g. 'merge Side Notes into Main Work'.",
         "input_schema": {

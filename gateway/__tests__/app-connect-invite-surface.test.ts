@@ -91,6 +91,9 @@ async function start(): Promise<Harness> {
     list: async () => [
       { ...seededProject, members: [...seededProject.members], last_activity_at: '', unread_count: 0 },
     ],
+    archive: async () => true,
+    restore: async () => true,
+    listArchived: async () => [],
   }
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
 
