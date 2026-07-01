@@ -425,6 +425,66 @@ describe('evaluateAuthGate — Argus r1 fix-pass regression tests (BLOCKER #1 + 
     // second token. If both hits minted, that's the loop signature.
     expect(mintCalled).toBe(1)
   })
+
+  test('doc-link deep-link 404 fix (Codex P1): cookie-only GET /projects/<id>/docs?path=… (no ?start=) + mint hook → 302 to the SAME deep-link path with ?start=<fresh> (path preserved)', async () => {
+    // A RETURNING Managed user (valid cookie) hard-loads a shared doc URL. On
+    // Managed the shell derives identity from the ?start= JWT sub (no Open
+    // __neutron_user_id injection), so a token-less serve would throw
+    // ChatBootstrapError. The gate must mint + 302 to the SAME path (NOT /chat)
+    // with the doc query preserved so the reload boots identified + opens the doc.
+    const km = await makeKeyMaterial()
+    const cookie = signSessionCookie(PROJECT_SLUG, COOKIE_SECRET, Date.now())
+    const mintedToken = await mintTokenFor(km)
+    let mintCalled = 0
+    const req = makeBrowserRequest(
+      'https://t-55555555.neutron.example/projects/acme/docs?path=pitch-deck.md',
+      { headers: { cookie: `${cookie.name}=${cookie.value}` } },
+    )
+    const opts = buildGateOpts(km)
+    opts.mintStartToken = async (): Promise<string | null> => {
+      mintCalled++
+      return mintedToken
+    }
+    const decision = await evaluateAuthGate(req, opts)
+    expect(decision.kind).toBe('redirect')
+    if (decision.kind === 'redirect') {
+      // Path + original doc query preserved; ?start= appended.
+      expect(decision.location).toBe(
+        `/projects/acme/docs?path=pitch-deck.md&start=${encodeURIComponent(mintedToken)}`,
+      )
+      expect(decision.set_cookie ?? '').toContain('__neutron_chat_session=')
+    }
+    expect(mintCalled).toBe(1)
+  })
+
+  test('doc-link deep-link: hot-loop breaker — the follow-up GET /projects/<id>/docs?path=…&start=<fresh> → allow (mint once)', async () => {
+    const km = await makeKeyMaterial()
+    const cookie = signSessionCookie(PROJECT_SLUG, COOKIE_SECRET, Date.now())
+    const mintedToken = await mintTokenFor(km)
+    let mintCalled = 0
+    const opts = buildGateOpts(km)
+    opts.mintStartToken = async (): Promise<string | null> => {
+      mintCalled++
+      return mintedToken
+    }
+    const d1 = await evaluateAuthGate(
+      makeBrowserRequest('https://t-55555555.neutron.example/projects/acme/docs?path=x.md', {
+        headers: { cookie: `${cookie.name}=${cookie.value}` },
+      }),
+      opts,
+    )
+    expect(d1.kind).toBe('redirect')
+    const loc = d1.kind === 'redirect' ? d1.location : ''
+    // Follow the 302 (cookie + the new ?start=): must ALLOW, not mint again.
+    const d2 = await evaluateAuthGate(
+      makeBrowserRequest(`https://t-55555555.neutron.example${loc}`, {
+        headers: { cookie: `${cookie.name}=${cookie.value}` },
+      }),
+      opts,
+    )
+    expect(d2.kind).toBe('allow')
+    expect(mintCalled).toBe(1)
+  })
 })
 
 describe('evaluateAuthGate — sliding refresh (persistent session cookie sprint)', () => {

@@ -37,8 +37,15 @@ would open General, not the doc:
   `ProjectShell` opens it ONCE on boot via the same `onOpenDocLink` the tap uses
   (ref-guarded). `Markdown.tsx` is untouched — `target="_blank"` stays, and it's
   now correct (a middle/cmd-click opens a real, navigable URL).
-- **Auth parity.** `isGatedUserFacingRoute` gates `/projects[/…]` like `/chat`
-  (Managed only; no-op on the Open self-host + tests where `authGate` is unset).
+- **Auth parity (Managed).** `isGatedUserFacingRoute` gates `/projects[/…]` like
+  `/chat`; AND `landing/auth-gate.ts` gives a cookie-valid RETURNING user's
+  deep-link hit the SAME fresh-`?start=` mint as `/chat` — redirecting to the
+  SAME path with `?start=<fresh>` appended (path preserved). Without this a
+  Managed returning user's hard-load fell through to `allow` and served a
+  token-less shell → `ChatBootstrapError` (the Managed shell derives identity
+  from the `?start=` JWT `sub`, not an Open-style `__neutron_*` injection). Both
+  are no-ops on the Open self-host + tests (`authGate`/`mintStartToken` unset).
+  [Codex cross-model review P1.]
 
 **Verify.** Fresh QUIET install (`NEUTRON_HOME=/tmp/wfdoc PORT=7861 bun run
 open/server.ts`): a hard-loaded `/projects/dev/docs?path=STATUS.md` 302s (owner

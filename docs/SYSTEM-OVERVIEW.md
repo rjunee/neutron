@@ -447,7 +447,11 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > (`doc-link-nav.ts` `initialDocLinkFromLocation`) so `ProjectShell` opens the
 > doc once on boot via the same `onOpenDocLink` the tap uses. `Markdown.tsx`
 > keeps `target="_blank"` (a middle/cmd-click still opens a real, now-navigable
-> URL). Managed boots gate `/projects[/…]` like `/chat` (`isGatedUserFacingRoute`).
+> URL). On Managed the deep link is gated like `/chat` (`isGatedUserFacingRoute`)
+> AND `landing/auth-gate.ts` mints a fresh `?start=` for a cookie-valid returning
+> user — redirecting to the SAME path with `?start=<fresh>` appended (path
+> preserved) so the Managed shell (identity from the JWT `sub`, no Open `__neutron_*`
+> injection) boots identified instead of throwing `ChatBootstrapError`.
 
 > **STATUS.md leads the Documents list (P-B).** The standard per-project
 > `STATUS.md` lives at the PROJECT ROOT (`Projects/<id>/STATUS.md`), a sibling of
