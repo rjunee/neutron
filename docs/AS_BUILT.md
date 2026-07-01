@@ -2,6 +2,47 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Chat: fix one-line message bubble rendering ~2x tall
+
+**Why.** Ryan flagged (twice) that a single-line chat message bubble — e.g. the
+one-word user message "Ryan" — rendered at roughly double the height its text
+needs, top/bottom heavy. #141 reduced `.car-bubble` vertical padding (8px→5px)
+and `.car-md p` line-height (1.5→1.4) but did NOT fix it, proving padding was not
+the (only) cause.
+
+**Root cause.** The USER bubble renders its body as a bare `<p class="car-text">`
+(`landing/chat-react/ChatApp.tsx` `TextPart`, role=user), but **no `.car-text`
+CSS rule existed** anywhere in `landing/chat-react.html` — the only global reset
+is `* { box-sizing: border-box }`. So that `<p>` inherited the UA default
+`margin-block: 1em` (~16px top + 16px bottom), stacking on the 5px bubble padding
+→ a one-line user bubble ~2x its text height. #141 only touched `.car-bubble` and
+`.car-md p` (the AGENT path, whose paragraph margins are already zeroed by
+`.car-md > :first-child/:last-child`), so it never reached the user `<p>` — which
+is exactly why it missed Ryan's user-message evidence.
+
+**What shipped.**
+
+- **`landing/chat-react.html`.** New `.car-text { margin: 0; line-height: 1.4; }`
+  rule — zeroes the inherited UA `<p>` margin and matches the agent paragraph
+  line-height so a single-line user message hugs its text (bubble height = 5px +
+  one line + 5px).
+- **`landing/chat-react/message-adapter.ts`.** New `normalizeBody()` strips the
+  stray leading newlines + all trailing whitespace from a message body in
+  `toThreadMessage` (the single display seam for both bubble types). Both paths
+  preserve newlines (`white-space: pre-line` on the user `<p>`, `pre-wrap` on
+  `.car-bubble`), so a stray trailing `\n` on a one-line message would otherwise
+  render as an extra empty line. Deliberately narrow (Codex P2): leading
+  horizontal whitespace is PRESERVED so a Markdown agent message opening with an
+  indented code block (`"    npm test"`) still renders as code; INTERNAL blank
+  lines (real multi-line messages) are untouched.
+
+**Tests.** `landing/chat-react/__tests__/message-adapter.test.ts` — trailing/
+leading-newline strip on user + agent bodies, whitespace-only → empty, and a
+`normalizeBody` unit block asserting internal blank lines survive. tsc (leaf
+`landing/chat-react/tsconfig.json`) clean; leak-gate silent. Verified on a fresh
+quiet boot: the served `/chat` HTML carries the new `.car-text` rule and the
+lazily-bundled `chat-react.js` compiles the normalization in.
+
 ## 2026-07-01 — Notes Core: wire the four S1 tools (drawer/search/traverse) — ISSUE #330
 
 **Why.** The `notes` manifest declares eight MCP tools, but the install pipeline

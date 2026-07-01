@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import type { RenderMessage } from '../controller.ts'
-import { absolutize, toThreadMessage } from '../message-adapter.ts'
+import { absolutize, normalizeBody, toThreadMessage } from '../message-adapter.ts'
 
 function msg(over: Partial<RenderMessage> = {}): RenderMessage {
   return {
@@ -84,5 +84,44 @@ describe('toThreadMessage', () => {
       msg({ role: 'user', text: '', deleted: true, attachments: ['https://x/doc.pdf'] }),
     )
     expect(t.content).toEqual([{ type: 'text', text: '🚫 This message was deleted' }])
+  })
+
+  // Chat-bubble height fix: a stray trailing/leading newline renders as an extra
+  // empty line under `white-space: pre-line`/`pre-wrap`, making a one-line bubble
+  // ~2x tall. toThreadMessage must trim the ends so the bubble hugs its text.
+  it('strips a trailing newline from a one-line user body', () => {
+    const t = toThreadMessage(msg({ role: 'user', text: 'Ryan\n' }))
+    expect(t.content).toEqual([{ type: 'text', text: 'Ryan' }])
+  })
+
+  it('strips a leading newline from an agent body', () => {
+    const t = toThreadMessage(msg({ role: 'agent', text: '\nyo' }))
+    expect(t.content).toEqual([{ type: 'text', text: 'yo' }])
+  })
+
+  it('drops a whitespace-only body to no text part (renders no bubble line)', () => {
+    const t = toThreadMessage(msg({ role: 'user', text: '\n \n' }))
+    // whitespace-only trims to '' → no text part is pushed (empty content fallback)
+    expect(t.content).toEqual([{ type: 'text', text: '' }])
+  })
+})
+
+describe('normalizeBody', () => {
+  it('strips leading newlines and all trailing whitespace', () => {
+    expect(normalizeBody('Ryan\n')).toBe('Ryan')
+    expect(normalizeBody('\n\nRyan')).toBe('Ryan')
+    expect(normalizeBody('Ryan  \n')).toBe('Ryan')
+  })
+
+  it('preserves LEADING horizontal whitespace (Markdown indented code block)', () => {
+    // A response opening with a 4-space indent is a Markdown code block — must
+    // survive normalization (Codex P2). Only newlines/trailing space are stray.
+    expect(normalizeBody('    npm test')).toBe('    npm test')
+    expect(normalizeBody('\n    npm test\n')).toBe('    npm test')
+  })
+
+  it('preserves intentional INTERNAL blank lines (real multi-line message)', () => {
+    expect(normalizeBody('line1\n\nline2\n')).toBe('line1\n\nline2')
+    expect(normalizeBody('a\nb\nc')).toBe('a\nb\nc')
   })
 })
