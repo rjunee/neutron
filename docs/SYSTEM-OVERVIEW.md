@@ -352,6 +352,26 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    `remark-gfm` + `rehype-sanitize` (shared `Markdown.tsx`). The Documents tab
 >    keeps a Rendered↔Source toggle so comment anchors still map to RAW offsets.
 
+> **Light/dark theme toggle (2026-07-01).** The web chat is CSS-variable-driven:
+> `chat-react.html`'s stylesheet has ONE dark `:root` var set (the historical
+> default) and a `:root[data-theme="light"]` override set with an
+> iMessage-on-iPhone light palette (white surface, `#007AFF` user bubble,
+> `~#E9E9EB` grey agent bubbles with near-black text, iOS separators). EVERY
+> color resolves through a var — there are no dark-only leftovers — so flipping
+> `data-theme` reskins the whole UI with no dual code path and NO feature flag (a
+> theme is a user preference, not a code-path flag). Resolution is the single
+> source of truth in `landing/chat-react/theme.ts` (`resolveTheme(pref,
+> systemPrefersLight)`): an explicit `light`/`dark` preference wins; `system`
+> (the DEFAULT, and anything unrecognized) follows `prefers-color-scheme`. The
+> preference persists in `localStorage['neutron-theme']`. Two appliers mirror
+> that module: a tiny pre-paint inline `<script>` in `chat-react.html` sets
+> `data-theme` (+ the `theme-color` meta) BEFORE the stylesheet paints (no dark
+> FOUC), and the React `useTheme` hook re-applies + owns it after mount,
+> subscribing to `prefers-color-scheme` while the preference is `system`. The
+> top-right `ThemeToggle` (in `ProjectShell`'s `.car-topbar`) cycles system →
+> light → dark, showing the resolved glyph (☀/☾) with an "Auto" marker while
+> following the OS.
+
 > **Doc references are tappable in-app (P-A).** The live agent announces a doc it
 > drafts/edits with the marker `[friendly-name](docs:/<project_id>/<path>)`
 > (instructed in `build-live-agent-turn.ts`'s `<live_agent_context>`), which the

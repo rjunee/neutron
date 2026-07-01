@@ -9,24 +9,143 @@
 <link rel="manifest" href="/site.webmanifest" />
 <meta name="apple-mobile-web-app-title" content="Neutron" />
 <meta name="theme-color" content="#0b0d10" />
+<script>
+  // Pre-paint theme resolution — sets data-theme on <html> BEFORE the stylesheet
+  // below paints, so a user who prefers/last-chose light never sees a dark flash
+  // (FOUC). This is a tiny, dependency-free MIRROR of the resolution in
+  // landing/chat-react/theme.ts (which can't be imported inline); React's
+  // useTheme hook re-applies + owns the attribute after mount. Same key
+  // ('neutron-theme') and same rule: explicit 'light'/'dark' wins; anything else
+  // ('system' / absent / corrupt) follows prefers-color-scheme.
+  (function () {
+    try {
+      var pref = null;
+      try { pref = window.localStorage.getItem('neutron-theme'); } catch (e) {}
+      if (pref !== 'light' && pref !== 'dark') pref = 'system';
+      var systemLight = false;
+      try { systemLight = window.matchMedia('(prefers-color-scheme: light)').matches; } catch (e) {}
+      var resolved = pref === 'light' ? 'light' : pref === 'dark' ? 'dark' : (systemLight ? 'light' : 'dark');
+      document.documentElement.setAttribute('data-theme', resolved);
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', resolved === 'light' ? '#f5f5f7' : '#0b0d10');
+    } catch (e) { /* leave data-theme unset → :root dark defaults apply */ }
+  })();
+</script>
 <style>
+  /* ─────────────────────────────────────────────────────────────────────────
+     THEME (light/dark) — Ryan-requested 2026-07-01.
+     The stylesheet is ENTIRELY CSS-variable-driven: `:root` holds the DARK
+     palette (the historical default + the fallback when no data-theme is set),
+     and `:root[data-theme="light"]` overrides the SAME vars with an
+     iMessage-on-iPhone light palette. Every color below resolves through a var,
+     so there are NO dark-only leftovers — flipping `data-theme` reskins the whole
+     UI with ONE stylesheet (no dual code paths). The effective theme
+     (`data-theme="light"|"dark"`) is resolved from the persisted preference +
+     `prefers-color-scheme` by the pre-paint inline script in <head> and the
+     React `useTheme` hook (landing/chat-react/theme.ts).
+     ───────────────────────────────────────────────────────────────────────── */
   :root {
+    /* Core surfaces + text */
     --bg: #0b0d10;
     --surface: #16181d;
     --border: #1d2026;
     --fg: #e9eaee;
     --muted: #8a8f99;
     --accent: #6cf;
+    /* Text/icon drawn ON an accent-filled surface (primary buttons, badges). */
+    --on-accent: #04121f;
+    /* Chat bubbles */
     --user-bubble: #0a84ff;
     --user-fg: #ffffff;
     --agent-bubble: #1d2026;
     --agent-fg: #e9eaee;
     --agent-avatar-bg: #2b3037;
     --bubble-radius: 18px;
+    /* Hover / active / accent tints (rail, lists, rows, filters, flash). */
+    --hover-bg: rgba(255,255,255,.05);
+    --hover-bg-weak: rgba(255,255,255,.04);
+    --active-bg: rgba(108,170,255,.16);
+    --active-fg: #cfe6ff;
+    --accent-tint: rgba(108,170,255,.12);
+    --accent-tint-weak: rgba(108,170,255,.10);
+    --accent-flash: rgba(108,170,255,.18);
+    --accent-border: rgba(108,170,255,.4);
+    /* Code (inline + block) */
+    --code-bg: rgba(255,255,255,.08);
+    --code-block-bg: #0c0e12;
+    /* Status: danger/error, warn, info, success */
+    --danger: #e5534b;
+    --error-fg: #ff8a8a;
+    --error-border: rgba(255,138,138,.4);
+    --warn-fg: #ffd27d;
+    --warn-border: rgba(255,210,125,.4);
+    --info-fg: #8cc6ff;
+    --info-border: rgba(140,198,255,.4);
+    --info-track: rgba(140,198,255,.18);
+    --info-ring: rgba(140,198,255,.3);
+    --success-fg: #7ddf9b;
+    --success-border: rgba(125,223,155,.4);
+    /* Connection banners */
+    --banner-warn-bg: #2a2410;   --banner-warn-fg: #ffd479;
+    --banner-info-bg: #18222e;   --banner-info-fg: #8cc6ff;
+    --banner-error-bg: #2a1416;  --banner-error-fg: #ff8a8a;
+    /* Overlays (drag-and-drop scrim/frame, image gallery label) */
+    --scrim: rgba(10,10,10,0.62);
+    --dropzone-frame-bg: rgba(18,18,18,0.92);
+    --gallery-label-bg: rgba(10,10,10,0.7);
+    --gallery-label-fg: #fff;
+    /* Misc controls */
+    --cancel-bg: #3a3f47;
     /* BUG 1 — centered, constrained chat column width (mirrors .cint-scroll's
        760px); applied to message rows + composer + status lines so the chat is
        a centered column on wide screens, full-width (margins collapse) on mobile. */
     --chat-col: 760px;
+  }
+  /* LIGHT — iMessage-on-iPhone palette: white chat surface, the #007AFF iMessage
+     blue for the user bubble, ~#E9E9EB grey agent bubbles with near-black text,
+     subtle iOS separators. Same vars, so every surface reskins. */
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --surface: #f5f5f7;
+    --border: #d1d1d6;
+    --fg: #1c1c1e;
+    --muted: #8a8a8e;
+    --accent: #007aff;
+    --on-accent: #ffffff;
+    --user-bubble: #007aff;
+    --user-fg: #ffffff;
+    --agent-bubble: #e9e9eb;
+    --agent-fg: #1c1c1e;
+    --agent-avatar-bg: #d1d1d6;
+    --hover-bg: rgba(0,0,0,.05);
+    --hover-bg-weak: rgba(0,0,0,.035);
+    --active-bg: rgba(0,122,255,.12);
+    --active-fg: #0b57d0;
+    --accent-tint: rgba(0,122,255,.10);
+    --accent-tint-weak: rgba(0,122,255,.07);
+    --accent-flash: rgba(0,122,255,.14);
+    --accent-border: rgba(0,122,255,.4);
+    --code-bg: rgba(0,0,0,.06);
+    --code-block-bg: #f5f5f7;
+    --danger: #d70015;
+    --error-fg: #c9252d;
+    --error-border: rgba(201,37,45,.4);
+    --warn-fg: #9a6a00;
+    --warn-border: rgba(154,106,0,.35);
+    --info-fg: #0b57d0;
+    --info-border: rgba(11,87,208,.35);
+    --info-track: rgba(11,87,208,.14);
+    --info-ring: rgba(11,87,208,.25);
+    --success-fg: #1a7f37;
+    --success-border: rgba(26,127,55,.35);
+    --banner-warn-bg: #fff4d6;   --banner-warn-fg: #7a5b00;
+    --banner-info-bg: #e6f0ff;   --banner-info-fg: #0b57d0;
+    --banner-error-bg: #ffe5e5;  --banner-error-fg: #c9252d;
+    --scrim: rgba(0,0,0,0.35);
+    --dropzone-frame-bg: #ffffff;
+    --gallery-label-bg: rgba(0,0,0,0.55);
+    --gallery-label-fg: #fff;
+    --cancel-bg: #d1d1d6;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -42,9 +161,16 @@
      + content column (tab bar over the active tab body). */
   .car-app { display: flex; height: 100dvh; min-height: 0; width: 100%; }
   .car-content { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  /* Top bar row: the section tab bar fills the row; the theme toggle is pinned
+     to the far right. The band's surface + bottom border live here so the tabs
+     and the toggle share one seamless strip. */
+  .car-topbar {
+    display: flex; align-items: stretch; flex: 0 0 auto;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+  }
   .car-tabs {
-    display: flex; gap: 2px; flex: 0 0 auto; overflow-x: auto;
-    padding: 0 8px; background: var(--surface); border-bottom: 1px solid var(--border);
+    display: flex; gap: 2px; flex: 1 1 auto; min-width: 0; overflow-x: auto;
+    padding: 0 8px;
   }
   .car-tab {
     appearance: none; background: transparent; color: var(--muted); border: 0;
@@ -53,6 +179,21 @@
   }
   .car-tab:hover { color: var(--fg); }
   .car-tab-active { color: var(--fg); border-bottom-color: var(--accent); }
+  /* Light/dark theme toggle — pinned top-right of the content pane. A single
+     pill button that cycles system → light → dark; the glyph shows the resolved
+     theme (☀/☾) with a small "Auto" marker while following the system. */
+  .car-theme-toggle {
+    flex: 0 0 auto; align-self: center; margin: 0 10px 0 6px;
+    display: inline-flex; align-items: center; gap: 6px;
+    appearance: none; cursor: pointer; font: inherit; font-size: 13px; line-height: 1;
+    color: var(--muted); background: transparent;
+    border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px;
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  .car-theme-toggle:hover { color: var(--fg); border-color: var(--accent); }
+  .car-theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .car-theme-glyph { font-size: 15px; line-height: 1; }
+  .car-theme-auto { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .car-tabpanels { flex: 1 1 auto; position: relative; min-height: 0; display: flex; }
   .car-tabpanel { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; }
   .car-tabpanel[hidden] { display: none; }
@@ -79,10 +220,10 @@
   .car-md em { font-style: italic; }
   .car-md code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
-    background: rgba(255,255,255,.08); border-radius: 4px; padding: 1px 5px;
+    background: var(--code-bg); border-radius: 4px; padding: 1px 5px;
   }
   .car-md pre {
-    background: #0c0e12; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--code-block-bg); border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 12px; overflow-x: auto; margin: 0 0 8px;
   }
   .car-md pre code { background: none; padding: 0; font-size: .85em; }
@@ -91,7 +232,7 @@
   }
   .car-md table { border-collapse: collapse; margin: 0 0 8px; display: block; overflow-x: auto; }
   .car-md th, .car-md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
-  .car-md th { background: rgba(255,255,255,.04); font-weight: 700; }
+  .car-md th { background: var(--hover-bg-weak); font-weight: 700; }
   .car-md hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
   .car-md img { max-width: 100%; border-radius: 6px; }
   /* Documents viewer markdown: scrollable, roomier line-height than chat. */
@@ -109,8 +250,8 @@
     appearance: none; background: transparent; border: 0; color: var(--fg);
     padding: 7px 12px; font: inherit; cursor: pointer;
   }
-  .cdoc-list-item:hover { background: rgba(255,255,255,.05); }
-  .cdoc-list-item-active { background: rgba(108,170,255,.16); }
+  .cdoc-list-item:hover { background: var(--hover-bg); }
+  .cdoc-list-item-active { background: var(--active-bg); }
   .cdoc-list-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cdoc-list-dir { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cdoc-view { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
@@ -146,7 +287,7 @@
   }
   .cdoc-empty { color: var(--muted); font-size: 13px; padding: 14px; text-align: center; }
   .cdoc-view-empty { margin: auto; }
-  .cdoc-comments-error { color: #ff8a8a; font-size: 12px; padding: 6px 8px; }
+  .cdoc-comments-error { color: var(--error-fg); font-size: 12px; padding: 6px 8px; }
   .cdoc-composer, .cdoc-reply-box {
     flex: 0 0 auto; border-top: 1px solid var(--border); padding: 10px 14px; background: var(--surface);
   }
@@ -161,14 +302,14 @@
     border-radius: 8px; padding: 5px 11px; font: inherit; font-size: 12px; cursor: pointer;
   }
   .cdoc-btn:disabled { opacity: .45; cursor: default; }
-  .cdoc-btn-primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+  .cdoc-btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   .cdoc-thread { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
   .cdoc-thread-resolved { opacity: .6; }
   .cdoc-thread-head {
     display: block; width: 100%; text-align: left; appearance: none; background: transparent;
     border: 0; color: var(--fg); padding: 9px 11px; font: inherit; cursor: pointer;
   }
-  .cdoc-thread-head:hover { background: rgba(255,255,255,.04); }
+  .cdoc-thread-head:hover { background: var(--hover-bg-weak); }
   .cdoc-thread-anchor { font-size: 11px; color: var(--accent); margin-bottom: 4px; font-style: italic; }
   .cdoc-thread-root { display: flex; flex-direction: column; gap: 2px; }
   .cdoc-thread-author { font-size: 12px; font-weight: 600; color: var(--muted); }
@@ -194,13 +335,13 @@
     border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer;
   }
   .ctask-filter:hover { color: var(--fg); }
-  .ctask-filter-active { color: var(--fg); border-color: var(--accent); background: rgba(108,170,255,.12); }
+  .ctask-filter-active { color: var(--fg); border-color: var(--accent); background: var(--accent-tint); }
   .ctask-add { display: flex; gap: 6px; flex: 1 1 240px; min-width: 200px; }
   .ctask-add-input {
     flex: 1 1 auto; min-width: 0; background: var(--bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 14px;
   }
-  .ctask-error { color: #ff8a8a; font-size: 12px; padding: 6px 14px; }
+  .ctask-error { color: var(--error-fg); font-size: 12px; padding: 6px 14px; }
   .ctask-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 14px; }
   .ctask-empty { color: var(--muted); font-size: 13px; padding: 24px 14px; text-align: center; }
   .ctask-ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -215,8 +356,8 @@
   .ctask-title { font-size: 14px; color: var(--fg); word-break: break-word; }
   .ctask-row-done .ctask-title { text-decoration: line-through; }
   .ctask-chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .ctask-chip-prio { color: #ffd27d; border-color: rgba(255,210,125,.4); }
-  .ctask-chip-due { color: var(--accent); border-color: rgba(108,170,255,.4); }
+  .ctask-chip-prio { color: var(--warn-fg); border-color: var(--warn-border); }
+  .ctask-chip-due { color: var(--accent); border-color: var(--accent-border); }
   .ctask-reason { font-size: 12px; color: var(--muted); font-style: italic; }
   .ctask-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; flex-wrap: wrap; }
   .ctask-btn {
@@ -226,7 +367,7 @@
   .ctask-btn:hover { border-color: var(--accent); }
   .ctask-btn:disabled { opacity: .4; cursor: default; }
   .ctask-btn-icon { padding: 4px 7px; line-height: 1; font-size: 10px; }
-  .ctask-btn-primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+  .ctask-btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   /* ── Work Board tab (cwb-) — flat one-line rows, NOT cards (distinct from
      ctask). Reuses --accent (#6cf live-blue), --muted, --border, car-blink. ── */
   .cwb { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; width: 100%; }
@@ -239,7 +380,7 @@
     flex: 1 1 auto; min-width: 0; background: var(--bg); color: var(--fg);
     border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 14px;
   }
-  .cwb-error { color: #ff8a8a; font-size: 12px; padding: 6px 14px; }
+  .cwb-error { color: var(--error-fg); font-size: 12px; padding: 6px 14px; }
   .cwb-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 8px; }
   .cwb-empty { color: var(--muted); font-size: 13px; padding: 24px 14px; text-align: center; }
   .cwb-empty-zero { padding: 40px 24px; }
@@ -248,7 +389,7 @@
     display: flex; align-items: center; gap: 8px;
     min-height: 34px; padding: 3px 8px; border-radius: 8px;
   }
-  .cwb-row:hover { background: rgba(255,255,255,.05); }
+  .cwb-row:hover { background: var(--hover-bg); }
   /* status dot — fixed-width leftmost column; a clickable button that advances. */
   .cwb-dot {
     flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; padding: 0;
@@ -279,7 +420,7 @@
   .cwb-btn:hover { border-color: var(--accent); }
   .cwb-btn:disabled { opacity: .35; cursor: default; }
   .cwb-btn-icon { padding: 2px 6px; line-height: 1; font-size: 10px; }
-  .cwb-btn-primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+  .cwb-btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   .cwb-row-done { opacity: .55; }
   .cwb-row-done .cwb-title { text-decoration: line-through; }
   /* completed disclosure — collapsed at the bottom, its own scroll region. */
@@ -293,7 +434,7 @@
   .cwb-completed-caret { display: inline-block; width: 10px; }
   .cwb-completed-ul { max-height: 40vh; overflow-y: auto; }
   /* one-shot flash when a row's snapshot changes; reduced-motion turns it off. */
-  @keyframes cwb-flash { from { background: rgba(108,170,255,.18); } to { background: transparent; } }
+  @keyframes cwb-flash { from { background: var(--accent-flash); } to { background: transparent; } }
   @media (prefers-reduced-motion: reduce) {
     .cwb-dot-active { animation: none; }
     .cwb-flash { animation: none; }
@@ -315,15 +456,15 @@
     background: transparent; color: var(--fg); border: 0; border-radius: 8px;
     padding: 8px 10px; margin: 2px 0; cursor: pointer; font: inherit;
   }
-  .car-rail-item:hover { background: rgba(255,255,255,.05); }
-  .car-rail-item-active { background: rgba(108,170,255,.16); color: #cfe6ff; }
+  .car-rail-item:hover { background: var(--hover-bg); }
+  .car-rail-item-active { background: var(--active-bg); color: var(--active-fg); }
   /* Pinned to the bottom of the rail (margin-top:auto pushes it down). */
   .car-rail-create {
     margin-top: auto; width: 100%; text-align: left;
     background: transparent; color: var(--accent); border: 1px dashed var(--border);
     border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit;
   }
-  .car-rail-create:hover:not(:disabled) { background: rgba(108,170,255,.10); border-color: var(--accent); }
+  .car-rail-create:hover:not(:disabled) { background: var(--accent-tint-weak); border-color: var(--accent); }
   .car-rail-create:disabled { opacity: .6; cursor: default; }
   /* Inline create-project form (replaces the native window.prompt). Pinned to
      the bottom like the closed button (margin-top:auto). */
@@ -334,7 +475,7 @@
     border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; outline: none;
   }
   .car-rail-input:focus { border-color: var(--accent); }
-  .car-rail-create-error { color: #ff8080; font-size: 12px; padding: 0 2px; }
+  .car-rail-create-error { color: var(--error-fg); font-size: 12px; padding: 0 2px; }
   .car-rail-create-actions { display: flex; gap: 6px; justify-content: flex-end; }
   .car-rail-create-cancel, .car-rail-create-confirm {
     font-size: 12px; padding: 4px 10px; border-radius: 8px; cursor: pointer; font: inherit;
@@ -352,10 +493,10 @@
   .car-main.car-dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
   .car-banner {
     text-align: center; font-size: 13px; padding: 6px 12px;
-    background: #2a2410; color: #ffd479; border-bottom: 1px solid var(--border);
+    background: var(--banner-warn-bg); color: var(--banner-warn-fg); border-bottom: 1px solid var(--border);
   }
-  .car-banner-connecting, .car-banner-reconnecting { background: #18222e; color: #8cc6ff; }
-  .car-banner-closed { background: #2a1416; color: #ff8a8a; }
+  .car-banner-connecting, .car-banner-reconnecting { background: var(--banner-info-bg); color: var(--banner-info-fg); }
+  .car-banner-closed { background: var(--banner-error-bg); color: var(--banner-error-fg); }
   .car-thread { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
   .car-viewport { flex: 1 1 auto; overflow-y: auto; padding: 18px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
   .car-empty { margin: auto; text-align: center; color: var(--muted); }
@@ -426,7 +567,7 @@
   .car-gallery-img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
   .car-gallery-label {
     position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 8px; text-align: left;
-    font-size: 12px; font-weight: 600; color: #fff; background: rgba(10,10,10,0.7);
+    font-size: 12px; font-weight: 600; color: var(--gallery-label-fg); background: var(--gallery-label-bg);
   }
   /* BUG 3/4 — history-import status above the composer: the one-shot upload
      banner AND the live `import_progress` indicator (spinner + body + bar).
@@ -436,31 +577,31 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--muted);
     display: flex; flex-direction: column; gap: 6px;
   }
-  .car-import-uploading { color: #8cc6ff; border-color: rgba(140,198,255,.4); }
-  .car-import-done { color: #7ddf9b; border-color: rgba(125,223,155,.4); }
-  .car-import-error { color: #ff8a8a; border-color: rgba(255,138,138,.4); }
+  .car-import-uploading { color: var(--info-fg); border-color: var(--info-border); }
+  .car-import-done { color: var(--success-fg); border-color: var(--success-border); }
+  .car-import-error { color: var(--error-fg); border-color: var(--error-border); }
   /* BUG 3 — live progress: spinner + body line + a thin determinate bar. */
   .car-import-row { display: flex; align-items: center; gap: 8px; }
   .car-import-body { flex: 1 1 auto; min-width: 0; }
   .car-spinner {
     flex: 0 0 auto; width: 13px; height: 13px; border-radius: 50%;
-    border: 2px solid rgba(140,198,255,.3); border-top-color: #8cc6ff;
+    border: 2px solid var(--info-ring); border-top-color: var(--info-fg);
     animation: car-spin 0.8s linear infinite;
   }
   @keyframes car-spin { to { transform: rotate(360deg); } }
-  .car-import-bar { display: block; height: 4px; border-radius: 999px; background: rgba(140,198,255,.18); overflow: hidden; }
-  .car-import-bar-fill { display: block; height: 100%; background: #8cc6ff; border-radius: 999px; transition: width .4s ease; }
+  .car-import-bar { display: block; height: 4px; border-radius: 999px; background: var(--info-track); overflow: hidden; }
+  .car-import-bar-fill { display: block; height: 100%; background: var(--info-fg); border-radius: 999px; transition: width .4s ease; }
   /* BUG 2+4 — the prominent drag-and-drop overlay (web counterpart of
      app/components/DropZoneOverlay.tsx). Full-surface tinted scrim + dashed frame,
      shown only while dragging a file with an active import affordance. */
   .car-dropzone {
     position: absolute; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
-    padding: 24px; background: rgba(10,10,10,0.62); animation: car-fade .12s ease;
+    padding: 24px; background: var(--scrim); animation: car-fade .12s ease;
   }
   @keyframes car-fade { from { opacity: 0; } to { opacity: 1; } }
   .car-dropzone-frame {
     width: 100%; max-width: 480px; border-radius: 14px; border: 2px dashed var(--accent);
-    background: rgba(18,18,18,0.92); padding: 28px 24px; text-align: center;
+    background: var(--dropzone-frame-bg); padding: 28px 24px; text-align: center;
     display: flex; flex-direction: column; gap: 8px;
   }
   .car-dropzone-title { font-size: 18px; font-weight: 600; color: var(--fg); }
@@ -526,7 +667,7 @@
     border: 0; border-radius: 12px; padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer;
   }
   .car-send:disabled { opacity: .5; cursor: default; }
-  .car-cancel { background: #3a3f47; }
+  .car-cancel { background: var(--cancel-bg); }
   /* Phase 3 — attachment compose affordance + render. */
   .car-attach-img { max-width: 100%; border-radius: 12px; display: block; margin-top: 6px; }
   .car-attach-loading, .car-attach-error { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--muted); }
@@ -539,7 +680,7 @@
     font-size: 12px; padding: 4px 6px 4px 10px; border-radius: 12px;
     border: 1px solid var(--border); background: var(--bg); color: var(--fg);
   }
-  .car-attach-chip-error { border-color: #ff8a8a; color: #ff8a8a; }
+  .car-attach-chip-error { border-color: var(--error-fg); color: var(--error-fg); }
   .car-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .car-attach-state { color: var(--muted); }
   .car-attach-remove {
@@ -553,7 +694,7 @@
     padding: 8px 10px; line-height: 1;
   }
   .car-attach-btn:hover { border-color: var(--accent); }
-  .car-fatal { margin: 40px auto; max-width: 480px; text-align: center; color: #ff8a8a; padding: 20px; }
+  .car-fatal { margin: 40px auto; max-width: 480px; text-align: center; color: var(--error-fg); padding: 20px; }
   /* ── Admin / Integrations tab ── */
   .cint { display: flex; flex: 1 1 auto; min-height: 0; width: 100%; }
   .cint-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 18px; width: 100%; max-width: 760px; margin: 0 auto; }
@@ -576,7 +717,7 @@
     flex: 0 0 auto; font-size: 11px; color: var(--muted); border: 1px solid var(--border);
     border-radius: 999px; padding: 2px 10px; white-space: nowrap; align-self: flex-start;
   }
-  .cint-badge-on { color: #04121f; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .cint-badge-on { color: var(--on-accent); background: var(--accent); border-color: var(--accent); font-weight: 600; }
   .cint-key-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
   .cint-key-input {
     flex: 1 1 200px; min-width: 0; background: var(--bg); color: var(--fg);
@@ -592,7 +733,7 @@
   .cset-section:last-child { border-bottom: 0; margin-bottom: 0; }
   .cset-h { font-size: 16px; font-weight: 700; color: var(--fg); margin: 0 0 4px; }
   .cset-sub { font-size: 13px; color: var(--muted); margin: 0 0 12px; line-height: 1.4; }
-  .cset-error { color: #ff8a8a; font-size: 12px; padding: 6px 0; }
+  .cset-error { color: var(--error-fg); font-size: 12px; padding: 6px 0; }
   .cset-empty { color: var(--muted); font-size: 13px; padding: 16px 0; text-align: center; }
   .cset-cred-ul { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .cset-cred-row {
@@ -630,7 +771,7 @@
   .cset-btn:hover:not(:disabled) { border-color: var(--accent); }
   .cset-btn:disabled { opacity: .45; cursor: default; }
   .cset-btn-icon { padding: 3px 8px; line-height: 1; font-size: 11px; }
-  .cset-btn-primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+  .cset-btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   .cset-people-ul { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .cset-person {
     display: flex; align-items: center; gap: 8px; padding: 6px 10px;

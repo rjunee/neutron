@@ -51,6 +51,7 @@ import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
+import { ThemeToggle } from './ThemeToggle.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -397,7 +398,13 @@ export function ProjectShell({
         creating={creatingProject}
       />
       <div className="car-content">
-        <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+        {/* Top bar: the section tab bar (fills the row) with the light/dark
+            theme toggle pinned top-right. The toggle owns the whole UI's theme
+            (a user preference, not per-tab), so it lives at the shell root. */}
+        <div className="car-topbar">
+          <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+          <ThemeToggle />
+        </div>
         <div className="car-tabpanels" ref={panelsRef}>
           {/* Chat stays mounted across tab switches so the live session, stream,
               and scroll state survive — only its visibility toggles. */}
