@@ -565,3 +565,161 @@ test('finalize without an emitChatMessage seam still completes (no closing/openi
   expect(after?.phase).toBe('completed')
   h.db.close()
 })
+
+// ---------------------------------------------------------------------------
+// HOBBY PROJECTS (2026-07-01, PART A) — outside-work interest answers now
+// MATERIALIZE projects too (previously they landed only in persona-gen).
+// ---------------------------------------------------------------------------
+
+test('finalize materializes hobby/interest answers as projects (non_work_interests + inferred_interests)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      primary_projects: ['Topline Revenue'],
+      // Conversationally-captured hobbies (the shape post-turn-extractor writes).
+      non_work_interests: [
+        { name: 'Rock Climbing' },
+        { name: 'Woodworking', cadence_hint: 'weekly' },
+      ],
+    },
+  })
+
+  const finalizer = buildOnboardingFinalize(h.deps)
+  // An import that also inferred an interest → it materializes too.
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      proposed_projects: [],
+      proposed_tasks: [],
+      inferred_interests: [{ name: 'Photography', basis: 'you shared several photo edits' }],
+    } as unknown as import('../../../onboarding/history-import/types.ts').ImportResult,
+  })
+
+  const names = h.db
+    .prepare<{ name: string }, []>(
+      `SELECT name FROM projects WHERE deleted_at IS NULL ORDER BY name`,
+    )
+    .all()
+    .map((r) => r.name)
+  // The work project AND every hobby now have a real projects row.
+  expect(names).toContain('Topline Revenue')
+  expect(names).toContain('Rock Climbing')
+  expect(names).toContain('Woodworking')
+  expect(names).toContain('Photography')
+  h.db.close()
+})
+
+test('finalize dedups a hobby against a same-named work project (work wins, one row)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      primary_projects: ['Photography'], // also named as a hobby below
+      non_work_interests: [{ name: 'Photography' }, { name: 'Baking' }],
+    },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const photoRows = h.db
+    .prepare<{ id: string }, []>(
+      `SELECT id FROM projects WHERE name = 'Photography' AND deleted_at IS NULL`,
+    )
+    .all()
+  expect(photoRows.length).toBe(1) // not doubled by the hobby union
+  const bakingRows = h.db
+    .prepare<{ id: string }, []>(
+      `SELECT id FROM projects WHERE name = 'Baking' AND deleted_at IS NULL`,
+    )
+    .all()
+  expect(bakingRows.length).toBe(1)
+  h.db.close()
+})
+
+test('finalize honors a dropped hobby (dropped_projects excludes the interest slug)', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: {
+      primary_projects: ['Topline Revenue'],
+      non_work_interests: [{ name: 'Woodworking' }],
+      dropped_projects: ['Woodworking'],
+    },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const wood = h.db
+    .prepare<{ id: string }, []>(
+      `SELECT id FROM projects WHERE name = 'Woodworking' AND deleted_at IS NULL`,
+    )
+    .all()
+  expect(wood.length).toBe(0) // dropped → never materialized
+  h.db.close()
+})
+
+// ---------------------------------------------------------------------------
+// AGENTIC KICKOFF (2026-07-01, PART B) — the per-project opening prefers the
+// one-time agentic kickoff, falling back to the deterministic opening, and
+// fills the SINGLE opening slot (one-time by construction).
+// ---------------------------------------------------------------------------
+
+test('finalize emits the agentic kickoff body when the kickoff fires (one dedupe slot)', async () => {
+  const h = makeHarness()
+  const emitted: Array<{ project_id: string | null; body: string; dedupe_key: string }> = []
+  h.deps.emitChatMessage = (input): void => {
+    emitted.push({ project_id: input.project_id, body: input.body, dedupe_key: input.dedupe_key })
+  }
+  // A kickoff that fires for the work project with a doc-link body, and returns
+  // null for anything it deems thin.
+  h.deps.projectKickoff = {
+    async composeKickoff(input): Promise<{
+      body: string
+      action: 'draft-doc'
+      indexed: boolean
+    } | null> {
+      if (input.name === 'Topline Revenue') {
+        return {
+          body: `I drafted a starting plan - [Starting plan](docs:/${input.project_id}/starting-plan.md).`,
+          action: 'draft-doc',
+          indexed: true,
+        }
+      }
+      return null
+    },
+  }
+
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { primary_projects: ['Topline Revenue', 'Quiet Corner'] },
+  })
+  const finalizer = buildOnboardingFinalize(h.deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const topline = emitted.find((e) => e.project_id === slugifyProjectId('Topline Revenue'))
+  const quiet = emitted.find((e) => e.project_id === slugifyProjectId('Quiet Corner'))
+  // The kickoff body was used for the project it fired on, keyed on the SINGLE
+  // per-project opening slot (so a re-entry / on-connect recovery collapses onto it).
+  expect(topline).toBeDefined()
+  expect(topline!.body).toContain('docs:/')
+  expect(topline!.body).toContain('Starting plan')
+  expect(topline!.dedupe_key).toBe(`onboarding_opening:${slugifyProjectId('Topline Revenue')}`)
+  // The project the kickoff declined still gets a (deterministic) opening.
+  expect(quiet).toBeDefined()
+  expect(quiet!.body.trim().length).toBeGreaterThan(0)
+  expect(quiet!.body).not.toContain('docs:/')
+  expect(quiet!.dedupe_key).toBe(`onboarding_opening:${slugifyProjectId('Quiet Corner')}`)
+
+  h.db.close()
+})

@@ -560,6 +560,43 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   making the client read per-project topics; the opening lands on the project's
 >   canonical app-ws topic, reconciled at merge.
 
+> **Hobby projects + one-time agentic per-project kickoff (2026-07-01).** Two
+> onboarding-end upgrades to what a fresh install produces, both landing in
+> `build-onboarding-finalize.ts`:
+> - **Hobbies materialize as projects.** The interview's outside-work
+>   interest/hobby answers land in a SEPARATE field (`phase_state.non_work_interests`
+>   + `import_result.inferred_interests`) that `resolveProjects` never read, so they
+>   fed persona-gen (USER/SOUL.md) but never a `projects` row / on-disk repo. A new
+>   `collectInterestProjects` adds them as a THIRD union source (after the
+>   import-proposed and interview-named work projects), mapped to
+>   `CapturedProject{name, rationale?, is_interest:true}`. The materializer is
+>   source-agnostic, so a hobby gets the identical on-disk repo + doc set; the
+>   `is_interest` flag only steers the kickoff. Existing `seen`/`dropped` dedup makes
+>   the superset safe (a work project of the same name wins; a curation-dropped
+>   hobby is excluded).
+> - **The per-project opening is agentic when there's signal.** Instead of always
+>   emitting the deterministic "want me to X?" one-liner, `emitProjectOpenings` first
+>   asks a ONE-TIME `ProjectKickoff` (`build-project-kickoff.ts`) behind a HARD
+>   data-sufficiency gate ("better nothing than a bad job", Ryan). Best-fit action
+>   per project: **draft-doc** (rich work → compose a real starting plan via the
+>   CC-substrate `build-project-kickoff-composer.ts`, `writeDocIfMissing` under
+>   `Projects/<id>/docs/`, present a tappable `docs:/…` link, index it to GBrain
+>   recall via the same `buildProjectPageIndexer` the materializer uses);
+>   **deadline-offer** (a real upcoming import deadline related to the project →
+>   name it and OFFER a reminder, never auto-create; the live agent's
+>   `reminders_create` handles an accept); **interest-research** (rich hobby → light
+>   starting notes doc); **interest-questions** (thin hobby → engaging questions, a
+>   hobby's meaty opening, never a bad artifact); or `null` (thin work) → the
+>   deterministic opening. ONE-TIME by construction: the kickoff fills the SAME
+>   `onboarding_opening:<project_id>` durable slot as the deterministic opening, so
+>   the on-connect recovery (`ensureProjectOpeningOnEntry`) collapses onto it and
+>   there is NO cadence / cooldown / on-enter refresh / setting (none of the
+>   recurring wow machinery). The full wow `ActionRunner`/dispatcher is deliberately
+>   NOT reused — it is a batch button-prompt path with a channel adapter + cron that
+>   the one-time plain-emit finalize has no surface for; the kickoff reuses its
+>   trigger/gate CONTRACT plus `ProjectDocComposer`, `runtime/doc-links.ts`, and the
+>   project-page indexer.
+
 > **Onboarding is a GENERAL-topic-only mode + cold-turn timeout self-heals
 > (#136 verify gaps, 2026-06-30).** Two robustness fixes for gaps the #136
 > fresh-install verify left open:

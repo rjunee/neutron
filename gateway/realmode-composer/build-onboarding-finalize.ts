@@ -44,7 +44,10 @@ import type {
 } from '../../onboarding/interview/state-store.ts'
 import type { ImportResult } from '../../onboarding/history-import/types.ts'
 import type { ProjectDb } from '../../persistence/index.ts'
-import type { ProjectDocComposer } from '../../onboarding/wow-moment/project-materializer.ts'
+import type {
+  ProjectDocComposer,
+  MaterializeOutcome,
+} from '../../onboarding/wow-moment/project-materializer.ts'
 import type { CapturedProject } from '../../onboarding/wow-moment/action-types.ts'
 import type { SyncHook } from '../../runtime/entity-writer.ts'
 
@@ -52,6 +55,7 @@ import { PersonaComposer } from '../../onboarding/persona-gen/compose.ts'
 import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts'
 import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
 import { buildComposeInput } from '../../onboarding/interview/engine-internals.ts'
+import { readNonWorkInterests } from '../../onboarding/interview/engine-internals.ts'
 import {
   slugifyProjectId,
   findRelatedImportSignal,
@@ -69,6 +73,7 @@ import {
   synthesizeMatchFromSignal,
   type ProjectOpeningDocs,
 } from './build-onboarding-handoff.ts'
+import type { ProjectKickoff } from './build-project-kickoff.ts'
 
 /**
  * Item 6 (Path-1 closing handoff, 2026-06-30) — the deterministic closing
@@ -144,6 +149,16 @@ export interface OnboardingFinalizeDeps {
     body: string
     dedupe_key: string
   }) => void | Promise<void>
+  /**
+   * AGENTIC KICKOFF (2026-07-01) — the one-time per-project kickoff. When wired,
+   * `emitProjectOpenings` asks it for a richer agentic opening (draft a starting
+   * doc / offer a deadline reminder / ask a hobby engaging questions) BEFORE the
+   * deterministic prompt-the-user opening; it returns null for projects too thin
+   * to do a good job, so those degrade to the deterministic opening. Optional:
+   * omitted → every project gets the deterministic opening (unchanged behaviour).
+   * Built in `open/composer.ts` from the CC-substrate composer + GBrain indexer.
+   */
+  projectKickoff?: ProjectKickoff
   now?: () => number
   log?: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void
   /**
@@ -316,9 +331,49 @@ async function emitProjectOpenings(
       const matched = proposedByName.get(project.name.toLowerCase()) ?? null
       const effectiveMatch =
         matched ?? synthesizeMatchFromSignal(project.name, findRelatedImportSignal(project.name, import_result))
-      const composition = buildDeterministicProjectOpening(project.name, effectiveMatch, docs)
-      const body = finalizeOpeningBody(composition.body)
+      // AGENTIC KICKOFF (2026-07-01) — first ask the one-time kickoff for a
+      // richer opening (draft a doc / offer a reminder / ask engaging questions).
+      // It returns null when the project is too thin to do a good job (work
+      // projects) so we degrade to the deterministic prompt-the-user opening
+      // below. Best-effort + non-throwing by its own contract.
+      let body = ''
+      if (deps.projectKickoff !== undefined) {
+        try {
+          const kickoff = await deps.projectKickoff.composeKickoff({
+            project_id: project.project_id,
+            name: project.name.trim(),
+            is_interest: project.is_interest,
+            docs,
+            matched: effectiveMatch,
+            import_result,
+            outcome: project.outcome,
+          })
+          if (kickoff !== null) {
+            body = finalizeOpeningBody(kickoff.body)
+            log('info', 'finalize: agentic kickoff fired', {
+              project: project.name,
+              action: kickoff.action,
+              ...(kickoff.doc_relpath !== undefined ? { doc: kickoff.doc_relpath } : {}),
+              indexed: kickoff.indexed,
+            })
+          }
+        } catch (err) {
+          // Kickoff must never block the opening — fall through to deterministic.
+          log('warn', 'finalize: kickoff failed; using deterministic opening', {
+            project: project.name,
+            err: errStr(err),
+          })
+        }
+      }
+      if (body.trim().length === 0) {
+        const composition = buildDeterministicProjectOpening(project.name, effectiveMatch, docs)
+        body = finalizeOpeningBody(composition.body)
+      }
       if (body.trim().length === 0) continue
+      // SAME dedupe key as the deterministic opening: the agentic kickoff fills
+      // the ONE per-project opening slot, so it is one-time by construction and
+      // the on-connect opening recovery (open/composer.ts ensureProjectOpeningOnEntry)
+      // collapses onto the same durable row instead of double-posting.
       await deps.emitChatMessage({
         user_id,
         project_id: project.project_id,
@@ -400,6 +455,17 @@ function defaultArchetypeDataDirFromRepo(): string {
 interface MaterializedProject {
   project_id: string
   name: string
+  /** True iff materialized from a hobby/interest answer (steers the kickoff). */
+  is_interest: boolean
+  /**
+   * The materializer's per-project outcome — `slice_chunk_count` /
+   * `summary_written` / `llm_docs` are the strongest "enough signal" proxies
+   * (real transcript history matched this project). Previously discarded here;
+   * threaded through so the per-project agentic kickoff can gate on it. Null
+   * when materialization threw before producing an outcome (kickoff then leans
+   * on the on-disk docs + import signal alone).
+   */
+  outcome: MaterializeOutcome | null
 }
 
 /**
@@ -455,14 +521,21 @@ async function materializeProjects(
       // Materialize against the RESOLVED bind id (which may be a pre-existing
       // row's id, not the freshly-computed slug) so the on-disk repo + memory
       // page index against the same project the DB row binds to.
-      await materializer.materialize({
+      const materializeOutcome = await materializer.materialize({
         project,
         slug: bind_id,
         import_result,
       })
       // Record the landed project so the opening-message step can seed its
       // chat. Keyed on the resolved bind id (matches the topic + on-disk repo).
-      materialized.push({ project_id: bind_id, name: project.name.trim() })
+      // Carry `is_interest` + the materialize outcome so the per-project agentic
+      // kickoff can pick a hobby-vs-work opening and gate on real signal.
+      materialized.push({
+        project_id: bind_id,
+        name: project.name.trim(),
+        is_interest: project.is_interest === true,
+        outcome: materializeOutcome,
+      })
     } catch (err) {
       // Isolate: log this project's failure and continue with the rest.
       log('warn', 'project materialize failed; continuing', {
@@ -558,14 +631,71 @@ function resolveProjects(
           .map((p) => ({ name: p.name.trim(), rationale: p.rationale }))
           .filter((p) => p.name.length > 0)
       : []
+  // HOBBY PROJECTS (2026-07-01) — the onboarding interview also asks about
+  // outside-work interests/hobbies, but historically those answers materialized
+  // NOTHING: they land in a SEPARATE field (`phase_state.non_work_interests` +
+  // `import_result.inferred_interests`) this resolver never read, so they reached
+  // persona-gen (USER/SOUL.md) but never a `projects` row / on-disk repo.
+  // Materialize them too, as `is_interest` projects: the on-disk repo + doc set is
+  // identical to a work project (the materializer is source-agnostic); the flag
+  // only steers the per-project agentic kickoff toward a hobby-appropriate opening.
+  // Interest entries come LAST in the union so a work project of the same name
+  // wins the slug dedup (it carries the richer work rationale + import signal).
+  const fromInterests = collectInterestProjects(state, import_result)
   const out: CapturedProject[] = []
   const seen = new Set<string>()
-  for (const p of [...fromImport, ...interviewProjects(state)]) {
+  for (const p of [...fromImport, ...interviewProjects(state), ...fromInterests]) {
     const slug = slugifyProjectId(p.name)
     if (seen.has(slug)) continue
     seen.add(slug)
     if (dropped.has(slug)) continue
     out.push(p)
+  }
+  return out
+}
+
+/**
+ * HOBBY PROJECTS (2026-07-01) — the interest-derived contribution to the
+ * materialized project set. Unions the conversationally-captured hobbies
+ * (`phase_state.non_work_interests`, read via the canonical
+ * `readNonWorkInterests` reader) with the import-inferred interests
+ * (`import_result.inferred_interests`), mapping each `{name, basis?}` to a
+ * `CapturedProject{name, rationale?, is_interest:true}`. Dedupes by slug so a
+ * hobby that appears in both sources materializes once. The caller's
+ * `seen`/`dropped` dedup then subtracts anything already covered by a work
+ * project (work wins) or dropped during curation. `rationale` is carried from an
+ * import interest's `basis` so the materialized repo's synthesized context has
+ * real grounding; conversational hobbies have no rationale.
+ */
+function collectInterestProjects(
+  state: OnboardingState,
+  import_result: ImportResult | null,
+): CapturedProject[] {
+  const out: CapturedProject[] = []
+  const seen = new Set<string>()
+  const push = (name: string, rationale?: string): void => {
+    const trimmed = name.trim()
+    if (trimmed.length === 0) return
+    const slug = slugifyProjectId(trimmed)
+    if (slug.length === 0 || seen.has(slug)) return
+    seen.add(slug)
+    const entry: CapturedProject = { name: trimmed, is_interest: true }
+    if (typeof rationale === 'string' && rationale.trim().length > 0) {
+      entry.rationale = rationale.trim()
+    }
+    out.push(entry)
+  }
+  for (const interest of readNonWorkInterests(state.phase_state)) {
+    push(interest.name)
+  }
+  const inferred = import_result?.inferred_interests
+  if (Array.isArray(inferred)) {
+    for (const row of inferred) {
+      if (row === null || typeof row !== 'object') continue
+      const name = typeof row.name === 'string' ? row.name : ''
+      const basis = typeof row.basis === 'string' ? row.basis : undefined
+      push(name, basis)
+    }
   }
   return out
 }

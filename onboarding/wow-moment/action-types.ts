@@ -45,6 +45,18 @@ export interface RitualEntry {
 export interface CapturedProject {
   name: string
   rationale?: string
+  /**
+   * True iff this project was materialized from an outside-work
+   * hobby/interest answer (`phase_state.non_work_interests` or
+   * `import_result.inferred_interests`) rather than a work project.
+   * Optional + defaults to false, so existing callers/tests stay at the
+   * work-project behaviour. The materializer treats hobby and work
+   * projects identically (same on-disk repo + doc set); the flag exists so
+   * the per-project agentic KICKOFF (build-onboarding-finalize →
+   * build-project-kickoff) can pick a hobby-appropriate opening (engaging
+   * questions / light research) instead of a work-project one.
+   */
+  is_interest?: boolean
 }
 
 /**
