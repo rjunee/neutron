@@ -259,8 +259,7 @@ const FAILURE_BODY =
  * an immediate live (non-persisted) bubble so the user knows it's waking
  * up, not stuck. Subsequent turns hit the warm session and skip the ack.
  */
-const COLD_START_ACK_BODY =
-  "Waking up your workspace for the first time — this one takes a moment while I load its full context. I'll have your answer shortly."
+const COLD_START_ACK_BODY = "⏳ Waking up, one moment..."
 
 /**
  * Item 12 — default delay before the cold-start ack fires. Long enough that
