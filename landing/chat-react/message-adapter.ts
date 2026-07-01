@@ -28,6 +28,19 @@ function looksLikeImage(url: string): boolean {
   return IMAGE_EXT.test(url)
 }
 
+/**
+ * Strip leading/trailing whitespace (incl. newlines) from a message body before
+ * it reaches the bubble. Both bubble paths preserve newlines — the user `<p
+ * class="car-text">` renders `white-space: pre-line` and the agent `.car-bubble`
+ * has `white-space: pre-wrap` — so a stray trailing (or leading) `\n` on a
+ * one-line message renders as an extra EMPTY line, making the bubble ~2x tall.
+ * Trimming only the ends leaves intentional INTERNAL blank lines (a user's
+ * multi-line message) untouched, so real line breaks still render.
+ */
+export function normalizeBody(text: string): string {
+  return text.replace(/^\s+|\s+$/g, '')
+}
+
 type ContentPart =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'image'; readonly image: string }
@@ -46,7 +59,8 @@ export function toThreadMessage(m: RenderMessage, origin = ''): ThreadMessageLik
     const tomb = { id: m.id, role, content: [{ type: 'text', text: '🚫 This message was deleted' }] } as const
     return role === 'assistant' ? { ...tomb, status: { type: 'complete', reason: 'stop' } } : tomb
   }
-  if (m.text.length > 0) parts.push({ type: 'text', text: m.text })
+  const body = normalizeBody(m.text)
+  if (body.length > 0) parts.push({ type: 'text', text: body })
   if (m.attachments !== null) {
     for (const raw of m.attachments) {
       const url = absolutize(raw, origin)
