@@ -286,6 +286,19 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(await store.detachRun(SLUG, 'ghost-run', 'done')).toBeNull()
   })
 
+  test('clearRun only clears when run_id is still the bound run (concurrent-safe)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'shared item' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.attachRun(SLUG, a.id, 'run-2') // run-2 supersedes run-1's binding
+    // run-1 finishing must NOT clear run-2's still-live marker.
+    await store.clearRun(SLUG, a.id, 'run-1')
+    expect(store.get(SLUG, a.id)?.linked_run_id).toBe('run-2')
+    // run-2 finishing clears it (it IS the bound run).
+    await store.clearRun(SLUG, a.id, 'run-2')
+    expect(store.get(SLUG, a.id)?.linked_run_id).toBeNull()
+  })
+
   test('attachRun re-opening a done item clears completed_at + re-appends to the active lane', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'reopen me' })

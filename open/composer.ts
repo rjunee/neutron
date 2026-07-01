@@ -635,8 +635,8 @@ export function buildOpenGraphComposer(
       attachRun: async (slug, id, run_id) => {
         await dispatchBoardHolder.store?.attachRun(slug, id, run_id)
       },
-      clearRun: async (slug, id) => {
-        await dispatchBoardHolder.store?.clearRun(slug, id)
+      clearRun: async (slug, id, run_id) => {
+        await dispatchBoardHolder.store?.clearRun(slug, id, run_id)
       },
     }
     const dispatchService = ((): DispatchService | null => {

@@ -31,6 +31,10 @@ keys off `linked_run_id` (no reverse column needed).
   (datestamped history), `failed`/`stopped` → back to `upcoming`; binding cleared (fork
   goes dark). `dispatch_agent` runs clear the binding on terminal but leave status to the
   orchestrator. Every mutation fires the existing `work_board_changed` push.
+  `WorkBoardStore.clearRun` (the `dispatch_agent` terminal path) guards on
+  `linked_run_id = run_id`, so when two dispatches bind the same item in turn the
+  earlier one finishing can never clear the still-live later run's fork marker
+  (Codex [P2] concurrent-clear fix).
 - **Activity icons DERIVED, not manual.** The web `WorkBoardTab` + mobile
   `WorkBoardRow` already derive fork `⑂` from `linked_run_id` and caret `›` from
   `inline_active`; Phase 2b is purely the WRITERS (`attachRun`/`detachRun` for the

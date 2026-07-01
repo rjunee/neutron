@@ -473,12 +473,17 @@ export class WorkBoardStore {
     this.emitChange()
   }
 
-  /** Clear a bound trident run. */
-  async clearRun(project_slug: string, id: string): Promise<void> {
+  /** Clear a bound trident run — but ONLY if `run_id` is still the run bound to
+   *  this item. Two concurrent dispatches can bind the same item in turn (the
+   *  later `attachRun` supersedes the earlier `linked_run_id`); when the earlier
+   *  run finishes it must NOT clear the still-live later run's marker. Guarding
+   *  on `linked_run_id = run_id` makes the clear a no-op in that race. Leaves the
+   *  lane/status untouched (a non-build dispatch finishing ≠ the item done). */
+  async clearRun(project_slug: string, id: string, run_id: string): Promise<void> {
     await this.db.run(
       `UPDATE work_board_items SET linked_run_id = NULL, updated_at = ?
-        WHERE project_slug = ? AND id = ?`,
-      [this.now(), project_slug, id],
+        WHERE project_slug = ? AND id = ? AND linked_run_id = ?`,
+      [this.now(), project_slug, id, run_id],
     )
     this.emitChange()
   }

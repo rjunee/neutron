@@ -82,7 +82,7 @@ export interface DispatchBoardBinder {
   /** Bind a run to the item (linked_run_id + status=in_progress). */
   attachRun(project_slug: string, id: string, run_id: string): Promise<unknown>
   /** Clear the run binding on terminal (fork icon goes dark; status untouched). */
-  clearRun(project_slug: string, id: string): Promise<unknown>
+  clearRun(project_slug: string, id: string, run_id: string): Promise<unknown>
 }
 
 /** Thrown when a dispatch violates the board-binding chokepoint rules. The
@@ -471,7 +471,7 @@ export class DispatchService {
     // work_board_complete); a non-build dispatch finishing ≠ the item being
     // done. Best-effort: a board write outage never breaks the report path.
     try {
-      await this.deps.board.clearRun(this.deps.project_slug, board_item_id)
+      await this.deps.board.clearRun(this.deps.project_slug, board_item_id, record.run_id)
     } catch {
       // swallow
     }
