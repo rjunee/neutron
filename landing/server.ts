@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 export { MOBILE_APP_URL } from '../onboarding/interview/final-handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
+import { isSpaClientRoute } from './spa-routes.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -1334,7 +1335,11 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
           headers: { location: `${dest.pathname}${dest.search}` },
         })
       }
-      if (url.pathname === '/chat' && req.method === 'GET') {
+      // Serve the chat-react SPA shell (or the Claude-auth gate page when no
+      // substrate credential is present). Shared by `GET /chat` and the SPA
+      // client-route catch-all below so a hard-loaded deep link boots the same
+      // shell + honours the same auth gate as `/chat`.
+      function serveChatReactShell(): Response {
         // ISSUES #318 — app-level Claude-auth gate. A box with no working
         // substrate credential would render an interactive-looking chat that
         // silently produces nothing; show a clear "authenticate Claude" page
@@ -1361,6 +1366,9 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         return new Response(new Uint8Array(chat_react_html), {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })
+      }
+      if (url.pathname === '/chat' && req.method === 'GET') {
+        return serveChatReactShell()
       }
       // Serve the lazily-bundled React client. Returns 404 only on a packaging
       // error (the `chat-react/main.tsx` entry missing) — the shell that
@@ -1469,6 +1477,16 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
           )
         }
         return options.inviteAcceptHandler(req)
+      }
+      // SPA client-route catch-all — a hard load / share of a project-scoped
+      // deep link (e.g. the P-A doc-reference URL `/projects/<id>/docs?path=…`)
+      // must serve the chat-react shell so the SPA boots and client-routes to
+      // the deep link instead of 404ing. Scoped to `GET /projects[/…]`
+      // (`isSpaClientRoute`), a prefix disjoint from every API/asset/websocket
+      // path — those are matched earlier here + in the compose chain, so this
+      // never masks a real 404. All other unknown paths keep returning 404.
+      if (isSpaClientRoute(url.pathname, req.method)) {
+        return serveChatReactShell()
       }
       // The legacy `/ws/chat` onboarding WebSocket upgrade was removed —
       // onboarding + chat are unified on the `/ws/app/chat` Expo-app

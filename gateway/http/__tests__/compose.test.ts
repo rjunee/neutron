@@ -102,6 +102,60 @@ describe('composeHttpHandler — precedence chain', () => {
     expect(await res.text()).toBe('def-404')
   })
 
+  test('SPA catch-all — GET /projects/<id>/docs deep link is delegated to landing (doc-link 404 fix)', async () => {
+    const delegatedPaths: string[] = []
+    const landing: LandingHandler = {
+      fetch: async (req) => {
+        const url = new URL(req.url)
+        delegatedPaths.push(url.pathname)
+        // Landing serves the SPA shell for the /projects[/…] catch-all.
+        if (url.pathname.startsWith('/projects')) return new Response('spa-shell', { status: 200 })
+        return new Response('not found', { status: 404 })
+      },
+      websocket: { open() {}, message() {}, close() {} },
+    }
+    const composed = composeHttpHandler({ landing, defaultHandler: makeDefault('def-404') })
+    const res = await composed.fetch(
+      new Request('http://x/projects/acme/docs?path=pitch-deck.md'),
+      fakeServer(),
+    )
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('spa-shell')
+    expect(delegatedPaths).toEqual(['/projects/acme/docs'])
+  })
+
+  test('SPA catch-all does NOT swallow an unknown /api/* 404 (real 404 preserved)', async () => {
+    let delegatedToLanding = false
+    const landing: LandingHandler = {
+      fetch: async () => {
+        delegatedToLanding = true
+        return new Response('spa-shell', { status: 200 })
+      },
+      websocket: { open() {}, message() {}, close() {} },
+    }
+    const composed = composeHttpHandler({ landing, defaultHandler: makeDefault('def-404') })
+    const res = await composed.fetch(
+      new Request('http://x/api/app/projects/acme/bogus'),
+      fakeServer(),
+    )
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe('def-404')
+    expect(delegatedToLanding).toBe(false)
+  })
+
+  test('SPA catch-all is GET-only — POST /projects/<id> falls through to default 404', async () => {
+    const composed = composeHttpHandler({
+      landing: makeLanding(''),
+      defaultHandler: makeDefault('def-404'),
+    })
+    const res = await composed.fetch(
+      new Request('http://x/projects/acme/docs', { method: 'POST' }),
+      fakeServer(),
+    )
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe('def-404')
+  })
+
   test('routes / with ?invite= to landing (invite short-circuit)', async () => {
     const composed = composeHttpHandler({
       landing: makeLanding(''),

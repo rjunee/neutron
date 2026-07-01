@@ -29,6 +29,7 @@ import {
   evaluateAuthGate,
   type AuthGateOptions,
 } from '../../landing/auth-gate.ts'
+import { isSpaClientRoute } from '../../landing/spa-routes.ts'
 
 /** Matches landing/server.ts SocketState (kept loose to avoid coupling). */
 type LandingSocketState = unknown
@@ -821,6 +822,13 @@ function isLandingRoute(pathname: string, method: string, hasInviteQuery: boolea
 function isGatedUserFacingRoute(pathname: string, method: string): boolean {
   if (pathname === '/' && method === 'GET') return true
   if (pathname === '/chat' && method === 'GET') return true
+  // SPA client-route deep links (`GET /projects[/…]`, e.g. a shared
+  // `/projects/<id>/docs?path=…` doc URL) serve the same chat-react shell as
+  // `/chat`, so they get the SAME auth gate: a tokenless browser hard-load is
+  // 302'd to signin rather than rendering a shell that then 302s on its first
+  // `/api/app/*` fetch. Only active when `authGate` is wired (Managed); the
+  // Open self-host + tests leave it unset, so this is a no-op there.
+  if (isSpaClientRoute(pathname, method)) return true
   if (pathname.startsWith('/api/app/')) return true
   return false
 }
@@ -1282,6 +1290,18 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       // 2. Landing routes — explicit path-set match so cross-instance API
       //    paths can't be shadowed by a landing 404.
       if (landing !== undefined && isLandingRoute(pathname, method, url.searchParams.has('invite'))) {
+        return await landing.fetch(req, server)
+      }
+      // 2.5. SPA client-route catch-all — a hard load / share of a
+      //      project-scoped deep link (e.g. the P-A doc-reference URL
+      //      `/projects/<id>/docs?path=…`) is a browser navigation into the
+      //      chat-react shell, not an API call. Delegate it to landing so the
+      //      SPA boots + client-routes to the deep link instead of falling
+      //      through to the default 404. `isSpaClientRoute` matches only
+      //      `GET /projects[/…]`, a prefix disjoint from every API/asset/
+      //      operator surface above (all of which already ran + returned their
+      //      own real 404s), so this can never mask an API 404.
+      if (landing !== undefined && isSpaClientRoute(pathname, method)) {
         return await landing.fetch(req, server)
       }
       // 3. Cross-instance API — returns null to indicate the request is not

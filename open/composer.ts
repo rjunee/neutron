@@ -38,6 +38,7 @@ import { buildOpenInstallTokenHandler } from './install-token-handoff.ts'
 import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
 import { buildLocalPlatformAdapter } from '../runtime/platform-adapter-local.ts'
 import type { PlatformAdapter } from '../runtime/platform-adapter.ts'
+import { isSpaClientRoute } from '../landing/spa-routes.ts'
 import { CronJobRegistry } from '../cron/jobs.ts'
 import {
   buildLandingStack,
@@ -1656,6 +1657,42 @@ export function buildOpenGraphComposer(
         return hasResumableState().then((resumable) =>
           resumable ? withReactBootstrap(landing.fetch(req, server)) : coldStartRedirect(url),
         )
+      }
+
+      // SPA client-route deep link (doc-link 404 fix) — a HARD load / share of
+      // a project-scoped URL (e.g. `/projects/<id>/docs?path=…`, the P-A
+      // doc-reference link). It serves the SAME chat-react shell as /chat, so it
+      // needs the SAME owner cookie-mint + React-bootstrap injection: without the
+      // injected `__neutron_user_id` / `__neutron_projects` the client throws
+      // ChatBootstrapError and never opens the doc. A no-cookie/no-token visit
+      // mints the owner cookie and bounces back to the SAME deep link
+      // (preserving the doc path — unlike /chat's cold-start, which resets to
+      // onboarding); the reload then carries a valid cookie and serves the
+      // injected shell, which client-routes to the doc (`ProjectShell` boot-open).
+      if (isGet && isSpaClientRoute(url.pathname, req.method)) {
+        if (!hasValidCookie && !hasStart) {
+          const headers = new Headers({ location: `${url.pathname}${url.search}` })
+          headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
+          return new Response(null, { status: 302, headers })
+        }
+        const spaRes = landing.fetch(req, server)
+        if (!hasValidCookie) {
+          // Arrived with a `?start=` token (a shared link opened in a fresh
+          // browser that already went through the mint bounce): claim it
+          // single-use + mint the cookie, then inject + serve — identical to the
+          // /chat `?start=` gate below.
+          const startToken = url.searchParams.get('start')
+          return (async (): Promise<Response> => {
+            const minted = startToken !== null ? await claimStartToken(startToken) : false
+            const r = await withReactBootstrap(spaRes)
+            const headers = new Headers(r.headers)
+            if (minted) {
+              headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
+            }
+            return new Response(r.body, { status: r.status, headers })
+          })()
+        }
+        return withReactBootstrap(spaRes)
       }
 
       // Otherwise serve via the landing server, ensuring the owner cookie is

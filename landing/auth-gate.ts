@@ -59,6 +59,7 @@ import {
   readSessionCookie,
   signSessionCookie,
 } from './session-cookie.ts'
+import { isSpaClientRoute } from './spa-routes.ts'
 
 /** Resolve a JWKS key by `kid`. Structurally identical to the resolver
  *  the platform chat-proxy uses; defined locally since C2 relocated that
@@ -402,6 +403,45 @@ export async function evaluateAuthGate(
       // 400s, and chat.ts's onClose path may still loop. Logged above
       // so the operator can chase the mint failure; the loop is no
       // worse than the pre-Argus-r1 shape we're already shipping.
+    }
+    // Doc-link deep-link 404 fix — a gated SPA client-route deep link
+    // (`GET /projects/<id>/docs?path=…`) served to a cookie-valid RETURNING
+    // user needs the SAME fresh-`?start=` mint as /chat above. The Managed
+    // chat-react shell derives its identity from the `?start=` JWT `sub`
+    // (there is NO Open-style `__neutron_user_id` injection on Managed), so a
+    // cookie-only deep-link hit that fell through to `allow` would serve a
+    // token-less shell → `resolveBootstrapConfig` throws ChatBootstrapError
+    // instead of opening the doc (Codex P1). 302 to the SAME deep-link URL
+    // with `?start=<fresh>` appended (PATH PRESERVED, unlike /chat) so the
+    // reload boots identified + client-routes to the doc. Kept SEPARATE from
+    // the /chat branch so that well-tested path is untouched.
+    if (
+      isSpaClientRoute(pathname, method) &&
+      !hasStartQuery &&
+      opts.mintStartToken !== undefined
+    ) {
+      try {
+        const fresh = await opts.mintStartToken()
+        if (typeof fresh === 'string' && fresh.length > 0) {
+          const refreshed = signSessionCookie(
+            opts.project_slug,
+            opts.cookie_secret,
+            now(),
+          )
+          const dest = new URL(url.toString())
+          dest.searchParams.set('start', fresh)
+          return {
+            kind: 'redirect',
+            location: `${dest.pathname}${dest.search}`,
+            set_cookie: formatSetCookie(refreshed),
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[auth-gate] project_slug=${opts.project_slug} mintStartToken threw for SPA deep link — falling through to allow (shell boots token-less):`,
+          err,
+        )
+      }
     }
     // 2026-05-27 persistent-session-cookie sprint: refresh the cookie on
     // every cookie-valid `allow` so the 30-day TTL keeps rolling forward

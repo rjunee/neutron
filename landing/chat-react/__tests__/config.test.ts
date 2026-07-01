@@ -18,7 +18,7 @@ function jwt(claims: Record<string, unknown>): string {
 
 function win(over: Partial<WindowLike> = {}): WindowLike {
   return {
-    location: { protocol: 'https:', host: 'sam.neutron.test', search: '' },
+    location: { protocol: 'https:', host: 'sam.neutron.test', search: '', pathname: '/chat' },
     ...over,
   }
 }
@@ -68,7 +68,7 @@ describe('resolveBootstrapConfig', () => {
 
   it('reads the start token from the URL when not stashed', () => {
     const cfg = resolveBootstrapConfig(
-      win({ location: { protocol: 'https:', host: 'h.test', search: `?start=${jwt({ sub: 'q' })}` } }),
+      win({ location: { protocol: 'https:', host: 'h.test', search: `?start=${jwt({ sub: 'q' })}`, pathname: '/chat' } }),
     )
     expect(cfg.userId).toBe('q')
   })
@@ -130,6 +130,27 @@ describe('resolveBootstrapConfig', () => {
       resolveBootstrapConfig(
         win({ __neutron_user_id: 'sam', __neutron_post_onboarding_claim_url: '' }),
       ).postOnboardingClaimUrl,
+    ).toBeUndefined()
+  })
+
+  it('doc-link deep link — parses initialDocLink from a hard-loaded /projects/<id>/docs URL', () => {
+    const cfg = resolveBootstrapConfig(
+      win({
+        __neutron_user_id: 'sam',
+        location: {
+          protocol: 'https:',
+          host: 'sam.neutron.test',
+          pathname: '/projects/acme/docs',
+          search: '?path=pitch-deck.md',
+        },
+      }),
+    )
+    expect(cfg.initialDocLink).toEqual({ projectId: 'acme', path: 'pitch-deck.md' })
+  })
+
+  it('doc-link deep link — initialDocLink is undefined on a normal /chat boot', () => {
+    expect(
+      resolveBootstrapConfig(win({ __neutron_user_id: 'sam' })).initialDocLink,
     ).toBeUndefined()
   })
 })

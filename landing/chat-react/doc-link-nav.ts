@@ -86,3 +86,22 @@ export function parseWebDocLinkHref(href: string, origin: string): DocLinkTarget
   }
   return { projectId, path }
 }
+
+/**
+ * Parse the current browser LOCATION (a hard-loaded / bookmarked / shared doc
+ * deep-link URL) into a doc-link target, or `null` when the URL isn't a project
+ * doc link. The SPA calls this ONCE on boot: when the gateway's SPA catch-all
+ * served the shell for a `/projects/<id>/docs?path=…` URL, this recovers the
+ * `{projectId, path}` so `ProjectShell` can switch to that project's Documents
+ * tab and open the doc — the same effect a tap would have had, but for a real
+ * navigable URL. Reuses {@link parseWebDocLinkHref} (same origin + traversal
+ * guards); `origin` is the page origin so an absolute self-host URL still
+ * resolves.
+ */
+export function initialDocLinkFromLocation(
+  pathname: string,
+  search: string,
+  origin: string,
+): DocLinkTarget | null {
+  return parseWebDocLinkHref(`${pathname}${search}`, origin)
+}

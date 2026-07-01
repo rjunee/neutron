@@ -52,6 +52,37 @@ describe('GET /chat — React is the only chat client', () => {
   })
 })
 
+describe('SPA client-route catch-all — doc-link deep-link 404 fix', () => {
+  test('GET /projects/<id>/docs?path=… hard load serves the React shell (not 404)', async () => {
+    const res = await get('http://x.test/projects/acme/docs?path=pitch-deck.md')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // Same shell as /chat — the SPA boots + client-routes to the deep link.
+    expect(body).toContain('id="root"')
+    expect(body).toContain('/chat-react.js')
+  })
+
+  test('GET a bare /projects rail deep link serves the shell', async () => {
+    const res = await get('http://x.test/projects/acme')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('id="root"')
+  })
+
+  test('a genuinely-unknown non-SPA path still 404s (catch-all is narrow)', async () => {
+    const res = await get('http://x.test/totally-unknown')
+    expect(res.status).toBe(404)
+  })
+
+  test('POST /projects/<id> is not the SPA nav catch-all — still 404s', async () => {
+    const handler = createLandingServer({ static_dir: STATIC_DIR, bridge: makeBridge() })
+    const res = await handler.fetch(
+      new Request('http://x.test/projects/acme/docs', { method: 'POST' }),
+      fakeServer,
+    )
+    expect(res.status).toBe(404)
+  })
+})
+
 describe('GET /chat-react.js', () => {
   test('bundles the React/assistant-ui client on first request', async () => {
     const res = await get('http://x.test/chat-react.js')
