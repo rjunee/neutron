@@ -42,6 +42,29 @@ share one backend instance. Examples:
   (`gateway/boot-helpers.ts`, re-exported from the `gateway` barrel) so the
   composer chains it into `buildChainedChatCommandFilter([...])` alongside
   `/remind` and `/code`.
+- Notes (`cores/free/notes`, `@neutronai/notes`): per-project SQLite sidecar at
+  `<owner_home>/Projects/<id>/notes/notes.db` via a per-instance
+  `NotesStoreResolver`. Eight MCP tools split across the composer's TWO tool
+  factories (see below): the legacy four (`notes_write/recall/list/link`) ship in
+  `buildTools` against `buildNotesStoreBackend`, and the four Notes-Core-S1 tools
+  (`notes_create_drawer/drawer_list/search/traverse`) ship in `buildExtraTools`
+  against the resolver directly (they take an explicit `project_id` per call). The
+  `notes` backend factory in `gateway/boot-helpers.ts` returns `{ backend,
+  resolver }` so `normalizeBackend` threads BOTH into the one `deps` bundle both
+  factories receive. (Before this wiring the four S1 tools fell through to
+  `not_implemented` stubs and boot logged `manifest_tool_unimplemented core=notes`
+  four times per owner install — ISSUE #330.)
+
+**Two tool factories per Core.** The install pipeline
+(`gateway/cores/install-bundled.ts → registerCoreTools`) resolves `buildTools`
+from a Core's barrel and, if present, ALSO `buildExtraTools` — a second factory
+returning additional handlers merged over the base set. Both receive the same
+`deps` bundle. The split lets a Core keep its legacy tool surface
+construction-compatible while shipping new tools separately (Research, Calendar,
+Tasks, and Notes all use it). Any manifest-declared tool that NEITHER factory
+returns a handler for registers as a loud `not_implemented` stub and logs
+`manifest_tool_unimplemented` — the manifest never silently lies about its
+surface.
 
 ### Per-project credential resolution (D2)
 

@@ -73,6 +73,11 @@ function buildBackendFactories(db: ProjectDb, ownerHome: string): CoreBackendFac
           resolver,
           default_project_id: 'default',
         }),
+        // The four S1 tools (create_drawer/drawer_list/search/traverse)
+        // resolve project scope against this SAME resolver via
+        // `buildExtraTools` — mirror the production factory
+        // (gateway/boot-helpers.ts) which returns `{ backend, resolver }`.
+        resolver,
       }
     },
     tasks_core: async ({ project_slug }) => {
@@ -250,6 +255,50 @@ describe('cores tool dispatch — end-to-end', () => {
       { project_slug: OWNER, topic_id: null, call_id: 'c-list', speaker_user_id: null },
     )) as { briefs: unknown[] }
     expect(Array.isArray(out.briefs)).toBe(true)
+  })
+
+  test('Notes Core registers ALL 8 manifest-declared tools (ISSUE #330)', async () => {
+    await installBundledCores({
+      project_slug: OWNER,
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [REPO_ROOT],
+      backends: buildBackendFactories(bench.db, bench.ownerHome),
+    })
+    // The 4 legacy + 4 S1 tools the manifest declares must ALL be live
+    // (no `not_implemented` fallback stub for any of them) — closes the
+    // buildExtraTools wire-up gap that logged `manifest_tool_unimplemented
+    // core=notes` ×4 on every owner boot.
+    const required = [
+      'notes_write',
+      'notes_recall',
+      'notes_list',
+      'notes_link',
+      'notes_create_drawer',
+      'notes_drawer_list',
+      'notes_search',
+      'notes_traverse',
+    ]
+    for (const name of required) {
+      expect(bench.tools.get(name)).toBeDefined()
+    }
+    // Verify an S1 extra dispatches through the CapabilityGuard +
+    // resolver-backed store (not the manifest-tool-unimplemented stub):
+    // create a drawer then list it back.
+    const createDrawer = bench.tools.get('notes_create_drawer')!
+    const created = (await createDrawer.handler(
+      { project_id: 'demo-project', name: 'Inbox2' },
+      { project_slug: OWNER, topic_id: null, call_id: 'c-drawer', speaker_user_id: null },
+    )) as { id: string }
+    expect(typeof created.id).toBe('string')
+    const drawerList = bench.tools.get('notes_drawer_list')!
+    const drawers = (await drawerList.handler(
+      { project_id: 'demo-project' },
+      { project_slug: OWNER, topic_id: null, call_id: 'c-dlist', speaker_user_id: null },
+    )) as { drawers: Array<{ id: string }> }
+    expect(drawers.drawers.some((d) => d.id === created.id)).toBe(true)
   })
 })
 
