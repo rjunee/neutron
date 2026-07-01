@@ -23,7 +23,77 @@ const okUpload = () =>
     { status: 200, headers: { 'content-type': 'application/json' } },
   )
 
-describe('BUG 4 — history-import ZIP upload', () => {
+/** One recorded request against the chunked upload protocol. */
+interface ChunkedCall {
+  url: string
+  method: string
+  auth: string
+  topic: string
+  contentRange: string | null
+  bodyLen: number
+}
+
+/**
+ * A scripted `fetchImpl` that plays the gateway's CHUNKED upload protocol
+ * (`…/start` → per-chunk `PATCH` → terminal completion) so the tests exercise
+ * the real path {@link importHistoryZip} now drives. `/start` mints a fixed
+ * `upload_id` + the caller-chosen `chunk_size_bytes`; each `PATCH` advances a
+ * high-water mark and returns `{ bytes_received }` until the final chunk lands,
+ * when it returns the `completion` body (job_id / outcome / source).
+ */
+function chunkedFake(opts?: {
+  chunkSize?: number
+  completion?: Record<string, unknown>
+  /** Force a non-2xx on the FIRST request (start) — the error-mapping test. */
+  failStartWith?: { status: number; body: unknown }
+}): { fetchImpl: (url: string, init?: RequestInit) => Promise<Response>; calls: ChunkedCall[] } {
+  const calls: ChunkedCall[] = []
+  const uploadId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  let total = 0
+  const chunkSize = opts?.chunkSize ?? 4 * 1024 * 1024
+  const completion = opts?.completion ?? { job_id: 'job-1', outcome: 'advanced', source: 'chatgpt' }
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+    const method = (init?.method ?? 'GET').toUpperCase()
+    const h = (init?.headers ?? {}) as Record<string, string>
+    const contentRange = h['Content-Range'] ?? h['content-range'] ?? null
+    const bodyLen =
+      init?.body instanceof Blob
+        ? init.body.size
+        : typeof init?.body === 'string'
+          ? init.body.length
+          : 0
+    calls.push({
+      url,
+      method,
+      auth: String(h['authorization'] ?? ''),
+      topic: String(h[IMPORT_TOPIC_HEADER] ?? ''),
+      contentRange,
+      bodyLen,
+    })
+    if (url.endsWith('/start') && method === 'POST') {
+      if (opts?.failStartWith !== undefined) {
+        return new Response(JSON.stringify(opts.failStartWith.body), { status: opts.failStartWith.status })
+      }
+      const body = JSON.parse(String(init?.body)) as { total_bytes: number }
+      total = body.total_bytes
+      return new Response(
+        JSON.stringify({ upload_id: uploadId, chunk_size_bytes: chunkSize, total_bytes: total }),
+        { status: 200 },
+      )
+    }
+    // PATCH a chunk. Parse the end offset from the Content-Range header.
+    const m = String(contentRange).match(/bytes (\d+)-(\d+)\/(\d+)/)
+    const end = m?.[2] !== undefined ? Number(m[2]) : 0
+    const received = end + 1
+    if (received >= total) {
+      return new Response(JSON.stringify({ ok: true, status: 'complete', ...completion }), { status: 200 })
+    }
+    return new Response(JSON.stringify({ ok: true, bytes_received: received }), { status: 200 })
+  }
+  return { fetchImpl, calls }
+}
+
+describe('BUG 4 — history-import ZIP upload (chunked)', () => {
   it('isExportZip detects zips by MIME or .zip extension, not images', () => {
     expect(isExportZip(new File(['x'], 'export.zip', { type: 'application/zip' }))).toBe(true)
     expect(isExportZip(new File(['x'], 'EXPORT.ZIP', { type: '' }))).toBe(true)
@@ -31,85 +101,108 @@ describe('BUG 4 — history-import ZIP upload', () => {
     expect(isExportZip(new File(['x'], 'shot.png', { type: 'image/png' }))).toBe(false)
   })
 
-  it('POSTs the zip multipart to /api/upload/<source> with the bearer + topic header', async () => {
-    let seenUrl = ''
-    let seenAuth = ''
-    let seenTopic = ''
-    let bodyIsForm = false
-    await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+  it('drives the chunked protocol: POST …/start then PATCH …/<id>, with the bearer + topic header on BOTH', async () => {
+    const { fetchImpl, calls } = chunkedFake()
+    await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
       token: 'dev:sam',
       topicId: 'app:sam',
-      fetchImpl: async (url, init) => {
-        seenUrl = url
-        const h = init?.headers as Record<string, string>
-        seenAuth = String(h['authorization'])
-        seenTopic = String(h[IMPORT_TOPIC_HEADER])
-        bodyIsForm = init?.body instanceof FormData
-        return new Response(JSON.stringify({ ok: true }), { status: 200 })
-      },
+      fetchImpl,
     })
-    expect(seenUrl).toBe('/api/upload/chatgpt')
-    expect(seenAuth).toBe('Bearer dev:sam')
-    expect(seenTopic).toBe('app:sam')
-    expect(bodyIsForm).toBe(true)
+    // First call mints the session at …/start; a PATCH (not a single-shot POST)
+    // carries the bytes with a Content-Range.
+    const start = calls[0]
+    const patch = calls.find((c) => c.method === 'PATCH')
+    expect(start?.url).toBe('/api/upload/chatgpt/start')
+    expect(start?.method).toBe('POST')
+    expect(patch?.url).toBe('/api/upload/chatgpt/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+    expect(patch?.contentRange).toBe('bytes 0-1/2')
+    // Bearer + topic header ride EVERY request so the finaliser's engine notify
+    // routes the post-upload prompt back to this socket.
+    for (const c of calls) {
+      expect(c.auth).toBe('Bearer dev:sam')
+      expect(c.topic).toBe('app:sam')
+    }
+    // No single-shot multipart POST to the bare source path — this is the
+    // chunked path only.
+    expect(calls.some((c) => c.url === '/api/upload/chatgpt')).toBe(false)
   })
 
-  it('routes the claude source to /api/upload/claude', async () => {
-    let seenUrl = ''
+  it('routes the claude source to /api/upload/claude/start', async () => {
+    const { fetchImpl, calls } = chunkedFake()
     await importHistoryZip(new File(['PK'], 'c.zip', { type: 'application/zip' }), 'claude', {
       token: 't',
-      fetchImpl: async (url) => {
-        seenUrl = url
-        return new Response('{}', { status: 200 })
-      },
+      fetchImpl,
     })
-    expect(seenUrl).toBe('/api/upload/claude')
+    expect(calls[0]?.url).toBe('/api/upload/claude/start')
   })
 
-  it('ND2 — returns the server job_id so the caller can tell a real start from a no-op', async () => {
+  it('reports UPLOAD progress that reflects chunk progress and ends at total', async () => {
+    // chunk_size 1 forces the 2-byte export into TWO chunks so progress is
+    // observably incremental rather than a single 0→100 jump.
+    const { fetchImpl } = chunkedFake({ chunkSize: 1 })
+    const loaded: number[] = []
+    let seenTotal = 0
+    await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+      token: 't',
+      fetchImpl,
+      onProgress: (l, t) => {
+        loaded.push(l)
+        seenTotal = t
+      },
+    })
+    expect(seenTotal).toBe(2)
+    // Starts at 0, ends at the full size, monotonically non-decreasing.
+    expect(loaded[0]).toBe(0)
+    expect(loaded[loaded.length - 1]).toBe(2)
+    expect(loaded).toEqual([...loaded].sort((a, b) => a - b))
+    // More than one distinct tick — the bar actually moves through the upload.
+    expect(new Set(loaded).size).toBeGreaterThan(1)
+  })
+
+  it('ND2 — returns the completion job_id so the caller can tell a real start from a no-op', async () => {
+    const { fetchImpl } = chunkedFake({ completion: { job_id: 'job-42', outcome: 'advanced', source: 'claude' } })
     const started = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'claude', {
       token: 't',
-      fetchImpl: async () =>
-        new Response(JSON.stringify({ ok: true, source: 'claude', outcome: 'advanced', job_id: 'job-42' }), {
-          status: 200,
-        }),
+      fetchImpl,
     })
     expect(started.job_id).toBe('job-42')
     expect(started.outcome).toBe('advanced')
+    expect(started.source).toBe('claude')
   })
 
-  it('ND2 — a 200 no-op (job_id null / absent) resolves with job_id:null, NOT a false success', async () => {
-    // The engine declined to route the upload (e.g. stray / no affordance):
-    // HTTP 200 with `job_id: null`. The caller MUST be able to see this so it
+  it('ND2 — a completion no-op (job_id null / absent) resolves with job_id:null, NOT a false success', async () => {
+    // The engine declined to route the upload (e.g. stray / no affordance): the
+    // terminal PATCH is 200 with `job_id: null`. The caller MUST see this so it
     // surfaces an honest "couldn't start" notice instead of "reading your
     // history now" (the banned silent-false-success).
-    const noop = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+    const noop = chunkedFake({ completion: { job_id: null, outcome: 'no_active_prompt', source: 'chatgpt' } })
+    const res = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
       token: 't',
-      fetchImpl: async () =>
-        new Response(JSON.stringify({ ok: true, source: 'chatgpt', outcome: 'no_active_prompt', job_id: null }), {
-          status: 200,
-        }),
+      fetchImpl: noop.fetchImpl,
     })
-    expect(noop.job_id).toBeNull()
-    expect(noop.outcome).toBe('no_active_prompt')
+    expect(res.job_id).toBeNull()
+    expect(res.outcome).toBe('no_active_prompt')
 
-    // An empty / job_id-absent body also degrades to job_id:null (no false success).
-    const bare = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
+    // A completion body with job_id ABSENT also degrades to job_id:null.
+    const bare = chunkedFake({ completion: {} })
+    const bareRes = await importHistoryZip(new File(['PK'], 'export.zip', { type: 'application/zip' }), 'chatgpt', {
       token: 't',
-      fetchImpl: async () => new Response('{}', { status: 200 }),
+      fetchImpl: bare.fetchImpl,
     })
-    expect(bare.job_id).toBeNull()
+    expect(bareRes.job_id).toBeNull()
   })
 
-  it('surfaces the server error message on a non-ok response', async () => {
+  it('surfaces the server error as an AttachmentUploadError on a non-ok start', async () => {
+    const { fetchImpl } = chunkedFake({
+      failStartWith: { status: 413, body: { error: 'total_bytes 999 exceeds cap 5' } },
+    })
     const err = await importHistoryZip(new File(['PK'], 'x.zip', { type: 'application/zip' }), 'chatgpt', {
       token: 't',
-      fetchImpl: async () =>
-        new Response(JSON.stringify({ message: 'not a zip file (magic bytes mismatch)' }), { status: 400 }),
+      fetchImpl,
     }).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(AttachmentUploadError)
-    expect((err as AttachmentUploadError).message).toContain('magic bytes')
-    expect((err as AttachmentUploadError).status).toBe(400)
+    expect((err as AttachmentUploadError).status).toBe(413)
+    expect((err as AttachmentUploadError).code).toBe('http_413')
   })
 })
 

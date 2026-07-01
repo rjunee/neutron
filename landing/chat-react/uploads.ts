@@ -21,6 +21,13 @@
  * unit-tests with a fake fetch and no DOM.
  */
 
+import {
+  uploadChunked,
+  UploadChunkedError,
+  type UploadChunkedOptions,
+  type UploadChunkedResult,
+} from '../upload-client.ts'
+
 /** Mirrors the server cap (`MAX_CHAT_UPLOAD_BYTES`) for a friendly pre-flight
  *  rejection — the server remains the source of truth. */
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
@@ -38,12 +45,18 @@ export const ACCEPTED_IMAGE_TYPES: readonly string[] = [
 export const UPLOAD_ENDPOINT = '/api/app/upload'
 
 /**
- * BUG 4 — the history-import (ChatGPT/Claude export ZIP) upload endpoint. The
- * server mounts `POST /api/upload/<source>` (`source` ∈ {chatgpt,claude}); the
- * single-shot handler writes `<owner_home>/imports/<source>.zip`, magic-byte
- * checks it, and notifies the onboarding engine so it advances out of
- * `import_upload_pending` and emits the next prompt over the same socket. This
- * is a SEPARATE path from image attachments (which are image-only).
+ * BUG 4 — the history-import (ChatGPT/Claude export ZIP) upload endpoint base.
+ * The server mounts the CHUNKED resumable protocol under
+ * `/api/upload/<source>/...` (`source` ∈ {chatgpt,claude}):
+ * `POST …/start`, `PATCH …/<upload_id>` (per-chunk), `HEAD …/<upload_id>`
+ * (resume). On the terminal chunk the handler assembles
+ * `<owner_home>/imports/<source>.zip`, magic-byte checks it, and notifies the
+ * onboarding engine so it advances out of `import_upload_pending` and emits
+ * the next prompt over the same socket. {@link importHistoryZip} drives that
+ * protocol via the shared {@link uploadChunked} client — a large export
+ * uploads in 4 MiB slices (no single giant body → no 413) with live progress.
+ * This is a SEPARATE path from image attachments (which are image-only and
+ * single-shot).
  */
 export const IMPORT_UPLOAD_ENDPOINT = '/api/upload'
 
@@ -75,6 +88,14 @@ export interface ImportZipOptions {
   endpoint?: string
   fetchImpl?: FetchImpl
   signal?: AbortSignal
+  /**
+   * UPLOAD progress callback — invoked with `(loadedBytes, totalBytes)` at
+   * start (`0, total`), after each landed chunk, and at completion
+   * (`total, total`). Wired to the chat-react upload progress bar. This is
+   * the UPLOAD itself (bytes over the wire), distinct from the post-upload
+   * import-ANALYSIS progress the engine streams once the zip lands.
+   */
+  onProgress?: (loaded: number, total: number) => void
 }
 
 /**
@@ -94,12 +115,20 @@ export interface ImportHistoryResult {
 }
 
 /**
- * BUG 4 — upload a history-import export ZIP to `POST /api/upload/<source>`.
+ * BUG 4 — upload a history-import export ZIP via the CHUNKED resumable
+ * protocol (`…/start` → per-chunk `PATCH` → terminal completion), driving the
+ * shared {@link uploadChunked} client. Large exports upload in 4 MiB slices so
+ * a single giant request body never hits the server (no 413), and
+ * `opts.onProgress` drives a live upload progress bar. On the terminal chunk
+ * the server assembles the zip, magic-byte checks it, and bridges
+ * `notifyImportUpload` — the SAME engine advance the old single-shot POST
+ * triggered.
+ *
  * Resolves with the server's parsed result so the caller can tell a real
  * job-started from a 200-OK no-op via {@link ImportHistoryResult.job_id} (the
  * engine then drives the rest of onboarding over the WebSocket); rejects with
- * an {@link AttachmentUploadError} on a client/network/HTTP failure. The
- * server re-validates magic bytes + size, so this is a thin multipart POST.
+ * an {@link AttachmentUploadError} on a client/network/HTTP failure (mapped
+ * from {@link UploadChunkedError}). The server re-validates magic bytes + size.
  */
 export async function importHistoryZip(
   file: File,
@@ -107,49 +136,50 @@ export async function importHistoryZip(
   opts: ImportZipOptions,
 ): Promise<ImportHistoryResult> {
   const base = opts.endpoint ?? IMPORT_UPLOAD_ENDPOINT
-  const endpoint = `${base}/${source}`
-  const doFetch = resolveFetch(opts.fetchImpl)
-  const form = new FormData()
-  form.set('file', file)
+  const url = `${base}/${source}`
   const headers: Record<string, string> = { authorization: `Bearer ${opts.token}` }
   if (opts.topicId !== undefined && opts.topicId.length > 0) headers[IMPORT_TOPIC_HEADER] = opts.topicId
-  const init: RequestInit = { method: 'POST', headers, body: form }
-  if (opts.signal !== undefined) init.signal = opts.signal
-  let res: Response
+
+  const chunkedOpts: UploadChunkedOptions = { url, file, headers }
+  if (opts.onProgress !== undefined) chunkedOpts.onProgress = opts.onProgress
+  if (opts.signal !== undefined) chunkedOpts.signal = opts.signal
+  if (opts.fetchImpl !== undefined) {
+    // Adapt the string-input `FetchImpl` this module already accepts to the
+    // wider `typeof fetch` the chunked client expects. The client only ever
+    // calls it with string URLs, so stringifying a non-string input is safe.
+    const injected = opts.fetchImpl
+    chunkedOpts.fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) =>
+      injected(typeof input === 'string' ? input : String(input), init)) as typeof fetch
+  }
+
+  let result: UploadChunkedResult
   try {
-    res = await doFetch(endpoint, init)
+    result = await uploadChunked(chunkedOpts)
   } catch (err) {
+    if (err instanceof UploadChunkedError) {
+      if (err.opts.phase === 'abort') {
+        throw new AttachmentUploadError('aborted', 'Import cancelled.')
+      }
+      // A positive HTTP status → `http_<status>`; a 0 status is a transport
+      // failure after the retry envelope was exhausted → `network_error`.
+      const code = err.opts.status > 0 ? `http_${err.opts.status}` : 'network_error'
+      throw new AttachmentUploadError(code, err.message, err.opts.status)
+    }
     if (err instanceof Error && err.name === 'AbortError') {
       throw new AttachmentUploadError('aborted', 'Import cancelled.')
     }
     throw new AttachmentUploadError('network_error', err instanceof Error ? err.message : 'network error')
   }
-  if (!res.ok) {
-    let message = `import upload failed (status ${res.status})`
-    try {
-      const body = (await res.json()) as { message?: unknown; error?: unknown }
-      if (typeof body.message === 'string') message = body.message
-      else if (typeof body.error === 'string') message = body.error
-    } catch {
-      /* non-JSON error body — keep the status-based message */
-    }
-    throw new AttachmentUploadError(`http_${res.status}`, message, res.status)
-  }
-  // Parse the success body so the caller can distinguish a real job-started
-  // (job_id present) from a 200-OK no-op (job_id: null). A malformed/empty body
-  // degrades to job_id: null → the caller shows the honest "couldn't start"
-  // notice rather than a false success.
-  let parsed: { ok?: unknown; source?: unknown; outcome?: unknown; job_id?: unknown } = {}
-  try {
-    parsed = (await res.json()) as typeof parsed
-  } catch {
-    /* non-JSON success body — treat as a no-op (job_id: null) below */
-  }
+
+  // Map the completion result to the caller's honest-success contract. The
+  // finaliser echoes `job_id` on the terminal PATCH: non-null ⇒ a real import
+  // job started; null / absent ⇒ a 200 no-op → the caller surfaces "couldn't
+  // start" rather than a false success (ND2).
   return {
-    ok: parsed.ok === true,
-    ...(typeof parsed.source === 'string' ? { source: parsed.source } : {}),
-    ...(typeof parsed.outcome === 'string' ? { outcome: parsed.outcome } : {}),
-    job_id: typeof parsed.job_id === 'string' && parsed.job_id.length > 0 ? parsed.job_id : null,
+    ok: true,
+    ...(typeof result.source === 'string' ? { source: result.source } : {}),
+    ...(typeof result.outcome === 'string' ? { outcome: result.outcome } : {}),
+    job_id: typeof result.job_id === 'string' && result.job_id.length > 0 ? result.job_id : null,
   }
 }
 

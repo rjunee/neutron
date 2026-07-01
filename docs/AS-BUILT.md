@@ -2,6 +2,51 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Web history-import upload is chunked + shows an upload progress bar
+
+**The bug.** The web React client uploaded the ChatGPT/Claude export as a
+SINGLE-SHOT `POST /api/upload/<source>` — the whole export in one multipart
+body (`landing/chat-react/uploads.ts` `importHistoryZip` → `IMPORT_UPLOAD_ENDPOINT`).
+A large export (>128 MB) 413s at the Bun server body layer (#146 raised the cap
+to 5 GB as a backstop, but a single giant body is still the wrong shape), and
+the user saw only a spinner — no upload progress. A server-side CHUNKED,
+resumable handler already EXISTED and was mounted in production
+(`gateway/upload/chunked-upload-handler.ts`, wired at `open/composer.ts` →
+`buildChunkedUploadHandler`, routes `POST …/start` / `PATCH …/<upload_id>` /
+`HEAD …/<upload_id>`, regression-tested by
+`open/__tests__/open-import-upload-wiring.test.ts`) — plus a fully-tested
+client (`landing/upload-client.ts` `uploadChunked`) — but the web chat client
+never called them.
+
+**The fix.** `importHistoryZip` now drives `uploadChunked` (4 MiB slices:
+`/start` → per-chunk `PATCH` → terminal completion) instead of the single-shot
+multipart POST. The bearer + `x-neutron-topic-id` headers ride every request so
+the finaliser's `notifyImportUpload` still routes the post-upload prompt back to
+the socket; the terminal chunk kicks the SAME engine advance the old POST did.
+`uploadChunked`'s result now surfaces the finalisation `job_id` / `outcome` /
+`source` (echoed from the completion `PATCH` body) so the caller keeps the ND2
+honest-success contract (job_id non-null ⇒ real import job started; null/absent
+⇒ an honest "couldn't start" notice, never a false success). No feature flags —
+the single-shot import client path is REPLACED, not dual-pathed. #146's raised
+body cap stays as a backstop.
+
+**Progress bar.** `ChatApp.tsx` threads `uploadChunked`'s `onProgress`
+(`loaded`/`total` bytes) into the `ImportState` and renders a real upload
+progress bar in `ImportStatus` (reusing the existing `car-import-bar` styling),
+distinct from the post-upload import-ANALYSIS progress (`vm.importProgress`).
+When the analysis stream begins the upload banner steps aside (existing
+`hasLiveProgress` effect).
+
+**Tests.** `landing/chat-react/__tests__/uploads.test.ts` rewired to a scripted
+`chunkedFake` that plays the real protocol: asserts the client hits `…/start`
+then `PATCH …/<id>` (no single-shot POST), carries bearer + topic on every
+request, reports incremental upload progress that ends at `total`, surfaces the
+completion `job_id` (and degrades a no-op to `job_id:null`), and maps a non-ok
+`/start` to a typed `AttachmentUploadError`. The chunked client + server
+reachability + engine-advance-on-completion stay covered by the existing
+`landing/__tests__/upload-chunked-client.test.ts` and
+`open/__tests__/open-import-upload-wiring.test.ts`.
+
 ## Create Project rail refresh reaches a project-scoped socket
 
 **The bug.** #132 wired the "Create Project" button to fan a `projects_changed`
