@@ -107,4 +107,29 @@ describe('resolveBootstrapConfig', () => {
       resolveBootstrapConfig(win({ __neutron_user_id: 'sam', __neutron_onboarding_active: true })).onboardingActive,
     ).toBe(true)
   })
+
+  it('claim redirect — postOnboardingClaimUrl is undefined by default (Open self-host)', () => {
+    expect(
+      resolveBootstrapConfig(win({ __neutron_user_id: 'sam' })).postOnboardingClaimUrl,
+    ).toBeUndefined()
+  })
+
+  it('claim redirect — reads the injected claim URL when present (Managed)', () => {
+    expect(
+      resolveBootstrapConfig(
+        win({
+          __neutron_user_id: 'sam',
+          __neutron_post_onboarding_claim_url: 'https://claim.example.test',
+        }),
+      ).postOnboardingClaimUrl,
+    ).toBe('https://claim.example.test')
+  })
+
+  it('claim redirect — ignores an empty injected URL (treated as absent)', () => {
+    expect(
+      resolveBootstrapConfig(
+        win({ __neutron_user_id: 'sam', __neutron_post_onboarding_claim_url: '' }),
+      ).postOnboardingClaimUrl,
+    ).toBeUndefined()
+  })
 })

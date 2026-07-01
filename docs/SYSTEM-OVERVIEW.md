@@ -424,6 +424,29 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > collapsed (one path, no flag). Supersedes the deferred-BUG-0 note and
 > `docs/research/p2-v3-conversational-onboarding-design.md`.
 >
+> **Post-onboarding claim redirect (Managed overlay, 2026-07-01).** At the
+> terminal `completed` transition `build-onboarding-finalize.ts` fires a one-shot
+> `emitOnboardingCompleted(user_id)` dep (right after `emitProjectsChanged`,
+> guarded exactly-once by the finalizer's idempotency gate). In `open/composer.ts`
+> that fans a payload-free `onboarding_completed` app-ws frame
+> (`AppWsOutboundOnboardingCompleted`) to the owner's base + per-project topics.
+> The web client (`controller.ts`) redirects the browser to a configured claim URL
+> on that frame — **but only if** `NEUTRON_POST_ONBOARDING_CLAIM_URL` was injected
+> into the page bootstrap (`composer.ts` `claimBootstrapScript` →
+> `window.__neutron_post_onboarding_claim_url` → `BootstrapConfig.postOnboardingClaimUrl`).
+> This is a Managed-overlay CONFIG, **not a feature flag**: ONE code path
+> (redirect-if-URL-present); the Managed overlay points the env at the control-plane
+> `/claim`, Open self-host leaves it unset so the client no-ops and onboarding
+> completes normally. The redirect target lives in the client config, never on the
+> frame; a `claimRedirected` latch makes it at-most-once. **Reconnect recovery:**
+> the live frame is dropped if finalize fires with no socket registered (e.g. a
+> background import-completion watcher finalizes while the tab is closed), so
+> `on_session_open`'s steady-state branch replays it to the connecting topic for
+> a completed owner when the claim URL is configured — deriving the redirect from
+> the persisted `completed` state so it can't be permanently missed. Pairs with the
+> neutron-managed personal-URL claim flow (`GET/POST /claim` → rename → 302 to the
+> owner's personal URL).
+>
 > **Import advances out of `import_running` on the app-socket (ND-A, 2026-06-28).**
 > Because Path-1 onboarding runs AS the live session it never calls `engine.start`,
 > so it never stamps `phase_state.signup_via`. The 5 s `import-running-cron`'s

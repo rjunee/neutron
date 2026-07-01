@@ -217,6 +217,21 @@ export interface NeutronChatControllerOptions {
    * to 12000 (≈2 missed ticks). Injectable so tests don't wait on a real timer.
    */
   importProgressStaleMs?: number
+  /**
+   * Managed post-onboarding claim redirect target (from the page bootstrap
+   * config's {@link BootstrapConfig.postOnboardingClaimUrl}). When set, the
+   * controller navigates the browser here on the `onboarding_completed` frame;
+   * when omitted (the Open self-host default) the redirect no-ops. ONE code
+   * path — presence/absence is the only branch, never an on/off flag.
+   */
+  postOnboardingClaimUrl?: string
+  /**
+   * Navigation seam for the claim redirect. Defaults to
+   * `window.location.assign` in the browser (a no-op when `window` is absent,
+   * e.g. tests that don't inject one). Injectable so tests can observe the
+   * redirect target without a real navigation.
+   */
+  navigate?: (url: string) => void
 }
 
 interface StreamEntry {
@@ -284,11 +299,30 @@ export class NeutronChatController {
   /** BUG 3 — staleness timer that clears {@link importProgress} when frames stop. */
   private importProgressTimer: ReturnType<typeof setTimeout> | null = null
   private readonly importProgressStaleMs: number
+  /** Managed post-onboarding claim redirect target (null = Open self-host / no
+   *  redirect). Read on the `onboarding_completed` frame. */
+  private readonly postOnboardingClaimUrl: string | null
+  /** Navigation seam for the claim redirect (defaults to window.location.assign). */
+  private readonly navigate: (url: string) => void
+  /** Latch so the claim redirect fires at most once even if the server re-sends
+   *  the `onboarding_completed` frame (reconnect replay / defensive re-finalize). */
+  private claimRedirected = false
 
   constructor(opts: NeutronChatControllerOptions) {
     this.projectId = opts.projectId ?? null
     this.projects = opts.projects ?? []
     this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
+    this.postOnboardingClaimUrl =
+      typeof opts.postOnboardingClaimUrl === 'string' && opts.postOnboardingClaimUrl.length > 0
+        ? opts.postOnboardingClaimUrl
+        : null
+    this.navigate =
+      opts.navigate ??
+      ((url: string): void => {
+        const w = (globalThis as { window?: { location?: { assign?: (u: string) => void } } })
+          .window
+        w?.location?.assign?.(url)
+      })
     this.createSessionFn = opts.createSession
     this.topicForProject =
       opts.topicForProject ??
@@ -581,6 +615,23 @@ export class NeutronChatController {
           fn(items, framePid)
         } catch {
           /* a throwing tab callback must not wedge the frame loop */
+        }
+      }
+      return
+    }
+    if (type === 'onboarding_completed') {
+      // Managed post-onboarding claim redirect. The server fires this ONCE at the
+      // onboarding→completed transition. IF a claim URL was injected into the page
+      // bootstrap (the Managed overlay sets it), navigate there; on Open self-host
+      // no URL is configured so this no-ops and onboarding completes normally. The latch
+      // guards against a re-sent frame (reconnect replay / defensive re-finalize)
+      // triggering a second navigation.
+      if (this.postOnboardingClaimUrl !== null && !this.claimRedirected) {
+        this.claimRedirected = true
+        try {
+          this.navigate(this.postOnboardingClaimUrl)
+        } catch {
+          /* a throwing navigation seam must not wedge the frame loop */
         }
       }
       return

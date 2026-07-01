@@ -172,6 +172,7 @@ import {
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentTyping,
   type AppWsOutboundImportProgress,
+  type AppWsOutboundOnboardingCompleted,
   type AppWsOutboundProjectsChanged,
   type AppWsOutboundWorkBoardChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
@@ -1501,6 +1502,20 @@ export function buildOpenGraphComposer(
       }
       return `<script>window.__neutron_onboarding_active=${active ? 'true' : 'false'};</script>`
     }
+    // Managed post-onboarding claim redirect — a CONFIG passthrough, not a flag.
+    // When env `NEUTRON_POST_ONBOARDING_CLAIM_URL` is set (the Managed overlay
+    // points it at the control-plane `/claim`), inject it into the page bootstrap so the
+    // React client can navigate there when it receives the `onboarding_completed`
+    // frame. When UNSET (the Open self-host default) NOTHING is injected — the
+    // client's config reads `undefined` and the redirect no-ops. There is ONE
+    // code path (redirect-if-present); absence of the env is the "off" state.
+    const claimBootstrapScript = (): string => {
+      const claimUrl = env['NEUTRON_POST_ONBOARDING_CLAIM_URL']
+      if (typeof claimUrl !== 'string' || claimUrl.length === 0) return ''
+      // Escape `<` so the URL can never break out of the <script> context.
+      const enc = JSON.stringify(claimUrl).replace(/</g, '\\u003c')
+      return `<script>window.__neutron_post_onboarding_claim_url=${enc};</script>`
+    }
     const withReactBootstrap = async (res: Response | Promise<Response>): Promise<Response> => {
       const r = await res
       const ct = r.headers.get('content-type') ?? ''
@@ -1511,9 +1526,12 @@ export function buildOpenGraphComposer(
         const headers = new Headers(r.headers)
         return new Response(html, { status: r.status, headers })
       }
+      const claimScript = claimBootstrapScript()
       const injected = html.replace(
         '<script type="module" src="/chat-react.js"></script>',
-        `${projectsBootstrapScript()}\n${onboardingBootstrapScript()}\n<script type="module" src="/chat-react.js"></script>`,
+        `${projectsBootstrapScript()}\n${onboardingBootstrapScript()}` +
+          `${claimScript.length > 0 ? `\n${claimScript}` : ''}` +
+          `\n<script type="module" src="/chat-react.js"></script>`,
       )
       const headers = new Headers(r.headers)
       headers.delete('content-length')
@@ -1958,6 +1976,25 @@ export function buildOpenGraphComposer(
       lastProjectsSnapshot = JSON.stringify(frame.projects)
       fanProjectsChanged(user_id, frame)
     }
+    // One-shot onboarding-complete signal for the web client (Managed post-
+    // onboarding claim redirect). Fanned to the base topic AND every live per-
+    // project topic — same topology as `fanProjectsChanged` — so it reaches the
+    // client regardless of which project socket is active. The frame carries no
+    // redirect target; the client reads the claim URL (if any) from its page
+    // bootstrap, so on Open self-host it simply no-ops.
+    const fanOnboardingCompleted = (user_id: string): void => {
+      const frame: AppWsOutboundOnboardingCompleted = {
+        v: 1,
+        type: 'onboarding_completed',
+        ts: Date.now(),
+      }
+      const base = appWsTopicId(user_id)
+      const scopedPrefix = `${base}:`
+      appWsRegistry.send(base, frame)
+      for (const topic of appWsRegistry.topics()) {
+        if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+      }
+    }
 
     // Work Board (Phase 1a) — the per-project live work-tracking board that
     // doubles as the orchestrator's EXTERNAL memory. ONE canonical store shared
@@ -2154,6 +2191,7 @@ export function buildOpenGraphComposer(
             ...(projectKickoff !== null ? { projectKickoff } : {}),
             gbrainSyncHook,
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
+            emitOnboardingCompleted: (user_id: string): void => fanOnboardingCompleted(user_id),
             emitChatMessage: (input): Promise<void> =>
               onboardingMsgHolder.emit?.(input) ?? Promise.resolve(),
           })
@@ -3073,6 +3111,34 @@ export function buildOpenGraphComposer(
           // deterministic opening (item 1 / 4b). No-op for the General topic, an
           // unmaterialized topic, or a project that already has chat history.
           await ensureProjectOpeningOnEntry(user_id, channel_topic_id)
+          // RECOVERY (Managed post-onboarding claim redirect) — replay the one-
+          // shot `onboarding_completed` signal on connect for an already-completed
+          // owner when a claim URL is configured. The live frame fanned at
+          // finalize is DROPPED if no socket was registered then (e.g. a
+          // background import-completion watcher finalizes while the tab is
+          // closed/reloading), and a reconnect sees an already-`completed` row so
+          // nothing re-signals — the redirect would be lost forever. Deriving it
+          // from the persisted completed state here makes it recoverable. Gated on
+          // the env so it is a strict NO-OP on Open self-host; sent only to the
+          // connecting topic. The client's `claimRedirected` latch keeps it at-
+          // most-once per load, and once the owner claims they move to a host
+          // without the env, so this never loops post-claim.
+          const claimUrl = env['NEUTRON_POST_ONBOARDING_CLAIM_URL']
+          if (typeof claimUrl === 'string' && claimUrl.length > 0) {
+            // This branch is reached for BOTH terminal phases (`isOnboardingActive`
+            // is false for `completed` AND `failed`), so gate strictly on the
+            // persisted phase being exactly `completed` — a `failed` onboarding
+            // never had the completion transition and must NOT redirect to claim.
+            const st = await onboardingStateStore.get(project_slug, user_id)
+            if (st !== null && st.phase === 'completed') {
+              const completedFrame: AppWsOutboundOnboardingCompleted = {
+                v: 1,
+                type: 'onboarding_completed',
+                ts: Date.now(),
+              }
+              appWsRegistry.send(channel_topic_id, completedFrame)
+            }
+          }
         }
         // Emit if the seed turn (or anything since the pre-seed) changed the set.
         emitProjectsChangedIfChanged(user_id)

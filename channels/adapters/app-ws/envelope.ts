@@ -513,6 +513,24 @@ export interface AppWsOutboundImportProgress {
   ts: number
 }
 
+/**
+ * Fired ONCE at the onboarding→completed transition (from the idempotent
+ * finalizer, so it can't double-fire). A pure signal frame — it carries no
+ * payload beyond its type. The web client reacts to it to run the Managed
+ * post-onboarding claim redirect: IF (and only if) a claim URL was injected
+ * into the page bootstrap (`window.__neutron_post_onboarding_claim_url`, from
+ * env `NEUTRON_POST_ONBOARDING_CLAIM_URL`) the client navigates there; on Open
+ * self-host that config is absent, so the client no-ops and onboarding
+ * completes normally. The URL is deliberately NOT carried on the frame — it
+ * lives in the client bootstrap config so the redirect target is a Managed-
+ * overlay concern the server injects, not a per-frame value.
+ */
+export interface AppWsOutboundOnboardingCompleted {
+  v: 1
+  type: 'onboarding_completed'
+  ts: number
+}
+
 export type AppWsOutbound =
   | AppWsOutboundSessionReady
   | AppWsOutboundUserMessageEcho
@@ -523,6 +541,7 @@ export type AppWsOutbound =
   | AppWsOutboundEditUpdate
   | AppWsOutboundProjectsChanged
   | AppWsOutboundWorkBoardChanged
+  | AppWsOutboundOnboardingCompleted
   | AppWsOutboundAgentTyping
   | AppWsOutboundImportProgress
   | AppWsOutboundError
