@@ -663,41 +663,6 @@ function PendingBadge({ pending }: { pending: number }): React.JSX.Element | nul
   )
 }
 
-/**
- * Track B Phase 4 — Telegram-style delivery status for the latest user send.
- * assistant-ui owns per-message bubble composition via the runtime, so rather
- * than fight it for a per-bubble tick we surface the most-recent send's ladder
- * here: 🕓 Queued → ✓ Sent → ✓✓ Delivered → ✓✓ Read (the read tick blue, via
- * the `car-receipt-read` class). Hidden once the agent's reply arrives (the
- * thread itself is the acknowledgement) or before anything is sent.
- */
-function DeliveryStatus({
-  delivery,
-  isRunning,
-}: {
-  delivery: ChatViewModel['latestUserDelivery']
-  isRunning: boolean
-}): React.JSX.Element | null {
-  if (delivery === null || isRunning) return null
-  const label =
-    delivery === 'pending'
-      ? '🕓 Queued'
-      : delivery === 'sent'
-        ? '✓ Sent'
-        : delivery === 'read'
-          ? '✓✓ Read'
-          : '✓✓ Delivered'
-  return (
-    <div
-      className={`car-receipt${delivery === 'read' ? ' car-receipt-read' : ''}`}
-      role="status"
-      aria-label={`delivery: ${delivery}`}
-    >
-      {label}
-    </div>
-  )
-}
-
 export function TopicRail({
   projects,
   activeId,
@@ -1118,7 +1083,6 @@ function ChatSurface({
           ↓
         </ThreadPrimitive.ScrollToBottom>
         <PendingBadge pending={vm.pending} />
-        <DeliveryStatus delivery={vm.latestUserDelivery} isRunning={vm.isRunning} />
         <ImportStatus progress={vm.importProgress} upload={importState} />
         <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
       </ThreadPrimitive.Root>
