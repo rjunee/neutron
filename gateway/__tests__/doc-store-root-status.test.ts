@@ -17,7 +17,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -127,6 +127,21 @@ describe('DocStore — project-root STATUS.md surfacing (P-B)', () => {
     expect(readFileSync(join(projectRoot, 'docs', 'renamed.md'), 'utf8')).toBe('state\n')
     // …and no longer exists at the project root.
     expect(() => readFileSync(join(projectRoot, 'STATUS.md'), 'utf8')).toThrow()
+  })
+
+  it('does NOT surface a SYMLINKED project-root STATUS.md (no metadata leak)', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    // A secret file OUTSIDE the project; STATUS.md is a symlink to it.
+    const outside = join(home, 'secret.md')
+    writeFileSync(outside, 'TOP SECRET out-of-project content\n')
+    symlinkSync(outside, join(projectRoot, 'STATUS.md'))
+    const store = new DocStore({ owner_home: home })
+
+    // The symlink is not surfaced (its target's size/mtime never enters the tree).
+    expect((await store.tree(PROJECT)).some((n) => n.path === 'STATUS.md')).toBe(false)
+    // And a read of it is rejected by realpath containment (never leaks content).
+    await expect(store.readDoc(PROJECT, 'STATUS.md')).rejects.toThrow()
   })
 
   it('prefers a real docs/STATUS.md over the project-root copy (no ambiguity)', async () => {

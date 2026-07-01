@@ -42,6 +42,7 @@
 
 import { existsSync } from 'node:fs'
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -445,7 +446,12 @@ export class DocStore {
       const abs = join(projectRoot, name)
       let st
       try {
-        st = await stat(abs)
+        // lstat (not stat) so a SYMLINK at the project root doesn't get
+        // surfaced with its target's size/mtime — that would leak metadata
+        // about an out-of-project file into the tree (the same leak the docs
+        // walker guards against). A symlink fails the isFile() check below and
+        // is skipped; reads of it are rejected by realpath containment anyway.
+        st = await lstat(abs)
       } catch {
         continue
       }
