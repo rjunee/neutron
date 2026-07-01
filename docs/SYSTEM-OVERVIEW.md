@@ -354,6 +354,12 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > required at boot (`landing/server.ts` + `landing/boot.ts` throw if missing) and
 > `/chat-react.js` is the only served client bundle (`compose.ts` `LANDING_PATHS`).
 > A fresh single-owner Open install serves the tabbed React UI with no env var.
+> Beyond the exact `/chat` path + `LANDING_PATHS`, a narrow **SPA catch-all**
+> serves the same shell for `GET /projects[/…]` browser navigations
+> (`landing/spa-routes.ts` `isSpaClientRoute`) so project-scoped deep links (doc
+> URLs) are real navigable URLs — see the doc-link deep-link note below. It runs
+> AFTER every API/asset/operator surface in the precedence chain, so it never
+> masks a real 404.
 
 > **Web-client rework (2026-06-30) — per-project chat + rail/tab layout +
 > markdown.** Five linked changes to `landing/chat-react/`:
@@ -423,6 +429,25 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > Documents tab and opens that doc (`DocumentsTab` `openRequest`). Cross-project
 > links `controller.setProject(...)` first. Mobile native resolves `neutron://`
 > doc links via `app/lib/doc-links.ts`.
+>
+> **Doc links are also REAL navigable URLs (deep-link 404 fix).** A HARD load /
+> new-tab / shared `/projects/<id>/docs?path=…` URL used to 404 — nothing served
+> the SPA shell for any path but the exact `/chat`. Now a `GET /projects[/…]`
+> browser navigation (`landing/spa-routes.ts` `isSpaClientRoute`) is a SPA
+> catch-all: it serves the same chat-react shell. Two seams make it work: (1)
+> **routing** — `gateway/http/compose.ts` (and the raw `landing/server.ts` fetch,
+> the Open single-owner path) delegate the `/projects[/…]` GET to the shell
+> instead of the default 404; the match is a prefix disjoint from every
+> API/asset/operator path so it can NEVER mask a real `/api/*` 404 (an unknown
+> `/api/app/…` still 404s). (2) **boot-open** — the Open `openFetch`
+> (`open/composer.ts`) gives the deep link the SAME owner cookie-mint +
+> `__neutron_*` bootstrap injection as `/chat` (a fresh no-cookie visit 302s to
+> the SAME path with the owner cookie, preserving the doc path), and
+> `chat-react/config.ts` parses `window.location` into `config.initialDocLink`
+> (`doc-link-nav.ts` `initialDocLinkFromLocation`) so `ProjectShell` opens the
+> doc once on boot via the same `onOpenDocLink` the tap uses. `Markdown.tsx`
+> keeps `target="_blank"` (a middle/cmd-click still opens a real, now-navigable
+> URL). Managed boots gate `/projects[/…]` like `/chat` (`isGatedUserFacingRoute`).
 
 > **STATUS.md leads the Documents list (P-B).** The standard per-project
 > `STATUS.md` lives at the PROJECT ROOT (`Projects/<id>/STATUS.md`), a sibling of

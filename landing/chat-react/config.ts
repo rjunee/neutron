@@ -21,6 +21,8 @@
  * a DOM.
  */
 
+import { initialDocLinkFromLocation } from './doc-link-nav.ts'
+
 export interface ProjectTab {
   id: string
   label: string
@@ -92,10 +94,19 @@ export interface BootstrapConfig {
    * (redirect-if-present), never an on/off flag.
    */
   postOnboardingClaimUrl?: string
+  /**
+   * Doc-link deep-link 404 fix — the doc-link target parsed from the page URL
+   * when the SPA was hard-loaded at a `/projects/<id>/docs?path=…` deep link
+   * (the gateway's SPA catch-all served the shell). Present ONLY on such a boot;
+   * `ProjectShell` consumes it once to switch to that project's Documents tab
+   * and open the doc. Absent on a normal `/chat` boot. Optional + defaults to
+   * undefined so existing config literals (tests) need no change.
+   */
+  initialDocLink?: { projectId: string; path: string }
 }
 
 export interface WindowLike {
-  location: { protocol: string; host: string; search: string }
+  location: { protocol: string; host: string; search: string; pathname: string }
   __neutron_start_token?: string
   __neutron_app_ws_token?: string
   __neutron_app_ws_url?: string
@@ -234,5 +245,15 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
   ) {
     config.postOnboardingClaimUrl = win.__neutron_post_onboarding_claim_url
   }
+  // Doc-link deep-link 404 fix — recover the doc target from the boot URL when
+  // the SPA was hard-loaded at a `/projects/<id>/docs?path=…` deep link (the
+  // gateway's SPA catch-all served the shell). Set ONLY when the current URL is
+  // a valid project doc link; a normal `/chat` boot leaves it undefined.
+  const initialDocLink = initialDocLinkFromLocation(
+    win.location.pathname,
+    win.location.search,
+    origin,
+  )
+  if (initialDocLink !== null) config.initialDocLink = initialDocLink
   return config
 }

@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import { parseWebDocLinkHref } from '../doc-link-nav.ts'
+import { initialDocLinkFromLocation, parseWebDocLinkHref } from '../doc-link-nav.ts'
 
 const ORIGIN = 'https://app.example.test'
 
@@ -93,5 +93,29 @@ describe('parseWebDocLinkHref', () => {
     expect(parseWebDocLinkHref('/projects/acme/docs', ORIGIN)).toBeNull()
     expect(parseWebDocLinkHref('/projects/acme/docs?path=', ORIGIN)).toBeNull()
     expect(parseWebDocLinkHref('', ORIGIN)).toBeNull()
+  })
+})
+
+describe('initialDocLinkFromLocation', () => {
+  it('parses a hard-loaded doc deep-link location (pathname + search)', () => {
+    expect(
+      initialDocLinkFromLocation('/projects/acme/docs', '?path=pitch-deck.md', ORIGIN),
+    ).toEqual({ projectId: 'acme', path: 'pitch-deck.md' })
+  })
+
+  it('parses a nested doc path from the location', () => {
+    expect(
+      initialDocLinkFromLocation('/projects/acme/docs', '?path=research%2Fnotes.md', ORIGIN),
+    ).toEqual({ projectId: 'acme', path: 'research/notes.md' })
+  })
+
+  it('returns null for a normal /chat boot (not a doc link)', () => {
+    expect(initialDocLinkFromLocation('/chat', '', ORIGIN)).toBeNull()
+    expect(initialDocLinkFromLocation('/chat', '?start=abc', ORIGIN)).toBeNull()
+  })
+
+  it('returns null for a /projects page that is not a docs deep link', () => {
+    expect(initialDocLinkFromLocation('/projects/acme', '', ORIGIN)).toBeNull()
+    expect(initialDocLinkFromLocation('/projects/acme/docs', '', ORIGIN)).toBeNull()
   })
 })

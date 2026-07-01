@@ -249,6 +249,22 @@ export function ProjectShell({
     [vm.projectId, controller],
   )
 
+  // Doc-link deep-link 404 fix — when the SPA was HARD-LOADED at a
+  // `/projects/<id>/docs?path=…` deep link (the gateway's SPA catch-all served
+  // the shell; `config.initialDocLink` carries the parsed target), open that
+  // doc ONCE on boot — the same effect a tap would have had. Reusing
+  // `onOpenDocLink` shares all the project-switch + tab-resolve + open-request
+  // machinery. The ref guard fires it a single time so a later re-render can't
+  // re-open a doc the user has since navigated away from.
+  const bootDocLinkOpened = useRef(false)
+  useEffect(() => {
+    if (bootDocLinkOpened.current) return
+    const link = config.initialDocLink
+    if (link === undefined) return
+    bootDocLinkOpened.current = true
+    onOpenDocLink(link.projectId, link.path)
+  }, [config.initialDocLink, onOpenDocLink])
+
   // Resolve the tab set for the current scope:
   //   - General  → Chat + the GLOBAL tabs (builtin Admin + global Core tabs).
   //   - Project  → the project tabs (Chat / Plan / Documents + project Core

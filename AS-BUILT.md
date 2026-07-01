@@ -2,6 +2,62 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-01 — Doc-reference deep-link 404 fix: SPA catch-all + boot-open (ISSUES follow-up to #148)
+
+**The bug.** #148 made a doc reference a friendly tappable link
+`/projects/<id>/docs?path=…` that, tapped IN the SPA, switches to the Documents
+tab + opens the doc (`landing/chat-react/doc-link-nav.ts`). But the anchor also
+carries `target="_blank"`, so a HARD new-tab / fresh-browser / shared load of
+that URL **404'd**: the gateway HTTP precedence chain served the chat-react shell
+for the exact `/chat` path only (`gateway/http/compose.ts` — `isLandingRoute` is
+false for `/projects/…`, so it fell through `connectHandler` to `defaultHandler`
+→ 404). The deep link worked as an in-SPA tap, never as a real navigable URL.
+
+**What shipped (PREFERRED catch-all path — makes doc links real shareable URLs;
+NO feature flags, single code path).** Two seams, because a catch-all *alone* is
+insufficient — the SPA never read the URL path on boot, so even a served shell
+would open General, not the doc:
+
+- **Routing — narrow SPA catch-all.** `landing/spa-routes.ts` (NEW) exports
+  `isSpaClientRoute(pathname, method)` = `GET /projects[/…]` only. Wired in BOTH
+  HTTP paths: `gateway/http/compose.ts` (step 2.5, delegates the nav to
+  `landing.fetch`) and the raw `landing/server.ts` fetch (SPA catch-all before
+  its final 404 — the Open single-owner `openFetch` path). `/projects/` is a
+  prefix **disjoint from every API/asset/operator surface** (`/api/`, `/ws/`,
+  `/webhook/`, `/internal/`, `/admin/`, `/oauth/`, `/healthz`, `/chat-react.js`,
+  brand assets) — all matched EARLIER in the chain — so it can never mask a real
+  404 (an unknown `/api/app/…` still 404s; verified). GET-only.
+- **Boot-open — identity + doc-open.** The Open `openFetch` (`open/composer.ts`)
+  gives the deep link the SAME owner cookie-mint + `__neutron_*` React-bootstrap
+  injection as `/chat` (else the client throws `ChatBootstrapError`): a fresh
+  no-cookie visit 302s to the SAME path (preserving the doc path, unlike /chat's
+  onboarding cold-start) with the owner cookie set; the reload serves the
+  injected shell. `chat-react/config.ts` parses `window.location` into
+  `config.initialDocLink` (`doc-link-nav.ts` `initialDocLinkFromLocation`), and
+  `ProjectShell` opens it ONCE on boot via the same `onOpenDocLink` the tap uses
+  (ref-guarded). `Markdown.tsx` is untouched — `target="_blank"` stays, and it's
+  now correct (a middle/cmd-click opens a real, navigable URL).
+- **Auth parity.** `isGatedUserFacingRoute` gates `/projects[/…]` like `/chat`
+  (Managed only; no-op on the Open self-host + tests where `authGate` is unset).
+
+**Verify.** Fresh QUIET install (`NEUTRON_HOME=/tmp/wfdoc PORT=7861 bun run
+open/server.ts`): a hard-loaded `/projects/dev/docs?path=STATUS.md` 302s (owner
+cookie, path preserved) → 200 shell WITH injected `__neutron_user_id` /
+`__neutron_projects` / `__neutron_active_project_id`; unknown non-SPA path +
+unknown `/api/*` + `POST /projects/…` all still 404. `tsc` clean (root +
+chat-react leaf), leak-gate SILENT. Tests: `landing/spa-routes.test.ts`,
+`open/__tests__/open-doc-deeplink-serve.test.ts` (real-boot mint-bounce +
+injection + narrow-404), `compose.test.ts` (delegation + non-swallow + GET-only),
+`chat-react-serving.test.ts`, `doc-link-nav.test.ts` (`initialDocLinkFromLocation`),
+`config.test.ts` (initialDocLink parse), `doc-link-boot-open.test.tsx`
+(opens on boot, no tap).
+
+**Contract implications.** The HTTP routing surface gained a catch-all — any new
+top-level browser route under `/projects/` will now be absorbed by the SPA shell
+(intended: they ARE SPA client-routes). API/asset routes are unaffected (disjoint
+prefixes, matched first). `WindowLike.location` gained a required `pathname`
+(config fixtures updated). Mobile native (`neutron://` links) unchanged.
+
 ## 2026-07-01 — Wire existing Cores to the per-project credential RESOLVER (D2 follow-up to #149)
 
 **What shipped.** The #149 FOUNDATION built the `project_credentials` store + its
