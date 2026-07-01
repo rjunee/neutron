@@ -31,6 +31,14 @@ export const THEME_STORAGE_KEY = 'neutron-theme'
 /** Absent / unrecognized preference falls back to following the system. */
 export const DEFAULT_PREFERENCE: ThemePreference = 'system'
 
+/** The browser chrome `theme-color` (PWA/mobile address-bar tint) per resolved
+ *  theme. Kept in LOCKSTEP with the pre-paint inline script in `chat-react.html`
+ *  so a runtime toggle and a fresh page load agree. */
+export const THEME_COLORS: Record<ResolvedTheme, string> = {
+  light: '#f5f5f7',
+  dark: '#0b0d10',
+}
+
 /** The minimal `Storage` surface this module touches (so tests can pass a stub
  *  without a real `localStorage`). */
 export interface StorageLike {

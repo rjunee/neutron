@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
+  THEME_COLORS,
   applyResolvedTheme,
   readStoredPreference,
   resolveTheme,
@@ -35,10 +36,17 @@ interface MediaQueryLike {
   removeEventListener?: (type: 'change', cb: () => void) => void
 }
 
+interface MetaLike {
+  setAttribute(name: string, value: string): void
+}
+
 interface WindowLike {
   matchMedia?: (q: string) => MediaQueryLike
   localStorage?: StorageLike
-  document?: { documentElement: { setAttribute(name: string, value: string): void } }
+  document?: {
+    documentElement: { setAttribute(name: string, value: string): void }
+    querySelector?: (sel: string) => MetaLike | null
+  }
 }
 
 /** Resolve the window once; SSR / test envs without a window degrade gracefully. */
@@ -46,6 +54,22 @@ function getWin(injected?: WindowLike): WindowLike | null {
   if (injected !== undefined) return injected
   if (typeof window === 'undefined') return null
   return window as unknown as WindowLike
+}
+
+/**
+ * Read `localStorage` off the window DEFENSIVELY. Accessing the `localStorage`
+ * property itself throws (not just its methods) in some privacy modes and on
+ * sandboxed/opaque origins — a throw here would kill the render — so we swallow
+ * it and fall back to null (the system default). The stored-preference readers
+ * additionally guard the `getItem`/`setItem` calls.
+ */
+function safeLocalStorage(win: WindowLike | null): StorageLike | null {
+  if (win === null) return null
+  try {
+    return win.localStorage ?? null
+  } catch {
+    return null
+  }
 }
 
 function systemPrefersLight(win: WindowLike | null): boolean {
@@ -72,7 +96,7 @@ export interface UseThemeResult {
  */
 export function useTheme(injectedWindow?: WindowLike): UseThemeResult {
   const win = useMemo(() => getWin(injectedWindow), [injectedWindow])
-  const storage = win?.localStorage ?? null
+  const storage = useMemo(() => safeLocalStorage(win), [win])
 
   const [preference, setPreferenceState] = useState<ThemePreference>(() =>
     readStoredPreference(storage),
@@ -82,10 +106,16 @@ export function useTheme(injectedWindow?: WindowLike): UseThemeResult {
   const resolved = resolveTheme(preference, systemLight)
 
   // Apply the resolved theme to the DOM whenever it changes. The inline script
-  // set the initial value pre-paint; this keeps the hook authoritative after.
+  // set the initial value pre-paint; this keeps the hook authoritative after —
+  // including the browser chrome `theme-color` meta (which the inline script
+  // also set once), so a runtime toggle doesn't leave the PWA chrome on the old
+  // color until reload.
   useEffect(() => {
-    const root = win?.document?.documentElement
-    if (root !== undefined) applyResolvedTheme(root, resolved)
+    const doc = win?.document
+    if (doc === undefined) return
+    applyResolvedTheme(doc.documentElement, resolved)
+    const meta = doc.querySelector?.('meta[name="theme-color"]')
+    meta?.setAttribute('content', THEME_COLORS[resolved])
   }, [win, resolved])
 
   // Follow the OS ONLY while the preference is 'system' — an explicit override

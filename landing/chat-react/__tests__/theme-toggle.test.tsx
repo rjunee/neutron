@@ -38,7 +38,18 @@ function setSystemLight(light: boolean): void {
 beforeEach(() => {
   window.localStorage.clear()
   document.documentElement.removeAttribute('data-theme')
+  // A theme-color meta so the hook's chrome-color sync has a target (mirrors the
+  // one shipped in chat-react.html).
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.remove())
+  const meta = document.createElement('meta')
+  meta.setAttribute('name', 'theme-color')
+  meta.setAttribute('content', '#0b0d10')
+  document.head.appendChild(meta)
 })
+
+function themeColor(): string | null {
+  return document.querySelector('meta[name="theme-color"]')?.getAttribute('content') ?? null
+}
 
 async function mount(): Promise<void> {
   const { createRoot } = await import('react-dom/client')
@@ -78,10 +89,13 @@ describe('ThemeToggle (happy-dom)', () => {
     // system (resolved dark)
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
 
-    // → light
+    expect(themeColor()).toBe('#0b0d10')
+
+    // → light (data-theme AND the browser chrome theme-color both flip)
     await click()
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light')
     expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    expect(themeColor()).toBe('#f5f5f7')
 
     // → dark
     await click()
@@ -102,5 +116,44 @@ describe('ThemeToggle (happy-dom)', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
     const btn = container.querySelector('.car-theme-toggle') as HTMLButtonElement
     expect(btn.querySelector('.car-theme-auto')).toBeNull() // not following system
+  })
+
+  // Codex P2 — a privacy mode where the `localStorage` PROPERTY getter throws
+  // (not just its methods) must not crash render; useTheme falls back to system.
+  it('does not crash render when localStorage access throws; falls back to system', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const React = await import('react')
+    const { act } = await import('react')
+    const { useTheme } = await import('../useTheme.ts')
+    const appliedRef: { v: string | null } = { v: null }
+    const injected = {
+      matchMedia: (q: string) => ({ matches: q.includes('light'), addEventListener() {}, removeEventListener() {} }),
+      get localStorage(): never {
+        throw new Error('SecurityError: storage denied')
+      },
+      document: {
+        documentElement: { setAttribute: (_n: string, v: string) => { appliedRef.v = v } },
+        querySelector: () => null,
+      },
+    }
+    function Probe(): React.JSX.Element {
+      const { preference, resolved } = useTheme(injected as never)
+      return React.createElement('span', { 'data-pref': preference, 'data-res': resolved })
+    }
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    let threw = false
+    await act(async () => {
+      try {
+        createRoot(el).render(React.createElement(Probe))
+      } catch {
+        threw = true
+      }
+    })
+    expect(threw).toBe(false)
+    // OS light + no readable preference → system → light
+    expect(el.querySelector('span')?.getAttribute('data-pref')).toBe('system')
+    expect(el.querySelector('span')?.getAttribute('data-res')).toBe('light')
+    expect(appliedRef.v).toBe('light')
   })
 })
