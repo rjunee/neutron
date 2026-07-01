@@ -234,7 +234,10 @@ export function ProjectShell({
   // `DocumentsTab` via a nonce-stamped {@link DocOpenRequest}.
   const docNonce = useRef(0)
   const [pendingDoc, setPendingDoc] = useState<{ projectId: string; path: string } | null>(null)
-  const [docOpenRequest, setDocOpenRequest] = useState<DocOpenRequest | null>(null)
+  // The open request is SCOPED to the project that produced it, so a stale
+  // request can never open project A's doc after the user switches to project B.
+  const [docOpenRequest, setDocOpenRequest] =
+    useState<{ projectId: string; req: DocOpenRequest } | null>(null)
   const onOpenDocLink = useCallback(
     (linkProjectId: string, path: string): void => {
       // Cross-project link (e.g. tapped from the General onboarding chat): switch
@@ -296,7 +299,10 @@ export function ProjectShell({
     if (docsTab === undefined) return
     setActiveKey(docsTab.key)
     docNonce.current += 1
-    setDocOpenRequest({ path: pendingDoc.path, nonce: docNonce.current })
+    setDocOpenRequest({
+      projectId: pendingDoc.projectId,
+      req: { path: pendingDoc.path, nonce: docNonce.current },
+    })
     setPendingDoc(null)
   }, [pendingDoc, projectId, tabs])
 
@@ -305,6 +311,20 @@ export function ProjectShell({
   const hasActive = tabs.some((t) => t.key === activeKey)
   const resolvedActiveKey = hasActive ? activeKey : CHAT_KEY
   const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
+
+  // P-A — a doc-open request is ONE-SHOT: clear it once the user leaves the
+  // Documents tab so revisiting Documents (or a `DocumentsTab` remount on a
+  // project switch) can't replay the old linked doc.
+  const activeTarget = activeTab.mount.target
+  useEffect(() => {
+    if (activeTarget !== 'docs' && docOpenRequest !== null) setDocOpenRequest(null)
+  }, [activeTarget, docOpenRequest])
+  // Only forward the request to the Documents tab of the project that produced
+  // it (never a different project's Documents mount).
+  const docReqForTab =
+    docOpenRequest !== null && docOpenRequest.projectId === (projectId ?? '')
+      ? docOpenRequest.req
+      : undefined
 
   // assistant-ui's composer autofocus tries to scroll the focused input into
   // view on mount; keep the panels container as the scroll parent.
@@ -384,7 +404,7 @@ export function ProjectShell({
                 config={config}
                 controller={controller}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-                {...(docOpenRequest !== null ? { docOpenRequest } : {})}
+                {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
               />
             </div>
           ) : null}

@@ -188,6 +188,29 @@ describe('doc-link tap → Documents tab (P-A)', () => {
     expect(container.querySelector('.cdoc')).not.toBeNull()
     expect(container.textContent).toContain('BRIEF-DOC-BODY')
 
+    // The request is ONE-SHOT: leave Documents (→ Chat) and come back; the old
+    // linked doc must NOT auto-reopen (Codex: no stale replay on remount).
+    const chatBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
+      (b) => b.textContent === 'Chat',
+    ) as HTMLButtonElement
+    await act(async () => {
+      chatBtn.click()
+      await tick()
+    })
+    const docsBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
+      (b) => b.textContent === 'Documents',
+    ) as HTMLButtonElement
+    await act(async () => {
+      docsBtn.click()
+      await tick()
+      await tick()
+    })
+    // Documents is active again but the doc is NOT auto-opened — the empty
+    // prompt shows instead of the previously-linked doc's body.
+    expect(container.querySelector('.cdoc')).not.toBeNull()
+    expect(container.textContent).toContain('Select a document to read.')
+    expect(container.textContent).not.toContain('BRIEF-DOC-BODY')
+
     await act(async () => {
       root.unmount()
     })
