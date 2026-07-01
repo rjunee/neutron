@@ -840,6 +840,17 @@ export async function buildCoresBackendFactories(
       | null
       | ((label: string) => Promise<string | null>)
     /**
+     * D2 credential resolver (2026-07-01) — the per-project → global → unset
+     * seam every Core reads its credential through. When supplied, the three
+     * Google factories build their live client with `resolver.accessorFor(label)`
+     * (a project's own Drive token wins over the instance default; Email/Calendar
+     * stay global) instead of the raw per-instance `googleOAuthAccessToken`
+     * closure. `googleOAuthAccessToken` / `emailOAuthTokens` still gate live-vs-
+     * in-memory client selection (unchanged). When omitted (tests, non-Open
+     * callers), the legacy per-instance accessor is used verbatim.
+     */
+    credentialResolver?: import('./cores/core-credential-resolver.ts').CoreCredentialResolver
+    /**
      * Calendar Core S1 (Argus r2 BLOCKER #1 follow-up) — pre-built
      * `CalendarClient` instance. When supplied, the `calendar_core`
      * factory returns THIS instance verbatim instead of constructing
@@ -913,6 +924,7 @@ export async function buildCoresBackendFactories(
     pickNextLlmClient,
     researchProjectBackend,
     codegenOrchestrator: codegenOrchestratorFromOpts,
+    credentialResolver,
   } = opts
   const googleOAuthAccessToken = opts.googleOAuthAccessToken ?? null
   const preBuiltCalendarClient = opts.calendarClient ?? null
@@ -999,9 +1011,15 @@ export async function buildCoresBackendFactories(
       // preserves the existing __tests__/install-lifecycle.test.ts
       // shape + the dev boot.
       if (googleOAuthAccessToken !== null) {
+        // D2: route through the resolver (Email/Calendar stay GLOBAL scope —
+        // the active project is ignored for `google_calendar`), else the raw
+        // per-instance accessor. Effective behavior identical for Calendar.
         return {
           client: mod.buildGoogleCalendarClient({
-            accessToken: () => googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
+            accessToken:
+              credentialResolver !== undefined
+                ? credentialResolver.accessorFor(mod.OAUTH_SECRET_LABEL)
+                : () => googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
           }),
         }
       }
@@ -1020,13 +1038,19 @@ export async function buildCoresBackendFactories(
       const client =
         emailOAuthTokens !== undefined
           ? mod.buildGoogleGmailClient({
-              accessToken: async () => {
-                try {
-                  return await emailOAuthTokens.getAccessToken(mod.OAUTH_SECRET_LABEL)
-                } catch {
-                  return null
-                }
-              },
+              // D2: route through the resolver (Email stays GLOBAL scope — the
+              // active project is ignored for `gmail_compose`), else the raw
+              // per-instance OAuthTokenManager read. Effective behavior identical.
+              accessToken:
+                credentialResolver !== undefined
+                  ? credentialResolver.accessorFor(mod.OAUTH_SECRET_LABEL)
+                  : async () => {
+                      try {
+                        return await emailOAuthTokens.getAccessToken(mod.OAUTH_SECRET_LABEL)
+                      } catch {
+                        return null
+                      }
+                    },
             })
           : mod.buildInMemoryGmailClient()
       const factoryDeps: {
@@ -1057,9 +1081,16 @@ export async function buildCoresBackendFactories(
       // grants — per-Core OAuth, NOT a shared global token.
       const mod = await import('@neutronai/google-workspace-core')
       if (googleOAuthAccessToken !== null) {
+        // D2: a project's OWN Drive resolves PER-PROJECT → global. The resolver
+        // consults `project_credentials` for the active project's
+        // `google_workspace` token first, then falls back to the instance-wide
+        // OAuthTokenManager grant. Legacy raw accessor when no resolver wired.
         return {
           client: mod.buildGoogleWorkspaceClient({
-            accessToken: () => googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
+            accessToken:
+              credentialResolver !== undefined
+                ? credentialResolver.accessorFor(mod.OAUTH_SECRET_LABEL)
+                : () => googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
           }),
         }
       }

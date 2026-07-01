@@ -2,6 +2,69 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-01 — Wire existing Cores to the per-project credential RESOLVER (D2 follow-up to #149)
+
+**What shipped.** The #149 FOUNDATION built the `project_credentials` store + its
+`resolve(owner_slug, project_id, service)` resolver (**per-project → global →
+unset**) + Settings CRUD, but no Core consumed it — the Cores still read Google
+OAuth tokens straight off the per-instance `OAuthTokenManager`. This wires the
+Cores' actual credential reads through the resolver, honoring D2's per-credential
+granularity. **No feature flags; the resolver is THE path** ("global" is a scope
+*within* it, not a separate route).
+
+- **`CoreCredentialResolver`** (`gateway/cores/core-credential-resolver.ts`, NEW) —
+  the one seam every Core resolves its credential through, keyed by `(active
+  project, service)`. Order: (1) `ProjectCredentialStore.resolve` (per-project →
+  global); (2) `OAuthTokenManager.getAccessToken(label)` for the three Google
+  labels (transparent refresh) as the instance-wide default; (3) `null`
+  (uncredentialed → the Core's graceful empty state). `accessorFor(service)`
+  returns the fail-soft `() => Promise<string|null>` closure a Core client
+  consumes verbatim.
+- **D2 per-credential granularity** — a `SERVICE_SCOPE` policy, NOT a flag:
+  - `gmail_compose` / `google_calendar` (**Email + Calendar**) stay **GLOBAL**:
+    routed through the resolver for uniform plumbing but the active project id is
+    *ignored* (scope forced to the global sentinel), so a stray per-project row
+    can never shadow the shared grant → **no per-project re-consent, no
+    regression** to the working inbox/calendar.
+  - `google_workspace` (**a project's own Drive**) **+ any static service token**
+    (Meta Ads / Google Ads / Apify / …) resolve **PER-PROJECT → global**: the
+    project's pasted token wins; else the instance default.
+- **Ambient active-project plumbing** (`gateway/cores/active-project-context.ts`,
+  NEW) — the per-instance Core clients are built once at boot with an
+  argument-less accessor, so the active project is bound as an `AsyncLocalStorage`
+  frame (`runWithActiveProject` / `currentActiveProjectId`) at the in-process
+  chat-command boundary (`gateway/http/chat-bridge.ts` wraps
+  `chatCommandFilter.match(...)`), and the resolver reads it back when the
+  accessor fires. The single in-process `await` chain propagates the frame
+  straight through to the Google client's lazy `accessToken()`.
+- **Wiring** — `gateway/cores/mount-open-cores.ts` constructs the resolver (over
+  the shared `ProjectCredentialStore` + the always-built `OAuthTokenManager`) and
+  the `/cal`+`/email` chat-filter clients take `resolver.accessorFor(label)`; new
+  required input `projectCredentialStore`. `gateway/boot-helpers.ts`
+  `buildCoresBackendFactories` takes an optional `credentialResolver` and the
+  `calendar_core` / `email_managed_core` / `google_workspace_core` MCP-backend
+  factories build their live client through it (legacy raw accessor when absent;
+  `googleOAuthAccessToken`/`emailOAuthTokens` still gate live-vs-in-memory).
+  `open/composer.ts` hoists the ONE canonical `ProjectCredentialStore` above
+  `mountOpenCores` so the resolver, the CRUD surface, and the awareness injection
+  share it.
+
+**Scope boundary (no regression).** The active-project frame reaches the
+in-process chat-command path. The CC-spawn MCP-tool path crosses a process +
+loopback-HTTP boundary (`topic_id: null` at dispatch) the frame can't follow, so
+MCP-tool credential reads resolve at **global scope = the exact pre-D2
+per-instance behavior**. Forwarding the bound topic through the tools-bridge →
+sink → `McpServer` (populating `ToolCallContext.topic_id`) is the documented next
+slice.
+
+**Tests.** `gateway/cores/__tests__/core-credential-resolver.test.ts` — per-Core
+resolver wiring, per-project override USED, global fallback, static
+per-project→global→unset, **Email/Calendar no-regression at global scope**, legacy
+OAuth fallback, `accessorFor` reads ambient context, fail-soft.
+`gateway/cores/__tests__/active-project-context.test.ts` — bind / default / trim /
+nest / await-propagation. `mount-open-cores.test.ts` updated for the new required
+input. `tsc --noEmit` clean; leak-gate SILENT.
+
 ## 2026-07-01 — Per-project Settings tab + credential system (FOUNDATION)
 
 **What shipped.** A per-project **Settings** tab (Chat / Plan / Documents /

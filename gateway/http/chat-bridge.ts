@@ -228,6 +228,7 @@ export class InMemoryWebChatSenderRegistry implements WebChatSenderRegistry {
 // cycle). Imported for internal use below and re-exported so existing
 // `import { webTopicId } from '.../chat-bridge.ts'` callers are unchanged.
 import { webTopicId } from './web-topic-id.ts'
+import { runWithActiveProject } from '../cores/active-project-context.ts'
 export { webTopicId }
 
 /**
@@ -1710,13 +1711,21 @@ export function buildWebChatBridge(opts: BuildWebChatBridgeOptions): ChatBridge 
         let command_result: import('./app-ws-surface.ts').ChatCommandFilterResult | null =
           null
         try {
-          command_result = await opts.chatCommandFilter.match({
-            user_id,
-            project_slug,
-            channel_topic_id: wire_topic_id,
-            body: event.body,
-            ...(command_project_id !== undefined ? { project_id: command_project_id } : {}),
-          })
+          // D2 (2026-07-01): bind the active project as ambient context so a
+          // routed Core's credential accessor resolves per-project → global via
+          // the CoreCredentialResolver. This in-process `await` chain propagates
+          // the AsyncLocalStorage frame straight through to the Core client's
+          // lazy `accessToken()` closure. Undefined project_id → '' → global
+          // scope (General topic), matching the pre-D2 per-instance behavior.
+          command_result = await runWithActiveProject(command_project_id, () =>
+            opts.chatCommandFilter!.match({
+              user_id,
+              project_slug,
+              channel_topic_id: wire_topic_id,
+              body: event.body,
+              ...(command_project_id !== undefined ? { project_id: command_project_id } : {}),
+            }),
+          )
         } catch (err) {
           console.warn(
             `${LOG_TAG} handleInbound event=chat_command_filter_threw project=${project_slug} topic=${wire_topic_id} err=${
