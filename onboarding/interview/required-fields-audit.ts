@@ -13,12 +13,20 @@
  * not audited here (it's the URL, not a user-data point; the slug picker
  * has its own validator).
  *
+ * 2026-07-01 (Neutron Open — DROP the agent-NAME step): `agent_name` is no
+ * longer a required field. Neutron Open is an agent ORCHESTRATOR, not a
+ * personal agent, so onboarding never asks the owner to name it — only its
+ * personality (→ SOUL.md). The audit therefore drops to 4 required fields and
+ * finalize (`next_to_collect === null`) triggers once personality is settled.
+ * The legacy phase-machine engine still writes `phase_state.agent_name` at its
+ * `agent_name_chosen` phase (untouched, kept for Managed), but the shared audit
+ * no longer HARD-REQUIRES a name.
+ *
  * Priority order (Sam-locked):
  *   1. user_first_name       (collected at signup, S3)
  *   2. primary_projects      (≥3 entries, collected via import + gap_fill)
  *   3. non_work_interests    (≥1 entry,   collected via import + gap_fill)
  *   4. agent_personality     (collected at personality_offered)
- *   5. agent_name            (collected at agent_name_chosen)
  *
  * The auditor's `next_to_collect` returns the highest-priority missing
  * field. The work_interview_gap_fill handler asks for that field; on the
@@ -27,13 +35,12 @@
  * advances to `personality_offered`.
  */
 
-/** The five required fields, in Sam-locked priority order. */
+/** The four required fields, in Sam-locked priority order. */
 export type RequiredField =
   | 'user_first_name'
   | 'primary_projects'
   | 'non_work_interests'
   | 'agent_personality'
-  | 'agent_name'
 
 /**
  * Required-field-collected partition. The phase machine reads
@@ -60,13 +67,20 @@ export interface RequiredFieldsAudit {
  *                            entries may be plain strings OR objects with
  *                            `name` + optional `cadence_hint`)
  *   - `agent_personality` — personality_offered writes here AND to the owner record
- *   - `agent_name`        — agent_name_chosen writes here AND to the owner record
+ *
+ * NB: `agent_name` remains a member of this shape (the legacy phase-machine
+ * engine + its `llm-router` still amend it at `agent_name_chosen`, and it is a
+ * valid `phase_state` key), but it is NO LONGER an audited required field — see
+ * `RequiredField` / `PRIORITY` (2026-07-01, DROP the agent-NAME step). The audit
+ * never reads it, so it can never gate finalize; it is kept here only so the
+ * shared amend/capture types keep type-checking.
  */
 export interface RequiredFieldsState {
   readonly user_first_name?: string | null
   readonly primary_projects?: ReadonlyArray<unknown>
   readonly non_work_interests?: ReadonlyArray<unknown>
   readonly agent_personality?: string | null
+  /** Legacy-engine phase_state field (see NB above); NOT audited/required. */
   readonly agent_name?: string | null
   /**
    * TRANSIENT advance-path removal signal — NOT a persisted required field.
@@ -88,7 +102,6 @@ const PRIORITY: ReadonlyArray<RequiredField> = [
   'primary_projects',
   'non_work_interests',
   'agent_personality',
-  'agent_name',
 ]
 
 /**
@@ -141,8 +154,6 @@ function isFilled(
       return isArrayOfMinLength(state['non_work_interests'], 1)
     case 'agent_personality':
       return isNonEmptyString(state['agent_personality'])
-    case 'agent_name':
-      return isNonEmptyString(state['agent_name'])
   }
 }
 

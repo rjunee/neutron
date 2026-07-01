@@ -2,6 +2,47 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — DROP the agent-NAME step in onboarding (personality-only → SOUL.md)
+
+**Why.** Neutron Open is an agent ORCHESTRATOR, not a named personal agent. Ryan:
+*"we can remove the idea of selecting a name … in neutron open lets drop the name
+entirely, just ask about personality to setup SOUL.md."* Onboarding used to force
+a "name your assistant" step (step-5 preamble ask + a hard-required `agent_name`
+field + a name-suggestion button block) that gated finalize.
+
+**What changed (Path-1 live-session; NO flags, NO dual paths).**
+- `onboarding/interview/required-fields-audit.ts` — `agent_name` removed from
+  `RequiredField` / `PRIORITY` / `isFilled`. Now **4** required fields
+  (`user_first_name`, `primary_projects` ≥3, `non_work_interests` ≥1,
+  `agent_personality`); `next_to_collect` goes null — and finalize fires — once
+  personality settles. `agent_name` is KEPT on the `RequiredFieldsState` shape
+  (the legacy engine + its `llm-router` still amend it) but is never audited.
+- `onboarding/interview/onboarding-preamble.ts` — deleted the step-5 "a name for
+  you" ask + custom-name-acceptance copy; added an explicit "Do NOT ask them to
+  name you" instruction. `buildOnboardingStepGuardFragment` lost its `needsName`
+  half: personality is the ONLY button-driven required step; the guard returns
+  null once it settles.
+- `onboarding/interview/button-backed-answer.ts` — the deterministic capture now
+  settles only `agent_personality` (name branch + name-only helpers removed).
+- `onboarding/interview/post-turn-extractor.ts` — no longer solicits (LLM prompt)
+  or persists `agent_name`.
+- `open/composer.ts` — stopped building + wiring the `agentNameSuggester` into
+  onboarding. **`agent-name-suggester.ts` MODULE stays in the tree** (Managed
+  repurposes it later); the legacy engine's `agent_name_chosen` phase is untouched.
+
+**Personality → SOUL.md verified intact.** `onboarding/persona-gen/soul.ts`
+already renders SOUL.md from personality alone — `composeOpenerSentence` falls
+back to "You are a personal agent." when no `agent_name` is present — so dropping
+the name does not affect SOUL.md generation.
+
+**Tests / evidence.** Updated `required-fields-audit.test.ts` (4-field contract +
+explicit "missing agent_name never gates finalize"), `button-backed-answer.test.ts`
+(personality-only; a name-suggestion block settles nothing), `onboarding-preamble.test.ts`
+(guard never emits a NAME step; preamble never asks a name), `post-turn-extractor.test.ts`
+(extractor never persists `agent_name`). Full `onboarding/` suite green
+(1602 pass / 0 fail), `open/` suite green (125 pass / 0 fail), root `tsc --noEmit`
+clean, leak-gate SILENT.
+
 ## 2026-06-30 — Create Project rail refresh reaches a project-scoped socket (not just General)
 
 **Bug.** #132's "Create Project" fan emitted its `projects_changed` app-ws frame

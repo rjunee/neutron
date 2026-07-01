@@ -400,7 +400,9 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > conversationally; a fire-and-forget **post-turn extractor**
 > (`onboarding/interview/post-turn-extractor.ts`, substrate-backed) scribes
 > name/projects/interests/personality into `OnboardingStateStore.phase_state`.
-> When the 5 required fields complete, `build-onboarding-finalize.ts` composes +
+> (Onboarding never asks for an AGENT name — Open is an orchestrator, not a named
+> personal agent; DROP the agent-NAME step, 2026-07-01.) When the 4 required
+> fields complete, `build-onboarding-finalize.ts` composes +
 > commits the persona, materializes the named projects (rows + topics + docs +
 > MEMORY/gbrain), and marks the row completed → next turn is plain chat in the
 > SAME session. History import stays full-fidelity (engine-driven synthesis +
@@ -655,6 +657,27 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   deterministic finalize closing (which names the LEFT RAIL) is the ONE closing;
 >   the preamble also tells the agent not to write its own closing (and to avoid em
 >   dashes).
+
+> **DROP the agent-NAME step — personality-only onboarding (2026-07-01).**
+> Neutron Open is an agent ORCHESTRATOR, not a named personal agent, so onboarding
+> NO LONGER asks the owner to name it — it only asks for personality (→ SOUL.md).
+> This SUPERSEDES the name halves of the 2026-06-30 items above. Concretely: the
+> step-5 "a name for you" ask + the custom-name-acceptance copy are gone from
+> `onboarding-preamble.ts`; `buildOnboardingStepGuardFragment` no longer has a
+> `needsName` branch (personality is the ONLY button-driven required step and the
+> guard returns null once it settles); `required-fields-audit.ts` drops
+> `agent_name` from `RequiredField`/`PRIORITY` (now **4** required fields —
+> `user_first_name`, `primary_projects` ≥3, `non_work_interests` ≥1,
+> `agent_personality` — so finalize triggers once personality is set);
+> `button-backed-answer.ts` settles only `agent_personality`; the post-turn
+> extractor no longer solicits or persists `agent_name`; and `open/composer.ts` no
+> longer wires the `agentNameSuggester` into onboarding. `agent-name-suggester.ts`
+> stays in the tree (Managed reuses it) and the LEGACY phase-machine engine's
+> `agent_name_chosen` phase is untouched (`agent_name` remains a valid `phase_state`
+> key, just not audited/required). `soul.ts` already renders SOUL.md from
+> personality alone ("You are a personal agent." opener when no name is present),
+> so personality → SOUL.md is unaffected. NO FLAGS; done = onboarding asks
+> personality but never a name, finalizes without one.
 
 The React web client (`landing/chat-react/`) is **registry-driven** too, and
 since the 2026-06-30 rework `chat-react/ProjectShell.tsx` is the **APP SHELL**:

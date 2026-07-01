@@ -51,27 +51,29 @@ test('buildPhaseStatePatch: merges arrays, dedupes, LLM-driven scalars', () => {
   const patch = buildPhaseStatePatch(
     prior,
     { primary_projects: ['topline', 'Acme'], agent_personality: 'warm and direct', agent_name: 'Atlas' },
-    'I want to call you Atlas',
+    'warm and direct please',
   )
   // dedupe case-insensitive against prior, append new
   expect(patch['primary_projects']).toEqual(['Topline', 'Acme'])
   expect(patch['agent_personality']).toBe('warm and direct')
   // user_first_name already set in prior → not re-patched
   expect(patch['user_first_name']).toBeUndefined()
-  // agent_name comes from the LLM field
-  expect(patch['agent_name']).toBe('Atlas')
+  // DROP the agent-NAME step (2026-07-01): even if the LLM smuggles an agent_name,
+  // the extractor NEVER persists it — Open onboarding does not name the orchestrator.
+  expect(patch['agent_name']).toBeUndefined()
 })
 
-test('buildPhaseStatePatch: does NOT mis-extract an agent name from a general turn', () => {
-  // No agent_name from the LLM + a conversational answer → no spurious name.
-  const patch = buildPhaseStatePatch({}, { user_first_name: 'Sam' }, "I'm Sam and I build things")
+test('buildPhaseStatePatch: never persists an agent_name (dropped step)', () => {
+  // Even with an explicit agent_name from the LLM, nothing is written.
+  const patch = buildPhaseStatePatch({}, { user_first_name: 'Sam', agent_name: 'Atlas' }, 'call you Atlas')
   expect(patch['agent_name']).toBeUndefined()
   expect(patch['user_first_name']).toBe('Sam')
 })
 
-test('extractor persists fields and fires onComplete when 5 required fields complete', async () => {
+test('extractor persists fields and fires onComplete when the 4 required fields complete', async () => {
   const store = new InMemoryOnboardingStateStore()
-  // One LLM response that completes every required field at once.
+  // One LLM response that completes every required field at once. (An agent_name
+  // is included to prove the extractor ignores it — DROP the agent-NAME step.)
   const client = stubClient([
     JSON.stringify({
       user_first_name: 'Sam',
@@ -101,7 +103,8 @@ test('extractor persists fields and fires onComplete when 5 required fields comp
 
   expect(state).not.toBeNull()
   expect(state!.phase_state['user_first_name']).toBe('Sam')
-  expect(state!.phase_state['agent_name']).toBe('Atlas')
+  // agent_name is never persisted by the extractor (DROP the agent-NAME step).
+  expect(state!.phase_state['agent_name']).toBeUndefined()
   expect((state!.phase_state['primary_projects'] as string[]).length).toBe(3)
   expect(auditRequiredFields(state!.phase_state).next_to_collect).toBeNull()
   expect(completedWith).not.toBeNull()
@@ -206,7 +209,10 @@ test('an in-flight job at an interview phase ADOPTS import_running (no downgrade
   })
   let completed = false
   const extractor = buildPostTurnExtractor({
-    anthropicClient: stubClient([JSON.stringify({ agent_name: 'Atlas' })]),
+    // A real onboarding turn that persists a field (an interest) so the adopt
+    // path runs. (Formerly used agent_name, which is no longer persisted after
+    // the DROP the agent-NAME step change.)
+    anthropicClient: stubClient([JSON.stringify({ non_work_interests: ['climbing'] })]),
     stateStore: store,
     project_slug: SLUG,
     hasInFlightImport: async () => true, // a job is genuinely live
@@ -216,8 +222,8 @@ test('an in-flight job at an interview phase ADOPTS import_running (no downgrade
   })
   const state = await extractor.runOnce({
     user_id: USER,
-    agent_text: 'What should I call you?',
-    user_text: 'Atlas',
+    agent_text: 'Anything you care about outside work?',
+    user_text: 'I climb',
     observed_at: 1000,
   })
   // Must NOT write the interview marker back (that would re-strand the cron and

@@ -9,9 +9,14 @@
  * post-turn extractor (`post-turn-extractor.ts`) scribes the structured profile
  * out of the conversation in the background.
  *
- * The five fields the extractor + `required-fields-audit.ts` need before
+ * The four fields the extractor + `required-fields-audit.ts` need before
  * onboarding completes: the user's first name, ≥3 work projects/focus areas,
- * ≥1 non-work interest, the agent's personality, and the agent's name.
+ * ≥1 non-work interest, and the agent's personality.
+ *
+ * 2026-07-01 (DROP the agent-NAME step): Neutron Open is an agent ORCHESTRATOR,
+ * not a personal agent, so onboarding NEVER asks the owner to name it. The
+ * former step-5 "a name for you" ask and the `needsName` half of the step guard
+ * are gone; personality alone drives SOUL.md.
  */
 
 import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-character-suggester.ts'
@@ -100,22 +105,18 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   for (const c of DEFINED_PERSONALITY_CHARACTERS) {
     lines.push(`       - ${c.name} — ${c.why}`)
   }
+  lines.push('')
   lines.push(
-    '  5. A name for you, their assistant. Suggest a few short names that fit the',
-    '     personality they picked, offered as tappable [[OPTIONS]] (plus a "You pick" /',
-    '     "I\'ll choose my own" option). CRITICAL: accept ANY name they give — typed OR',
-    '     tapped — verbatim, exactly as written, even if it is not one you suggested',
-    '     (e.g. "Ferin"). The moment they clearly give a name, confirm it warmly and',
-    '     move on. NEVER re-ask for a name they already gave, and never reject an',
-    '     unfamiliar name.',
+    'Do NOT ask them to name you. This is an agent ORCHESTRATOR, not a personal agent',
+    'with a name — never ask "what should you call me" or suggest names for yourself.',
+    'The personality above is the last thing you need from them.',
   )
   lines.push('')
   lines.push('Offering choices (tappable buttons):')
   lines.push(
-    'When you offer the owner a set of choices — the personality archetypes, name',
-    'suggestions, or a yes/no like the history-import offer — give them tappable buttons',
-    'by appending a block in EXACTLY this format at the very END of your message, after',
-    'your prose question:',
+    'When you offer the owner a set of choices — the personality archetypes or a yes/no',
+    'like the history-import offer — give them tappable buttons by appending a block in',
+    'EXACTLY this format at the very END of your message, after your prose question:',
   )
   lines.push('')
   lines.push('  [[OPTIONS]]')
@@ -126,9 +127,9 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   lines.push('')
   lines.push(
     'Rules: write your normal conversational question FIRST, then the block. Keep each',
-    'option SHORT (a name or a few words) — the option\'s text is exactly what gets sent',
-    'back when they tap it, so make it self-explanatory. Use the block ONLY for genuine',
-    'choice steps (personality, name, a clear yes/no), at most ~6 options, and always',
+    'option SHORT (a few words) — the option\'s text is exactly what gets sent back when',
+    'they tap it, so make it self-explanatory. Use the block ONLY for genuine choice',
+    'steps (personality, a clear yes/no), at most ~6 options, and always',
     'leave room for a free-text answer (they can ignore the buttons and just type). Do',
     'NOT use it for open questions like "what do you work on?". Never show the literal',
     '[[OPTIONS]] markers in prose — they are stripped before the owner sees the message.',
@@ -144,8 +145,9 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     'message automatically the moment the last step is answered: it confirms everything',
     'is set, names the projects it created, and invites the owner to open one in the LEFT',
     'RAIL (each has its own Plan, Documents, and Chat). So once they have given the final',
-    'answer (their name), reply with at MOST a single short, warm acknowledgement of that',
-    'answer (e.g. "Love it.") and STOP — do NOT say "you\'re all set", do NOT list or',
+    'answer (their personality choice), reply with at MOST a single short, warm',
+    'acknowledgement of that answer (e.g. "Love it.") and STOP.',
+    'Do NOT say "you\'re all set", do NOT list or',
     'summarise their projects, do NOT mention the left rail or "onboarding complete", and',
     'do NOT ask "what do you want to look at first?". Restating any of that duplicates the',
     'automatic closing (the exact bug we are avoiding). Never announce phases; the',
@@ -163,68 +165,59 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
 /**
  * DETERMINISTIC step guard (item 3, 2026-06-30 fresh-install fix) — a per-turn
  * fragment re-injected on EVERY onboarding turn (the same mechanism the
- * `<import_analysis>` grounding uses) that FORCES the two button-driven steps to
- * actually happen.
+ * `<import_analysis>` grounding uses) that FORCES the button-driven personality
+ * step to actually happen.
  *
- * THE BUG this fixes: the personality/archetype + name steps lived only as soft
- * prose in the first-turn preamble ("offer the DEFINED set ... as tappable
- * options"), and the preamble ALSO says "you do NOT need to collect these in
- * order." So whether the archetype buttons ever appeared was pure LLM whim — a
- * fresh-install verify saw a whole onboarding run with ZERO option buttons (the
- * agent settled personality/name by free text, or inferred them, and skipped the
- * choice UI entirely). The preamble alone cannot GUARANTEE the step.
+ * THE BUG this fixes: the personality/archetype step lived only as soft prose in
+ * the first-turn preamble ("offer the DEFINED set ... as tappable options"), and
+ * the preamble ALSO says "you do NOT need to collect these in order." So whether
+ * the archetype buttons ever appeared was pure LLM whim — a fresh-install verify
+ * saw a whole onboarding run with ZERO option buttons (the agent settled
+ * personality by free text, or inferred it, and skipped the choice UI entirely).
+ * The preamble alone cannot GUARANTEE the step.
  *
  * THE FIX (stays inside Path-1 live-session — no phase-machine revival): audit
- * the durable `phase_state` for the two button-backed required fields. While
+ * the durable `phase_state` for the button-backed personality field. While
  * `agent_personality` is still unset, this fragment HARD-REQUIRES the agent to
  * present the named archetypes as a `[[OPTIONS]]` block (it cannot be settled by
- * free text alone, and the agent may not finalize without it); once personality
- * is set but `agent_name` is unset, it HARD-REQUIRES the name-suggestion
- * `[[OPTIONS]]` block. Returns null once both are settled (nothing to force).
+ * free text alone, and the agent may not finalize without it). Returns null once
+ * personality is settled (nothing to force).
+ *
+ * 2026-07-01 (DROP the agent-NAME step): the former second half of this guard —
+ * a `needsName` branch that forced a name-suggestion `[[OPTIONS]]` block once
+ * personality was set — is gone. Neutron Open never asks the owner to name the
+ * orchestrator, so personality is the only button-driven required step.
  *
  * Because it re-injects every turn, the agent cannot drift past the personality
  * step without rendering the buttons — making the step reliable rather than
  * LLM-whim — while still leaving room for a free-text answer (the [[OPTIONS]]
- * block always carries a "Something else" / "I'll choose my own" escape and the
+ * block always carries a "Something else" / "I'll describe it" escape and the
  * owner can ignore the buttons and type).
  */
 export function buildOnboardingStepGuardFragment(
   phase_state: Readonly<Record<string, unknown>>,
 ): string | null {
   const audit = auditRequiredFields(phase_state)
-  const missing = new Set(audit.missing)
-  const needsPersonality = missing.has('agent_personality')
-  const needsName = missing.has('agent_name')
-  if (!needsPersonality && !needsName) return null
+  const needsPersonality = new Set(audit.missing).has('agent_personality')
+  if (!needsPersonality) return null
   const lines: string[] = []
   lines.push('<onboarding_required_steps>')
   lines.push(
-    'REQUIRED-STEP GUARD: two onboarding steps are button-driven and MUST be',
+    'REQUIRED-STEP GUARD: the personality step is button-driven and MUST be',
     'presented as a `[[OPTIONS]]` block (see "Offering choices") — never settled by',
     'free text alone and never silently skipped. You may not wrap up / finalize',
-    'onboarding until BOTH are settled.',
+    'onboarding until it is settled.',
   )
-  if (needsPersonality) {
-    lines.push('')
-    lines.push(
-      'STILL OPEN - PERSONALITY: you have NOT yet settled the personality/voice the owner',
-      'wants from you. The next time it is natural in the conversation (and BEFORE you',
-      'wrap up), you MUST ask which voice they want and present THESE named archetypes as',
-      'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
-      'Do not invent a different list, and do not skip the buttons:',
-    )
-    for (const c of DEFINED_PERSONALITY_CHARACTERS) {
-      lines.push(`  - ${c.name}`)
-    }
-  }
-  if (needsName) {
-    lines.push('')
-    lines.push(
-      'STILL OPEN - NAME: you have NOT yet settled the name the owner wants to call you.',
-      'When you reach it (after personality), suggest a few short names that fit the',
-      'chosen personality as a tappable [[OPTIONS]] block (plus a "I\'ll choose my own"',
-      'option). Accept ANY name they give, typed or tapped, verbatim.',
-    )
+  lines.push('')
+  lines.push(
+    'STILL OPEN - PERSONALITY: you have NOT yet settled the personality/voice the owner',
+    'wants from you. The next time it is natural in the conversation (and BEFORE you',
+    'wrap up), you MUST ask which voice they want and present THESE named archetypes as',
+    'a tappable [[OPTIONS]] block (plus a "Something else (I\'ll describe it)" option).',
+    'Do not invent a different list, and do not skip the buttons:',
+  )
+  for (const c of DEFINED_PERSONALITY_CHARACTERS) {
+    lines.push(`  - ${c.name}`)
   }
   lines.push('</onboarding_required_steps>')
   return lines.join('\n')
@@ -314,7 +307,7 @@ export function buildImportAnalysisContextFragment(
     'naturally and confirm the updated set; a dropped project is not created, and one you',
     'add is. You do not need their explicit sign-off on every project — once the set looks',
     'right, keep going. You still need the rest of the interview (their work focus beyond',
-    'these, a non-work interest, your personality, and your name) before you finalize.',
+    'these, a non-work interest, and your personality) before you finalize.',
   )
   lines.push('</import_analysis>')
   return lines.join('\n')

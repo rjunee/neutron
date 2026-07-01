@@ -24,8 +24,10 @@
  * Storage is byte-compatible with the engine's gap-fill merge: we reuse the
  * exported `dedupeStringsCaseInsensitive` / `readNonWorkInterests` helpers and
  * write the same `phase_state` keys (`user_first_name`, `primary_projects`,
- * `non_work_interests`, `agent_personality`, `agent_name`) so persona-gen's
- * `buildComposeInput` and `auditRequiredFields` read our output unchanged.
+ * `non_work_interests`, `agent_personality`) so persona-gen's `buildComposeInput`
+ * and `auditRequiredFields` read our output unchanged. As of 2026-07-01 (DROP the
+ * agent-NAME step) this extractor no longer writes `agent_name`: Neutron Open is
+ * an orchestrator and never asks the owner to name it.
  */
 
 import { getBestModel } from '../../runtime/models.ts'
@@ -328,14 +330,9 @@ export function buildPhaseStatePatch(
   if (llmFirstName !== null && readString(prior_phase_state, 'user_first_name') === null) {
     patch['user_first_name'] = llmFirstName
   }
-  // agent_name — LLM only (the user's chosen name for their assistant).
-  const llmAgentName =
-    fields?.agent_name !== undefined && fields.agent_name.trim().length > 0
-      ? fields.agent_name.trim()
-      : null
-  if (llmAgentName !== null && readString(prior_phase_state, 'agent_name') === null) {
-    patch['agent_name'] = llmAgentName
-  }
+  // 2026-07-01 (DROP the agent-NAME step): Neutron Open never asks the owner to
+  // name the orchestrator, so this extractor no longer persists `agent_name` —
+  // it is not a required field and the preamble never solicits one.
   if (fields?.agent_personality !== undefined && fields.agent_personality.trim().length > 0) {
     patch['agent_personality'] = fields.agent_personality.trim()
   }
@@ -444,7 +441,6 @@ the user did not supply it this turn.
 
 Fields:
   - user_first_name: the user's own first name, if they gave it.
-  - agent_name: the name the user wants to call their AI assistant, if chosen.
   - agent_personality: a short phrase capturing the personality/voice the user
     wants for their assistant (e.g. "warm and direct", "Paul-Graham-ish",
     "dry and concise"), if expressed.
@@ -491,8 +487,6 @@ function summarizeKnown(phase_state: Record<string, unknown>): string {
   const parts: string[] = []
   const fn = readString(phase_state, 'user_first_name')
   if (fn !== null) parts.push(`user_first_name=${fn}`)
-  const an = readString(phase_state, 'agent_name')
-  if (an !== null) parts.push(`agent_name=${an}`)
   const ap = readString(phase_state, 'agent_personality')
   if (ap !== null) parts.push(`agent_personality set`)
   const pp = readStringArray(phase_state, 'primary_projects')
