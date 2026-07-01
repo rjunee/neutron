@@ -2,6 +2,58 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Light/dark theme toggle for the web chat UI
+
+**Why.** The web chat (`landing/chat-react`) shipped dark-only. Ryan asked for a
+light/dark toggle: default to the OS setting, allow an explicit override, persist
+the choice, and make LIGHT mode an iMessage-on-iPhone look.
+
+**Framing — a user preference, NOT a feature flag.** ONE stylesheet, themed via
+CSS variables. No `NEUTRON_*` env, no `?client=`-style branch, no dual code path.
+The whole UI reskins by flipping a single `data-theme` attribute on the document
+root.
+
+**What changed.**
+- `landing/chat-react/theme.ts` (NEW) — the pure, DOM-free source of truth for
+  resolution + persistence. `ThemePreference = 'light' | 'dark' | 'system'`;
+  `resolveTheme(pref, systemPrefersLight)` (explicit override wins; `system` /
+  unrecognized follows `prefers-color-scheme`); `read/writeStoredPreference`
+  (localStorage key `neutron-theme`, safe when storage throws);
+  `cyclePreference` (system → light → dark); `applyResolvedTheme` (writes
+  `data-theme`). Default preference is `system`.
+- `landing/chat-react/useTheme.ts` (NEW) — the React binding: initializes from
+  storage, resolves against the live system signal, writes `data-theme` on the
+  root, persists on change, and subscribes to `prefers-color-scheme` ONLY while
+  the preference is `system`.
+- `landing/chat-react/ThemeToggle.tsx` (NEW) — the top-right control. A single
+  pill button that cycles the preference; the glyph shows the RESOLVED theme
+  (☀/☾) with an "Auto" marker while following the OS.
+- `landing/chat-react/ProjectShell.tsx` — wraps the tab bar + toggle in a new
+  `.car-topbar` flex row so the toggle is pinned top-right of the content pane
+  (owns the whole UI's theme, so it lives at the shell root).
+- `landing/chat-react.html` — (1) the `<style>` block is now FULLY
+  variable-driven: the dark `:root` set gained semantic vars for every
+  previously-hardcoded color (hover/active tints, code bg, banners, import
+  status, overlays, on-accent text, error/warn/info/success), and a new
+  `:root[data-theme="light"]` set overrides them with the iMessage light palette
+  (`#ffffff` surface, `#007aff` user bubble, `#e9e9eb` agent bubble, `#1c1c1e`
+  text, iOS separators) — audited so there are NO dark-only leftovers; (2) a
+  pre-paint inline `<script>` reads `neutron-theme` + `prefers-color-scheme` and
+  sets `data-theme` (+ the `theme-color` meta) BEFORE the stylesheet paints, so
+  a light user never sees a dark flash; (3) `.car-topbar` + `.car-theme-toggle`
+  styles.
+- `landing/chat-react/__tests__/theme.test.ts` (NEW) — the theme-resolution unit
+  test (system vs. explicit override vs. persisted; storage fallbacks; cycle
+  order). `theme-toggle.test.tsx` (NEW) — happy-dom wiring test: the toggle
+  mounts, reflects the initial preference, and clicking it flips `data-theme` +
+  persists to localStorage; a persisted override wins over the OS on mount.
+
+**Verification.** `bunx tsc -p landing/chat-react/tsconfig.json` clean; full
+`landing/chat-react/__tests__` suite green (193 + 16 new); the browser bundle
+(`bun build landing/chat-react/main.tsx`) builds with the theme code wired in;
+`scripts/ci/leak-gate.sh` SILENT; visual check of both themes off the real
+stylesheet (light = iMessage, dark unchanged, toggle top-right, no leftovers).
+
 ## 2026-07-01 — Auto-navigate to the personal-URL claim page at onboarding-end (Managed overlay)
 
 **Why.** The Managed personal-URL claim flow (control-plane `GET/POST /claim` →
