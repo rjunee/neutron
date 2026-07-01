@@ -617,8 +617,10 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   `captureRequiredAnswer` seam the live runner calls + AWAITS at turn-START
 >   (BEFORE the guard grounding reads `phase_state`), persisting
 >   `agent_name`/`agent_personality` deterministically so the audit recomputes
->   settled and never re-asks. Conservative: only on a prior `[[OPTIONS]]` turn,
->   personality anchored on the DEFINED archetype names actually rendered (an early
+>   settled and never re-asks. Conservative: keyed off the prior question's DURABLE
+>   persisted options (`ButtonStore.latestPromptByTopic` — live replies strip the
+>   `[[OPTIONS]]` block out of `body`), personality anchored on the DEFINED
+>   archetype names actually rendered (an early
 >   import yes/no can't be mis-captured), escape hatches declined, LLM extractor
 >   kept as the free-text fallback. **Duplicate closing:** when that capture settles
 >   the LAST required field it fires finalize and returns `finalized: true`, and the

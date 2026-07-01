@@ -46,8 +46,10 @@ seam that the live runner (`build-live-agent-turn.ts`) calls + AWAITS at
 turn-START — BEFORE the step-guard grounding reads `phase_state`. It persists
 `agent_name`/`agent_personality` deterministically at choice-time, so the audit
 recomputes with the answer already settled and the step is never re-asked. It is
-conservative: only fires when the prior agent message carried an `[[OPTIONS]]`
-block, anchors the personality step on the DEFINED archetype names actually
+conservative: only fires off the prior agent question's DURABLE persisted options
+(`ButtonStore.latestPromptByTopic` — live replies strip the `[[OPTIONS]]` block
+out of `body` into `options_json`, so the body alone would never match; Codex r1
+P1), anchors the personality step on the DEFINED archetype names actually
 rendered (so an early import yes/no can't be mis-captured), declines escape hatches
 ("Something else"/"I'll choose my own"), and lets the LLM extractor stay the
 fallback for free-text answers it declines. Typed custom names still settle.
