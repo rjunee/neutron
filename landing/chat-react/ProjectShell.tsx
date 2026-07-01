@@ -255,32 +255,45 @@ export function ProjectShell({
   // A stale in-flight fetch (rapid switches, StrictMode double-invoke) is
   // ignored via the `cancelled` latch. Switching scope resets the active tab to
   // Chat so we never land on a tab that doesn't exist in the new set.
+  // Which project (`''` = General) the current `tabs` were RESOLVED for. Null
+  // while a fetch is in flight. The doc-link resolver waits for this to match
+  // the pending link's project, so a cross-project link never consumes the
+  // previous project's stale tab set (Codex).
+  const [tabsScope, setTabsScope] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
     setActiveKey(CHAT_KEY)
     setTabs([CHAT_TAB])
+    setTabsScope(null)
     if (isGeneral) {
       void client
         .listGlobalTabs()
         .then((globalTabs) => {
           if (cancelled) return
           setTabs([CHAT_TAB, ...globalTabs])
+          setTabsScope('')
         })
         .catch(() => {
-          if (!cancelled) setTabs([CHAT_TAB])
+          if (cancelled) return
+          setTabs([CHAT_TAB])
+          setTabsScope('')
         })
       return () => {
         cancelled = true
       }
     }
+    const scope = projectId as string
     void client
-      .listProjectTabs(projectId as string)
+      .listProjectTabs(scope)
       .then((projectTabs) => {
         if (cancelled) return
         setTabs(projectTabs.length > 0 ? projectTabs : [CHAT_TAB])
+        setTabsScope(scope)
       })
       .catch(() => {
-        if (!cancelled) setTabs([CHAT_TAB])
+        if (cancelled) return
+        setTabs([CHAT_TAB])
+        setTabsScope(scope)
       })
     return () => {
       cancelled = true
@@ -288,13 +301,15 @@ export function ProjectShell({
   }, [client, projectId, isGeneral])
 
   // P-A — resolve a pending doc-link tap: once the shell is scoped to the
-  // link's project AND its Documents tab has loaded, activate that tab and hand
-  // the path to `DocumentsTab`. Runs after the tab-set effect above, which
-  // resets to Chat on a project switch — so a cross-project link lands on the
-  // doc, not Chat.
+  // link's project AND that project's tabs have RESOLVED (not the previous
+  // project's stale set) AND its Documents tab exists, activate that tab and
+  // hand the path to `DocumentsTab`.
   useEffect(() => {
     if (pendingDoc === null) return
     if ((projectId ?? '') !== pendingDoc.projectId) return
+    // Wait until the loaded tab set actually belongs to the pending project —
+    // after a cross-project setProject, `tabs` briefly still holds the old set.
+    if (tabsScope === null || tabsScope !== pendingDoc.projectId) return
     const docsTab = tabs.find((t) => t.mount.target === 'docs')
     if (docsTab === undefined) return
     setActiveKey(docsTab.key)
@@ -304,7 +319,7 @@ export function ProjectShell({
       req: { path: pendingDoc.path, nonce: docNonce.current },
     })
     setPendingDoc(null)
-  }, [pendingDoc, projectId, tabs])
+  }, [pendingDoc, projectId, tabs, tabsScope])
 
   // The previous active tab can vanish when the set changes (scope switch / Core
   // uninstall). Fall back to Chat so we never highlight a missing tab.

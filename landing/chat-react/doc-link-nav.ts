@@ -54,17 +54,15 @@ export function parseWebDocLinkHref(href: string, origin: string): DocLinkTarget
     if (o.length === 0 || !rest.startsWith(`${o}/`)) return null
     rest = rest.slice(o.length)
   }
-  const prefix = '/projects/'
-  if (!rest.startsWith(prefix)) return null
-  const q = rest.indexOf('?')
-  if (q < 0) return null
-  const head = rest.slice(prefix.length, q) // `<id>/docs`
-  const slash = head.indexOf('/')
-  if (slash <= 0) return null
-  const projectId = head.slice(0, slash)
+  // Match `…/projects/<id>/docs?<query>`. A leading path segment is tolerated so
+  // a WEB_APP_BASE with a path prefix (`https://host/app/projects/…`) still
+  // resolves after the origin strip (`/app/projects/…`). The `/projects/` must
+  // be `/`-delimited, so `/xprojects/…` can't match.
+  const m = rest.match(/\/projects\/([A-Za-z0-9_.-]+)\/docs\?(.*)$/)
+  if (m === null) return null
+  const projectId = m[1] as string
   if (!PROJECT_ID_RE.test(projectId)) return null
-  if (head.slice(slash + 1) !== 'docs') return null
-  const query = rest.slice(q + 1)
+  const query = m[2] as string
   // The path is the FIRST query key (`path=…`); an optional `&line=`/`&range=`
   // anchor may follow and is ignored (the viewer opens the whole doc).
   const amp = query.indexOf('&')

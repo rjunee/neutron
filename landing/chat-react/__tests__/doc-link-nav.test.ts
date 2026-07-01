@@ -46,6 +46,22 @@ describe('parseWebDocLinkHref', () => {
     ).toEqual({ projectId: 'acme', path: 'brief.md' })
   })
 
+  it('tolerates a WEB_APP_BASE path prefix (absolute)', () => {
+    expect(
+      parseWebDocLinkHref(`${ORIGIN}/app/projects/acme/docs?path=brief.md`, ORIGIN),
+    ).toEqual({ projectId: 'acme', path: 'brief.md' })
+  })
+
+  it('tolerates a path prefix (root-relative)', () => {
+    expect(
+      parseWebDocLinkHref('/app/projects/acme/docs?path=brief.md', ORIGIN),
+    ).toEqual({ projectId: 'acme', path: 'brief.md' })
+  })
+
+  it('does not match a lookalike segment (/xprojects/)', () => {
+    expect(parseWebDocLinkHref('/xprojects/acme/docs?path=brief.md', ORIGIN)).toBeNull()
+  })
+
   it('rejects a different origin', () => {
     expect(
       parseWebDocLinkHref('https://evil.example/projects/acme/docs?path=x.md', ORIGIN),
