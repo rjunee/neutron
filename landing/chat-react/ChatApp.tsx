@@ -575,13 +575,32 @@ function ImportStatus({
     )
   }
   if (upload.status !== 'idle') {
+    // While uploading, show a real progress bar driven by bytes-over-the-wire
+    // (loaded/total) once the first chunk callback lands. Reuses the same
+    // `car-import-bar` styling as the analysis progress. The percent is only
+    // shown when we have a positive total (a zero-byte total can't be a ratio).
+    const hasBar =
+      upload.status === 'uploading' && typeof upload.total === 'number' && upload.total > 0
+    const pct = hasBar
+      ? Math.max(0, Math.min(100, Math.round(((upload.loaded ?? 0) / (upload.total as number)) * 100)))
+      : 0
     return (
       <div className={`car-import-status car-import-${upload.status}`} role="status" aria-live="polite">
         {upload.status === 'uploading' ? (
-          <span className="car-import-row">
-            <span className="car-spinner" aria-hidden="true" />
-            <span className="car-import-body">{upload.message}</span>
-          </span>
+          <>
+            <span className="car-import-row">
+              <span className="car-spinner" aria-hidden="true" />
+              <span className="car-import-body">
+                {upload.message}
+                {hasBar ? ` — ${pct}%` : ''}
+              </span>
+            </span>
+            {hasBar ? (
+              <span className="car-import-bar" aria-hidden="true">
+                <span className="car-import-bar-fill" style={{ width: `${pct}%` }} />
+              </span>
+            ) : null}
+          </>
         ) : (
           upload.message
         )}
@@ -830,6 +849,12 @@ function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Eleme
 interface ImportState {
   status: 'idle' | 'uploading' | 'done' | 'error'
   message?: string
+  /** UPLOAD progress (bytes over the wire) while `status === 'uploading'`.
+   *  Drives the upload progress bar in {@link ImportStatus} — distinct from
+   *  the post-upload import-ANALYSIS progress (`vm.importProgress`). Both
+   *  undefined until the first chunk callback fires. */
+  loaded?: number
+  total?: number
 }
 
 function Composer({
@@ -980,8 +1005,17 @@ function ChatSurface({
       })
       return
     }
-    setImportState({ status: 'uploading', message: `Importing ${zip.name}…` })
-    void importHistoryZip(zip, uploadAffordance.source, { token: config.token, topicId: config.topicId })
+    const uploadingMsg = `Importing ${zip.name}…`
+    setImportState({ status: 'uploading', message: uploadingMsg, loaded: 0, total: zip.size })
+    void importHistoryZip(zip, uploadAffordance.source, {
+      token: config.token,
+      topicId: config.topicId,
+      // Live UPLOAD progress — each landed 4 MiB chunk advances the bar. This
+      // is the bytes-over-the-wire indicator, distinct from the post-upload
+      // analysis progress the engine streams once the zip lands.
+      onProgress: (loaded, total) =>
+        setImportState({ status: 'uploading', message: uploadingMsg, loaded, total }),
+    })
       .then((result) => {
         // ND2 (dogfood 2026-06-27) — only claim "reading your history now" when
         // the engine actually STARTED an import job (`job_id` present). A 200

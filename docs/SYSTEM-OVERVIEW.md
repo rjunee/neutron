@@ -359,8 +359,14 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > `BootstrapConfig.onboardingActive`) instead of "Send a message to begin.";
 > (2) tighter bubbles (`min-width:4ch`, 8/13 padding); (3) quick-reply buttons
 > render the real choice text (`opt.body`), not the A/B/C letter `label`;
-> (4) ChatGPT/Claude export ZIP upload wired to `POST /api/upload/<source>`
-> (`uploads.ts` `importHistoryZip`); (5) iMessage-style — reaction "＋" and
+> (4) ChatGPT/Claude export ZIP upload is CHUNKED (`uploads.ts`
+> `importHistoryZip` drives the shared `upload-client.ts` `uploadChunked`:
+> `POST /api/upload/<source>/start` → per-chunk 4 MiB `PATCH` → terminal
+> completion, mounted in prod at `open/composer.ts`) with a live upload
+> progress bar in the import UI (`ChatApp.tsx` `ImportStatus`, distinct from
+> the post-upload analysis progress) — a large export no longer 413s on a
+> single giant body; the terminal chunk kicks the SAME `notifyImportUpload`
+> engine advance the old single-shot POST did; (5) iMessage-style — reaction "＋" and
 > Edit/Delete are hover-revealed, not always-on; (7) no spurious empty agent
 > bubble above the typing indicator (`controller.ts` drops the empty-delta open
 > frame; the typing dots key off `awaitingFirstToken`).

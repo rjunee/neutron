@@ -90,6 +90,24 @@ export interface UploadChunkedResult {
   /** Server-reported total bytes (mirrors `file.size`). Surfaced so the
    *  caller can log + compare against any local hash. */
   bytes: number
+  /**
+   * Import-completion fields echoed from the server's TERMINAL PATCH
+   * response (`status: 'complete'`, emitted by the chunked-upload
+   * handler's `finaliseUpload`). Present only on the completion path
+   * (undefined on the defensive zero-chunk fallthrough):
+   *
+   *   - `job_id`: the engine's `import_job_id` — non-null ONLY when the
+   *     `notifyImportUpload` bridge actually STARTED an import job. A
+   *     null / absent value is a no-op the caller MUST surface honestly
+   *     (ND2 — the banned silent-false-success).
+   *   - `outcome`: the engine's routing verdict (e.g. `advanced`,
+   *     `no_active_prompt`).
+   *   - `source`: the server's sniffed export source (may differ from
+   *     the URL source when the zip's entry list disagrees).
+   */
+  job_id?: string | null
+  outcome?: string
+  source?: string
 }
 
 export class UploadChunkedError extends Error {
@@ -242,7 +260,15 @@ export async function uploadChunked(
     }
     if (opts.onProgress !== undefined) opts.onProgress(offset, total)
     if (patchResult.status === 'complete') {
-      return { upload_id, status: 'complete', bytes: total }
+      const result: UploadChunkedResult = { upload_id, status: 'complete', bytes: total }
+      // Echo the finalisation fields (job_id / outcome / source) so the
+      // import caller can tell a real job-started from a 200 no-op (ND2)
+      // without a second round-trip. `exactOptionalPropertyTypes` — assign
+      // only when present.
+      if (patchResult.job_id !== undefined) result.job_id = patchResult.job_id
+      if (patchResult.outcome !== undefined) result.outcome = patchResult.outcome
+      if (patchResult.source !== undefined) result.source = patchResult.source
+      return result
     }
   }
 
