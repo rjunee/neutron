@@ -2,6 +2,37 @@
 
 Running log of what shipped, newest-first. One entry per delivered PR.
 
+## Create Project rail refresh reaches a project-scoped socket
+
+**The bug.** #132 wired the "Create Project" button to fan a `projects_changed`
+app-ws frame so the left rail refreshes live, but it fanned **only to the
+user-scoped General topic `app:<user>`**. The served web React client opens ONE
+socket scoped to whichever project it is viewing (`app:<user>:<project>` —
+`appWsProjectTopicId`); General is the only client on the bare `app:<user>`
+topic. So creating a project **from inside a project** dropped the frame — the
+new project appeared in the rail only after a page reload. Onboarding masked the
+gap because onboarding runs on the General topic.
+
+**The fix.** `open/composer.ts` adds a `fanProjectsChanged(user_id, frame)`
+helper that fans the rail-refresh frame to the base topic **and every live
+per-project topic** for that user (`appWsRegistry.topics()` prefixed with
+`app:<user>:`). Both emit paths route through it: the unconditional
+`emitProjectsChangedNow` (the create-project HTTP endpoint `POST
+/api/app/projects` **and** the `create_project` agent tool, which share
+`createProjectAndRefresh`) and the diff-gated `emitProjectsChangedIfChanged`
+(onboarding turns). The registry is keyed by exact topic string and each web
+socket lives on exactly one topic, so no socket receives the frame twice. The
+frame carries the full current project list from `readProjectRows()` (which
+filters `deleted_at IS NULL`), so it always includes the just-created project.
+No flags — on by default.
+
+**Tests.** `open/__tests__/open-projects-changed-wiring.test.ts` gains a real
+e2e test that boots the Open composition over `Bun.serve`, opens BOTH a
+project-scoped web socket (`app:owner:acme`) and a General socket (`app:owner`),
+drives the real `POST /api/app/projects`, and asserts a `projects_changed` frame
+carrying the new project arrives on **both** — no reload. Verified failing
+before the fix (base-only fan) and passing after.
+
 ## Work Board — Phase 1b tab UI (web + mobile)
 
 **What shipped.** The first-class per-project **Work Board** tab on both clients,

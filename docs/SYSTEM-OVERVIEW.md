@@ -331,6 +331,14 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
 >    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
 >    General (durable rows under `app:<user>`), not the per-project chats.
+>    **Cross-project exception — the project rail.** The left rail is a
+>    cross-project concern, so a `projects_changed` refresh (onboarding minting a
+>    project, or the "Create Project" button / `create_project` tool) must reach
+>    the client whatever project socket is active. `open/composer.ts`
+>    `fanProjectsChanged` therefore fans that frame to the bare `app:<user>` topic
+>    AND every live `app:<user>:<project>` topic (via `appWsRegistry.topics()`),
+>    else creating a project from inside a project would only show up after a
+>    reload (the #132 → this-fix bug).
 > 2. **Persistent rail + tab layout.** `TopicRail` is lifted OUT of `ChatApp`
 >    (which is now just the Chat-tab body) to a persistent left column in
 >    `ProjectShell`; the `TabBar` renders in the content pane for BOTH views.

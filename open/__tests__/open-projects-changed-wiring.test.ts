@@ -173,4 +173,88 @@ describe('Open projects_changed live-refresh wiring', () => {
     ws.close()
     await sleep(50)
   }, 30_000)
+
+  // THE BUG (this dispatch): #132 wired the create-project fan, but only to the
+  // user-scoped General topic `app:<user>`. The served web client opens ONE
+  // socket scoped to whichever project it is viewing (`app:<user>:<project>`),
+  // so clicking "Create Project" from INSIDE a project never refreshed the rail
+  // until a reload. THE FIX: `fanProjectsChanged` fans the frame to the base
+  // topic AND every live per-project topic. This drives the REAL HTTP create
+  // endpoint (`POST /api/app/projects`) — the SAME `createProjectAndRefresh` →
+  // `emitProjectsChangedNow` path the `create_project` agent tool uses — against
+  // BOTH a project-scoped socket and a General socket, and asserts the new
+  // project reaches both live, no reload.
+  test('POST /api/app/projects fans projects_changed to a project-scoped web socket AND General', async () => {
+    harness = await startHarness()
+    const wsUrl = harness.base.replace(/^http/, 'ws')
+
+    // An existing project the client is currently VIEWING (scoped socket).
+    await harness.db.run(
+      `INSERT INTO projects (id, name, privacy_mode, billing_mode, created_at, updated_at)
+       VALUES (?, ?, 'private', 'personal', ?, ?)`,
+      ['acme', 'Acme', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'],
+    )
+
+    // Socket #1 — inside project 'acme' → topic `app:owner:acme`.
+    const scopedEvents: AppWsOutbound[] = []
+    const scoped = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web&project_id=acme`)
+    // Socket #2 — General → topic `app:owner`.
+    const generalEvents: AppWsOutbound[] = []
+    const general = new WebSocket(`${wsUrl}/ws/app/chat?token=dev:owner&platform=web`)
+    await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        scoped.onopen = () => resolve()
+        scoped.onerror = (e) => reject(new Error(`scoped ws error: ${JSON.stringify(e)}`))
+      }),
+      new Promise<void>((resolve, reject) => {
+        general.onopen = () => resolve()
+        general.onerror = (e) => reject(new Error(`general ws error: ${JSON.stringify(e)}`))
+      }),
+    ])
+    scoped.onmessage = (ev) => {
+      scopedEvents.push(JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)) as AppWsOutbound)
+    }
+    general.onmessage = (ev) => {
+      generalEvents.push(JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)) as AppWsOutbound)
+    }
+    // Both sockets must be registered before the create fans.
+    await waitFor(() => scopedEvents.some((e) => e.type === 'session_ready'))
+    await waitFor(() => generalEvents.some((e) => e.type === 'session_ready'))
+
+    // The REAL Create Project button → POST /api/app/projects. Owner-bearer
+    // (dev:owner → user_id 'owner' = OWNER_USER_ID). This creates the row + fans
+    // the live rail refresh (no reload).
+    const res = await fetch(`${harness.base}/api/app/projects`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Beta' }),
+    })
+    expect(res.status).toBe(201)
+    const created = (await res.json()) as { ok: boolean; project: { id: string; label: string }; created: boolean }
+    expect(created.ok).toBe(true)
+    expect(created.created).toBe(true)
+    expect(created.project).toEqual({ id: 'beta', label: 'Beta' })
+
+    // The scoped socket (viewing 'acme') is where #132 dropped the frame — it
+    // MUST now carry the new project so the rail updates without a reload.
+    await waitFor(() => scopedEvents.some((e) => e.type === 'projects_changed'))
+    const scopedFrame = scopedEvents.find((e) => e.type === 'projects_changed')
+    if (scopedFrame === undefined || scopedFrame.type !== 'projects_changed') {
+      throw new Error('expected a projects_changed frame on the project-scoped socket')
+    }
+    expect(scopedFrame.projects.map((p) => p.id).sort()).toEqual(['acme', 'beta'])
+    expect(scopedFrame.projects.find((p) => p.id === 'beta')).toEqual({ id: 'beta', label: 'Beta' })
+
+    // No regression — the General socket still receives the same refresh.
+    await waitFor(() => generalEvents.some((e) => e.type === 'projects_changed'))
+    const generalFrame = generalEvents.find((e) => e.type === 'projects_changed')
+    if (generalFrame === undefined || generalFrame.type !== 'projects_changed') {
+      throw new Error('expected a projects_changed frame on the General socket')
+    }
+    expect(generalFrame.projects.find((p) => p.id === 'beta')).toEqual({ id: 'beta', label: 'Beta' })
+
+    scoped.close()
+    general.close()
+    await sleep(50)
+  }, 30_000)
 })
