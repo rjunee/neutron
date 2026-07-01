@@ -52,6 +52,7 @@ import type {
   WowActionResult,
 } from '../action-types.ts'
 import { slugifyProjectId, synthesizeProjectContext } from '../project-identity.ts'
+import { defaultProjectEmoji } from '../../../gateway/projects/default-emoji.ts'
 import {
   buildProjectMaterializer,
   mapBounded,
@@ -449,10 +450,10 @@ async function reconcileProject(
       // post-onboarding settings concern, not materialized here.
       await tx.run(
         `INSERT OR IGNORE INTO projects
-           (id, name, description, persona, privacy_mode, billing_mode,
-            created_at, updated_at)
-         VALUES (?, ?, ?, NULL, 'private', 'personal', ?, ?)`,
-        [bind_id, name, description, iso, iso],
+           (id, name, description, persona, emoji, privacy_mode, billing_mode,
+            created_at, updated_at, last_activity_at)
+         VALUES (?, ?, ?, NULL, ?, 'private', 'personal', ?, ?, ?)`,
+        [bind_id, name, description, defaultProjectEmoji(name), iso, iso, iso],
       )
       outcome = 'created'
     } else if (!alreadyShelled) {

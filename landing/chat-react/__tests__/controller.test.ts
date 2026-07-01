@@ -464,6 +464,38 @@ describe('NeutronChatController — live projects_changed (FIX 1)', () => {
     expect(sockets.length).toBe(1)
   })
 
+  it('carries the rail-redesign fields (emoji / unread / last_activity_at) through the frame', async () => {
+    const { controller, sockets } = setup(null)
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(
+      projectsChanged(
+        [
+          { id: 'p1', label: 'Fitness', emoji: '🏋️', unread: 3, last_activity_at: '2026-07-01T00:00:00Z' },
+          // A malformed unread (negative / non-int) is clamped; a missing emoji
+          // is simply absent (the rail falls back to a generic glyph).
+          { id: 'p2', label: 'Notes', unread: -5 },
+        ] as unknown as Array<{ id: string; label: string }>,
+        'p1',
+      ),
+    )
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.projects[0]).toEqual({
+      id: 'p1',
+      label: 'Fitness',
+      emoji: '🏋️',
+      unread: 3,
+      last_activity_at: '2026-07-01T00:00:00Z',
+    })
+    // p2: no emoji key, unread clamped to 0.
+    expect(vm.projects[1]!.id).toBe('p2')
+    expect(vm.projects[1]!.emoji).toBeUndefined()
+    expect(vm.projects[1]!.unread).toBe(0)
+  })
+
   it('re-scopes to a per-project topic + hydrates that topic’s transcript on switch', async () => {
     // A SHARED store holds each topic's transcript under its own topic_id, so a
     // switch re-scopes the session and the new topic's history hydrates.

@@ -156,6 +156,7 @@ import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
 import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
 import { createAppProjectsSurface } from '../gateway/http/app-projects-surface.ts'
 import { SqliteProjectSettingsStore } from '../gateway/projects/sqlite-store.ts'
+import { resolveProjectEmoji } from '../gateway/projects/default-emoji.ts'
 import {
   createProjectRow,
   materializeProjectScaffold,
@@ -169,6 +170,7 @@ import { AppWsAdapter, optionsToInlineChoices } from '../channels/adapters/app-w
 import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
 import {
   appWsTopicId,
+  appWsProjectTopicId,
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentTyping,
   type AppWsOutboundImportProgress,
@@ -1449,14 +1451,63 @@ export function buildOpenGraphComposer(
     // injection AND the live `projects_changed` app-ws emit (FIX 1) so both
     // surface the IDENTICAL shape/order. Best-effort: a transient read failure
     // degrades to an empty list rather than sinking the request.
-    const readProjectRows = (): { id: string; label: string }[] => {
+    // Per-project unread = agent messages on the project's chat topic
+    // (`app:<user>:<project>`) beyond the owner's highest READ receipt seq.
+    // Honest (derived from the real chat log + receipt cursor), best-effort
+    // (a read failure — e.g. chat tables absent in a minimal DB — degrades to
+    // 0 rather than sinking the rail refresh).
+    const readProjectUnread = (project_id: string): number => {
+      const topic = appWsProjectTopicId(OWNER_USER_ID, project_id)
+      try {
+        const row = db
+          .prepare<{ n: number }, [string, string]>(
+            `SELECT COUNT(*) AS n
+               FROM app_chat_messages m
+              WHERE m.topic_id = ?
+                AND m.role = 'agent'
+                AND m.seq > (
+                  SELECT COALESCE(MAX(r.seq), 0)
+                    FROM app_chat_receipts r
+                   WHERE r.topic_id = ? AND r.read_at IS NOT NULL
+                )`,
+          )
+          .get(topic, topic)
+        return row?.n ?? 0
+      } catch {
+        return 0
+      }
+    }
+    // The rail row shape shared by the page bootstrap injection AND the live
+    // `projects_changed` app-ws emit — id + label + the rail-redesign fields
+    // (emoji / unread / activity). Ordered most-recent-activity-first so an
+    // active project floats to the top; a legacy row with a NULL activity key
+    // falls back to updated_at (COALESCE) rather than sinking.
+    const readProjectRows = (): {
+      id: string
+      label: string
+      emoji: string
+      unread: number
+      last_activity_at: string
+    }[] => {
       try {
         return db
-          .prepare<{ id: string; name: string }, []>(
-            `SELECT id, name FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC, id ASC`,
+          .prepare<
+            { id: string; name: string; emoji: string | null; last_activity_at: string | null; updated_at: string },
+            []
+          >(
+            `SELECT id, name, emoji, last_activity_at, updated_at
+               FROM projects
+              WHERE deleted_at IS NULL
+              ORDER BY COALESCE(last_activity_at, updated_at) DESC, id ASC`,
           )
           .all()
-          .map((r) => ({ id: r.id, label: r.name }))
+          .map((r) => ({
+            id: r.id,
+            label: r.name,
+            emoji: resolveProjectEmoji(r.emoji, r.name),
+            unread: readProjectUnread(r.id),
+            last_activity_at: r.last_activity_at ?? r.updated_at,
+          }))
       } catch {
         return []
       }
@@ -2537,6 +2588,30 @@ export function buildOpenGraphComposer(
         }
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
         void appWsHolder.adapter?.send(msg)
+        // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
+        // stamp the project's `last_activity_at` and re-fan `projects_changed`
+        // so every connected rail reorders (this project pops to the top) and
+        // its unread badge updates live. Best-effort + General-exempt (a General
+        // reply carries no project_id). The stamp is a tiny UPDATE; the fan is
+        // an idempotent full-snapshot push, so doing it per agent turn is fine.
+        if (project_id !== undefined && project_id.length > 0) {
+          // Stamp THEN emit — the re-fanned frame is ordered by
+          // `last_activity_at`, so the UPDATE must commit before we rebuild it or
+          // this project wouldn't yet have popped to the top. Async IIFE keeps
+          // the fan itself sync + non-throwing; a stamp failure still emits (the
+          // frame just keeps the prior order).
+          void (async (): Promise<void> => {
+            try {
+              await db.run(
+                `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL`,
+                [new Date().toISOString(), project_id],
+              )
+            } catch {
+              /* activity stamping must never break a message turn */
+            }
+            emitProjectsChangedNow(OWNER_USER_ID)
+          })()
+        }
       }
     // Path-1 closing + per-project opening delivery (items 6/7). Deliver a
     // finalize-composed agent message the SAME way a live-agent reply is

@@ -226,16 +226,125 @@ describe('SqliteProjectSettingsStore — list', () => {
     expect(all).toEqual([])
   })
 
-  test('list orders by updated_at DESC then id ASC', async () => {
+  test('list orders by last_activity_at DESC then id ASC', async () => {
+    // Rail-redesign: ordering is ACTIVITY-based. Seed acme then neutron (so
+    // neutron's seed activity is later), then post activity to acme — acme must
+    // float to the top. A plain settings edit does NOT count as activity.
     await store.get(OWNER, 'acme')
     await new Promise((r) => setTimeout(r, 5))
     await store.get(OWNER, 'neutron')
-    await new Promise((r) => setTimeout(r, 5))
+    // A settings edit bumps updated_at but NOT last_activity_at, so it must not
+    // reorder the rail (neutron, seeded last, is still most-recently-active).
     await store.update(OWNER, 'acme', { privacy_mode: 'public' })
-    const all = await store.list(OWNER)
-    // acme was touched last, so it should be first.
-    expect(all[0]!.id).toBe('acme')
-    expect(all[1]!.id).toBe('neutron')
+    const afterEdit = await store.list(OWNER)
+    expect(afterEdit[0]!.id).toBe('neutron')
+    // Real activity on acme DOES float it to the top.
+    await new Promise((r) => setTimeout(r, 5))
+    await store.touchActivity('acme')
+    const afterActivity = await store.list(OWNER)
+    expect(afterActivity[0]!.id).toBe('acme')
+    expect(afterActivity[1]!.id).toBe('neutron')
+  })
+})
+
+describe('SqliteProjectSettingsStore — emoji (rail-redesign)', () => {
+  test('auto-seeded row carries a deterministic default emoji from the name', async () => {
+    // 'read-books' humanises to 'Read Books' → the 📚 keyword pick.
+    const project = await store.get(OWNER, 'read-books')
+    expect(project!.emoji).toBe('📚')
+    // Persisted, not just resolved on read.
+    const stored = db
+      .prepare<{ emoji: string | null }, [string]>(`SELECT emoji FROM projects WHERE id = ?`)
+      .get('read-books')
+    expect(stored?.emoji).toBe('📚')
+  })
+
+  test('a legacy row with NULL emoji resolves to the default on read', async () => {
+    await db.run(
+      `INSERT INTO projects (id, name, privacy_mode, billing_mode, created_at, updated_at)
+       VALUES (?, ?, 'private', 'personal', ?, ?)`,
+      ['legacy', 'Marathon plan', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'],
+    )
+    const project = await store.get(OWNER, 'legacy')
+    expect(project!.emoji).toBe('🏃')
+  })
+
+  test('PATCH emoji round-trips and does not freeze on a name-only edit', async () => {
+    await store.get(OWNER, 'legacy2') // seed
+    const updated = await store.update(OWNER, 'legacy2', { emoji: '🎯' })
+    expect(updated!.emoji).toBe('🎯')
+    const reread = await store.get(OWNER, 'legacy2')
+    expect(reread!.emoji).toBe('🎯')
+
+    // A NULL-emoji legacy row edited by NAME only must NOT freeze a resolved
+    // default into the emoji column (it stays NULL, re-deriving from the name).
+    await db.run(
+      `INSERT INTO projects (id, name, privacy_mode, billing_mode, created_at, updated_at)
+       VALUES (?, ?, 'private', 'personal', ?, ?)`,
+      ['legacy3', 'coding side project', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'],
+    )
+    await store.update(OWNER, 'legacy3', { name: 'gardening notes' })
+    const col = db
+      .prepare<{ emoji: string | null }, [string]>(`SELECT emoji FROM projects WHERE id = ?`)
+      .get('legacy3')
+    expect(col?.emoji).toBeNull()
+    // …so the resolved emoji now reflects the NEW name (garden → 🌱), not code.
+    const reread3 = await store.get(OWNER, 'legacy3')
+    expect(reread3!.emoji).toBe('🌱')
+  })
+})
+
+describe('SqliteProjectSettingsStore — unread + activity (rail-redesign)', () => {
+  const USER = 'u1'
+  function topic(project_id: string): string {
+    return `app:${USER}:${project_id}`
+  }
+  async function addAgentMsg(project_id: string, seq: number): Promise<void> {
+    await db.run(
+      `INSERT INTO app_chat_messages (topic_id, seq, message_id, role, body, project_id, created_at)
+       VALUES (?, ?, ?, 'agent', ?, ?, ?)`,
+      [topic(project_id), seq, `m-${project_id}-${seq}`, `body ${seq}`, project_id, seq],
+    )
+  }
+  async function markRead(project_id: string, seq: number): Promise<void> {
+    await db.run(
+      `INSERT INTO app_chat_receipts (topic_id, message_id, device_id, seq, delivered_at, read_at)
+       VALUES (?, ?, 'dev1', ?, ?, ?)`,
+      [topic(project_id), `m-${project_id}-${seq}`, seq, seq, seq],
+    )
+  }
+
+  test('unread_count = agent messages beyond the highest read receipt seq', async () => {
+    await store.get(OWNER, 'acme') // seed the project row
+    await addAgentMsg('acme', 1)
+    await addAgentMsg('acme', 2)
+    await addAgentMsg('acme', 3)
+    // Nothing read yet → all 3 unread.
+    let list = await store.list(OWNER, USER)
+    expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(3)
+    // Read up to seq 2 → 1 unread (seq 3).
+    await markRead('acme', 1)
+    await markRead('acme', 2)
+    list = await store.list(OWNER, USER)
+    expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(1)
+    // Read seq 3 → caught up.
+    await markRead('acme', 3)
+    list = await store.list(OWNER, USER)
+    expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(0)
+  })
+
+  test('unread_count is 0 when user_id is omitted (no topic to compute from)', async () => {
+    await store.get(OWNER, 'acme')
+    await addAgentMsg('acme', 1)
+    const list = await store.list(OWNER)
+    expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(0)
+  })
+
+  test('list exposes last_activity_at (column value, else updated_at fallback)', async () => {
+    await store.get(OWNER, 'acme') // seed stamps last_activity_at = now
+    const list = await store.list(OWNER, USER)
+    const acme = list.find((p) => p.id === 'acme')!
+    expect(acme.last_activity_at.length).toBeGreaterThan(0)
   })
 })
 

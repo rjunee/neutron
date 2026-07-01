@@ -92,6 +92,12 @@ export function SettingsTab({
   const [renaming, setRenaming] = useState(false)
   const [nameError, setNameError] = useState<string | null>(null)
 
+  // ── project emoji (rail-redesign) ──
+  const [emoji, setEmoji] = useState('')
+  const [emojiDraft, setEmojiDraft] = useState('')
+  const [savingEmoji, setSavingEmoji] = useState(false)
+  const [emojiError, setEmojiError] = useState<string | null>(null)
+
   // ── collaborators (display-only) ──
   const [members, setMembers] = useState<ProjectMemberView[]>([])
 
@@ -121,10 +127,14 @@ export function SettingsTab({
     })
       .then((res) => (res.ok ? res.json() : null))
       .then((data: unknown) => {
-        const project = (data as { project?: { name?: unknown; members?: unknown } } | null)?.project
+        const project = (data as { project?: { name?: unknown; emoji?: unknown; members?: unknown } } | null)
+          ?.project
         const pName = typeof project?.name === 'string' ? project.name : ''
         setName(pName)
         setNameDraft(pName)
+        const pEmoji = typeof project?.emoji === 'string' ? project.emoji : ''
+        setEmoji(pEmoji)
+        setEmojiDraft(pEmoji)
         const rawMembers = Array.isArray(project?.members) ? project.members : []
         setMembers(
           rawMembers.filter(
@@ -155,6 +165,7 @@ export function SettingsTab({
     setLabel('')
     setBusyKey(null)
     setNameError(null)
+    setEmojiError(null)
     setMembers([])
     loadCreds()
     loadSettings()
@@ -226,6 +237,35 @@ export function SettingsTab({
         setNameError(err instanceof Error ? err.message : 'failed to rename project')
       })
   }, [doFetch, config.origin, config.token, projectId, nameDraft, name, renaming])
+
+  const saveEmoji = useCallback((): void => {
+    const next = emojiDraft.trim()
+    if (next.length === 0 || next === emoji || savingEmoji) return
+    setSavingEmoji(true)
+    setEmojiError(null)
+    void doFetch(`${config.origin}/api/app/projects/${encodeURIComponent(projectId)}/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${config.token}` },
+      body: JSON.stringify({ emoji: next }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = (await res.json().catch(() => null)) as { message?: string } | null
+          throw new Error(body?.message ?? `HTTP ${res.status}`)
+        }
+        // Read back the server-normalised emoji so the field reflects what was
+        // actually stored (the live rail refreshes off the projects_changed frame).
+        const data = (await res.json().catch(() => null)) as { project?: { emoji?: unknown } } | null
+        const saved = typeof data?.project?.emoji === 'string' ? data.project.emoji : next
+        setEmoji(saved)
+        setEmojiDraft(saved)
+        setSavingEmoji(false)
+      })
+      .catch((err: unknown) => {
+        setSavingEmoji(false)
+        setEmojiError(err instanceof Error ? err.message : 'failed to set emoji')
+      })
+  }, [doFetch, config.origin, config.token, projectId, emojiDraft, emoji, savingEmoji])
 
   const ownerRow =
     members.find((m) => m.role === 'owner') ?? { user_id: config.userId, name: 'You (owner)', role: 'owner' as const }
@@ -378,16 +418,36 @@ export function SettingsTab({
           {nameError !== null ? <div className="cset-error">{nameError}</div> : null}
         </div>
 
-        {/* Emoji is a SEAM — there's no emoji column yet, so the control renders
-            disabled. It lands with the rail-emoji work (no invented backend). */}
+        {/* Emoji — the rail glyph for this project. Editable (rail-redesign);
+            defaults to a deterministic pick from the name until changed. */}
         <div className="cset-field">
           <label className="cset-label" htmlFor="cset-emoji">
             Emoji
           </label>
           <div className="cset-inline">
-            <input id="cset-emoji" className="cset-input cset-input-emoji" value="" disabled placeholder="🙂" />
+            <input
+              id="cset-emoji"
+              className="cset-input cset-input-emoji"
+              value={emojiDraft}
+              placeholder={nameLoaded ? '🙂' : '…'}
+              maxLength={16}
+              onChange={(e) => setEmojiDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') saveEmoji()
+              }}
+              aria-label="Project emoji"
+            />
+            <button
+              type="button"
+              className="cset-btn cset-btn-primary"
+              disabled={savingEmoji || emojiDraft.trim().length === 0 || emojiDraft.trim() === emoji}
+              onClick={saveEmoji}
+            >
+              {savingEmoji ? 'Saving…' : 'Save'}
+            </button>
           </div>
-          <div className="cset-note">Coming with rail emoji.</div>
+          <div className="cset-note">Shown next to this project in the rail.</div>
+          {emojiError !== null ? <div className="cset-error">{emojiError}</div> : null}
         </div>
       </section>
 

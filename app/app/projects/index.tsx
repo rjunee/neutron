@@ -31,6 +31,7 @@ import {
   formatLastActivity,
   loadProjects,
   projectCardInteractivity,
+  sortProjectsByActivity,
   type Project,
   type ProjectSourceError,
 } from '../../lib/projects';
@@ -132,8 +133,9 @@ export default function ProjectListScreen() {
   }, [loadFromServer]);
 
   const projects = useMemo(() => {
-    if (serverProjects !== null) return serverProjects;
-    return loadProjects(now);
+    const base = serverProjects !== null ? serverProjects : loadProjects(now);
+    // Most-recent-activity first (active projects float to the top).
+    return sortProjectsByActivity(base);
   }, [now, serverProjects]);
 
   const handleOpen = useCallback(
@@ -429,7 +431,15 @@ function ProjectCard({
       ]}
     >
       <View style={styles.cardRow}>
+        <Text style={styles.cardEmoji}>{project.emoji}</Text>
         <Text style={styles.cardTitle}>{project.name}</Text>
+        {project.unread_count > 0 ? (
+          <View style={styles.unreadBadge} testID={`project-unread-${project.id}`}>
+            <Text style={styles.unreadBadgeText}>
+              {project.unread_count > 99 ? '99+' : project.unread_count}
+            </Text>
+          </View>
+        ) : null}
         <Text style={styles.cardActivity}>{formatLastActivity(project.last_activity_ms, now)}</Text>
       </View>
       <Text style={styles.cardDescription}>{project.description}</Text>
@@ -559,8 +569,20 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 8,
   },
+  cardEmoji: { fontSize: 18, lineHeight: 22 },
   cardTitle: { color: '#fafafa', fontSize: 17, fontWeight: '600', flex: 1 },
   cardActivity: { color: '#7a7a7a', fontSize: 12, fontWeight: '500' },
+  // Telegram-style unread pill: compact accent-blue count next to the title.
+  unreadBadge: {
+    minWidth: 20,
+    paddingHorizontal: 6,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#2f6bed',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unreadBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   cardDescription: { color: '#a0a0a0', fontSize: 13, lineHeight: 18 },
   cardMeta: {
     flexDirection: 'row',

@@ -1056,7 +1056,7 @@ CREATE TABLE "projects" (
     context_archived_at  TEXT,                                   -- ISO-8601 UTC; NULL = not archived
     topic_id             TEXT                                    -- telegram forum-topic thread id; NULL = unbound
 , agent_engagement_mode TEXT NOT NULL DEFAULT 'all_messages'
-        CHECK (agent_engagement_mode IN ('tag_gated', 'all_messages'))) STRICT
+        CHECK (agent_engagement_mode IN ('tag_gated', 'all_messages')), emoji TEXT, last_activity_at TEXT) STRICT
 
 [table] reminders (tbl=reminders)
 CREATE TABLE reminders (

@@ -898,8 +898,9 @@ tab is a registry builtin (`tabs/registry.ts`, `key:'settings'`, `order:15`,
 `mount.target:'settings'`) — both clients (web `landing/chat-react/SettingsTab.tsx`
 via `ProjectShell.tsx`'s `TabContent`; mobile `app/app/projects/[id]/settings.tsx`)
 render it from the ONE engine registry, never hardcoded. It hosts the
-credentials UI, project rename (emoji is a seam), and a display-only, M2-gated
-collaborators scaffold.
+credentials UI, project rename + **emoji edit** (a real editable control since
+the rail-redesign sprint — PATCH `{ emoji }` to the settings surface, mirroring
+the name rename), and a display-only, M2-gated collaborators scaffold.
 
 **Credential model.** A credential is a static, long-lived service token (Meta
 Ads, Google Ads, Apify, …) set at **per-project** or **global** scope.
@@ -1093,6 +1094,27 @@ Project` bar reveals an inline name input → `POST /api/app/projects` →
 `router.push('/projects/<id>')`. No migration (the `projects` table already
 exists, `0038`); the Work Board tab is automatic per-project
 (`tabs/registry.ts`).
+
+**Rail redesign (per-project emoji · activity-reorder · unread badge).** Each
+rail row is `emoji chip · label · unread pill` (web `RailItem` in `ChatApp.tsx` +
+the redesigned `.car-rail-*` CSS, theme-var-driven so it reskins with the #153
+light/dark toggle; mobile `ProjectCard`). The list is ordered
+most-recent-activity-first, so a project with a new message pops to the top:
+`projects` gains `emoji` + `last_activity_at` (migrations `0093`/`0094`);
+`last_activity_at` is stamped on create/materialize and bumped on each agent reply
+to the project's topic (`open/composer.ts`, which then re-fans `projects_changed`
+so connected rails reorder + re-badge live). `list()` and `readProjectRows()`
+order by `COALESCE(last_activity_at, updated_at) DESC`. **Emoji** defaults to a
+deterministic pick from the name (`gateway/projects/default-emoji.ts` — keyword
+table + hash fallback; `GENERAL_EMOJI` = 💬), resolved from NULL at serve time so
+legacy rows always show a glyph, and is editable in the Settings tab (PATCH
+`{ emoji }`). **Unread** is honest: `unread_count` = agent messages on the project
+topic (`app:<user>:<project>`) beyond the owner's highest READ receipt seq
+(`app_chat_messages` ⋈ `app_chat_receipts`; the active project's badge is zeroed
+client-side since viewing = read). No fabricated counts — the separate
+`chat-topics-surface` no-fake-unread contract is untouched. The
+`projects_changed` frame (`envelope.ts` `AppWsOutboundProjectsChanged`) carries
+`emoji` / `unread` / `last_activity_at` per project alongside id + label.
 
 ## Tasks — canonical store + LLM-primary prioritization (`tasks/`)
 

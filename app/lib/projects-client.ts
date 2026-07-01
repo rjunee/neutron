@@ -42,6 +42,9 @@ export interface ProjectSettings {
   name: string;
   description: string;
   persona: string;
+  /** Short glyph shown on the project rail/card. Always a non-empty glyph
+   *  server-side; the client defaults it when an older gateway omits it. */
+  emoji: string;
   privacy_mode: PrivacyMode;
   billing_mode: BillingMode;
   agent_engagement_mode: AgentEngagementMode;
@@ -68,6 +71,11 @@ export interface ProjectListItem extends ProjectSettings {
   kind: ProjectOrigin;
   origin_instance: string;
   owning_instance_slug: string;
+  /** ISO-8601 wall-clock of the last activity on this project. '' when the
+   *  server can't determine one (older gateway / never touched). */
+  last_activity_at: string;
+  /** Count of unread items for the bearer-resolved user. 0 when caught up. */
+  unread_count: number;
 }
 
 /** Per-workspace fan-out failure — surfaced as a non-blocking notice. */
@@ -171,6 +179,20 @@ export class ProjectsClient {
     const res = await this.req<SettingsResponse>(
       `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
       { method: 'PATCH', body: { name } },
+    );
+    return res.project;
+  }
+
+  /**
+   * Set the project's rail emoji via the settings PATCH surface (`{ emoji }`).
+   * Returns the canonical settings after the write. Throws
+   * `ProjectsClientError` (e.g. `invalid_emoji`, `field_not_writable`) so the
+   * caller can surface the precise reason.
+   */
+  async setEmoji(project_id: string, emoji: string): Promise<ProjectSettings> {
+    const res = await this.req<SettingsResponse>(
+      `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
+      { method: 'PATCH', body: { emoji } },
     );
     return res.project;
   }

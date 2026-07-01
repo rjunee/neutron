@@ -645,7 +645,16 @@ export class NeutronChatController {
         const id = rec['id']
         const label = rec['label']
         if (typeof id === 'string' && id.length > 0 && typeof label === 'string') {
-          projects.push({ id, label })
+          const tab: ProjectTab = { id, label }
+          // Rail-redesign fields (emoji / unread / activity). Optional on the
+          // wire; carry them through when present so the rail renders the glyph,
+          // badge, and activity order.
+          if (typeof rec['emoji'] === 'string' && rec['emoji'].length > 0) tab.emoji = rec['emoji']
+          if (typeof rec['unread'] === 'number' && Number.isFinite(rec['unread'])) {
+            tab.unread = Math.max(0, Math.trunc(rec['unread'] as number))
+          }
+          if (typeof rec['last_activity_at'] === 'string') tab.last_activity_at = rec['last_activity_at']
+          projects.push(tab)
         }
       }
       // Refresh the rail list; the active conversation is NOT changed here (see

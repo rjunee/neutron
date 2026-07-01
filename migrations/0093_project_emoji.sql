@@ -1,0 +1,33 @@
+-- 0093_project_emoji.sql
+--
+-- Per-project EMOJI for the redesigned project rail (rail-redesign sprint).
+--
+-- Each project shows an emoji in the left rail (web) + project card (mobile).
+-- A sensible DEFAULT is auto-picked from the project name at
+-- create/materialize time by a deterministic keyword+hash heuristic
+-- (`gateway/projects/default-emoji.ts`), and the owner can EDIT it in the
+-- per-project Settings tab (PATCH /api/app/projects/<id>/settings adds `emoji`
+-- to its writable whitelist) or via the agent's project-settings tool
+-- (agent-native parity).
+--
+-- Migration mechanics: `projects` is a STRICT table (0038 / 0053). A nullable
+-- `TEXT` column is legal to add to a STRICT table via a plain forward-only
+-- `ALTER TABLE ... ADD COLUMN` (no table rebuild needed — mirrors
+-- 0088_project_agent_engagement_mode). NULL is the "no explicit emoji" state:
+-- rows created before this migration read back NULL and the serve-time path
+-- (`SqliteProjectSettingsStore.list` / `open/composer.ts:readProjectRows`)
+-- fills the deterministic default so the rail always shows a glyph. New rows
+-- persist a concrete default at creation, so NULL only ever means "legacy row".
+--
+-- No CHECK: an emoji is an opaque short grapheme string; the write-side
+-- validators (the PATCH surface + the agent tool) bound its length/shape. A
+-- SQLite CHECK cannot meaningfully validate "is one emoji", so we keep the
+-- column permissive and gate at the application layer.
+--
+-- SNAPSHOT REGEN REQUIRED: this ADD COLUMN changes the `projects` table shape,
+-- so `migrations/expected-schema.txt` MUST be regenerated
+-- (`bun run migrations/regen-snapshot.ts`) and committed alongside this file or
+-- `migrations/snapshot.test.ts` fails with schema drift.
+
+ALTER TABLE projects
+    ADD COLUMN emoji TEXT;

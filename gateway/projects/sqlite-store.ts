@@ -39,25 +39,31 @@
 
 import type { ProjectDb } from '../../persistence/index.ts'
 import type { AgentEngagementMode } from '../../connect/agent-engagement.ts'
+import { appWsProjectTopicId } from '../../channels/adapters/app-ws/envelope.ts'
 import {
   type PrivacyMode,
   type BillingMode,
   type ProjectMember,
   type ProjectSettings,
+  type ProjectListEntry,
   type ProjectSettingsStore,
   buildDefaultSettings,
 } from '../http/app-projects-surface.ts'
+import { resolveProjectEmoji } from './default-emoji.ts'
 
 interface ProjectRow {
   id: string
   name: string
   description: string | null
   persona: string | null
+  emoji: string | null
   privacy_mode: PrivacyMode
   billing_mode: BillingMode
   agent_engagement_mode: AgentEngagementMode
   created_at: string
   updated_at: string
+  /** ISO-8601; NULL on legacy rows → sort falls back to updated_at. */
+  last_activity_at: string | null
 }
 
 interface MemberRow {
@@ -69,7 +75,7 @@ interface MemberRow {
 }
 
 const PROJECT_COLS =
-  'id, name, description, persona, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at'
+  'id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -97,6 +103,9 @@ function rowToSettings(row: ProjectRow, members: MemberRow[]): ProjectSettings {
     name: row.name,
     description: row.description ?? '',
     persona: row.persona ?? '',
+    // Resolve a legacy NULL emoji to the deterministic default from the name,
+    // so every row reads back a concrete glyph for the rail.
+    emoji: resolveProjectEmoji(row.emoji, row.name),
     privacy_mode: row.privacy_mode,
     billing_mode: row.billing_mode,
     agent_engagement_mode: row.agent_engagement_mode,
@@ -156,7 +165,12 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
   async update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode; name?: string },
+    patch: {
+      privacy_mode?: PrivacyMode
+      agent_engagement_mode?: AgentEngagementMode
+      name?: string
+      emoji?: string
+    },
   ): Promise<ProjectSettings | null> {
     // Resolve-or-seed so callers always get a coherent doc back. The
     // surface's PATCH never fabricates a value on the client — an
@@ -166,7 +180,8 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
     if (
       patch.privacy_mode === undefined &&
       patch.agent_engagement_mode === undefined &&
-      patch.name === undefined
+      patch.name === undefined &&
+      patch.emoji === undefined
     ) {
       return existing
     }
@@ -176,15 +191,32 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
     const next_privacy = patch.privacy_mode ?? existing.privacy_mode
     const next_engagement = patch.agent_engagement_mode ?? existing.agent_engagement_mode
     const next_name = patch.name ?? existing.name
-    await this.db.run(
-      `UPDATE projects
-          SET name = ?,
-              privacy_mode = ?,
-              agent_engagement_mode = ?,
-              updated_at = ?
-        WHERE id = ?`,
-      [next_name, next_privacy, next_engagement, ts, project_id],
-    )
+    // Emoji is written ONLY when the caller explicitly set one — `existing.emoji`
+    // is the RESOLVED glyph (a default when the column is NULL), so coalescing it
+    // into every UPDATE would freeze that default into the row and stop a legacy
+    // row re-deriving as its name changes. Guard the column out otherwise.
+    if (patch.emoji !== undefined) {
+      await this.db.run(
+        `UPDATE projects
+            SET name = ?,
+                emoji = ?,
+                privacy_mode = ?,
+                agent_engagement_mode = ?,
+                updated_at = ?
+          WHERE id = ?`,
+        [next_name, patch.emoji, next_privacy, next_engagement, ts, project_id],
+      )
+    } else {
+      await this.db.run(
+        `UPDATE projects
+            SET name = ?,
+                privacy_mode = ?,
+                agent_engagement_mode = ?,
+                updated_at = ?
+          WHERE id = ?`,
+        [next_name, next_privacy, next_engagement, ts, project_id],
+      )
+    }
     const row = this.readRow(project_id)
     if (row === null) return null
     const members = this.readMembers(project_id)
@@ -202,19 +234,23 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
    * `updated_at DESC` order so the most-recently-touched project
    * floats to the top of the list.
    */
-  async list(project_slug: string): Promise<ProjectSettings[]> {
+  async list(project_slug: string, user_id?: string): Promise<ProjectListEntry[]> {
     void project_slug
     // 2026-06-03 (onboarding-buttons-only-tweak-later): exclude rows the
     // settings Core soft-deleted (delete_project / merge_projects set
     // `deleted_at`, migration 0053). Without this filter `/api/app/projects`
     // would keep showing a project that `list_projects` already hides — the
     // user-facing list and the tweak-later tools would disagree (Codex P2).
+    //
+    // Rail-redesign: sort by ACTIVITY (`COALESCE(last_activity_at, updated_at)`
+    // DESC) so a project with new messages pops to the top; a legacy row with a
+    // NULL activity key falls back to updated_at rather than sinking.
     const rows = this.db
       .prepare<ProjectRow, []>(
         `SELECT ${PROJECT_COLS}
            FROM projects
           WHERE deleted_at IS NULL
-          ORDER BY updated_at DESC, id ASC`,
+          ORDER BY COALESCE(last_activity_at, updated_at) DESC, id ASC`,
       )
       .all()
     if (rows.length === 0) return []
@@ -233,7 +269,60 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       if (list === undefined) byProject.set(m.project_id, [m])
       else list.push(m)
     }
-    return rows.map((r) => rowToSettings(r, byProject.get(r.id) ?? []))
+    return rows.map((r) => {
+      const settings = rowToSettings(r, byProject.get(r.id) ?? [])
+      return {
+        ...settings,
+        last_activity_at: r.last_activity_at ?? r.updated_at,
+        unread_count: user_id !== undefined ? this.unreadCount(user_id, r.id) : 0,
+      }
+    })
+  }
+
+  /**
+   * Per-project unread count: agent messages on the project's chat topic
+   * (`app:<user>:<project>`) with a seq beyond the highest the owner has a READ
+   * receipt for. Honest — derived from the real chat-log + receipt cursor, so a
+   * caught-up project reads 0 (never a fabricated badge). Best-effort: a read
+   * failure (e.g. the chat tables absent in a minimal test DB) degrades to 0.
+   */
+  private unreadCount(user_id: string, project_id: string): number {
+    const topic = appWsProjectTopicId(user_id, project_id)
+    try {
+      const row = this.db
+        .prepare<{ n: number }, [string, string]>(
+          `SELECT COUNT(*) AS n
+             FROM app_chat_messages m
+            WHERE m.topic_id = ?
+              AND m.role = 'agent'
+              AND m.seq > (
+                SELECT COALESCE(MAX(r.seq), 0)
+                  FROM app_chat_receipts r
+                 WHERE r.topic_id = ? AND r.read_at IS NOT NULL
+              )`,
+        )
+        .get(topic, topic)
+      return row?.n ?? 0
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Stamp a project's `last_activity_at` to `now` (best-effort). Called from the
+   * chat-message fan when a message lands on the project's topic, so the rail
+   * reorders (most-recent-activity first) on the next `projects_changed` frame.
+   * A no-op on a missing/soft-deleted row.
+   */
+  async touchActivity(project_id: string, iso: string = nowIso()): Promise<void> {
+    try {
+      await this.db.run(
+        `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL`,
+        [iso, project_id],
+      )
+    } catch {
+      /* activity stamping must never break a message turn */
+    }
   }
 
   /**
@@ -311,16 +400,20 @@ export class SqliteProjectSettingsStore implements ProjectSettingsStore {
       // IGNORE keeps the loser idempotent.
       await tx.run(
         `INSERT OR IGNORE INTO projects
-           (id, name, description, persona, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, name, description, persona, emoji, privacy_mode, billing_mode, agent_engagement_mode, created_at, updated_at, last_activity_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           seed.id,
           seed.name,
           seed.description.length > 0 ? seed.description : null,
           seed.persona.length > 0 ? seed.persona : null,
+          // `seed.emoji` is the resolved default from buildDefaultSettings; persist
+          // it so a freshly-seeded row already carries a concrete glyph.
+          seed.emoji.length > 0 ? seed.emoji : null,
           seed.privacy_mode,
           seed.billing_mode,
           seed.agent_engagement_mode,
+          ts,
           ts,
           ts,
         ],

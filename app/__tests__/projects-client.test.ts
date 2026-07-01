@@ -29,6 +29,7 @@ function fakeProject(): ProjectSettings {
     name: 'Neutron',
     description: '',
     persona: 'Forge',
+    emoji: '⚛️',
     privacy_mode: 'private',
     billing_mode: 'personal',
     agent_engagement_mode: 'all_messages',
@@ -124,6 +125,26 @@ describe('ProjectsClient', () => {
     });
     const got = await client.patchPrivacy('neutron', 'public');
     expect(got.privacy_mode).toBe('public');
+  });
+
+  it('setEmoji PATCHes { emoji } + parses the canonical doc back', async () => {
+    const stub = makeFetchStub((req) => {
+      expect(req.method).toBe('PATCH');
+      expect(req.url).toBe('http://example.test/api/app/projects/neutron/settings');
+      expect(req.headers['content-type']).toBe('application/json');
+      expect(req.body).toBe(JSON.stringify({ emoji: '🚀' }));
+      return {
+        status: 200,
+        body: { ok: true, project: { ...fakeProject(), emoji: '🚀' } },
+      };
+    });
+    globalThis.fetch = stub.fetch;
+    const client = new ProjectsClient({
+      base_url: 'http://example.test',
+      token: 'dev:sam',
+    });
+    const got = await client.setEmoji('neutron', '🚀');
+    expect(got.emoji).toBe('🚀');
   });
 
   it('create POSTs { name } and parses the new project id + label', async () => {
@@ -249,7 +270,14 @@ describe('ProjectsClient', () => {
 
   it('list GETs /api/app/projects and parses the envelope (ISSUES #9 + M2.3)', async () => {
     const projects = [
-      { ...fakeProject(), kind: 'solo' as const, origin_instance: 'demo', owning_instance_slug: 'demo' },
+      {
+        ...fakeProject(),
+        kind: 'solo' as const,
+        origin_instance: 'demo',
+        owning_instance_slug: 'demo',
+        last_activity_at: '2023-11-14T22:13:20.000Z',
+        unread_count: 2,
+      },
       {
         ...fakeProject(),
         id: 'acme',
@@ -258,6 +286,8 @@ describe('ProjectsClient', () => {
         kind: 'solo' as const,
         origin_instance: 'demo',
         owning_instance_slug: 'demo',
+        last_activity_at: '',
+        unread_count: 0,
       },
     ];
     const stub = makeFetchStub(() => ({

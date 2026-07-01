@@ -46,6 +46,7 @@ import {
   DEFAULT_AGENT_ENGAGEMENT_MODE,
   isAgentEngagementMode,
 } from '../../connect/agent-engagement.ts'
+import { defaultProjectEmoji, normaliseEmojiInput } from '../projects/default-emoji.ts'
 import {
   handleAppProjectInvite,
   httpStatusForInvite,
@@ -79,6 +80,14 @@ export interface ProjectSettings {
   name: string
   description: string
   persona: string
+  /**
+   * Per-project rail emoji (migration 0093). Always resolved to a non-empty
+   * glyph on read — an explicitly-stored emoji when set, otherwise the
+   * deterministic default from the project name (`defaultProjectEmoji`). The
+   * owner edits it via the Settings tab (PATCH `emoji`) or the agent's
+   * project-settings tool.
+   */
+  emoji: string
   privacy_mode: PrivacyMode
   billing_mode: BillingMode
   /**
@@ -88,6 +97,22 @@ export interface ProjectSettings {
    */
   agent_engagement_mode: AgentEngagementMode
   members: ProjectMember[]
+}
+
+/**
+ * A store `list()` row: the project's settings plus the two rail-only fields
+ * that don't belong on the editable settings doc — the activity sort key and
+ * the per-project unread count. Both are computed at serve time (activity from
+ * the `last_activity_at` column, unread from the chat-log read cursor), so they
+ * live here rather than on `ProjectSettings`.
+ */
+export interface ProjectListEntry extends ProjectSettings {
+  /** ISO-8601 activity sort key (`COALESCE(last_activity_at, updated_at)`);
+   *  '' when unknown. The rail sorts DESC so an active project floats to top. */
+  last_activity_at: string
+  /** Count of agent messages on this project's topic the owner hasn't read
+   *  (0 when caught up, or when unread can't be computed — never a fake value). */
+  unread_count: number
 }
 
 /**
@@ -110,7 +135,7 @@ export type ProjectOrigin = 'solo' | 'shared'
  * privacy quarantine: a shared item's foreign origin tag MUST survive to
  * the client so nothing persists it into this instance's GBrain.
  */
-export interface ProjectListItem extends ProjectSettings {
+export interface ProjectListItem extends ProjectListEntry {
   /** `solo` (local) | `shared` (from a workspace the user belongs to). */
   kind: ProjectOrigin
   /** Slug of the instance that owns this project. Equals this gateway's
@@ -164,9 +189,20 @@ export interface ProjectSettingsStore {
   update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode; name?: string },
+    patch: {
+      privacy_mode?: PrivacyMode
+      agent_engagement_mode?: AgentEngagementMode
+      name?: string
+      emoji?: string
+    },
   ): Promise<ProjectSettings | null>
-  list(project_slug: string): Promise<ProjectSettings[]>
+  /**
+   * List every project in the instance scope. `user_id` (the owner) lets the
+   * store form each project's chat topic (`app:<user>:<project>`) to compute
+   * the per-project `unread_count`; omitted by callers that don't need unread
+   * (unread degrades to 0). Returns the richer {@link ProjectListEntry} rows.
+   */
+  list(project_slug: string, user_id?: string): Promise<ProjectListEntry[]>
 }
 
 /**
@@ -179,11 +215,13 @@ export interface ProjectSettingsStore {
  * renders the canonical sections with a clear "not configured" state.
  */
 export function buildDefaultSettings(project_id: string): ProjectSettings {
+  const name = humaniseProjectId(project_id)
   return {
     id: project_id,
-    name: humaniseProjectId(project_id),
+    name,
     description: '',
     persona: '',
+    emoji: defaultProjectEmoji(name),
     privacy_mode: 'private',
     billing_mode: 'personal',
     agent_engagement_mode: DEFAULT_AGENT_ENGAGEMENT_MODE,
@@ -222,13 +260,19 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
   async update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode; name?: string },
+    patch: {
+      privacy_mode?: PrivacyMode
+      agent_engagement_mode?: AgentEngagementMode
+      name?: string
+      emoji?: string
+    },
   ): Promise<ProjectSettings | null> {
     const current = await this.get(project_slug, project_id)
     if (current === null) return null
     const updated: ProjectSettings = {
       ...current,
       name: patch.name ?? current.name,
+      emoji: patch.emoji ?? current.emoji,
       privacy_mode: patch.privacy_mode ?? current.privacy_mode,
       agent_engagement_mode: patch.agent_engagement_mode ?? current.agent_engagement_mode,
     }
@@ -236,12 +280,15 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
     return cloneSettings(updated)
   }
 
-  async list(project_slug: string): Promise<ProjectSettings[]> {
+  async list(project_slug: string, _user_id?: string): Promise<ProjectListEntry[]> {
+    void _user_id
     const prefix = `${project_slug}::`
-    const out: ProjectSettings[] = []
+    const out: ProjectListEntry[] = []
     for (const [key, value] of this.rows.entries()) {
       if (!key.startsWith(prefix)) continue
-      out.push(cloneSettings(value))
+      // The in-memory seam has no chat log, so unread degrades to 0 and there
+      // is no activity timestamp — the SQLite store owns the real values.
+      out.push({ ...cloneSettings(value), last_activity_at: '', unread_count: 0 })
     }
     out.sort((a, b) => a.id.localeCompare(b.id))
     return out
@@ -263,6 +310,7 @@ function cloneSettings(s: ProjectSettings): ProjectSettings {
     name: s.name,
     description: s.description,
     persona: s.persona,
+    emoji: s.emoji,
     privacy_mode: s.privacy_mode,
     billing_mode: s.billing_mode,
     agent_engagement_mode: s.agent_engagement_mode,
@@ -368,11 +416,9 @@ const CONNECT_INVITES_RE = /^\/api\/app\/projects\/([^/]+)\/connect-invites$/
 const CONNECT_MEMBERS_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members$/
 const CONNECT_REVOKE_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members\/([^/]+)\/revoke$/
 
-const ALLOWED_PATCH_FIELDS: ReadonlyArray<'privacy_mode' | 'agent_engagement_mode' | 'name'> = [
-  'privacy_mode',
-  'agent_engagement_mode',
-  'name',
-]
+const ALLOWED_PATCH_FIELDS: ReadonlyArray<
+  'privacy_mode' | 'agent_engagement_mode' | 'name' | 'emoji'
+> = ['privacy_mode', 'agent_engagement_mode', 'name', 'emoji']
 /** Project display-name (rename) bounds. */
 const MAX_PROJECT_NAME_LEN = 120
 const ALLOWED_PATCH_FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_PATCH_FIELDS)
@@ -528,8 +574,9 @@ async function handleList(
   sharedProjects: SharedProjectsResolver | undefined,
 ): Promise<Response> {
   // Local solo projects — this owner's own DB. Always rendered, even
-  // if the shared fan-out below fails entirely.
-  const local = await store.list(project_slug)
+  // if the shared fan-out below fails entirely. `user_id` lets the store
+  // compute each project's unread count off its chat topic.
+  const local = await store.list(project_slug, user_id)
   const soloItems: ProjectListItem[] = local.map((p) => ({
     ...p,
     kind: 'solo',
@@ -631,12 +678,18 @@ function sharedItemToListItem(item: SharedProjectItem): ProjectListItem {
     name: item.display_name,
     description: '',
     persona: '',
+    // Deterministic default emoji from the shared project's display name — a
+    // member doesn't own the origin's stored emoji, so we derive one locally.
+    emoji: defaultProjectEmoji(item.display_name),
     privacy_mode: 'private',
     billing_mode: 'personal',
     // A shared item carries the cross-instance projection only; a member
     // doesn't own the origin's settings, so the engagement mode defaults.
     agent_engagement_mode: DEFAULT_AGENT_ENGAGEMENT_MODE,
     members: [],
+    // No local chat log for a foreign project → no activity key / unread.
+    last_activity_at: '',
+    unread_count: 0,
     kind: 'shared',
     origin_instance: item.owning_instance_slug,
     owning_instance_slug: item.owning_instance_slug,
@@ -678,11 +731,12 @@ async function handlePatch(
   const hasPrivacy = 'privacy_mode' in fields
   const hasEngagement = 'agent_engagement_mode' in fields
   const hasName = 'name' in fields
-  if (!hasPrivacy && !hasEngagement && !hasName) {
+  const hasEmoji = 'emoji' in fields
+  if (!hasPrivacy && !hasEngagement && !hasName && !hasEmoji) {
     return jsonError(
       400,
       'empty_patch',
-      'PATCH body must include at least one writable field (name, privacy_mode, agent_engagement_mode)',
+      'PATCH body must include at least one writable field (name, emoji, privacy_mode, agent_engagement_mode)',
     )
   }
 
@@ -690,7 +744,21 @@ async function handlePatch(
     privacy_mode?: PrivacyMode
     agent_engagement_mode?: AgentEngagementMode
     name?: string
+    emoji?: string
   } = {}
+
+  if (hasEmoji) {
+    const normalised = normaliseEmojiInput(fields['emoji'])
+    if (normalised === null) {
+      return jsonError(
+        400,
+        'invalid_emoji',
+        'emoji must be a short non-ASCII glyph (1 emoji, not text)',
+        { field: 'emoji' },
+      )
+    }
+    patch.emoji = normalised
+  }
 
   if (hasName) {
     const raw = fields['name']

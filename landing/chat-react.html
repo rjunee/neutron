@@ -439,30 +439,72 @@
     .cwb-dot-active { animation: none; }
     .cwb-flash { animation: none; }
   }
+  /* ── Project rail (rail-redesign) ──────────────────────────────────────────
+     A cleaner, more tactile left column: emoji "avatar" chips give every row a
+     visual anchor (like app icons), the label sits in a medium weight, an
+     accent-lit pill marks the active project, and a Telegram-style count pill
+     shows unread activity. A row with unread activity reads bolder to draw the
+     eye. Entirely theme-var-driven, so it reskins with the #153 light/dark
+     toggle with zero hardcoded colours. */
   .car-rail {
-    width: 220px;
-    flex: 0 0 220px;
+    width: 244px;
+    flex: 0 0 244px;
     border-right: 1px solid var(--border);
     background: var(--surface);
-    padding: 12px 8px;
+    padding: 14px 10px 10px;
     overflow-y: auto;
     /* Flex column so the Create Project button pins to the bottom (margin-top:auto). */
     display: flex;
     flex-direction: column;
+    gap: 4px;
   }
-  .car-rail-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 8px 8px; }
+  .car-rail-title {
+    color: var(--muted); font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .09em; padding: 2px 10px 8px;
+  }
+  .car-rail-list { display: flex; flex-direction: column; gap: 2px; }
   .car-rail-item {
-    display: block; width: 100%; text-align: left;
-    background: transparent; color: var(--fg); border: 0; border-radius: 8px;
-    padding: 8px 10px; margin: 2px 0; cursor: pointer; font: inherit;
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; text-align: left;
+    background: transparent; color: var(--fg); border: 0; border-radius: 11px;
+    padding: 7px 9px; cursor: pointer; font: inherit; font-size: 14px;
+    transition: background .14s ease, color .14s ease, transform .06s ease;
   }
   .car-rail-item:hover { background: var(--hover-bg); }
-  .car-rail-item-active { background: var(--active-bg); color: var(--active-fg); }
+  .car-rail-item:active { transform: scale(.985); }
+  .car-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Emoji "avatar" chip — a soft rounded square that anchors each row. */
+  .car-rail-emoji {
+    flex: 0 0 30px; width: 30px; height: 30px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 17px; line-height: 1;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+    transition: border-color .14s ease, background .14s ease;
+  }
+  .car-rail-label {
+    flex: 1 1 auto; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Active row: accent-tinted fill, brighter label, and the emoji chip lifts to
+     the accent tint so the selection reads as one cohesive object. */
+  .car-rail-item-active { background: var(--active-bg); color: var(--active-fg); font-weight: 600; }
+  .car-rail-item-active .car-rail-emoji { border-color: var(--accent-border); background: var(--accent-tint-weak); }
+  /* Unread (and not active) — bolder, full-contrast label, Telegram-style. */
+  .car-rail-item-unread .car-rail-label { color: var(--fg); font-weight: 600; }
+  /* Unread count pill, right-aligned. */
+  .car-rail-badge {
+    flex: 0 0 auto; margin-left: auto;
+    min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent); color: var(--on-accent);
+    font-size: 11px; font-weight: 700; line-height: 1; border-radius: 999px;
+  }
   /* Pinned to the bottom of the rail (margin-top:auto pushes it down). */
   .car-rail-create {
     margin-top: auto; width: 100%; text-align: left;
     background: transparent; color: var(--accent); border: 1px dashed var(--border);
-    border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit;
+    border-radius: 10px; padding: 9px 11px; cursor: pointer; font: inherit; font-size: 14px;
+    transition: background .14s ease, border-color .14s ease;
   }
   .car-rail-create:hover:not(:disabled) { background: var(--accent-tint-weak); border-color: var(--accent); }
   .car-rail-create:disabled { opacity: .6; cursor: default; }
@@ -484,8 +526,9 @@
   .car-rail-create-confirm { border-color: var(--accent); color: var(--accent); }
   .car-rail-create-cancel:disabled, .car-rail-create-confirm:disabled { opacity: .6; cursor: default; }
   /* The rail is the sole project navigation (persistent left column), so keep it
-     visible on narrow screens — just slimmer — rather than hiding it. */
-  @media (max-width: 720px) { .car-rail { width: 140px; flex-basis: 140px; padding: 12px 6px; } }
+     visible on narrow screens — just slimmer — rather than hiding it. The emoji
+     chip stays; the label ellipsises. */
+  @media (max-width: 720px) { .car-rail { width: 208px; flex-basis: 208px; padding: 12px 8px; } }
   /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
   .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
   /* Subtle drag feedback for a PLAIN image drag (no import affordance) — the

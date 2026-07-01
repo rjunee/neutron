@@ -76,6 +76,7 @@ async function start(): Promise<Harness> {
     name: 'Neutron',
     description: '',
     persona: '',
+    emoji: '⚛️',
     privacy_mode: 'private',
     billing_mode: 'personal',
     agent_engagement_mode: 'all_messages',
@@ -87,7 +88,9 @@ async function start(): Promise<Harness> {
   const store: ProjectSettingsStore = {
     get: async () => ({ ...seededProject, members: [...seededProject.members] }),
     update: async () => ({ ...seededProject, members: [...seededProject.members] }),
-    list: async () => [{ ...seededProject, members: [...seededProject.members] }],
+    list: async () => [
+      { ...seededProject, members: [...seededProject.members], last_activity_at: '', unread_count: 0 },
+    ],
   }
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
 

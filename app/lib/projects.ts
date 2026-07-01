@@ -37,8 +37,12 @@ export interface Project {
   name: string;
   /** One-line tagline rendered under the name on the project card. */
   description: string;
+  /** Short glyph shown at the start of the project card title row. */
+  emoji: string;
   /** Wall-clock ms of the last activity for sort + "Last opened" label. */
   last_activity_ms: number;
+  /** Unread item count for the current user; drives the card badge (0 = hidden). */
+  unread_count: number;
   /** Stub members list — surfaced read-only in the project settings drawer. */
   members: ReadonlyArray<{ name: string; role: 'owner' | 'member' }>;
   /** Stub persona surfaced in the drawer. */
@@ -129,7 +133,9 @@ export function loadProjects(now: number = Date.now()): Project[] {
       id: 'neutron',
       name: 'Neutron',
       description: 'Build Neutron itself — engineering, design, ops.',
+      emoji: '⚛️',
       last_activity_ms: now - 12 * 60 * 1000,
+      unread_count: 3,
       members: [
         { name: 'Sam', role: 'owner' },
         { name: 'Nova', role: 'member' },
@@ -143,7 +149,9 @@ export function loadProjects(now: number = Date.now()): Project[] {
       id: 'acme',
       name: 'Acme',
       description: "Casey's brand and product work — campaigns, ops, launches.",
+      emoji: '🚀',
       last_activity_ms: now - 4 * ONE_HOUR_MS,
+      unread_count: 0,
       members: [
         { name: 'Casey', role: 'owner' },
         { name: 'Sam', role: 'member' },
@@ -159,7 +167,9 @@ export function loadProjects(now: number = Date.now()): Project[] {
       id: 'northwind',
       name: 'Northwind Labs',
       description: 'Northwind Labs — supplement formulation + brand assets.',
+      emoji: '🧪',
       last_activity_ms: now - 2 * ONE_DAY_MS,
+      unread_count: 0,
       members: [{ name: 'Sam', role: 'owner' }],
       persona: 'Sentinel — review + QA',
       privacy_mode: 'private',
@@ -174,15 +184,30 @@ export function findProject(id: string, now: number = Date.now()): Project | nul
 }
 
 /**
+ * Order the project list for display: most-recent activity first. Stable
+ * tie-break by id so equal timestamps (e.g. a fresh list where several fall
+ * back to `now`) keep a deterministic order across renders. Returns a new
+ * array — never mutates the input.
+ */
+export function sortProjectsByActivity(projects: readonly Project[]): Project[] {
+  return [...projects].sort((a, b) => {
+    if (b.last_activity_ms !== a.last_activity_ms) {
+      return b.last_activity_ms - a.last_activity_ms;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/**
  * Real fetch — ISSUES #9. Calls `GET /api/app/projects` and maps the
  * `ProjectSettings` server view onto the legacy `Project` shape the
  * project-list screen consumes.
  *
- * `last_activity_ms` is set to `now` for every project (the server
- * doesn't track last-activity timestamps yet; per-project activity
- * tracking is a later P5.x sprint). The UI still shows "just now" /
- * "Nm ago" labels — they're just all identical until the server
- * surfaces a real timestamp.
+ * `last_activity_ms` is parsed from the server's `last_activity_at`
+ * ISO-8601 timestamp; when the server omits it (older gateway) or sends
+ * '' we fall back to `now` so the "just now" / "Nm ago" labels stay
+ * sensible. `emoji` and `unread_count` come straight off the list item,
+ * defaulted for a pre-rail gateway.
  *
  * Throws on network errors / non-2xx responses; the caller should
  * fall back to `loadProjects()` for the initial paint and surface
@@ -219,13 +244,25 @@ function listItemToProject(p: ProjectListItem, now: number): Project {
     id: p.id,
     name: p.name,
     description: p.description,
-    last_activity_ms: now,
+    // Default to a neutral folder glyph when an older gateway omits emoji.
+    emoji: p.emoji !== undefined && p.emoji.length > 0 ? p.emoji : '📁',
+    last_activity_ms: parseActivityMs(p.last_activity_at, now),
+    unread_count: typeof p.unread_count === 'number' ? p.unread_count : 0,
     members: p.members.map((m) => ({ name: m.name, role: m.role })),
     persona: p.persona,
     privacy_mode: p.privacy_mode,
     kind: p.kind,
     origin_instance: p.origin_instance,
   };
+}
+
+/** Parse a server `last_activity_at` ISO-8601 string to wall-clock ms. Falls
+ *  back to `now` when the field is missing/'' or otherwise unparseable so the
+ *  card's relative-time label stays sensible. */
+function parseActivityMs(iso: string | undefined, now: number): number {
+  if (iso === undefined || iso.length === 0) return now;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : now;
 }
 
 const FORMATTER = new Intl.DateTimeFormat('en-US', {

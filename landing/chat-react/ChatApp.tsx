@@ -701,6 +701,57 @@ function PendingBadge({ pending }: { pending: number }): React.JSX.Element | nul
   )
 }
 
+/** The General (no-project) scope glyph + a generic fallback for a project the
+ *  server didn't send an emoji for (older row / degraded frame). Kept in sync
+ *  with the server's `GENERAL_EMOJI` / `GENERIC_EMOJI` (default-emoji.ts). */
+const GENERAL_EMOJI = '💬'
+const GENERIC_PROJECT_EMOJI = '📁'
+
+/** Telegram-style unread badge. Renders nothing when caught up; caps the
+ *  displayed count at 99+ so a busy project can't blow out the row width. */
+function UnreadBadge({ count }: { count: number }): React.JSX.Element | null {
+  if (count <= 0) return null
+  const shown = count > 99 ? '99+' : String(count)
+  return (
+    <span className="car-rail-badge" aria-label={`${count} unread`}>
+      {shown}
+    </span>
+  )
+}
+
+/** One rail row: emoji chip · label · unread badge. A single presentational
+ *  component shared by General + every project so their look stays identical. */
+function RailItem({
+  emoji,
+  label,
+  active,
+  unread,
+  onClick,
+}: {
+  emoji: string
+  label: string
+  active: boolean
+  unread: number
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className={`car-rail-item${active ? ' car-rail-item-active' : ''}${
+        unread > 0 && !active ? ' car-rail-item-unread' : ''
+      }`}
+      onClick={onClick}
+      aria-current={active ? 'true' : undefined}
+    >
+      <span className="car-rail-emoji" aria-hidden="true">
+        {emoji}
+      </span>
+      <span className="car-rail-label">{label}</span>
+      <UnreadBadge count={unread} />
+    </button>
+  )
+}
+
 export function TopicRail({
   projects,
   activeId,
@@ -751,23 +802,28 @@ export function TopicRail({
   return (
     <aside className="car-rail" aria-label="Projects">
       <div className="car-rail-title">Projects</div>
-      <button
-        type="button"
-        className={`car-rail-item${activeId === null ? ' car-rail-item-active' : ''}`}
-        onClick={() => onSelect(null)}
-      >
-        General
-      </button>
-      {projects.map((p) => (
-        <button
-          key={p.id}
-          type="button"
-          className={`car-rail-item${activeId === p.id ? ' car-rail-item-active' : ''}`}
-          onClick={() => onSelect(p.id)}
-        >
-          {p.label}
-        </button>
-      ))}
+      <div className="car-rail-list">
+        <RailItem
+          emoji={GENERAL_EMOJI}
+          label="General"
+          active={activeId === null}
+          unread={0}
+          onClick={() => onSelect(null)}
+        />
+        {projects.map((p) => (
+          <RailItem
+            key={p.id}
+            emoji={p.emoji !== undefined && p.emoji.length > 0 ? p.emoji : GENERIC_PROJECT_EMOJI}
+            label={p.label}
+            active={activeId === p.id}
+            // The project the user is viewing is, by definition, read — zero its
+            // badge locally so a just-arrived reply on the ACTIVE project doesn't
+            // flash a stale count before the next server frame catches up.
+            unread={activeId === p.id ? 0 : (p.unread ?? 0)}
+            onClick={() => onSelect(p.id)}
+          />
+        ))}
+      </div>
       {/* Pinned to the bottom (the rail is a flex column; the closed button /
           open form both carry `margin-top:auto`). Always visible, even when only
           General exists, so a skip-import owner can jump straight into a fresh
