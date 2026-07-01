@@ -340,12 +340,18 @@ async function tryDraftDoc(
 
   try {
     mkdirSync(docsDir, { recursive: true })
-    writeFileSync(abs, `${body}\n`, 'utf8')
+    // ATOMIC create-if-missing (Codex P2): the `existsSync` above is a cheap
+    // early-out, but two finalize/recovery paths can both pass it before either
+    // writes. `flag: 'wx'` makes the create atomic + exclusive, so the loser
+    // throws `EEXIST` and we fall back (never clobbering the winner's doc, which
+    // the winner's opening already describes) rather than truncate-overwriting it.
+    writeFileSync(abs, `${body}\n`, { encoding: 'utf8', flag: 'wx' })
   } catch (err) {
-    ;(deps.log ?? (() => {}))('kickoff doc write failed', {
-      project: input.name,
-      err: err instanceof Error ? err.message : String(err),
-    })
+    const code = (err as NodeJS.ErrnoException | null)?.code
+    ;(deps.log ?? (() => {}))(
+      code === 'EEXIST' ? 'kickoff doc already exists (concurrent create); falling back' : 'kickoff doc write failed',
+      { project: input.name, err: err instanceof Error ? err.message : String(err) },
+    )
     return null
   }
 
