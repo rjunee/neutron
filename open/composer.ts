@@ -119,7 +119,6 @@ import { TridentRunStore, type TridentRun } from '../trident/store.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
-import { buildAgentNameSuggester } from '../onboarding/interview/agent-name-suggester.ts'
 import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '../gateway/realmode-composer/persona-loader.ts'
 import type { GraphComposer } from '../gateway/boot-helpers.ts'
@@ -1050,10 +1049,11 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildPersonalityCharacterSuggester({ anthropicClient: onboardingAnthropicClient })
         : undefined
-    const agentNameSuggester =
-      onboardingAnthropicClient !== null
-        ? buildAgentNameSuggester({ anthropicClient: onboardingAnthropicClient })
-        : undefined
+    // 2026-07-01 (DROP the agent-NAME step): Neutron Open onboarding never asks
+    // the owner to name the orchestrator, so the agent-name suggester is no
+    // longer wired here. The `agent-name-suggester.ts` MODULE stays in the tree
+    // (Managed repurposes it as a personal-URL suggester); only Open's onboarding
+    // wiring is removed.
     const personaSummarizer =
       onboardingAnthropicClient !== null
         ? buildPersonaSummarizer({ anthropicClient: onboardingAnthropicClient })
@@ -1225,7 +1225,8 @@ export function buildOpenGraphComposer(
       ...(personalityCharacterSuggester !== undefined
         ? { personalityCharacterSuggester }
         : {}),
-      ...(agentNameSuggester !== undefined ? { agentNameSuggester } : {}),
+      // agentNameSuggester intentionally NOT wired (DROP the agent-NAME step,
+      // 2026-07-01) — Open onboarding never names the orchestrator.
       ...(personaSummarizer !== undefined ? { personaSummarizer } : {}),
       ...(llmRouter !== undefined ? { llmRouter } : {}),
       ...(projectOpeningComposer !== undefined ? { projectOpeningComposer } : {}),

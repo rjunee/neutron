@@ -6,9 +6,13 @@
  * the work questions — so the box can analyse the user's real history and the
  * rest of the interview is informed by it (onboarding-experience spec: upload
  * precedes the guided interview). The earlier preamble placed the offer after
- * all five learning goals + gated it "after you have their name AND a sense of
+ * all the learning goals + gated it "after you have their name AND a sense of
  * their work", so the model deferred it past the work-interview ("import is
  * buried"). These tests pin the new ordering so it can't silently regress.
+ *
+ * The "name" referenced throughout is the OWNER's first name (learning goal 1).
+ * Neutron Open never asks the owner to name the agent (DROP the agent-NAME step,
+ * 2026-07-01) — personality is the only button-driven step.
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -20,14 +24,15 @@ import {
 } from '../onboarding-preamble.ts'
 
 /** A phase_state with the 3 non-button fields filled, so the audit's only
- *  remaining gaps are the button-driven personality + name steps. */
+ *  remaining gap is the button-driven personality step. (agent_name was dropped
+ *  as a required step on 2026-07-01 — Open never names the orchestrator.) */
 const NON_BUTTON_FIELDS_FILLED = {
   user_first_name: 'Sam',
   primary_projects: ['A', 'B', 'C'],
   non_work_interests: ['climbing'],
 } as const
 
-describe('buildOnboardingStepGuardFragment — deterministic personality/name guard (item 3)', () => {
+describe('buildOnboardingStepGuardFragment — deterministic personality guard (item 3)', () => {
   it('forces the personality archetype [[OPTIONS]] while agent_personality is unset', () => {
     const out = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED })
     expect(out).not.toBeNull()
@@ -42,32 +47,29 @@ describe('buildOnboardingStepGuardFragment — deterministic personality/name gu
     expect(out as string).toContain('You may not wrap up / finalize')
   })
 
-  it('forces the name [[OPTIONS]] once personality is set but agent_name is unset', () => {
+  it('returns null once personality is settled (nothing to force — no name step)', () => {
     const out = buildOnboardingStepGuardFragment({
       ...NON_BUTTON_FIELDS_FILLED,
       agent_personality: 'warm and direct',
-    })
-    expect(out).not.toBeNull()
-    expect(out as string).toContain('NAME')
-    expect(out as string).toContain('[[OPTIONS]]')
-    // Personality is settled → the guard no longer pushes the archetype step.
-    expect(out as string).not.toContain('PERSONALITY')
-  })
-
-  it('returns null once BOTH personality and name are settled (nothing to force)', () => {
-    const out = buildOnboardingStepGuardFragment({
-      ...NON_BUTTON_FIELDS_FILLED,
-      agent_personality: 'warm and direct',
-      agent_name: 'Atlas',
     })
     expect(out).toBeNull()
   })
 
-  it('flags BOTH steps when personality and name are both unset', () => {
-    const out = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED })
-    expect(out).not.toBeNull()
-    expect(out as string).toContain('PERSONALITY')
-    expect(out as string).toContain('NAME')
+  it('NEVER emits a NAME step, even after personality is set (DROP the agent-NAME step)', () => {
+    // Once personality is set the guard is null; and while it IS active (personality
+    // unset) it must never mention naming the agent.
+    const active = buildOnboardingStepGuardFragment({ ...NON_BUTTON_FIELDS_FILLED })
+    expect(active as string).not.toContain('STILL OPEN - NAME')
+    expect((active as string).toLowerCase()).not.toContain('name they want to call you')
+
+    // A stale/legacy agent_name in phase_state does not resurrect a name step or
+    // keep the guard alive once personality is settled.
+    const withStaleName = buildOnboardingStepGuardFragment({
+      ...NON_BUTTON_FIELDS_FILLED,
+      agent_personality: 'warm and direct',
+      agent_name: 'Atlas',
+    })
+    expect(withStaleName).toBeNull()
   })
 })
 
@@ -111,7 +113,7 @@ describe('buildOnboardingPreamble — import offer ordering', () => {
   })
 })
 
-describe('buildOnboardingPreamble — defined archetypes + options + name + closing (2026-06-30)', () => {
+describe('buildOnboardingPreamble — defined archetypes + options + closing (2026-06-30)', () => {
   it('injects the DEFINED named-character set at the personality step (not "improvise flavors")', () => {
     const out = buildOnboardingPreamble({ import_offered: false })
     // The stable curated figures from the personality-character suggester.
@@ -133,12 +135,15 @@ describe('buildOnboardingPreamble — defined archetypes + options + name + clos
     expect(out.toLowerCase()).toContain('just type')
   })
 
-  it('mandates verbatim custom-name acceptance and no re-asking', () => {
+  it('NEVER asks the owner to name the orchestrator (DROP the agent-NAME step, 2026-07-01)', () => {
     const out = buildOnboardingPreamble({ import_offered: false })
-    expect(out).toContain('accept ANY name they give')
-    expect(out).toContain('NEVER re-ask for a name they already gave')
-    // The concrete example from the live regression.
-    expect(out).toContain('Ferin')
+    // The old name step + its custom-name-acceptance copy are gone.
+    expect(out).not.toContain('A name for you')
+    expect(out).not.toContain('accept ANY name they give')
+    expect(out).not.toContain('NEVER re-ask for a name they already gave')
+    expect(out).not.toContain('Ferin')
+    // And it explicitly instructs the agent not to name itself.
+    expect(out).toContain('Do NOT ask them to name you')
   })
 
   it('tells the agent NOT to write its own closing — the system sends the one closing (BUG 2, 2026-06-30)', () => {
@@ -150,7 +155,7 @@ describe('buildOnboardingPreamble — defined archetypes + options + name + clos
     expect(out).toMatch(/left\s+rail/i)
     expect(out).toContain('Plan')
     // And it explicitly forbids the phrases that made it read as a duplicate.
-    expect(out).toContain("do NOT say \"you're all set\"")
+    expect(out).toContain("Do NOT say \"you're all set\"")
     expect(out).toContain('what do you want to look at first')
   })
 
