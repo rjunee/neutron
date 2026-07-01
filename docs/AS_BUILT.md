@@ -2,6 +2,48 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Notes Core: wire the four S1 tools (drawer/search/traverse) — ISSUE #330
+
+**Why.** The `notes` manifest declares eight MCP tools, but the install pipeline
+only ever invoked `buildTools` (the legacy four: `notes_write/recall/list/link`).
+The four Notes-Core-S1 tools (`notes_create_drawer`, `notes_drawer_list`,
+`notes_search`, `notes_traverse`) were fully implemented in `buildNotesMcpTools`
+against a real per-project `NotesStore` backend — but the barrel never exported a
+`buildExtraTools`, so on EVERY owner install those four fell through to
+`not_implemented` stubs and boot logged `tool_registration_failed core=notes
+code=manifest_tool_unimplemented` four times. NOT vestigial: the store, FTS
+search, and KG traverse all exist and are tested; only the install-time wiring
+was missing.
+
+**What shipped.**
+
+- **`cores/free/notes/src/mcp-tools.ts`.** New `buildExtraTools(deps)` — a thin
+  factory over the existing `buildNotesMcpTools`, mirroring the Research/Calendar
+  Core split. `NotesExtraToolDeps` = `{ manifest, project_slug, audit, resolver }`.
+- **`cores/free/notes/index.ts`.** Barrel now exports `buildExtraTools` +
+  `NotesExtraToolDeps` so `registerCoreTools` discovers the second factory.
+- **`gateway/boot-helpers.ts`.** The `notes` backend factory now returns
+  `{ backend, resolver }` (was `{ backend }` only). `normalizeBackend` returns the
+  object verbatim because `backend` is present, so BOTH the legacy backend
+  (consumed by `buildTools`) and the resolver (consumed by `buildExtraTools`) land
+  in the one `deps` bundle both factories receive. The four S1 tools take an
+  explicit `project_id` per call, so cross-project scope is impossible by
+  construction.
+- **`cores/free/notes/__tests__/mcp-tools.test.ts`** (new). Asserts
+  `buildExtraTools` returns all four handlers, and exercises create_drawer →
+  drawer_list, FTS search, KG traverse over a user tunnel, and per-project
+  isolation.
+
+**Verified.** Fresh QUIET owner boot (`NEUTRON_HOME=/tmp/wfnotes`): the four
+`tool_registration_failed core=notes` lines are GONE; `install_ok core=notes`
+stands with all eight tools dispatchable. `discovered=10 installed=7 failed=3` is
+unchanged — notes was always `install_ok` (its legacy four registered fine); the
+fix eliminates the four per-tool registration failures WITHIN that install. The
+remaining `failed=3` are the expected OAuth-not-connected calendar/email/workspace
+Cores. The benign `tasks_core tasks_pick_next extra_tool_name_collision` warning
+is untouched (buildTools wins; harmless — Tasks intentionally registers that tool
+in both factories). tsc clean (notes + gateway), notes suite 66→72 tests green.
+
 ## 2026-07-01 — Archived projects: reversible archive via Settings/chat + global Admin restore
 
 **Why.** Projects had soft-delete only (`deleted_at`, migration 0053) — hidden

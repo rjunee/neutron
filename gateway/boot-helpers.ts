@@ -941,6 +941,14 @@ export async function buildCoresBackendFactories(
           resolver: notesResolver,
           default_project_id: notesDefaultProjectId,
         }),
+        // The four S1 tools (create_drawer/drawer_list/search/traverse)
+        // resolve project scope explicitly against the SAME per-instance
+        // resolver. Threaded through `normalizeBackend` (which returns the
+        // object verbatim because `backend` is present) into the deps
+        // bundle so `buildExtraTools(deps)` can wire them. Without this
+        // seam those tools register as `not_implemented` stubs and boot
+        // logs `manifest_tool_unimplemented core=notes` (ISSUE #330).
+        resolver: notesResolver,
       }
     },
     tasks_core: async ({ project_slug }) => {

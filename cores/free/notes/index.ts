@@ -120,11 +120,13 @@ export {
 export { search, type SearchHit, type SearchOptions } from './src/search.ts'
 
 export {
+  buildExtraTools,
   buildNotesMcpTools,
   type NotesCreateDrawerInput,
   type NotesCreateDrawerOutput,
   type NotesDrawerListInput,
   type NotesDrawerListOutput,
+  type NotesExtraToolDeps,
   type NotesMcpDeps,
   type NotesMcpTools,
   type NotesSearchInput,

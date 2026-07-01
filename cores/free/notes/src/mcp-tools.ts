@@ -171,3 +171,29 @@ export function buildNotesMcpTools(deps: NotesMcpDeps): NotesMcpTools {
 
   return { notes_create_drawer, notes_drawer_list, notes_search, notes_traverse }
 }
+
+/**
+ * Deps bundle the install composer passes to `buildExtraTools`. Same
+ * triple every Core carries (manifest / project_slug / audit) plus the
+ * per-instance `NotesStoreResolver` the four S1 tools resolve project
+ * scope against. The gateway's notes backend factory returns
+ * `{ backend, resolver }` so `normalizeBackend` threads BOTH the
+ * legacy `backend` (consumed by `buildTools`) and this `resolver`
+ * (consumed here) into the single `deps` bundle.
+ */
+export type NotesExtraToolDeps = NotesMcpDeps
+
+/**
+ * Second factory the install pipeline invokes alongside `buildTools`
+ * (see gateway/cores/install-bundled.ts — "A Core MAY additionally
+ * export `buildExtraTools(deps)`"). Mirrors the Research/Calendar Core
+ * split: the legacy four tools (write/recall/list/link) ship in
+ * `buildTools`, and these four S1 tools (create_drawer/drawer_list/
+ * search/traverse) ship here. Without this export the manifest
+ * declares four tools that fall through to `not_implemented` stubs and
+ * install logs `manifest_tool_unimplemented core=notes` on every owner
+ * boot (ISSUE #330).
+ */
+export function buildExtraTools(deps: NotesExtraToolDeps): NotesMcpTools {
+  return buildNotesMcpTools(deps)
+}
