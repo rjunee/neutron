@@ -86,16 +86,16 @@ afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
-/** Pre-seed a COMPLETED owner BEFORE boot so `on_session_open` reads a terminal
- *  row and takes the steady-state branch. */
-async function preSeedCompletedOwner(): Promise<void> {
+/** Pre-seed a terminal onboarding row (default `completed`) BEFORE boot so
+ *  `on_session_open` reads it and takes the steady-state branch. */
+async function preSeedOwner(phase: 'completed' | 'failed' = 'completed'): Promise<void> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   try {
     applyMigrations(db.raw())
     await new SqliteOnboardingStateStore({ db }).upsert({
       project_slug: 'owner',
       user_id: 'owner',
-      phase: 'completed',
+      phase,
     })
   } finally {
     db.close()
@@ -169,7 +169,7 @@ async function connectAndCollect(): Promise<AppWsOutbound[]> {
 describe('Open — post-onboarding claim redirect reconnect recovery', () => {
   test('replays onboarding_completed on connect for a completed owner when a claim URL is configured', async () => {
     process.env['NEUTRON_POST_ONBOARDING_CLAIM_URL'] = 'https://claim.example.test'
-    await preSeedCompletedOwner()
+    await preSeedOwner('completed')
     harness = await startHarness()
     const events = await connectAndCollect()
     expect(events.some((e) => e.type === 'onboarding_completed')).toBe(true)
@@ -177,11 +177,22 @@ describe('Open — post-onboarding claim redirect reconnect recovery', () => {
 
   test('does NOT replay onboarding_completed when no claim URL is configured (Open self-host)', async () => {
     // env deliberately unset.
-    await preSeedCompletedOwner()
+    await preSeedOwner('completed')
     harness = await startHarness()
     const events = await connectAndCollect()
     expect(events.some((e) => e.type === 'onboarding_completed')).toBe(false)
     // Sanity: the socket really did open + seed (session_ready present).
+    expect(events.some((e) => e.type === 'session_ready')).toBe(true)
+  }, 30_000)
+
+  test('does NOT replay for a FAILED onboarding even with a claim URL configured (never completed)', async () => {
+    process.env['NEUTRON_POST_ONBOARDING_CLAIM_URL'] = 'https://claim.example.test'
+    await preSeedOwner('failed')
+    harness = await startHarness()
+    const events = await connectAndCollect()
+    // `failed` is a terminal phase but the completion transition never happened —
+    // it must NOT trigger the claim redirect.
+    expect(events.some((e) => e.type === 'onboarding_completed')).toBe(false)
     expect(events.some((e) => e.type === 'session_ready')).toBe(true)
   }, 30_000)
 })

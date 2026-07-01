@@ -3125,12 +3125,19 @@ export function buildOpenGraphComposer(
           // without the env, so this never loops post-claim.
           const claimUrl = env['NEUTRON_POST_ONBOARDING_CLAIM_URL']
           if (typeof claimUrl === 'string' && claimUrl.length > 0) {
-            const completedFrame: AppWsOutboundOnboardingCompleted = {
-              v: 1,
-              type: 'onboarding_completed',
-              ts: Date.now(),
+            // This branch is reached for BOTH terminal phases (`isOnboardingActive`
+            // is false for `completed` AND `failed`), so gate strictly on the
+            // persisted phase being exactly `completed` — a `failed` onboarding
+            // never had the completion transition and must NOT redirect to claim.
+            const st = await onboardingStateStore.get(project_slug, user_id)
+            if (st !== null && st.phase === 'completed') {
+              const completedFrame: AppWsOutboundOnboardingCompleted = {
+                v: 1,
+                type: 'onboarding_completed',
+                ts: Date.now(),
+              }
+              appWsRegistry.send(channel_topic_id, completedFrame)
             }
-            appWsRegistry.send(channel_topic_id, completedFrame)
           }
         }
         // Emit if the seed turn (or anything since the pre-seed) changed the set.
