@@ -185,6 +185,35 @@ test('finalize is idempotent: a second call on a completed row is a no-op', asyn
   h.db.close()
 })
 
+test('finalize does NOT emit the onboarding-complete signal when the terminal upsert fails', async () => {
+  const h = makeHarness()
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { primary_projects: ['Topline Revenue'] },
+  })
+
+  // Wrap the real store so ONLY the terminal `completed` write throws (locked DB
+  // / disk full); every other read/write still delegates to the real store.
+  const realStore = h.deps.stateStore
+  const throwingStore = Object.create(realStore) as typeof realStore
+  throwingStore.upsert = ((input: Parameters<typeof realStore.upsert>[0]) => {
+    if (input.phase === 'completed') throw new Error('locked db')
+    return realStore.upsert(input)
+  }) as typeof realStore.upsert
+
+  const finalizer = buildOnboardingFinalize({ ...h.deps, stateStore: throwingStore })
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  // The row never reached `completed`, so the claim-redirect signal must NOT
+  // fire — otherwise a Managed client would be pulled to the claim flow despite
+  // an unfinished onboarding.
+  expect(h.onboardingCompleted).toEqual([])
+
+  h.db.close()
+})
+
 test('finalize reuses a pre-existing project whose name slugifies to the same id (no duplicate row)', async () => {
   const h = makeHarness()
 

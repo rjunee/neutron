@@ -257,6 +257,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       // (4) Terminal state — flip to `completed`. This is the load-bearing
       // write: even if persona/projects partially failed, the user must not
       // be stranded mid-onboarding.
+      let completedPersisted = false
       try {
         await deps.stateStore.upsert({
           project_slug: deps.project_slug,
@@ -265,6 +266,7 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
           completed_at: now(),
           wow_fired: true,
         })
+        completedPersisted = true
       } catch (err) {
         log('error', 'finalize: terminal upsert failed', { err: errStr(err) })
       }
@@ -277,16 +279,21 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
       }
 
       // (5b) One-shot onboarding-complete signal (Managed post-onboarding claim
-      // redirect). Fired at the terminal transition — the idempotency gate above
-      // guarantees this runs exactly once per owner. On a Managed install the
-      // client redirects to the configured claim page on receipt; on Open self-
-      // host the client no-ops (no claim URL in its bootstrap). Emitted BEFORE
-      // the closing/opening messages so a slow opening compose can't delay the
-      // redirect, and independent of the `emitChatMessage` seam. Best-effort.
-      try {
-        deps.emitOnboardingCompleted?.(input.user_id)
-      } catch (err) {
-        log('warn', 'finalize: emitOnboardingCompleted failed', { err: errStr(err) })
+      // redirect). On a Managed install the client redirects to the configured
+      // claim page on receipt; on Open self-host the client no-ops (no claim URL
+      // in its bootstrap). Emitted BEFORE the closing/opening messages so a slow
+      // opening compose can't delay the redirect, and independent of the
+      // `emitChatMessage` seam. GATED on the terminal upsert having SUCCEEDED —
+      // if the `completed` write failed (locked DB / disk full) the owner is not
+      // actually completed, so redirecting them to claim would pull them away
+      // from an unfinished onboarding (and the reconnect-recovery replay, which
+      // checks `phase === 'completed'`, would correctly NOT fire either). Best-effort.
+      if (completedPersisted) {
+        try {
+          deps.emitOnboardingCompleted?.(input.user_id)
+        } catch (err) {
+          log('warn', 'finalize: emitOnboardingCompleted failed', { err: errStr(err) })
+        }
       }
 
       // (6) Per-project opening messages (item 7) — seed each newly-materialized
