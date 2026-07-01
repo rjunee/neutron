@@ -163,6 +163,27 @@ describe('DocStore — project-root STATUS.md surfacing (P-B)', () => {
     expect(readFileSync(join(projectRoot, 'docs', 'STATUS.md'), 'utf8')).toBe('injected\n')
   })
 
+  it('does NOT fire the comment re-anchor hook for a surfaced STATUS.md edit', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    writeFileSync(join(projectRoot, 'STATUS.md'), 'state\n')
+    const hookPaths: string[] = []
+    const store = new DocStore({
+      owner_home: home,
+      onMutationSuccess: async (m) => {
+        hookPaths.push(m.path)
+      },
+    })
+
+    // Editing the surfaced root STATUS.md must NOT notify the walker (which
+    // resolves under docs/ and would misread it as a delete → dead anchors).
+    await store.writeDoc({ project_id: PROJECT, path: 'STATUS.md', content: 'edited\n' })
+    expect(hookPaths).not.toContain('STATUS.md')
+    // A normal docs/ write still fires the hook.
+    await store.writeDoc({ project_id: PROJECT, path: 'note.md', content: '# note\n' })
+    expect(hookPaths).toContain('note.md')
+  })
+
   it('prefers a real docs/STATUS.md over the project-root copy (no ambiguity)', async () => {
     const home = makeHome()
     const projectRoot = join(home, 'Projects', PROJECT)

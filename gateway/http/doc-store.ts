@@ -693,13 +693,19 @@ export class DocStore {
     }
     // P7.2 S2 — fire the re-anchor walker after every successful
     // write. Best-effort; failures are swallowed (see
-    // `invokeMutationHook` doc).
-    await this.invokeMutationHook({
-      op: 'write',
-      project_id: input.project_id,
-      path: input.path,
-      new_modified_at: Math.floor(st.mtimeMs),
-    })
+    // `invokeMutationHook` doc). Skipped for a surfaced project-root doc: the
+    // walker resolves doc paths under the docs/ root, so it can't read the root
+    // file — running it would misread the edit as a delete and mark any
+    // STATUS.md comment anchors dead. STATUS.md is outside the docs/ comment
+    // graph (comments on it stay at their prior offsets rather than re-anchor).
+    if (!writeRootSurfaced) {
+      await this.invokeMutationHook({
+        op: 'write',
+        project_id: input.project_id,
+        path: input.path,
+        new_modified_at: Math.floor(st.mtimeMs),
+      })
+    }
     return {
       path: input.path,
       size_bytes: st.size,
@@ -790,13 +796,16 @@ export class DocStore {
     // Argus r1 IMPORTANT — pass a finite "delete time" instead of null
     // so the materialiser's stale-event filter participates in
     // delete-vs-write races. See `delete_time` sampling above and
-    // anchor-walker.ts:handleDelete docblock.
-    await this.invokeMutationHook({
-      op: 'delete',
-      project_id,
-      path: relPath,
-      new_modified_at: delete_time,
-    })
+    // anchor-walker.ts:handleDelete docblock. Skipped for a surfaced
+    // project-root doc (outside the docs/ comment graph — see writeDoc).
+    if (!rootSurfaced) {
+      await this.invokeMutationHook({
+        op: 'delete',
+        project_id,
+        path: relPath,
+        new_modified_at: delete_time,
+      })
+    }
   }
 
   async moveDoc(
@@ -856,14 +865,18 @@ export class DocStore {
     // P7.2 S2 — fire the re-anchor walker; the walker emits
     // `anchor_relocated` events on the destination path carrying
     // `to_doc_path` metadata so the materialised anchor row moves
-    // with the file (brief § 9.9 / § 10.2 row 9).
-    await this.invokeMutationHook({
-      op: 'move',
-      project_id,
-      path: to,
-      from_path: from,
-      new_modified_at: Math.floor(st.mtimeMs),
-    })
+    // with the file (brief § 9.9 / § 10.2 row 9). Skipped when the move
+    // touches a surfaced project-root doc (outside the docs/ comment graph —
+    // see writeDoc).
+    if (!moveRootSurfaced) {
+      await this.invokeMutationHook({
+        op: 'move',
+        project_id,
+        path: to,
+        from_path: from,
+        new_modified_at: Math.floor(st.mtimeMs),
+      })
+    }
     return {
       path: to,
       size_bytes: st.size,
