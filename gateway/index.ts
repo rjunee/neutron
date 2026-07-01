@@ -5,6 +5,7 @@ import type { WebSocketHandler } from 'bun'
 import { applyMigrations } from '../migrations/runner.ts'
 import { shutdownAllPersistentRepls } from '../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { ProjectDb } from '../persistence/index.ts'
+import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
 // now lives in the Managed provisioning module (`realmode-composer.ts`) and reaches
@@ -290,6 +291,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     serve: () =>
       Bun.serve({
         port,
+        // Accept request bodies up to the import cap (+ 64MB multipart/protocol
+        // slack). Bun.serve defaults maxRequestBodySize to 128MB, which the
+        // single-shot history-import upload (`POST /api/upload/<source>`, whole
+        // export in one body) exceeds for a large ChatGPT/Claude export → Bun
+        // 413s it BEFORE the handler runs (no app log, the handler's own
+        // MAX_UPLOAD_BYTES_DEFAULT=5GB check never reached). Align the server
+        // cap with the import cap so per-route caps (chat 10MB, import 5GB) do
+        // the real enforcement with proper app-level 413s.
+        maxRequestBodySize: MAX_UPLOAD_BYTES_DEFAULT + 64 * 1024 * 1024,
         // Default to loopback so an unauthenticated gateway is not LAN-exposed
         // out of the box (S5 Argus security blocker). Self-hosters opt into a
         // wider bind with NEUTRON_HOST=0.0.0.0 once they front it with auth / a
