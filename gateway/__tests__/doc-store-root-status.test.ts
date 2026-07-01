@@ -144,6 +144,25 @@ describe('DocStore — project-root STATUS.md surfacing (P-B)', () => {
     await expect(store.readDoc(PROJECT, 'STATUS.md')).rejects.toThrow()
   })
 
+  it('does NOT route reads/writes through a STATUS.md symlinked to an IN-project file', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    // STATUS.md is a symlink to another IN-project file (would pass a naive
+    // realpath-containment check against the project root).
+    const target = join(projectRoot, 'CLAUDE.md')
+    writeFileSync(target, 'original CLAUDE contents\n')
+    symlinkSync(target, join(projectRoot, 'STATUS.md'))
+    const store = new DocStore({ owner_home: home })
+
+    // Not surfaced in the tree.
+    expect((await store.tree(PROJECT)).some((n) => n.path === 'STATUS.md')).toBe(false)
+    // A write to "STATUS.md" does NOT follow the symlink to overwrite CLAUDE.md —
+    // the redirect is gated off, so it lands under docs/ instead.
+    await store.writeDoc({ project_id: PROJECT, path: 'STATUS.md', content: 'injected\n' })
+    expect(readFileSync(target, 'utf8')).toBe('original CLAUDE contents\n')
+    expect(readFileSync(join(projectRoot, 'docs', 'STATUS.md'), 'utf8')).toBe('injected\n')
+  })
+
   it('prefers a real docs/STATUS.md over the project-root copy (no ambiguity)', async () => {
     const home = makeHome()
     const projectRoot = join(home, 'Projects', PROJECT)

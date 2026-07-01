@@ -40,7 +40,7 @@
  * concurrency without needing a CRDT.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync } from 'node:fs'
 import {
   lstat,
   mkdir,
@@ -118,6 +118,22 @@ export const ROOT_SURFACED_DOCS = Object.freeze(['STATUS.md']) as readonly strin
 /** True when a validated (cleaned) relative path is a root-surfaced doc name. */
 function isRootSurfacedDoc(cleanedRelPath: string): boolean {
   return ROOT_SURFACED_DOCS.includes(cleanedRelPath)
+}
+
+/**
+ * True iff `abs` is a REGULAR file (NOT a symlink). Uses `lstatSync` so a
+ * symlink resolves to `isFile() === false` — used to gate the project-root
+ * STATUS.md surfacing + read/write redirect. A symlinked STATUS.md must NOT be
+ * surfaced or routed to (it could point at another in-project file, letting a
+ * `STATUS.md` read/write reach/overwrite it); such a symlink is left to normal
+ * docs-root resolution (where realpath containment governs it).
+ */
+function isRealFileSync(abs: string): boolean {
+  try {
+    return lstatSync(abs).isFile()
+  } catch {
+    return false
+  }
 }
 
 /** Maximum allowed relative path length (segments + separators). */
@@ -486,7 +502,10 @@ export class DocStore {
     if (
       isRootSurfacedDoc(cleanedRelPath) &&
       !existsSync(join(docsRoot, cleanedRelPath)) &&
-      existsSync(join(dirname(docsRoot), cleanedRelPath))
+      // Regular file only — a SYMLINK at the project root is NOT routed to (it
+      // could point at another in-project file), matching the tree-surfacing
+      // gate. Such a path falls back to docs-root resolution.
+      isRealFileSync(join(dirname(docsRoot), cleanedRelPath))
     ) {
       return dirname(docsRoot)
     }
