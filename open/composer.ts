@@ -174,6 +174,9 @@ import {
   type AppWsOutboundWorkBoardChanged,
 } from '../channels/adapters/app-ws/envelope.ts'
 import { createWorkBoardSurface } from '../gateway/http/work-board-surface.ts'
+import { createProjectCredentialsSurface } from '../gateway/http/project-credentials-surface.ts'
+import { ProjectCredentialStore } from '../project-credentials/store.ts'
+import { formatAvailableServicesFragment } from '../project-credentials/fragment.ts'
 import { WorkBoardStore } from '../work-board/store.ts'
 import { formatWorkBoardFragment } from '../work-board/fragment.ts'
 // Chat transport — durable per-topic message log + receipt/reaction/edit logs
@@ -1995,6 +1998,18 @@ export function buildOpenGraphComposer(
     // store could exist) to the canonical store now that it's constructed.
     dispatchBoardHolder.store = workBoardStore
 
+    // Per-project credential store (Settings tab, FOUNDATION) — ONE canonical
+    // store shared by the CRUD surface (createProjectCredentialsSurface below),
+    // the per-project→global→unset resolver the Cores consult, and the per-turn
+    // "available services in this project" awareness injection. Reuses the
+    // SecretsStore AES-256-GCM crypto (shared `.neutron-aes-key` keyfile) so
+    // tokens are encrypted at rest with the same envelope as `secrets`.
+    const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
+    const projectCredentialsSurface = createProjectCredentialsSurface({
+      store: projectCredentialStore,
+      auth: appOwnerAuth,
+    })
+
     // ── Onboarding-as-CC-session → Path 1 (2026-06-27): ONE live-session path ─
     // Onboarding is NOT a separate engine/socket and NO LONGER a per-turn phase
     // machine. It is the INITIAL MODE of this same `/ws/app/chat` live agent:
@@ -2397,6 +2412,15 @@ export function buildOpenGraphComposer(
             // escaped `<work_board>` DATA block for the active+next items.
             workBoardSnapshot: (slug: string): string =>
               formatWorkBoardFragment(workBoardStore.listActive(slug)),
+            // Available-services awareness — the project-scoped credential
+            // picture (per-project ∪ global default), so the agent knows which
+            // external services it can use in THIS project and gracefully
+            // refuses the rest. `slug` = owner boundary, `project_id` =
+            // the real per-project dimension (undefined on General).
+            availableServicesSnapshot: (slug: string, project_id: string | undefined): string =>
+              formatAvailableServicesFragment(
+                projectCredentialStore.listAvailableServices(slug, project_id),
+              ),
             buttonStore: landing.buttonStore,
             project_slug,
             owner_home,
@@ -3251,6 +3275,9 @@ export function buildOpenGraphComposer(
       // (`/api/app/projects/<id>/work-board`), bearer-gated like the tabs
       // surface, dispatching the same canonical WorkBoardStore the agent uses.
       app_work_board_surface: { handler: workBoardSurface.handler },
+      // Per-project credential CRUD (`/api/app/projects/<id>/credentials`),
+      // bearer-gated, dispatching the canonical ProjectCredentialStore.
+      app_project_credentials_surface: { handler: projectCredentialsSurface.handler },
       // P1b — Tasks tab backend + chat attachment upload, so every visible React
       // control has a live backend (no 404s behind a shown tab/button).
       app_tasks_surface: { handler: appTasksSurface.handler },

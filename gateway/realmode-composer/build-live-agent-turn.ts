@@ -418,6 +418,20 @@ export interface BuildLiveAgentTurnInput {
    * throwing/absent seam degrades to no block, never kills the turn.
    */
   workBoardSnapshot?: (project_slug: string) => string | null
+  /**
+   * Per-project "available services" awareness (Settings-tab credentials).
+   * Returns the ALREADY-FORMATTED, escaped `<available_services>` DATA block
+   * for the active project — which external services are credentialed
+   * (per-project or global default) so the agent knows what it can use and can
+   * gracefully refuse the rest. Keyed on BOTH the instance `project_slug` (the
+   * owner boundary) and the real per-turn `project_id` (the per-project
+   * dimension; undefined on the General topic → global defaults only). Injected
+   * every turn like the work board; best-effort (throwing/absent → no block).
+   */
+  availableServicesSnapshot?: (
+    project_slug: string,
+    project_id: string | undefined,
+  ) => string | null
   /** The SAME ButtonStore the engine emits through (persistence + history). */
   buttonStore: ButtonStore
   /** Operator audit trail — same TranscriptWriter the engine appends to. */
@@ -657,6 +671,24 @@ export function buildLiveAgentTurn(
         )
       }
     }
+    // Available-services awareness — resolve the project-scoped credential
+    // picture ONCE for this turn (keyed on the real per-turn project_id, so
+    // switching projects flips availability). Best-effort like the board.
+    let availableServicesFragment: string | null = null
+    if (input.availableServicesSnapshot !== undefined) {
+      try {
+        availableServicesFragment = input.availableServicesSnapshot(
+          turn.project_slug,
+          turn.project_id,
+        )
+      } catch (err) {
+        console.warn(
+          `${LOG_TAG} event=available_services_snapshot_failed project=${turn.project_slug} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
     // Onboarding per-turn grounding (e.g. the import analysis the agent already
     // presented) — re-resolved EVERY onboarding turn so a warm session can act on
     // state that landed after the cold first turn (the import completes minutes
@@ -680,9 +712,11 @@ export function buildLiveAgentTurn(
       // Warm turn: the system prefix is already cached in the REPL's transcript;
       // re-ground by splicing the FRESH board + onboarding-context blocks before
       // the user's message (onboarding context LAST so it's most salient).
-      const warmPrefix = [workBoardFragment, onboardingContextFragment].filter(
-        (s): s is string => s !== null && s.length > 0,
-      )
+      const warmPrefix = [
+        workBoardFragment,
+        availableServicesFragment,
+        onboardingContextFragment,
+      ].filter((s): s is string => s !== null && s.length > 0)
       prompt =
         warmPrefix.length > 0 ? `${warmPrefix.join('\n\n')}\n\n${turn.user_text}` : turn.user_text
     } else {
@@ -697,6 +731,7 @@ export function buildLiveAgentTurn(
         onboardingPreamble,
         workBoardFragment,
         onboardingContextFragment,
+        availableServicesFragment,
       )
     }
 
@@ -1013,6 +1048,7 @@ async function composeFirstTurnPrompt(
   onboardingPreamble?: string | null,
   boardFragment?: string | null,
   onboardingContextFragment?: string | null,
+  availableServicesFragmentRaw?: string | null,
 ): Promise<string> {
   let persona = ''
   try {
@@ -1078,6 +1114,15 @@ async function composeFirstTurnPrompt(
   // user message). Already `<work_board>`-delimited + escaped at the seam.
   const workBoardFragment =
     typeof boardFragment === 'string' && boardFragment.trim().length > 0 ? boardFragment : null
+  // Available-services awareness — an UNCONDITIONAL fragment on the cold turn so
+  // the project's credential picture folds into the cacheable system prefix
+  // (warm turns re-splice the fresh block). Already `<available_services>`-
+  // delimited + escaped at the seam.
+  const availableServicesFragment =
+    typeof availableServicesFragmentRaw === 'string' &&
+    availableServicesFragmentRaw.trim().length > 0
+      ? availableServicesFragmentRaw
+      : null
   // Per-turn onboarding grounding (import-analysis the agent already presented).
   // Sits LAST so it governs this turn most strongly — the owner is curating it.
   const onboardingContext =
@@ -1089,6 +1134,7 @@ async function composeFirstTurnPrompt(
     ...(projectPersonaFragment !== null ? [projectPersonaFragment] : []),
     scopeFragment,
     ...(workBoardFragment !== null ? [workBoardFragment] : []),
+    ...(availableServicesFragment !== null ? [availableServicesFragment] : []),
     ...(onboardingFragment !== null ? [onboardingFragment] : []),
     ...(onboardingContext !== null ? [onboardingContext] : []),
   ]

@@ -122,6 +122,19 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     order: 10,
     mount: { kind: 'builtin', target: 'docs' },
   },
+  {
+    // Per-project Settings — hosts the credentials UI (per-project / global
+    // service tokens), project rename + emoji, and the collaborators
+    // (display-only, M2-gated) scaffold. Order 15 slots it after Documents (10)
+    // and before any Core-contributed tab (base 100), so it's the last builtin
+    // in the per-project set: Chat / Plan / Documents / Settings.
+    key: 'settings',
+    label: 'Settings',
+    scope: 'project',
+    source: 'builtin',
+    order: 15,
+    mount: { kind: 'builtin', target: 'settings' },
+  },
   // NOTE: the builtin `tasks` tab was REMOVED (Ryan directive, WAVE 3) — Tasks
   // returns as a Core-contributed webview tab via the `CoreTabContribution`
   // union, NOT as an engine builtin. Do not re-add a hardcoded tasks tab.

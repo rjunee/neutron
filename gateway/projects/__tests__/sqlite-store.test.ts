@@ -156,6 +156,20 @@ describe('SqliteProjectSettingsStore — update PATCH', () => {
     expect(reread!.privacy_mode).toBe('private')
   })
 
+  test('update renames the project (name) independently; persists across reopen', async () => {
+    const before = await store.get(OWNER, 'neutron')
+    expect(before!.name).toBe('Neutron')
+
+    const after = await store.update(OWNER, 'neutron', { name: 'Neutron Renamed' })
+    expect(after).not.toBeNull()
+    expect(after!.name).toBe('Neutron Renamed')
+    // A name-only patch leaves privacy_mode untouched.
+    expect(after!.privacy_mode).toBe('private')
+
+    const reread = await store.get(OWNER, 'neutron')
+    expect(reread!.name).toBe('Neutron Renamed')
+  })
+
   test('CHECK constraint rejects an out-of-band privacy_mode value', async () => {
     // Defence in depth — the HTTP surface validates the enum before
     // the store ever receives it, but we want to guard against a

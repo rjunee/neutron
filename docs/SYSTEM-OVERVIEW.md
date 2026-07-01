@@ -767,6 +767,48 @@ lives on `CoreInstallationsStore` (`recordGlobal` / `getGlobal` / `listGlobal`
 project data namespace or secrets prompt — those still flow through the
 per-project `installCore`).
 
+## Per-project Settings tab + credential system (`project-credentials/`, FOUNDATION)
+
+Each project's tab set is Chat / Plan / Documents / **Settings**. The Settings
+tab is a registry builtin (`tabs/registry.ts`, `key:'settings'`, `order:15`,
+`mount.target:'settings'`) — both clients (web `landing/chat-react/SettingsTab.tsx`
+via `ProjectShell.tsx`'s `TabContent`; mobile `app/app/projects/[id]/settings.tsx`)
+render it from the ONE engine registry, never hardcoded. It hosts the
+credentials UI, project rename (emoji is a seam), and a display-only, M2-gated
+collaborators scaffold.
+
+**Credential model.** A credential is a static, long-lived service token (Meta
+Ads, Google Ads, Apify, …) set at **per-project** or **global** scope.
+Resolution is **per-project → global → unset** (`ProjectCredentialStore.resolve`)
+so a single-owner install that only sets global tokens keeps working and a
+project can override a service with its own token. Storage is a NEW table
+`project_credentials` (migration `0092`, STRICT) — deliberately NOT an overload
+of `secrets` (whose `project_slug` column is a decoy for the frozen instance
+handle). Every row is keyed on a **composite**: `owner_slug` (the SERVER-derived
+instance handle from the bearer — the owner boundary, never client-supplied) +
+`project_id` (the REAL per-project id, `''` sentinel for global) + `service`.
+This differs from the Work Board (which keys purely on the instance slug and
+ignores the URL project id): credentials are genuinely per-project, so the real
+project id is part of the key, gated underneath the server-derived owner
+boundary — so no caller can read another owner's credentials. Ciphertext reuses
+the `secrets` AES-256-GCM envelope (shared `.neutron-aes-key`); `list` returns
+metadata only.
+
+**Surfaces + resolver + awareness.** Bearer-gated CRUD
+(`gateway/http/project-credentials-surface.ts`) owns
+`/api/app/projects/<id>/credentials[/<service>]` (GET/POST/DELETE), wired into
+`open/composer.ts` → `composition.ts` → `compose.ts` ahead of `appProjects`
+(mirrors work-board precedence). The same canonical `ProjectCredentialStore`
+backs the resolver AND the agent awareness: a per-turn `<available_services>`
+DATA block (`project-credentials/fragment.ts`), keyed on the real per-turn
+`project_id` (`LiveAgentTurnRequest.project_id`, parsed from the topic), spliced
+by `gateway/realmode-composer/build-live-agent-turn.ts` exactly like the Work
+Board block — so the agent knows which external services it can use in THIS
+project and gracefully refuses the rest, and switching projects flips
+availability within one turn. Wiring the existing Cores to CALL the resolver is
+a named follow-up (needs per-call `project_id` threaded into each Core's token
+provider — the deferred Phase-3 Cores rework).
+
 ## Work Board — orchestrator external memory + live work tracker (`work-board/`)
 
 Phase 1a (backend). The Work Board moves the orchestrator's per-feature state

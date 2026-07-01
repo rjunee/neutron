@@ -145,6 +145,10 @@ CREATE INDEX idx_overnight_queue_status
 CREATE INDEX idx_proactive_topic_state_project
     ON proactive_topic_state (project_slug)
 
+[index] idx_project_credentials_scope (tbl=project_credentials)
+CREATE INDEX idx_project_credentials_scope
+    ON project_credentials (owner_slug, project_id)
+
 [index] idx_project_members_user (tbl=project_members)
 CREATE INDEX idx_project_members_user
     ON project_members (user_id)
@@ -998,6 +1002,31 @@ CREATE TABLE profile_pic_pending (
     auto_retry_attempted INTEGER NOT NULL DEFAULT 0
         CHECK (auto_retry_attempted IN (0, 1))
 , job_id TEXT) STRICT
+
+[table] project_credentials (tbl=project_credentials)
+CREATE TABLE project_credentials (
+    id            TEXT PRIMARY KEY NOT NULL,   -- ULID
+    owner_slug    TEXT NOT NULL,               -- server-derived instance handle (owner boundary)
+    project_id    TEXT NOT NULL,               -- real per-project id; '' == GLOBAL sentinel
+    scope         TEXT NOT NULL
+                      CHECK (scope IN ('project', 'global')),
+    service       TEXT NOT NULL,
+    ciphertext    TEXT NOT NULL,               -- AES-256-GCM envelope JSON (never plaintext)
+    label         TEXT,
+    created_at    TEXT NOT NULL,               -- ISO-8601 UTC
+    updated_at    TEXT NOT NULL,               -- ISO-8601 UTC
+    expires_at    TEXT,                        -- ISO-8601 UTC; NULL == no expiry
+    -- The scope/sentinel invariant: a global row uses the '' project_id, a
+    -- project row uses a real (non-empty) project id. Prevents inconsistent
+    -- rows from ever landing.
+    CHECK (
+        (scope = 'global'  AND project_id = '') OR
+        (scope = 'project' AND project_id <> '')
+    ),
+    -- One credential per (owner, project-or-global, service). A re-set
+    -- overwrites in place (the store upserts on this key).
+    UNIQUE (owner_slug, project_id, service)
+) STRICT
 
 [table] project_members (tbl=project_members)
 CREATE TABLE project_members (

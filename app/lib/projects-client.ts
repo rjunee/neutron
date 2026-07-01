@@ -162,6 +162,20 @@ export class ProjectsClient {
   }
 
   /**
+   * Rename a project via the settings PATCH surface (`{ name }`) — the Settings
+   * tab's editable project name. Returns the canonical settings after the
+   * write. Throws `ProjectsClientError` (e.g. `invalid_name`,
+   * `field_not_writable`) so the caller can surface the precise reason.
+   */
+  async rename(project_id: string, name: string): Promise<ProjectSettings> {
+    const res = await this.req<SettingsResponse>(
+      `/api/app/projects/${encodeURIComponent(project_id)}/settings`,
+      { method: 'PATCH', body: { name } },
+    );
+    return res.project;
+  }
+
+  /**
    * List every project visible to the bearer-resolved user — the M2.3
    * unified list: the owner's solo projects merged with every
    * group project from the workspaces the user belongs to. Each item

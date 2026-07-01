@@ -164,7 +164,7 @@ export interface ProjectSettingsStore {
   update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode },
+    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode; name?: string },
   ): Promise<ProjectSettings | null>
   list(project_slug: string): Promise<ProjectSettings[]>
 }
@@ -222,12 +222,13 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
   async update(
     project_slug: string,
     project_id: string,
-    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode },
+    patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode; name?: string },
   ): Promise<ProjectSettings | null> {
     const current = await this.get(project_slug, project_id)
     if (current === null) return null
     const updated: ProjectSettings = {
       ...current,
+      name: patch.name ?? current.name,
       privacy_mode: patch.privacy_mode ?? current.privacy_mode,
       agent_engagement_mode: patch.agent_engagement_mode ?? current.agent_engagement_mode,
     }
@@ -367,10 +368,13 @@ const CONNECT_INVITES_RE = /^\/api\/app\/projects\/([^/]+)\/connect-invites$/
 const CONNECT_MEMBERS_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members$/
 const CONNECT_REVOKE_RE = /^\/api\/app\/projects\/([^/]+)\/connect-members\/([^/]+)\/revoke$/
 
-const ALLOWED_PATCH_FIELDS: ReadonlyArray<'privacy_mode' | 'agent_engagement_mode'> = [
+const ALLOWED_PATCH_FIELDS: ReadonlyArray<'privacy_mode' | 'agent_engagement_mode' | 'name'> = [
   'privacy_mode',
   'agent_engagement_mode',
+  'name',
 ]
+/** Project display-name (rename) bounds. */
+const MAX_PROJECT_NAME_LEN = 120
 const ALLOWED_PATCH_FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_PATCH_FIELDS)
 
 export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppProjectsSurface {
@@ -673,15 +677,34 @@ async function handlePatch(
   }
   const hasPrivacy = 'privacy_mode' in fields
   const hasEngagement = 'agent_engagement_mode' in fields
-  if (!hasPrivacy && !hasEngagement) {
+  const hasName = 'name' in fields
+  if (!hasPrivacy && !hasEngagement && !hasName) {
     return jsonError(
       400,
       'empty_patch',
-      'PATCH body must include at least one writable field (privacy_mode, agent_engagement_mode)',
+      'PATCH body must include at least one writable field (name, privacy_mode, agent_engagement_mode)',
     )
   }
 
-  const patch: { privacy_mode?: PrivacyMode; agent_engagement_mode?: AgentEngagementMode } = {}
+  const patch: {
+    privacy_mode?: PrivacyMode
+    agent_engagement_mode?: AgentEngagementMode
+    name?: string
+  } = {}
+
+  if (hasName) {
+    const raw = fields['name']
+    const trimmed = typeof raw === 'string' ? raw.trim() : ''
+    if (trimmed.length === 0 || trimmed.length > MAX_PROJECT_NAME_LEN) {
+      return jsonError(
+        400,
+        'invalid_name',
+        `name must be a non-empty string up to ${MAX_PROJECT_NAME_LEN} chars`,
+        { field: 'name' },
+      )
+    }
+    patch.name = trimmed
+  }
 
   if (hasPrivacy) {
     const raw = fields['privacy_mode']

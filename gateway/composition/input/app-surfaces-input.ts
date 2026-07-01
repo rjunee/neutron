@@ -267,6 +267,16 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Per-project credential CRUD (Settings tab, FOUNDATION). Owns
+   * `/api/app/projects/<id>/credentials[/<service>]`. Dispatches the SAME
+   * `ProjectCredentialStore` the resolver + per-turn awareness injection use.
+   * Surface factory:
+   * `gateway/http/project-credentials-surface.ts:createProjectCredentialsSurface`.
+   */
+  app_project_credentials_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P7.4 restore UI — optional project-backups + restore surface.
    * Owns `/api/app/projects/<id>/backups[...]` +
    * `/api/app/projects/<id>/restore`. Surface factory:

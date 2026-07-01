@@ -50,6 +50,7 @@ import { ChatApp, TopicRail } from './ChatApp.tsx'
 import { DocumentsTab } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
+import { SettingsTab } from './SettingsTab.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -173,6 +174,17 @@ function TabContent({
   if (tab.mount.target === 'admin') {
     return (
       <IntegrationsTab
+        projectId={projectId}
+        config={config}
+        {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+      />
+    )
+  }
+  // Builtin Settings — the per-project settings surface: credentials (API keys
+  // the agent's tools use), project rename, and (M2-gated) collaborators.
+  if (tab.mount.target === 'settings') {
+    return (
+      <SettingsTab
         projectId={projectId}
         config={config}
         {...(fetchImpl !== undefined ? { fetchImpl } : {})}

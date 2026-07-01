@@ -209,6 +209,16 @@ export interface AppWorkBoardHandler {
 }
 
 /**
+ * Per-project credential CRUD surface (Settings tab, FOUNDATION). Owns
+ * `/api/app/projects/<id>/credentials[/<service>]` (GET/POST/DELETE).
+ * Disclaims non-owned paths via `null`. Surface factory:
+ * `gateway/http/project-credentials-surface.ts`.
+ */
+export interface AppProjectCredentialsHandler {
+  handler: (req: Request) => Promise<Response | null>
+}
+
+/**
  * P7.4 restore UI — Expo-app project-backups + restore surface.
  * Owns `/api/app/projects/<id>/backups[...]` + `/api/app/projects/<id>/restore`.
  * Same disclaiming-null contract as the docs surface.
@@ -574,6 +584,13 @@ export interface ComposeHttpHandlerInput {
    */
   appWorkBoard?: AppWorkBoardHandler
   /**
+   * Per-project credential CRUD surface (Settings tab). When supplied, the
+   * composed handler routes `/api/app/projects/<id>/credentials[/<service>]`
+   * (GET/POST/DELETE) ahead of `appProjects`, mirroring the work-board
+   * precedence so the per-project child path is unambiguously owned.
+   */
+  appProjectCredentials?: AppProjectCredentialsHandler
+  /**
    * P7.4 restore UI — Expo-app project-backups + restore surface. When
    * supplied, the composed HTTP chain mounts:
    *
@@ -850,6 +867,7 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
     appDocs,
     appTabs,
     appWorkBoard,
+    appProjectCredentials,
     appBackups,
     cores,
     coresOAuth,
@@ -1124,6 +1142,14 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       if (appWorkBoard !== undefined) {
         const wbRes = await appWorkBoard.handler(req)
         if (wbRes !== null) return wbRes
+      }
+      // 0h1c. Per-project credential CRUD (Settings tab) — owns
+      //       `/api/app/projects/<id>/credentials[/<service>]` (GET/POST/DELETE).
+      //       Mounted BEFORE appProjects so the per-project `/credentials` path
+      //       is unambiguously owned, mirroring the work-board precedence.
+      if (appProjectCredentials !== undefined) {
+        const credRes = await appProjectCredentials.handler(req)
+        if (credRes !== null) return credRes
       }
       // 0h2. Expo-app project-settings + project-list surface — P5.2
       //      + ISSUES #9. Owns:
