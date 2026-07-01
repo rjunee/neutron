@@ -122,4 +122,54 @@ describe('ReminderStore', () => {
 
     expect(await store.reschedule('nope-not-a-real-id', 5000)).toBe(false)
   })
+
+  test('createRecurring with a coarse label round-trips recurrence, leaves recurrence_spec null', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'weekly',
+      recurrence: 'weekly',
+    })
+    const got = store.get(r.id)
+    expect(got?.recurrence).toBe('weekly')
+    expect(got?.recurrence_spec).toBeNull()
+  })
+
+  test('createRecurring with a cron spec round-trips recurrence_spec, leaves recurrence null', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'daily 9am',
+      recurrence_spec: '0 9 * * *',
+    })
+    const got = store.get(r.id)
+    expect(got?.recurrence_spec).toBe('0 9 * * *')
+    expect(got?.recurrence).toBeNull()
+  })
+
+  test('one-shot create leaves both cadence columns null', async () => {
+    const store = new ReminderStore(db)
+    const r = await store.create({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: 1700000000,
+      message: 'once',
+    })
+    const got = store.get(r.id)
+    expect(got?.recurrence).toBeNull()
+    expect(got?.recurrence_spec).toBeNull()
+  })
+
+  test('createRecurring enforces exactly-one cadence (rejects both / neither)', async () => {
+    const store = new ReminderStore(db)
+    const base = { project_slug: 't1', topic_id: null, fire_at: 1700000000, message: 'x' }
+    await expect(
+      store.createRecurring({ ...base, recurrence: 'weekly', recurrence_spec: '0 9 * * *' }),
+    ).rejects.toThrow()
+    await expect(store.createRecurring({ ...base })).rejects.toThrow()
+  })
 })

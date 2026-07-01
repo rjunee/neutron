@@ -165,6 +165,7 @@
       "dependencies": {
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/cron": "workspace:*",
         "@neutronai/reminders": "workspace:*",
         "@neutronai/tasks": "workspace:*",
       },
@@ -320,6 +321,7 @@
     "reminders": {
       "name": "@neutronai/reminders",
       "dependencies": {
+        "@neutronai/cron": "workspace:*",
         "@neutronai/persistence": "workspace:*",
       },
     },

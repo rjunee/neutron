@@ -119,6 +119,69 @@ describe('buildTools — capability-gated dispatch', () => {
     expect(store.get(oneShot.id)?.recurrence).toBeNull()
   })
 
+  test('reminders_create with recurrence_spec persists a CRON-recurring row', async () => {
+    const tools = makeTools()
+    const r = await tools.reminders_create({
+      message: 'daily 9am brief',
+      fire_at: 1_700_000_900,
+      recurrence_spec: '0 9 * * *',
+    })
+    expect(r.id).toBeTruthy()
+    const row = store.get(r.id)
+    expect(row?.recurrence_spec).toBe('0 9 * * *')
+    expect(row?.recurrence).toBeNull()
+    expect(row?.status).toBe('pending')
+  })
+
+  test('reminders_create rejects an invalid cron expression', async () => {
+    const tools = makeTools()
+    await expect(
+      tools.reminders_create({ message: 'x', fire_at: 1_700_001_050, recurrence_spec: 'not a cron' }),
+    ).rejects.toThrow(/invalid cron/i)
+  })
+
+  test('reminders_create rejects passing BOTH recurrence and recurrence_spec', async () => {
+    const tools = makeTools()
+    await expect(
+      tools.reminders_create({
+        message: 'x',
+        fire_at: 1_700_001_060,
+        recurrence: 'weekly',
+        recurrence_spec: '0 9 * * *',
+      }),
+    ).rejects.toThrow(/at most one/i)
+  })
+
+  test('snooze preserves a cron reminder’s cadence (does not degrade to one-shot)', async () => {
+    const tools = makeTools()
+    const r = await tools.reminders_create({
+      message: 'daily 9am',
+      fire_at: 1_700_000_900,
+      recurrence_spec: '0 9 * * *',
+    })
+    const snoozed = await tools.reminders_snooze({ id: r.id, new_fire_at: 1_700_099_999 })
+    const row = store.get(snoozed.id)
+    expect(row?.recurrence_spec).toBe('0 9 * * *')
+    expect(row?.recurrence).toBeNull()
+    // Original is cancelled.
+    expect(store.get(r.id)?.status).toBe('cancelled')
+  })
+
+  test('update preserves a cron reminder’s cadence while rewriting the body', async () => {
+    const backend = buildReminderStoreBackend({ project_slug: OWNER, projectDb })
+    const r = await backend.create({
+      message: 'old body',
+      fire_at: 1_700_000_900,
+      recurrence_spec: '0 9 * * 1-5',
+    })
+    const updated = await backend.update({ id: r.id, message: 'new body' })
+    const row = store.get(updated.id)
+    expect(row?.message).toBe('new body')
+    expect(row?.recurrence_spec).toBe('0 9 * * 1-5')
+    expect(row?.recurrence).toBeNull()
+    expect(row?.fire_at).toBe(1_700_000_900)
+  })
+
   test('reminders_create rejects an unsupported cadence rather than writing a dead row', async () => {
     const tools = makeTools()
     // 'daily' is NOT representable by the engine's cadence enum; without the

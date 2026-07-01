@@ -1199,6 +1199,44 @@ prioritize cron is wired in `gateway/composition/build-core-modules.ts` behind
 focus-score / nudge-engine gates); registering it with a null llm is safe — the
 handler runs the deterministic fallback until a credential exists.
 
+## Reminders — cadence + fire-time composition (`reminders/`)
+
+Instance-scoped reminder engine (`@neutronai/reminders`), backed by the
+per-project `reminders` table. Three parts:
+
+- **Store** (`reminders/store.ts`) — CRUD over the table. A reminder is
+  one-shot, or recurring via ONE of two cadence representations (mutually
+  exclusive, `isRecurring()` is the single predicate):
+  - a COARSE `recurrence` label (`weekly` / `monthly` / `occasional`) with
+    fixed-delta rescheduling; or
+  - a `recurrence_spec` — a FAITHFUL 5-field cron expression (migration 0093)
+    for exact wall-clock cadences (`0 9 * * *`, `0 9 * * 1-5`, `0 9 7 2 *`,
+    `0 */6 * * *`). This is the M2-cutover parity target: real cron reminders
+    migrate verbatim.
+- **Tick loop** (`reminders/tick.ts`) — a single-flight `setInterval` that
+  claims each due row BEFORE dispatch (crash-safe at-most-once, #319) and
+  advances it. Both cadence kinds resolve through ONE `computeNextFire(reminder,
+  now, tz)`: a cron spec computes the next DST-correct wall-clock instant
+  strictly after now (via `@neutronai/cron`'s `cron-standard.ts` evaluator — the
+  classic-crontab sibling of the systemd-`OnCalendar` parser in `calendar.ts`,
+  with Vixie dom/dow OR semantics and spring-forward gap-skip); a coarse label
+  uses the fixed delta. `time_zone` defaults to the host zone ("9am" = 9am
+  local). A corrupt cron fires once then retires so it can't wedge the loop.
+- **Dispatcher** (`reminders/dispatcher.ts` + `message-shape.ts`) — the
+  fire-time composer. The stored `message` is classified into one of three
+  shapes (**literal / smart-wrap `[smart]` / pattern-template `PATTERN:`**);
+  when an LLM substrate is wired it gathers live context
+  (`buildStatusMdContextSource`) and composes a fresh, warm nudge on a
+  Haiku-class turn, degrading to the shape's literal fallback on any failure so
+  a reminder ALWAYS delivers. This is orthogonal to cadence — cron and coarse
+  rows compose identically, so a migrated **smart** reminder still produces a
+  context-aware message at fire.
+
+The Reminders Core (`cores/free/reminders/`) is the product-surface adapter over
+this store: its `reminders_create` tool accepts an optional `recurrence` label
+OR `recurrence_spec` cron (validated via `isValidCron`), and `snooze` / `update`
+preserve a reminder's cadence across the atomic cancel+create.
+
 ## Proactive messaging — daily brief + idle-nudge sweep (`gateway/proactive/`)
 
 The owner-facing proactive layer (Vajra parity). Both halves were built + tested

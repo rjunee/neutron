@@ -87,6 +87,62 @@ tool. The HTTP PATCH surface + mobile client already accept `emoji`; adding a 10
 tool to that Core's manifest/capability-guard/test contract is deferred to a
 follow-up so this sprint stays focused on the rail. Per-project unread on the
 General scope is also not badged (onboarding lives there; low value).
+## 2026-07-01 — Reminders: faithful cron cadence (Vajra parity)
+
+**Why.** Neutron's reminder store only understood COARSE recurrence
+(`weekly` / `monthly` / `occasional`, fixed +7d/+30d/+14d deltas). The M2
+cutover must migrate ~66 real cron reminders (`0 9 * * *`, `0 9 7 2 *`,
+`0 */6 * * *`, `0 14 1 1,4,7,10 *`, …) FAITHFULLY, which those coarse labels
+cannot represent. This brings the store + tick loop to full 5-field cron
+parity. The SMART / context-aware side (literal / smart-wrap / pattern-template
+composition at fire time) was ALREADY at parity in `reminders/message-shape.ts`
++ `dispatcher.ts` — cron rows flow through that unchanged, so a migrated smart
+reminder still composes a fresh context-aware message at fire.
+
+**Framing — extend the ONE path, no flags, no dual system.** A reminder recurs
+when EITHER cadence column is set; the tick loop's single `computeNextFire`
+resolves the next instant from whichever is populated. No parallel scheduler,
+no feature flag.
+
+**What changed.**
+- `cron/cron-standard.ts` (NEW) — standard 5-field crontab evaluator
+  (`parseCron` / `isValidCron` / `nextCronFire`). Full grammar: `*`, single
+  values, ranges, comma lists, and steps; month + weekday names; `0`/`7`
+  both Sunday; Vixie day-of-month/day-of-week OR semantics. Wall-clock math is
+  DST-correct and reuses `calendar.ts`'s `wallClockToEpoch` / `zonedParts`; a
+  spring-forward gap time is skipped to the next valid instant. No `Date.now()`
+  inside — the caller passes the reference instant (deterministic + testable).
+  Kept SEPARATE from the systemd-`OnCalendar` parser (`calendar.ts`) because the
+  two grammars differ in field order, wildcard spelling, and dom/dow combination
+  (systemd ANDs; crontab ORs).
+- `migrations/0093_reminders_recurrence_spec.sql` (NEW) — `ALTER TABLE reminders
+  ADD COLUMN recurrence_spec TEXT` (nullable; forward-only; no CHECK — the
+  write-side `isValidCron` gate is authoritative). Snapshot regenerated.
+- `reminders/store.ts` — `Reminder.recurrence_spec`; `createRecurring` accepts a
+  coarse `recurrence` label OR a `recurrence_spec` cron (exactly-one invariant
+  enforced). New exported `isRecurring()` predicate; the claim/advance guards
+  (`advanceRecurrence` / `revertRecurrenceAdvance`) now recognise a row as
+  recurring when EITHER column is set.
+- `reminders/tick.ts` — the two next-fire branches collapse into one
+  `computeNextFire(reminder, now, tz)`: cron spec → DST-correct wall-clock
+  instant strictly after now (via `@neutronai/cron`); coarse label → the
+  existing fixed-delta (unchanged). New `time_zone` option (default host zone).
+  A corrupt cron that can never compute fires once then retires so it can't
+  wedge the tick loop.
+- `cores/free/reminders/src/backend.ts` + `package.json` manifest —
+  `reminders_create` accepts an optional `recurrence_spec` (validated via
+  `isValidCron`; mutually exclusive with `recurrence`). `snooze` / `update`
+  preserve a cron reminder's cadence (no silent degrade to one-shot). Existing
+  coarse-label + one-shot callers unchanged (back-compat).
+
+**Tests.** `cron/cron-standard.test.ts` (grammar, next-fire across daily /
+hourly / weekday / monthly / annual / quarterly, Vixie OR, DST spring-forward +
+fall-back + gap-skip); `reminders/tick.test.ts` (cron advances to the next
+wall-clock occurrence, rolls to tomorrow when past, poison-cron retires);
+`reminders/store.test.ts` (column round-trip + exactly-one invariant);
+`cores/free/reminders/__tests__/tools.test.ts` (cron create, invalid-cron
+reject, both-cadences reject, snooze/update cadence preservation). Full suite +
+root `tsc` + leak-gate green.
 
 ## 2026-07-01 — Light/dark theme toggle for the web chat UI
 

@@ -59,6 +59,7 @@
  * reminder the Core never created (symmetric inverse of the r1 leak).
  */
 
+import { isValidCron } from '@neutronai/cron'
 import {
   ALL_REMINDER_RECURRENCES,
   ReminderStore,
@@ -104,14 +105,23 @@ export interface RemindersCreateInput {
   /** Optional project scope; persisted as the engine's topic_id under the hood. */
   project_id?: string
   /**
-   * Optional cadence. When set, the reminder RECURS: `fire_at` is the first
-   * occurrence and the tick loop reschedules the next one after each fire
-   * (`weekly` +7d, `monthly` +30d, `occasional` +14d). When omitted the
-   * reminder is one-shot. Daily / weekday cadences are NOT representable here —
-   * the skill steers those to the nag-until-done pattern instead of falsely
-   * claiming recurrence.
+   * Optional COARSE cadence. When set, the reminder RECURS: `fire_at` is the
+   * first occurrence and the tick loop reschedules the next one after each fire
+   * (`weekly` +7d, `monthly` +30d, `occasional` +14d). Mutually exclusive with
+   * `recurrence_spec`. When both are omitted the reminder is one-shot.
    */
   recurrence?: ReminderRecurrence
+  /**
+   * Optional FAITHFUL cron cadence — a standard 5-field cron expression
+   * (`0 9 * * *` = daily 09:00, `0 9 * * 1-5` = weekdays 09:00,
+   * `0 9 7 2 *` = annually on Feb 7). When set, the reminder recurs on the
+   * exact wall-clock cadence, DST-correct, and the tick loop computes each next
+   * fire from the expression (not a fixed delta). Mutually exclusive with the
+   * coarse `recurrence` label — pass at most one. Validated here against
+   * `isValidCron` so a malformed expression is rejected at the tool boundary
+   * rather than written as a row that never reschedules.
+   */
+  recurrence_spec?: string
 }
 
 export interface RemindersCreateResult {
@@ -293,7 +303,36 @@ export function buildReminderStoreBackend(
 
   return {
     async create(input: RemindersCreateInput): Promise<RemindersCreateResult> {
-      // A cadence makes the reminder RECUR: route through the engine's
+      // Reject the ambiguous both-cadences case up front — the engine store
+      // also guards this, but failing here gives the caller a clearer error
+      // tied to the tool contract.
+      if (input.recurrence !== undefined && input.recurrence_spec !== undefined) {
+        throw new Error(
+          'reminders_create: pass at most one of recurrence (coarse label) or recurrence_spec (cron)',
+        )
+      }
+      // A cron cadence makes the reminder RECUR on a faithful wall-clock
+      // schedule: route through `createRecurring` with the cron spec so the
+      // tick loop computes each next fire from the expression (DST-correct).
+      if (input.recurrence_spec !== undefined) {
+        if (!isValidCron(input.recurrence_spec)) {
+          throw new Error(
+            `reminders_create: invalid cron expression '${String(input.recurrence_spec)}' ` +
+              `(expected 5 fields: minute hour day-of-month month day-of-week)`,
+          )
+        }
+        const cron_input: CreateRecurringReminderInput = {
+          project_slug: opts.project_slug,
+          topic_id: input.project_id ?? null,
+          fire_at: input.fire_at,
+          message: input.message,
+          recurrence_spec: input.recurrence_spec,
+          source: CORE_SOURCE_TAG,
+        }
+        const row = await store.createRecurring(cron_input)
+        return { id: row.id, fire_at: row.fire_at }
+      }
+      // A coarse cadence makes the reminder RECUR: route through the engine's
       // `createRecurring` so the tick loop reschedules the next occurrence
       // after each fire (instead of a one-shot that fires once and dies — the
       // bug where the agent confirmed "every week" but the row never repeated).
@@ -384,10 +423,21 @@ export function buildReminderStoreBackend(
         //
         // Recurring rows go through `createRecurring(...)` so snoozing a
         // recurring reminder PRESERVES its cadence — otherwise a weekly/monthly
-        // reminder would silently become a one-shot after the first snooze and
-        // stop repeating (mirrors the `update` path's same branch).
+        // (or cron) reminder would silently become a one-shot after the first
+        // snooze and stop repeating (mirrors the `update` path's same branch).
+        // A cron row carries its cadence in `recurrence_spec` (recurrence NULL),
+        // so check it FIRST; only then the coarse label; else one-shot.
         let replacement: Reminder
-        if (original.recurrence !== null) {
+        if (original.recurrence_spec !== null) {
+          replacement = await txStore.createRecurring({
+            project_slug: original.project_slug,
+            topic_id: original.topic_id,
+            fire_at: input.new_fire_at,
+            message: original.message,
+            recurrence_spec: original.recurrence_spec,
+            source: original.source,
+          })
+        } else if (original.recurrence !== null) {
           replacement = await txStore.createRecurring({
             project_slug: original.project_slug,
             topic_id: original.topic_id,
@@ -446,10 +496,23 @@ export function buildReminderStoreBackend(
         }
         // Recurring rows go through `createRecurring(...)` so the
         // replacement preserves cadence; one-shot rows go through
-        // `create(...)`. The engine surface stays untouched in both
-        // cases (no new method needed on `ReminderStore`).
+        // `create(...)`. A cron row carries its cadence in `recurrence_spec`
+        // (recurrence NULL) so check it FIRST. The engine surface stays
+        // untouched in all cases (no new method needed on `ReminderStore`).
         let replacement: Reminder
-        if (original.recurrence !== null) {
+        if (original.recurrence_spec !== null) {
+          const create_input: CreateRecurringReminderInput = {
+            project_slug: original.project_slug,
+            topic_id: original.topic_id,
+            fire_at: original.fire_at,
+            message: input.message,
+            recurrence_spec: original.recurrence_spec,
+            // Preserve the ORIGINAL row's source on the replacement —
+            // same rationale as snooze's r3 follow-up.
+            source: original.source,
+          }
+          replacement = await txStore.createRecurring(create_input)
+        } else if (original.recurrence !== null) {
           const create_input: CreateRecurringReminderInput = {
             project_slug: original.project_slug,
             topic_id: original.topic_id,

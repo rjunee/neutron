@@ -1069,7 +1069,7 @@ CREATE TABLE reminders (
     created_at REAL NOT NULL,
     fired_at REAL,                                       -- nullable until fired
     cancelled_at REAL                                    -- nullable until cancelled
-, recurrence TEXT, source TEXT)
+, recurrence TEXT, source TEXT, recurrence_spec TEXT)
 
 [table] remote_shared_projects (tbl=remote_shared_projects)
 CREATE TABLE remote_shared_projects (

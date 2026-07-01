@@ -14,7 +14,9 @@
  * is skipped (logged). This matches Nova's reminder-tick behavior.
  */
 
-import type { Reminder, ReminderRecurrence, ReminderStore } from './store.ts'
+import { hostTimeZone, nextCronFire, parseCron } from '@neutronai/cron'
+
+import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
 
 export interface ReminderDispatcher {
   /**
@@ -53,6 +55,13 @@ export interface ReminderTickOptions {
   /** Injectable clock for tests. Default Date.now. */
   now?: () => number
   /**
+   * IANA timezone for cron-cadence wall-clock resolution ("09:00" means 09:00
+   * in this zone, DST-correct). Defaults to the host zone — matching the intent
+   * that a user's `0 9 * * *` fires at 9am their local time. Coarse-label
+   * cadences are timezone-agnostic fixed deltas and ignore this.
+   */
+  time_zone?: string
+  /**
    * P5.6 — optional post-dispatch hook fired AFTER markFired /
    * advanceRecurrence. Production wires this to the push dispatcher
    * so an Expo notification fans out at the same instant the
@@ -68,6 +77,7 @@ export class ReminderTickLoop {
   private readonly interval_ms: number
   private readonly per_tick_limit: number
   private readonly now: () => number
+  private readonly time_zone: string
   private readonly on_fired: ReminderFiredHook | null
   private timer: ReturnType<typeof setInterval> | null = null
   private running = false
@@ -80,6 +90,7 @@ export class ReminderTickLoop {
     this.interval_ms = options.tick_interval_ms ?? 30_000
     this.per_tick_limit = options.per_tick_limit ?? 50
     this.now = options.now ?? Date.now
+    this.time_zone = options.time_zone ?? hostTimeZone()
     this.on_fired = options.on_fired ?? null
   }
 
@@ -131,12 +142,15 @@ export class ReminderTickLoop {
         // deliver-or-retry contract. Only a true crash (no catch runs) takes
         // the at-most-once path, which is the whole point.
         let claimRevert: (() => Promise<unknown>) | null = null
-        if (reminder.recurrence !== null) {
-          const next_fire_at_sec = computeNextRecurrence(
-            reminder.fire_at,
-            reminder.recurrence,
-            this.now() / 1000,
-          )
+        // A row recurs when EITHER cadence column is set (coarse label OR cron
+        // spec) — `computeNextFire` resolves the next instant from whichever
+        // one is populated. A `null` return means an uncomputable cadence (a
+        // corrupt cron that can never fire); we degrade that row to a one-shot
+        // so a poison expression can't wedge the tick loop re-throwing forever.
+        const next_fire_at_sec = isRecurring(reminder)
+          ? computeNextFire(reminder, this.now() / 1000, this.time_zone)
+          : null
+        if (next_fire_at_sec !== null) {
           const advanced = await this.store.advanceRecurrence(reminder.id, next_fire_at_sec)
           if (advanced) {
             // Revert = restore the original (due) fire_at so it re-fires — but
@@ -152,6 +166,12 @@ export class ReminderTickLoop {
             claimRevert = () => this.store.reopen(reminder.id)
           }
         } else {
+          if (isRecurring(reminder)) {
+            console.error(
+              `reminder ${reminder.id} has an uncomputable cadence ` +
+                `(recurrence_spec=${JSON.stringify(reminder.recurrence_spec)}) — firing once then retiring`,
+            )
+          }
           await this.store.markFired(reminder.id)
           claimRevert = () => this.store.reopen(reminder.id)
         }
@@ -195,10 +215,46 @@ export class ReminderTickLoop {
 }
 
 /**
- * P2 v2 S9 — compute the next occurrence's `fire_at` (unix seconds) for
- * a recurring reminder. Anchors on the LATER of (previous fire_at +
- * cadence) and (now + small slack) so a long-stopped tick loop doesn't
- * fire a stale recurring row repeatedly to catch up.
+ * Compute the next fire time (unix seconds) for a recurring reminder — the
+ * SINGLE next-fire resolution path the tick loop uses for BOTH cadence kinds:
+ *
+ *   • cron `recurrence_spec` → the next wall-clock instant STRICTLY after now,
+ *     DST-correct in `time_zone` (delegates to `@neutronai/cron`). Cron is
+ *     wall-clock-anchored ("next 9am after now"), so it keys off `now`, not the
+ *     row's `fire_at`. Returns `null` if the stored expression can't be parsed
+ *     or has no occurrence (a corrupt/impossible cron) so the caller can retire
+ *     the poison row instead of the tick loop throwing every interval.
+ *
+ *   • coarse `recurrence` label → the previous `fire_at` plus a fixed delta
+ *     (weekly 7d / monthly 30d / occasional 14d), floored at `now + 1m` so a
+ *     long-stopped loop doesn't fire a stale row repeatedly to catch up. This
+ *     is the P2 v2 S9 behaviour, unchanged.
+ *
+ * Returns `null` only for the uncomputable-cron case; the coarse path always
+ * returns a number. A one-shot row (neither column set) never reaches here.
+ */
+export function computeNextFire(
+  reminder: Pick<Reminder, 'fire_at' | 'recurrence' | 'recurrence_spec'>,
+  now_sec: number,
+  time_zone: string,
+): number | null {
+  if (reminder.recurrence_spec !== null) {
+    try {
+      const next_ms = nextCronFire(parseCron(reminder.recurrence_spec), now_sec * 1000, time_zone)
+      return next_ms / 1000
+    } catch {
+      return null
+    }
+  }
+  // recurrence_spec is null and the caller only invokes this for recurring
+  // rows, so recurrence is non-null here.
+  return computeNextRecurrence(reminder.fire_at, reminder.recurrence as ReminderRecurrence, now_sec)
+}
+
+/**
+ * P2 v2 S9 — the coarse-label fixed-delta rescheduler. Anchors on the LATER of
+ * (previous fire_at + cadence) and (now + small slack) so a long-stopped tick
+ * loop doesn't fire a stale recurring row repeatedly to catch up.
  *
  * Cadence durations:
  *   weekly      → 7 days

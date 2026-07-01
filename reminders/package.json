@@ -4,6 +4,7 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
+    "@neutronai/cron": "workspace:*",
     "@neutronai/persistence": "workspace:*"
   }
 }
