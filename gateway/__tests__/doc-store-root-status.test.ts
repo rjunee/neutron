@@ -184,6 +184,24 @@ describe('DocStore — project-root STATUS.md surfacing (P-B)', () => {
     expect(hookPaths).toContain('note.md')
   })
 
+  it('an escaping-symlink docs/STATUS.md does NOT mask the real root STATUS.md', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    // docs/STATUS.md is a symlink escaping the docs root (walker filters it out).
+    const outside = join(home, 'secret.md')
+    writeFileSync(outside, 'OUT OF DOCS\n')
+    symlinkSync(outside, join(projectRoot, 'docs', 'STATUS.md'))
+    // …but a legitimate project-root STATUS.md exists.
+    writeFileSync(join(projectRoot, 'STATUS.md'), 'REAL ROOT STATUS\n')
+    const store = new DocStore({ owner_home: home })
+
+    // The bad docs/ entry doesn't mask the root file: it's surfaced + first…
+    const tree = await store.tree(PROJECT)
+    expect(tree[0]?.path).toBe('STATUS.md')
+    // …and reads resolve to the safe project-root file, not the escaping symlink.
+    expect((await store.readDoc(PROJECT, 'STATUS.md')).content).toBe('REAL ROOT STATUS\n')
+  })
+
   it('prefers a real docs/STATUS.md over the project-root copy (no ambiguity)', async () => {
     const home = makeHome()
     const projectRoot = join(home, 'Projects', PROJECT)

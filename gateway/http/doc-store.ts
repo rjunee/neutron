@@ -40,7 +40,7 @@
  * concurrency without needing a CRDT.
  */
 
-import { existsSync, lstatSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
 import {
   lstat,
   mkdir,
@@ -131,6 +131,28 @@ function isRootSurfacedDoc(cleanedRelPath: string): boolean {
 function isRealFileSync(abs: string): boolean {
   try {
     return lstatSync(abs).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True iff `<docsRoot>/<name>` exists AND is a regular file whose realpath is
+ * CONTAINED under `docsRoot` — i.e. a docs file the tree walker would actually
+ * surface. A broken/absent path, a non-file, or an ESCAPING symlink (realpath
+ * outside docsRoot, which the walker filters out) all return false, so such an
+ * entry never masks the safe project-root surfaced copy. Used to gate the
+ * "docs/ copy wins" decision for a root-surfaced doc.
+ */
+function docsHasContainedFile(docsRoot: string, name: string): boolean {
+  const p = join(docsRoot, name)
+  try {
+    // Realpath BOTH sides so an intermediate symlink on the root itself (e.g.
+    // macOS /var → /private/var under tmpdir) doesn't break the string compare.
+    const realRoot = realpathSync(docsRoot)
+    const real = realpathSync(p)
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) return false
+    return statSync(p).isFile()
   } catch {
     return false
   }
@@ -457,8 +479,11 @@ export class DocStore {
     const projectRoot = dirname(docsRoot)
     const extra: DocTreeNode[] = []
     for (const name of ROOT_SURFACED_DOCS) {
+      // A valid contained docs/ copy is already in `tree` (surfaced by the
+      // walker) → skip. An escaping-symlink docs/STATUS.md the walker filtered
+      // out is NOT in the tree, so we still surface the safe project-root copy
+      // rather than let the bad entry mask it (Codex).
       if (tree.some((n) => n.path === name)) continue
-      if (existsSync(join(docsRoot, name))) continue
       const abs = join(projectRoot, name)
       let st
       try {
@@ -501,7 +526,10 @@ export class DocStore {
   private baseDirForDoc(docsRoot: string, cleanedRelPath: string): string {
     if (
       isRootSurfacedDoc(cleanedRelPath) &&
-      !existsSync(join(docsRoot, cleanedRelPath)) &&
+      // A valid CONTAINED docs/ copy wins; an escaping-symlink / non-file
+      // docs/STATUS.md must NOT mask the safe project-root copy (raw existsSync
+      // would — Codex regression). Redirect to root when there's no such copy.
+      !docsHasContainedFile(docsRoot, cleanedRelPath) &&
       // Regular file only — a SYMLINK at the project root is NOT routed to (it
       // could point at another in-project file), matching the tree-surfacing
       // gate. Such a path falls back to docs-root resolution.
