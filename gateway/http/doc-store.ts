@@ -563,6 +563,10 @@ export class DocStore {
     const cleanedWritePath = validateRelativePath(input.path, { requireMd: true })
     const writeBase = this.baseDirForDoc(root, cleanedWritePath)
     const abs = await assertContainedFileForWrite(writeBase, input.path)
+    // A surfaced project-root doc (STATUS.md) lives outside the docs/ git
+    // worktree + binary graph, so skip the version commit + binary-link sync
+    // below (they'd `git add` a path not in the worktree — no usable history).
+    const writeRootSurfaced = writeBase !== root
     // Record whether this is a create or overwrite BEFORE the rename so
     // the version store's commit message (`create:` vs `edit:` / `revert:`)
     // reflects the user's intent. The check is purely advisory — the
@@ -632,19 +636,21 @@ export class DocStore {
     // and the next successful write picks up the staged changes.
     // Callers can opt in to a revert-shaped commit by passing
     // `input.revert_target_sha`.
-    await this.recordCommit(input.project_id, {
-      op: input.revert_target_sha !== undefined ? 'revert' : was_create ? 'create' : 'edit',
-      path: input.path,
-      ...(input.revert_target_sha !== undefined
-        ? { target_sha: input.revert_target_sha }
-        : {}),
-    } as CommitKind)
+    if (!writeRootSurfaced) {
+      await this.recordCommit(input.project_id, {
+        op: input.revert_target_sha !== undefined ? 'revert' : was_create ? 'create' : 'edit',
+        path: input.path,
+        ...(input.revert_target_sha !== undefined
+          ? { target_sha: input.revert_target_sha }
+          : {}),
+      } as CommitKind)
+    }
     // P7.5 — recompute the binary refcount table for this markdown
     // file. Best-effort; the markdown write has already landed atomically
     // so a binary-store hiccup must not roll it back. Round-2 IMPORTANT
     // #4 — wire the store's structured-event logger in so refcount drift
     // is observable in ops dashboards instead of vanishing silently.
-    if (this.binaryStore !== null) {
+    if (this.binaryStore !== null && !writeRootSurfaced) {
       try {
         this.binaryStore.syncMarkdownLinks(
           input.project_id,
@@ -682,7 +688,10 @@ export class DocStore {
     opts: { expected_modified_at?: number } = {},
   ): Promise<void> {
     const root = this.assertProjectId(project_id)
-    const abs = await assertContainedFile(root, relPath)
+    const cleaned = validateRelativePath(relPath, { requireMd: true })
+    const base = this.baseDirForDoc(root, cleaned)
+    const rootSurfaced = base !== root
+    const abs = await assertContainedFile(base, cleaned)
     // Codex r2 IMPORTANT #2 — optimistic-concurrency check. Without
     // this, the `/docs/revert` delete branch silently clobbered any
     // concurrent edit that landed between the user opening the history
@@ -730,12 +739,16 @@ export class DocStore {
     // after our unlink will fstat a mtime > delete_time (same wall
     // clock on a sane host), and the writer's event wins.
     const delete_time = Date.now()
-    await this.recordCommit(project_id, { op: 'delete', path: relPath })
+    // Skip version/binary side-effects for a surfaced project-root doc — it
+    // lives outside the docs/ git worktree + binary graph.
+    if (!rootSurfaced) {
+      await this.recordCommit(project_id, { op: 'delete', path: relPath })
+    }
     // P7.5 — drop the markdown_link rows for this file so the linked
     // binaries' refcounts reflect the deletion. Round-2 IMPORTANT #4 —
     // log instead of silently swallowing so silent refcount drift can't
     // hide a stuck blob from GC visibility.
-    if (this.binaryStore !== null) {
+    if (this.binaryStore !== null && !rootSurfaced) {
       try {
         this.binaryStore.dropMarkdownLinks(project_id, relPath)
       } catch (err) {
@@ -767,8 +780,15 @@ export class DocStore {
     to: string,
   ): Promise<WriteFileResult> {
     const root = this.assertProjectId(project_id)
-    const absFrom = await assertContainedFile(root, from)
-    const absTo = await assertContainedFileForWrite(root, to)
+    const cleanedFrom = validateRelativePath(from, { requireMd: true })
+    const cleanedTo = validateRelativePath(to, { requireMd: true })
+    const baseFrom = this.baseDirForDoc(root, cleanedFrom)
+    const baseTo = this.baseDirForDoc(root, cleanedTo)
+    // A move touching the surfaced project-root doc crosses the docs/ worktree
+    // boundary, so skip the version commit + binary-link rename below.
+    const moveRootSurfaced = baseFrom !== root || baseTo !== root
+    const absFrom = await assertContainedFile(baseFrom, from)
+    const absTo = await assertContainedFileForWrite(baseTo, to)
     // Guard against destination already existing — refuse to clobber
     // an unrelated file via a rename. Caller can DELETE the target
     // first if they really mean overwrite.
@@ -789,11 +809,13 @@ export class DocStore {
       throw err
     }
     const st = await stat(absTo)
-    await this.recordCommit(project_id, { op: 'rename', from, to })
+    if (!moveRootSurfaced) {
+      await this.recordCommit(project_id, { op: 'rename', from, to })
+    }
     // P7.5 — keep the markdown_link table aligned with the new path so
     // refcount-by-markdown-link stays correct after a rename. Round-2
     // IMPORTANT #4 — log on failure rather than swallowing silently.
-    if (this.binaryStore !== null) {
+    if (this.binaryStore !== null && !moveRootSurfaced) {
       try {
         this.binaryStore.renameMarkdownLinks(project_id, from, to)
       } catch (err) {

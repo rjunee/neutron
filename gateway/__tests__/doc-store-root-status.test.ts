@@ -104,6 +104,31 @@ describe('DocStore — project-root STATUS.md surfacing (P-B)', () => {
     expect((await store.readDoc(PROJECT, 'STATUS.md')).content).toBe('new state\n')
   })
 
+  it('deleteDoc("STATUS.md") removes the real project-root file (no 404)', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    writeFileSync(join(projectRoot, 'STATUS.md'), 'state\n')
+    const store = new DocStore({ owner_home: home })
+
+    await store.deleteDoc(PROJECT, 'STATUS.md')
+    expect(() => readFileSync(join(projectRoot, 'STATUS.md'), 'utf8')).toThrow()
+    // Gone from the tree too.
+    expect((await store.tree(PROJECT)).some((n) => n.path === 'STATUS.md')).toBe(false)
+  })
+
+  it('moveDoc("STATUS.md" → docs/renamed.md) relocates the real root file', async () => {
+    const home = makeHome()
+    const projectRoot = join(home, 'Projects', PROJECT)
+    writeFileSync(join(projectRoot, 'STATUS.md'), 'state\n')
+    const store = new DocStore({ owner_home: home })
+
+    await store.moveDoc(PROJECT, 'STATUS.md', 'renamed.md')
+    // The root file moved INTO docs/ under the new name…
+    expect(readFileSync(join(projectRoot, 'docs', 'renamed.md'), 'utf8')).toBe('state\n')
+    // …and no longer exists at the project root.
+    expect(() => readFileSync(join(projectRoot, 'STATUS.md'), 'utf8')).toThrow()
+  })
+
   it('prefers a real docs/STATUS.md over the project-root copy (no ambiguity)', async () => {
     const home = makeHome()
     const projectRoot = join(home, 'Projects', PROJECT)
