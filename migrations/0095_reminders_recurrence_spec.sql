@@ -1,0 +1,35 @@
+-- 0095_reminders_recurrence_spec.sql
+--
+-- Reminder cron-cadence parity — add an optional `recurrence_spec` column to
+-- `reminders` so a reminder can recur on a FAITHFUL 5-field cron cadence
+-- (`0 9 * * *`, `0 */6 * * *`, `0 9 7 2 *`, `0 14 1 1,4,7,10 *`, …) in addition
+-- to the coarse `recurrence` labels (`weekly` / `monthly` / `occasional`,
+-- migration 0028).
+--
+-- The two cadence columns are MUTUALLY EXCLUSIVE per row and resolve through a
+-- SINGLE next-fire path in the tick loop (`reminders/tick.ts` computeNextFire):
+--   * `recurrence`      set → fixed-delta rescheduling (unchanged, 0028).
+--   * `recurrence_spec` set → DST-correct wall-clock rescheduling via the
+--                             standard-cron evaluator in `@neutronai/cron`.
+--   * both NULL             → one-shot (fires once).
+-- The store's `createRecurring` enforces the exactly-one invariant at write
+-- time; this column is the persistent half.
+--
+-- The column is nullable; existing rows + every one-shot / coarse-recurring
+-- write leave it NULL, so behaviour is unchanged for all current data (no
+-- backfill needed). Forward-only. No CHECK constraint — the write-side
+-- `isValidCron` gate (cron/cron-standard.ts) is the authoritative validator and
+-- future cron grammar extensions must not require another table rebuild; the
+-- column stays an opaque TEXT to SQLite.
+--
+-- SNAPSHOT REGEN REQUIRED: this ADD COLUMN changes the `reminders` table shape,
+-- so `migrations/expected-schema.txt` MUST be regenerated
+-- (`bun run migrations/regen-snapshot.ts`) and committed alongside this file or
+-- `migrations/snapshot.test.ts` will fail with schema drift.
+--
+-- Verification (post-migration, per-project DB):
+--   table_info(reminders) shows recurrence_spec TEXT (nullable, no default).
+--   SELECT recurrence, recurrence_spec, COUNT(*) FROM reminders GROUP BY 1, 2;
+--     -- every existing row has recurrence_spec NULL.
+
+ALTER TABLE reminders ADD COLUMN recurrence_spec TEXT;

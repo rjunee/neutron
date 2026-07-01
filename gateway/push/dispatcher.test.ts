@@ -86,6 +86,7 @@ function makeReminder(overrides: Partial<Reminder> = {}): Reminder {
     message: 'walk the dog',
     status: 'fired',
     recurrence: null,
+    recurrence_spec: null,
     source: null,
     created_at: 1699999000,
     fired_at: 1700000005,

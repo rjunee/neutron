@@ -16,6 +16,7 @@
   "dependencies": {
     "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/cron": "workspace:*",
     "@neutronai/reminders": "workspace:*",
     "@neutronai/tasks": "workspace:*"
   },
@@ -28,14 +29,15 @@
     "tools": [
       {
         "name": "reminders_create",
-        "description": "Schedule a reminder. One-shot by default; pass `recurrence` to make it repeat. Returns the new reminder's id and the persisted fire_at (unix seconds).",
+        "description": "Schedule a reminder. One-shot by default; pass `recurrence` (coarse label) OR `recurrence_spec` (exact cron cadence) to make it repeat. Returns the new reminder's id and the persisted fire_at (unix seconds).",
         "input_schema": {
           "type": "object",
           "properties": {
             "message":    { "type": "string", "description": "Reminder body — composed verbatim or wrapped by the fire-time agent." },
             "fire_at":    { "type": "number", "description": "Unix seconds (UTC) when the reminder should fire (the FIRST occurrence when recurring)." },
             "project_id": { "type": "string", "description": "Optional project scope; persisted as topic_id under the hood." },
-            "recurrence": { "type": "string", "enum": ["weekly", "monthly", "occasional"], "description": "Optional cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. Daily / weekday cadences are NOT supported here; use the nag-until-done reminder pattern for those instead of claiming a recurrence." }
+            "recurrence": { "type": "string", "enum": ["weekly", "monthly", "occasional"], "description": "Optional COARSE cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. For exact wall-clock cadences (daily at 9am, weekdays, annually) use `recurrence_spec` instead. Mutually exclusive with recurrence_spec." },
+            "recurrence_spec": { "type": "string", "description": "Optional FAITHFUL cron cadence — a standard 5-field cron expression (minute hour day-of-month month day-of-week). Examples: '0 9 * * *' = daily 09:00, '0 9 * * 1-5' = weekdays 09:00, '0 9 7 2 *' = annually on Feb 7, '0 */6 * * *' = every 6 hours. Wall-clock and DST-correct. Mutually exclusive with recurrence." }
           },
           "required": ["message", "fire_at"]
         },

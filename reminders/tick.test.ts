@@ -267,6 +267,76 @@ describe('ReminderTickLoop.runOnce', () => {
     expect(store.listPending('t1').map((r) => r.message)).toEqual(['weekly check-in'])
   })
 
+  test('cron reminder advances to the next wall-clock occurrence (not a fixed delta)', async () => {
+    const store = new ReminderStore(db)
+    // Fix "now" to 2026-01-15 08:00:00 UTC; a daily 09:00 UTC cron should
+    // advance to 2026-01-15 09:00:00 UTC — one hour later, NOT a coarse delta.
+    const now_ms = Date.UTC(2026, 0, 15, 8, 0, 0)
+    const now_sec = now_ms / 1000
+    const cron = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: now_sec - 10, // already due
+      message: 'daily 9am',
+      recurrence_spec: '0 9 * * *',
+    })
+    const dispatcher = recordingDispatcher()
+    const loop = new ReminderTickLoop({
+      store,
+      dispatcher,
+      now: () => now_ms,
+      time_zone: 'UTC',
+    })
+    const result = await loop.runOnce()
+    expect(result.fired).toBe(1)
+
+    const advanced = store.get(cron.id)
+    expect(advanced?.status).toBe('pending')
+    expect(advanced?.recurrence).toBeNull()
+    expect(advanced?.recurrence_spec).toBe('0 9 * * *')
+    // Next fire is today 09:00 UTC (strictly after now = 08:00).
+    expect(advanced?.fire_at).toBe(Date.UTC(2026, 0, 15, 9, 0, 0) / 1000)
+  })
+
+  test('cron reminder rolls to tomorrow when the daily time already passed today', async () => {
+    const store = new ReminderStore(db)
+    // "now" = 2026-01-15 09:30 UTC — today's 09:00 fire is past.
+    const now_ms = Date.UTC(2026, 0, 15, 9, 30, 0)
+    const cron = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: now_ms / 1000 - 10,
+      message: 'daily 9am',
+      recurrence_spec: '0 9 * * *',
+    })
+    const dispatcher = recordingDispatcher()
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_ms, time_zone: 'UTC' })
+    await loop.runOnce()
+    expect(store.get(cron.id)?.fire_at).toBe(Date.UTC(2026, 0, 16, 9, 0, 0) / 1000)
+  })
+
+  test('a corrupt cron cadence fires once then retires (does not wedge the tick loop)', async () => {
+    const store = new ReminderStore(db)
+    const now_ms = Date.UTC(2026, 0, 15, 8, 0, 0)
+    // recurrence_spec bypasses the tool-boundary validator here (store is
+    // deliberately opaque), so simulate a poison row reaching the tick loop.
+    const poison = await store.createRecurring({
+      project_slug: 't1',
+      topic_id: null,
+      fire_at: now_ms / 1000 - 10,
+      message: 'broken',
+      recurrence_spec: 'not a cron',
+    })
+    const dispatcher = recordingDispatcher()
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_ms, time_zone: 'UTC' })
+    const result = await loop.runOnce()
+    // It dispatched once…
+    expect(result.fired).toBe(1)
+    // …and retired (marked fired) rather than throwing every tick.
+    expect(store.get(poison.id)?.status).toBe('fired')
+    expect(store.listPending('t1').length).toBe(0)
+  })
+
   test('recurring next-fire floors at now+60s when the candidate is in the past (catch-up suppressed)', async () => {
     const store = new ReminderStore(db)
     const now_sec = 100_000_000

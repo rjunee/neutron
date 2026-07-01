@@ -17,6 +17,7 @@ function reminder(over: Partial<Reminder> = {}): Reminder {
     message: 'm',
     status: 'pending',
     recurrence: null,
+    recurrence_spec: null,
     source: null,
     created_at: 0,
     fired_at: null,

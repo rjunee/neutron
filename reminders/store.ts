@@ -37,8 +37,16 @@ export interface Reminder {
   fire_at: number
   message: string
   status: 'pending' | 'fired' | 'cancelled'
-  /** P2 v2 S9 — null for one-shot reminders; cadence label for recurring. */
+  /** P2 v2 S9 — null for one-shot reminders; coarse cadence label for recurring. */
   recurrence: ReminderRecurrence | null
+  /**
+   * Cron-cadence parity — a faithful 5-field cron expression (`0 9 * * *`,
+   * `0 9 7 2 *`, …) for wall-clock recurring reminders, or `null`. Mutually
+   * exclusive with `recurrence`: a row is recurring when EITHER column is set,
+   * and the tick loop resolves the next fire from whichever one is populated
+   * (coarse → fixed delta; cron → DST-correct wall-clock). Migration 0093.
+   */
+  recurrence_spec: string | null
   /**
    * Optional origin tag. NULL for organic engine writes (gateway
    * reminder agents, wow-moment actions, etc.). A Core that piggybacks
@@ -77,8 +85,19 @@ export interface CreateRecurringReminderInput {
   /** unix-seconds for the FIRST occurrence (UTC). */
   fire_at: number
   message: string
-  /** Cadence — drives the tick loop's next-occurrence rescheduler. */
-  recurrence: ReminderRecurrence
+  /**
+   * Coarse cadence label — drives the tick loop's fixed-delta rescheduler.
+   * Mutually exclusive with `recurrence_spec`; provide exactly one.
+   */
+  recurrence?: ReminderRecurrence
+  /**
+   * Faithful 5-field cron expression — drives the tick loop's DST-correct
+   * wall-clock rescheduler. Mutually exclusive with `recurrence`; provide
+   * exactly one. The store does not validate the cron grammar (callers
+   * validate at the tool boundary, as they do the coarse label); it only
+   * enforces that exactly one cadence is supplied.
+   */
+  recurrence_spec?: string
   /** Same semantics as `CreateReminderInput.source`. */
   source?: string | null
 }
@@ -91,6 +110,7 @@ interface ReminderDbRow {
   message: string
   status: 'pending' | 'fired' | 'cancelled'
   recurrence: ReminderRecurrence | null
+  recurrence_spec: string | null
   source: string | null
   created_at: number
   fired_at: number | null
@@ -98,7 +118,7 @@ interface ReminderDbRow {
 }
 
 const COLS =
-  'id, project_slug, topic_id, fire_at, message, status, recurrence, source, created_at, fired_at, cancelled_at'
+  'id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at, fired_at, cancelled_at'
 
 export class ReminderStore {
   constructor(private readonly db: ProjectDb) {}
@@ -109,8 +129,8 @@ export class ReminderStore {
     const source = input.source ?? null
     await this.db.run(
       `INSERT INTO reminders
-         (id, project_slug, topic_id, fire_at, message, status, recurrence, source, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?)`,
+         (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)`,
       [id, input.project_slug, input.topic_id, input.fire_at, input.message, source, created_at],
     )
     return {
@@ -121,6 +141,7 @@ export class ReminderStore {
       message: input.message,
       status: 'pending',
       recurrence: null,
+      recurrence_spec: null,
       source,
       created_at,
       fired_at: null,
@@ -138,20 +159,36 @@ export class ReminderStore {
    * the first occurrence themselves.
    */
   async createRecurring(input: CreateRecurringReminderInput): Promise<Reminder> {
+    const recurrence = input.recurrence ?? null
+    const recurrence_spec = input.recurrence_spec ?? null
+    // Exactly one cadence must be supplied. Both → ambiguous next-fire
+    // resolution; neither → a "recurring" row that never advances (fires once
+    // then dies), the exact bug recurrence was added to prevent.
+    if (recurrence !== null && recurrence_spec !== null) {
+      throw new Error(
+        'createRecurring: pass exactly one of recurrence (coarse label) or recurrence_spec (cron), not both',
+      )
+    }
+    if (recurrence === null && recurrence_spec === null) {
+      throw new Error(
+        'createRecurring: a recurring reminder needs a cadence — pass recurrence or recurrence_spec',
+      )
+    }
     const id = input.id ?? crypto.randomUUID()
     const created_at = Date.now() / 1000
     const source = input.source ?? null
     await this.db.run(
       `INSERT INTO reminders
-         (id, project_slug, topic_id, fire_at, message, status, recurrence, source, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+         (id, project_slug, topic_id, fire_at, message, status, recurrence, recurrence_spec, source, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       [
         id,
         input.project_slug,
         input.topic_id,
         input.fire_at,
         input.message,
-        input.recurrence,
+        recurrence,
+        recurrence_spec,
         source,
         created_at,
       ],
@@ -163,7 +200,8 @@ export class ReminderStore {
       fire_at: input.fire_at,
       message: input.message,
       status: 'pending',
-      recurrence: input.recurrence,
+      recurrence,
+      recurrence_spec,
       source,
       created_at,
       fired_at: null,
@@ -226,14 +264,15 @@ export class ReminderStore {
     if (
       before === null ||
       before.status !== 'pending' ||
-      before.recurrence === null ||
+      !isRecurring(before) ||
       before.fire_at !== claimed_fire_at
     ) {
       return false
     }
     await this.db.run(
       `UPDATE reminders SET fire_at = ?
-        WHERE id = ? AND status = 'pending' AND recurrence IS NOT NULL AND fire_at = ?`,
+        WHERE id = ? AND status = 'pending'
+          AND (recurrence IS NOT NULL OR recurrence_spec IS NOT NULL) AND fire_at = ?`,
       [original_fire_at, id, claimed_fire_at],
     )
     return true
@@ -248,18 +287,19 @@ export class ReminderStore {
    * (the v1 store had no recurrence concept; the new tick-loop branch
    * + this writer give the row its proper lifecycle).
    *
-   * Returns `true` iff the row was advanced (was `pending` AND had a
-   * non-null recurrence). Returns `false` for one-shot rows or
-   * already-fired/cancelled rows — caller should fall back to
-   * `markFired` on `false`.
+   * Returns `true` iff the row was advanced (was `pending` AND recurring —
+   * a coarse `recurrence` label OR a cron `recurrence_spec`). Returns `false`
+   * for one-shot rows or already-fired/cancelled rows — caller should fall
+   * back to `markFired` on `false`.
    */
   async advanceRecurrence(id: string, next_fire_at: number): Promise<boolean> {
     const before = this.get(id)
-    if (before === null || before.status !== 'pending' || before.recurrence === null) {
+    if (before === null || before.status !== 'pending' || !isRecurring(before)) {
       return false
     }
     await this.db.run(
-      `UPDATE reminders SET fire_at = ? WHERE id = ? AND status = 'pending' AND recurrence IS NOT NULL`,
+      `UPDATE reminders SET fire_at = ? WHERE id = ? AND status = 'pending'
+        AND (recurrence IS NOT NULL OR recurrence_spec IS NOT NULL)`,
       [next_fire_at, id],
     )
     return true
@@ -404,9 +444,21 @@ function rowToReminder(row: ReminderDbRow): Reminder {
     message: row.message,
     status: row.status,
     recurrence: row.recurrence,
+    recurrence_spec: row.recurrence_spec,
     source: row.source,
     created_at: row.created_at,
     fired_at: row.fired_at,
     cancelled_at: row.cancelled_at,
   }
+}
+
+/**
+ * A reminder recurs when EITHER cadence column is populated: a coarse
+ * `recurrence` label (fixed-delta rescheduling) OR a `recurrence_spec` cron
+ * expression (wall-clock rescheduling). One-shot rows have both `null`. This
+ * is the single "is recurring?" predicate the store's claim/advance guards key
+ * on so cron and coarse rows share one lifecycle.
+ */
+export function isRecurring(r: Pick<Reminder, 'recurrence' | 'recurrence_spec'>): boolean {
+  return r.recurrence !== null || r.recurrence_spec !== null
 }

@@ -38,3 +38,10 @@ export {
   type EmitInput,
   type EmittedUnits,
 } from './timer-emit.ts'
+export {
+  parseCron,
+  isValidCron,
+  nextCronFire,
+  nextCronFireFromExpression,
+  type CronSpec,
+} from './cron-standard.ts'
