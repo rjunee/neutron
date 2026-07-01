@@ -731,3 +731,75 @@ no-op on ≥, null, cursor-0, un-sequenced optimistic sends),
 `chat-core/__tests__/web-session.test.ts` + `app/__tests__/chat-core-mobile-session.test.ts`
 (end-to-end: stale transcript cleared + `resume after_seq=0` + fresh replay
 renders clean; normal reconnect preserves; absent `last_seen_seq` never wipes).
+
+---
+
+## Hobby projects + one-time agentic per-project kickoff (2026-07-01)
+
+**Problem.** Two gaps in what onboarding produces on a fresh install: (1) the
+interview asks about outside-work interests/hobbies but those answers materialized
+NOTHING (only work/primary projects became real projects); (2) each materialized
+project's opening was a static one-liner ("want me to X?") with no real agentic
+work — no drafted doc, no deadline offer.
+
+**PART A — hobbies materialize as projects.** Hobby answers land in
+`phase_state.non_work_interests` (`{name, cadence_hint?}`, written by the
+post-turn extractor) and `import_result.inferred_interests` (`{name, basis?}`) —
+fields `resolveProjects` in `build-onboarding-finalize.ts` never read, so hobbies
+reached persona-gen (USER/SOUL.md) but never a `projects` row / on-disk
+`Projects/<id>/` repo. Added `collectInterestProjects` as a THIRD union source
+(after import-proposed + interview-named work projects), mapping each interest to
+`CapturedProject{name, rationale?, is_interest:true}` (rationale carried from an
+import interest's `basis`). The existing `seen`/`dropped` dedup makes the superset
+safe: a work project of the same name wins the slug dedup; a curation-dropped
+hobby is excluded. The materializer is source-agnostic (identical repo + doc set
+for hobby and work); `is_interest` only steers the kickoff. Added `is_interest?`
+to `CapturedProject` (`onboarding/wow-moment/action-types.ts`).
+
+**PART B — one-time agentic kickoff.** `emitProjectOpenings` now first asks a
+`ProjectKickoff` (`gateway/realmode-composer/build-project-kickoff.ts`) for a
+richer opening, behind a HARD data-sufficiency gate ("better nothing than a bad
+job"). Best-fit action per project:
+- `draft-doc` (rich work): compose a real starting plan via the new
+  `build-project-kickoff-composer.ts` (same CC-substrate discipline as
+  `build-project-doc-composer.ts` — `getBestModel`, AbortController budget,
+  throw-on-empty), write it create-if-missing under `Projects/<id>/docs/starting-plan.md`,
+  present a tappable `[Starting plan](docs:/<id>/starting-plan.md)` marker, and
+  re-index the project page to GBrain recall via `buildProjectPageIndexer`.
+- `deadline-offer` (work with a real upcoming `import_result.proposed_tasks`
+  deadline related to the project by name/topic, within a 60-day window): name the
+  deadline(s) and OFFER a reminder — never auto-created; the live agent's
+  `reminders_create` handles an accept.
+- `interest-research` (rich hobby): light starting-notes doc, same write+link+index.
+- `interest-questions` (thin hobby): deterministic engaging questions (a hobby's
+  meaty opening, never a bad artifact).
+- `null` (thin work): fall back to the deterministic `buildDeterministicProjectOpening`.
+
+**One-time, no recurring machinery.** The kickoff runs inside finalize's single
+per-project opening pass and emits under the SAME `onboarding_opening:<project_id>`
+durable dedupe key as the deterministic opening, so it fills the ONE opening slot
+and the on-connect recovery (`open/composer.ts:ensureProjectOpeningOnEntry`)
+collapses onto it — no double-post. NO cadence / cooldown / on-enter refresh /
+setting. Any doc-compose failure degrades to `null` (work) or engaging questions
+(hobby), never a half-baked doc. The full wow `ActionRunner`/dispatcher is NOT
+reused (it is a batch button-prompt path with a channel adapter + cron the
+one-time plain-emit finalize has no surface for); the kickoff reuses its
+trigger/gate CONTRACT plus `ProjectDocComposer`, `runtime/doc-links.ts`, and the
+project-page indexer. `MaterializedProject` now threads `is_interest` + the
+materializer's `MaterializeOutcome` (previously discarded) so the gate can read
+`slice_chunk_count`/`summary_written`.
+
+**Wiring.** `open/composer.ts` builds `projectKickoff` from the onboarding
+Anthropic client (kickoff composer) + `buildProjectPageIndexer` (GBrain syncHook)
+and passes it into `buildOnboardingFinalize` (optional dep; omitted on the LLM-less
+path).
+
+**Tests.** `gateway/realmode-composer/__tests__/build-project-kickoff.test.ts`
+(gate picks meaty-vs-prompt; draft-doc writes + presents a valid `docs:/` marker +
+indexes; create-if-missing never clobbers; deadline offer names only related
+upcoming deadlines and is offer-only; overdue/far-future excluded; thin hobby →
+questions; rich hobby → research doc; compose failure degrades correctly).
+`build-onboarding-finalize.test.ts` (hobby materialization from
+`non_work_interests` + `inferred_interests`; hobby/work same-name dedup; dropped
+hobby excluded; kickoff body emitted under the single opening dedupe slot with the
+deterministic fallback for declined projects).

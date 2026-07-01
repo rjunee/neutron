@@ -46,6 +46,9 @@ import {
 import { buildLiveAgentTurn } from '../gateway/realmode-composer/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '../gateway/realmode-composer/build-live-agent-turn.ts'
 import { buildProjectDocComposer } from '../gateway/realmode-composer/build-project-doc-composer.ts'
+import { buildProjectKickoffComposer } from '../gateway/realmode-composer/build-project-kickoff-composer.ts'
+import { buildProjectKickoff } from '../gateway/realmode-composer/build-project-kickoff.ts'
+import { buildProjectPageIndexer } from '../gateway/realmode-composer/build-project-page-indexer.ts'
 import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
 import {
   buildProjectDocReader,
@@ -2037,6 +2040,27 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildProjectDocComposer({ client: onboardingAnthropicClient })
         : null
+    // AGENTIC KICKOFF (2026-07-01) — the one-time per-project kickoff finalize
+    // runs at onboarding completion. It drafts a real starting doc (via the
+    // same CC-substrate composer path as projectDocComposer), offers deadline
+    // reminders, or asks a hobby engaging questions when a project carries enough
+    // signal; otherwise it returns null and finalize emits the deterministic
+    // opening. The written doc is indexed to GBrain recall via the SAME
+    // project-page indexer the materializer uses. Null LLM path → no kickoff
+    // (onboarding can't run LLM-less anyway).
+    const projectKickoff =
+      onboardingAnthropicClient !== null
+        ? buildProjectKickoff({
+            owner_home,
+            project_slug,
+            composer: buildProjectKickoffComposer({ client: onboardingAnthropicClient }),
+            indexer: buildProjectPageIndexer({
+              ownerDataDir: owner_home,
+              project_slug,
+              ...(gbrainSyncHook !== undefined ? { syncHook: gbrainSyncHook } : {}),
+            }),
+          })
+        : null
 
     // ── Create-project capability (project-rail "Create Project" button) ──────
     // ONE owner-scoped create path, shared by the HTTP surface
@@ -2127,6 +2151,7 @@ export function buildOpenGraphComposer(
             stateStore: onboardingStateStore,
             personaLoader,
             ...(projectDocComposer !== null ? { projectDocComposer } : {}),
+            ...(projectKickoff !== null ? { projectKickoff } : {}),
             gbrainSyncHook,
             emitProjectsChanged: (user_id: string): void => emitProjectsChangedIfChanged(user_id),
             emitChatMessage: (input): Promise<void> =>
