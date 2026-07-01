@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
 import { SecretsStore } from '../../../auth/secrets-store.ts'
+import { ProjectCredentialStore } from '../../../project-credentials/store.ts'
 import { ToolRegistry } from '../../../tools/registry.ts'
 import { installBundledCores } from '../install-bundled.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
@@ -32,6 +33,7 @@ function makeBench(env: NodeJS.ProcessEnv = {}): {
   db: ProjectDb
   owner_home: string
   secretsStore: SecretsStore
+  projectCredentialStore: ProjectCredentialStore
   env: NodeJS.ProcessEnv
 } {
   const owner_home = mkdtempSync(join(tmpdir(), 'mount-open-cores-'))
@@ -43,16 +45,18 @@ function makeBench(env: NodeJS.ProcessEnv = {}): {
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secretsStore = new SecretsStore({ data_dir: owner_home, db })
-  return { db, owner_home, secretsStore, env }
+  const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
+  return { db, owner_home, secretsStore, projectCredentialStore, env }
 }
 
 test('composes the bundled free-Core backend factory map (Calendar/Email/Google + siblings)', async () => {
-  const { db, owner_home, secretsStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
+    projectCredentialStore,
     env,
     substrate: null,
   })
@@ -76,13 +80,14 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
   const { SETTINGS_BACKEND_UNAVAILABLE_ERROR } = await import(
     '../../../cores/free/agent-settings/index.ts'
   )
-  const { db, owner_home, secretsStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
   const reloads: string[] = []
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
+    projectCredentialStore,
     env,
     substrate: null,
     onPersonaReload: (filename) => reloads.push(filename),
@@ -118,12 +123,13 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
 })
 
 test('chains the free-Core chat-command filters — /cal and /email are ROUTED', async () => {
-  const { db, owner_home, secretsStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
+    projectCredentialStore,
     env,
     substrate: null,
   })
@@ -158,12 +164,13 @@ test('chains the free-Core chat-command filters — /cal and /email are ROUTED',
 })
 
 test('optional-until-credentialed: zero creds → in-memory clients, composes, never throws', async () => {
-  const { db, owner_home, secretsStore, env } = makeBench() // env has no Google client id
+  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench() // env has no Google client id
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
+    projectCredentialStore,
     env,
     substrate: null,
   })
@@ -190,6 +197,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
     owner_home: a.owner_home,
     project_slug: OWNER,
     secretsStore: a.secretsStore,
+    projectCredentialStore: a.projectCredentialStore,
     env: a.env,
     substrate: null,
   })
@@ -222,6 +230,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
     owner_home: b.owner_home,
     project_slug: OWNER,
     secretsStore: b.secretsStore,
+    projectCredentialStore: b.projectCredentialStore,
     env: b.env,
     substrate: null,
   })
@@ -240,7 +249,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
 })
 
 test('with Google OAuth client configured → oauthConfigured flips true (live-cred path)', async () => {
-  const { db, owner_home, secretsStore } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore } = makeBench()
   const env: NodeJS.ProcessEnv = {
     [GOOGLE_CLIENT_ID_ENV]: 'test-client-id.apps.googleusercontent.com',
     NEUTRON_CORES_GOOGLE_CLIENT_SECRET: 'test-secret',
@@ -250,6 +259,7 @@ test('with Google OAuth client configured → oauthConfigured flips true (live-c
     owner_home,
     project_slug: OWNER,
     secretsStore,
+    projectCredentialStore,
     env,
     substrate: null,
   })

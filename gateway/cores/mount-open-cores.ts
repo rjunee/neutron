@@ -49,6 +49,8 @@ import { SecretsStorePrompter } from './install-bundled.ts'
 import { buildOpenAgentProfileBackend } from '../../open/agent-profile-backend.ts'
 import type { ChatCommandFilter } from '../http/app-ws-surface.ts'
 import { OAuthTokenManager } from './oauth-token-manager.ts'
+import { CoreCredentialResolver } from './core-credential-resolver.ts'
+import type { ProjectCredentialStore } from '../../project-credentials/store.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import type { Substrate, AgentSpec } from '../../runtime/substrate.ts'
@@ -89,6 +91,15 @@ export interface MountOpenCoresInput {
   /** Per-instance encrypted secrets store (OAuth tokens). Built once by the
    *  composer (`new SecretsStore({ data_dir: owner_home, db })`). */
   secretsStore: SecretsStore
+  /**
+   * D2 (2026-07-01) — the canonical per-project credential store (the SAME
+   * instance the Settings CRUD surface mounts). The Cores' credential accessors
+   * resolve through it (`resolveCredential(activeProjectId, service)`:
+   * per-project → global → unset), so a project can carry its own Drive / static
+   * service token distinct from the instance default while Email/Calendar stay
+   * global. Required — the resolver is THE path (no flag, no legacy dual path).
+   */
+  projectCredentialStore: ProjectCredentialStore
   /** Process env (Google OAuth client config). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
   /**
@@ -192,13 +203,31 @@ export async function mountOpenCores(
       : null
   const emailOAuthTokens = oauthConfigured ? oauthTokens : undefined
 
+  // ── D2 credential resolver (2026-07-01) ────────────────────────────────────
+  // The one seam every Google-backed Core resolves its credential through:
+  // per-project → global → OAuthTokenManager (legacy global) → unset. Email +
+  // Calendar are forced to GLOBAL scope by SERVICE_SCOPE (no per-project
+  // re-consent), a project's own Drive (`google_workspace`) + static service
+  // tokens resolve per-project → global. Reads the ACTIVE project from the
+  // ambient `runWithActiveProject` frame the chat-command path binds; on the
+  // General topic / MCP-tool path the frame is absent → global scope (= today's
+  // per-instance behavior, no regression). `oauthTokens` is always constructed;
+  // it's the resolver's global fallback (used only when live per the gate below).
+  const credentialResolver = new CoreCredentialResolver({
+    owner_slug: input.project_slug,
+    store: input.projectCredentialStore,
+    oauthTokens,
+  })
+
   // ── Shared per-Core backends (one instance → MCP tools AND chat filter) ─────
   // Calendar: ONE client powers the `calendar_core` MCP tools (via the pre-built
   // `calendarClient` seam) AND the `/cal` filter (+ the brief scheduler elsewhere).
   const calendarClient: CalendarClient =
     googleOAuthAccessToken !== null
       ? buildGoogleCalendarClient({
-          accessToken: () => googleOAuthAccessToken(CALENDAR_OAUTH_LABEL),
+          // D2: route through the resolver (GLOBAL scope for Calendar — the
+          // active project is ignored, so effective behavior is unchanged).
+          accessToken: credentialResolver.accessorFor(CALENDAR_OAUTH_LABEL),
         })
       : buildInMemoryCalendarClient()
   const calendarCache = buildCalendarCacheResolver(input.owner_home)
@@ -209,13 +238,9 @@ export async function mountOpenCores(
   const gmailClient: GmailClient =
     emailOAuthTokens !== undefined
       ? buildGoogleGmailClient({
-          accessToken: async () => {
-            try {
-              return await emailOAuthTokens.getAccessToken(EMAIL_OAUTH_LABEL)
-            } catch {
-              return null
-            }
-          },
+          // D2: route through the resolver (GLOBAL scope for Email — the active
+          // project is ignored, so effective behavior is unchanged).
+          accessToken: credentialResolver.accessorFor(EMAIL_OAUTH_LABEL),
         })
       : buildInMemoryGmailClient()
   const emailResolver = new EmailProjectCacheResolver({ owner_home: input.owner_home })
@@ -270,6 +295,9 @@ export async function mountOpenCores(
     // per-call, aligned with the per-call `emailLlm` dispatch after a flip.
     emailModel: getBestModel,
     googleOAuthAccessToken,
+    // D2: the MCP-tool backend factories resolve their Google credential through
+    // the SAME resolver as the chat-filter clients (per-project → global → unset).
+    credentialResolver,
     calendarClient,
     researchProjectBackend: researchWiring.project_backend,
     // Settings Core (M1) — thread the Open-appropriate agent-profile writer so

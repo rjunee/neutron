@@ -969,6 +969,14 @@ export function buildOpenGraphComposer(
     // gracefully when LLM-less. Built unconditionally — Cores compose with zero
     // creds; only the LLM-backed sub-paths gate on `llmPool`.
     const secretsStore = new SecretsStore({ data_dir: owner_home, db })
+    // Per-project credential store (Settings tab + D2 Cores resolver) — ONE
+    // canonical instance shared by the CRUD surface (createProjectCredentialsSurface
+    // below), the per-project→global→unset resolver the Cores resolve their
+    // credential through (mountOpenCores), and the per-turn "available services"
+    // awareness injection. Reuses the SecretsStore AES-256-GCM crypto (shared
+    // `.neutron-aes-key` keyfile). Constructed HERE (before mountOpenCores) so the
+    // Cores' credential accessors can bind to it.
+    const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     const coresWiring = await mountOpenCores({
@@ -976,6 +984,7 @@ export function buildOpenGraphComposer(
       owner_home,
       project_slug,
       secretsStore,
+      projectCredentialStore,
       env,
       substrate: coresSubstrate,
       // Settings Core (M1) — when `update_agent_name` / `update_personality`
@@ -2039,13 +2048,9 @@ export function buildOpenGraphComposer(
     // store could exist) to the canonical store now that it's constructed.
     dispatchBoardHolder.store = workBoardStore
 
-    // Per-project credential store (Settings tab, FOUNDATION) — ONE canonical
-    // store shared by the CRUD surface (createProjectCredentialsSurface below),
-    // the per-project→global→unset resolver the Cores consult, and the per-turn
-    // "available services in this project" awareness injection. Reuses the
-    // SecretsStore AES-256-GCM crypto (shared `.neutron-aes-key` keyfile) so
-    // tokens are encrypted at rest with the same envelope as `secrets`.
-    const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
+    // Per-project credential store: the ONE canonical instance is constructed
+    // above (before mountOpenCores) so the Cores' credential resolver + this
+    // CRUD surface + the awareness injection all share it. Mount the CRUD surface.
     const projectCredentialsSurface = createProjectCredentialsSurface({
       store: projectCredentialStore,
       auth: appOwnerAuth,

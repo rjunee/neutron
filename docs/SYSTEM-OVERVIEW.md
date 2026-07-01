@@ -43,6 +43,46 @@ share one backend instance. Examples:
   composer chains it into `buildChainedChatCommandFilter([...])` alongside
   `/remind` and `/code`.
 
+### Per-project credential resolution (D2)
+
+Every Core resolves its credential through ONE seam — the
+`CoreCredentialResolver` (`gateway/cores/core-credential-resolver.ts`) — keyed by
+`(active project, service)`, with the `project_credentials` store (PR #149) as
+THE path and the per-instance `OAuthTokenManager` as the legacy global fallback.
+There is no flag and no dual path: "global" is a scope *within* the resolver, not
+a separate code route.
+
+Resolution order per call: (1) `ProjectCredentialStore.resolve(owner_slug,
+project_id, service)` — per-project → global; (2) `OAuthTokenManager
+.getAccessToken(label)` for the three Google labels (transparent refresh) as the
+instance-wide default; (3) `null` (uncredentialed → the Core's graceful empty
+state).
+
+**D2 per-credential granularity** (a `SERVICE_SCOPE` policy, not a flag):
+- **Email + Calendar** (`gmail_compose` / `google_calendar`) stay **GLOBAL** —
+  routed through the resolver for uniform plumbing, but the active project id is
+  *ignored* (scope forced to the global sentinel), so a stray per-project row can
+  never shadow the shared grant and there is **no per-project re-consent / no
+  regression** to the working inbox/calendar.
+- **A project's own Google Drive** (`google_workspace`) **+ any static service
+  token** (Meta Ads, Google Ads, an Apify key, …) resolve **PER-PROJECT →
+  global**: a project's pasted token wins; else the instance default.
+
+**Active-project plumbing.** The per-instance Core clients are built once at boot
+with a `() => Promise<string|null>` accessor that carries no per-call project
+argument, so the active project is bound as **ambient async context**
+(`gateway/cores/active-project-context.ts`, an `AsyncLocalStorage`) at the
+in-process chat-command boundary (`gateway/http/chat-bridge.ts` wraps
+`chatCommandFilter.match(...)` in `runWithActiveProject(project_id, …)`). The
+resolver reads it back when the accessor fires — the single in-process `await`
+chain propagates the frame straight through. When no frame is bound (the General
+topic, or the CC-spawn MCP-tool path, which crosses a process + loopback-HTTP
+boundary the frame can't follow) the active project resolves to `''` → **global
+scope**, i.e. the exact pre-D2 per-instance behavior (safe, no regression). Wiring
+the MCP-tool path to per-project resolution (forwarding the bound topic through
+the tools-bridge → sink → `McpServer` so `ToolCallContext.topic_id` is populated)
+is the documented next slice.
+
 ### Email-Managed Core (`cores/free/email/`)
 
 Tier 1 Gmail Core. Installs against the owner's Google account via a
