@@ -492,3 +492,65 @@ describe('app-projects surface — POST /api/app/projects (create)', () => {
     expect(json.code).toBe('project_deleted')
   })
 })
+
+describe('app-projects surface — archive / restore / list-archived (0095)', () => {
+  let harness: Harness
+  beforeEach(async () => {
+    harness = await startGateway()
+  })
+  afterEach(async () => {
+    await harness.close()
+  })
+
+  async function listIds(): Promise<string[]> {
+    const res = await authedFetch(harness.base, `/api/app/projects`)
+    const json = (await res.json()) as { projects: Array<{ id: string }> }
+    return json.projects.map((p) => p.id).sort()
+  }
+  async function archivedIds(): Promise<string[]> {
+    const res = await authedFetch(harness.base, `/api/app/projects/archived`)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { archived: Array<{ id: string }> }
+    return json.archived.map((p) => p.id).sort()
+  }
+
+  it('archive removes a project from the list and surfaces it under /archived; restore returns it', async () => {
+    // Seed two projects via the settings GET auto-seed.
+    await authedFetch(harness.base, `/api/app/projects/keep/settings`)
+    await authedFetch(harness.base, `/api/app/projects/gone/settings`)
+    expect(await listIds()).toEqual(['gone', 'keep'])
+    expect(await archivedIds()).toEqual([])
+
+    const arch = await authedFetch(harness.base, `/api/app/projects/gone/archive`, { method: 'POST' })
+    expect(arch.status).toBe(200)
+    expect((await arch.json()) as { archived: boolean }).toMatchObject({ archived: true })
+    expect(await listIds()).toEqual(['keep'])
+    expect(await archivedIds()).toEqual(['gone'])
+
+    const rest = await authedFetch(harness.base, `/api/app/projects/gone/restore`, { method: 'POST' })
+    expect(rest.status).toBe(200)
+    expect((await rest.json()) as { restored: boolean }).toMatchObject({ restored: true })
+    expect(await listIds()).toEqual(['gone', 'keep'])
+    expect(await archivedIds()).toEqual([])
+  })
+
+  it('archive/restore on an unknown project id return 404', async () => {
+    const arch = await authedFetch(harness.base, `/api/app/projects/ghost/archive`, { method: 'POST' })
+    expect(arch.status).toBe(404)
+    const rest = await authedFetch(harness.base, `/api/app/projects/ghost/restore`, { method: 'POST' })
+    expect(rest.status).toBe(404)
+  })
+
+  it('archive/restore reject non-POST; /archived rejects non-GET', async () => {
+    await authedFetch(harness.base, `/api/app/projects/x/settings`)
+    const badArchive = await authedFetch(harness.base, `/api/app/projects/x/archive`)
+    expect(badArchive.status).toBe(405)
+    const badList = await authedFetch(harness.base, `/api/app/projects/archived`, { method: 'POST' })
+    expect(badList.status).toBe(405)
+  })
+
+  it('/archived requires a Bearer token', async () => {
+    const res = await fetch(`${harness.base}/api/app/projects/archived`)
+    expect(res.status).toBe(401)
+  })
+})

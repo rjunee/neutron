@@ -1156,6 +1156,34 @@ client-side since viewing = read). No fabricated counts — the separate
 `projects_changed` frame (`envelope.ts` `AppWsOutboundProjectsChanged`) carries
 `emoji` / `unread` / `last_activity_at` per project alongside id + label.
 
+## Archived projects — reversible archive + global Admin restore
+
+A first-class ARCHIVE lifecycle DISTINCT from soft-delete (Ryan Q3, M2). Soft-delete
+(`deleted_at`, migration 0053) hides a project from every surface with no way back;
+**archive** (`archived_at`, migration 0095) hides it from the rail but keeps it in
+the owner's Admin tab, restorable in one click. The two are orthogonal — the rail +
+the archived list both additionally require `deleted_at IS NULL`, so a delete always
+wins over an archive.
+
+- **Column.** `projects.archived_at` (nullable ISO-8601, migration 0095 — plain
+  `ALTER TABLE ADD COLUMN` on the STRICT table, like 0093/0094). `NULL` = active.
+- **Store (`gateway/projects/sqlite-store.ts`).** `list()` (rail) + `readRow()`
+  (settings GET/PATCH) filter `archived_at IS NULL`; `archive` / `restore`
+  (idempotent, `deleted_at`-guarded so a deleted project is never touched) +
+  `listArchived` (newest-archived-first, emoji resolved).
+- **HTTP (`gateway/http/app-projects-surface.ts`).** `POST
+  /api/app/projects/<id>/archive`, `POST .../restore`, `GET
+  /api/app/projects/archived` — bearer-gated; archive/restore fan a live
+  `projects_changed` via `onRailFieldChanged`; unknown/deleted id → 404.
+- **UI.** Settings tab (`SettingsTab.tsx`) gains a two-step "Archive project"
+  action; the global Admin tab (`IntegrationsTab.tsx`) gains an "Archived projects"
+  section with a per-row **Restore** button.
+- **Agent-native / chat (`cores/free/agent-settings/`).** `archive_project` /
+  `restore_project` MCP tools (capability-gated, Telegram-confirmed) so "archive
+  this project" / "restore the Foo project" work in chat; `list_projects` +
+  `findLiveByName` exclude archived rows, `findArchivedByName` resolves the restore
+  target.
+
 ## Tasks — canonical store + LLM-primary prioritization (`tasks/`)
 
 The `tasks` table (migration `0032`) is the single source of truth for tasks

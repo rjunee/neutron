@@ -303,6 +303,62 @@ describe('agent-settings tools — project ops', () => {
     expect(list.projects.some((p) => p.id === 'old')).toBe(false)
   })
 
+  test('archive_project sets archived_at, closes the topic, confirms, and hides from list', async () => {
+    await seedProject({ id: 'summer', name: 'Summer Trip', topic_id: '55' })
+    const { telegram, calls } = buildRecordingTelegram()
+    const tools = buildToolsForTest({ telegram })
+
+    const res = await tools.archive_project({ name: 'Summer Trip' })
+    expect(res.success).toBe(true)
+    expect(res.archived?.name).toBe('Summer Trip')
+    expect(typeof res.archived?.archived_at).toBe('string')
+
+    // archived_at set; NOT deleted (distinct from delete_project).
+    const row = projectDb
+      .prepare<{ archived_at: string | null; deleted_at: string | null }, [string]>(
+        'SELECT archived_at, deleted_at FROM projects WHERE id = ?',
+      )
+      .get('summer')
+    expect(row?.archived_at).not.toBeNull()
+    expect(row?.deleted_at).toBeNull()
+    expect(calls.archives).toEqual(['55'])
+    expect(calls.confirmations[0]).toContain('Archived')
+
+    // It no longer shows in list_projects (left the rail).
+    const list = await tools.list_projects({})
+    expect(list.projects.some((p) => p.id === 'summer')).toBe(false)
+  })
+
+  test('restore_project clears archived_at and returns the project to the list', async () => {
+    await seedProject({ id: 'summer', name: 'Summer Trip', topic_id: '55' })
+    const { telegram, calls } = buildRecordingTelegram()
+    const tools = buildToolsForTest({ telegram })
+
+    await tools.archive_project({ name: 'Summer Trip' })
+    expect((await tools.list_projects({})).projects.some((p) => p.id === 'summer')).toBe(false)
+
+    const res = await tools.restore_project({ name: 'Summer Trip' })
+    expect(res.success).toBe(true)
+    expect(res.restored?.name).toBe('Summer Trip')
+
+    const row = projectDb
+      .prepare<{ archived_at: string | null }, [string]>(
+        'SELECT archived_at FROM projects WHERE id = ?',
+      )
+      .get('summer')
+    expect(row?.archived_at).toBeNull()
+    expect(calls.confirmations.some((c) => c.includes('Restored'))).toBe(true)
+    expect((await tools.list_projects({})).projects.some((p) => p.id === 'summer')).toBe(true)
+  })
+
+  test('archive_project on an unknown name fails; restore_project on a non-archived name fails', async () => {
+    await seedProject({ id: 'active', name: 'Active One' })
+    const tools = buildToolsForTest()
+    expect((await tools.archive_project({ name: 'Nope' })).success).toBe(false)
+    // 'Active One' is live (not archived) → restore can't resolve it.
+    expect((await tools.restore_project({ name: 'Active One' })).success).toBe(false)
+  })
+
   test('merge_projects moves members, soft-deletes from, archives from topic', async () => {
     await seedProject({ id: 'from', name: 'Side Notes', topic_id: '7' })
     await seedProject({ id: 'into', name: 'Main Work', topic_id: '8' })

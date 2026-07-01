@@ -1,10 +1,10 @@
 /**
  * @neutronai/agent-settings — capability-guarded MCP tool wiring.
  *
- * Nine tools the manifest declares (list_projects / rename_project /
- * delete_project / merge_projects / update_personality /
- * update_agent_name / connect_telegram / get_engagement_mode /
- * set_engagement_mode). Each is wrapped by the Sprint 31
+ * Eleven tools the manifest declares (list_projects / rename_project /
+ * delete_project / archive_project / restore_project / merge_projects /
+ * update_personality / update_agent_name / connect_telegram /
+ * get_engagement_mode / set_engagement_mode). Each is wrapped by the Sprint 31
  * `CapabilityGuard.wrapToolHandler` so every dispatch:
  *   - records `op='tool_call' outcome='ok'` on success
  *   - records `op='tool_call' outcome='capability_denied'` + throws
@@ -54,6 +54,20 @@ export interface DeleteProjectInput {
 export interface DeleteProjectOutput {
   success: boolean
   removed?: { name: string; context_archived_at: string | null }
+}
+export interface ArchiveProjectInput {
+  name: string
+}
+export interface ArchiveProjectOutput {
+  success: boolean
+  archived?: { name: string; archived_at: string }
+}
+export interface RestoreProjectInput {
+  name: string
+}
+export interface RestoreProjectOutput {
+  success: boolean
+  restored?: { name: string }
 }
 export interface MergeProjectsInput {
   from_name: string
@@ -132,6 +146,8 @@ export interface BuiltTools {
   list_projects: (input: Record<string, never>) => Promise<ListProjectsOutput>
   rename_project: (input: RenameProjectInput) => Promise<RenameProjectOutput>
   delete_project: (input: DeleteProjectInput) => Promise<DeleteProjectOutput>
+  archive_project: (input: ArchiveProjectInput) => Promise<ArchiveProjectOutput>
+  restore_project: (input: RestoreProjectInput) => Promise<RestoreProjectOutput>
   merge_projects: (input: MergeProjectsInput) => Promise<MergeProjectsOutput>
   update_personality: (
     input: UpdatePersonalityInput,
@@ -151,7 +167,7 @@ export interface BuiltTools {
 }
 
 /**
- * Construct the nine tool handlers, each wrapped by the Sprint 31
+ * Construct the eleven tool handlers, each wrapped by the Sprint 31
  * `CapabilityGuard.wrapToolHandler` so every dispatch is audited. The
  * capability strings match the manifest's `tools[]` declarations
  * exactly — wrapping with a different `capability_required` value trips
@@ -195,6 +211,28 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     capability_required: WRITE_CAPABILITY,
     fn: async (input: DeleteProjectInput): Promise<DeleteProjectOutput> => {
       return deps.backend.deleteProject(input.name)
+    },
+  })
+
+  const archive_project = guard.wrapToolHandler<
+    ArchiveProjectInput,
+    ArchiveProjectOutput
+  >({
+    tool_name: 'archive_project',
+    capability_required: WRITE_CAPABILITY,
+    fn: async (input: ArchiveProjectInput): Promise<ArchiveProjectOutput> => {
+      return deps.backend.archiveProject(input.name)
+    },
+  })
+
+  const restore_project = guard.wrapToolHandler<
+    RestoreProjectInput,
+    RestoreProjectOutput
+  >({
+    tool_name: 'restore_project',
+    capability_required: WRITE_CAPABILITY,
+    fn: async (input: RestoreProjectInput): Promise<RestoreProjectOutput> => {
+      return deps.backend.restoreProject(input.name)
     },
   })
 
@@ -281,6 +319,8 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     list_projects,
     rename_project,
     delete_project,
+    archive_project,
+    restore_project,
     merge_projects,
     update_personality,
     update_agent_name,

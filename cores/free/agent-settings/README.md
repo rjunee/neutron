@@ -3,7 +3,7 @@
 Tier 1 free Core that makes the onboarding "tweak later" promise real.
 The onboarding final-handoff tells the user they can rename / delete /
 merge projects, switch the agent's personality, and rename the agent
-later — just by asking. This Core supplies the six tools the owner's
+later — just by asking. This Core supplies the tools the owner's
 Claude Code subprocess invokes to honour that.
 
 ## Tools
@@ -13,6 +13,8 @@ Claude Code subprocess invokes to honour that.
 | `list_projects` | `() → {projects: Array<{id, name, slug, topic_id, context_summary}>}` | Current (non-deleted) projects. |
 | `rename_project` | `(old_name, new_name) → {success, project?}` | Renames the project + retitles its Telegram forum topic. |
 | `delete_project` | `(name) → {success, removed?:{name, context_archived_at}}` | Soft-deletes (sets `deleted_at`) + closes/archives the Telegram topic. |
+| `archive_project` | `(name) → {success, archived?:{name, archived_at}}` | Reversibly archives (sets `archived_at`, migration 0095): leaves the rail but stays in the Admin tab, restorable. Closes the Telegram topic. Distinct from delete. |
+| `restore_project` | `(name) → {success, restored?:{name}}` | Clears `archived_at` — returns an archived project to the rail. |
 | `merge_projects` | `(from_name, into_name) → {success, merged_project?}` | Moves `from`'s members into `into`, soft-deletes `from`, archives `from`'s topic. |
 | `update_personality` | `(new_archetype?, new_description?) → {success, personality?}` | Updates the registry `agent_personality`. |
 | `update_agent_name` | `(new_name) → {success, agent_name?}` | Updates the registry `agent_name`. |
@@ -42,7 +44,7 @@ Telegram confirmation on success.
 Registered into the production `ToolRegistry` by
 `gateway/cores/install-bundled.ts` via the `agent_settings`
 `CoreBackendFactory` built in
-`gateway/index.ts:buildCoresBackendFactories`. The six tool names are
+`gateway/index.ts:buildCoresBackendFactories`. The tool names are
 surfaced to the owner's CC subprocess through
 `runtime/system-prompt.ts:AGENT_SETTINGS_TOOLS_FRAGMENT`.
 

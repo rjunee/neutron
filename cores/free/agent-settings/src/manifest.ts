@@ -27,7 +27,7 @@ export const CORE_SLUG = 'agent_settings' as const
 export const CORE_PACKAGE_NAME = '@neutronai/agent-settings' as const
 
 /**
- * The nine tool names declared in the manifest. Exposed as a `const`
+ * The eleven tool names declared in the manifest. Exposed as a `const`
  * tuple so capability-guard wiring, the system-prompt fragment, and
  * tests can iterate without re-reading the manifest body.
  */
@@ -35,6 +35,8 @@ export const TOOL_NAMES = [
   'list_projects',
   'rename_project',
   'delete_project',
+  'archive_project',
+  'restore_project',
   'merge_projects',
   'update_personality',
   'update_agent_name',
