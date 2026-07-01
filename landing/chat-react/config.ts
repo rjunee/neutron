@@ -71,6 +71,17 @@ export interface BootstrapConfig {
    * literals (tests) need no change; `resolveBootstrapConfig` always sets it.
    */
   onboardingActive?: boolean
+  /**
+   * Managed post-onboarding claim redirect target. Present ONLY when the server
+   * injected `window.__neutron_post_onboarding_claim_url` (from env
+   * `NEUTRON_POST_ONBOARDING_CLAIM_URL` — a Managed-overlay config). When set,
+   * the controller navigates the browser here on the `onboarding_completed`
+   * frame; when ABSENT (the Open self-host default) the redirect no-ops and
+   * onboarding completes normally. Optional + defaults to undefined so existing
+   * config literals (tests) need no change; there is ONE code path
+   * (redirect-if-present), never an on/off flag.
+   */
+  postOnboardingClaimUrl?: string
 }
 
 export interface WindowLike {
@@ -82,6 +93,7 @@ export interface WindowLike {
   __neutron_projects?: ProjectTab[]
   __neutron_active_project_id?: string
   __neutron_onboarding_active?: boolean
+  __neutron_post_onboarding_claim_url?: string
 }
 
 /** Synthetic app-ws topic id for a user. Mirrors `appWsTopicId` on the server
@@ -204,5 +216,13 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     onboardingActive: win.__neutron_onboarding_active === true,
   }
   if (win.__neutron_app_ws_url !== undefined) config.wsUrlOverride = win.__neutron_app_ws_url
+  // Managed-overlay claim redirect target — set ONLY when the server injected a
+  // non-empty URL. Absent ⇒ the controller's redirect no-ops (Open self-host).
+  if (
+    typeof win.__neutron_post_onboarding_claim_url === 'string' &&
+    win.__neutron_post_onboarding_claim_url.length > 0
+  ) {
+    config.postOnboardingClaimUrl = win.__neutron_post_onboarding_claim_url
+  }
   return config
 }

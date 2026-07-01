@@ -62,6 +62,7 @@ interface Harness {
   persona: ReturnType<typeof fakePersonaComposer>
   invalidated: string[]
   projectsChanged: string[]
+  onboardingCompleted: string[]
   deps: OnboardingFinalizeDeps
 }
 
@@ -72,6 +73,7 @@ function makeHarness(): Harness {
   const persona = fakePersonaComposer()
   const invalidated: string[] = []
   const projectsChanged: string[] = []
+  const onboardingCompleted: string[] = []
   const deps: OnboardingFinalizeDeps = {
     owner_home: ownerHome,
     project_slug: PROJECT_SLUG,
@@ -79,11 +81,12 @@ function makeHarness(): Harness {
     stateStore,
     personaLoader: { invalidate: (f?: string): void => void invalidated.push(f ?? '*') },
     emitProjectsChanged: (uid: string): void => void projectsChanged.push(uid),
+    emitOnboardingCompleted: (uid: string): void => void onboardingCompleted.push(uid),
     now: () => 1_700_000_000_000,
     log: (): void => {},
     personaComposer: persona,
   }
-  return { db, stateStore, ownerHome, persona, invalidated, projectsChanged, deps }
+  return { db, stateStore, ownerHome, persona, invalidated, projectsChanged, onboardingCompleted, deps }
 }
 
 test('finalize completes onboarding: persona, projects row, rail refresh', async () => {
@@ -139,6 +142,9 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
   expect(h.persona.committed).toBe(1)
   expect(h.invalidated.length).toBe(1)
   expect(h.projectsChanged).toEqual([USER_ID])
+  // (4) One-shot onboarding-complete signal fired at the terminal transition
+  // (Managed post-onboarding claim redirect). Exactly once, for the owner.
+  expect(h.onboardingCompleted).toEqual([USER_ID])
 
   h.db.close()
 })
@@ -171,6 +177,10 @@ test('finalize is idempotent: a second call on a completed row is a no-op', asyn
   })
   expect(h.projectsChanged.length).toBe(firstChanged)
   expect(h.persona.composed).toBe(firstComposed)
+  // The onboarding-complete signal must ALSO fire exactly once — the idempotent
+  // re-entry short-circuits before re-emitting it (so the client's claim
+  // redirect can't be re-triggered by a defensive re-finalize).
+  expect(h.onboardingCompleted).toEqual([USER_ID])
 
   h.db.close()
 })

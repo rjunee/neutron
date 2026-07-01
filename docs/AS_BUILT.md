@@ -2,6 +2,61 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Auto-navigate to the personal-URL claim page at onboarding-end (Managed overlay)
+
+**Why.** The Managed personal-URL claim flow (control-plane `GET/POST /claim` →
+rename → 302 to the owner's personal chat URL; neutron-managed personal-URL claim
+flow, merged + deployed) serves the claim page but nothing sent the owner there
+when onboarding finished. This is the paired Open-side trigger: when onboarding
+completes, send the browser to the configured claim URL.
+
+**Framing — Managed-overlay CONFIG, not a feature flag.** ONE code path
+(redirect-if-URL-present). On a Managed install the env
+`NEUTRON_POST_ONBOARDING_CLAIM_URL` points at the control-plane `/claim`, so the
+client redirects there; on Open self-host the env is absent, the client sees
+`undefined`, and the redirect no-ops (onboarding completes normally). No on/off
+boolean, no dual path.
+
+**What changed (NO flags, NO dual paths).**
+- `channels/adapters/app-ws/envelope.ts` — new outbound frame
+  `AppWsOutboundOnboardingCompleted` (`type: 'onboarding_completed'`, payload-free
+  signal) added to the `AppWsOutbound` union. The redirect *target* is NOT on the
+  frame — it lives in the client bootstrap config (a Managed-overlay concern).
+- `gateway/realmode-composer/build-onboarding-finalize.ts` — new optional dep
+  `emitOnboardingCompleted?(user_id)`, called at the terminal `completed`
+  transition (step 5b, right after `emitProjectsChanged`, before the closing
+  message so a slow opening compose can't delay the redirect). The finalizer's
+  idempotency gate guarantees it fires **exactly once** per owner.
+- `open/composer.ts` — (1) `fanOnboardingCompleted(user_id)` fans the frame to the
+  base topic AND every live per-project topic (same topology as
+  `fanProjectsChanged`) and is wired into `buildOnboardingFinalize`; (2)
+  `claimBootstrapScript()` injects `window.__neutron_post_onboarding_claim_url`
+  into the served `/chat` React shell **only when** the env is set (`<`-escaped),
+  alongside the existing projects/onboarding bootstrap scripts.
+- `landing/chat-react/config.ts` — `BootstrapConfig.postOnboardingClaimUrl` +
+  `WindowLike.__neutron_post_onboarding_claim_url`; `resolveBootstrapConfig` reads
+  the injected global (non-empty string only; empty ⇒ treated as absent).
+- `landing/chat-react/controller.ts` — new options `postOnboardingClaimUrl` +
+  injectable `navigate` (defaults to `window.location.assign`). On the
+  `onboarding_completed` frame, IF a claim URL is configured it navigates there
+  (once — a `claimRedirected` latch guards a re-sent frame); else no-op.
+- `landing/chat-react/main.tsx` — passes `config.postOnboardingClaimUrl` through
+  (spread-only when present, so Open self-host stays undefined).
+
+**Tests / evidence.**
+- `landing/chat-react/__tests__/controller.test.ts` — redirect fires to the
+  configured URL on `onboarding_completed` (Managed); no-op + session stays open
+  when unset (Open self-host); at-most-once on a re-sent frame.
+- `landing/chat-react/__tests__/config.test.ts` — `postOnboardingClaimUrl`
+  undefined by default, read when injected, empty treated as absent.
+- `gateway/realmode-composer/__tests__/build-onboarding-finalize.test.ts` —
+  `emitOnboardingCompleted` fires once at the terminal transition and is NOT
+  re-emitted on an idempotent re-finalize.
+- `open/__tests__/open-claim-redirect-bootstrap.test.ts` — the served `/chat`
+  shell injects the claim script when the env is set and injects NOTHING when
+  unset (no-regression), driven through the composed graph `fetch`.
+- `tsc` clean (root + `landing/chat-react`).
+
 ## 2026-07-01 — DROP the agent-NAME step in onboarding (personality-only → SOUL.md)
 
 **Why.** Neutron Open is an agent ORCHESTRATOR, not a named personal agent. Ryan:

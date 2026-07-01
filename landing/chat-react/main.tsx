@@ -85,6 +85,11 @@ async function boot(): Promise<void> {
     // FIX 1 — seed the rail from the bootstrap, then keep it reactive so
     // projects created mid-onboarding appear live (a `projects_changed` frame).
     projects: config.projects,
+    // Managed post-onboarding claim redirect — undefined on Open self-host, so
+    // the controller's redirect no-ops (see BootstrapConfig.postOnboardingClaimUrl).
+    ...(config.postOnboardingClaimUrl !== undefined
+      ? { postOnboardingClaimUrl: config.postOnboardingClaimUrl }
+      : {}),
     topicForProject: (projectId) => topicForProject(config.userId, projectId),
     createSession: (sinks, scope) =>
       new WebChatSession({

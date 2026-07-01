@@ -982,3 +982,74 @@ describe('NeutronChatController — per-project re-scope hydration race (Codex P
     controller.stop()
   })
 })
+
+describe('NeutronChatController — Managed post-onboarding claim redirect', () => {
+  // Construct a controller with an injected `navigate` spy (and optional claim
+  // URL), returning the socket list + the captured navigations.
+  function setupClaim(postOnboardingClaimUrl?: string) {
+    const sockets: FakeSocket[] = []
+    const navigations: string[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      ...(postOnboardingClaimUrl !== undefined ? { postOnboardingClaimUrl } : {}),
+      navigate: (url) => navigations.push(url),
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    return { controller, sockets, navigations }
+  }
+
+  const onboardingCompleted = () => ({ v: 1, type: 'onboarding_completed', ts: 1 })
+
+  it('navigates to the configured claim URL on the onboarding_completed frame (Managed)', async () => {
+    const { controller, sockets, navigations } = setupClaim('https://claim.example.test')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(onboardingCompleted())
+    await tick()
+    expect(navigations).toEqual(['https://claim.example.test'])
+    controller.stop()
+  })
+
+  it('does NOT navigate when no claim URL is configured (Open self-host no-op)', async () => {
+    const { controller, sockets, navigations } = setupClaim() // no URL
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(onboardingCompleted())
+    await tick()
+    expect(navigations).toEqual([])
+    // Onboarding still "completes normally": the frame is a harmless no-op — the
+    // session stays connected and the empty transcript is unaffected.
+    expect(controller.getViewModel().status).toBe('open')
+    controller.stop()
+  })
+
+  it('navigates at most once even if the frame is re-sent (reconnect replay latch)', async () => {
+    const { controller, sockets, navigations } = setupClaim('https://claim.example.test')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(onboardingCompleted())
+    sockets[0]!.deliver(onboardingCompleted())
+    await tick()
+    expect(navigations).toEqual(['https://claim.example.test'])
+    controller.stop()
+  })
+})

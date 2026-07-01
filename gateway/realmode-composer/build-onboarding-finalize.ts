@@ -125,6 +125,16 @@ export interface OnboardingFinalizeDeps {
   /** Fire a projects_changed app-ws frame for the owner after projects are created. */
   emitProjectsChanged: (user_id: string) => void
   /**
+   * Fire a one-shot `onboarding_completed` app-ws frame at the terminal
+   * transition (Managed post-onboarding claim redirect signal). Called exactly
+   * once — the finalizer no-ops a re-entry on an already-`completed` row, so
+   * this can't double-fire. Optional: on Open self-host the composer still
+   * wires it (the frame is harmless; the client no-ops when no claim URL is
+   * configured), but tests / LLM-less paths may omit it. Best-effort + non-
+   * throwing by contract; NEVER blocks finalize.
+   */
+  emitOnboardingCompleted?: (user_id: string) => void
+  /**
    * Item 6/7 (Path-1 closing + per-project opening, 2026-06-30) — deliver a
    * deterministic agent message into a chat topic. `project_id === null` targets
    * the owner's General topic (the closing handoff); a non-null `project_id`
@@ -264,6 +274,19 @@ export function buildOnboardingFinalize(deps: OnboardingFinalizeDeps): Onboardin
         deps.emitProjectsChanged(input.user_id)
       } catch (err) {
         log('warn', 'finalize: emitProjectsChanged failed', { err: errStr(err) })
+      }
+
+      // (5b) One-shot onboarding-complete signal (Managed post-onboarding claim
+      // redirect). Fired at the terminal transition — the idempotency gate above
+      // guarantees this runs exactly once per owner. On a Managed install the
+      // client redirects to the configured claim page on receipt; on Open self-
+      // host the client no-ops (no claim URL in its bootstrap). Emitted BEFORE
+      // the closing/opening messages so a slow opening compose can't delay the
+      // redirect, and independent of the `emitChatMessage` seam. Best-effort.
+      try {
+        deps.emitOnboardingCompleted?.(input.user_id)
+      } catch (err) {
+        log('warn', 'finalize: emitOnboardingCompleted failed', { err: errStr(err) })
       }
 
       // (6) Per-project opening messages (item 7) — seed each newly-materialized
