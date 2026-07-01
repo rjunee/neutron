@@ -216,7 +216,7 @@ export function loadCoreFromDir(coreDir: string): LoadedCore {
  * `docs/research/neutron-cores-marketplace-split-2026-05-17.md § 3`. So:
  *
  *   cores/dtc-analytics/package.json   → discovered (immediate Core)
- *   cores/free/notes/package.json      → discovered (container + Core)
+ *   cores/free/reminders/package.json  → discovered (container + Core)
  *   cores/free/tasks/package.json      → discovered (container + Core)
  *   cores/free/foo/bar/package.json    → NOT discovered (too deep)
  *

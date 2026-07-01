@@ -10,7 +10,7 @@
  *   - the Telegram confirmation + topic side-effect fired
  *   - the SecretAuditLog captured a tool_call success / denial row
  *
- * Mirrors `cores/free/notes/__tests__/tools.test.ts`. Timestamps are
+ * Mirrors the sibling free-Core tools test pattern. Timestamps are
  * Date.now()-relative (the rows stamp `new Date().toISOString()`), never
  * hardcoded ISO strings.
  */

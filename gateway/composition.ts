@@ -246,11 +246,6 @@ async function buildComposedHttpFromComposition(
       handler: composition.cores_integrations_surface.handler,
     }
   }
-  if (composition.notes_drawer_browser_surface !== undefined) {
-    composeInput.notesDrawerBrowser = {
-      handler: composition.notes_drawer_browser_surface.handler,
-    }
-  }
   if (composition.auth_gate !== undefined) {
     // 2026-05-27 returning-user resume sprint — every gated route in
     // the per-instance gateway runs through `landing/auth-gate.ts` before
@@ -291,8 +286,7 @@ async function buildComposedHttpFromComposition(
     composition.app_backups_surface !== undefined ||
     composition.cores_surface !== undefined ||
     composition.cores_oauth_surface !== undefined ||
-    composition.cores_integrations_surface !== undefined ||
-    composition.notes_drawer_browser_surface !== undefined
+    composition.cores_integrations_surface !== undefined
   if (!hasAnyChainedSurface) return null
   return composeHttpHandler(composeInput)
 }

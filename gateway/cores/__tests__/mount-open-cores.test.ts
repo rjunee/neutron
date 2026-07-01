@@ -66,7 +66,6 @@ test('composes the bundled free-Core backend factory map (Calendar/Email/Google 
     'calendar_core',
     'email_managed_core',
     'google_workspace_core',
-    'notes',
     'reminders_core',
     'research_core',
     'agent_settings',
@@ -151,9 +150,9 @@ test('chains the free-Core chat-command filters — /cal and /email are ROUTED',
   expect(email).not.toBeNull()
   expect(typeof email?.text).toBe('string')
 
-  // /note → claimed by the Notes Core (the chain is general, not one-off).
-  const note = await mounted.chatCommandFilter.match({ ...base, body: '/note drawer' })
-  expect(note).not.toBeNull()
+  // /remind → claimed by the Reminders Core (the chain is general, not one-off).
+  const remind = await mounted.chatCommandFilter.match({ ...base, body: '/remind me tomorrow' })
+  expect(remind).not.toBeNull()
 
   // Plain prose falls through (null) so it reaches the live agent unchanged.
   const prose = await mounted.chatCommandFilter.match({

@@ -47,5 +47,5 @@ Cross-refs:
 - `SPEC.md § Phases→Steps` — Tier 1 Cores buildout
 - `cores/sdk/SDK-CONTRACT.md` — author-facing API
 - `cores/runtime/` — install / capability gating / audit log
-- `cores/free/notes/AGENTS.md`, `cores/free/tasks/AGENTS.md` —
+- `cores/free/reminders/AGENTS.md`, `cores/free/tasks/AGENTS.md` —
   sibling Tier 1 Cores; same scaffolding pattern.

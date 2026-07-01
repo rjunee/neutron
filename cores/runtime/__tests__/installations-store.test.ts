@@ -176,22 +176,22 @@ test('recordGlobal + getGlobal round-trip', async () => {
 test('global installs are SEPARATE from per-project installs (no key collision)', async () => {
   await store.record({
     project_slug: 't1',
-    core_slug: 'notes',
-    package_name: '@neutronai/notes',
+    core_slug: 'demo_core',
+    package_name: '@neutronai/demo-core',
     package_version: '1.0.0',
     capabilities: [],
     data_layout: 'tables',
   })
   await store.recordGlobal({
-    core_slug: 'notes',
-    package_name: '@neutronai/notes',
+    core_slug: 'demo_core',
+    package_name: '@neutronai/demo-core',
     package_version: '1.0.0',
     capabilities: [],
   })
   // Per-project read sees its row; global read sees its own; neither pollutes
   // the other.
-  expect((await store.listLive('t1')).map((r) => r.core_slug)).toEqual(['notes'])
-  expect((await store.listGlobalLive()).map((r) => r.core_slug)).toEqual(['notes'])
+  expect((await store.listLive('t1')).map((r) => r.core_slug)).toEqual(['demo_core'])
+  expect((await store.listGlobalLive()).map((r) => r.core_slug)).toEqual(['demo_core'])
 })
 
 test('listGlobalLive excludes tombstoned installs; re-install via UPSERT revives', async () => {

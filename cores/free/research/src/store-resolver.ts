@@ -6,7 +6,7 @@
  * `<owner_home>/Projects/<project_id>/research/research.db`,
  * applying the Research Core's own migration tree before construction.
  *
- * Mirrors `cores/free/notes/src/store-resolver.ts` byte-for-byte in
+ * Mirrors the sibling free-Core store-resolver pattern in
  * mechanics: init-promise dedup so concurrent first-resolves wait on
  * the same init; one Database handle per project, cached for the
  * gateway lifetime.

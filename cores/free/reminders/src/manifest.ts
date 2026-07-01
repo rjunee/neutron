@@ -51,7 +51,7 @@ export type RemindersToolName = typeof TOOL_NAMES[number]
 
 /**
  * Capability strings the manifest declares. Same shape lock as
- * `cores/free/notes/src/manifest.ts` — re-exposed so tools.ts can
+ * the sibling free-Core manifest — re-exposed so tools.ts can
  * pass the exact-match strings to `CapabilityGuard.wrapToolHandler`.
  *
  * Resource name `reminders_core.db` matches the Core's slug

@@ -114,12 +114,10 @@ export interface AppWsSurface {
 
 /**
  * Pre-dispatch chat-command filter. Returns a non-null response when
- * the inbound is a recognised command (e.g. `/note <body>`); the
+ * the inbound is a recognised command (e.g. `/remind <body>`); the
  * surface posts the response back via the session registry and SKIPS
  * `adapter.dispatchInbound` so the LLM path doesn't fire. Returning
  * `null` lets the inbound fall through to the normal LLM dispatch.
- *
- * Per docs/plans/notes-core-tier1-brief.md § 3.2.
  */
 export interface ChatCommandFilter {
   match(input: {
@@ -593,10 +591,9 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             ...(inbound_project_id !== undefined ? { project_id: inbound_project_id } : {}),
           })
           // Pre-dispatch chat-command filter — when matched, the
-          // filter has already executed its side effect (e.g. captured
-          // a note); we post a tool-result envelope back and SKIP
-          // `dispatchInbound` so the LLM path doesn't run. Per
-          // docs/plans/notes-core-tier1-brief.md § 3.2.
+          // filter has already executed its side effect (e.g. created
+          // a reminder); we post a tool-result envelope back and SKIP
+          // `dispatchInbound` so the LLM path doesn't run.
           if (chat_command_filter !== undefined) {
             const matchInput: Parameters<ChatCommandFilter['match']>[0] = {
               user_id: data.user_id,
@@ -774,7 +771,7 @@ async function handleSend(
     })
     // Pre-dispatch chat-command filter — when matched, short-circuit
     // the LLM dispatch and stash a tool-result envelope to ship in the
-    // response body. Per docs/plans/notes-core-tier1-brief.md § 3.2.
+    // response body.
     if (ctx.chat_command_filter !== undefined) {
       const matchInput: Parameters<ChatCommandFilter['match']>[0] = {
         user_id: resolved.user_id,

@@ -42,18 +42,14 @@ share one backend instance. Examples:
   (`gateway/boot-helpers.ts`, re-exported from the `gateway` barrel) so the
   composer chains it into `buildChainedChatCommandFilter([...])` alongside
   `/remind` and `/code`.
-- Notes (`cores/free/notes`, `@neutronai/notes`): per-project SQLite sidecar at
-  `<owner_home>/Projects/<id>/notes/notes.db` via a per-instance
-  `NotesStoreResolver`. Eight MCP tools split across the composer's TWO tool
-  factories (see below): the legacy four (`notes_write/recall/list/link`) ship in
-  `buildTools` against `buildNotesStoreBackend`, and the four Notes-Core-S1 tools
-  (`notes_create_drawer/drawer_list/search/traverse`) ship in `buildExtraTools`
-  against the resolver directly (they take an explicit `project_id` per call). The
-  `notes` backend factory in `gateway/boot-helpers.ts` returns `{ backend,
-  resolver }` so `normalizeBackend` threads BOTH into the one `deps` bundle both
-  factories receive. (Before this wiring the four S1 tools fell through to
-  `not_implemented` stubs and boot logged `manifest_tool_unimplemented core=notes`
-  four times per owner install — ISSUE #330.)
+> **Notes / second-brain core — REMOVED (2026-07-01).** The former
+> `cores/free/notes` (`@neutronai/notes`) package — a second-brain port that
+> shipped a per-project `notes.db` sidecar + eight `notes_*` MCP tools + the
+> `/note` chat command — was ripped out. It was made redundant by the
+> second-brain→GBrain rip-replace: **GBrain is now the SOLE per-owner memory
+> store** (see “Entity-page memory + provisioning (GBrain)” below). Nothing in the
+> runtime reads the old notes tables; the historical per-Core migration is a
+> no-op orphan on any already-deployed DB.
 
 **Two tool factories per Core.** The install pipeline
 (`gateway/cores/install-bundled.ts → registerCoreTools`) resolves `buildTools`
@@ -61,7 +57,7 @@ from a Core's barrel and, if present, ALSO `buildExtraTools` — a second factor
 returning additional handlers merged over the base set. Both receive the same
 `deps` bundle. The split lets a Core keep its legacy tool surface
 construction-compatible while shipping new tools separately (Research, Calendar,
-Tasks, and Notes all use it). Any manifest-declared tool that NEITHER factory
+and Tasks all use it). Any manifest-declared tool that NEITHER factory
 returns a handler for registers as a loud `not_implemented` stub and logs
 `manifest_tool_unimplemented` — the manifest never silently lies about its
 surface.
@@ -211,7 +207,7 @@ Always-on when scribe is — **no feature flag**. (The Cores' MCP tools + `/cal`
 ## Free Cores in the Open boot path (parity gap #2) — `gateway/cores/mount-open-cores.ts`
 
 The single-owner Open composer composes the bundled free Cores
-(Calendar / Email / Google-Workspace / Notes / Reminders / Research) into the
+(Calendar / Email / Google-Workspace / Reminders / Research) into the
 daily-driver, **reusing the Managed mechanism — not a fork**:
 
 - **Backends + MCP tools.** `open/composer.ts` sets `composition.cores` (dataDir +
@@ -223,7 +219,7 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
   `buildTools(deps)` MCP surface. Per-Core install is **fail-soft**
   (`install-bundled.ts`) so a Core lacking creds is hidden without blocking boot.
 - **Chat-command filters.** `mountOpenCores` chains the bundled free-Core filters
-  (`/cal`, `/email`, `/note`, `/remind`, `/research`) via
+  (`/cal`, `/email`, `/remind`, `/research`) via
   `buildChainedChatCommandFilter([...])` and the composer threads the result into
   `buildLandingStack` → `buildWebChatBridge`. The web-chat bridge invokes the
   filter at the top of the `user_message` handler and, when a Core claims the
@@ -233,8 +229,8 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
   Open web chat had no slash-command interception at all; a typed `/cal` fell
   through to the LLM. Each Core's MCP tools and its chat-command filter share **one
   backend instance** (the pre-built `calendarClient` seam, one
-  `EmailProjectCacheResolver` / `NotesStoreResolver`, the Research
-  `project_backend`) — agent-native parity.
+  `EmailProjectCacheResolver`, the Research `project_backend`) — agent-native
+  parity.
 - **Optional-until-credentialed.** A per-instance `OAuthTokenManager` over the
   `SecretsStore`. With no `NEUTRON_CORES_GOOGLE_CLIENT_ID` (the zero-creds Open
   default) the Calendar/Gmail/Workspace backends fall back to in-memory clients —
@@ -251,7 +247,7 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
 
 The live chat agent is a spawned interactive `claude` REPL driven over the
 dev-channel (`runtime/adapters/claude-code/persistent/`). It reaches the
-gateway's in-process tool surface — Cores (`/cal` `/email` `/note` `/remind`
+gateway's in-process tool surface — Cores (`/cal` `/email` `/remind`
 `/research`), `doc_search` / `doc_read`, `message_search`, `gbrain_search`
 (memory recall, P0-2), `dispatch_agent`, `skill_forge_*`, and the
 `neutron-tools` surface — as **native MCP tool calls**, not via the user typing
@@ -309,7 +305,7 @@ immediately discoverable + invokable too. Provisioning is idempotent and never
 deletes a forged pack.
 - **The command-filter's role.** `buildChainedChatCommandFilter`
   (`open/composer.ts`) is the **user's** slash-command path: it intercepts a
-  user-typed `/cal` `/remind` `/note` etc. BEFORE the LLM and routes to the SAME
+  user-typed `/cal` `/remind` etc. BEFORE the LLM and routes to the SAME
   registry tool backend. It is NOT an agent-invocation path — the bridge is the
   agent's single native path. One underlying tool implementation, two entry
   surfaces (user-typed slash vs. agent-native MCP).

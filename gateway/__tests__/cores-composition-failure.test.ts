@@ -95,11 +95,11 @@ describe('installBundledCores — failure isolation', () => {
   test('one Core with broken manifest doesnt kill the gateway when blockOnFirstError=false (via failures bucket)', async () => {
     // Seed 4 cleanly-installable Cores + 1 with an unknown capability
     // (which fails manifest validation under the SDK's strict regex).
-    seedCore(bench.rootDir, 'notes')
+    seedCore(bench.rootDir, 'scraping')
     seedCore(bench.rootDir, 'tasks')
     seedCore(bench.rootDir, 'reminders')
     seedCore(bench.rootDir, 'research')
-    seedCore(bench.rootDir, 'notes', {
+    seedCore(bench.rootDir, 'scraping', {
       destSlug: 'evil-twin',
       manifestMangler: (pkg) => {
         // Rename so it doesn't clash on slug.
@@ -136,10 +136,10 @@ describe('installBundledCores — failure isolation', () => {
   })
 
   test('hard-fail threshold trips when >50% of discovered Cores fail to install', async () => {
-    // 3 cores: notes, calendar, email (dir; slug email_managed_core). Calendar + Email-
+    // 3 cores: reminders, calendar, email (dir; slug email_managed_core). Calendar + Email-
     // Managed both have required oauth secrets the Noop prompter
     // refuses → 2 of 3 = 66.6% failure rate, over the 50% gate.
-    seedCore(bench.rootDir, 'notes')
+    seedCore(bench.rootDir, 'reminders')
     seedCore(bench.rootDir, 'calendar')
     seedCore(bench.rootDir, 'email')
     await expect(
@@ -156,7 +156,7 @@ describe('installBundledCores — failure isolation', () => {
 
   test('hard-fail threshold is configurable — disabling lets all Cores fail without throwing', async () => {
     // Same fixture as above (2/3 fail), but disable the gate.
-    seedCore(bench.rootDir, 'notes')
+    seedCore(bench.rootDir, 'reminders')
     seedCore(bench.rootDir, 'calendar')
     seedCore(bench.rootDir, 'email')
     const result = await installBundledCores({
@@ -169,12 +169,12 @@ describe('installBundledCores — failure isolation', () => {
       hardFailFailureRatio: 1, // never trip
     })
     expect(result.discovered).toBe(3)
-    expect(result.installed.size).toBe(1) // notes
+    expect(result.installed.size).toBe(1) // reminders
     expect(result.failures.length).toBe(2) // calendar + email
   })
 
   test('telemetry log receives a cores.install_failed event per failed Core', async () => {
-    seedCore(bench.rootDir, 'notes')
+    seedCore(bench.rootDir, 'reminders')
     seedCore(bench.rootDir, 'calendar')
     seedCore(bench.rootDir, 'email')
     const events: unknown[] = []
@@ -207,6 +207,6 @@ describe('installBundledCores — failure isolation', () => {
         (e as { event_name?: string }).event_name === 'cores.install_ok',
     )
     expect(ok.length).toBe(1)
-    expect(ok[0]?.core_slug).toBe('notes')
+    expect(ok[0]?.core_slug).toBe('reminders_core')
   })
 })

@@ -390,7 +390,7 @@ describe('bundled registry — Reminders Core discovery', () => {
     const root = env.tmp
     copyRemindersIntoFixture(root)
 
-    const sibling = join(root, 'cores', 'notes-stub')
+    const sibling = join(root, 'cores', 'demo-stub')
     mkdirSync(sibling, { recursive: true })
     const siblingManifest = {
       capabilities: ['read:project.db'],
@@ -404,7 +404,7 @@ describe('bundled registry — Reminders Core discovery', () => {
       build: { neutronVersion: '0.1.0' },
     }
     const siblingPkg = {
-      name: '@neutronai/notes-stub',
+      name: '@neutronai/demo-stub',
       version: '0.0.0',
       type: 'module',
       neutron: siblingManifest,
@@ -417,9 +417,9 @@ describe('bundled registry — Reminders Core discovery', () => {
     const reg = buildBundledRegistry({ rootDir: root })
     const slugs = reg.list().map((c) => c.slug).sort()
     expect(slugs).toContain(CORE_SLUG)
-    expect(slugs).toContain('notes_stub')
+    expect(slugs).toContain('demo_stub')
     expect(reg.get(CORE_SLUG)?.package_name).toBe(CORE_PACKAGE_NAME)
-    expect(reg.get('notes_stub')?.package_name).toBe('@neutronai/notes-stub')
+    expect(reg.get('demo_stub')?.package_name).toBe('@neutronai/demo-stub')
   })
 })
 

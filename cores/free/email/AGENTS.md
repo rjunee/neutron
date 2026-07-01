@@ -88,6 +88,6 @@ Cross-refs:
 - `cores/sdk/SDK-CONTRACT.md` — author-facing API
 - `cores/runtime/` — install / capability gating / audit log
 - `cores/free/calendar/AGENTS.md`,
-  `cores/free/notes/AGENTS.md`,
+  `cores/free/reminders/AGENTS.md`,
   `cores/free/tasks/AGENTS.md` — sibling Tier 1 Cores; same
   scaffolding pattern.

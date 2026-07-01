@@ -122,7 +122,7 @@ test('buildBundledRegistry: discovers Cores nested under tier containers (cores/
   // Mirrors the production layout introduced by PRs #141 + #143: Tier
   // 1 free Cores ship at `cores/free/<slug>/` with no package.json on
   // the `free/` container itself. The registry walk must descend one
-  // level into containers so notes + tasks light up at boot. Without
+  // level into containers so demo-core + tasks light up at boot. Without
   // recursive discovery, both Cores ship as dead code in the bundle.
   const free = join(tmp, 'cores', 'free')
   mkdirSync(free, { recursive: true })
@@ -136,42 +136,42 @@ test('buildBundledRegistry: discovers Cores nested under tier containers (cores/
       neutron: MIN_MANIFEST,
     }))
   }
-  writeFreeCore('notes')
+  writeFreeCore('demo-core')
   writeFreeCore('tasks')
   // A direct-child Core under cores/ continues to be discovered.
   writeBundledCore('email')
 
   const reg = buildBundledRegistry({ rootDir: tmp })
   const slugs = reg.list().map((c) => c.slug).sort()
-  expect(slugs).toEqual(['email', 'notes', 'tasks'])
+  expect(slugs).toEqual(['demo_core', 'email', 'tasks'])
   // Source + rootDir propagate cleanly through the recursion path.
-  expect(reg.get('notes')?.source).toBe('bundled')
-  expect(reg.get('notes')?.rootDir).toBe(tmp)
+  expect(reg.get('demo_core')?.source).toBe('bundled')
+  expect(reg.get('demo_core')?.rootDir).toBe(tmp)
   expect(reg.get('tasks')?.package_name).toBe('@neutronai/tasks')
 })
 
 test('buildBundledRegistry: nested too-deep package.json is ignored', () => {
-  // `cores/free/notes/node_modules/dep/package.json` must NOT be
+  // `cores/free/demo-core/node_modules/dep/package.json` must NOT be
   // discovered as a Core — recursion is bounded to a single container
   // level. Otherwise a real Core's vendored deps would surface as
   // sibling Cores and fail validation at boot.
   const free = join(tmp, 'cores', 'free')
   mkdirSync(free, { recursive: true })
-  const notesDir = join(free, 'notes')
-  mkdirSync(notesDir, { recursive: true })
-  writeFileSync(join(notesDir, 'package.json'), JSON.stringify({
-    name: '@neutronai/notes',
+  const demoDir = join(free, 'demo-core')
+  mkdirSync(demoDir, { recursive: true })
+  writeFileSync(join(demoDir, 'package.json'), JSON.stringify({
+    name: '@neutronai/demo-core',
     version: '0.1.0',
     type: 'module',
     neutron: MIN_MANIFEST,
   }))
   // Vendored dep — has package.json but lives too deep.
-  const deepDep = join(notesDir, 'node_modules', 'dep')
+  const deepDep = join(demoDir, 'node_modules', 'dep')
   mkdirSync(deepDep, { recursive: true })
   writeFileSync(join(deepDep, 'package.json'), JSON.stringify({
     name: 'dep', version: '1.0.0',
   }))
 
   const reg = buildBundledRegistry({ rootDir: tmp })
-  expect(reg.list().map((c) => c.slug)).toEqual(['notes'])
+  expect(reg.list().map((c) => c.slug)).toEqual(['demo_core'])
 })

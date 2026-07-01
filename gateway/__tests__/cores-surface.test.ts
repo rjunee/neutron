@@ -32,12 +32,11 @@ const OWNER = 'surface-test'
 
 // Deployment-mode-aware expectations — see cores-composition.test.ts. The
 // Tier 2 staging Core `dtc_analytics` (under `cores/paid-staging/`) is
-// stripped by the Sprint C Open carve, so the carved Open tree installs 6
+// stripped by the Sprint C Open carve, so the carved Open tree installs 5
 // and the catalog row count drops by one. Derive from on-disk presence.
 const HAS_PAID_STAGING = existsSync(join(REPO_ROOT, 'cores', 'paid-staging', 'dtc-analytics'))
 const INSTALLED_SLUGS = [
   'codegen_core',
-  'notes',
   'reminders_core',
   'research_core',
   // Scraping Core (parity gap #6) — installs cleanly; its `apify`
@@ -173,7 +172,7 @@ describe('GET /api/cores/:slug', () => {
   })
 
   test('returns full manifest + installation for an installed Core', async () => {
-    const res = await authedFetch(bench.base, '/api/cores/notes')
+    const res = await authedFetch(bench.base, '/api/cores/reminders_core')
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
       ok: boolean
@@ -185,12 +184,12 @@ describe('GET /api/cores/:slug', () => {
       }
     }
     expect(body.ok).toBe(true)
-    expect(body.core.slug).toBe('notes')
+    expect(body.core.slug).toBe('reminders_core')
     expect(body.core.install_state).toBe('installed')
-    expect(body.core.manifest.capabilities).toContain('write:notes.db')
+    expect(body.core.manifest.capabilities).toContain('write:reminders_core.db')
     expect(body.core.manifest.tools.length).toBeGreaterThan(0)
     expect(body.core.installation).toBeDefined()
-    expect(body.core.installation?.package_name).toBe('@neutronai/notes')
+    expect(body.core.installation?.package_name).toBe('@neutronai/reminders-core')
     expect(body.core.installation?.installed_at).toBeGreaterThan(0)
   })
 
@@ -231,7 +230,7 @@ describe('POST /api/cores/install + /api/cores/uninstall', () => {
     const res = await authedFetch(bench.base, '/api/cores/install', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ slug: 'notes' }),
+      body: JSON.stringify({ slug: 'reminders_core' }),
     })
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
@@ -241,7 +240,7 @@ describe('POST /api/cores/install + /api/cores/uninstall', () => {
       restart_hint: string
     }
     expect(body.ok).toBe(true)
-    expect(body.slug).toBe('notes')
+    expect(body.slug).toBe('reminders_core')
     expect(body.requires_restart).toBe(true)
     expect(body.restart_hint).toContain('/api/app/admin/gateway/restart')
   })
@@ -250,7 +249,7 @@ describe('POST /api/cores/install + /api/cores/uninstall', () => {
     const res = await authedFetch(bench.base, '/api/cores/uninstall', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ slug: 'notes' }),
+      body: JSON.stringify({ slug: 'reminders_core' }),
     })
     expect(res.status).toBe(200)
     const body = (await res.json()) as {
