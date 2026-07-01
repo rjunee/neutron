@@ -24,6 +24,63 @@ project. No flags.
 that opens both a project-scoped socket and a General socket, drives the real
 `POST /api/app/projects`, and asserts the new project reaches both live.
 Confirmed red before the fix, green after; leak-gate silent; `tsc` clean.
+## 2026-06-30 — Onboarding live-path: deterministic name/personality capture (no double-ask) + single closing
+
+**P1 — two live-path bugs from Ryan's deployed-onboarding test.** Both fixed inside
+Path-1 (no flags, live-session locked, honoring #129; no regression of the passing
+gates — archetype buttons #139, custom-name accept #136, per-project openings
+#136/#138/#139, bubble/tab/markdown #137/#141).
+
+**BUG 1 — agent name (and personality) asked TWICE on a TAP.** Root cause:
+`agent_name`/`agent_personality` were persisted ONLY by the fire-and-forget
+post-turn LLM extractor (`post-turn-extractor.ts` — literally "agent_name — LLM
+only"). So a TAPPED (or typed) choice left `phase_state` unset until that slow,
+sometimes-timing-out extractor caught up, while the per-turn required-step guard
+(`onboarding-preamble.ts:buildOnboardingStepGuardFragment` via
+`required-fields-audit.ts`) re-injected the "STILL OPEN - NAME/PERSONALITY"
+hard-require from the STALE pre-turn `phase_state` every turn — so the live agent
+dutifully re-asked. **Fix:** a new PURE decider `button-backed-answer.ts:`
+`captureButtonBackedRequiredField` (prior-question + phase_state + answer →
+which field to settle), driven by a new `LiveAgentOnboardingSeam.captureRequiredAnswer`
+seam that the live runner (`build-live-agent-turn.ts`) calls + AWAITS at
+turn-START — BEFORE the step-guard grounding reads `phase_state`. It persists
+`agent_name`/`agent_personality` deterministically at choice-time, so the audit
+recomputes with the answer already settled and the step is never re-asked. It is
+conservative: only fires off the prior agent question's DURABLE persisted options
+(`ButtonStore.latestPromptByTopic` — live replies strip the `[[OPTIONS]]` block
+out of `body` into `options_json`, so the body alone would never match; Codex r1
+P1), anchors the personality step on the DEFINED archetype names actually
+rendered (so an early import yes/no can't be mis-captured), declines escape hatches
+("Something else"/"I'll choose my own"), and lets the LLM extractor stay the
+fallback for free-text answers it declines. Typed custom names still settle.
+
+**BUG 2 — duplicate closing message.** The live agent emitted its own wrap-up
+("We're set, what first?") AND finalize emitted the deterministic
+`ONBOARDING_CLOSING_MESSAGE` (`build-onboarding-finalize.ts`). **Fix:** when
+`captureRequiredAnswer` settles the LAST required field it fires finalize
+(idempotent, `finalizeImportOnboardingIfReady`) and returns `finalized: true`, and
+the runner SUPPRESSES its own wrap-up turn (returns early, no substrate dispatch,
+no `agent_message`) — so the single deterministic finalize closing (which already
+names the LEFT RAIL) is the ONE closing. Defense-in-depth: the preamble now tells
+the agent NOT to write its own closing (the system sends it) and forbids the exact
+duplicate phrases. Nice-to-have: preamble asks the agent to avoid em dashes.
+
+**Tests.** New `onboarding/interview/__tests__/button-backed-answer.test.ts` (15:
+tap/typed name + personality settle without the extractor; escape hatch / bare
+confirm / no-options-block / early yes/no / both-settled all decline); new
+`gateway/realmode-composer/__tests__/build-live-agent-turn-capture.test.ts` (5:
+capture runs BEFORE the guard grounding; `finalized:true` suppresses dispatch +
+`agent_message`; `finalized:false` runs normally; seed turn never captures;
+settling answer still persisted as the user bubble); `onboarding-preamble.test.ts`
+updated (agent told not to self-close + em-dash guidance). Full
+`onboarding/interview` + `gateway/realmode-composer` + chat-bridge live-agent
+suites green (1373 pass / 0 fail). tsc clean; leak-gate SILENT.
+
+**Touched:** `onboarding/interview/button-backed-answer.ts` (new pure decider),
+`onboarding/interview/onboarding-preamble.ts` (export archetype names + no-self-
+close/em-dash guidance), `gateway/realmode-composer/build-live-agent-turn.ts`
+(`captureRequiredAnswer` seam + turn-start call + wrap-up suppression),
+`open/composer.ts` (seam impl: deterministic persist + finalize-on-complete).
 
 ## 2026-06-30 — Onboarding reliability: per-project opening recovery + empty-project loader + deterministic archetype step + larger cold budget
 

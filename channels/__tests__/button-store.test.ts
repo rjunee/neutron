@@ -553,3 +553,28 @@ describe('ButtonStore.latestTurnByTopic — insertion-order recency (same-ms tie
     expect(latest).toBeNull()
   })
 })
+
+describe('ButtonStore.latestPromptByTopic — full prompt with persisted options', () => {
+  test('returns the most-recent prompt WITH its parsed options (not the stripped body)', async () => {
+    await store.emit(samplePrompt({ body: 'older' }), { topic_id: 'topic-1' })
+    await store.emit(
+      samplePrompt({
+        body: 'What should I call you?', // body carries NO [[OPTIONS]] block, like a live reply
+        options: [
+          { label: 'A', body: 'Sage', value: 'Sage' },
+          { label: 'B', body: 'Atlas', value: 'Atlas' },
+        ],
+      }),
+      { topic_id: 'topic-1' },
+    )
+    const prompt = await store.latestPromptByTopic({ topic_id: 'topic-1', before: now, now })
+    expect(prompt).not.toBeNull()
+    expect(prompt!.body).toBe('What should I call you?')
+    expect(prompt!.options.map((o) => o.value)).toEqual(['Sage', 'Atlas'])
+  })
+
+  test('returns null for a topic with no rows', async () => {
+    const prompt = await store.latestPromptByTopic({ topic_id: 'empty-topic', before: now, now })
+    expect(prompt).toBeNull()
+  })
+})

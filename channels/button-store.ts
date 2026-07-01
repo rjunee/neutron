@@ -778,6 +778,43 @@ export class ButtonStore {
   }
 
   /**
+   * Like {@link latestTurnByTopic} but returns the FULL persisted prompt
+   * (crucially its parsed `options`), not the history-turn projection. The
+   * onboarding deterministic-answer capture (button-backed-answer.ts) needs the
+   * durable option set of the agent's last question — the `body` alone is not
+   * enough because live-agent replies persist the `[[OPTIONS]]` block STRIPPED
+   * from `body` (it lives in `options_json`). Same recency + ghost-filter rule
+   * as `latestTurnByTopic` (`rowid DESC` same-ms tiebreak). Returns null when the
+   * topic has no visible row.
+   */
+  async latestPromptByTopic(input: {
+    topic_id: string
+    /** Upper bound (inclusive) on `created_at` — the caller's wall clock. */
+    before: number
+    /** Wall clock used to drop expired unresolved "ghost" rows. */
+    now: number
+  }): Promise<ButtonPrompt | null> {
+    if (typeof input.topic_id !== 'string' || input.topic_id.length === 0) {
+      throw new ButtonStoreError(
+        'invalid_prompt',
+        `latestPromptByTopic requires a non-empty topic_id`,
+      )
+    }
+    const row = this.db
+      .prepare<PromptRow, [string, number, number]>(
+        `SELECT ${SELECT_PROMPT_COLS}
+           FROM button_prompts
+          WHERE topic_id = ?
+            AND created_at <= ?
+            AND (resolved_at IS NOT NULL OR expires_at > ?)
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT 1`,
+      )
+      .get(input.topic_id, input.before, input.now)
+    return row === undefined || row === null ? null : rowToPrompt(row)
+  }
+
+  /**
    * Sidebar topic rail (2026-05-28 sprint) — enumerate the distinct
    * `topic_id`s for a user with per-topic metadata (latest body, latest
    * `created_at`, count of active unresolved prompts). Caller is the

@@ -141,12 +141,22 @@ describe('buildOnboardingPreamble — defined archetypes + options + name + clos
     expect(out).toContain('Ferin')
   })
 
-  it('wrap-up points the owner at the left rail + Plan (closing handoff, secondary)', () => {
+  it('tells the agent NOT to write its own closing — the system sends the one closing (BUG 2, 2026-06-30)', () => {
     const out = buildOnboardingPreamble({ import_offered: false })
-    expect(out).toContain('left rail')
+    // The duplicate-closing fix: the agent must not emit its own wrap-up (which
+    // Ryan hit as a second, near-identical closing). The deterministic finalize
+    // message is the single closing and it names the LEFT RAIL + Plan.
+    expect(out).toContain('do NOT write your own closing')
+    expect(out).toMatch(/left\s+rail/i)
     expect(out).toContain('Plan')
-    // Mentions the automatic confirmation so the agent keeps the wrap-up brief.
-    expect(out).toContain('sent')
+    // And it explicitly forbids the phrases that made it read as a duplicate.
+    expect(out).toContain("do NOT say \"you're all set\"")
+    expect(out).toContain('what do you want to look at first')
+  })
+
+  it('asks the agent to avoid em dashes in owner-facing copy (nice-to-have)', () => {
+    const out = buildOnboardingPreamble({ import_offered: false })
+    expect(out).toContain('do not use em dashes')
   })
 })
 

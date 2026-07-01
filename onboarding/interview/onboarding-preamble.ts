@@ -36,6 +36,19 @@ const DEFINED_PERSONALITY_CHARACTERS: ReadonlyArray<{ name: string; why: string 
   ...STATIC_PERSONALITY_CHARACTER_FALLBACK.wild,
 ]
 
+/**
+ * The archetype NAMES the personality step presents (item, 2026-06-30 name/
+ * closing fix). Exported so the deterministic button-backed-answer capture
+ * (`button-backed-answer.ts`) can recognise "the prior agent message WAS the
+ * personality step" by matching these names inside its `[[OPTIONS]]` block —
+ * the signal that lets it settle `agent_personality` at choice-time instead of
+ * waiting on the flaky post-turn LLM extractor. Kept in lock-step with the set
+ * the step guard forces (`DEFINED_PERSONALITY_CHARACTERS` above), so the
+ * matcher can never drift from what the agent is instructed to render.
+ */
+export const DEFINED_PERSONALITY_CHARACTER_NAMES: ReadonlyArray<string> =
+  DEFINED_PERSONALITY_CHARACTERS.map((c) => c.name)
+
 export function buildOnboardingPreamble(input: OnboardingPreambleInput): string {
   const lines: string[] = []
   lines.push('<onboarding>')
@@ -123,13 +136,25 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
   lines.push('')
   lines.push(
     'You do NOT need to collect these in order, and a single answer may cover several. Do',
-    'not re-ask something they already told you. When you have a good sense of all five,',
-    'briefly reflect back what you learned and tell them you\'re all set. Mention that',
-    'you\'ve set up their projects in the left rail and that each one has its own Plan,',
-    'Documents, and Chat — they can open one any time. Then simply continue as their',
-    'assistant. Do not announce phases or "completing onboarding"; the transition should',
-    'feel seamless. (A confirmation message naming the projects is also sent',
-    'automatically once they are created, so keep your wrap-up brief.)',
+    'not re-ask something they already told you.',
+  )
+  lines.push('')
+  lines.push(
+    'FINISHING — do NOT write your own closing/wrap-up. The system sends ONE closing',
+    'message automatically the moment the last step is answered: it confirms everything',
+    'is set, names the projects it created, and invites the owner to open one in the LEFT',
+    'RAIL (each has its own Plan, Documents, and Chat). So once they have given the final',
+    'answer (their name), reply with at MOST a single short, warm acknowledgement of that',
+    'answer (e.g. "Love it.") and STOP — do NOT say "you\'re all set", do NOT list or',
+    'summarise their projects, do NOT mention the left rail or "onboarding complete", and',
+    'do NOT ask "what do you want to look at first?". Restating any of that duplicates the',
+    'automatic closing (the exact bug we are avoiding). Never announce phases; the',
+    'transition should feel seamless as you simply continue as their assistant.',
+  )
+  lines.push('')
+  lines.push(
+    'STYLE: do not use em dashes (—) in your messages to the owner; write with commas,',
+    'periods, or parentheses instead.',
   )
   lines.push('</onboarding>')
   return lines.join('\n')

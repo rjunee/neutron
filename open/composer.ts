@@ -55,6 +55,7 @@ import {
 } from '../gateway/realmode-composer/build-onboarding-handoff.ts'
 import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
 import { auditRequiredFields } from '../onboarding/interview/required-fields-audit.ts'
+import { captureButtonBackedRequiredField } from '../onboarding/interview/button-backed-answer.ts'
 import {
   buildImportAnalysisContextFragment,
   buildOnboardingPreamble,
@@ -2326,6 +2327,59 @@ export function buildOpenGraphComposer(
             },
             uploadAffordance: (): { source: 'chatgpt' | 'claude' } | null =>
               importSubstrate !== null ? { source: 'chatgpt' } : null,
+            // BUG 1/2 fix (2026-06-30, Ryan live test) — deterministic
+            // button-backed answer capture, run + awaited at turn-START (before
+            // the step-guard grounding reads phase_state). Persists agent_name /
+            // agent_personality DIRECTLY on a tap/typed answer so the required-step
+            // audit recomputes settled and never re-asks (BUG 1); when the answer
+            // settles the LAST required field, fires finalize and returns
+            // `finalized: true` so the runner suppresses its own wrap-up and the
+            // deterministic finalize closing is the ONE closing (BUG 2). Fully
+            // best-effort: any read/write hiccup degrades to extractor-only
+            // persistence and a normal (un-suppressed) turn.
+            captureRequiredAnswer: async ({
+              user_id,
+              user_text,
+              prior_agent_options,
+            }): Promise<{ finalized: boolean }> => {
+              try {
+                const st = await onboardingStateStore.get(project_slug, user_id)
+                if (st === null) return { finalized: false }
+                const captured = captureButtonBackedRequiredField({
+                  phase_state: st.phase_state,
+                  user_text,
+                  prior_agent_options,
+                })
+                if (captured === null) return { finalized: false }
+                // Persist the settled field (shallow-merge; phase unchanged).
+                const next = await onboardingStateStore.upsert({
+                  project_slug,
+                  user_id,
+                  phase: st.phase,
+                  phase_state_patch: { [captured.field]: captured.value },
+                })
+                // BUG 2 — did this settle the final required field? If every
+                // required field is now present and no import is in flight, finalize
+                // now (idempotent) and tell the runner to suppress its wrap-up so the
+                // single deterministic closing owns the ending. `finalizeImport-
+                // OnboardingIfReady` re-checks readiness + fires finalize.
+                if (auditRequiredFields(next.phase_state).next_to_collect === null) {
+                  const finalized = await finalizeImportOnboardingIfReady(user_id, next)
+                  if (finalized) {
+                    emitProjectsChangedIfChanged(user_id)
+                    return { finalized: true }
+                  }
+                }
+                return { finalized: false }
+              } catch (err) {
+                console.warn(
+                  `[open] event=capture_required_answer_failed project=${project_slug} user=${user_id} err=${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                )
+                return { finalized: false }
+              }
+            },
             onTurnComplete: (turn): void => onboardingExtractor.onTurnComplete(turn),
           }
         : undefined

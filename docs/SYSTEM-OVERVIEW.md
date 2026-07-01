@@ -605,6 +605,29 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   minutes leaves comfortable headroom over the observed worst case, with the
 >   seed-failure self-heal + the project-opening regeneration above covering the
 >   rarer turn that exceeds even this.
+> - **Name/personality settle DETERMINISTICALLY at choice-time — no double-ask; ONE
+>   closing (2026-06-30, Ryan live test).** The step guard above made the archetype/
+>   name buttons appear, but the two button-backed fields were still persisted ONLY
+>   by the fire-and-forget post-turn LLM extractor ("agent_name — LLM only"). So a
+>   TAP left `phase_state` unset until that slow/timing-out extractor caught up, and
+>   the same step guard — reading STALE pre-turn `phase_state` every turn —
+>   re-injected "STILL OPEN - NAME" and the agent re-asked the just-tapped answer.
+>   **Fix:** a new PURE decider `onboarding/interview/button-backed-answer.ts:`
+>   `captureButtonBackedRequiredField` + a new `LiveAgentOnboardingSeam.`
+>   `captureRequiredAnswer` seam the live runner calls + AWAITS at turn-START
+>   (BEFORE the guard grounding reads `phase_state`), persisting
+>   `agent_name`/`agent_personality` deterministically so the audit recomputes
+>   settled and never re-asks. Conservative: keyed off the prior question's DURABLE
+>   persisted options (`ButtonStore.latestPromptByTopic` — live replies strip the
+>   `[[OPTIONS]]` block out of `body`), personality anchored on the DEFINED
+>   archetype names actually rendered (an early
+>   import yes/no can't be mis-captured), escape hatches declined, LLM extractor
+>   kept as the free-text fallback. **Duplicate closing:** when that capture settles
+>   the LAST required field it fires finalize and returns `finalized: true`, and the
+>   runner SUPPRESSES its own wrap-up (no dispatch, no `agent_message`) so the single
+>   deterministic finalize closing (which names the LEFT RAIL) is the ONE closing;
+>   the preamble also tells the agent not to write its own closing (and to avoid em
+>   dashes).
 
 The React web client (`landing/chat-react/`) is **registry-driven** too, and
 since the 2026-06-30 rework `chat-react/ProjectShell.tsx` is the **APP SHELL**:

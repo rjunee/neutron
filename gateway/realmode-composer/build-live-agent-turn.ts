@@ -331,6 +331,30 @@ export interface LiveAgentOnboardingSeam {
   onboardingContext?(user_id: string): Promise<string | null>
   /** Upload affordance attached to onboarding agent_messages (zip import), or null. */
   uploadAffordance(): { source: 'chatgpt' | 'claude' } | null
+  /**
+   * BUG 1 fix (2026-06-30) — deterministic button-backed answer capture, run at
+   * turn-START (BEFORE the system prompt / step-guard reads `phase_state`) and
+   * AWAITED (not fire-and-forget) so the persist is visible to the same turn's
+   * grounding. When the owner taps/types the agent name or personality, this
+   * writes it straight to `phase_state` so the required-step audit recomputes
+   * with the answer already settled and never re-asks. A no-op turn (not a
+   * name/personality answer) returns `{ finalized: false }` and the turn runs
+   * normally.
+   *
+   * `finalized: true` signals BUG 2: this answer settled the LAST required field
+   * and onboarding finalize was fired, so the runner MUST suppress its own
+   * wrap-up reply — the deterministic finalize closing (which names the left
+   * rail) is the single closing. Optional + best-effort: a throwing/absent seam
+   * degrades to the pre-fix behaviour (extractor-only persistence).
+   */
+  captureRequiredAnswer?(input: {
+    user_id: string
+    user_text: string
+    /** The DURABLE option values of the prior agent question (its persisted
+     *  `options[].value`), NOT the row body — live-agent replies strip the
+     *  `[[OPTIONS]]` block out of `body`, so the body alone would never match. */
+    prior_agent_options: ReadonlyArray<string>
+  }): Promise<{ finalized: boolean }>
   /** Fire-and-forget post-turn scribe — never blocks, never throws into the turn. */
   onTurnComplete(input: {
     user_id: string
@@ -530,6 +554,29 @@ export function buildLiveAgentTurn(
         onboardingActive = false
       }
     }
+    // BUG 1 fix — read the prior agent question's DURABLE options BEFORE the
+    // resolve below mutates the row (and before an inert user-turn row can become
+    // "latest"). Live-agent replies persist the `[[OPTIONS]]` block stripped from
+    // `body` (it lives in `options_json`), so the deterministic capture must key
+    // off these persisted option values, not the stripped body text. Onboarding-
+    // only + best-effort: a read failure degrades to no capture.
+    let priorAgentOptions: string[] = []
+    if (
+      onboardingActive &&
+      turn.seed_turn !== true &&
+      input.onboarding?.captureRequiredAnswer !== undefined
+    ) {
+      try {
+        const priorPrompt = await input.buttonStore.latestPromptByTopic({
+          topic_id: turn.topic_id,
+          before: now(),
+          now: now(),
+        })
+        priorAgentOptions = priorPrompt?.options.map((o) => o.value) ?? []
+      } catch {
+        priorAgentOptions = []
+      }
+    }
     // ── 1. Persist the user turn onto the previous agent row (best-effort).
     // Capture that previous agent reply: the owner's message THIS turn is a
     // response to the PRIOR reply, so correction detection must judge (prior
@@ -548,6 +595,43 @@ export function buildLiveAgentTurn(
         })
       } catch {
         /* audit-trail only — never blocks the turn */
+      }
+    }
+
+    // BUG 1 fix (2026-06-30) — deterministic button-backed answer capture. When
+    // the owner just tapped/typed the agent name or personality, persist it to
+    // `phase_state` NOW — synchronously, BEFORE the step-guard grounding below
+    // reads `phase_state` — so the required-step audit recomputes with the answer
+    // already settled and the live agent never re-asks it (the flaky post-turn
+    // extractor was the sole writer; see button-backed-answer.ts). Awaited (not
+    // fire-and-forget) precisely so the write is visible to THIS turn's prompt.
+    // Skipped for the synthetic seed turn (no answer). Best-effort: a throwing
+    // seam degrades to extractor-only persistence, never kills the turn.
+    if (
+      onboardingActive &&
+      turn.seed_turn !== true &&
+      input.onboarding?.captureRequiredAnswer !== undefined
+    ) {
+      try {
+        const capture = await input.onboarding.captureRequiredAnswer({
+          user_id: turn.user_id,
+          user_text: turn.user_text,
+          prior_agent_options: priorAgentOptions,
+        })
+        // BUG 2 fix — this answer settled the LAST required field and finalize
+        // fired. Suppress the live agent's own wrap-up so the ONE closing is the
+        // deterministic finalize message (which already names the left rail). The
+        // owner's answer bubble was already persisted (step 1); finalize delivers
+        // the closing + per-project openings over the same durable path.
+        if (capture.finalized) {
+          return { outcome: 'replied', reply_prompt_id: null }
+        }
+      } catch (err) {
+        console.warn(
+          `${LOG_TAG} event=capture_required_answer_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
       }
     }
 
