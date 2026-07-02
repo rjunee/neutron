@@ -129,6 +129,17 @@ export interface ChatViewModel {
    * during streaming so the composer shows Stop.
    */
   awaitingFirstToken: boolean
+  /**
+   * Chat-typing persistence — true while the active project's Work Board has at
+   * least one `in_progress` item (the SAME signal that flashes the Plan-tab
+   * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
+   * so the dots stay visible for the WHOLE processing window — including a long
+   * or background build that continues AFTER the ack turn settles (the agent
+   * acks, dispatches the build, `awaitingReply` clears, but the board still shows
+   * work in flight). Clears the moment the board reports no `in_progress` item
+   * (work marked done), so the dots stop exactly when the work completes.
+   */
+  hasActiveWork: boolean
   status: ConnStatus
   /** Count of sends still queued/unacked (offline tail). */
   pending: number
@@ -303,9 +314,11 @@ export class NeutronChatController {
   private readonly listeners = new Set<(vm: ChatViewModel) => void>()
   /**
    * Work Board live-frame subscribers (the `WorkBoardTab`). Kept SEPARATE from
-   * the `vm` listeners so a `work_board_changed` frame re-renders only the board
-   * tab, never the whole chat view — mirrors the `projects_changed` apply but
-   * out-of-band of the chat ViewModel (the board isn't chat state).
+   * the `vm` listeners so a `work_board_changed` frame re-renders the board tab
+   * out-of-band — mirrors the `projects_changed` apply. The chat ViewModel now
+   * derives ONE field from the board (`hasActiveWork`, for the typing indicator),
+   * so the frame handler ALSO calls `publish()`; everything else about the board
+   * stays out-of-band of the chat vm.
    */
   private readonly workBoardListeners = new Set<
     (items: WorkBoardItem[], projectId: string | undefined) => void
@@ -687,6 +700,10 @@ export class NeutronChatController {
           /* a throwing tab callback must not wedge the frame loop */
         }
       }
+      // The chat typing indicator ORs in `hasActiveWork` (derived from this
+      // board), so a board change can flip the dots on/off — re-render the chat
+      // vm too. Cheap (getViewModel recomputes) and idempotent.
+      this.publish()
       return
     }
     if (type === 'onboarding_completed') {
@@ -966,6 +983,7 @@ export class NeutronChatController {
       messages,
       isRunning: this.awaitingReply || liveStreams.length > 0,
       awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
+      hasActiveWork: this.computeHasActiveWork(),
       // Chat-rail stability — present a project-switch's initial `connecting` as
       // `idle` so `ConnectionBanner` stays hidden across a warm switch. A real
       // disconnect (which clears `switchConnecting`) still reports its true
@@ -977,6 +995,26 @@ export class NeutronChatController {
       latestUserDelivery,
       importProgress: this.importProgress,
     }
+  }
+
+  /**
+   * True when the active project's Work Board has an `in_progress` item — the
+   * signal behind the Plan-tab flashing active-work dot, reused to keep the chat
+   * typing dots visible while a long/background build runs.
+   *
+   * `lastWorkBoard` is populated ONLY by live `work_board_changed` frames (the
+   * server pushes on every mutation, never on connect), so this is null until a
+   * mutation lands this session — a lingering item from a prior session can't
+   * spin the dots at load time. Project scoping mirrors `WorkBoardTab`: a
+   * snapshot with no project id is "this project"; one naming a DIFFERENT project
+   * than the active chat scope is not ours (the app-ws topic is per-user, so a
+   * sibling project's board can arrive on this socket).
+   */
+  private computeHasActiveWork(): boolean {
+    if (this.lastWorkBoard === null || this.lastWorkBoard.length === 0) return false
+    const pid = this.lastWorkBoardProjectId
+    if (pid !== undefined && pid.length > 0 && pid !== this.projectId) return false
+    return this.lastWorkBoard.some((it) => it.status === 'in_progress')
   }
 
   /** Monotonic local ordering key for streaming bubbles (no wall clock). */
