@@ -188,7 +188,11 @@ import { ProjectCredentialStore } from '../project-credentials/store.ts'
 import { CodexCredentialService } from '../trident/codex-credential.ts'
 import { resolveCodexHome } from '../trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '../project-credentials/fragment.ts'
-import { WorkBoardStore, type WorkBoardItem } from '../work-board/store.ts'
+import {
+  WorkBoardStore,
+  workBoardProjectIdForKey,
+  type WorkBoardItem,
+} from '../work-board/store.ts'
 import { WorkBoardSpecDocService } from '../work-board/spec-doc-service.ts'
 import { dispatchBoardBoundBuild } from '../trident/board-dispatch.ts'
 import type { WorkBoardStartResult } from '../gateway/http/work-board-surface.ts'
@@ -2140,13 +2144,19 @@ export function buildOpenGraphComposer(
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
     const workBoardStore = new WorkBoardStore(db, {
-      onChange: (): void => {
+      // `changedKey` is the storage key of the board that mutated. List + push
+      // THAT project's snapshot (not one shared board) and tag the frame with the
+      // per-project `project_id` so the clients' per-project filter applies it to
+      // the right view; General (key === the owner slug) → no tag (the clients'
+      // "no project_id = this/General board" broadcast).
+      onChange: (changedKey: string): void => {
         try {
           const nowMs = Date.now()
+          const framePid = workBoardProjectIdForKey(project_slug, changedKey)
           const frame: AppWsOutboundWorkBoardChanged = {
             v: 1,
             type: 'work_board_changed',
-            items: workBoardStore.list(project_slug).map((it) => {
+            items: workBoardStore.list(changedKey).map((it) => {
               // Item 1 — attach the bound run's live progress (null when unbound).
               const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
               return {
@@ -2163,12 +2173,13 @@ export function buildOpenGraphComposer(
                 ...(run_progress !== null ? { run_progress } : {}),
               }
             }),
+            ...(framePid !== undefined ? { project_id: framePid } : {}),
             ts: nowMs,
           }
           appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
         } catch (err) {
           console.warn(
-            `[work-board] event=push_failed project=${project_slug} err=${
+            `[work-board] event=push_failed project=${changedKey} err=${
               err instanceof Error ? err.message : String(err)
             }`,
           )

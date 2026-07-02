@@ -152,3 +152,94 @@ describe('buildMergeCleanupDeps — local mode', () => {
     expect(calls).toHaveLength(0)
   })
 })
+
+describe('buildMergeCleanupDeps — local mode per-workspace serialization (Bug 1)', () => {
+  // A `deferred` gate + a host that blocks the FIRST merge lets us observe
+  // whether a SECOND concurrent merge on the same working tree interleaves.
+  function gate(): { promise: Promise<void>; release: () => void } {
+    let release!: () => void
+    const promise = new Promise<void>((r) => {
+      release = r
+    })
+    return { promise, release }
+  }
+
+  test('two concurrent local merges on the SAME repo_path serialize (second waits for the first)', async () => {
+    const calls: string[] = []
+    const firstMerge = gate()
+    let merges = 0
+    const host: RunHostCommand = async (cmd) => {
+      calls.push(cmd.join(' '))
+      if (cmd.includes('merge') && cmd.includes('--no-ff')) {
+        merges += 1
+        if (merges === 1) await firstMerge.promise // hold build A mid-merge
+      }
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const a = makeRun({ merge_mode: 'local', branch: 'feat-a', pr: null, repo_path: '/shared' })
+    const b = makeRun({ merge_mode: 'local', branch: 'feat-b', pr: null, repo_path: '/shared' })
+
+    const pA = cleanupAfterMerge(a, deps)
+    const pB = cleanupAfterMerge(b, deps)
+    // Let microtasks flush: A is now blocked mid-merge; B must NOT have begun.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(calls.filter((c) => c.includes('checkout'))).toEqual(['git -C /shared checkout main'])
+    expect(calls.filter((c) => c.includes('merge --no-ff')).length).toBe(1)
+
+    // Release A; B may now run its checkout+merge on the (now-updated) base.
+    firstMerge.release()
+    await Promise.all([pA, pB])
+    expect(calls.filter((c) => c.includes('checkout')).length).toBe(2)
+    expect(calls.filter((c) => c.includes('merge --no-ff')).length).toBe(2)
+    expect(calls.some((c) => c.startsWith('git -C /shared merge --no-ff feat-b'))).toBe(true)
+  })
+
+  test('a failed first merge does NOT wedge the queue — the second still runs', async () => {
+    const calls: string[] = []
+    let merges = 0
+    const host: RunHostCommand = async (cmd) => {
+      calls.push(cmd.join(' '))
+      if (cmd.includes('merge') && cmd.includes('--no-ff')) {
+        merges += 1
+        if (merges === 1) return fail('conflict') // A's merge fails
+      }
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const a = makeRun({ merge_mode: 'local', branch: 'feat-a', pr: null, repo_path: '/shared2' })
+    const b = makeRun({ merge_mode: 'local', branch: 'feat-b', pr: null, repo_path: '/shared2' })
+
+    const pA = cleanupAfterMerge(a, deps)
+    const pB = cleanupAfterMerge(b, deps)
+    await expect(pA).rejects.toBeInstanceOf(TridentMergeError)
+    await pB // B is not blocked by A's failure
+    expect(calls.some((c) => c.startsWith('git -C /shared2 merge --no-ff feat-b'))).toBe(true)
+  })
+
+  test('local merges on DIFFERENT repo_paths run in parallel (lock is per working tree)', async () => {
+    const bothMerging = gate()
+    let inMerge = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('merge') && cmd.includes('--no-ff')) {
+        inMerge += 1
+        await bothMerging.promise // both stay parked in-merge together
+      }
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const pA = cleanupAfterMerge(
+      makeRun({ merge_mode: 'local', branch: 'feat-a', pr: null, repo_path: '/repoA' }),
+      deps,
+    )
+    const pB = cleanupAfterMerge(
+      makeRun({ merge_mode: 'local', branch: 'feat-b', pr: null, repo_path: '/repoB' }),
+      deps,
+    )
+    await new Promise((r) => setTimeout(r, 10))
+    // Distinct working trees → BOTH merges are in flight at once (no serialization).
+    expect(inMerge).toBe(2)
+    bothMerging.release()
+    await Promise.all([pA, pB])
+  })
+})

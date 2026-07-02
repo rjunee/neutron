@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { createAppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import { WorkBoardStore } from '../../work-board/store.ts'
+import { WorkBoardStore, workBoardScopeKey } from '../../work-board/store.ts'
 import {
   createWorkBoardSurface,
   type TridentRunAccess,
@@ -72,6 +72,10 @@ let db: ProjectDb
 let store: WorkBoardStore
 let surface: WorkBoardSurface
 const SLUG = 'owner'
+// The routes below all use the `proj1` path segment; the per-project storage
+// key for it is `workBoardScopeKey('owner', 'proj1') === 'proj1'`. Seed + assert
+// under that key so the store fixtures line up with what the surface reads.
+const SCOPE = workBoardScopeKey(SLUG, 'proj1')
 
 function req(method: string, path: string, body?: unknown, withAuth = true): Request {
   const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -109,7 +113,7 @@ describe('work-board HTTP surface', () => {
   })
 
   test('GET returns the board for the bearer project_slug', async () => {
-    await store.create(SLUG, { title: 'A' })
+    await store.create(SCOPE, { title: 'A' })
     const res = await surface.handler(req('GET', '/api/app/projects/proj1/work-board'))
     expect(res?.status).toBe(200)
     const body = (await res!.json()) as { ok: boolean; items: { title: string }[] }
@@ -122,7 +126,7 @@ describe('work-board HTTP surface', () => {
     expect(res?.status).toBe(201)
     const body = (await res!.json()) as { ok: boolean; item: { id: string; title: string } }
     expect(body.item.title).toBe('new item')
-    expect(store.get(SLUG, body.item.id)?.title).toBe('new item')
+    expect(store.get(SCOPE, body.item.id)?.title).toBe('new item')
   })
 
   test('POST create rejects a javascript: design_doc_ref with 400', async () => {
@@ -149,18 +153,18 @@ describe('work-board HTTP surface', () => {
   })
 
   test('PATCH updates; complete + DELETE work; reorder reorders', async () => {
-    const a = await store.create(SLUG, { title: 'A' })
-    const b = await store.create(SLUG, { title: 'B' })
+    const a = await store.create(SCOPE, { title: 'A' })
+    const b = await store.create(SCOPE, { title: 'B' })
     // PATCH title
     const patch = await surface.handler(
       req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { title: 'A-renamed' }),
     )
     expect(patch?.status).toBe(200)
-    expect(store.get(SLUG, a.id)?.title).toBe('A-renamed')
+    expect(store.get(SCOPE, a.id)?.title).toBe('A-renamed')
     // complete
     const done = await surface.handler(req('POST', `/api/app/projects/proj1/work-board/${a.id}/complete`))
     expect(done?.status).toBe(200)
-    expect(store.get(SLUG, a.id)?.status).toBe('done')
+    expect(store.get(SCOPE, a.id)?.status).toBe('done')
     // reorder B to end (no-op-ish) — returns 200 with items
     const reorder = await surface.handler(
       req('POST', `/api/app/projects/proj1/work-board/${b.id}/reorder`, {}),
@@ -169,7 +173,7 @@ describe('work-board HTTP surface', () => {
     // DELETE
     const del = await surface.handler(req('DELETE', `/api/app/projects/proj1/work-board/${b.id}`))
     expect(del?.status).toBe(200)
-    expect(store.get(SLUG, b.id)).toBeNull()
+    expect(store.get(SCOPE, b.id)).toBeNull()
   })
 
   test('PATCH on an unknown item → 404', async () => {
@@ -189,10 +193,12 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
 
   test('GET enriches a bound item with its live run_progress (item 1)', async () => {
-    const item = await store.create(SLUG, { title: 'Building' })
-    await store.bindRun(SLUG, item.id, 'run-1')
+    const item = await store.create(SCOPE, { title: 'Building' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
     const { access } = fakeRunAccess({
-      'run-1': fakeRun({ id: 'run-1', phase: 'forge-init', inner_checkpoint: 'forge-done', pr: 9 }),
+      // A run bound to a proj1 item carries project_slug=proj1 (dispatch keys the
+      // run on the same scope), so the run-progress cross-scope guard passes.
+      'run-1': fakeRun({ id: 'run-1', project_slug: SCOPE, phase: 'forge-init', inner_checkpoint: 'forge-done', pr: 9 }),
     })
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
     const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
@@ -205,7 +211,7 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
   })
 
   test('GET omits run_progress on an unbound item', async () => {
-    const item = await store.create(SLUG, { title: 'Idle' })
+    const item = await store.create(SCOPE, { title: 'Idle' })
     const { access } = fakeRunAccess({})
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
     const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
@@ -215,8 +221,8 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
   })
 
   test('DELETE cancels a non-terminal linked run (phase→stopped) then deletes (item 3)', async () => {
-    const item = await store.create(SLUG, { title: 'Running build' })
-    await store.bindRun(SLUG, item.id, 'run-1')
+    const item = await store.create(SCOPE, { title: 'Running build' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
     const { access, updates } = fakeRunAccess({ 'run-1': fakeRun({ id: 'run-1', phase: 'forge-init' }) })
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
 
@@ -226,12 +232,12 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(body.cancelled_run).toBe('run-1')
     // The run was stopped BEFORE the item was removed.
     expect(updates).toEqual([{ id: 'run-1', phase: 'stopped' }])
-    expect(store.get(SLUG, item.id)).toBeNull()
+    expect(store.get(SCOPE, item.id)).toBeNull()
   })
 
   test('DELETE does NOT cancel an already-terminal linked run', async () => {
-    const item = await store.create(SLUG, { title: 'Done build' })
-    await store.bindRun(SLUG, item.id, 'run-1')
+    const item = await store.create(SCOPE, { title: 'Done build' })
+    await store.bindRun(SCOPE, item.id, 'run-1')
     const { access, updates } = fakeRunAccess({ 'run-1': fakeRun({ id: 'run-1', phase: 'done' }) })
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
 
@@ -240,18 +246,18 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     const body = (await res!.json()) as { cancelled_run?: string }
     expect(body.cancelled_run).toBeUndefined()
     expect(updates).toEqual([])
-    expect(store.get(SLUG, item.id)).toBeNull()
+    expect(store.get(SCOPE, item.id)).toBeNull()
   })
 
   test('DELETE on an unbound item just deletes (no cancel)', async () => {
-    const item = await store.create(SLUG, { title: 'Plain item' })
+    const item = await store.create(SCOPE, { title: 'Plain item' })
     const { access, updates } = fakeRunAccess({})
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
 
     const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
     expect(res?.status).toBe(200)
     expect(updates).toEqual([])
-    expect(store.get(SLUG, item.id)).toBeNull()
+    expect(store.get(SCOPE, item.id)).toBeNull()
   })
 })
 
@@ -276,7 +282,7 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
   })
 
   test('POST start → dispatches + returns run_id', async () => {
-    const item = await store.create(SLUG, { title: 'Ready item' })
+    const item = await store.create(SCOPE, { title: 'Ready item' })
     const s = createWorkBoardSurface({
       store,
       auth,
@@ -297,16 +303,16 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
   })
 
   test('POST start with no start_build wired → 501', async () => {
-    const item = await store.create(SLUG, { title: 'Ready item' })
+    const item = await store.create(SCOPE, { title: 'Ready item' })
     const s = createWorkBoardSurface({ store, auth })
     const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
     expect(res?.status).toBe(501)
   })
 
   test('POST start on an item with a LIVE bound run → 409 already_running', async () => {
-    const item = await store.create(SLUG, { title: 'Bound item' })
-    await store.attachRun(SLUG, item.id, 'run-live')
-    const bound = store.get(SLUG, item.id)!
+    const item = await store.create(SCOPE, { title: 'Bound item' })
+    await store.attachRun(SCOPE, item.id, 'run-live')
+    const bound = store.get(SCOPE, item.id)!
     const { access } = fakeRunAccess({ 'run-live': fakeRun({ id: 'run-live', phase: 'forge-init' }) })
     const s = createWorkBoardSurface({
       store,
@@ -321,7 +327,7 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
   })
 
   test('POST start when the dispatch is underspecified → 409 with the guidance', async () => {
-    const item = await store.create(SLUG, { title: 'thin' })
+    const item = await store.create(SCOPE, { title: 'thin' })
     const s = createWorkBoardSurface({
       store,
       auth,
@@ -332,5 +338,56 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
     const body = (await res!.json()) as { code: string; message: string }
     expect(body.code).toBe('underspecified')
     expect(body.message).toContain('ask the owner')
+  })
+})
+
+describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
+  test('two projects keep DISTINCT boards; an item created in A is absent from B', async () => {
+    // Create in project A THROUGH the surface (the real write path).
+    const created = await surface.handler(
+      req('POST', '/api/app/projects/projA/work-board', { title: 'A-only' }),
+    )
+    expect(created?.status).toBe(201)
+
+    // GET project A sees it; GET project B is empty (isolated).
+    const aList = await surface.handler(req('GET', '/api/app/projects/projA/work-board'))
+    const aBody = (await aList!.json()) as { items: { title: string }[]; project_id: string }
+    expect(aBody.items.map((i) => i.title)).toEqual(['A-only'])
+    expect(aBody.project_id).toBe('projA')
+
+    const bList = await surface.handler(req('GET', '/api/app/projects/projB/work-board'))
+    const bBody = (await bList!.json()) as { items: unknown[] }
+    expect(bBody.items).toEqual([])
+
+    // The row is keyed on project A's scope, NOT the bare owner slug.
+    expect(store.list('projA').map((i) => i.title)).toEqual(['A-only'])
+    expect(store.list(SLUG)).toEqual([])
+  })
+
+  test("an item id from project A is 404 through project B's path (no cross-scope probe)", async () => {
+    const a = await store.create('projA', { title: 'secret' })
+    const patchB = await surface.handler(
+      req('PATCH', `/api/app/projects/projB/work-board/${a.id}`, { title: 'x' }),
+    )
+    expect(patchB?.status).toBe(404)
+    const delB = await surface.handler(req('DELETE', `/api/app/projects/projB/work-board/${a.id}`))
+    expect(delB?.status).toBe(404)
+    // A's item is untouched.
+    expect(store.get('projA', a.id)?.title).toBe('secret')
+  })
+
+  test('the General board maps to the owner slug (pre-scoping legacy rows preserved)', async () => {
+    // A row written under the bare owner slug (how ALL rows were keyed before
+    // per-project scoping) surfaces on the General board — not stranded.
+    await store.create(SLUG, { title: 'legacy' })
+    const gen = await surface.handler(req('GET', '/api/app/projects/general/work-board'))
+    const genBody = (await gen!.json()) as { items: { title: string }[]; project_id: string }
+    expect(genBody.items.map((i) => i.title)).toEqual(['legacy'])
+    expect(genBody.project_id).toBe('general')
+
+    // A real project does NOT see the legacy General rows.
+    const proj = await surface.handler(req('GET', '/api/app/projects/projA/work-board'))
+    const projBody = (await proj!.json()) as { items: unknown[] }
+    expect(projBody.items).toEqual([])
   })
 })

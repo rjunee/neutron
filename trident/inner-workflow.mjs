@@ -425,6 +425,16 @@ function shSingleQuote(s) {
 // and pulled in via `readfile()` (CAST AS TEXT) so the JSON's own double quotes
 // can never break the double-quoted sqlite shell argument. No-ops when the
 // launcher did not thread a dbPath/runId (a dry source check).
+//
+// COLUMN CONSISTENCY (harvest-gap defense): `subagent_status` flips to
+// 'completed' ONLY inside a CASE guarded on the SAME `readfile()` actually
+// yielding non-empty text. If the temp file is missing/unreadable/empty at
+// UPDATE time, `inner_result` lands NULL and `subagent_status` is LEFT UNCHANGED
+// (stays 'running') — so a `completed` status can never be committed alongside a
+// null/unparseable result (which would strand the run at forge-init, the hang
+// watchdog defeated by the re-stamped `last_advanced_at`). The OUTER loop's
+// terminal-but-garbled harvest guard is the required backstop; this keeps the
+// two columns from ever disagreeing at the source.
 async function writeTerminalResult(result) {
   if (!dbPath || !runId) return
   const verdict = result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
@@ -433,7 +443,7 @@ async function writeTerminalResult(result) {
   const sets = [
     `inner_result=CAST(readfile('${tmp}') AS TEXT)`,
     `inner_verdict='${verdict}'`,
-    `subagent_status='completed'`,
+    `subagent_status=CASE WHEN length(CAST(readfile('${tmp}') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END`,
     `branch='${forgeBranch}'`,
   ]
   if (result.prNumber !== undefined && result.prNumber !== null) {

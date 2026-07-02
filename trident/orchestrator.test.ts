@@ -441,3 +441,57 @@ describe('orchestrator — CODEX_HOME resolution', () => {
     expect(h.inputs[0]?.codex_home).toBeNull()
   })
 })
+
+describe('orchestrator — terminal-but-garbled harvest guard (Bug 2)', () => {
+  test('subagent_status=completed with a NULL inner_result → failed (not stuck at forge-init)', async () => {
+    // The inner workflow marked completed but its inner_result is null (the
+    // readfile() yielded nothing at UPDATE time). parseInnerResult is null so the
+    // normal harvest can't fire; the hang watchdog is DEFEATED because the
+    // completed-write re-stamped last_advanced_at (fresh here). The gate must
+    // still drive the run terminal.
+    let t = 0
+    const h = buildHarness({ plan: () => ({ result: null }), now: () => new Date(t).toISOString() })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    // Simulate the inner workflow's terminal write, but with a null result.
+    await store.update(run.id, { subagent_run_id: 'wf-done', subagent_status: 'completed', inner_result: null })
+    t = 1_000 // move the clock forward, but NOT past any hang threshold
+
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('terminal result missing/garbled')
+    // Never re-fired, never merged.
+    expect(h.inputs).toHaveLength(0)
+    expect(h.hostCalls.some((c) => c.join(' ').startsWith('git -C /repo merge'))).toBe(false)
+  })
+
+  test('subagent_status=completed with a GARBLED inner_result → failed', async () => {
+    let t = 0
+    const h = buildHarness({ plan: () => ({ result: null }), now: () => new Date(t).toISOString() })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    await store.update(run.id, {
+      subagent_run_id: 'wf-done',
+      subagent_status: 'completed',
+      inner_result: '{"ok":true,"verdict":"APPRO', // truncated → unparseable
+    })
+    t = 1_000
+
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('terminal result missing/garbled')
+  })
+
+  test('a still-running inflight (subagent_status=running, null result) is NOT reaped by the gate', async () => {
+    // Guard: the gate only fires on a TERMINAL subagent_status. A healthy in-flight
+    // run (running, no result yet, fresh timestamp) must stay waiting.
+    let t = 0
+    const h = buildHarness({ plan: () => ({ result: null }), now: () => new Date(t).toISOString() })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    await store.update(run.id, { subagent_run_id: 'wf-live', subagent_status: 'running', inner_result: null })
+    t = 1_000
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+})

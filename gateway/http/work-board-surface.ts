@@ -15,11 +15,13 @@
  * SAME `WorkBoardStore` the agent tools + the per-turn injection use — one code
  * path, so a write here fires the same `work_board_changed` push.
  *
- * Scope: the board is INSTANCE-scoped by the SERVER-derived `project_slug`
- * (`resolved.project_slug` from the bearer, never the client-supplied path id).
- * The `<project_id>` path segment is sanitized for URL-scheme consistency with
- * the tabs/tasks surfaces but is NOT the storage key; `store.get(project_slug,
- * id)` returning null is reported as 404 so a caller can't probe another scope.
+ * Scope: the board is PER-PROJECT. The storage key is
+ * `workBoardScopeKey(resolved.project_slug, <project_id>)` — the bearer-derived
+ * owner slug bounds the scope (single-owner box), and the VALIDATED URL
+ * `<project_id>` selects the project within it (General → the bare owner slug,
+ * which also carries all pre-scoping legacy rows). So project A and project B
+ * read/write DIFFERENT boards. `store.get(scope, id)` returning null is reported
+ * as 404, so a caller can't read or probe an item from another project's scope.
  *
  * `design_doc_ref` schemes are allow-listed at the store (https + in-app docs
  * link only); a rejected scheme surfaces here as a 400, not a 500.
@@ -29,6 +31,7 @@ import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
 import {
   WorkBoardValidationError,
+  workBoardScopeKey,
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
@@ -156,16 +159,21 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
       if ('code' in resolved) {
         return jsonError(401, resolved.code, resolved.message)
       }
-      const project_slug = resolved.project_slug
+      // Per-project storage key: the bearer-derived owner slug bounds the scope
+      // (single-owner box) and the validated URL `project_id` selects the project
+      // within it (General → the bare owner slug). Threaded to EVERY store call
+      // so project A and project B are distinct boards; the URL `project_id` is
+      // echoed back to the client verbatim.
+      const scope = workBoardScopeKey(resolved.project_slug, project_id)
       const method = req.method
 
       // Bare collection path: `/work-board`.
       if (raw_item_id === '') {
         if (method === 'GET') {
-          return jsonOk({ items: withRunProgress(store.list(project_slug)), project_id })
+          return jsonOk({ items: withRunProgress(store.list(scope)), project_id })
         }
         if (method === 'POST') {
-          return handleCreate(req, store, project_slug, project_id, createCard)
+          return handleCreate(req, store, scope, project_id, createCard)
         }
         return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /work-board`)
       }
@@ -178,10 +186,10 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
 
       if (action === '') {
         if (method === 'PATCH') {
-          return handleUpdate(req, store, project_slug, project_id, item_id)
+          return handleUpdate(req, store, scope, project_id, item_id)
         }
         if (method === 'DELETE') {
-          return handleDelete(store, project_slug, project_id, item_id, trident_runs)
+          return handleDelete(store, scope, project_id, item_id, trident_runs)
         }
         return jsonError(
           405,
@@ -190,13 +198,13 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
         )
       }
       if (action === 'start' && method === 'POST') {
-        return handleStart(store, project_slug, project_id, item_id, trident_runs, startBuild)
+        return handleStart(store, scope, project_id, item_id, trident_runs, startBuild)
       }
       if (action === 'complete' && method === 'POST') {
-        return handleComplete(store, project_slug, project_id, item_id)
+        return handleComplete(store, scope, project_id, item_id)
       }
       if (action === 'reorder' && method === 'POST') {
-        return handleReorder(req, store, project_slug, project_id, item_id)
+        return handleReorder(req, store, scope, project_id, item_id)
       }
       return jsonError(
         405,

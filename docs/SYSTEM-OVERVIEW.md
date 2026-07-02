@@ -1183,9 +1183,23 @@ Phase 1a (backend). The Work Board moves the orchestrator's per-feature state
 conversation becomes a thin, disposable query layer instead of a rotting
 context window — and it doubles as a first-class per-project tab (UI = Phase
 1b). One row == one thing the owner (or the agent) is working on / about to /
-has finished. The board is **instance-scoped by the server-derived
-`project_slug`** (no `project_id` column; `ctx.project_slug` /
-`resolved.project_slug` / `turn.project_slug` are all the one instance slug).
+has finished. The board is **PER-PROJECT** (correctness bundle, 2026-07-02): the
+HTTP surface keys every `store.*` call on `workBoardScopeKey(owner_slug,
+<url project_id>)` — the bearer-derived owner slug bounds the scope (single-owner
+box), the VALIDATED URL `project_id` selects the project within it (General → the
+bare owner slug, which also carries every pre-scoping legacy row). So project A
+and project B are DISTINCT boards; a `store.get(scope, id)` miss is a 404, so a
+caller can't probe another project's items. The storage `project_slug` column now
+holds that per-project key (no schema change — single-owner ∴ a bare project id
+is a sufficient key). The `work_board_changed` push tags each frame with the
+per-project `project_id` (via `workBoardProjectIdForKey`) so the clients'
+existing per-project filter applies it to the right view; General frames stay
+untagged (the "no project_id = this/General board" client contract). The AGENT
+`work_board_*` tools + the per-turn injection still key on the instance slug
+(`ctx.project_slug` / `turn.project_slug`, hard-overridden in `mcp/server.ts`), so
+the chat agent and the General Plan tab SHARE the General board; per-project
+boards are human/HTTP + ▶-button scoped (a deeper per-project agent context is a
+separate change).
 
 - **Store** — `work-board/store.ts` `WorkBoardStore` (mirrors `trident/store.ts`,
   a typed `ProjectDb` wrapper). `sort_order` is a SIMPLE INTEGER with
@@ -1320,6 +1334,28 @@ already renders are now LIT by real writers:
   isolated and a project with no pre-existing code repo is buildable. A fresh local
   project has no GitHub origin, so merge mode degrades to `'local'` (branch + local
   merge, no PR) — the correct shape for a self-hoster's new project.
+- **Serialized local merge (correctness bundle, 2026-07-02).** Two builds in the
+  SAME project share ONE `code` workspace, so their local merges (`git checkout
+  <base>` + `git merge --no-ff` in that one working tree) collide — build A's
+  committed-but-unmerged files show as UNTRACKED when B checks out base ("untracked
+  working tree files would be overwritten"). `trident/merge.ts:mergeLocal` now runs
+  under a per-`repo_path` promise-chain lock (`withLocalMergeLock`): the second
+  merge WAITS for the first, then checks out a base that already has A's files
+  TRACKED and merges cleanly. Keyed on `repo_path` so DIFFERENT-project workspaces
+  still merge in parallel; PR-mode (remote merge, never touches the shared tree) is
+  not gated. A failed predecessor doesn't wedge the queue.
+- **Robust terminal harvest (correctness bundle, 2026-07-02).** The inner workflow
+  writes `subagent_status='completed'` in the SAME sqlite UPDATE that sets
+  `inner_result` via `readfile()`. If that readfile yields null (temp file
+  missing/unreadable, or a crash mid-write) the run was left `completed` with a
+  null/garbled `inner_result`: `parseInnerResult` returned null so the harvest never
+  fired, AND the completed-write re-stamped `last_advanced_at` so the hang watchdog
+  was DEFEATED — the run stuck at `forge-init` forever (the taskdag symptom). The
+  orchestrator harvest gate now treats a terminal `subagent_status`
+  (`completed`/`failed`) with no parseable `inner_result` as a TERMINAL FAILURE
+  (never merge — there is no verified result). Defense-in-depth: `writeTerminalResult`
+  only flips `subagent_status` to `completed` inside a CASE guarded on the same
+  `readfile()` being non-empty, so the two columns can't disagree at the source.
 - **Binding + reconcile.** Success → `WorkBoardStore.attachRun` (`linked_run_id` +
   `status=in_progress`, clears inline → fork `⑂`). On a terminal run the durable
   `TridentTickLoop`'s `on_terminal` observer (`trident/board-reconcile.ts`, composed

@@ -415,6 +415,33 @@ export function buildTridentOrchestrator(
       if (result !== null) {
         return applyResult(run, result)
       }
+      // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
+      //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes
+      //     `inner_result` (via `readfile()` of a temp file). If that readfile
+      //     yields NULL — temp file missing/unreadable at UPDATE time, or a
+      //     crash mid-write — the run is left `completed` with a null/unparseable
+      //     `inner_result`: `parseInnerResult` returns null so the harvest above
+      //     never fires, AND the workflow re-stamped `last_advanced_at` as it
+      //     wrote `completed`, so the hang watchdog below is DEFEATED and the run
+      //     sticks at `forge-init` forever. Treat a terminal `subagent_status`
+      //     with no harvestable result as a TERMINAL FAILURE now (never merge —
+      //     there is no verified result to merge on).
+      if (run.subagent_status === 'completed' || run.subagent_status === 'failed') {
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        const reaped = failedRun(
+          run,
+          `terminal result missing/garbled (inner workflow marked ${run.subagent_status} ` +
+            'but wrote no parseable inner_result)',
+          false,
+        )
+        return {
+          run: reaped,
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (terminal result garbled)`,
+        }
+      }
     }
 
     // (1b) HANG WATCHDOG (M1 trident-UX hardening, item 2) — the PRIMARY

@@ -5,8 +5,11 @@ import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
 import { ProjectDb } from '../persistence/index.ts'
 import {
+  GENERAL_WORK_BOARD_PROJECT_ID,
   sanitizeTitle,
   validateDesignDocRef,
+  workBoardProjectIdForKey,
+  workBoardScopeKey,
   WorkBoardStore,
   WorkBoardValidationError,
 } from './store.ts'
@@ -309,5 +312,42 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(reopened?.status).toBe('in_progress')
     expect(reopened?.completed_at).toBeNull()
     expect(reopened?.linked_run_id).toBe('run-reopen')
+  })
+})
+
+describe('workBoardScopeKey / workBoardProjectIdForKey (Bug 3 per-project scoping)', () => {
+  const OWNER = 'owner'
+
+  test('General (empty / general / undefined) → the bare owner slug', () => {
+    expect(workBoardScopeKey(OWNER, '')).toBe(OWNER)
+    expect(workBoardScopeKey(OWNER, GENERAL_WORK_BOARD_PROJECT_ID)).toBe(OWNER)
+    expect(workBoardScopeKey(OWNER, undefined)).toBe(OWNER)
+    expect(workBoardScopeKey(OWNER, null)).toBe(OWNER)
+    expect(workBoardScopeKey(OWNER, '   ')).toBe(OWNER)
+  })
+
+  test('a real project id → the id verbatim (distinct per project)', () => {
+    expect(workBoardScopeKey(OWNER, 'acme')).toBe('acme')
+    expect(workBoardScopeKey(OWNER, 'northwind')).toBe('northwind')
+    expect(workBoardScopeKey(OWNER, 'acme')).not.toBe(workBoardScopeKey(OWNER, 'northwind'))
+  })
+
+  test('the frame project_id reverses the key: General → undefined, project → the id', () => {
+    expect(workBoardProjectIdForKey(OWNER, OWNER)).toBeUndefined()
+    expect(workBoardProjectIdForKey(OWNER, 'acme')).toBe('acme')
+    // round-trip a real project
+    const key = workBoardScopeKey(OWNER, 'acme')
+    expect(workBoardProjectIdForKey(OWNER, key)).toBe('acme')
+    // round-trip General → no tag
+    const gkey = workBoardScopeKey(OWNER, 'general')
+    expect(workBoardProjectIdForKey(OWNER, gkey)).toBeUndefined()
+  })
+
+  test('onChange receives the storage key of the board that mutated', async () => {
+    const keys: string[] = []
+    const store = new WorkBoardStore(db, { onChange: (k) => keys.push(k) })
+    await store.create('acme', { title: 'in acme' })
+    await store.create('owner', { title: 'in general' })
+    expect(keys).toEqual(['acme', 'owner'])
   })
 })
