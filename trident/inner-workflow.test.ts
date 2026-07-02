@@ -119,10 +119,29 @@ describe('inner-workflow.mjs — deterministic branch + worktree isolation', () 
     expect(SRC).toContain('schema: FORGE_SCHEMA')
   })
 
-  test('ralph bootstrap note appended when ralph === true', () => {
-    expect(SRC).toContain('ralph === true ? RALPH_NOTE')
+  test('ralph mode runs a DEDICATED plan:fable orchestrator step (split out of forge:build) that emits an execution spec + complexity tag', () => {
+    // P-F2: Ralph planning is no longer FUSED into forge:build — a dedicated
+    // Fable planner regenerates IMPLEMENTATION_PLAN.md + emits the per-task
+    // exec spec + complexity tag; forge:build is now a pure executor.
+    expect(SRC).toContain('function planFablePrompt(')
+    expect(SRC).toContain('function ralphExecuteNote(')
+    expect(SRC).toContain('const PLAN_SCHEMA =')
+    expect(SRC).toContain("label: 'plan:fable'")
+    expect(SRC).toContain('schema: PLAN_SCHEMA')
+    // Gated on ralph mode; forge:build carries the exec spec + is routed by tag.
+    expect(SRC).toContain('if (ralph === true)')
     expect(SRC).toContain('RALPH MODE')
     expect(SRC).toContain('IMPLEMENTATION_PLAN.md')
+    expect(SRC).toContain('you are the EXECUTOR')
+  })
+
+  test('Ralph fails loudly on a null plan (never runs Forge unplanned) + the planner inspects the reused branch on resume (Codex [P2])', () => {
+    // A null plan (planner terminal error) must NOT silently fall through to an
+    // unplanned forge:build now that the in-Forge RALPH_NOTE is gone.
+    expect(SRC).toContain('refusing to run Forge without a plan in Ralph mode')
+    // On resume the planner inspects the reused branch, not just the base branch.
+    expect(SRC).toContain('planFablePrompt(resuming)')
+    expect(SRC).toContain('RESUME — a prior run ALREADY committed progress')
   })
 })
 
