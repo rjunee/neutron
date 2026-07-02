@@ -50,6 +50,15 @@ if [ -z "$CODEX_HOME" ] || [ ! -f "$CODEX_HOME/auth.json" ]; then
 fi
 export CODEX_HOME
 
+# ── HARD BILLING CONTRACT: subscription OAuth ONLY, never a metered API key ────
+# This review MUST use the ChatGPT-subscription OAuth persisted under CODEX_HOME.
+# The codex CLI PREFERS OPENAI_API_KEY over persisted OAuth, and the gateway
+# process may carry one in its env (it also backs gbrain embeddings + the GPT
+# adapter), which would silently bill a metered key. Scrub the API-key variants so
+# codex falls back to the CODEX_HOME OAuth for BOTH the precheck and the review
+# (Codex review [P1]).
+unset OPENAI_API_KEY OPENAI_KEY 2>/dev/null || true
+
 # ── NOT CONNECTED: the codex CLI itself is absent (best-effort install skipped) ─
 if ! command -v codex >/dev/null 2>&1; then
   echo "CODEX_REVIEW_NOT_CONNECTED: codex CLI not on PATH (install with 'brew install codex' or 'npm install -g @openai/codex'). Falling back to Claude-only review." >&2

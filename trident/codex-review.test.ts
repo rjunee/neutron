@@ -124,6 +124,21 @@ describe('trident/codex-review.sh — exit-code contract', () => {
     expect(stderr).not.toContain('EMPTY_DIFF')
   })
 
+  test('scrubs OPENAI_API_KEY before running codex → subscription OAuth only, never a metered key (Codex [P1])', () => {
+    // With OPENAI_API_KEY set in the env, the wrapper must unset it so codex uses
+    // the CODEX_HOME OAuth. The exec cmd fails if the key survived into codex's env.
+    const { status } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        OPENAI_API_KEY: 'sk-metered-should-be-scrubbed',
+        NEUTRON_CODEX_EXEC_CMD:
+          'cat >/dev/null; if [ -n "$OPENAI_API_KEY" ]; then exit 8; fi; echo "VERDICT: APPROVE"',
+      },
+    })
+    expect(status).toBe(0)
+  })
+
   test('configured + authed but the review CALL fails → exit 5 (DEFERRED)', () => {
     const { status, stderr } = run({
       authed: true,

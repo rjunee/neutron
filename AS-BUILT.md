@@ -72,7 +72,12 @@ approve without reviewing; (2) the wrapper path is shell-quoted
 (`shSingleQuote(script)`) so a `repoPath` with spaces doesn't split the command
 and falsely report `deferred`; (3) the codex `/tmp` output files are keyed on
 `runId` (globally unique), not `slug` (unique only within a project), so
-concurrent same-slug runs in different projects can't cross-read verdicts.
+concurrent same-slug runs in different projects can't cross-read verdicts. A
+follow-up round caught a **P1**: (4) the wrapper now scrubs `OPENAI_API_KEY` /
+`OPENAI_KEY` before invoking codex — the CLI prefers an API key over the persisted
+OAuth and the gateway env may carry one (it backs gbrain embeddings + the GPT
+adapter), which would silently bill a metered key, violating the "ChatGPT
+subscription — NEVER a metered API key" contract.
 
 ## 2026-07-01 — SEV1: chat rail stability — project-switch crash, error boundary, banner flicker, unread badge, URL scrub
 
