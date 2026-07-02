@@ -237,6 +237,26 @@ describe('buildSubstrateWorkflowFire — fire + settle on a warm substrate', () 
     expect(specs[0]!.tools.map((t) => t.name)).toEqual([...WORKFLOW_FIRE_TOOL_NAMES])
   })
 
+  test('the fire surface includes the BUILD tools the workflow workers inherit (regression: 2026-07-02 toolless-worker failure)', async () => {
+    // REGRESSION GUARD. The CC Workflow `agent()` API has no per-call tool set, so
+    // the inner-workflow's forge:build/argus/Bash-step WORKERS inherit the fire
+    // launcher's `--tools` surface. If this constant is narrowed back to just
+    // `Workflow`, the spawned forge:build agent is toolless (only Workflow + the
+    // dev-channel reply/send_typing MCP tools), cannot Write/Edit/Bash any files,
+    // the build fails instantly, and NO PR is ever produced. The build tools MUST
+    // be present on the fire surface so the inherited workers can do the work.
+    const { substrate, specs } = fakeSubstrate([completion])
+    const fire = buildSubstrateWorkflowFire({ substrate })
+    await fire(fireInput())
+    const surface = specs[0]!.tools.map((t) => t.name)
+    // forge:build/forge:fix need Read/Glob/Grep/Write/Edit/Bash; argus:* need
+    // Read/Glob/Grep/Bash; checkpoint/terminal-result/cleanup/codex need Bash; the
+    // launcher turn needs Workflow.
+    for (const required of ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash', 'Workflow']) {
+      expect(surface).toContain(required)
+    }
+  })
+
   test('an error event before settling → failed', async () => {
     const { substrate, cancelled } = fakeSubstrate([
       { kind: 'error', message: 'turn died', retryable: false },

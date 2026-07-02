@@ -141,14 +141,53 @@ const DEFAULT_SETTLE_TIMEOUT_MS = 3 * 60_000
 export const DEFAULT_INNER_WORKFLOW_PATH = new URL('./inner-workflow.mjs', import.meta.url).pathname
 
 /**
- * The `--tools` surface the WARM fire substrate needs — just the native CC
- * `Workflow` tool (the inner-workflow's `agent()`/`parallel()` workers are
- * workflow-runtime globals, not separate tools). Exported so the composer wires
- * the fire substrate with EXACTLY this constant surface (the warm-REPL reuse
- * guard pins `--tools` constant across turns). The Forge/Argus/Bash work all
- * runs INSIDE the workflow's own nested agents, not on this launcher turn.
+ * The `--tools` surface the WARM fire substrate needs. It is NOT enough to grant
+ * the launcher turn only `Workflow`: the inner-workflow's `agent()`/`parallel()`
+ * WORKERS (forge:build, forge:fix, argus:*, codex, and the Bash-only checkpoint/
+ * terminal-result/cleanup steps) run as nested Claude Code subagents that INHERIT
+ * the launcher REPL's built-in tool surface — the CC Workflow `agent()` API has
+ * NO per-call tool set (see `inner-workflow.mjs`, where every `agent()` call
+ * passes only `{label, phase, schema, model, effort, isolation}`, never `tools`).
+ *
+ * With `['Workflow']` alone the spawned forge:build agent had ONLY `Workflow`
+ * plus the always-present neutron dev-channel MCP tools (reply/send_typing) and
+ * literally could not Write/Edit/Bash any files → the build failed instantly →
+ * the workflow emitted `{ok:false}` → cleanup tore down the worktree → NO PR was
+ * ever produced (live trident-run failure, 2026-07-02). The comment here used
+ * to assert the fire substrate needed "just the native CC Workflow"; that
+ * assumption was FALSE — orchestration inherits from the launcher, so the WORKERS
+ * were toolless.
+ *
+ * So the fire surface MUST include the BUILD tools the workers need:
+ *   • forge:build / forge:fix → Read, Glob, Grep, Write, Edit, Bash (create +
+ *     test + commit code in the isolated worktree)
+ *   • argus:* (read-only review) → Read, Glob, Grep, Bash
+ *   • checkpoint / terminal-result / cleanup → Bash (sqlite3 + git worktree)
+ *   • codex cross-model review → Bash (shells out to trident/codex-review.sh)
+ *   • the launcher turn itself → Workflow (fires the inner workflow)
+ *   • Task → lets a worker fan out its own subagents when a step needs it
+ *
+ * This is kept a SINGLE constant so every fire spawns the SAME `--tools` surface:
+ * the warm-REPL reuse guard (`persistent-repl-substrate.ts` `getOrSpawnSession`)
+ * refuses to reuse a warm child whose spawned surface differs from the requested
+ * one, so a per-fire-varying surface would churn (evict + respawn) the warm REPL
+ * every fire. A constant surface keeps the guard consistent across turns.
+ *
+ * The neutron dev-channel MCP tools (reply/send_typing) are UNAFFECTED — they
+ * attach via `--mcp-config`/`--allowedTools`, which `--tools` (built-in gate)
+ * does not govern — so broadening the built-in surface neither adds nor removes
+ * the channel tools the launcher needs to `reply()`.
  */
-export const WORKFLOW_FIRE_TOOL_NAMES = ['Workflow'] as const
+export const WORKFLOW_FIRE_TOOL_NAMES = [
+  'Read',
+  'Glob',
+  'Grep',
+  'Write',
+  'Edit',
+  'Bash',
+  'Task',
+  'Workflow',
+] as const
 
 /**
  * Build the args object the launcher passes to the `Workflow` tool. Mirrors the

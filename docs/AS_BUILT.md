@@ -2,6 +2,52 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — trident fire path P0: broaden the fire substrate's `--tools` so the workflow's workers can actually build
+
+**Why.** trident did NOT work end-to-end. The inner-workflow
+(`trident/inner-workflow.mjs`, a CC Dynamic Workflow) fired correctly, but the
+`agent()` workers it spawns (forge:build, forge:fix, argus:*, the sqlite/git Bash
+steps, codex) were TOOLLESS — a live trident run (2026-07-02) had a forge:build
+agent report it only had the dev-channel MCP tools (`reply`/`send_typing`) and NO
+`Bash`/`Read`/`Write`/`Edit`. With no way to create files the build failed
+instantly → the workflow emitted `{ok:false}` → cleanup tore down the worktree →
+NO PR was ever produced.
+
+**Root cause.** `trident/inner-loop.ts` `WORKFLOW_FIRE_TOOL_NAMES = ['Workflow']`
+was threaded into the warm fire substrate's `AgentSpec.tools` →
+`persistent-repl-substrate` `toolSurface` → `buildReplArgv` `--tools Workflow`.
+The CC Workflow `agent()` API has **no per-call tool set** — spawned subagents
+INHERIT the launcher REPL's `--tools`. So the launcher could orchestrate but its
+workers inherited only `Workflow` (+ the always-present dev-channel MCP tools).
+The old comment's assertion that the fire substrate needed "just the native CC
+Workflow" was false.
+
+**What shipped.** `WORKFLOW_FIRE_TOOL_NAMES` broadened to
+`['Read','Glob','Grep','Write','Edit','Bash','Task','Workflow']` (a single
+constant so every fire spawns the SAME surface — the warm-REPL reuse guard is a
+dynamic self-comparison, so a constant surface keeps it consistent and avoids
+per-fire REPL churn). The neutron dev-channel MCP tools (`reply`/`send_typing`)
+are unaffected — they attach via `--mcp-config`/`--allowedTools`, which `--tools`
+(built-in gate) does not govern.
+
+**Tests.** New regression test in `trident/inner-loop.test.ts` asserts the fire
+surface includes the build tools (`Read/Glob/Grep/Write/Edit/Bash/Workflow`) so a
+narrowing regression fails loudly. (A unit test alone was insufficient — the
+suite mocks the substrate, which is exactly how this shipped broken.)
+
+**Verified end-to-end (real, not mocked; claude 2.1.198).**
+- *Mechanism probe:* control launcher `--tools Workflow` → the workflow's
+  `agent()` subagent had MCP-only tools and could NOT write a file (reproduces the
+  bug); fix launcher `--tools Read,Glob,Grep,Write,Edit,Bash,Task,Workflow` → the
+  same subagent inherited `Bash,Edit,Glob,Grep,Read,Write` and actually wrote the
+  file via the Write tool.
+- *Real inner-workflow:* drove `inner-workflow.mjs` against a throwaway git repo
+  in `local` mode; forge:build wrote + committed 4 files (`index.js`,
+  `src/add.js`, `src/mul.js`, `test.js`), the run advanced forge → argus →
+  `verdict=APPROVE` (`{ok:true, branch:"trident/e2e-calc", round:1,
+  checkpoint:"argus-approved"}`), the worktree was cleaned up, and the committed
+  code runs (`node test.js` → `ALL_TESTS_PASS`).
+
 ## 2026-07-02 — Fable-orchestrator model routing in trident's inner workflow
 
 **Why.** Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log
