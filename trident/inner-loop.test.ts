@@ -165,6 +165,20 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(prompt).toContain('"runId":"run-9"')
   })
 
+  test('args thread codexHome when a per-project CODEX_HOME is configured (cross-model review)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input({ codex_home: '/projects/acme/.codex' }))
+    expect(calls[0]!.prompt).toContain('"codexHome":"/projects/acme/.codex"')
+  })
+
+  test('args thread codexHome=null when no codex credential is configured (Claude-only review)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    expect(calls[0]!.prompt).toContain('"codexHome":null')
+  })
+
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {
     const fire: FireInnerWorkflow = async () => {
       throw new Error('unexpected launcher crash')

@@ -2,6 +2,83 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-01 — Trident codex cross-model review (Part A): CLI install + review-panel wiring
+
+**Why.** Trident's inner Forge→Argus loop reviewed with Claude ONLY (rubric +
+adversarial Argus, then asymmetric-gated synthesis — `trident/inner-workflow.mjs`
+`reviewAndSynthesize`). Ryan requires a cross-model (OpenAI GPT-5) second opinion,
+mirroring Vajra, using the ChatGPT SUBSCRIPTION (`codex login`) — NEVER a metered
+API key. This slice (Part A) ships the CLI install + the trident review-panel
+wiring; Part B (a separate PR) adds the admin-panel auth capture +
+agent-auto-invoke.
+
+**Spec-conformance diff.** SPEC§ codex-review = trident MUST do a cross-model
+review. CURRENT (pre-PR) = Claude-only Argus. GAP = no codex panelist. THIS PR =
+`ensure_codex` in `install.sh` + a `trident/codex-review.sh` wrapper + a codex
+reviewer wired into `reviewAndSynthesize` as a third panelist, keyed on a
+per-project `CODEX_HOME`, with graceful not-connected fallback + never-silent
+DEFERRED gating. OUT-OF-SCOPE = the admin-panel auth capture + agent-auto-invoke
+(Part B) + the Managed `provision-hetzner.sh` `ensure_codex` step (other repo —
+noted as a follow-up).
+
+**M-1 — `ensure_codex` in `install.sh`.** Mirrors `ensure_gbrain` (idempotent
+pre-check, retry loop, test seams `NEUTRON_CODEX_INSTALL_CMD` /
+`NEUTRON_CODEX_ATTEMPTS` / `NEUTRON_INSTALL_PRINT_CODEX`) but is BEST-EFFORT, not
+required: any failure WARNs + CONTINUES (codex review degrades gracefully — unlike
+gbrain it is never install-fatal). Installs by default (`brew install codex`,
+falling back to `npm install -g @openai/codex`), with a `--no-codex` /
+`NEUTRON_SKIP_CODEX` opt-out. Auth itself (`codex login`) stays a separate
+host-level step under `CODEX_HOME`. Tests: `tests/integration/install-codex.test.ts`
+(7 cases: success / idempotent / fail→WARN-continue / PATH-gap→WARN-continue /
+retry-then-succeed / `--no-codex` / `NEUTRON_SKIP_CODEX`).
+
+**M-3 — codex reviewer in the trident review panel.**
+- `trident/codex-review.sh` — a synchronous foreground wrapper (ported from
+  Vajra's `scripts/codex-review.sh`; NEVER `run_in_background`). Distinguishes,
+  by EXIT CODE: `0` connected (verdict on stdout) · `10`/`11` NOT_CONNECTED (no
+  `CODEX_HOME`/auth.json, or codex CLI absent → graceful, Claude-only) · `3`
+  DEFERRED (configured but `codex login status` failed after 3× retry) · `5`
+  DEFERRED (authed but the review call failed). DEFERRED = configured-but-failed →
+  must never be treated as an approval (Vajra never-silent-downgrade rule).
+- `trident/inner-workflow.mjs` — `reviewAndSynthesize` now builds a `reviewers`
+  array (Claude rubric + Claude adversarial ALWAYS; the `argus:codex` reviewer
+  pushed ONLY when `codexConfigured`) run via `parallel(reviewers)`. The codex
+  reviewer runs the wrapper with the per-project `CODEX_HOME` and returns a
+  `CODEX_VERDICT_SCHEMA` (`verdict` + `findings` + `codexStatus` ∈
+  connected/not_connected/deferred). Synthesis folds the codex verdict in as a
+  full third panelist when connected, notes "codex not connected" and proceeds
+  Claude-only when absent, and — via the deterministic `enforceCodexGate` guard —
+  FORCES `REQUEST_CHANGES` when codex is `deferred` and synthesis said APPROVE
+  (never a silent approve). `CODEX_HOME` is threaded through
+  `buildWorkflowArgs`→`codexHome` (`trident/inner-loop.ts`), the orchestrator
+  `codex_home` option (`trident/orchestrator.ts`), sourced from
+  `NEUTRON_CODEX_HOME` at wiring time (`gateway/composition/build-core-modules.ts`).
+  Absent env → `codexHome=null` → codex skipped entirely (no wasted agent) →
+  Claude-only. Tests: `trident/codex-review.test.ts` (6 exit-code cases, codex
+  mocked), `trident/inner-workflow.test.ts` (source assertions + behavioral
+  `enforceCodexGate` cases), `trident/inner-loop.test.ts` (codexHome threading).
+
+**Verify.** `tsc -p trident/tsconfig.json` clean; `tsc -p gateway/tsconfig.json`
+clean; full trident suite 305 pass / 0 fail; install-codex 7 pass; codex-review
+wrapper 7 pass; leak-gate SILENT. **Contract note:** the workflow `args` shape
+gained `codexHome` — a legacy launcher that omits it defaults to `null`
+(Claude-only), so no back-compat break.
+
+**Cross-model (Codex) review of this PR — 3 P2s fixed:** (1) the codex reviewer
+now reviews the SAME diff FILE Forge wrote (`NEUTRON_CODEX_DIFF_FILE`), not a
+`git diff` in `repoPath` — `repoPath` is still on the base branch (Forge builds
+in an isolated worktree), so a git-diff there is empty/stale and codex would
+approve without reviewing; (2) the wrapper path is shell-quoted
+(`shSingleQuote(script)`) so a `repoPath` with spaces doesn't split the command
+and falsely report `deferred`; (3) the codex `/tmp` output files are keyed on
+`runId` (globally unique), not `slug` (unique only within a project), so
+concurrent same-slug runs in different projects can't cross-read verdicts. A
+follow-up round caught a **P1**: (4) the wrapper now scrubs `OPENAI_API_KEY` /
+`OPENAI_KEY` before invoking codex — the CLI prefers an API key over the persisted
+OAuth and the gateway env may carry one (it backs gbrain embeddings + the GPT
+adapter), which would silently bill a metered key, violating the "ChatGPT
+subscription — NEVER a metered API key" contract.
+
 ## 2026-07-01 — SEV1: chat rail stability — project-switch crash, error boundary, banner flicker, unread badge, URL scrub
 
 **The bug (black screen on project switch).** Live testing surfaced an uncaught

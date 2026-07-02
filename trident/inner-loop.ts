@@ -62,6 +62,11 @@ export interface InnerLoopInput {
   max_rounds: number
   /** Last persisted `inner_checkpoint` (idempotent crash-resume), or null. */
   resume_checkpoint?: string | null
+  /** Per-project Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
+   *  review, or null when not configured. Threaded into the workflow args so the
+   *  codex reviewer runs `trident/codex-review.sh` with this CODEX_HOME; null → the
+   *  review runs Claude-only + a "codex not connected" note (never a blocker). */
+  codex_home?: string | null
 }
 
 /**
@@ -168,6 +173,9 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     dbPath: input.db_path,
     runId: run.id,
     resumeCheckpoint: input.resume_checkpoint ?? null,
+    // Per-project CODEX_HOME for the optional cross-model review; null → the
+    // workflow treats codex as not-connected and reviews Claude-only.
+    codexHome: input.codex_home ?? null,
   }
 }
 

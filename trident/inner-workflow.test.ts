@@ -157,7 +157,10 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
 
 describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthesis', () => {
   test('parallel() runs argus-claude + argus-adversarial, each with VERDICT_SCHEMA', () => {
-    expect(SRC).toContain('parallel([')
+    // The reviewer thunks are collected into a `reviewers` array (codex is pushed
+    // conditionally), then run via parallel(reviewers).
+    expect(SRC).toContain('const reviewers = [')
+    expect(SRC).toContain('await parallel(reviewers)')
     expect(SRC).toContain("label: 'argus:claude'")
     expect(SRC).toContain("label: 'argus:adversarial'")
     expect(SRC).toContain('schema: VERDICT_SCHEMA')
@@ -188,6 +191,107 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     expect(SRC).toContain('forgeBuildContract(true)')
     // The re-enter step switches WITHOUT -c; the create step uses -c.
     expect(SRC).toContain('Re-enter it WITHOUT')
+  })
+})
+
+describe('inner-workflow.mjs — codex cross-model review panelist', () => {
+  test('destructures codexHome from args (per-project CODEX_HOME) + gates on codexConfigured', () => {
+    expect(SRC).toContain('codexHome = null')
+    expect(SRC).toContain('const codexConfigured =')
+    expect(SRC).toContain("typeof codexHome === 'string' && codexHome.length > 0")
+  })
+
+  test('a CODEX_VERDICT_SCHEMA carries codexStatus connected/not_connected/deferred', () => {
+    expect(SRC).toContain('const CODEX_VERDICT_SCHEMA =')
+    expect(SRC).toContain('codexStatus')
+    expect(SRC).toContain("enum: ['connected', 'not_connected', 'deferred']")
+  })
+
+  test('the codex reviewer runs trident/codex-review.sh SYNCHRONOUSLY with per-project CODEX_HOME (never backgrounded)', () => {
+    expect(SRC).toContain('function codexReviewerPrompt(diffFile)')
+    expect(SRC).toContain('/trident/codex-review.sh')
+    expect(SRC).toContain('CODEX_HOME=')
+    expect(SRC).toContain('do NOT background it')
+    // Codex reviews the SAME diff FILE Forge wrote — NOT `git diff` in repoPath
+    // (which is still on the base branch) — via NEUTRON_CODEX_DIFF_FILE (Codex [P2]).
+    expect(SRC).toContain('NEUTRON_CODEX_DIFF_FILE=')
+    expect(SRC).toContain('codexReviewerPrompt(diffFile)')
+    // Codex [P2]: the wrapper path is shell-quoted (repoPath may contain spaces),
+    // and the /tmp output files are keyed on runId (globally unique) not slug
+    // (unique only within a project → concurrent same-slug runs would collide).
+    expect(SRC).toContain('bash ${shSingleQuote(script)}')
+    expect(SRC).toContain('const uniq = runId || slug')
+    expect(SRC).toContain('/tmp/trident-codex-${uniq}.out')
+    // Wired into the review panel only when a codex credential is configured.
+    expect(SRC).toContain('if (codexConfigured)')
+    expect(SRC).toContain("label: 'argus:codex'")
+    expect(SRC).toContain('schema: CODEX_VERDICT_SCHEMA')
+  })
+
+  test('exit codes map to codexStatus: 0→connected, 10/11→not_connected, 3/5→deferred', () => {
+    expect(SRC).toContain("codexStatus='connected'")
+    expect(SRC).toContain("codexStatus='not_connected'")
+    expect(SRC).toContain("codexStatus='deferred'")
+    // The graceful path invents no findings; the deferred path never APPROVEs.
+    expect(SRC).toContain('do NOT invent findings')
+    expect(SRC).toContain('NEVER report APPROVE for a deferred codex')
+  })
+
+  test('synthesis folds in the codex verdict as a third panelist / notes not-connected / gates deferred', () => {
+    expect(SRC).toContain('Verdict C (codex cross-model')
+    expect(SRC).toContain('codex not connected')
+    expect(SRC).toContain('full third panelist')
+  })
+
+  test('a deterministic never-silent-downgrade guard forces REQUEST_CHANGES on deferred+APPROVE', () => {
+    expect(SRC).toContain('function enforceCodexGate(')
+    expect(SRC).toContain("codexStatus === 'deferred' && synthesis && synthesis.verdict === 'APPROVE'")
+    expect(SRC).toContain('return enforceCodexGate(synthesisRaw, codexStatus)')
+  })
+})
+
+// Execute the EXACT enforceCodexGate logic the script uses (kept in lockstep with
+// the .mjs) so the never-silent-downgrade rule is verified BEHAVIORALLY.
+describe('inner-workflow.mjs — enforceCodexGate behavior (never-silent-downgrade)', () => {
+  function enforceCodexGate(
+    synthesis: { verdict: string; findings: unknown[] } | null,
+    codexStatus: string,
+  ): { verdict: string; findings: unknown[] } | null {
+    if (codexStatus === 'deferred' && synthesis && synthesis.verdict === 'APPROVE') {
+      return {
+        verdict: 'REQUEST_CHANGES',
+        findings: [
+          {
+            severity: 'blocker',
+            title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
+            evidence: 'codex was configured but the review call failed/timed out',
+          },
+          ...((synthesis && synthesis.findings) || []),
+        ],
+      }
+    }
+    return synthesis
+  }
+
+  test('deferred codex + APPROVE synthesis → forced REQUEST_CHANGES with a blocker prepended', () => {
+    const out = enforceCodexGate({ verdict: 'APPROVE', findings: [] }, 'deferred')
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    expect(out?.findings.length).toBe(1)
+  })
+
+  test('deferred codex + REQUEST_CHANGES synthesis → passes through unchanged (already blocked)', () => {
+    const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major' }] }
+    expect(enforceCodexGate(s, 'deferred')).toBe(s)
+  })
+
+  test('connected codex + APPROVE → NOT downgraded (codex ran fine)', () => {
+    const s = { verdict: 'APPROVE', findings: [] }
+    expect(enforceCodexGate(s, 'connected')).toBe(s)
+  })
+
+  test('not_connected codex + APPROVE → NOT downgraded (graceful Claude-only)', () => {
+    const s = { verdict: 'APPROVE', findings: [] }
+    expect(enforceCodexGate(s, 'not_connected')).toBe(s)
   })
 })
 

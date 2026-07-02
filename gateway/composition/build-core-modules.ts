@@ -388,6 +388,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
         }
+        // OPTIONAL cross-model review: thread the per-project Codex credential dir
+        // (CODEX_HOME) into the inner workflow. Resolved from NEUTRON_CODEX_HOME
+        // env for now; Part B populates it per project_slug via the admin panel.
+        // Absent → codex "not connected" → the trident review runs Claude-only.
+        const codexHome = process.env['NEUTRON_CODEX_HOME']
+        if (codexHome !== undefined && codexHome.length > 0) {
+          orchestratorOpts.codex_home = codexHome
+        }
         const { step } = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({ store, step, on_terminal })
       } else {
