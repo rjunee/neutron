@@ -461,7 +461,7 @@
     background: var(--surface);
     padding: 14px 10px 10px;
     overflow-y: auto;
-    /* Flex column so the Create Project button pins to the bottom (margin-top:auto). */
+    /* Flex column: Projects title · project list · Create Project button, top-aligned. */
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -493,10 +493,13 @@
     flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  /* Active row: accent-tinted fill, brighter label, and the emoji chip lifts to
-     the accent tint so the selection reads as one cohesive object. */
+  /* Active row: accent-tinted fill + brighter label carry the whole selection.
+     The emoji itself sits FLUSH — no border, no chip fill (Ryan 2026-07-01:
+     drop the box around the selected emoji glyph). `transparent` (not `0`)
+     keeps the 30px chip geometry identical to inactive rows, so the glyph
+     doesn't shift 1px when a row becomes active. */
   .car-rail-item-active { background: var(--active-bg); color: var(--active-fg); font-weight: 600; }
-  .car-rail-item-active .car-rail-emoji { border-color: var(--accent-border); background: var(--accent-tint-weak); }
+  .car-rail-item-active .car-rail-emoji { border-color: transparent; background: transparent; }
   /* Unread (and not active) — bolder, full-contrast label, Telegram-style. */
   .car-rail-item-unread .car-rail-label { color: var(--fg); font-weight: 600; }
   /* Unread count pill, right-aligned. */
@@ -507,18 +510,20 @@
     background: var(--accent); color: var(--on-accent);
     font-size: 11px; font-weight: 700; line-height: 1; border-radius: 999px;
   }
-  /* Pinned to the bottom of the rail (margin-top:auto pushes it down). */
+  /* Flows directly under the last project row (Ryan 2026-07-01: no more
+     push-to-bottom). The rail is a flex column with a 4px gap, so dropping
+     `margin-top:auto` lets the button sit right after `.car-rail-list`. */
   .car-rail-create {
-    margin-top: auto; width: 100%; text-align: left;
+    width: 100%; text-align: left;
     background: transparent; color: var(--accent); border: 1px dashed var(--border);
     border-radius: 10px; padding: 9px 11px; cursor: pointer; font: inherit; font-size: 14px;
     transition: background .14s ease, border-color .14s ease;
   }
   .car-rail-create:hover:not(:disabled) { background: var(--accent-tint-weak); border-color: var(--accent); }
   .car-rail-create:disabled { opacity: .6; cursor: default; }
-  /* Inline create-project form (replaces the native window.prompt). Pinned to
-     the bottom like the closed button (margin-top:auto). */
-  .car-rail-create-form { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+  /* Inline create-project form (replaces the native window.prompt). Sits in the
+     same spot as the closed button — directly under the last project row. */
+  .car-rail-create-form { display: flex; flex-direction: column; gap: 6px; }
   .car-rail-input {
     width: 100%; box-sizing: border-box; font: inherit;
     background: var(--bg); color: var(--fg);

@@ -272,16 +272,26 @@ export function ProjectShell({
   // A stale in-flight fetch (rapid switches, StrictMode double-invoke) is
   // ignored via the `cancelled` latch. Switching scope resets the active tab to
   // Chat so we never land on a tab that doesn't exist in the new set.
-  // Which project (`''` = General) the current `tabs` were RESOLVED for. Null
-  // while a fetch is in flight. The doc-link resolver waits for this to match
-  // the pending link's project, so a cross-project link never consumes the
-  // previous project's stale tab set (Codex).
+  //
+  // NO-FLICKER TAB BAR (2026-07-01): we do NOT collapse `tabs` to `[CHAT_TAB]`
+  // before the new set resolves. The `TabBar` is a single stable instance
+  // (always rendered in the same slot of `car-topbar`); keeping the PRIOR
+  // project's tabs on-screen until the new set lands lets React RECONCILE the
+  // labels in place — the per-project tab set still changes, but as an in-place
+  // diff, not a collapse-to-one-then-re-expand double flash. `resolvedActiveKey`
+  // (below) already falls back to Chat when the active tab is absent from the
+  // freshly-loaded set, so we still land on Chat after a switch without needing
+  // to blank the bar first. `tabsScope` is NOT reset to null here: the doc-link
+  // resolver guards on `tabsScope === pendingDoc.projectId`, and the OUTGOING
+  // project's scope (≠ the pending link's project) already fails that guard, so
+  // it keeps waiting until the new fetch stamps the correct scope.
+  // Which project (`''` = General) the current `tabs` were RESOLVED for. The
+  // doc-link resolver waits for this to match the pending link's project, so a
+  // cross-project link never consumes the previous project's stale tab set.
   const [tabsScope, setTabsScope] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
     setActiveKey(CHAT_KEY)
-    setTabs([CHAT_TAB])
-    setTabsScope(null)
     if (isGeneral) {
       void client
         .listGlobalTabs()

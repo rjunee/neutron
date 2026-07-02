@@ -825,10 +825,9 @@ export function TopicRail({
           />
         ))}
       </div>
-      {/* Pinned to the bottom (the rail is a flex column; the closed button /
-          open form both carry `margin-top:auto`). Always visible, even when only
-          General exists, so a skip-import owner can jump straight into a fresh
-          project + its tabs. */}
+      {/* Flows directly under the last project row (no push-to-bottom). Always
+          visible, even when only General exists, so a skip-import owner can jump
+          straight into a fresh project + its tabs. */}
       {createOpen ? (
         <div className="car-rail-create-form">
           <input
@@ -1161,8 +1160,22 @@ function ChatSurface({
     >
       <ConnectionBanner status={vm.status} />
       <WebDropZoneOverlay visible={dragOver && importActive} source={importSourceLabel(uploadAffordance)} />
-      <ChatErrorBoundary key={convId} onBackToGeneral={() => controller.setProject(null)}>
+      {/* The `ThreadPrimitive.Root`, `Composer`, and status rows stay MOUNTED
+          with stable React identity across a project switch — the runtime
+          context comes from `AssistantRuntimeProvider` (main.tsx), not Root, so
+          the composer/input keep their instance and never flicker/remount when
+          `convId` changes.
+          ONLY the message-list viewport is keyed on `convId`: PR #162's
+          `useClientLookup: Index N out of bounds` crash comes exclusively from
+          a stale `<MessagePartPrimitive>` (rendered inside `ThreadPrimitive.Messages`)
+          indexing past the emptied list mid-switch, so REMOUNTING just that
+          subtree kills every stale MessagePart while leaving the chrome intact.
+          The `ChatErrorBoundary` shares the same `convId` key (defense-in-depth:
+          resets on switch AND catches any residual render throw into a
+          recoverable fallback). Narrowing it to the viewport keeps the #162 fix
+          fully intact while ending the composer flicker. */}
       <ThreadPrimitive.Root className="car-thread">
+        <ChatErrorBoundary key={convId} onBackToGeneral={() => controller.setProject(null)}>
         <ThreadPrimitive.Viewport className="car-viewport">
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
@@ -1205,11 +1218,13 @@ function ChatSurface({
         <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
           ↓
         </ThreadPrimitive.ScrollToBottom>
+        </ChatErrorBoundary>
+        {/* OUTSIDE the keyed boundary — stable instances that reconcile in place
+            (new project's data flows in via props), never unmount/remount. */}
         <PendingBadge pending={vm.pending} />
         <ImportStatus progress={vm.importProgress} upload={importState} />
         <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
       </ThreadPrimitive.Root>
-      </ChatErrorBoundary>
     </main>
   )
 }

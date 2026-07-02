@@ -217,6 +217,167 @@ describe('ProjectShell render (happy-dom)', () => {
     })
   })
 
+  it('keeps the TabBar + Composer MOUNTED across a project switch while the tab set updates per-project', async () => {
+    // Flicker fix (2026-07-01): switching projects must NOT unmount/remount the
+    // tab bar or the composer/input. Only the keyed message viewport remounts
+    // (the #162 crash fix). We assert this via DOM node IDENTITY: a React
+    // reconcile-in-place reuses the SAME element object; a remount creates a new
+    // one. Composer input + tab-bar `<nav>` stay identical across the switch;
+    // the message viewport is a fresh node; and the tab labels reflect the new
+    // project (per-project set, updated in place — not a shared static bar).
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const PROJECT_A = 'acme'
+    const PROJECT_B = 'zen'
+    // Project B has a DIFFERENT (smaller) tab set — Chat + Plan only — so a
+    // successful switch is observable as the bar changing to exactly this set.
+    const ZEN_TABS = [
+      { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
+      { key: 'work_board', label: 'Plan', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
+    ]
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT_A}/tabs`)) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT_A, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.endsWith(`/api/app/projects/${PROJECT_B}/tabs`)) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT_B, tabs: ZEN_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT_A,
+      projects: [
+        { id: PROJECT_A, label: 'Acme' },
+        { id: PROJECT_B, label: 'Zen' },
+      ],
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT_A,
+      projects: [
+        { id: PROJECT_A, label: 'Acme' },
+        { id: PROJECT_B, label: 'Zen' },
+      ],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+      await tick()
+    })
+
+    const tabLabels = () =>
+      Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
+    // Project A's full tab set is resolved.
+    expect(tabLabels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+
+    // Capture the LIVE DOM instances BEFORE the switch. If React remounts them,
+    // these object references are replaced with fresh elements after the switch.
+    const navBefore = container.querySelector('nav.car-tabs')
+    const inputBefore = container.querySelector('.car-input')
+    const viewportBefore = container.querySelector('.car-viewport')
+    expect(navBefore).not.toBeNull()
+    expect(inputBefore).not.toBeNull()
+    expect(viewportBefore).not.toBeNull()
+
+    // Switch into project B (a different per-project tab set).
+    await act(async () => {
+      controller.setProject(PROJECT_B)
+      await tick()
+      await tick()
+    })
+
+    const navAfter = container.querySelector('nav.car-tabs')
+    const inputAfter = container.querySelector('.car-input')
+    const viewportAfter = container.querySelector('.car-viewport')
+
+    // The tab bar and composer input are the SAME element instances — reconciled
+    // in place, never unmount/remount ⇒ no flicker.
+    expect(navAfter).toBe(navBefore)
+    expect(inputAfter).toBe(inputBefore)
+
+    // But the message viewport IS a fresh node — the keyed remount that kills the
+    // #162 stale-MessagePart crash is still in force.
+    expect(viewportAfter).not.toBe(viewportBefore)
+
+    // And the persistent tab bar now reflects project B's set (per-project data,
+    // updated in place on the SAME <nav>) — proving it is NOT a shared static bar.
+    expect(tabLabels()).toEqual(['Chat', 'Plan'])
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
   it('shows Chat + Admin (global tabs) for the General / no-project view', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')

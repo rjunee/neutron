@@ -2,6 +2,60 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — M1 chat-UI polish: kill project-switch flicker (per-project tabs intact) + rail emoji/create-button tweaks
+
+**Why.** Ryan's M1 live test flagged three chat-react web-UI rough edges:
+(1) the tab bar AND the message input box FLICKERED on every project switch —
+PR #162's crash fix keyed the WHOLE thread subtree (`ChatErrorBoundary
+key={convId}`, wrapping down through the `Composer`) so the entire chrome
+unmounted+remounted on each switch, and `ProjectShell` additionally collapsed
+the tab set to `[Chat]` before re-fetching. Ryan: "the tab bar is PER PROJECT …
+i just dont want it to flicker. architect it better." (2) the selected rail
+row drew a bordered/filled box around its emoji glyph. (3) the "Create Project"
+button was pinned to the rail BOTTOM (`margin-top:auto`) instead of flowing
+under the last project.
+
+**What shipped (no feature flags).**
+
+- **Narrowed the keyed remount (fix 1a) — `ChatApp.tsx`.** The `convId`-keyed
+  `ChatErrorBoundary` now wraps ONLY the message-list viewport
+  (`ThreadPrimitive.Viewport` + `ScrollToBottom`), the sole place the #162
+  `useClientLookup: Index N out of bounds` crash originates (a stale
+  `<MessagePartPrimitive>` indexing past the emptied list mid-switch). The
+  `ThreadPrimitive.Root`, `Composer`, `PendingBadge`, and `ImportStatus` now
+  live OUTSIDE the keyed boundary as stable instances — the runtime context
+  comes from `AssistantRuntimeProvider` (main.tsx), not `Root`, so the composer
+  keeps its React identity and never remounts. Result: input box no longer
+  flickers; the #162 crash fix stays fully in force (viewport still remounts).
+
+- **Stopped collapsing the tab bar (fix 1b) — `ProjectShell.tsx`.** The
+  scope-change effect no longer resets `tabs` to `[CHAT_TAB]` (nor `tabsScope`
+  to null) before the new set resolves. The single stable `<TabBar>` keeps the
+  prior project's tabs on-screen until the new set lands, so React RECONCILES
+  the per-project labels in place — the tab set still changes per project, but
+  as an in-place diff, not a collapse-then-re-expand flash. `resolvedActiveKey`
+  already falls back to Chat when the active tab is absent from the new set.
+
+- **Emoji box on the selected row (fix 2) — `chat-react.html`.**
+  `.car-rail-item-active .car-rail-emoji` now sets `border-color: transparent;
+  background: transparent;` (kept `transparent`, not `0`, so the 30px chip
+  geometry is identical to inactive rows — no 1px glyph shift). The row
+  background highlight stays; the box around the glyph is gone.
+
+- **Create Project button position (fix 3) — `chat-react.html`.** Dropped
+  `margin-top:auto` from `.car-rail-create` and `.car-rail-create-form`; the
+  button now flows directly under the last project row (rail is a 4px-gap flex
+  column).
+
+**Tests.** New `project-shell.test.tsx` case asserts DOM-node IDENTITY across a
+project switch: the tab-bar `<nav>` and composer `.car-input` are the SAME
+element instances (reconciled in place, no remount) while the message
+`.car-viewport` IS a fresh node (keyed remount intact) and the tab labels update
+to the new project's set. #162 `chat-rail-stability.test.tsx` stays green.
+227/227 chat-react tests pass, `tsc -p landing/chat-react/tsconfig.json` clean,
+lazy `/chat-react.js` bundle builds + serves (945 KB, HTTP 200) on a fresh
+QUIET `NEUTRON_HOME` boot.
+
 ## 2026-07-01 — SEV1 M1: gate projects on import completion + honest no-context projects + doc frontmatter strip
 
 **Why.** Ryan's M1 live test hit four related onboarding defects (SPEC.md
