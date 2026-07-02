@@ -1192,9 +1192,11 @@ and project B are DISTINCT boards; a `store.get(scope, id)` miss is a 404, so a
 caller can't probe another project's items. The storage `project_slug` column now
 holds that per-project key (no schema change — single-owner ∴ a bare project id
 is a sufficient key). The `work_board_changed` push tags each frame with the
-per-project `project_id` (via `workBoardProjectIdForKey`) so the clients'
-existing per-project filter applies it to the right view; General frames stay
-untagged (the "no project_id = this/General board" client contract). The AGENT
+per-project `project_id` (via `workBoardProjectIdForKey`); the app + web clients
+apply a frame ONLY on an EXACT board match (`(framePid ?? '') === projectId`),
+where an untagged frame is the General board (`projectId` `''`/null) — NOT a
+broadcast, so a General/agent write can't clobber an open project's live view
+(Codex P2). The AGENT
 `work_board_*` tools + the per-turn injection still key on the instance slug
 (`ctx.project_slug` / `turn.project_slug`, hard-overridden in `mcp/server.ts`), so
 the chat agent and the General Plan tab SHARE the General board; per-project

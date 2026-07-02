@@ -1006,6 +1006,30 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     controller.stop()
   })
 
+  it('an untagged (General) board frame does NOT clobber the active project signal (Codex P2)', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // p1 has work in flight.
+    sockets[0]!.deliver(changed([boardItem({ id: 'build', status: 'in_progress' })]))
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    // The untagged GENERAL board mutates (e.g. an agent write, all-idle). With
+    // project p1 active it must be treated as a sibling board, NOT "this project",
+    // so it can't clobber p1's in-flight signal.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'work_board_changed',
+      items: [boardItem({ id: 'g', status: 'done' })],
+      ts: 3,
+    })
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    controller.stop()
+  })
+
   it('hasActiveWork ignores a board frame for a DIFFERENT project', async () => {
     const { controller, sockets } = setup('p1')
     controller.start()

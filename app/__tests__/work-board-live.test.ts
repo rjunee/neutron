@@ -71,8 +71,14 @@ describe('decodeWorkBoardFrame', () => {
     expect(decodeWorkBoardFrame(frame([boardRow()], 'other'), 'p')).toBeNull();
   });
 
-  it('accepts a frame with no project_id (single-project instance)', () => {
-    expect(decodeWorkBoardFrame(frame([boardRow()]), 'p')).not.toBeNull();
+  it('drops an untagged (General) frame in a per-project view — no cross-board leak', () => {
+    // An untagged frame IS the General board; a subscriber on project 'p' must
+    // NOT apply it (Codex P2 — else a General/agent write clobbers the project view).
+    expect(decodeWorkBoardFrame(frame([boardRow()]), 'p')).toBeNull();
+  });
+
+  it('accepts an untagged (General) frame for the General board (project_id "")', () => {
+    expect(decodeWorkBoardFrame(frame([boardRow()]), '')).not.toBeNull();
   });
 
   it('tolerates non-JSON / non-object data', () => {

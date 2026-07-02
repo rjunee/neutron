@@ -43,8 +43,10 @@ flags, no migration.
   stranded). A cross-scope `store.get` miss stays a 404. The dispatch ▶ path threads
   the same scope so a build resolves a per-project workspace + reconciles on the
   right key. The `work_board_changed` push tags each frame with the per-project
-  `project_id` (`workBoardProjectIdForKey`) so the clients' EXISTING per-project
-  filter routes it; General frames stay untagged (client contract). Interaction:
+  `project_id` (`workBoardProjectIdForKey`); the app + web clients now apply a
+  frame ONLY on an EXACT board match — an untagged frame is the General board
+  (projectId `''`/null), NOT a broadcast (Codex P2 fix — else a General/agent
+  write clobbered an open project's live view). Interaction:
   fixing #3 does NOT subsume #1 — two concurrent builds in the SAME project still
   share one workspace, so #1's lock is still required.
 
