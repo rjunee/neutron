@@ -68,28 +68,42 @@ type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 /** The Chat tab key — kept mounted and the default active tab. */
 const CHAT_KEY = CHAT_TAB.key
 
-/** The horizontal tab bar. Pure presentation over the resolved descriptors. */
+/** The horizontal tab bar. Pure presentation over the resolved descriptors.
+ *
+ *  `resolving` is true while a scope switch's tab fetch is in flight: the bar
+ *  keeps the PREVIOUS scope's descriptors mounted for visual continuity (no
+ *  flicker), but every NON-Chat tab is disabled so a stale button can't be
+ *  clicked to mount a wrong-scope `TabContent` (e.g. the old project's Core
+ *  iframe) before the new set resolves (Codex P2). Chat is always in-scope. */
 function TabBar({
   tabs,
   activeKey,
   onSelect,
+  resolving,
 }: {
   tabs: readonly TabDescriptor[]
   activeKey: string
   onSelect: (key: string) => void
+  resolving: boolean
 }): React.JSX.Element {
   return (
     <nav className="car-tabs" role="tablist" aria-label="Sections">
       {tabs.map((t) => {
         const active = t.key === activeKey
+        const disabled = resolving && t.key !== CHAT_KEY
         return (
           <button
             key={t.key}
             type="button"
             role="tab"
             aria-selected={active}
+            disabled={disabled}
+            aria-disabled={disabled}
             className={`car-tab${active ? ' car-tab-active' : ''}`}
-            onClick={() => onSelect(t.key)}
+            onClick={() => {
+              if (disabled) return
+              onSelect(t.key)
+            }}
           >
             {t.label}
           </button>
@@ -345,9 +359,14 @@ export function ProjectShell({
   }, [pendingDoc, projectId, tabs, tabsScope])
 
   // The previous active tab can vanish when the set changes (scope switch / Core
-  // uninstall). Fall back to Chat so we never highlight a missing tab.
+  // uninstall). Fall back to Chat so we never highlight a missing tab. While a
+  // scope switch's tab fetch is in flight (`resolving`), the still-mounted tabs
+  // belong to the OUTGOING scope, so clamp the active tab to the always-in-scope
+  // Chat until the new set resolves — belt-and-braces with the disabled non-Chat
+  // buttons so no wrong-scope `TabContent` can mount mid-switch (Codex P2).
+  const resolving = tabsScope === null
   const hasActive = tabs.some((t) => t.key === activeKey)
-  const resolvedActiveKey = hasActive ? activeKey : CHAT_KEY
+  const resolvedActiveKey = resolving || !hasActive ? CHAT_KEY : activeKey
   const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
 
   // P-A — a doc-open request is ONE-SHOT: clear it once the user leaves the
@@ -424,7 +443,7 @@ export function ProjectShell({
             theme toggle pinned top-right. The toggle owns the whole UI's theme
             (a user preference, not per-tab), so it lives at the shell root. */}
         <div className="car-topbar">
-          <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+          <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} resolving={resolving} />
           <ThemeToggle />
         </div>
         <div className="car-tabpanels" ref={panelsRef}>

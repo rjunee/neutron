@@ -47,7 +47,10 @@ shared runtime shrank in place with old subscribers still attached.
   two-step flicker). It reconciles IN PLACE: keep the current descriptors mounted
   until the new set resolves, mark the scope in-flight (`tabsScope = null`, which
   the doc-link resolver keys off), and swap in one step — the always-present Chat
-  tab (stable key) never remounts.
+  tab (stable key) never remounts. While the fetch is in flight the still-mounted
+  descriptors belong to the OUTGOING scope, so every non-Chat tab is DISABLED and
+  the active tab is clamped to Chat (Codex P2): a stale button can't be clicked to
+  mount a wrong-scope `TabContent` (e.g. the old project's Core iframe) mid-switch.
 - **Safety net kept.** The #162 `ChatErrorBoundary` stays as a last-resort catch
   (not removed), but now essentially never fires on a normal switch/load.
 

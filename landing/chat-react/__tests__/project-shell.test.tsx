@@ -217,6 +217,150 @@ describe('ProjectShell render (happy-dom)', () => {
     })
   })
 
+  it('keeps the tab bar mounted but DISABLES stale non-Chat tabs while a scope switch resolves', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChatVm } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const BETA = 'beta'
+    const BETA_TABS = [
+      { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
+      { key: 'work_board', label: 'Plan', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
+    ]
+    // GATE the beta resolver: it stays pending until we release it, so we can
+    // observe the in-flight (resolving) window deterministically.
+    let releaseBeta: () => void = () => {}
+    const betaPending = new Promise<void>((res) => {
+      releaseBeta = res
+    })
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.endsWith(`/api/app/projects/${BETA}/tabs`)) {
+        await betaPending
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: BETA, tabs: BETA_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }, { id: BETA, label: 'Beta' }],
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }, { id: BETA, label: 'Beta' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const vm = useNeutronChatVm(controller)
+      return <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+      await tick()
+    })
+    const tabBtns = () =>
+      Array.from(container.querySelectorAll('button[role="tab"]')) as HTMLButtonElement[]
+    const labels = () => tabBtns().map((b) => b.textContent ?? '')
+    // Acme's full set resolved, all enabled.
+    expect(labels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+    expect(tabBtns().every((b) => !b.disabled)).toBe(true)
+
+    // Switch to beta; its resolver is gated → we're now IN-FLIGHT.
+    await act(async () => {
+      controller.setProject(BETA)
+      await tick()
+    })
+    // Reconcile-in-place: the bar is NOT collapsed to Chat-only — acme's
+    // descriptors stay mounted (no flicker) — BUT every non-Chat tab is now
+    // DISABLED so a stale button can't mount a wrong-scope panel mid-switch.
+    expect(labels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+    const byLabel = (l: string) => tabBtns().find((b) => b.textContent === l)!
+    expect(byLabel('Chat').disabled).toBe(false)
+    expect(byLabel('Plan').disabled).toBe(true)
+    expect(byLabel('Documents').disabled).toBe(true)
+    expect(byLabel('Analytics').disabled).toBe(true)
+    // Clicking a disabled stale tab is a no-op: Chat stays the visible panel.
+    await act(async () => {
+      byLabel('Analytics').click()
+      await tick()
+    })
+    expect((container.querySelector('.car-tabpanel') as HTMLElement).hasAttribute('hidden')).toBe(false)
+    expect(container.querySelector('iframe.car-tab-frame')).toBeNull()
+
+    // Release the resolver → beta's set swaps in, all enabled again.
+    await act(async () => {
+      releaseBeta()
+      await tick()
+      await tick()
+    })
+    expect(labels()).toEqual(['Chat', 'Plan'])
+    expect(tabBtns().every((b) => !b.disabled)).toBe(true)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
   it('shows Chat + Admin (global tabs) for the General / no-project view', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
