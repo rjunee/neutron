@@ -35,6 +35,10 @@ under the last project.
   the per-project labels in place — the tab set still changes per project, but
   as an in-place diff, not a collapse-then-re-expand flash. `resolvedActiveKey`
   already falls back to Chat when the active tab is absent from the new set.
+  Tab SELECTION is gated to the resolved scope (Codex P2): while the displayed
+  tabs are still the outgoing project's (fetch in flight / hung), `onSelectTab`
+  ignores clicks so a stale Documents/Core tab can't mount its content under the
+  new project. Invisible in the fast path (we always land on Chat on switch).
 
 - **Emoji box on the selected row (fix 2) — `chat-react.html`.**
   `.car-rail-item-active .car-rail-emoji` now sets `border-color: transparent;

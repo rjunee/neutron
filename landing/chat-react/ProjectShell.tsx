@@ -354,6 +354,25 @@ export function ProjectShell({
   const resolvedActiveKey = hasActive ? activeKey : CHAT_KEY
   const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
 
+  // Have the currently-displayed `tabs` been RESOLVED for the active scope?
+  // To avoid the tab-bar flicker we keep the PREVIOUS project's tabs on-screen
+  // while the new project's `/tabs` fetch is in flight, so during that window
+  // the visible tabs are stale (they belong to the outgoing project). Ignore
+  // tab SELECTION until the set matches the current scope: otherwise a slow or
+  // hung fetch would leave the previous project's Documents/Admin/Core tabs
+  // clickable and mount their content under the NEW `projectId` (a tab that may
+  // not even exist in the new project). Chat is always safe and always present,
+  // and `setActiveKey(CHAT_KEY)` already lands us there on every switch, so the
+  // gate is invisible in the common (fast-resolve) case (Codex P2).
+  const expectedScope = isGeneral ? '' : (projectId ?? '')
+  const onSelectTab = useCallback(
+    (key: string): void => {
+      if (tabsScope !== expectedScope) return
+      setActiveKey(key)
+    },
+    [tabsScope, expectedScope],
+  )
+
   // P-A — a doc-open request is ONE-SHOT: clear it once the user leaves the
   // Documents tab so revisiting Documents (or a `DocumentsTab` remount on a
   // project switch) can't replay the old linked doc.
@@ -428,7 +447,7 @@ export function ProjectShell({
             theme toggle pinned top-right. The toggle owns the whole UI's theme
             (a user preference, not per-tab), so it lives at the shell root. */}
         <div className="car-topbar">
-          <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} />
+          <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={onSelectTab} />
           <ThemeToggle />
         </div>
         <div className="car-tabpanels" ref={panelsRef}>

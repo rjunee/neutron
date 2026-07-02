@@ -378,6 +378,146 @@ describe('ProjectShell render (happy-dom)', () => {
     })
   })
 
+  it('ignores stale tab selections while the new project’s /tabs fetch is in flight (Codex P2)', async () => {
+    // While the new project's tab set is still resolving we keep the PREVIOUS
+    // project's tabs on-screen (no flicker) — but they must NOT be selectable,
+    // or a slow/hung fetch would mount the old project's Documents/Core content
+    // under the new projectId. Here project B's /tabs never resolves; clicking a
+    // stale tab from project A must be a no-op (Chat stays visible).
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const PROJECT_A = 'acme'
+    const PROJECT_B = 'hang'
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT_A}/tabs`)) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT_A, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      // Project B: the tab resolver HANGS (never resolves) — the stuck-loading case.
+      if (url.endsWith(`/api/app/projects/${PROJECT_B}/tabs`)) {
+        return new Promise<Response>(() => {})
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT_A,
+      projects: [
+        { id: PROJECT_A, label: 'Acme' },
+        { id: PROJECT_B, label: 'Hang' },
+      ],
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT_A,
+      projects: [
+        { id: PROJECT_A, label: 'Acme' },
+        { id: PROJECT_B, label: 'Hang' },
+      ],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+      await tick()
+    })
+    const tabLabels = () =>
+      Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
+    expect(tabLabels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+
+    // Switch into project B — its /tabs hangs, so A's tabs stay on-screen (no
+    // flicker/collapse), but the scope no longer matches the displayed set.
+    await act(async () => {
+      controller.setProject(PROJECT_B)
+      await tick()
+      await tick()
+    })
+    expect(tabLabels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+    // Chat panel is visible (active), not a stale tab's content.
+    const chatPanel = container.querySelector('.car-tabpanel') as HTMLElement
+    expect(chatPanel.hasAttribute('hidden')).toBe(false)
+
+    // Click the STALE "Documents" tab — the guard ignores it: no Documents view
+    // mounts under project B, and the Chat panel stays visible.
+    const docsBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
+      (b) => b.textContent === 'Documents',
+    ) as HTMLButtonElement
+    await act(async () => {
+      docsBtn.click()
+      await tick()
+    })
+    expect(container.querySelector('.cdoc')).toBeNull()
+    expect((container.querySelector('.car-tabpanel') as HTMLElement).hasAttribute('hidden')).toBe(false)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
   it('shows Chat + Admin (global tabs) for the General / no-project view', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
