@@ -746,6 +746,23 @@
   }
   .car-attach-btn:hover { border-color: var(--accent); }
   .car-fatal { margin: 40px auto; max-width: 480px; text-align: center; color: var(--error-fg); padding: 20px; }
+  /* SEV1 chat-rail stability — recoverable fallback when the chat thread throws
+     during render (assistant-ui index lookup on a project switch). Replaces the
+     dead black screen with a centered card + Retry / Back to General / Reload. */
+  .car-error-boundary {
+    margin: auto; max-width: 460px; text-align: center; padding: 32px 24px;
+    display: flex; flex-direction: column; gap: 10px; align-items: center;
+  }
+  .car-error-title { font-size: 18px; font-weight: 600; color: var(--fg); }
+  .car-error-sub { font-size: 14px; color: var(--muted); line-height: 1.5; }
+  .car-error-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 6px; }
+  .car-error-btn {
+    appearance: none; cursor: pointer; font: inherit; font-size: 13px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+    border-radius: 8px; padding: 7px 14px;
+  }
+  .car-error-btn:hover { border-color: var(--accent); }
+  .car-error-btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   /* ── Admin / Integrations tab ── */
   .cint { display: flex; flex: 1 1 auto; min-height: 0; width: 100%; }
   .cint-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 18px; width: 100%; max-width: 760px; margin: 0 auto; }
@@ -853,8 +870,11 @@
       if (params.get('debug') === '1') { window.__neutron_debug = true; }
       if (token) {
         window.__neutron_start_token = token;
-        // Preserve the client flag across the scrub so a refresh stays on React.
-        var clean = window.location.pathname + '?client=react';
+        // Scrub to the bare path — the start token is stashed on window, and the
+        // legacy `?client=react` flag is dead (the vanilla client was removed
+        // 2026-06-26; nothing reads the param, and there is no client-selection
+        // branch left on the server). Leaving it appended just littered the URL.
+        var clean = window.location.pathname;
         window.history.replaceState(null, '', clean);
       }
     } catch (e) { /* sandboxed — config.ts falls back to location.search */ }
