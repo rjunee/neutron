@@ -48,7 +48,10 @@ React unmounted the whole tree → dead black screen.
    presented to the view-model as `idle` (banner hidden). The latch clears the
    moment the socket resolves (`open`) or GENUINELY degrades (`reconnecting` /
    `closed`), so a real disconnect still surfaces the banner. No "Connecting…"
-   flash on a sub-second warm switch; real reconnects unaffected.
+   flash on a sub-second warm switch; real reconnects unaffected. The suppression
+   is TIME-BOXED (`switchConnectingGraceMs`, default 2500 — Codex P2): a switch
+   whose fresh socket STALLS in `connecting` (captive portal / firewall) surfaces
+   the banner after the window instead of hiding a dead chat forever.
 5. **Unread badge never cleared.** `controller.ts` `setProject` now zeroes the
    activated project's cached `unread` (viewing == read), and `TopicRail`
    (`ChatApp.tsx`) already forces the active row's badge to 0 — so a just-arrived

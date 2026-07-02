@@ -1163,4 +1163,43 @@ describe('NeutronChatController — chat-rail stability (SEV1 2026-07-01)', () =
     ).toBe(0)
     controller.stop()
   })
+
+  it('surfaces the banner if a switch socket STALLS in connecting past the grace window (Codex P2)', async () => {
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      // Tiny grace so the test doesn't wait on the real 2.5s window.
+      switchConnectingGraceMs: 20,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().status).toBe('open')
+
+    // Switch, but the fresh socket NEVER opens (captive-portal / firewall stall).
+    controller.setProject('meditation')
+    // Immediately after the switch, the connecting banner is suppressed.
+    expect(controller.getViewModel().status).toBe('idle')
+
+    // Once the grace window elapses and the socket is STILL connecting, the
+    // banner surfaces so the user isn't left staring at a silently-dead chat.
+    await new Promise((r) => setTimeout(r, 45))
+    expect(controller.getViewModel().status).toBe('connecting')
+    controller.stop()
+  })
 })

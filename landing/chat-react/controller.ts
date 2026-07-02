@@ -218,6 +218,14 @@ export interface NeutronChatControllerOptions {
    */
   importProgressStaleMs?: number
   /**
+   * Chat-rail stability — how long (ms) the project-switch `connecting` banner
+   * suppression lasts before a still-`connecting` socket surfaces the banner
+   * (Codex P2 — don't hide a genuinely stalled switch connection). A warm switch
+   * resolves to `open` in well under this; the window only matters for a stall.
+   * Defaults to 2500. Injectable so tests don't wait on a real timer.
+   */
+  switchConnectingGraceMs?: number
+  /**
    * Managed post-onboarding claim redirect target (from the page bootstrap
    * config's {@link BootstrapConfig.postOnboardingClaimUrl}). When set, the
    * controller navigates the browser here on the `onboarding_completed` frame;
@@ -276,8 +284,17 @@ export class NeutronChatController {
    * hidden for it (a warm switch shouldn't flash "Connecting…"). Cleared the
    * moment the socket resolves (`open`) or genuinely degrades (`reconnecting` /
    * `closed`), so a REAL disconnect after a switch still surfaces the banner.
+   *
+   * TIME-BOXED (Codex P2) — the suppression is bounded by a grace timer so a
+   * switch whose fresh socket STALLS in `connecting` (captive portal, firewall,
+   * a handshake that never fails promptly) surfaces the banner after the window
+   * instead of hiding a genuinely-disconnected chat forever.
    */
   private switchConnecting = false
+  /** Grace timer that drops {@link switchConnecting} if the switch socket is
+   *  still `connecting` after {@link switchConnectingGraceMs}. */
+  private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly switchConnectingGraceMs: number
   private awaitingReply = false
   private pending = 0
   private projectId: string | null
@@ -322,6 +339,7 @@ export class NeutronChatController {
     this.projectId = opts.projectId ?? null
     this.projects = opts.projects ?? []
     this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
+    this.switchConnectingGraceMs = opts.switchConnectingGraceMs ?? 2_500
     this.postOnboardingClaimUrl =
       typeof opts.postOnboardingClaimUrl === 'string' && opts.postOnboardingClaimUrl.length > 0
         ? opts.postOnboardingClaimUrl
@@ -369,6 +387,10 @@ export class NeutronChatController {
     if (this.importProgressTimer !== null) {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
+    }
+    if (this.switchConnectingTimer !== null) {
+      clearTimeout(this.switchConnectingTimer)
+      this.switchConnectingTimer = null
     }
     this.session.stop()
   }
@@ -429,6 +451,17 @@ export class NeutronChatController {
     // `closed` has already fired) so the fresh socket's initial `connecting` is
     // recognised as switch plumbing and the banner stays hidden for it.
     this.switchConnecting = true
+    // Time-box the suppression (Codex P2): if the fresh socket is STILL
+    // `connecting` after the grace window, drop the latch so a genuinely stalled
+    // switch connection surfaces the banner instead of hiding it forever.
+    if (this.switchConnectingTimer !== null) clearTimeout(this.switchConnectingTimer)
+    this.switchConnectingTimer = setTimeout(() => {
+      this.switchConnectingTimer = null
+      if (this.switchConnecting) {
+        this.switchConnecting = false
+        this.publish()
+      }
+    }, this.switchConnectingGraceMs)
     this.session = this.createSessionFn(this.sinks, {
       projectId,
       topicId: this.topicForProject(projectId),
@@ -493,8 +526,15 @@ export class NeutronChatController {
     // Chat-rail stability — the switch latch survives only the fresh socket's
     // INITIAL `connecting`; any other status means the handshake resolved
     // (`open`) or genuinely degraded (`reconnecting` / `closed`), so drop it and
-    // let the banner reflect reality again.
-    if (status !== 'connecting') this.switchConnecting = false
+    // let the banner reflect reality again. Cancel the grace timer too — the
+    // switch has resolved, so the time-box no longer applies.
+    if (status !== 'connecting') {
+      this.switchConnecting = false
+      if (this.switchConnectingTimer !== null) {
+        clearTimeout(this.switchConnectingTimer)
+        this.switchConnectingTimer = null
+      }
+    }
     this.publish()
   }
 
