@@ -46,6 +46,7 @@ import type { CapturedProject } from './action-types.ts'
 import { OVERNIGHT_OPT_IN_KEY } from '../overnight/status-md-sync.ts'
 import {
   findRelatedImportSignal,
+  hasRealProjectContext,
   namesRelate,
   synthesizeProjectContext,
   weaveRelatedSignal,
@@ -153,6 +154,16 @@ export interface MaterializeOutcome {
   llm_docs: boolean
   git_ok: boolean
   indexed: boolean
+  /**
+   * True iff the project has REAL grounding — matched transcript slices OR
+   * import/project-derived context (`hasRealProjectContext`). Drives the
+   * "better nothing than a bad job" data-sufficiency gate (2026-07-01 SEV1):
+   * a no-context project (`has_context:false`) gets a MINIMAL STATUS.md (no
+   * autonomous-overnight opt-in, no seeded overnight task) and an HONEST opening
+   * ("I don't have any context on X yet ...") instead of a fabricated status.
+   * A project WITH context is materialized fully as before.
+   */
+  has_context: boolean
   error?: string
 }
 
@@ -195,7 +206,12 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
         llm_docs: false,
         git_ok: false,
         indexed: false,
+        has_context: false,
       }
+      // Import/project-derived grounding (DB-free). OR-ed with matched transcript
+      // slices below to decide `has_context` — the data-sufficiency gate for the
+      // minimal no-context STATUS.md + honest opening (2026-07-01 SEV1).
+      const importCtx = hasRealProjectContext(input.project, input.import_result)
       const root = join(deps.owner_home, 'Projects', slug)
       try {
         // Idempotency marker — STATUS.md is written LAST among the doc
@@ -211,6 +227,9 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
         if (existsSync(join(root, 'STATUS.md'))) {
           out.reason = 'already_materialized'
           out.summary_written = existsSync(join(root, TRANSCRIPT_SUMMARY_RELPATH))
+          // A prior run wrote a transcript-summary only when it matched slices,
+          // so `summary_written` stands in for "had slices" on the re-fire path.
+          out.has_context = importCtx || out.summary_written
           await repairGitIfNeeded(root, slug, runGit, out, logFailure)
           await runIndexerStep(deps, input, root, out, logFailure)
           return out
@@ -232,6 +251,13 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
           logFailure('slice_query', slug, err),
         )
         out.slice_chunk_count = slices.chunks.length
+        // Data-sufficiency: real grounding is matched transcript slices OR
+        // import/project-derived context. A no-context project (thin chat answer,
+        // no import match, no related signal) gets the minimal STATUS.md + no
+        // overnight opt-in below (2026-07-01 SEV1 — "better nothing than a bad
+        // job").
+        const hasContext = importCtx || slices.chunks.length > 0
+        out.has_context = hasContext
         if (slices.chunks.length > 0) {
           mkdirSync(join(root, 'research', 'transcripts'), { recursive: true })
           writeDocIfMissing(
@@ -298,17 +324,35 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
         // adopts the seeded bullet into a real `overnight_queue` row, the
         // `[context:]` hard gate passes (the file exists), and the item runs
         // as a Trident run whose REAL result lands in the morning brief.
-        mkdirSync(join(root, 'docs', 'overnight'), { recursive: true })
+        //
+        // NO-CONTEXT GATE (2026-07-01 SEV1): only for a project with real
+        // grounding. Seeding a "Deepen + analyze X from imported context"
+        // overnight task for a project that HAS no imported context (thin chat
+        // answer) is the exact phantom-work bug Ryan hit — it would run atlas
+        // against an empty seed doc. A no-context project gets neither the seed
+        // doc nor the overnight opt-in (see renderStatusMd below).
+        if (hasContext) {
+          mkdirSync(join(root, 'docs', 'overnight'), { recursive: true })
+          writeDocIfMissing(
+            root,
+            SEED_CONTEXT_RELPATH,
+            renderSeedContext(name, context, weaveRelatedSignal(name, related)),
+            out,
+          )
+        }
+
+        // 7) STATUS.md LAST — the completion marker (§ 4 frontmatter). A project
+        // with context gets the full STATUS (overnight opt-in + seeded bullet
+        // pointing at the context doc above); a no-context project gets a MINIMAL
+        // STATUS (clean frontmatter, one-line body, NO overnight machinery).
         writeDocIfMissing(
           root,
-          SEED_CONTEXT_RELPATH,
-          renderSeedContext(name, context, weaveRelatedSignal(name, related)),
+          'STATUS.md',
+          hasContext
+            ? renderStatusMd(slug, name, context, deps.now())
+            : renderMinimalStatusMd(slug, deps.now()),
           out,
         )
-
-        // 7) STATUS.md LAST — the completion marker (§ 4 frontmatter), with
-        // the seeded overnight bullet pointing at the context doc above.
-        writeDocIfMissing(root, 'STATUS.md', renderStatusMd(slug, name, context, deps.now()), out)
 
         // 8) git init + commit (§ 3.3). Failure-isolated: the docs are
         // already on disk; a box without git still gets the doc set.
@@ -677,6 +721,37 @@ function renderStatusMd(slug: string, name: string, context: string, nowMs: numb
     `\n` +
     `- [ ] Deepen + analyze ${name} from imported context ` +
     `[agent:atlas] [priority:P3] [context:${SEED_CONTEXT_RELPATH}]\n`
+  )
+}
+
+/**
+ * MINIMAL STATUS.md for a NO-CONTEXT project (2026-07-01 SEV1 — "STOP M2" b/c).
+ * Clean § 4 frontmatter + a single honest body line. Deliberately OMITS:
+ *   - `autonomous_overnight_enabled` (a no-context project must NOT be opted into
+ *     the overnight engine — there is nothing real to work on),
+ *   - the `## Autonomous Overnight Work` section + its seeded "Deepen + analyze
+ *     from imported context" task (phantom work against an empty seed doc),
+ *   - a fabricated `one_liner` / status prose (there is no context to summarize).
+ * The empty `one_liner` is what makes the opening composer emit the honest "I
+ * don't have any context on X yet" prompt instead of a fake "here's where X
+ * stands". A project that later gains real context is handled by the full
+ * `renderStatusMd`; the agent can also opt this project in by hand later.
+ */
+function renderMinimalStatusMd(slug: string, nowMs: number): string {
+  const date = new Date(nowMs).toISOString().slice(0, 10)
+  return (
+    `---\n` +
+    `name: ${slug}\n` +
+    `status: active\n` +
+    `priority: P2\n` +
+    `one_liner: ""\n` +
+    `remote: local\n` +
+    `last_updated: ${date}\n` +
+    `---\n` +
+    `\n` +
+    `# Status\n` +
+    `\n` +
+    `Created during onboarding - no context yet.\n`
   )
 }
 

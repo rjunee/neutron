@@ -170,14 +170,16 @@ const ALL_FIVE = JSON.stringify({
   non_work_interests: ['climbing'],
 })
 
-test('in-flight import DEFERS completion even when all 5 fields are present', async () => {
+test('in-flight import SUPPRESSES project-discovery fields and DEFERS completion (SEV1 gate)', async () => {
   const store = new InMemoryOnboardingStateStore()
   let completed = false
   const extractor = buildPostTurnExtractor({
     anthropicClient: stubClient([ALL_FIVE]),
     stateStore: store,
     project_slug: SLUG,
-    // A real import job is live → must NOT finalize on top of it.
+    // A real import is live → project discovery is owned by the import; the
+    // extractor must NOT persist project-discovery fields (2026-07-01 SEV1) NOR
+    // finalize on top of it.
     hasInFlightImport: async () => true,
     onComplete: () => {
       completed = true
@@ -186,14 +188,40 @@ test('in-flight import DEFERS completion even when all 5 fields are present', as
   const state = await extractor.runOnce({
     user_id: USER,
     agent_text: 'Tell me about yourself.',
-    user_text: "I'm Sam, I build Topline/Acme/a focus book, I climb, call you Atlas.",
+    user_text: "I'm Sam, I build Topline/Acme/a focus book, I climb, warm and direct.",
     observed_at: 1000,
   })
-  // Fields persisted, but completion deferred while the import runs.
-  expect(auditRequiredFields(state!.phase_state).next_to_collect).toBeNull()
+  // Project-discovery fields are dropped while the import is in flight (they will
+  // come from the import's analysis); import-INDEPENDENT fields still land.
+  expect(state!.phase_state['primary_projects']).toBeUndefined()
+  expect(state!.phase_state['non_work_interests']).toBeUndefined()
+  expect(state!.phase_state['user_first_name']).toBe('Sam')
+  expect(state!.phase_state['agent_personality']).toBe('warm and direct')
+  // And with the project fields absent (plus the import gate), completion is deferred.
+  expect(auditRequiredFields(state!.phase_state).next_to_collect).not.toBeNull()
   expect(state!.phase).not.toBe('completed')
   expect(state!.completed_at ?? null).toBeNull()
   expect(completed).toBe(false)
+})
+
+test('NO import in flight → project-discovery fields persist normally (gate off)', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  const extractor = buildPostTurnExtractor({
+    anthropicClient: stubClient([
+      JSON.stringify({ primary_projects: ['Topline', 'Acme'], non_work_interests: ['climbing'] }),
+    ]),
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => false, // no import → the SEV1 gate must NOT fire
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'What are you working on, and any hobbies?',
+    user_text: 'Topline and Acme, and I climb.',
+    observed_at: 1000,
+  })
+  expect(state!.phase_state['primary_projects']).toEqual(['Topline', 'Acme'])
+  expect(state!.phase_state['non_work_interests']).toEqual([{ name: 'climbing' }])
 })
 
 test('an in-flight job at an interview phase ADOPTS import_running (no downgrade) — Codex r1 P1', async () => {
@@ -209,10 +237,12 @@ test('an in-flight job at an interview phase ADOPTS import_running (no downgrade
   })
   let completed = false
   const extractor = buildPostTurnExtractor({
-    // A real onboarding turn that persists a field (an interest) so the adopt
-    // path runs. (Formerly used agent_name, which is no longer persisted after
-    // the DROP the agent-NAME step change.)
-    anthropicClient: stubClient([JSON.stringify({ non_work_interests: ['climbing'] })]),
+    // A real onboarding turn that persists an import-INDEPENDENT field
+    // (personality) so the adopt path runs. Project-discovery fields are now
+    // suppressed while an import is in flight (2026-07-01 SEV1), so a hobby-only
+    // turn would write nothing; personality survives the gate and drives the
+    // adopt-import_running write.
+    anthropicClient: stubClient([JSON.stringify({ agent_personality: 'warm and direct' })]),
     stateStore: store,
     project_slug: SLUG,
     hasInFlightImport: async () => true, // a job is genuinely live
@@ -222,13 +252,14 @@ test('an in-flight job at an interview phase ADOPTS import_running (no downgrade
   })
   const state = await extractor.runOnce({
     user_id: USER,
-    agent_text: 'Anything you care about outside work?',
-    user_text: 'I climb',
+    agent_text: 'What personality do you want from me?',
+    user_text: 'warm and direct',
     observed_at: 1000,
   })
   // Must NOT write the interview marker back (that would re-strand the cron and
   // re-orphan the import); it adopts import_running so the cron keeps driving.
   expect(state!.phase).toBe('import_running')
+  expect(state!.phase_state['agent_personality']).toBe('warm and direct')
   expect(completed).toBe(false)
 })
 
@@ -343,10 +374,44 @@ test('a concurrent upload that advances the row to import_running mid-extraction
     observed_at: 1000,
   })
   // The fresh re-read must preserve `import_running` (no downgrade) and defer
-  // completion — even though all 5 fields are now present.
+  // completion. The concurrent import flipping the row to import_running also
+  // trips the SEV1 project-discovery gate, so this turn's hobby field is NOT
+  // persisted (it will come from the import); completion stays deferred.
   expect(state!.phase).toBe('import_running')
-  expect(auditRequiredFields(state!.phase_state).next_to_collect).toBeNull()
+  expect(state!.phase_state['non_work_interests']).toBeUndefined()
   expect(completed).toBe(false)
+})
+
+test('a curation DROP is honored during import review (drops are never gated) — Codex P2', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  // Import review phase: the import already merged its proposals into
+  // primary_projects and the owner is reviewing them.
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'import_analysis_presented',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      primary_projects: ['Topline', 'Family Home', 'Acme'],
+    },
+    advanced_at: 500,
+  })
+  const extractor = buildPostTurnExtractor({
+    // The owner explicitly rejects an import-proposed project during review.
+    anthropicClient: stubClient([JSON.stringify({ removed_projects: ['Family Home'] })]),
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => true, // import still in flight/review
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Here are the projects I found. Anything to drop?',
+    user_text: 'drop Family Home',
+    observed_at: 1000,
+  })
+  // The drop MUST survive the import gate (it only removes, never creates) so
+  // finalize's resolveProjects excludes it from the re-pulled import proposals.
+  expect(state!.phase_state['dropped_projects']).toEqual(['Family Home'])
 })
 
 test('a terse no-op turn AFTER an import is consumed still finalizes (no stall)', async () => {

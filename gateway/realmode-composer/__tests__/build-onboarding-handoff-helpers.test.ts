@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildDeterministicProjectOpening,
+  buildNoContextProjectOpening,
   buildProjectDocReader,
   finalizeOpeningBody,
   firstProseParagraph,
@@ -111,6 +112,19 @@ describe('buildDeterministicProjectOpening (Item 5)', () => {
     const out = buildDeterministicProjectOpening('Mystery', null, NO_DOCS)
     expect(out.body).toContain('You added Mystery to your projects.')
     expect(out.body).toContain('tell me what it is and what you want me to track')
+  })
+})
+
+describe('buildNoContextProjectOpening (SEV1 honest opening)', () => {
+  test('asks for context directly, never fabricates a status', () => {
+    const out = buildNoContextProjectOpening('Mystery')
+    expect(out.body).toContain("I don't have any context on Mystery yet")
+    expect(out.body).toContain('what do you want to work on first?')
+    // Never a fabricated "here's where X stands" / status claim.
+    expect(out.body.toLowerCase()).not.toContain("here's where")
+    expect(out.body).not.toContain('active, P2')
+    // Em-dash-free (Sam hard rule).
+    expect(out.body).not.toContain('—')
   })
 })
 

@@ -224,6 +224,42 @@ export function buildOnboardingStepGuardFragment(
 }
 
 /**
+ * IMPORT-IN-FLIGHT steer (2026-07-01 SEV1 M1 blocker — "STOP M2" a). A per-turn
+ * fragment injected while a history import is uploading / being analyzed. Its job
+ * is to keep the live agent from doing PROJECT DISCOVERY during the upload: the
+ * real projects come from the import once it lands, so asking "what do you work
+ * on?" now and creating projects from thin chat answers is exactly the bug this
+ * sprint fixes (the durable post-turn extractor already refuses to persist
+ * project-discovery fields while the import is in flight; this fragment keeps the
+ * conversation itself from soliciting them, so the owner isn't asked a question
+ * whose answer is silently dropped).
+ *
+ * Import-INDEPENDENT progress is still encouraged: acknowledge the upload, and if
+ * personality/voice (→ SOUL.md) is still open, that is the thing to move on. When
+ * the import finishes the system surfaces what it found and project discovery
+ * resumes.
+ *
+ * Returns null when no import is in flight (the caller then injects nothing).
+ */
+export function buildImportInFlightSteerFragment(import_in_flight: boolean): string | null {
+  if (!import_in_flight) return null
+  const lines: string[] = []
+  lines.push('<import_in_flight>')
+  lines.push(
+    'A history import is uploading and being analyzed RIGHT NOW. Do NOT ask the owner',
+    'about their projects, work, or what they are focused on yet, and do NOT try to',
+    'create or name any projects: their real projects come from this import once it',
+    'finishes. While it runs, keep the conversation on import-INDEPENDENT things only.',
+    'Acknowledge the upload warmly, and if you still need it, this is a good moment to',
+    'settle the personality/voice they want from you (offer the archetype options). The',
+    'moment the import is done the system surfaces what it found and project discovery',
+    'continues from there, so there is no need to rush it.',
+  )
+  lines.push('</import_in_flight>')
+  return lines.join('\n')
+}
+
+/**
  * Escape import-derived text before splicing it into the `<import_analysis>`
  * prompt block. The proposed project name/rationale come from the user's
  * ChatGPT/Claude export (untrusted), so XML-like content must not be able to

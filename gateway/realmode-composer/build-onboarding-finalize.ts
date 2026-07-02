@@ -68,6 +68,7 @@ import {
 import {
   buildProjectDocReader,
   buildDeterministicProjectOpening,
+  buildNoContextProjectOpening,
   finalizeOpeningBody,
   indexProposedProjects,
   synthesizeMatchFromSignal,
@@ -396,7 +397,19 @@ async function emitProjectOpenings(
         }
       }
       if (body.trim().length === 0) {
-        const composition = buildDeterministicProjectOpening(project.name, effectiveMatch, docs)
+        // DATA-SUFFICIENCY GATE (2026-07-01 SEV1 — "STOP M2" b). The kickoff
+        // declined (a thin WORK project — a thin HOBBY already returned engaging
+        // questions above, never null). If the materializer flagged this project
+        // as having NO real context, emit the HONEST prompt instead of letting
+        // the deterministic composer fabricate a "here's where X stands" summary
+        // off the minimal placeholder STATUS.md. `has_context` defaults to true
+        // when the outcome is missing (materialize threw) so we never suppress a
+        // legitimate summary; in that case the deterministic composer's own
+        // § 4.4 no-history fallback still keeps the opening honest.
+        const composition =
+          project.outcome !== null && project.outcome.has_context === false
+            ? buildNoContextProjectOpening(project.name.trim())
+            : buildDeterministicProjectOpening(project.name, effectiveMatch, docs)
         body = finalizeOpeningBody(composition.body)
       }
       if (body.trim().length === 0) continue

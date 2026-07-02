@@ -2,6 +2,59 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — SEV1 M1: gate projects on import completion + honest no-context projects + doc frontmatter strip
+
+**Why.** Ryan's M1 live test hit four related onboarding defects (SPEC.md
+Decisions Log 2026-07-01 "STOP M2" blockers a+b): (a) onboarding created projects
+from thin chat answers WHILE the ChatGPT/Claude history import was still uploading
+(e.g. at 31%), so projects were born from the wrong signal; (b) a no-context
+project opened with a fabricated "here's where X stands ... active, P2" summary;
+(c) its seeded `STATUS.md` even scheduled phantom "Deepen + analyze from imported
+context" OVERNIGHT work (`autonomous_overnight_enabled:true`) for a project with
+zero data; (d) the Documents tab rendered a doc's YAML frontmatter as a raw bold
+blob. Single path, no feature flags (Ryan approved).
+
+**What shipped.**
+
+- **Import-gate on project creation (fix 1).** `probeInFlightImport`
+  (`open/composer.ts`) now also detects an in-progress **chunked upload**
+  (`upload_sessions.status='uploading'`, non-expired), not just a live
+  `import_jobs` row — closing the window where a turn that settled the last
+  required field mid-upload finalized BEFORE the import job existed. The post-turn
+  extractor (`onboarding/interview/post-turn-extractor.ts`) drops the
+  project-discovery fields (`primary_projects`, `non_work_interests`,
+  `dropped_projects`) from its `phase_state` write while an import is in flight
+  (import-independent `user_first_name`/`agent_personality` still land). A new
+  per-turn `<import_in_flight>` preamble fragment
+  (`onboarding/interview/onboarding-preamble.ts` `buildImportInFlightSteerFragment`)
+  steers the live agent to skip project questions during the upload.
+  `finalizeImportOnboardingIfReady` also blocks `import_upload_pending`.
+- **Honest no-context opening (fix 2).** The materializer computes `has_context`
+  (matched slices OR `hasRealProjectContext`); `emitProjectOpenings`
+  (`gateway/realmode-composer/build-onboarding-finalize.ts`) routes a no-context
+  WORK project to `buildNoContextProjectOpening` ("I don't have any context on X
+  yet - tell me a bit about it, and what do you want to work on first?") instead
+  of the fabricated status. Projects WITH context (and thin hobbies, via the
+  kickoff's engaging questions) are unchanged.
+- **Minimal no-context STATUS.md (fix 3).** `renderMinimalStatusMd`
+  (`onboarding/wow-moment/project-materializer.ts`) writes clean frontmatter
+  (`one_liner:""`) + one line "Created during onboarding - no context yet." with
+  NO overnight opt-in, NO `## Autonomous Overnight Work` section, NO seeded task,
+  and NO `docs/overnight/seed-context.md`. Context-bearing projects keep the full
+  STATUS + overnight machinery.
+- **Documents frontmatter strip (fix 4).** `Markdown.tsx` gains
+  `stripLeadingFrontmatter` + a `stripFrontmatter` prop the Documents viewer
+  (`DocumentsTab.tsx`, rendered view) passes; the leading `---\n…\n---` fence is
+  hidden from the rendered body. Chat + the Source view are untouched; a bare
+  `---` rule is never stripped.
+
+**Tests.** Extractor import-gate (suppress project fields while import in flight,
+persist personality; gate off with no import); minimal-vs-full STATUS.md +
+`has_context`; honest-vs-real opening routing in finalize; `buildNoContext
+ProjectOpening` copy; `stripLeadingFrontmatter` (fence removed, body kept, bare
+rule + no-frontmatter untouched, CRLF). tsc clean, leak-gate silent, server boots
+clean on a fresh QUIET install (port 7869).
+
 ## 2026-07-01 — Notes / second-brain core: REMOVED entirely
 
 **Why.** The `notes` core (`cores/free/notes`, `@neutronai/notes`) was a

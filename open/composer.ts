@@ -62,6 +62,7 @@ import { auditRequiredFields } from '../onboarding/interview/required-fields-aud
 import { captureButtonBackedRequiredField } from '../onboarding/interview/button-backed-answer.ts'
 import {
   buildImportAnalysisContextFragment,
+  buildImportInFlightSteerFragment,
   buildOnboardingPreamble,
   buildOnboardingStepGuardFragment,
 } from '../onboarding/interview/onboarding-preamble.ts'
@@ -2302,8 +2303,8 @@ export function buildOpenGraphComposer(
     // recovery below.
     const probeInFlightImport = async (): Promise<boolean> => {
       try {
-        const row = db
-          .raw()
+        const raw = db.raw()
+        const job = raw
           .query<{ one: number }, [string]>(
             `SELECT 1 AS one FROM import_jobs
                WHERE project_slug = ?
@@ -2311,7 +2312,29 @@ export function buildOpenGraphComposer(
                LIMIT 1`,
           )
           .get(project_slug)
-        return row !== null && row !== undefined
+        if (job !== null && job !== undefined) return true
+        // SEV1 (2026-07-01, "STOP M2" a) — close the UPLOAD-WINDOW hole. The
+        // chunked resumable upload writes an `upload_sessions` row (status=
+        // 'uploading') during the client→server transfer and only creates the
+        // `import_jobs` row once the full ZIP lands (`notifyImportUpload`). An
+        // onboarding turn that settles the last required field mid-upload would
+        // otherwise finalize BEFORE the import exists (no job row yet, phase not
+        // yet `import_running`) and materialize thin chat-answer projects while
+        // the export is still at e.g. 31%. Treating an in-progress (non-expired)
+        // upload session as "import in flight" makes BOTH finalize gates (the
+        // extractor's onComplete AND `finalizeImportOnboardingIfReady`) AND the
+        // extractor's project-discovery field suppression hold across the WHOLE
+        // upload, not just after the ZIP lands.
+        const upload = raw
+          .query<{ one: number }, [string, number]>(
+            `SELECT 1 AS one FROM upload_sessions
+               WHERE project_slug = ?
+                 AND status = 'uploading'
+                 AND expires_at > ?
+               LIMIT 1`,
+          )
+          .get(project_slug, Date.now())
+        return upload !== null && upload !== undefined
       } catch {
         // Probe failure must never block a legitimate completion.
         return false
@@ -2338,8 +2361,15 @@ export function buildOpenGraphComposer(
       // Only AFTER the import has been consumed back into a conversational
       // marker (the engine has by then stamped `import_result` + the merged
       // primary_projects onto phase_state). Never finalize on top of a live or
-      // not-yet-consumed import phase.
-      if (st.phase === 'import_running' || st.phase === 'import_analysis_presented') return false
+      // not-yet-consumed import phase. `import_upload_pending` is included (SEV1
+      // 2026-07-01) so a turn that settles the last field while the source picker
+      // / upload affordance is live cannot finalize ahead of the export either.
+      if (
+        st.phase === 'import_upload_pending' ||
+        st.phase === 'import_running' ||
+        st.phase === 'import_analysis_presented'
+      )
+        return false
       if (auditRequiredFields(st.phase_state).next_to_collect !== null) return false
       if (await probeInFlightImport()) return false
       const importResult =
@@ -2474,6 +2504,18 @@ export function buildOpenGraphComposer(
                 //     the proposed/curated project set so the warm session honors
                 //     "drop X" / "keep the rest").
                 const stepGuard = buildOnboardingStepGuardFragment(st.phase_state)
+                // IMPORT-IN-FLIGHT steer (SEV1 2026-07-01) — while a history
+                // import is uploading/analyzing, tell the agent NOT to do project
+                // discovery (real projects come from the import). Authoritative:
+                // the durable import phase OR the in-flight probe (which now also
+                // catches an in-progress chunked upload before the import_jobs row
+                // exists), so it holds across the whole upload window.
+                const importInFlight =
+                  st.phase === 'import_upload_pending' ||
+                  st.phase === 'import_running' ||
+                  st.phase === 'import_analysis_presented' ||
+                  (await probeInFlightImport())
+                const importSteer = buildImportInFlightSteerFragment(importInFlight)
                 const ir = st.phase_state['import_result']
                 const importResult =
                   ir !== null && typeof ir === 'object' ? (ir as ImportResult) : null
@@ -2493,7 +2535,7 @@ export function buildOpenGraphComposer(
                     user_first_name: typeof fn === 'string' ? fn : null,
                   })
                 }
-                const parts = [stepGuard, importFragment].filter(
+                const parts = [importSteer, stepGuard, importFragment].filter(
                   (p): p is string => p !== null && p.length > 0,
                 )
                 return parts.length > 0 ? parts.join('\n\n') : null

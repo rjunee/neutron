@@ -230,6 +230,36 @@ export function synthesizeProjectContext(
 }
 
 /**
+ * True iff there is REAL import/project-derived grounding for this project
+ * beyond the generic "added during onboarding" stub. Mirrors the priority
+ * ladder in `synthesizeProjectContext`: the project's OWN rationale (an import
+ * proposed_projects rationale or an interest's basis), an import
+ * proposed_projects rationale matched by name, or cross-project import signal
+ * (related entities/topics/interests) that names it. When this returns false,
+ * `synthesizeProjectContext` falls through to the generic no-history stub — i.e.
+ * the project has NO context.
+ *
+ * NB: raw transcript slices (import_pass1_chunks matched to the project) are an
+ * ADDITIONAL context source that requires a DB read; the materializer checks
+ * those separately (`slices.chunks.length > 0`) and OR-s them with this. This
+ * predicate covers only the import-result / project-derived signal, so it stays
+ * pure + DB-free and is safe to call anywhere.
+ *
+ * Exported for the materializer's data-sufficiency gate (minimal no-context
+ * STATUS.md + honest no-context opening) and for unit testing.
+ */
+export function hasRealProjectContext(
+  project: CapturedProject,
+  import_result: ImportResult | null,
+): boolean {
+  const name = project.name.trim()
+  if ((project.rationale ?? '').trim().length > 0) return true
+  if (findImportedRationale(name, import_result).length > 0) return true
+  const related = findRelatedImportSignal(name, import_result)
+  return weaveRelatedSignal(name, related).length > 0
+}
+
+/**
  * Turn the related cross-project signal into a 1-2 sentence context
  * paragraph that names concrete threads/entities. Returns '' when there
  * is genuinely nothing related (caller falls to the generic stub).

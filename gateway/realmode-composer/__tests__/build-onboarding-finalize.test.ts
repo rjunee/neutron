@@ -561,6 +561,76 @@ test('finalize emits a General closing message + one per-project opening (items 
   h.db.close()
 })
 
+test('no-context project opens with the HONEST prompt, not a fabricated status (SEV1)', async () => {
+  const h = makeHarness()
+  const emitted: Array<{ project_id: string | null; body: string }> = []
+  const deps: OnboardingFinalizeDeps = {
+    ...h.deps,
+    emitChatMessage: (input): void => void emitted.push(input),
+  }
+  // A thin chat-answer project: no import, no rationale → materializer flags it
+  // has_context=false → the opening must ask for context, never fabricate one.
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Mystery Thing'] },
+  })
+  const finalizer = buildOnboardingFinalize(deps)
+  await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
+
+  const opening = emitted.find((e) => e.project_id === slugifyProjectId('Mystery Thing'))
+  expect(opening).toBeDefined()
+  expect(opening!.body).toContain("I don't have any context on Mystery Thing yet")
+  // The exact bug: NO fabricated "here's where X stands" / "active, P2".
+  expect(opening!.body.toLowerCase()).not.toContain("here's where")
+  expect(opening!.body).not.toContain('active, P2')
+  h.db.close()
+})
+
+test('a project WITH import context keeps a real summary opening (not the honest prompt)', async () => {
+  const h = makeHarness()
+  const emitted: Array<{ project_id: string | null; body: string }> = []
+  const deps: OnboardingFinalizeDeps = {
+    ...h.deps,
+    emitChatMessage: (input): void => void emitted.push(input),
+  }
+  const seeded = await h.stateStore.upsert({
+    project_slug: PROJECT_SLUG,
+    user_id: USER_ID,
+    phase: 'wow_fired',
+    phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Topline Revenue'] },
+  })
+  const finalizer = buildOnboardingFinalize(deps)
+  await finalizer.finalize({
+    user_id: USER_ID,
+    topic_id: TOPIC_ID,
+    state: seeded,
+    import_result: {
+      entities: [],
+      topics: [],
+      proposed_projects: [
+        {
+          name: 'Topline Revenue',
+          rationale: 'The Topline revenue model is the highest-leverage thread in your history.',
+          suggested_topics: ['revenue model'],
+        },
+      ],
+      proposed_tasks: [],
+      proposed_reminders: [],
+      voice_signals: {},
+      facts: {},
+    } as never,
+  })
+
+  const opening = emitted.find((e) => e.project_id === slugifyProjectId('Topline Revenue'))
+  expect(opening).toBeDefined()
+  // Real grounding → NOT the honest no-context prompt.
+  expect(opening!.body).not.toContain("I don't have any context on")
+  expect(opening!.body.toLowerCase()).toContain('revenue')
+  h.db.close()
+})
+
 test('finalize with NO projects emits an honest closing (no "I created your projects" claim)', async () => {
   const h = makeHarness()
   const emitted: Array<{ project_id: string | null; body: string }> = []

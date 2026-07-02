@@ -547,7 +547,7 @@ export function DocumentsTab({
                 {saveError !== null ? <div className="cdoc-comments-error">{saveError}</div> : null}
               </>
             ) : viewMode === 'rendered' ? (
-              <Markdown text={file.content} className="cdoc-md" />
+              <Markdown text={file.content} className="cdoc-md" stripFrontmatter />
             ) : (
               <pre
                 ref={contentRef}
