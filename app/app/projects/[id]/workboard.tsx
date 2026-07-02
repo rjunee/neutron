@@ -238,6 +238,9 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
               onDelete={() =>
                 runMutation(it.id, client.delete(projectId, it.id), 'failed to delete item')
               }
+              onPlay={() =>
+                runMutation(it.id, client.start(projectId, it.id), 'failed to start build')
+              }
             />
           ))}
 

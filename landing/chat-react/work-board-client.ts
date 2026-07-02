@@ -94,6 +94,14 @@ export interface CreateWorkBoardItemInput {
   title: string
   status?: WorkBoardStatus
   design_doc_ref?: string | null
+  /** M1 — full context/ask; a substantial spec is persisted to a plans/ doc. */
+  spec?: string
+}
+
+/** Result of a ▶ start/retry dispatch. */
+export interface StartBuildResult {
+  ok: boolean
+  run_id?: string
 }
 
 export interface UpdateWorkBoardItemInput {
@@ -193,6 +201,19 @@ export class WebWorkBoardClient {
     return res.items
   }
 
+  /**
+   * ▶ START or RETRY a build bound to this item, using its SAVED spec (its
+   * linked design doc, else its title) as the task. The card flips to a live
+   * build (in_progress + fork ⑂) via the same dispatch chokepoint the agent
+   * uses. Throws `WorkBoardClientError` (e.g. `underspecified`, `already_running`,
+   * `build_dispatch_unavailable`) on a non-2xx so the tab can surface it.
+   */
+  async start(project_id: string, item_id: string): Promise<StartBuildResult> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/start`
+    const res = await this.req<{ ok: boolean; run_id?: string }>(path, { method: 'POST' })
+    return { ok: res.ok === true, ...(typeof res.run_id === 'string' ? { run_id: res.run_id } : {}) }
+  }
+
   /** Delete an item (the human board is full-CRUD for the owner). */
   async delete(project_id: string, item_id: string): Promise<void> {
     const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`
@@ -235,6 +256,42 @@ export class WebWorkBoardClient {
     }
     return json as T
   }
+}
+
+/**
+ * Extract the docs-root-relative path a card's `design_doc_ref` points at, or
+ * null when the ref isn't an in-app docs link (external https URL / absent). A
+ * browser-side mirror of `work-board/spec-doc.ts#docPathFromDesignRef` (the app
+ * bundle can't import across the workspace boundary). Both accepted in-app forms
+ * map to a docs-relative path the Documents tab can open:
+ *   - `neutron-docs:plans/foo.md`                          → `plans/foo.md`
+ *   - `/api/app/projects/<id>/docs/file?path=plans/foo.md` → `plans/foo.md`
+ */
+export function docPathFromDesignRef(ref: string | null | undefined): string | null {
+  if (typeof ref !== 'string') return null
+  const r = ref.trim()
+  if (r.length === 0) return null
+  if (r.startsWith('neutron-docs:')) {
+    const p = r.slice('neutron-docs:'.length).trim().replace(/^\/+/, '')
+    return p.length > 0 ? p : null
+  }
+  if (r.startsWith('/api/app/')) {
+    const q = r.indexOf('?')
+    if (q >= 0) {
+      const p = new URLSearchParams(r.slice(q + 1)).get('path')
+      if (p !== null && p.trim().length > 0) return p.trim().replace(/^\/+/, '')
+    }
+    return null
+  }
+  return null
+}
+
+/** A short display label for a card's doc link — the basename without `.md`. */
+export function docLinkLabel(ref: string | null | undefined): string | null {
+  const path = docPathFromDesignRef(ref)
+  if (path === null) return null
+  const base = path.split('/').pop() ?? path
+  return base.replace(/\.md$/i, '')
 }
 
 /**

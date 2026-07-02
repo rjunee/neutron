@@ -185,6 +185,12 @@ export interface MiscCompositionInput {
    */
   work_board?: {
     store: import('../../../work-board/store.ts').WorkBoardStore
+    /**
+     * M1 on-disk spec — when supplied, `work_board_add` persists a non-trivial
+     * `spec` to a per-project `plans/` doc and links the card's `design_doc_ref`
+     * at it. Omitted → title-only adds (unchanged behaviour).
+     */
+    spec_doc?: import('../../../work-board/spec-doc-service.ts').WorkBoardSpecDocService
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the
@@ -206,6 +212,15 @@ export interface MiscCompositionInput {
     channel_kind?: import('../../../channels/types.ts').Topic['channel_kind']
     max_rounds?: number
     max_ralph_rounds?: number
+    /**
+     * M1 ▶ play button (agent-native) — resolves a board item's SAVED spec (its
+     * design_doc_ref doc, else its title) so `work_board_start` builds from the
+     * on-disk spec. Wired to the work-board spec-doc service.
+     */
+    resolve_task?: (
+      project_slug: string,
+      item: { title: string; design_doc_ref: string | null },
+    ) => Promise<string>
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

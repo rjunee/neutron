@@ -194,7 +194,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // surface + per-turn injection use (one code path, one live-push). Rides
       // the #87 tools-bridge as `mcp__neutron__work_board_*`.
       if (input.work_board !== undefined) {
-        registerWorkBoardToolSurface(reg, input.work_board.store)
+        registerWorkBoardToolSurface(reg, input.work_board.store, {
+          ...(input.work_board.spec_doc !== undefined ? { specDoc: input.work_board.spec_doc } : {}),
+        })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
       // dispatch (`work_board_dispatch_build`) when the composer wired it (live

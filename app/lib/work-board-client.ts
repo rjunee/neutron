@@ -45,6 +45,8 @@ export interface CreateWorkBoardItemInput {
   title: string;
   status?: WorkBoardStatus;
   design_doc_ref?: string | null;
+  /** M1 — full context/ask; a substantial spec is persisted to a plans/ doc. */
+  spec?: string;
 }
 
 export interface UpdateWorkBoardItemInput {
@@ -144,6 +146,16 @@ export class WorkBoardClient {
     await this.req<{ ok: boolean; deleted: string }>(path, { method: 'DELETE' });
   }
 
+  /**
+   * ▶ START or RETRY a build bound to this item, using its SAVED spec (its
+   * linked design doc, else its title). Throws `WorkBoardClientError` on a
+   * non-2xx (e.g. `underspecified`, `already_running`).
+   */
+  async start(project_id: string, item_id: string): Promise<{ ok: boolean; run_id?: string }> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/start`;
+    return await this.req<{ ok: boolean; run_id?: string }>(path, { method: 'POST' });
+  }
+
   private async req<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
     const method = init.method ?? 'GET';
     const headers: Record<string, string> = { authorization: `Bearer ${this.token}` };
@@ -170,6 +182,39 @@ export class WorkBoardClient {
     }
     return json as T;
   }
+}
+
+/**
+ * Extract the docs-root-relative path a card's `design_doc_ref` points at, or
+ * null when the ref isn't an in-app docs link. Mirror of
+ * `work-board/spec-doc.ts#docPathFromDesignRef` (the app is dep-isolated from
+ * the workspace, same convention as `parseWorkBoardItems`).
+ */
+export function docPathFromDesignRef(ref: string | null | undefined): string | null {
+  if (typeof ref !== 'string') return null;
+  const r = ref.trim();
+  if (r.length === 0) return null;
+  if (r.startsWith('neutron-docs:')) {
+    const p = r.slice('neutron-docs:'.length).trim().replace(/^\/+/, '');
+    return p.length > 0 ? p : null;
+  }
+  if (r.startsWith('/api/app/')) {
+    const q = r.indexOf('?');
+    if (q >= 0) {
+      const p = new URLSearchParams(r.slice(q + 1)).get('path');
+      if (p !== null && p.trim().length > 0) return p.trim().replace(/^\/+/, '');
+    }
+    return null;
+  }
+  return null;
+}
+
+/** A short display label for a card's doc link — the basename without `.md`. */
+export function docLinkLabel(ref: string | null | undefined): string | null {
+  const path = docPathFromDesignRef(ref);
+  if (path === null) return null;
+  const base = path.split('/').pop() ?? path;
+  return base.replace(/\.md$/i, '');
 }
 
 /**

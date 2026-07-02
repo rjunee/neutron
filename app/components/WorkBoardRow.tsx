@@ -23,7 +23,7 @@ import {
   formatCompletedDate,
   statusLabel,
 } from '../lib/work-board-helpers';
-import type { WorkBoardItem } from '../lib/work-board-client';
+import { docLinkLabel, type WorkBoardItem } from '../lib/work-board-client';
 
 const DOT_SIZE = 10;
 const DOT_BORDER = 1.5;
@@ -41,6 +41,20 @@ export interface WorkBoardRowProps {
   onMoveUp: () => void;
   onMoveDown: () => void;
   onDelete: () => void;
+  /** ▶ — START/RETRY a build from the card's saved spec. */
+  onPlay?: () => void;
+  /** Open the card's linked spec-doc; undefined = no doc / no nav. */
+  onOpenDoc?: () => void;
+}
+
+/**
+ * True when the ▶ (play) control should render: NOT in_progress, NOT done, and
+ * no bound run. On terminal reconcile a failed build clears the binding + moves
+ * the card back to `upcoming`, so this covers both START and RETRY.
+ */
+function canPlay(item: WorkBoardItem): boolean {
+  const linked = item.linked_run_id !== null && item.linked_run_id.length > 0;
+  return item.status !== 'in_progress' && item.status !== 'done' && !linked;
 }
 
 function dotStyle(kind: ReturnType<typeof dotKind>) {
@@ -59,11 +73,15 @@ function WorkBoardRowImpl({
   onMoveUp,
   onMoveDown,
   onDelete,
+  onPlay,
+  onOpenDoc,
 }: WorkBoardRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.title);
   const activity = activityFor(item);
   const kind = dotKind(item.status);
+  const docLabel = docLinkLabel(item.design_doc_ref);
+  const showPlay = canPlay(item) && onPlay !== undefined;
 
   const commit = (): void => {
     const next = draft.trim();
@@ -108,22 +126,43 @@ function WorkBoardRowImpl({
           testID={`wb-edit-${item.id}`}
         />
       ) : (
-        <Pressable
-          style={styles.titleWrap}
-          accessibilityRole="button"
-          accessibilityLabel={`Edit ${item.title}`}
-          onPress={() => {
-            setDraft(item.title);
-            setEditing(true);
-          }}
-        >
-          <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
-            {item.title}
-          </Text>
-        </Pressable>
+        <View style={styles.titleCol}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Edit ${item.title}`}
+            onPress={() => {
+              setDraft(item.title);
+              setEditing(true);
+            }}
+          >
+            <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
+              {item.title}
+            </Text>
+          </Pressable>
+          {docLabel !== null ? (
+            <Pressable
+              accessibilityRole={onOpenDoc !== undefined ? 'button' : 'text'}
+              accessibilityLabel={`Spec doc: ${docLabel}`}
+              disabled={onOpenDoc === undefined}
+              onPress={onOpenDoc}
+            >
+              <Text style={styles.docLink} numberOfLines={1} ellipsizeMode="tail">
+                📄 {docLabel}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
       )}
 
       <View style={styles.actions}>
+        {showPlay ? (
+          <IconButton
+            label={item.linked_run_id !== null ? 'Retry build' : 'Start build'}
+            glyph="▶"
+            disabled={busy}
+            onPress={onPlay ?? (() => {})}
+          />
+        ) : null}
         <IconButton label="Move up" glyph="▲" disabled={busy || !canMoveUp} onPress={onMoveUp} />
         <IconButton
           label="Move down"
@@ -152,7 +191,7 @@ function WorkBoardCompletedRowImpl({
       <View style={styles.dotHit}>
         <View style={[styles.dot, styles.dotDone]} />
       </View>
-      <Text style={[styles.title, styles.titleDone]} numberOfLines={1} ellipsizeMode="tail">
+      <Text style={[styles.title, styles.titleFill, styles.titleDone]} numberOfLines={1} ellipsizeMode="tail">
         {item.title}
       </Text>
       <Text style={styles.date} accessibilityLabel={`Completed ${formatCompletedDate(item.completed_at)}`}>
@@ -225,11 +264,17 @@ const styles = StyleSheet.create({
   },
   activitySpacer: { width: GLYPH_WIDTH },
   titleWrap: { flex: 1, justifyContent: 'center' },
+  titleCol: { flex: 1, justifyContent: 'center' },
+  titleFill: { flex: 1 },
   title: {
-    flex: 1,
     color: THEME.text_primary,
     fontSize: TYPOGRAPHY.body.fontSize,
     lineHeight: TYPOGRAPHY.body.lineHeight,
+  },
+  docLink: {
+    color: THEME.link,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
   },
   titleDone: { color: THEME.text_muted, textDecorationLine: 'line-through' },
   editInput: {

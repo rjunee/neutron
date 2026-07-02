@@ -33,6 +33,7 @@ import {
 import type { MergeMode, TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
+export const WORK_BOARD_START_TOOL = 'work_board_start'
 
 const inputSchema: JsonSchemaDocument = {
   type: 'object',
@@ -86,6 +87,33 @@ export interface TridentBuildToolDeps {
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * Resolve the build spec for a board item — its `design_doc_ref` doc content
+   * when present + readable, else the item title. Wired to the work-board
+   * spec-doc service so `work_board_start` (and the ▶ button, via the HTTP
+   * route) build from the SAME on-disk spec. When absent, `work_board_start`
+   * falls back to the item title.
+   */
+  resolve_task?: (
+    project_slug: string,
+    item: { title: string; design_doc_ref: string | null },
+  ) => Promise<string>
+}
+
+interface StartArgs {
+  board_item_id?: unknown
+}
+
+const startOutputSchema: JsonSchemaDocument = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' },
+    run_id: { type: 'string', description: 'The trident run id (track / stop the build with it).' },
+    board_item_id: { type: 'string' },
+    status: { type: 'string', description: '"dispatched" on success; the result arrives later.' },
+    error: { type: 'string', description: 'Set when ok=false — incl. the ask-before-acting guidance.' },
+  },
+  required: ['ok'],
 }
 
 /** Register `work_board_dispatch_build` against `registry`. Returns the name. */
@@ -135,6 +163,81 @@ export function registerTridentBuildToolSurface(
         ok: true,
         run_id: result.run.id,
         board_item_id: board_item_id ?? '',
+        status: 'dispatched',
+      }
+    },
+  })
+
+  // `work_board_start` — the agent-native equivalent of the ▶ (play) button:
+  // START (never-dispatched item) or RETRY (last run failed/stopped) a build
+  // bound to a Plan item, using the item's PERSISTED spec (its design_doc_ref
+  // doc, else its title) as the task — no need to re-supply the full context.
+  // Same `dispatchBoardBoundBuild` chokepoint (required item + ask-before-acting
+  // gate), so a card that is both doc-less AND thin is REJECTED with the
+  // clarifying-question guidance rather than firing a doomed build.
+  registry.register({
+    name: WORK_BOARD_START_TOOL,
+    description:
+      'START or RETRY an autonomous Forge→Argus→merge build (trident) for a Plan item, using the ' +
+      "item's SAVED spec (its linked design doc, else its title) as the task — you do NOT re-supply " +
+      'the context. Use this to (re)launch a card the owner added to the Plan or a card whose last ' +
+      'build failed. Requires board_item_id. If the item is underspecified (no design doc AND a thin ' +
+      'title) the start is REJECTED and you MUST ask the owner a clarifying question first. Returns ' +
+      'immediately; the result reconciles onto the board when it lands. (To build with a DIFFERENT, ' +
+      'explicitly-supplied task, use work_board_dispatch_build instead.)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        board_item_id: {
+          type: 'string',
+          description: 'The Plan item to start/retry — REQUIRED. From work_board_list / work_board_add.',
+        },
+      },
+      required: ['board_item_id'],
+      additionalProperties: false,
+    },
+    output_schema: startOutputSchema,
+    capability_required: 'agent:dispatch_subagent',
+    approval_policy: 'prompt-user',
+    handler: async (args, ctx) => {
+      const a = (args ?? {}) as StartArgs
+      const board_item_id = typeof a.board_item_id === 'string' ? a.board_item_id.trim() : ''
+      if (board_item_id.length === 0) {
+        return { ok: false, error: 'board_item_id is required and must be a non-empty string' }
+      }
+      const item = deps.work_board.get(ctx.project_slug, board_item_id)
+      if (item === null) {
+        return {
+          ok: false,
+          error: `No Plan item "${board_item_id}" on this project's board. Use work_board_list to find the item id.`,
+        }
+      }
+      const task =
+        deps.resolve_task !== undefined
+          ? await deps.resolve_task(ctx.project_slug, {
+              title: item.title,
+              design_doc_ref: item.design_doc_ref,
+            })
+          : item.title
+      const buildDeps: BoardBoundBuildDeps = {
+        store: deps.store,
+        board: deps.work_board,
+        project_slug: ctx.project_slug,
+        repo_path: deps.repo_path,
+        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
+        ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
+        ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
+        ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+      }
+      const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
+      if (!result.ok) {
+        return { ok: false, error: result.message }
+      }
+      return {
+        ok: true,
+        run_id: result.run.id,
+        board_item_id,
         status: 'dispatched',
       }
     },
