@@ -16,7 +16,11 @@ import { ProjectDb } from '../persistence/index.ts'
 import { ToolRegistry } from '../tools/registry.ts'
 import { TridentRunStore } from './store.ts'
 import type { TridentBoardBinder } from './board-dispatch.ts'
-import { registerTridentBuildToolSurface, WORK_BOARD_DISPATCH_BUILD_TOOL } from './work-board-build-tool.ts'
+import {
+  registerTridentBuildToolSurface,
+  WORK_BOARD_DISPATCH_BUILD_TOOL,
+  WORK_BOARD_START_TOOL,
+} from './work-board-build-tool.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -111,5 +115,67 @@ describe('work_board_dispatch_build tool', () => {
     const out = (await toolFor().handler({ board_item_id: 'ready', task: '   ' }, ctx)) as Record<string, unknown>
     expect(out.ok).toBe(false)
     expect(String(out.error)).toContain('task')
+  })
+})
+
+function startToolFor(resolve_task?: (slug: string, item: { title: string; design_doc_ref: string | null }) => Promise<string>) {
+  const reg = new ToolRegistry()
+  registerTridentBuildToolSurface(reg, {
+    store,
+    work_board: board(),
+    repo_path: '/repo',
+    resolveMergeMode: async () => 'local',
+    resolveRalph: async () => false,
+    ...(resolve_task !== undefined ? { resolve_task } : {}),
+  })
+  return reg.get(WORK_BOARD_START_TOOL)!
+}
+
+describe('work_board_start tool (▶ agent-native parity)', () => {
+  test('registers with dispatch capability + only board_item_id required', () => {
+    const tool = startToolFor()
+    expect(tool.capability_required).toBe('agent:dispatch_subagent')
+    expect(tool.approval_policy).toBe('prompt-user')
+    expect(tool.input_schema.required).toEqual(['board_item_id'])
+  })
+
+  test('starts a ready item using its title (no resolve_task wired)', async () => {
+    const out = (await startToolFor().handler({ board_item_id: 'ready' }, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    expect(out.board_item_id).toBe('ready')
+    const run = store.get(out.run_id as string)!
+    // Falls back to the item title as the task.
+    expect(run.task).toContain('wire the CSV export button')
+    expect(attached).toEqual([{ id: 'ready', run_id: out.run_id as string }])
+  })
+
+  test('resolve_task supplies the saved spec as the task', async () => {
+    const out = (await startToolFor(async () => 'THE FULL SAVED SPEC').handler(
+      { board_item_id: 'ready' },
+      ctx,
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    const run = store.get(out.run_id as string)!
+    expect(run.task).toBe('THE FULL SAVED SPEC')
+  })
+
+  test('an unknown item is rejected with no run', async () => {
+    const out = (await startToolFor().handler({ board_item_id: 'nope' }, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('nope')
+    expect(attached.length).toBe(0)
+  })
+
+  test('ask-before-acting: a doc-less, thin item is blocked', async () => {
+    const out = (await startToolFor().handler({ board_item_id: 'terse' }, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(false)
+    expect(String(out.error).toLowerCase()).toContain('underspecified')
+    expect(attached.length).toBe(0)
+  })
+
+  test('missing board_item_id is rejected', async () => {
+    const out = (await startToolFor().handler({}, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('board_item_id')
   })
 })

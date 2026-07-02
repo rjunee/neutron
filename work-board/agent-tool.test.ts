@@ -116,3 +116,38 @@ describe('work_board_* agent tools', () => {
     expect(res.error).toContain('design_doc_ref')
   })
 })
+
+describe('work_board_add spec-doc routing (M1)', () => {
+  test('the add schema exposes a `spec` param', () => {
+    const schema = registry.get(WORK_BOARD_ADD_TOOL)!.input_schema as {
+      properties?: Record<string, unknown>
+    }
+    expect(Object.keys(schema.properties!)).toContain('spec')
+  })
+
+  test('when a specDoc service is wired, add routes through it (spec persisted)', async () => {
+    const reg = new ToolRegistry()
+    const seen: Array<{ title: string; spec?: string }> = []
+    // Minimal structural stand-in for WorkBoardSpecDocService.
+    const specDoc = {
+      createCardWithOptionalSpec: async (
+        slug: string,
+        input: { title: string; spec?: string; status?: 'upcoming' | 'in_progress' | 'done'; design_doc_ref?: string | null },
+      ) => {
+        seen.push({ title: input.title, ...(input.spec !== undefined ? { spec: input.spec } : {}) })
+        return store.create(slug, { title: input.title, design_doc_ref: 'neutron-docs:plans/x.md' })
+      },
+      resolveTaskForItem: async () => 'unused',
+    }
+    registerWorkBoardToolSurface(reg, store, {
+      specDoc: specDoc as unknown as import('./spec-doc-service.ts').WorkBoardSpecDocService,
+    })
+    const out = (await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Wire it', spec: 'a\nb\nc' },
+      ctx('owner'),
+    )) as { ok: boolean; item?: { design_doc_ref: string | null } }
+    expect(out.ok).toBe(true)
+    expect(seen).toEqual([{ title: 'Wire it', spec: 'a\nb\nc' }])
+    expect(out.item?.design_doc_ref).toBe('neutron-docs:plans/x.md')
+  })
+})

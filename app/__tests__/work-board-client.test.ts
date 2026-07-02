@@ -11,6 +11,8 @@ import { describe, expect, it } from 'bun:test';
 import {
   WorkBoardClient,
   WorkBoardClientError,
+  docLinkLabel,
+  docPathFromDesignRef,
   parseWorkBoardItems,
   type WorkBoardItem,
 } from '../lib/work-board-client';
@@ -137,5 +139,21 @@ describe('parseWorkBoardItems', () => {
 
   it('returns [] for a non-array', () => {
     expect(parseWorkBoardItems(null)).toEqual([]);
+  });
+});
+
+describe('WorkBoardClient.start + doc-ref helpers', () => {
+  it('start POSTs /work-board/<id>/start', async () => {
+    const { client, calls } = make({ status: 200, body: { ok: true, started: 'w1', run_id: 'r9' } });
+    const out = await client.start('p', 'w1');
+    expect(out.run_id).toBe('r9');
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.url).toBe(`${BASE}/api/app/projects/p/work-board/w1/start`);
+  });
+
+  it('docPathFromDesignRef + docLinkLabel resolve an in-app doc ref', () => {
+    expect(docPathFromDesignRef('neutron-docs:plans/foo.md')).toBe('plans/foo.md');
+    expect(docLinkLabel('neutron-docs:plans/foo.md')).toBe('foo');
+    expect(docPathFromDesignRef('https://example.test/x')).toBeNull();
   });
 });

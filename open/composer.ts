@@ -2184,6 +2184,12 @@ export function buildOpenGraphComposer(
     const workBoardSpecDoc = new WorkBoardSpecDocService({
       docs: docStore,
       board: workBoardStore,
+      // Ensure the project's docs/ root exists before a spec doc is written — the
+      // owner's default board scope (+ any not-yet-materialized project) may lack
+      // one, and the DocStore rejects a write under a missing root. Idempotent.
+      ensureDocsDir: async (slug) => {
+        mkdirSync(joinPath(owner_home, 'Projects', slug, 'docs'), { recursive: true })
+      },
     })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
     // its title) and dispatches a board-bound build through the SAME chokepoint

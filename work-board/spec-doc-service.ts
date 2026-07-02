@@ -68,11 +68,28 @@ export class WorkBoardSpecDocService {
   private readonly docs: SpecDocStore
   private readonly board: SpecDocBoardStore
   private readonly log: SpecDocLog
+  private readonly ensureDocsDir: ((project_slug: string) => Promise<void>) | null
 
-  constructor(deps: { docs: SpecDocStore; board: SpecDocBoardStore; log?: SpecDocLog }) {
+  constructor(deps: {
+    docs: SpecDocStore
+    board: SpecDocBoardStore
+    log?: SpecDocLog
+    /**
+     * Ensure the project's `docs/` root exists before a spec doc is written.
+     * The `DocStore` write path realpath-confines every write UNDER `docs/` and
+     * REJECTS a write when that root doesn't exist yet (its closest existing
+     * ancestor resolves above the root). Most projects are materialized with a
+     * `docs/` dir, but the owner's default board scope (and any not-yet-
+     * materialized project) may lack one — without this the spec-doc write would
+     * silently degrade to a title-only card. The composer wires this to a
+     * recursive mkdir of `<owner_home>/Projects/<slug>/docs`.
+     */
+    ensureDocsDir?: (project_slug: string) => Promise<void>
+  }) {
     this.docs = deps.docs
     this.board = deps.board
     this.log = deps.log ?? { warn: (m) => console.warn(m) }
+    this.ensureDocsDir = deps.ensureDocsDir ?? null
   }
 
   /**
@@ -103,6 +120,7 @@ export class WorkBoardSpecDocService {
     const spec = (input.spec ?? '').trim()
     const relPath = specDocRelPath(specDocSlug(item.title, item.id.slice(-6)))
     try {
+      if (this.ensureDocsDir !== null) await this.ensureDocsDir(project_slug)
       await this.docs.writeDoc({
         project_id: project_slug,
         path: relPath,

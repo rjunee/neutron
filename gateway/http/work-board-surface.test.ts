@@ -254,3 +254,83 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(store.get(SLUG, item.id)).toBeNull()
   })
 })
+
+describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test('POST create with a substantial spec routes through create_card', async () => {
+    const calls: Array<{ title: string; spec?: string }> = []
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      create_card: async (slug, input) => {
+        calls.push({ title: input.title, ...(input.spec !== undefined ? { spec: input.spec } : {}) })
+        return store.create(slug, { title: input.title, design_doc_ref: 'neutron-docs:plans/x.md' })
+      },
+    })
+    const res = await s.handler(
+      req('POST', '/api/app/projects/proj1/work-board', { title: 'big', spec: 'a\nb\nc' }),
+    )
+    expect(res?.status).toBe(201)
+    expect(calls).toEqual([{ title: 'big', spec: 'a\nb\nc' }])
+  })
+
+  test('POST start → dispatches + returns run_id', async () => {
+    const item = await store.create(SLUG, { title: 'Ready item' })
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      start_build: async () => ({ ok: true, run_id: 'run-xyz' }),
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { ok: boolean; run_id: string; started: string }
+    expect(body.ok).toBe(true)
+    expect(body.run_id).toBe('run-xyz')
+    expect(body.started).toBe(item.id)
+  })
+
+  test('POST start on an unknown item → 404', async () => {
+    const s = createWorkBoardSurface({ store, auth, start_build: async () => ({ ok: true, run_id: 'r' }) })
+    const res = await s.handler(req('POST', '/api/app/projects/proj1/work-board/nope/start'))
+    expect(res?.status).toBe(404)
+  })
+
+  test('POST start with no start_build wired → 501', async () => {
+    const item = await store.create(SLUG, { title: 'Ready item' })
+    const s = createWorkBoardSurface({ store, auth })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(501)
+  })
+
+  test('POST start on an item with a LIVE bound run → 409 already_running', async () => {
+    const item = await store.create(SLUG, { title: 'Bound item' })
+    await store.attachRun(SLUG, item.id, 'run-live')
+    const bound = store.get(SLUG, item.id)!
+    const { access } = fakeRunAccess({ 'run-live': fakeRun({ id: 'run-live', phase: 'forge-init' }) })
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      trident_runs: access,
+      start_build: async () => ({ ok: true, run_id: 'should-not-be-called' }),
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${bound.id}/start`))
+    expect(res?.status).toBe(409)
+    const body = (await res!.json()) as { code: string }
+    expect(body.code).toBe('already_running')
+  })
+
+  test('POST start when the dispatch is underspecified → 409 with the guidance', async () => {
+    const item = await store.create(SLUG, { title: 'thin' })
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      start_build: async () => ({ ok: false, code: 'underspecified', message: 'ask the owner first' }),
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(409)
+    const body = (await res!.json()) as { code: string; message: string }
+    expect(body.code).toBe('underspecified')
+    expect(body.message).toContain('ask the owner')
+  })
+})

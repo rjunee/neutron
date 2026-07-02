@@ -2,6 +2,75 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — M1 Work Board ▶ play button + on-disk spec persistence
+
+**Why.** Two coupled gaps from the live trident test: (1) a Plan card that was
+added but never dispatched (or whose build failed) had no way to START/RETRY it
+from the board — only auto-dispatch + the `#174` X-cancel existed; (2) a card
+persisted ONLY its one-line `title` — the full context/ask lived in session
+context and only landed on disk (in `code_trident_runs.task`) AFTER a build
+started. So an `upcoming` card's spec did not survive a session reset, and a ▶
+that survives a reset had nothing to build from. One PR, no feature flags, no
+migration (the `design_doc_ref` column already existed, unused for docs).
+
+**What shipped.**
+
+- **Spec-doc persistence.** `work-board/spec-doc.ts` (pure): a triviality
+  heuristic (`shouldPersistSpecDoc` — a short one-liner stays title-only;
+  multi-line or ≥20-word specs persist), the `plans/<slug>.md` path, and the
+  `neutron-docs:` deep-link ref build/parse + doc-link label. New
+  `work-board/spec-doc-service.ts` (`WorkBoardSpecDocService`) is the ONE seam
+  coupling the policy to the real `DocStore` + `WorkBoardStore`:
+  `createCardWithOptionalSpec` writes the doc to `Projects/<id>/docs/plans/<slug>.md`
+  and links the card; `resolveTaskForItem` reads it back as the build spec. An
+  `ensureDocsDir` hook (composer → recursive mkdir of the project docs root)
+  guarantees the write never silently degrades for a not-yet-materialized project
+  scope. A doc-write failure degrades gracefully to a title-only card.
+- **▶ start/retry.** `POST /api/app/projects/<id>/work-board/<item>/start` +
+  the agent-native `work_board_start` tool, both routing through the SAME
+  `dispatchBoardBoundBuild` chokepoint (required-item + ask-before-acting gate +
+  `attachRun`), resolving the card's saved spec (doc, else title) as the run
+  `task`. A live-run guard 409s a double-start; an underspecified card 409s with
+  the clarify guidance; an LLM-less box 501s (dispatch unwired, mirroring
+  `work_board_dispatch_build`). `work_board_add` gained a `spec` param; the HTTP
+  create route gained a `spec` field — both route through the service.
+- **UI.** Web `WorkBoardTab.tsx`: an always-visible ▶ on a startable card (START
+  vs RETRY by label) + a tappable `📄 <name>` doc link that opens the Documents
+  tab (threaded `onOpenDoc` from `ProjectShell`, reusing the `#148` doc-link nav);
+  `cwb-btn-play` + `cwb-doc-link` CSS. Expo `WorkBoardRow.tsx` + `workboard.tsx`:
+  the same ▶ + doc-link for parity. `work-board-client.ts` (web + app): a `start()`
+  method + `docPathFromDesignRef`/`docLinkLabel` mirrors.
+- **§1b unification (one canonical doc).** ▶ feeds the card's doc content to the
+  run as its `task`, so the doc IS the spec the trident planning stage reads —
+  verified live (the dispatched run's `task` was the doc's full body). There is
+  no second user-facing plan doc.
+
+**Spec-conformance delta (Ryan-locked path adjusted for the docs surface).**
+
+- The spec's Ryan-locked folder was literally `Projects/<id>/plans/<slug>.md`.
+  The `DocStore` confines every SERVED + tappable doc to `Projects/<id>/docs/`
+  (`gateway/http/doc-store.ts` resolves the docs root there; only the fixed
+  `STATUS.md` basename is surfaced from the project root). A doc at
+  `Projects/<id>/plans/…` (a sibling of `docs/`) would NOT be served by the docs
+  API nor appear in the Documents tab — breaking the hard requirement that the
+  doc is "served by the existing docs store/API + shows in Documents +
+  tappable". So the plans folder is nested UNDER `docs/`:
+  `Projects/<id>/docs/plans/<slug>.md`. This honours the intent (user-visible
+  project docs, a `plans/` folder, tappable) exactly; the only delta is the
+  `docs/` prefix, which is what makes it visible at all.
+- **§1b write-back deferred (noted, not built).** ▶ makes the card doc the
+  READ source-of-truth for the build (`task` = doc content). The spec's further
+  ask — the ralph planning stage writing its ELABORATED `IMPLEMENTATION_PLAN.md`
+  BACK INTO the card doc — materially reshapes the ralph I/O: the ralph loop runs
+  in an ephemeral git WORKTREE and writes `IMPLEMENTATION_PLAN.md` at the worktree
+  root, while the card doc lives in `NEUTRON_HOME/Projects/<id>/docs/`; the
+  detached inner Workflow has no `DocStore` handle, and ralph only engages for a
+  governed repo (`SPEC.md` at the git root), not the common single-context build.
+  Per the spec's own "STOP and note the delta rather than fork a second code
+  path" instruction, the bidirectional write-back is left for a follow-up. No
+  parallel user-facing plan doc is created; the worktree `IMPLEMENTATION_PLAN.md`
+  is an existing build-internal artifact (not user-surfaced).
+
 ## 2026-07-02 — M1 trident-UX hardening: live Plan progress, hang watchdog, X-cancels-run, confirm dialog
 
 **Why.** A live trident test wedged SILENTLY and surfaced four gaps: (1) a
