@@ -279,8 +279,14 @@ export function ProjectShell({
   const [tabsScope, setTabsScope] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
+    // Reconcile the tab bar IN PLACE (2026-07-02 flicker fix): a switch resets
+    // the active tab to Chat and marks the scope in-flight (`tabsScope = null`,
+    // which the doc-link resolver keys off), but it does NOT collapse `tabs` to
+    // `[CHAT_TAB]` first. Collapsing then re-expanding was a visible two-step
+    // flicker on every switch; keeping the current descriptors mounted until the
+    // new set resolves lets React reconcile the `<TabBar>` buttons by key (the
+    // always-present Chat tab never remounts) and swap the rest in ONE step.
     setActiveKey(CHAT_KEY)
-    setTabs([CHAT_TAB])
     setTabsScope(null)
     if (isGeneral) {
       void client
