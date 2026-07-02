@@ -122,7 +122,10 @@ if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
   exit 5
 fi
 
-if codex exec "$PROMPT"; then
+# Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
+# diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
+# ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
+if printf '%s' "$PROMPT" | codex exec -; then
   exit 0
 fi
 echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — do NOT treat as an approval." >&2
