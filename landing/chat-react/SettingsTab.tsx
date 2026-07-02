@@ -116,6 +116,10 @@ export function SettingsTab({
     setCodexError(null)
     void codexClient
       .connect(projectId, codexAuth.trim())
+      // The POST reply carries {status, mode, scope} but NOT `override_present`
+      // (which gates "Remove override"), so re-fetch the effective status after
+      // saving so the remove affordance appears immediately, no reload needed.
+      .then(() => codexClient.status(projectId))
       .then((s) => {
         setCodexStatus(s)
         setCodexAuth('')

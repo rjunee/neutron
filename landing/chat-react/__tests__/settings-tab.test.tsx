@@ -166,6 +166,45 @@ describe('SettingsTab Codex override (happy-dom)', () => {
     root.unmount()
   })
 
+  it('saving an override refetches status so "Remove override" appears immediately (P2)', async () => {
+    let saved = false
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        // Before save: no override. After save: the refetch reports the override.
+        return saved
+          ? json({ ok: true, status: 'connected', scope: 'project', override_present: true })
+          : json({ ok: true, status: 'not_connected', scope: null, override_present: false })
+      }
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && init?.method === 'POST') {
+        saved = true
+        // NOTE: the POST reply intentionally omits `override_present`.
+        return json({ ok: true, status: 'connected', mode: 'subscription', scope: 'project' }, 201)
+      }
+      return null
+    })
+
+    expect(btn(container, 'Remove override')).toBeUndefined()
+    const textarea = container.querySelector('#cset-codex-auth') as HTMLTextAreaElement
+    const setVal = (Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )?.set as (v: string) => void) ?? (() => {})
+    await act(async () => {
+      setVal.call(textarea, '{"tokens":{"access_token":"a","refresh_token":"r"}}')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+    await act(async () => {
+      btn(container, 'Save project override').click()
+      await tick()
+      await tick()
+    })
+    // The refetch populated override_present → the remove affordance is present.
+    expect(container.textContent).toContain('Connected (project override)')
+    expect(btn(container, 'Remove override')).not.toBeUndefined()
+    root.unmount()
+  })
+
   it('removes a STALE/expired override, then reflects the global fallback (not "not connected") (P2)', async () => {
     let deleted = false
     const { container, root, act, calls } = await mount((url, init) => {
