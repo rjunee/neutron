@@ -52,6 +52,214 @@ read/list/write round-trip and `.txt`-still-rejected in
 `landing/chat-react`) clean; leak-gate silent; fresh `NEUTRON_HOME=/tmp/wfi`
 boot on :7874 serves the bundle with the `HtmlDoc` renderer and the docs routes
 wired.
+## 2026-07-02 — Chat typing dots persist for the WHOLE processing window (incl. background builds)
+
+**Why.** Ryan live-test 2026-07-01: he asked the agent to build a meditation-timer
+app. Chat showed the cold-start ack ("⏳ Waking up, one moment…") then NOTHING,
+while the Plan tab flashed its active-work dot — so he had no signal the agent was
+still working. The typing indicator vanished the instant the ack turn settled even
+though the real (long/background) build kept running. No feature flags.
+
+**Root cause.** The chat `TypingIndicator` (`landing/chat-react/ChatApp.tsx`) rendered
+ONLY on `vm.awaitingFirstToken` (`= awaitingReply && no live stream`). `awaitingReply`
+clears on the first token / `agent_message` / `agent_typing end` — i.e. when the ack
+turn settles — so the dots disappeared while a dispatched build continued. The
+build's progress WAS surfaced to the client (the `work_board_changed` frame that
+drives the Plan-tab flashing dot) but that frame was handled out-of-band of the chat
+view model, so the chat never reacted to it.
+
+**What shipped.** The typing indicator now uses the standard animated dots (unchanged
+appearance) and stays visible for the full processing window: `awaitingFirstToken`
+**OR** `hasActiveWork`.
+
+- **New `ChatViewModel.hasActiveWork`** (`landing/chat-react/controller.ts`) — true
+  while the active project's Work Board has an `in_progress` item. Derived from a
+  dedicated `activeWorkBoardItems` cache that ONLY frames pertaining to the active
+  project update (matching `project_id`, or absent → "this project"); a sibling
+  project's board on the per-user app-ws topic is ignored so it can't stop the active
+  dots (Codex P2). `lastWorkBoard` stays the raw last-frame cache for `WorkBoardTab`
+  replay; the active cache clears on project switch.
+- **`work_board_changed` now also `publish()`es the chat vm** (was board-tab-only), so
+  a build starting/finishing flips the dots on/off. Everything else about the board
+  stays out-of-band of chat state.
+- **The gate** (`ChatApp.tsx`) is now `vm.awaitingFirstToken || vm.hasActiveWork`.
+- **No false-positive at load:** the server pushes `work_board_changed` only on a
+  mutation, never on connect, so `lastWorkBoard` is null until work actually happens
+  this session — a lingering item from a prior session can't spin the dots on open. A
+  trivial quick turn (no board mutation) behaves exactly as before. Dots stop the
+  moment the item flips to `done`.
+
+**Tests.** `controller.test.ts` — `hasActiveWork` true on `in_progress`, clears on
+`done`, ignores a foreign-project board (updated the "does NOT touch chat vm" test:
+board frames now republish so `hasActiveWork` can update; chat MESSAGES stay
+untouched). `component.test.tsx` — full render E2E: dots stay through a background
+build after the ack `agent_message`, then stop when the board item completes.
+
+**SYSTEM-OVERVIEW.md:** none (behavior fix reusing the existing `work_board_changed`
+frame — no new surface or client subscription).
+
+## 2026-07-02 — Connect Codex is a GLOBAL admin credential (was per-project) + project override
+
+**Why.** #167 (Part B) put the Connect-Codex UI only in the per-PROJECT Settings
+tab, calling `.connect(projectId, …)`, which made it read as a project-level
+setting. But Codex is the **trident cross-model reviewer credential, and trident
+runs across ANY project** — so it must be a **GLOBAL** setting in the General
+admin UI, not per-project (Ryan, 2026-07-02: "this is not a project-level
+setting… it should be a global setting, in the general admin UI. There can be a
+project-level override if necessary"). No feature flags.
+
+**What shipped.**
+
+- **Global connect is now the PRIMARY surface.** A new account-wide route
+  `GET/POST/DELETE /api/app/codex-auth` (`gateway/http/codex-credential-surface.ts`)
+  connects Codex at `scope='global'`. The **General → Admin** tab
+  (`landing/chat-react/IntegrationsTab.tsx`) renders a "Codex cross-model review"
+  section — paste `~/.codex/auth.json`, connection status, disconnect — alongside
+  the other global integrations. `codex-credential-client.ts` gained
+  `statusGlobal()` / `connectGlobal()` / `disconnectGlobal()`.
+- **Store defaults to GLOBAL.** `CodexCredentialService.connect()` now defaults to
+  `scope='global'` (materializes to the owner CODEX_HOME `<owner_home>/.codex`);
+  validation unchanged (subscription-only, metered `OPENAI_API_KEY` rejected).
+- **Per-project OVERRIDE kept, for the edge case.** The per-project Settings
+  section stays but is relabelled "Codex review — project override" (clearly
+  optional; the primary connect lives in General → Admin). It POSTs the existing
+  `/api/app/projects/<id>/codex-auth` route, which now stores `scope='project'`
+  under the REAL project id and materializes to a nested
+  `codexProjectHome()` = `<owner_home>/.codex/projects/<id>` dir.
+- **Resolution honors project → global → unset.** New
+  `CodexCredentialService.resolveActiveCodexHome(owner, project_id)` resolves the
+  effective CODEX_HOME via the #149 store resolver (project override wins, else
+  global, else `null`) with self-healing re-materialization. `status()` reports the
+  resolving `scope`. The trident loop threads the GLOBAL CODEX_HOME (the
+  trident-wide default); the `codex_connect`/`codex_status` agent tools stay
+  global-scoped (the tool context carries only the owner boundary).
+
+**Spec-conformance (5-line diff).** SPEC§ codex-review global cred / CURRENT #167
+per-project only / GAP: not global, wrong default / THIS PR: global connect in
+General admin + project-override + resolver project→global / OUT-OF-SCOPE: none.
+
+**Files.** `trident/codex-auth.ts` (`codexProjectHome` helper),
+`trident/codex-credential.ts` (scope-aware connect/status/disconnect +
+`resolveActiveCodexHome`), `gateway/http/codex-credential-surface.ts` (global
+route + project override), `gateway/http/compose.ts` (comment),
+`open/composer.ts` (comment), `landing/chat-react/IntegrationsTab.tsx` (global
+UI), `landing/chat-react/SettingsTab.tsx` (override relabel),
+`landing/chat-react/codex-credential-client.ts` (global methods + `scope`). Tests:
+service override/resolver, surface global+override routes, client global methods,
+IntegrationsTab global-connect render. tsc clean (trident/root/chat-react),
+leak-gate SILENT; live boot confirms both routes mounted + auth-gated.
+
+**Verify.** Real-component integration tests exercise connect(global) →
+materialize → `codex-review.sh` exit-0 CONNECTED; override stored under the
+project home; `resolveActiveCodexHome` project→global→unset; override wins;
+removing an override falls back to global; `ensureMaterialized` ignores overrides.
+Live server (`NEUTRON_HOME=/tmp/wfcx PORT=7871 bun run open/server.ts`) boots
+clean and both `/api/app/codex-auth` + `/api/app/projects/<id>/codex-auth` return
+401 (mounted + auth-gated), not 404.
+
+**Codex cross-model review — addressed.**
+- **[P1] review resolves through the store resolver (not a static path).** The
+  trident orchestrator gained `resolve_codex_home?: (run) => string | null`
+  (preferred over the static `codex_home`); the composer wires it to
+  `CodexCredentialService.resolveActiveCodexHome(run.project_slug)` so the inner
+  review's CODEX_HOME is resolved per-run through the #149 resolver (project
+  override → global → unset, self-healing) rather than a raw dir. **Known
+  constraint:** trident runs are instance-scoped by `project_slug` (no per-project
+  id on a run — see `trident/store.ts` `TridentRun`), so a run resolves the GLOBAL
+  default; a per-project override cannot select a different cred *per trident run*
+  until runs carry a project id (a larger, separate change). The override
+  mechanism itself (store/resolver/status/UI) is fully implemented + tested.
+- **[P2] a stale/expired project override is always removable.** `status()` now
+  returns `override_present` (a project-scope row exists, even expired — the
+  resolver skips expired rows so `scope` would report the global fallback). The
+  Settings override section shows "Remove override" whenever `override_present`,
+  so an expired override that masks itself behind the global default can still be
+  cleaned up.
+- **[P2] Settings reflects the EFFECTIVE status after save/remove.** Both
+  `connectCodex` and `disconnectCodex` now re-fetch the per-project status after
+  their write (the POST/DELETE replies omit `override_present` / the global
+  fallback), so the "Remove override" affordance appears right after saving and a
+  removed override immediately shows the global fallback (not a hard
+  "not connected").
+
+**DECISION FOR RYAN — per-project override does NOT reach a trident RUN (by
+design of trident, not this PR).** Trident runs are **instance-scoped by
+`project_slug`** (the owner boundary) and carry **no per-project credential id**
+(`trident/store.ts` `TridentRun`; runs are created with `project_slug` = owner,
+`slug` = task slug). So `resolveActiveCodexHome(run.project_slug)` resolves the
+GLOBAL default, and a per-project codex override — whose only consumer is the
+instance-scoped trident reviewer — cannot change which credential a given trident
+run uses. The override is fully built + tested at the store/resolver/status/UI
+layer (it honors project → global → unset wherever a real project id is supplied),
+the Settings copy is explicit that the trident review currently uses the global
+credential, and the override takes effect for trident once builds are
+project-scoped (a separate change: thread the originating project id onto the run
++ resolve with it). Ryan asked for a project override "if necessary" — flagging
+that for trident specifically it is a stored preference, not yet a per-run switch.
+Codex cross-model review re-raised this as the remaining item; it is an
+acknowledged trident-architecture constraint, not a defect in this diff.
+## 2026-07-02 — SEV1 chat project-switch: fresh per-conversation assistant-ui runtime (seamless switch, no error card, no flicker)
+
+**Why.** M1 top-priority (Ryan, frustrated): switching projects (or cold-loading
+one) frequently tripped the #162 error boundary ("This conversation hit a snag /
+Try again"), and "Try again" fixed it — a transient render race, not a real
+failure. Ryan: "an annoying useless error message is just as bad as a black
+screen. fix the underlying problem. This should be seamless." Same root also
+caused the tab-bar / input-box flicker on switch. No feature flags. The #162
+keyed error boundary was NOT the fix — it only *caught* the throw; the goal was
+to eliminate the underlying race so it essentially never fires.
+
+**Root cause (verified).** The assistant-ui message primitives resolve a part by
+INDEX into the runtime's live message list (`@assistant-ui/react`
+`useExternalStoreRuntime`; `useClientLookup` throws `Index N out of bounds
+(length: 0)`). The runtime was a SINGLE stable instance created once at the root
+(`main.tsx` `useNeutronChat` → `AssistantRuntimeProvider`). On a project switch,
+`controller.setProject` (`landing/chat-react/controller.ts:439`) sets `this.msgs
+= []` and publishes an EMPTY list; the ExternalStore adapter handed that emptied
+list to the SAME retained runtime while a stale `MessagePart` from the outgoing
+project still indexed a position into it → throw mid-render → #162 boundary
+trips. #162's keyed *render subtree* remount reduced but did not eliminate the
+one-frame race because the RUNTIME itself was never reset per conversation — the
+shared runtime shrank in place with old subscribers still attached.
+
+**What shipped.**
+
+- **Per-conversation runtime (root-cause fix).** Split
+  `landing/chat-react/useNeutronChat.ts` into `useNeutronChatVm` (vm mirror +
+  controller lifecycle — stable across the session, keyed on the controller) and
+  `useChatRuntime` (builds the `ExternalStoreRuntime` from the current vm). A new
+  `ConversationRuntimeHost` in `ChatApp.tsx` calls `useChatRuntime` and is mounted
+  with `key={convId}` (`conversationIdOf(projectId)`), so every conversation gets
+  its OWN runtime. On a switch the outgoing runtime is discarded WHOLE — never
+  shrunk in place — and the incoming one starts from the already-scoped (empty →
+  hydrating) list, so no part ever indexes a stale position. The provider moved
+  OFF the root (`main.tsx` now renders `ProjectShell` directly with a
+  `useNeutronChatVm` vm) and DOWN to wrap only the chat surface (thread +
+  composer), so the TabBar + project rail above it stay mounted.
+- **Atomic transition.** A genuinely empty project renders assistant-ui's
+  `ThreadPrimitive.Empty` ("Send a message to begin."), never an index into `[]`.
+- **Tab-bar flicker fix.** `ProjectShell.tsx` tab-resolution effect no longer
+  collapses `tabs` to `[CHAT_TAB]` on every switch before re-fetching (a visible
+  two-step flicker). It reconciles IN PLACE: keep the current descriptors mounted
+  until the new set resolves, mark the scope in-flight (`tabsScope = null`, which
+  the doc-link resolver keys off), and swap in one step — the always-present Chat
+  tab (stable key) never remounts. While the fetch is in flight the still-mounted
+  descriptors belong to the OUTGOING scope, so every non-Chat tab is DISABLED and
+  the active tab is clamped to Chat (Codex P2): a stale button can't be clicked to
+  mount a wrong-scope `TabContent` (e.g. the old project's Core iframe) mid-switch.
+- **Safety net kept.** The #162 `ChatErrorBoundary` stays as a last-resort catch
+  (not removed), but now essentially never fires on a normal switch/load.
+
+**Tests.** `landing/chat-react/__tests__/chat-rail-stability.test.tsx` extended:
+the laden-General → empty-project switch now also asserts the boundary card
+("This conversation hit a snag") is ABSENT — proving the RUNTIME RESET prevented
+the throw, not the boundary catching it. Added a rapid-switch stress test
+(General → alpha → beta → empty → General → … 8 hops) asserting no index throw,
+no boundary, clean empty state, and no stale-content bleed. Harnesses mirror
+production wiring (no external `AssistantRuntimeProvider`; `ChatApp` self-owns the
+runtime). Full `landing/chat-react` suite: 231 pass / 0 fail; `tsc -p
+landing/chat-react/tsconfig.json` clean; browser bundle + live iso server
+(`/chat`, lazy `/chat-react.js`) build and serve cleanly.
 
 ## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
 

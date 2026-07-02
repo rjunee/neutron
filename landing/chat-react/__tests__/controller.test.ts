@@ -931,7 +931,7 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     controller.stop()
   })
 
-  it('does NOT touch the chat view model on a board frame', async () => {
+  it('does NOT disturb chat messages on a board frame (only hasActiveWork derives from it)', async () => {
     const { controller, sockets } = setup('p1')
     controller.onWorkBoardChanged(() => {})
     controller.start()
@@ -942,8 +942,87 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     sockets[0]!.deliver(changed([boardItem()]))
     await tick()
     const after = controller.getViewModel()
-    // The board is out-of-band of chat state — the vm reference is unchanged.
-    expect(after.messages).toBe(before.messages)
+    // The board is out-of-band of chat MESSAGES — their content is untouched.
+    // (The vm is republished so `hasActiveWork` can update, so the array is a
+    // fresh reference, but the messages themselves are equal.)
+    expect(after.messages).toEqual(before.messages)
+    controller.stop()
+  })
+
+  // Chat-typing persistence — the typing indicator ORs in `hasActiveWork`, so a
+  // long/background build keeps the dots visible after the ack turn settles.
+  it('hasActiveWork is true while the active project board has an in_progress item', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // No board frame yet — nothing in flight.
+    expect(controller.getViewModel().hasActiveWork).toBe(false)
+    // A build starts: one item goes in_progress.
+    sockets[0]!.deliver(changed([boardItem({ id: 'build', status: 'in_progress' })]))
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    controller.stop()
+  })
+
+  it('hasActiveWork clears when the in_progress item is marked done (dots stop when work completes)', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'build', status: 'in_progress' })]))
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    // Build completes: the same item flips to done.
+    sockets[0]!.deliver(changed([boardItem({ id: 'build', status: 'done' })]))
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(false)
+    controller.stop()
+  })
+
+  it('a foreign-project board frame does NOT clear the active project active-work signal (Codex P2)', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // p1 has work in flight.
+    sockets[0]!.deliver(changed([boardItem({ id: 'build', status: 'in_progress' })]))
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    // A sibling project's board arrives on the per-user socket (all-idle). It must
+    // NOT clobber p1's in-flight signal / stop p1's dots.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'work_board_changed',
+      items: [boardItem({ id: 'other', status: 'done' })],
+      project_id: 'p2',
+      ts: 2,
+    })
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    controller.stop()
+  })
+
+  it('hasActiveWork ignores a board frame for a DIFFERENT project', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // A sibling project's board can arrive on the per-user app-ws topic — it must
+    // not spin THIS project's chat dots.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'work_board_changed',
+      items: [boardItem({ id: 'other', status: 'in_progress' })],
+      project_id: 'p2',
+      ts: 1,
+    })
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(false)
     controller.stop()
   })
 })

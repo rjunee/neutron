@@ -116,6 +116,10 @@ export function SettingsTab({
     setCodexError(null)
     void codexClient
       .connect(projectId, codexAuth.trim())
+      // The POST reply carries {status, mode, scope} but NOT `override_present`
+      // (which gates "Remove override"), so re-fetch the effective status after
+      // saving so the remove affordance appears immediately, no reload needed.
+      .then(() => codexClient.status(projectId))
       .then((s) => {
         setCodexStatus(s)
         setCodexAuth('')
@@ -132,8 +136,12 @@ export function SettingsTab({
     setCodexError(null)
     void codexClient
       .disconnect(projectId)
-      .then(() => {
-        setCodexStatus({ status: 'not_connected' })
+      // Removing a project override must reflect the EFFECTIVE status, not a hard
+      // `not_connected`: if a global default exists the project falls back to it
+      // (connected, scope=global). Re-fetch rather than assume.
+      .then(() => codexClient.status(projectId))
+      .then((s) => {
+        setCodexStatus(s)
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
@@ -482,25 +490,44 @@ export function SettingsTab({
         </form>
       </section>
 
-      {/* ── Codex review (Part B — trident cross-model reviewer credential) ── */}
-      <section className="cset-section" aria-label="Codex review">
-        <h2 className="cset-h">Codex cross-model review</h2>
+      {/* ── Codex review OVERRIDE (optional — the primary/global connect lives
+          in the General → Admin tab; this only overrides it for THIS project) ── */}
+      <section className="cset-section" aria-label="Codex review override">
+        <h2 className="cset-h">Codex review — project override</h2>
         <p className="cset-sub">
-          Connect a ChatGPT <strong>subscription</strong> so trident builds get an independent
-          GPT-5 (Codex) review alongside Claude. Run <code>codex login</code> on your machine, then
-          paste the contents of <code>~/.codex/auth.json</code> below. A metered
-          <code> OPENAI_API_KEY</code> is rejected — subscription only.
+          <strong>Optional / advanced.</strong> Codex is normally connected once, account-wide, in
+          <strong> General → Admin → Codex cross-model review</strong>, and the trident reviewer
+          uses that global credential. You can store a <em>project-scoped</em> override here; the
+          credential resolver prefers it over the global default wherever this project’s id is in
+          play (project → global → unset). Run <code>codex login</code>, then paste that
+          subscription’s <code>~/.codex/auth.json</code>. A metered <code>OPENAI_API_KEY</code> is
+          rejected — subscription only.
+          <br />
+          <small>
+            Note: the trident review loop is instance-scoped, so builds currently use the global
+            credential; a stored override takes effect for the trident review once builds are
+            project-scoped.
+          </small>
         </p>
         <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
           {codexStatus?.status === 'connected'
-            ? '✓ Connected'
+            ? codexStatus.scope === 'project'
+              ? '✓ Connected (project override)'
+              : codexStatus.override_present === true
+                ? '⚠ Override expired — using the global default'
+                : '✓ Connected (using the global default)'
             : codexStatus?.status === 'expired'
               ? '⚠ Token expired — re-connect'
-              : '○ Not connected'}
+              : codexStatus?.override_present === true
+                ? '○ Override set but not usable — using the global default'
+                : '○ Not connected'}
           {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
         </p>
         {codexError !== null ? <p className="cset-error">{codexError}</p> : null}
-        {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+        {/* Show removal whenever a project-override ROW exists — including an
+            expired one the resolver skipped (which masks itself behind the global
+            default), so a stale override is never un-removable. */}
+        {codexStatus?.override_present === true ? (
           <div className="cset-form-actions">
             <button
               type="button"
@@ -508,7 +535,7 @@ export function SettingsTab({
               disabled={codexBusy}
               onClick={disconnectCodex}
             >
-              {codexBusy ? 'Working…' : 'Disconnect Codex'}
+              {codexBusy ? 'Working…' : 'Remove override'}
             </button>
           </div>
         ) : null}
@@ -520,7 +547,7 @@ export function SettingsTab({
           }}
         >
           <label className="cset-label" htmlFor="cset-codex-auth">
-            Paste ~/.codex/auth.json
+            Paste ~/.codex/auth.json (project override)
           </label>
           <textarea
             id="cset-codex-auth"
@@ -536,7 +563,7 @@ export function SettingsTab({
               className="cset-btn cset-btn-primary"
               disabled={codexBusy || codexAuth.trim().length === 0}
             >
-              {codexBusy ? 'Connecting…' : 'Connect Codex'}
+              {codexBusy ? 'Saving…' : 'Save project override'}
             </button>
           </div>
         </form>

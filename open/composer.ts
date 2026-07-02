@@ -984,15 +984,21 @@ export function buildOpenGraphComposer(
     // `.neutron-aes-key` keyfile). Constructed HERE (before mountOpenCores) so the
     // Cores' credential accessors can bind to it.
     const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
-    // Codex subscription credential (Part B — trident cross-model review). The
-    // admin-panel "Connect Codex" flow + the `codex_connect`/`codex_status` agent
-    // tools dispatch this ONE service: validate a pasted ChatGPT-subscription
-    // auth.json (metered OPENAI_API_KEY rejected), store it encrypted in the #149
-    // credential store (service `codex`, global scope), and materialize it to the
-    // per-project CODEX_HOME that `trident/codex-review.sh` reads. `resolveCodexHome`
-    // is the ONE path both this and the trident loop (`build-core-modules`) agree
-    // on. `ensureMaterialized` self-heals the file if a stored credential exists
-    // but the on-disk auth.json is missing (fresh process / wiped tmp).
+    // Codex subscription credential (trident cross-model review). Codex is a
+    // GLOBAL, trident-wide credential (trident runs across ANY project), so the
+    // PRIMARY connect surface is the account-wide General admin UI; the store
+    // scope defaults to `global`. A per-project OVERRIDE (that project's Settings
+    // tab) wins over the global default for that project (store resolver:
+    // project → global → unset). The admin-panel Connect Codex surface + the
+    // `codex_connect`/`codex_status` agent tools dispatch this ONE service:
+    // validate a pasted ChatGPT-subscription auth.json (metered OPENAI_API_KEY
+    // rejected), store it encrypted in the #149 credential store (service `codex`),
+    // and materialize it to the CODEX_HOME `trident/codex-review.sh` reads — the
+    // GLOBAL dir (`resolveCodexHome`) for the default, or a nested per-project dir
+    // (`codexProjectHome`) for an override. The trident loop threads the GLOBAL
+    // CODEX_HOME (the trident-wide default); `ensureMaterialized` self-heals the
+    // global file if a stored credential exists but the on-disk auth.json is
+    // missing (fresh process / wiped tmp).
     const codexHome = resolveCodexHome({ owner_home })
     const codexCredentialService = new CodexCredentialService({
       store: projectCredentialStore,
@@ -3509,9 +3515,17 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: skillForgeOnRunTerminal,
-              // Part B — the per-project CODEX_HOME the trident loop threads into
-              // the inner workflow's optional codex reviewer. SAME path the admin
-              // panel materializes auth.json into (`resolveCodexHome`).
+              // The CODEX_HOME the trident loop threads into the inner workflow's
+              // optional codex reviewer. Resolved PER RUN through the credential
+              // service (`resolveActiveCodexHome`: project override → global →
+              // unset, self-healing) so a connect made AFTER boot + any project
+              // override are honored via the #149 store resolver. Trident runs are
+              // instance-scoped by `project_slug` (no per-project id), so a run
+              // resolves the GLOBAL default; the resolver still prefers an override
+              // for any project id it is given. `codex_home` (static global dir)
+              // stays as the dev/legacy fallback (see build-core-modules).
+              resolve_codex_home: (run) =>
+                codexCredentialService.resolveActiveCodexHome(run.project_slug),
               codex_home: codexHome,
             },
             // Work Board Phase 2b — the agent-native board-bound build dispatch
