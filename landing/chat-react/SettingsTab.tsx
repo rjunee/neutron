@@ -132,8 +132,12 @@ export function SettingsTab({
     setCodexError(null)
     void codexClient
       .disconnect(projectId)
-      .then(() => {
-        setCodexStatus({ status: 'not_connected' })
+      // Removing a project override must reflect the EFFECTIVE status, not a hard
+      // `not_connected`: if a global default exists the project falls back to it
+      // (connected, scope=global). Re-fetch rather than assume.
+      .then(() => codexClient.status(projectId))
+      .then((s) => {
+        setCodexStatus(s)
         setCodexBusy(false)
       })
       .catch((err: unknown) => {

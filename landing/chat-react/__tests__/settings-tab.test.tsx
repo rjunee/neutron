@@ -166,13 +166,16 @@ describe('SettingsTab Codex override (happy-dom)', () => {
     root.unmount()
   })
 
-  it('shows Remove override for a STALE/expired override (masked behind global) and DELETEs it (P2)', async () => {
+  it('removes a STALE/expired override, then reflects the global fallback (not "not connected") (P2)', async () => {
     let deleted = false
     const { container, root, act, calls } = await mount((url, init) => {
       if (url.endsWith('/api/app/projects/acme/codex-auth') && (init?.method ?? 'GET') === 'GET') {
-        // Expired override masks itself → resolver reports the global default,
-        // but override_present stays true so the row is removable.
-        return json({ ok: true, status: 'connected', scope: 'global', override_present: true })
+        // BEFORE removal: expired override masks itself → resolver reports the
+        // global default, but override_present stays true (removable). AFTER
+        // removal: the override is gone → plain global fallback.
+        return deleted
+          ? json({ ok: true, status: 'connected', scope: 'global', override_present: false })
+          : json({ ok: true, status: 'connected', scope: 'global', override_present: true })
       }
       if (url.endsWith('/api/app/projects/acme/codex-auth') && init?.method === 'DELETE') {
         deleted = true
@@ -193,6 +196,11 @@ describe('SettingsTab Codex override (happy-dom)', () => {
     expect(
       calls.some((c) => c === 'DELETE https://sam.neutron.test/api/app/projects/acme/codex-auth'),
     ).toBe(true)
+    // After removal the effective status is the GLOBAL default — NOT "not connected".
+    expect(container.textContent).toContain('Connected (using the global default)')
+    expect(container.textContent).not.toContain('○ Not connected')
+    // Override row gone → no remove button.
+    expect(btn(container, 'Remove override')).toBeUndefined()
     root.unmount()
   })
 })
