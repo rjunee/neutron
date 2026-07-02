@@ -141,14 +141,32 @@ const DEFAULT_SETTLE_TIMEOUT_MS = 3 * 60_000
 export const DEFAULT_INNER_WORKFLOW_PATH = new URL('./inner-workflow.mjs', import.meta.url).pathname
 
 /**
- * The `--tools` surface the WARM fire substrate needs — just the native CC
- * `Workflow` tool (the inner-workflow's `agent()`/`parallel()` workers are
- * workflow-runtime globals, not separate tools). Exported so the composer wires
- * the fire substrate with EXACTLY this constant surface (the warm-REPL reuse
- * guard pins `--tools` constant across turns). The Forge/Argus/Bash work all
- * runs INSIDE the workflow's own nested agents, not on this launcher turn.
+ * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
+ * launcher fires it) PLUS the build/review tools — because the inner-workflow's
+ * `agent()`/`parallel()` workers INHERIT this launcher session's tool surface;
+ * the CC Workflow `agent()` primitive has no per-call `tools` option, so a worker
+ * can only use what the launcher session was granted. The earlier `['Workflow']`-
+ * only surface (which assumed the workers were "workflow-runtime globals") shipped
+ * broken: on the first real end-to-end run (2026-07-02) every spawned
+ * forge:build/bash worker reported "I don't have access to a bash execution tool
+ * ... I only have reply and send_typing" → forge:build could not Write a single
+ * file → the build failed instantly (terminal-result ok:false). Granting the full
+ * build surface here is what lets forge:build actually Write/Edit/Bash in its
+ * worktree and the bash steps (checkpoint/terminal-result/cleanup/codex) run Bash.
+ * Exported so the composer wires the fire substrate with EXACTLY this constant
+ * surface (the warm-REPL reuse guard pins `--tools` constant across turns).
  */
-export const WORKFLOW_FIRE_TOOL_NAMES = ['Workflow'] as const
+export const WORKFLOW_FIRE_TOOL_NAMES = [
+  'Workflow',
+  'Read',
+  'Glob',
+  'Grep',
+  'Write',
+  'Edit',
+  'Bash',
+  'Task',
+  'TodoWrite',
+] as const
 
 /**
  * Build the args object the launcher passes to the `Workflow` tool. Mirrors the
