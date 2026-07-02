@@ -81,6 +81,31 @@ export const MAX_DOC_BYTES = 5 * 1024 * 1024
  */
 export const MARKDOWN_EXTENSIONS = Object.freeze(['.md', '.markdown']) as readonly string[]
 
+/**
+ * Accepted HTML doc extensions (case-insensitive). The Documents tab renders
+ * these as STATIC styled HTML/CSS pages (see landing/chat-react HtmlDoc):
+ * HTML structure + CSS are preserved, but script execution is stripped before
+ * render — an `.html` doc is a styled page, NOT a JS sandbox. Interactive JS
+ * apps route to the app launcher (a separate surface), not the docs store.
+ *
+ * Added 2026-07-01: before this, saving/opening an `.html` doc failed with
+ * `invalid_extension: path must end with .md or .markdown`. The docs store
+ * now surfaces + accepts `.html`/`.htm` alongside markdown for read/list/
+ * open/write.
+ */
+export const HTML_EXTENSIONS = Object.freeze(['.html', '.htm']) as readonly string[]
+
+/**
+ * Every extension the docs store surfaces in the tree AND accepts on
+ * read/list/open/write. Markdown renders via the Markdown path; HTML renders
+ * as a static styled page. This is the single allowlist behind the
+ * `invalid_extension` gate — extend it here, not at individual call sites.
+ */
+export const DOC_EXTENSIONS = Object.freeze([
+  ...MARKDOWN_EXTENSIONS,
+  ...HTML_EXTENSIONS,
+]) as readonly string[]
+
 /** Lowercased regex sourced from `MARKDOWN_EXTENSIONS` for cheap leaf
  *  checks. Anchored at end-of-string and case-insensitive. */
 const MARKDOWN_EXTENSION_RE = new RegExp(
@@ -88,13 +113,38 @@ const MARKDOWN_EXTENSION_RE = new RegExp(
   'i',
 )
 
+/** Lowercased regex sourced from `DOC_EXTENSIONS` (markdown + HTML). Anchored
+ *  at end-of-string, case-insensitive. */
+const DOC_EXTENSION_RE = new RegExp(
+  `\\.(?:${DOC_EXTENSIONS.map((e) => e.slice(1)).join('|')})$`,
+  'i',
+)
+
+/** Human-readable list of accepted extensions for `invalid_extension` errors,
+ *  e.g. ".md, .markdown, .html or .htm". Derived from `DOC_EXTENSIONS` so the
+ *  message never drifts from the allowlist. */
+const DOC_EXTENSIONS_HINT = ((): string => {
+  if (DOC_EXTENSIONS.length === 1) return DOC_EXTENSIONS[0]!
+  return `${DOC_EXTENSIONS.slice(0, -1).join(', ')} or ${DOC_EXTENSIONS[DOC_EXTENSIONS.length - 1]!}`
+})()
+
 /**
- * True if `name` ends with one of the accepted markdown extensions
- * (case-insensitive). Single source of truth used by the tree walker
- * AND the `requireMd` leaf check inside `validateRelativePath`.
+ * True if `name` ends with one of the accepted MARKDOWN extensions
+ * (case-insensitive). Markdown-specific — used where a caller must distinguish
+ * a markdown leaf from an HTML one.
  */
 export function isMarkdownLeaf(name: string): boolean {
   return MARKDOWN_EXTENSION_RE.test(name)
+}
+
+/**
+ * True if `name` ends with any accepted DOC extension — markdown OR HTML
+ * (case-insensitive). Single source of truth used by the tree walker AND the
+ * `requireMd` leaf check inside `validateRelativePath`, so `.html`/`.htm` docs
+ * both surface in the tree and pass the read/write extension gate.
+ */
+export function isDocLeaf(name: string): boolean {
+  return DOC_EXTENSION_RE.test(name)
 }
 
 /**
@@ -1089,10 +1139,10 @@ function validateRelativePath(
   }
   if (opts.requireMd) {
     const last = segments[segments.length - 1] ?? ''
-    if (!isMarkdownLeaf(last)) {
+    if (!isDocLeaf(last)) {
       throw new DocPathError(
         'invalid_extension',
-        `path must end with .md or .markdown (got '${last}')`,
+        `path must end with ${DOC_EXTENSIONS_HINT} (got '${last}')`,
       )
     }
   }
@@ -1362,7 +1412,7 @@ async function walkTree(
       })
       continue
     }
-    if (!isMarkdownLeaf(entry.name)) continue
+    if (!isDocLeaf(entry.name)) continue
     let st
     try {
       st = await stat(abs)

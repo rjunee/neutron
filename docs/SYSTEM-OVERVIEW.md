@@ -1005,6 +1005,34 @@ routes incl. `writeFile` PUT + the 409 conflict, the 503 gate,
 (happy-dom: list renders, doc opens, selection→comment post round-trip, the
 unavailable gate, and the PR-6 edit→save→PUT + 409-conflict flows).
 
+**`.html` docs render as static styled pages (2026-07-01).** The docs store +
+API allowlist now accept `.html`/`.htm` alongside `.md`/`.markdown` for
+read/list/open/write — the single source of truth is `DOC_EXTENSIONS` +
+`isDocLeaf` in `gateway/http/doc-store.ts` (used by both the tree walker and the
+`validateRelativePath` `requireMd` gate; the duplicate history/comments gate in
+`app-docs-surface.ts` shares `isDocLeaf`). Before this, saving/opening an `.html`
+doc failed with `invalid_extension: path must end with .md or .markdown`. In the
+Documents tab, the **Rendered** view branches on extension: an `.html`/`.htm`
+doc renders through `chat-react/HtmlDoc.tsx` as a **static styled HTML/CSS page**
+— the doc's HTML structure + CSS (both `<style>` blocks and inline `style`) are
+preserved, but **script execution is explicitly excluded**: `sanitizeHtmlDoc`
+strips `<script>` (incl. SVG script), `<iframe>`/`<object>`/`<embed>`/`<base>`/
+`<meta>`/`<link>`, every `on*` event-handler attribute, and `javascript:`/
+`vbscript:`/`data:text/html` URLs, then the sanitized document's **live
+`<documentElement>` nodes are adopted into a Shadow-DOM island** (keeping
+`<html>`/`<body>` so `body{…}`/`html{…}` CSS + body attributes apply) so the
+doc's CSS is scoped and can't restyle the app. A
+`.md` doc keeps rendering via the Markdown path unchanged; Source view + Edit
+still show/edit the raw text of either. **Interactive JS apps do NOT belong
+here** — they route to the app launcher (a separate, out-of-scope surface), not
+the doc renderer. Tests: `chat-react/__tests__/html-doc.test.tsx` (sanitize
+strips scripts/handlers/js-URLs while keeping structure+CSS; the component
+mounts into a shadow root and no doc script executes) + the `.html`/`.htm`
+read/list/write round-trip in `gateway/__tests__/app-docs-surface.test.ts`.
+(The mobile docs tab `app/app/projects/[id]/docs.tsx` still renders markdown
+only; an `.html` doc now surfaces in its list but its static HTML render is a
+follow-up.)
+
 **Obsidian retired (WAVE 3 close-out, PR-6).** With web edit parity shipped, the
 per-project **Documents tab is the primary and only daily doc surface** on both
 web and mobile. No daily-driver doc flow depends on Obsidian: doc bodies are
