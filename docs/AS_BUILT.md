@@ -30,9 +30,12 @@ shipped as the default.
   `<iframe>`/`<object>`/`<embed>`/`<base>`/`<meta>`/`<link>`/`<frame*>`/`<applet>`,
   all `on*` handler attributes, and `javascript:`/`vbscript:`/`data:text/html`
   URLs — while PRESERVING HTML structure, `<style>` blocks (head + body), and
-  inline `style`. The sanitized markup is injected into a **Shadow-DOM island**
-  so the doc's CSS is scoped and can't restyle the chat app (and injection via
-  `innerHTML` never runs `<script>`, per spec — defense in depth). `DocumentsTab`
+  inline `style`. The sanitized document's **live `<documentElement>` nodes are
+  adopted** into a **Shadow-DOM island** (not an `innerHTML` string — fragment
+  parsing strips `<html>`/`<body>`, which would drop `body{…}`/`html{…}` CSS +
+  body attributes; Codex P2), so document-level CSS renders correctly and the
+  doc's styles stay scoped to their subtree. `importNode`/`appendChild` never
+  run the (already-removed) scripts. `DocumentsTab`
   Rendered view branches on `isHtmlDoc(file.path)`; `.md` renders via the existing
   Markdown path unchanged, and Source/Edit still show/edit raw text of either.
   **Design note:** chose a `DOMParser` DOM-walk sanitizer over DOMPurify because

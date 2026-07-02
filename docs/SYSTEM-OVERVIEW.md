@@ -1018,8 +1018,10 @@ doc renders through `chat-react/HtmlDoc.tsx` as a **static styled HTML/CSS page*
 preserved, but **script execution is explicitly excluded**: `sanitizeHtmlDoc`
 strips `<script>` (incl. SVG script), `<iframe>`/`<object>`/`<embed>`/`<base>`/
 `<meta>`/`<link>`, every `on*` event-handler attribute, and `javascript:`/
-`vbscript:`/`data:text/html` URLs, then the sanitized markup is injected into a
-**Shadow-DOM island** so the doc's CSS is scoped and can't restyle the app. A
+`vbscript:`/`data:text/html` URLs, then the sanitized document's **live
+`<documentElement>` nodes are adopted into a Shadow-DOM island** (keeping
+`<html>`/`<body>` so `body{…}`/`html{…}` CSS + body attributes apply) so the
+doc's CSS is scoped and can't restyle the app. A
 `.md` doc keeps rendering via the Markdown path unchanged; Source view + Edit
 still show/edit the raw text of either. **Interactive JS apps do NOT belong
 here** — they route to the app launcher (a separate, out-of-scope surface), not

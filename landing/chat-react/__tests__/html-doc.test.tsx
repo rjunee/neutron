@@ -29,8 +29,8 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 // No <img src>/<a href> that would trip happy-dom's resource loader — the
 // script-execution vectors under test are what matter.
 const FULL_DOC = `<!DOCTYPE html><html><head>
-  <style>body { background: #123456 } h1 { color: tomato }</style>
-</head><body>
+  <style>body { background: #123456; margin: 0 } h1 { color: tomato }</style>
+</head><body class="doc-body">
   <h1 onclick="window.__pwned = 'click'">Timer</h1>
   <p style="font-weight:bold">hello world</p>
   <script>window.__pwned = 'script'</script>
@@ -57,6 +57,15 @@ describe('sanitizeHtmlDoc', () => {
     expect(out).toContain('Timer')
     expect(out).toContain('hello world')
     expect(out).toContain('data-x="ok"')
+  })
+  it('preserves the <body> element + attrs so body{…} CSS applies (Codex P2)', () => {
+    const { sanitizeHtmlDoc } = require('../HtmlDoc.tsx')
+    const out = sanitizeHtmlDoc(FULL_DOC).toLowerCase()
+    // Full-document output keeps <body> (fragment parsing would drop it), so a
+    // `body { margin: 0; background: … }` rule + `<body class>` still target it.
+    expect(out).toContain('<body')
+    expect(out).toContain('class="doc-body"')
+    expect(out).toContain('margin: 0')
   })
   it('strips <script> (incl. SVG script)', () => {
     const { sanitizeHtmlDoc } = require('../HtmlDoc.tsx')
@@ -119,6 +128,8 @@ describe('HtmlDoc component', () => {
     expect(shadow!.innerHTML).toContain('Timer')
     expect(shadow!.innerHTML).toContain('background: #123456')
     expect(shadow!.innerHTML.toLowerCase()).not.toContain('<script')
+    // The <body> element survives adoption so body-level CSS applies.
+    expect(shadow!.querySelector('body')).not.toBeNull()
 
     // The doc's script / handler / javascript: URL never executed.
     expect(g['__pwned']).toBeUndefined()

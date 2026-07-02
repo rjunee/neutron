@@ -97,20 +97,22 @@ function sanitizeElement(el: Element): void {
 }
 
 /**
- * Sanitize a raw HTML doc string for STATIC render: strip all script execution
- * while keeping HTML structure + CSS. Pure + total — returns a sanitized HTML
- * string (head `<style>` blocks followed by the sanitized body) safe to inject
- * via `innerHTML`. Exported for unit testing without mounting the component.
+ * Parse a raw HTML doc and strip every script-execution vector IN PLACE,
+ * returning the sanitized `Document` (or `null` for empty/unparseable input).
+ * Keeps the full `<html>`/`<head>`/`<body>` structure so document-level CSS
+ * (`html{…}`, `body{…}`) and body attributes are preserved. Shared by
+ * {@link sanitizeHtmlDoc} (string form, for tests) and {@link HtmlDoc} (live
+ * node adoption, for render).
  */
-export function sanitizeHtmlDoc(raw: string): string {
-  if (typeof raw !== 'string' || raw.length === 0) return ''
+function parseAndSanitize(raw: string): Document | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null
   let doc: Document
   try {
     doc = new DOMParser().parseFromString(raw, 'text/html')
   } catch {
     // Parsing should never throw for a string, but never surface raw markup if
     // it somehow does — an empty render is safe.
-    return ''
+    return null
   }
   // Remove forbidden elements everywhere (head + body, any nesting/namespace).
   for (const el of Array.from(doc.querySelectorAll('*'))) {
@@ -122,13 +124,19 @@ export function sanitizeHtmlDoc(raw: string): string {
   for (const el of Array.from(doc.querySelectorAll('*'))) {
     sanitizeElement(el)
   }
-  // Preserve document-level CSS: hoist head `<style>` blocks ahead of the body
-  // so the page keeps its styling once injected into the shadow root.
-  const headStyles = Array.from(doc.head?.querySelectorAll('style') ?? [])
-    .map((s) => s.outerHTML)
-    .join('')
-  const body = doc.body?.innerHTML ?? ''
-  return headStyles + body
+  return doc
+}
+
+/**
+ * Sanitize a raw HTML doc string for STATIC render: strip all script execution
+ * while keeping HTML structure + CSS. Pure + total — returns the sanitized
+ * FULL-document HTML (`<html>…</html>`, so head `<style>` blocks + `<body>`
+ * attributes/selectors survive) or `''` for empty/unparseable input. Exported
+ * for unit testing without mounting the component.
+ */
+export function sanitizeHtmlDoc(raw: string): string {
+  const doc = parseAndSanitize(raw)
+  return doc?.documentElement?.outerHTML ?? ''
 }
 
 /**
@@ -160,9 +168,17 @@ export function HtmlDoc({
       }
     }
     const root: ShadowRoot | HTMLElement = shadowRef.current ?? host
-    // innerHTML injection never executes `<script>` (HTML spec), and the string
-    // is already sanitized — belt and suspenders.
-    root.innerHTML = sanitizeHtmlDoc(html)
+    // Clear any prior render.
+    root.textContent = ''
+    // Adopt the sanitized document's LIVE nodes (not an innerHTML string): the
+    // HTML fragment parser strips `<html>`/`<body>` tags, which would drop
+    // `body{…}` / `html{…}` selectors + body attributes. Importing the real
+    // `<documentElement>` keeps them, so document-level CSS renders correctly.
+    // `importNode`/`appendChild` never execute the (already-removed) scripts.
+    const doc = parseAndSanitize(html)
+    if (doc?.documentElement != null) {
+      root.appendChild(document.importNode(doc.documentElement, true))
+    }
   }, [html])
 
   return (
