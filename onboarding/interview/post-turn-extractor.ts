@@ -71,18 +71,22 @@ const IMPORT_RUNNING_PHASE = 'import_running'
 
 /**
  * Project-discovery phase_state fields the import-gate suppresses while a history
- * import is in flight (2026-07-01 SEV1). These are the fields that go on to
- * MATERIALIZE projects at finalize: `primary_projects` (work projects),
- * `non_work_interests` (hobby/interest projects), and `dropped_projects` (only
- * meaningful once there are projects to drop). Import-INDEPENDENT fields
- * (`user_first_name`, `agent_personality`) are deliberately NOT listed — the
- * interview keeps collecting them during the upload.
+ * import is in flight (2026-07-01 SEV1). These are the ADDITIVE fields that go on
+ * to CREATE projects at finalize: `primary_projects` (work projects) and
+ * `non_work_interests` (hobby/interest projects). Suppressing them stops thin
+ * chat answers from materializing projects the import should own.
+ *
+ * Deliberately NOT listed:
+ *   - `dropped_projects` — a CURATION drop only ever REMOVES a project, never
+ *     creates one, so it is always safe (and must be honored: the owner may say
+ *     "drop X" during `import_analysis_presented` while reviewing the import's
+ *     proposals; `resolveProjects` re-pulls `import_result.proposed_projects` and
+ *     excludes only names in `dropped_projects`, so dropping this field here would
+ *     let a rejected import project be created anyway — Codex P2).
+ *   - `user_first_name` / `agent_personality` — import-INDEPENDENT; the interview
+ *     keeps collecting them during the upload.
  */
-const PROJECT_DISCOVERY_FIELDS: readonly string[] = [
-  'primary_projects',
-  'non_work_interests',
-  'dropped_projects',
-]
+const PROJECT_DISCOVERY_FIELDS: readonly string[] = ['primary_projects', 'non_work_interests']
 
 export type ExtractorLog = (
   level: 'info' | 'warn' | 'error',

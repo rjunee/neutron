@@ -382,6 +382,38 @@ test('a concurrent upload that advances the row to import_running mid-extraction
   expect(completed).toBe(false)
 })
 
+test('a curation DROP is honored during import review (drops are never gated) — Codex P2', async () => {
+  const store = new InMemoryOnboardingStateStore()
+  // Import review phase: the import already merged its proposals into
+  // primary_projects and the owner is reviewing them.
+  await store.upsert({
+    project_slug: SLUG,
+    user_id: USER,
+    phase: 'import_analysis_presented',
+    phase_state_patch: {
+      user_first_name: 'Sam',
+      primary_projects: ['Topline', 'Family Home', 'Acme'],
+    },
+    advanced_at: 500,
+  })
+  const extractor = buildPostTurnExtractor({
+    // The owner explicitly rejects an import-proposed project during review.
+    anthropicClient: stubClient([JSON.stringify({ removed_projects: ['Family Home'] })]),
+    stateStore: store,
+    project_slug: SLUG,
+    hasInFlightImport: async () => true, // import still in flight/review
+  })
+  const state = await extractor.runOnce({
+    user_id: USER,
+    agent_text: 'Here are the projects I found. Anything to drop?',
+    user_text: 'drop Family Home',
+    observed_at: 1000,
+  })
+  // The drop MUST survive the import gate (it only removes, never creates) so
+  // finalize's resolveProjects excludes it from the re-pulled import proposals.
+  expect(state!.phase_state['dropped_projects']).toEqual(['Family Home'])
+})
+
 test('a terse no-op turn AFTER an import is consumed still finalizes (no stall)', async () => {
   const store = new InMemoryOnboardingStateStore()
   // Post-consume state: all 5 fields present (incl. the import-merged projects),
