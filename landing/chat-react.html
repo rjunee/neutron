@@ -486,17 +486,15 @@
     flex: 0 0 30px; width: 30px; height: 30px;
     display: inline-flex; align-items: center; justify-content: center;
     font-size: 17px; line-height: 1;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
-    transition: border-color .14s ease, background .14s ease;
+    /* No chip/box around the emoji — plain glyph, Telegram-style (Ryan 2026-07-02). */
   }
   .car-rail-label {
     flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  /* Active row: accent-tinted fill, brighter label, and the emoji chip lifts to
-     the accent tint so the selection reads as one cohesive object. */
+  /* Active row: accent-tinted row fill + brighter label carry the selection.
+     No box around the emoji (Ryan 2026-07-02) — the emoji stays a plain glyph. */
   .car-rail-item-active { background: var(--active-bg); color: var(--active-fg); font-weight: 600; }
-  .car-rail-item-active .car-rail-emoji { border-color: var(--accent-border); background: var(--accent-tint-weak); }
   /* Unread (and not active) — bolder, full-contrast label, Telegram-style. */
   .car-rail-item-unread .car-rail-label { color: var(--fg); font-weight: 600; }
   /* Unread count pill, right-aligned. */
@@ -507,18 +505,17 @@
     background: var(--accent); color: var(--on-accent);
     font-size: 11px; font-weight: 700; line-height: 1; border-radius: 999px;
   }
-  /* Pinned to the bottom of the rail (margin-top:auto pushes it down). */
+  /* Flows directly under the last project row (Ryan 2026-07-02 — was pinned to the rail bottom). */
   .car-rail-create {
-    margin-top: auto; width: 100%; text-align: left;
+    width: 100%; text-align: left;
     background: transparent; color: var(--accent); border: 1px dashed var(--border);
     border-radius: 10px; padding: 9px 11px; cursor: pointer; font: inherit; font-size: 14px;
     transition: background .14s ease, border-color .14s ease;
   }
   .car-rail-create:hover:not(:disabled) { background: var(--accent-tint-weak); border-color: var(--accent); }
   .car-rail-create:disabled { opacity: .6; cursor: default; }
-  /* Inline create-project form (replaces the native window.prompt). Pinned to
-     the bottom like the closed button (margin-top:auto). */
-  .car-rail-create-form { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+  /* Inline create-project form (replaces the native window.prompt). Flows under the last project. */
+  .car-rail-create-form { display: flex; flex-direction: column; gap: 6px; }
   .car-rail-input {
     width: 100%; box-sizing: border-box; font: inherit;
     background: var(--bg); color: var(--fg);
