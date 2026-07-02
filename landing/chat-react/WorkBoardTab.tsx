@@ -259,24 +259,23 @@ export function WorkBoardTab({
     return unsub
   }, [liveSource, projectId, listSeq])
 
-  // Item 1 — while ANY item is bound to a live run, tick a clock (for the live
-  // elapsed/stall sub-label) AND quietly re-poll the board every 15s. Intermediate
-  // trident checkpoints (forge-done → reviewing, fix-round-N → building) don't
-  // mutate the board row, so they don't fire a `work_board_changed` push; the
-  // poll is what surfaces those phase/round/stall changes live. Gated on having a
-  // linked run so an idle board does zero background work.
-  const hasLinkedRun = useMemo(
-    () => items.some((it) => it.linked_run_id !== null && it.linked_run_id.length > 0),
-    [items],
-  )
+  // Item 1 — while any item is bound to a LIVE (non-terminal) run, tick a clock
+  // (for the live elapsed/stall sub-label) AND quietly re-poll the board every
+  // 15s. Intermediate trident checkpoints (forge-done → reviewing, fix-round-N →
+  // building) don't mutate the board row, so they don't fire a
+  // `work_board_changed` push; the poll is what surfaces those phase/round/stall
+  // changes live. Gated on a LIVE link (via `isLinkedRunning`, not merely a
+  // present `linked_run_id`) so a finished/terminal linked run does NOT poll
+  // forever (Codex review [P2]).
+  const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
   useEffect(() => {
-    if (!hasLinkedRun) return
+    if (!hasLiveRun) return
     const interval = setInterval(() => {
       setNowTick(Date.now())
       refresh(true)
     }, 15_000)
     return () => clearInterval(interval)
-  }, [hasLinkedRun, refresh])
+  }, [hasLiveRun, refresh])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()

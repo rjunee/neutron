@@ -31,11 +31,15 @@ feature flags, no migration (all four derive from existing columns).
   checkpoints don't mutate the board row (no push), so the tab quietly re-polls
   every 15s while any run is live + ticks elapsed off the timestamps.
 - **Per-agent hang watchdog (item 2).** `trident/orchestrator.ts` gains a
-  `NO_ADVANCE_HANG_MS` (15 min) fail-fast reap: a non-terminal run with an
+  `NO_ADVANCE_HANG_MS` (25 min) fail-fast reap: a non-terminal run with an
   in-flight dispatch whose `last_advanced_at` hasn't moved is treated as a
   suspected agent hang → `failed` with a named reason, checked BEFORE orphan
   recovery so a wedged orphan is reaped (not redispatched). A healthy build
-  re-stamps `last_advanced_at` on every checkpoint, so it never trips. The 2h
+  re-stamps `last_advanced_at` on every checkpoint, so it never trips. (25 min,
+  not 15 — the only long no-checkpoint window is a single Forge/fix `agent()`
+  step, which a large build can legitimately hold 15–20 min; 25 clears that while
+  still catching the 30+ min silent wedge far faster than the 2h ceiling. Codex
+  review [P1].) The 2h
   `max_inflight_ms` ceiling stays as a defense-in-depth backstop. The reaped
   `failed` transition flows through the existing `on_terminal` hook → terminal
   notification + board reconcile (item back to `upcoming`, fork glyph dark). Only

@@ -114,7 +114,7 @@ export interface BuildTridentOrchestratorOptions {
    * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
    * only a genuinely wedged agent() (or a stalled orphan) does. This is
    * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
-   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (15 min).
+   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (25 min).
    */
   no_advance_hang_ms?: number
   /**
@@ -170,11 +170,18 @@ const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
 /**
  * Per-agent hang watchdog default (M1 trident-UX hardening, item 2). A
  * non-terminal run whose `last_advanced_at` has not moved for this long while a
- * dispatch is in flight is reaped as a suspected agent hang. 15 min: long enough
- * that a healthy build (which checkpoints between phases) never trips it, short
- * enough to catch the exact 30+ min silent wedge that motivated this.
+ * dispatch is in flight is reaped as a suspected agent hang.
+ *
+ * 25 min is a deliberate balance (Codex cross-model review [P1]): the ONLY
+ * long no-checkpoint window in a HEALTHY build is a single Forge/fix `agent()`
+ * step (checkpoints land between phases, not during one), and a large build can
+ * legitimately run 15–20 min in that one step — a 15-min threshold would falsely
+ * reap it. 25 min clears a normal large build while still catching the exact
+ * 30+ min SILENT wedge that motivated this, FAR faster than the old 2h ceiling.
+ * A reaped run is recoverable (re-run resumes from the last checkpoint). Tune via
+ * `no_advance_hang_ms`.
  */
-const NO_ADVANCE_HANG_MS = 15 * 60_000
+const NO_ADVANCE_HANG_MS = 25 * 60_000
 
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,

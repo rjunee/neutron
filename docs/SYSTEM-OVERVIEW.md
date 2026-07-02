@@ -1232,7 +1232,7 @@ has finished. The board is **instance-scoped by the server-derived
   (`phase='stopped'`, the existing trident stop path) BEFORE removing the card, so
   deleting a card can't orphan a running build; the client shows a confirm dialog
   first ("Cancel this build and remove it?"). Separately, the durable loop's
-  **hang watchdog** (`trident/orchestrator.ts`, `NO_ADVANCE_HANG_MS` = 15 min)
+  **hang watchdog** (`trident/orchestrator.ts`, `NO_ADVANCE_HANG_MS` = 25 min)
   reaps a non-terminal run whose `last_advanced_at` has not moved — a suspected
   zero-token agent hang — to `failed` with a named reason, so it surfaces on the
   Plan item + fires the terminal notification instead of stalling silently.
