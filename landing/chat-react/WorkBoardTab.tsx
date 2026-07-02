@@ -38,6 +38,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { BootstrapConfig } from './config.ts'
 import {
   WebWorkBoardClient,
+  docLinkLabel,
+  docPathFromDesignRef,
   type RunPhaseLabel,
   type RunProgress,
   type WorkBoardItem,
@@ -152,11 +154,22 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
 }
 
+/**
+ * True when the ▶ (play) control should render: the item is NOT in_progress and
+ * NOT done and has NO live linked run. That's an `upcoming` card that has never
+ * been dispatched (START) OR whose last build failed/stopped (RETRY). A live
+ * build shows the run sub-label + the X-cancel instead; a done card is history.
+ */
+function canPlay(item: WorkBoardItem): boolean {
+  return item.status !== 'in_progress' && item.status !== 'done' && !isLinkedRunning(item)
+}
+
 export function WorkBoardTab({
   projectId,
   config,
   liveSource,
   fetchImpl,
+  onOpenDoc,
 }: {
   projectId: string
   config: BootstrapConfig
@@ -164,6 +177,9 @@ export function WorkBoardTab({
   liveSource?: WorkBoardLiveSource | null
   /** Injected in tests; defaults to the global fetch inside the client. */
   fetchImpl?: FetchImpl
+  /** Open a project doc in the Documents tab (card ▸ spec-doc link). Optional —
+   *  when absent, the doc link falls back to a non-navigating label. */
+  onOpenDoc?: (projectId: string, path: string) => void
 }): React.JSX.Element {
   const client = useMemo(
     () =>
@@ -392,6 +408,37 @@ export function WorkBoardTab({
     [client, projectId, busyId, refresh],
   )
 
+  // ▶ START / RETRY — dispatch a build bound to this card, using its SAVED spec
+  // (its plans/ doc, else its title). The card flips to a live build (fork ⑂ +
+  // the #174 run sub-label) on the next snapshot; we also poll (hasLiveRun). No
+  // confirm on ▶ — starting is cheap + intended (RETRY re-uses the same spec).
+  const startBuild = useCallback(
+    (item: WorkBoardItem): void => {
+      if (busyId !== null) return
+      setBusyId(item.id)
+      setActionError(null)
+      void client
+        .start(projectId, item.id)
+        .then(() => {
+          setBusyId(null)
+          refresh()
+        })
+        .catch((err: unknown) => {
+          setBusyId(null)
+          setActionError(err instanceof Error ? err.message : 'failed to start build')
+        })
+    },
+    [client, projectId, busyId, refresh],
+  )
+
+  const openDoc = useCallback(
+    (item: WorkBoardItem): void => {
+      const path = docPathFromDesignRef(item.design_doc_ref)
+      if (path !== null && onOpenDoc !== undefined) onOpenDoc(projectId, path)
+    },
+    [onOpenDoc, projectId],
+  )
+
   // Item 4 — open the confirm dialog instead of deleting immediately. Prevents
   // an accidental click from cancelling an expensive running build.
   const requestRemove = useCallback(
@@ -500,6 +547,8 @@ export function WorkBoardTab({
                   onMoveUp={() => move(active, i, -1)}
                   onMoveDown={() => move(active, i, 1)}
                   onRemove={() => requestRemove(it)}
+                  onPlay={() => startBuild(it)}
+                  {...(onOpenDoc !== undefined ? { onOpenDoc: () => openDoc(it) } : {})}
                   nowMs={nowTick}
                 />
               ))}
@@ -563,6 +612,8 @@ function WorkBoardRow({
   onMoveUp,
   onMoveDown,
   onRemove,
+  onPlay,
+  onOpenDoc,
   nowMs,
 }: {
   item: WorkBoardItem
@@ -579,12 +630,18 @@ function WorkBoardRow({
   onMoveUp: () => void
   onMoveDown: () => void
   onRemove: () => void
+  /** ▶ — START/RETRY a build from the card's saved spec. */
+  onPlay: () => void
+  /** Open the card's linked spec-doc in the Documents tab; undefined = no nav. */
+  onOpenDoc?: () => void
   /** Item 1 — a ticking clock so the run sub-label's elapsed/stall advances live. */
   nowMs: number
 }): React.JSX.Element {
   const dot = statusMeta(item.status)
   const activity = activityGlyph(item)
   const progress = item.run_progress
+  const docLabel = docLinkLabel(item.design_doc_ref)
+  const showPlay = canPlay(item)
   return (
     <li className={`cwb-row cwb-row-${item.status}`}>
       <button
@@ -631,8 +688,37 @@ function WorkBoardRow({
               {runProgressText(progress, nowMs)}
             </span>
           ) : null}
+          {docLabel !== null ? (
+            onOpenDoc !== undefined ? (
+              <button
+                type="button"
+                className="cwb-doc-link"
+                onClick={onOpenDoc}
+                title={`Open spec: ${docLabel}`}
+                aria-label={`Open spec doc: ${docLabel}`}
+              >
+                📄 {docLabel}
+              </button>
+            ) : (
+              <span className="cwb-doc-link cwb-doc-link-static" title={`Spec: ${docLabel}`}>
+                📄 {docLabel}
+              </span>
+            )
+          ) : null}
         </span>
       )}
+      {showPlay ? (
+        <button
+          type="button"
+          className="cwb-btn cwb-btn-icon cwb-btn-play"
+          onClick={onPlay}
+          disabled={busy}
+          title={item.linked_run_id !== null ? 'Retry build' : 'Start build'}
+          aria-label={item.linked_run_id !== null ? 'Retry build' : 'Start build'}
+        >
+          ▶
+        </button>
+      ) : null}
       <div className="cwb-actions">
         <button
           type="button"

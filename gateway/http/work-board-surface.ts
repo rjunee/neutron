@@ -49,6 +49,41 @@ export interface TridentRunAccess {
   update(id: string, patch: { phase: TridentPhase }): Promise<unknown>
 }
 
+/**
+ * Result of a ▶ start/retry dispatch. Decoupled from `trident/board-dispatch`
+ * so the surface never imports the dispatch internals — the composer maps its
+ * `BoardBoundBuildResult` onto this shape.
+ */
+export type WorkBoardStartResult =
+  | { ok: true; run_id: string }
+  | {
+      ok: false
+      code: 'missing_board_item' | 'unknown_board_item' | 'underspecified' | 'backend_error'
+      message: string
+    }
+
+/**
+ * Create a card, persisting a non-trivial `spec` to a plans/ doc and linking the
+ * card to it (M1 on-disk spec). The composer wires this to
+ * `WorkBoardSpecDocService.createCardWithOptionalSpec`; when absent the surface
+ * falls back to a plain `store.create` (a supplied `spec` is then ignored).
+ */
+export type WorkBoardCreateCardFn = (
+  project_slug: string,
+  input: { title: string; status?: WorkBoardStatus; design_doc_ref?: string | null; spec?: string },
+) => Promise<WorkBoardItem>
+
+/**
+ * ▶ start/retry a build bound to `item`, using the item's SAVED spec (its
+ * design_doc_ref doc, else its title) as the task. The composer wires this to
+ * the `dispatchBoardBoundBuild` chokepoint (required-item + ask-before-acting
+ * gate + attachRun binding). When absent, the start route returns 501.
+ */
+export type WorkBoardStartBuildFn = (
+  project_slug: string,
+  item: WorkBoardItem,
+) => Promise<WorkBoardStartResult>
+
 export interface WorkBoardSurfaceOptions {
   store: WorkBoardStore
   auth: AppWsAuthResolver
@@ -56,6 +91,10 @@ export interface WorkBoardSurfaceOptions {
   trident_runs?: TridentRunAccess
   /** Injectable clock (ms) for the run-progress derivation; defaults to wall-clock. */
   now?: () => number
+  /** M1 on-disk spec — persist a non-trivial create `spec` to a plans/ doc. */
+  create_card?: WorkBoardCreateCardFn
+  /** M1 ▶ play button — start/retry a build from the card's saved spec. */
+  start_build?: WorkBoardStartBuildFn
 }
 
 export interface WorkBoardSurface {
@@ -76,6 +115,8 @@ const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
   const { store, auth, trident_runs } = opts
   const nowMs = opts.now ?? (() => Date.now())
+  const createCard = opts.create_card
+  const startBuild = opts.start_build
 
   /**
    * Attach each bound item's live run progress (item 1) so the HTTP GET carries
@@ -124,7 +165,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
           return jsonOk({ items: withRunProgress(store.list(project_slug)), project_id })
         }
         if (method === 'POST') {
-          return handleCreate(req, store, project_slug, project_id)
+          return handleCreate(req, store, project_slug, project_id, createCard)
         }
         return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /work-board`)
       }
@@ -148,6 +189,9 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
           `method '${method}' not allowed on /work-board/<id>`,
         )
       }
+      if (action === 'start' && method === 'POST') {
+        return handleStart(store, project_slug, project_id, item_id, trident_runs, startBuild)
+      }
       if (action === 'complete' && method === 'POST') {
         return handleComplete(store, project_slug, project_id, item_id)
       }
@@ -168,6 +212,7 @@ async function handleCreate(
   store: WorkBoardStore,
   project_slug: string,
   project_id: string,
+  createCard: WorkBoardCreateCardFn | undefined,
 ): Promise<Response> {
   const body = await readJsonBody(req)
   if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
@@ -184,16 +229,71 @@ async function handleCreate(
   if (design_doc_ref === false) {
     return jsonError(400, 'invalid_design_doc_ref', 'design_doc_ref must be a string')
   }
+  const spec = readOptionalString(fields['spec'])
+  if (spec === false) {
+    return jsonError(400, 'invalid_spec', 'spec must be a string')
+  }
   try {
-    const item = await store.create(project_slug, {
-      title,
-      ...(status !== null ? { status } : {}),
-      ...(design_doc_ref !== null ? { design_doc_ref } : {}),
-    })
+    // M1 on-disk spec: when the spec-doc path is wired, route through it so a
+    // non-trivial `spec` is persisted to a plans/ doc and the card is linked;
+    // else fall back to a plain title-only (+ optional ref) create.
+    const item =
+      createCard !== undefined
+        ? await createCard(project_slug, {
+            title,
+            ...(status !== null ? { status } : {}),
+            ...(design_doc_ref !== null ? { design_doc_ref } : {}),
+            ...(spec !== null ? { spec } : {}),
+          })
+        : await store.create(project_slug, {
+            title,
+            ...(status !== null ? { status } : {}),
+            ...(design_doc_ref !== null ? { design_doc_ref } : {}),
+          })
     return jsonOk({ item, project_id }, 201)
   } catch (err) {
     return mapWriteError(err)
   }
+}
+
+/**
+ * ▶ play button — START (a never-dispatched card) or RETRY (a card whose last
+ * run failed/stopped) a build bound to the card, using its SAVED spec (the
+ * design_doc_ref doc, else the title) as the task. Guards against double-firing:
+ * a card that already has a LIVE (non-terminal) linked run returns 409 (the ▶
+ * should not have rendered). An underspecified card (no doc + thin title) is
+ * rejected 409 with the ask-before-acting guidance rather than firing a doomed
+ * build. The dispatch chokepoint itself does the attachRun binding, so the card
+ * flips to in_progress + fork ⑂ and the #174 live progress takes over.
+ */
+async function handleStart(
+  store: WorkBoardStore,
+  project_slug: string,
+  project_id: string,
+  item_id: string,
+  trident_runs: TridentRunAccess | undefined,
+  startBuild: WorkBoardStartBuildFn | undefined,
+): Promise<Response> {
+  const item = store.get(project_slug, item_id)
+  if (item === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  if (startBuild === undefined) {
+    return jsonError(501, 'build_dispatch_unavailable', 'trident build dispatch is not enabled on this instance')
+  }
+  // Don't start a card that already has a live build (the ▶ is hidden for these,
+  // but a stale client / concurrent request could still hit this).
+  const runId = item.linked_run_id
+  if (trident_runs !== undefined && runId !== null && runId.length > 0) {
+    const run = trident_runs.get(runId)
+    if (run !== null && !isTerminalPhase(run.phase)) {
+      return jsonError(409, 'already_running', `item_id=${item_id} already has a live build (${runId})`)
+    }
+  }
+  const result = await startBuild(project_slug, item)
+  if (!result.ok) {
+    const status = result.code === 'backend_error' ? 500 : 409
+    return jsonError(status, result.code, result.message)
+  }
+  return jsonOk({ started: item_id, run_id: result.run_id, project_id })
 }
 
 async function handleUpdate(

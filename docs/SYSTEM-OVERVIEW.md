@@ -1236,6 +1236,32 @@ has finished. The board is **instance-scoped by the server-derived
   reaps a non-terminal run whose `last_advanced_at` has not moved — a suspected
   zero-token agent hang — to `failed` with a named reason, so it surfaces on the
   Plan item + fires the terminal notification instead of stalling silently.
+- **▶ play button + on-disk spec persistence (M1).** A Plan card created from a
+  NON-TRIVIAL ask now persists the FULL context to a real, user-visible markdown
+  doc so it survives session resets and drives the build. `work-board/spec-doc.ts`
+  (pure) decides triviality (a short one-liner stays title-only; multi-line or
+  ≥20-word specs persist), builds the doc, and owns the `neutron-docs:` deep-link
+  format; `work-board/spec-doc-service.ts` (`WorkBoardSpecDocService`) writes the
+  doc to the **user-visible project docs** — `Projects/<id>/docs/plans/<slug>.md`
+  (nested under `docs/` so the Documents tab serves + renders it; a sibling of
+  `docs/` would not be served) — and sets the card's `design_doc_ref` to
+  `neutron-docs:plans/<slug>.md`. Both the create path (`work_board_add`'s new
+  `spec` param + the HTTP `POST` `spec` field) and the ▶ start path go through
+  this ONE service; `ensureDocsDir` recursively creates the docs root first so a
+  not-yet-materialized project scope never silently degrades to a title-only card.
+  The **▶ (play) control** renders on a card that is NOT in_progress and NOT done
+  and has no live run — i.e. an `upcoming` card never dispatched (START) or one
+  whose last build failed/stopped (RETRY). ▶ dispatches through the SAME
+  `dispatchBoardBoundBuild` chokepoint (required-item + ask-before-acting gate +
+  `attachRun` binding) the agent uses, resolving the card's SAVED spec (its
+  `design_doc_ref` doc content, else its title) as the run's `task` — so the doc
+  IS the canonical spec the trident planning stage reads (one doc per card, no
+  competing plan). Agent-native parity: `POST
+  /api/app/projects/<id>/work-board/<item>/start` + the `work_board_start` agent
+  tool are the exact same action. The card links to its doc via a tappable
+  `📄 <name>` label that opens the Documents tab (reusing the `#148` doc-link
+  nav). ▶ START has no confirm (cheap + intended); the `#174` X-cancel confirm is
+  unchanged.
 - **Per-turn injection** — `work-board/fragment.ts` `formatWorkBoardFragment`
   builds a compact `<work_board>` DATA block (active+next items, escaped +
   length-capped, + an advisory drift-guard line). `build-live-agent-turn.ts`

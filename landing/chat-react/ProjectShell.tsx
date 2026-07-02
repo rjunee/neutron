@@ -134,6 +134,7 @@ function TabContent({
   controller,
   fetchImpl,
   docOpenRequest,
+  onOpenDocLink,
 }: {
   tab: TabDescriptor
   projectId: string
@@ -143,6 +144,9 @@ function TabContent({
   fetchImpl?: FetchImpl
   /** P-A — a pending "open this doc" request forwarded to the Documents tab. */
   docOpenRequest?: DocOpenRequest
+  /** Open a project doc in the Documents tab — threaded to the Plan tab's card
+   *  ▸ spec-doc links (same nav a chat doc link uses). */
+  onOpenDocLink?: (projectId: string, path: string) => void
 }): React.JSX.Element {
   if (tab.mount.kind === 'webview') {
     const safeUrl = sanitizeCoreTabUrl(tab.mount.target)
@@ -185,6 +189,7 @@ function TabContent({
         config={config}
         liveSource={controller}
         {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+        {...(onOpenDocLink !== undefined ? { onOpenDoc: onOpenDocLink } : {})}
       />
     )
   }
@@ -466,6 +471,7 @@ export function ProjectShell({
                 projectId={projectId ?? ''}
                 config={config}
                 controller={controller}
+                onOpenDocLink={onOpenDocLink}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
                 {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
               />

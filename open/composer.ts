@@ -188,7 +188,10 @@ import { ProjectCredentialStore } from '../project-credentials/store.ts'
 import { CodexCredentialService } from '../trident/codex-credential.ts'
 import { resolveCodexHome } from '../trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '../project-credentials/fragment.ts'
-import { WorkBoardStore } from '../work-board/store.ts'
+import { WorkBoardStore, type WorkBoardItem } from '../work-board/store.ts'
+import { WorkBoardSpecDocService } from '../work-board/spec-doc-service.ts'
+import { dispatchBoardBoundBuild } from '../trident/board-dispatch.ts'
+import type { WorkBoardStartResult } from '../gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '../work-board/fragment.ts'
 // Chat transport — durable per-topic message log + receipt/reaction/edit logs
 // for the app-ws (Expo / web) surface. Wiring these into the adapter is what
@@ -2172,11 +2175,59 @@ export function buildOpenGraphComposer(
         }
       },
     })
+    // M1 on-disk spec + ▶ play button — the ONE service that persists a card's
+    // full ask to a user-visible `Projects/<id>/docs/plans/<slug>.md` doc (setting
+    // the card's `design_doc_ref`) and resolves that doc back as the build's spec
+    // input. Shared by the create path (agent tool + HTTP POST) and the start
+    // path (▶ button HTTP route + `work_board_start` agent tool) so there is one
+    // doc-write path and one spec-read path.
+    const workBoardSpecDoc = new WorkBoardSpecDocService({
+      docs: docStore,
+      board: workBoardStore,
+      // Ensure the project's docs/ root exists before a spec doc is written — the
+      // owner's default board scope (+ any not-yet-materialized project) may lack
+      // one, and the DocStore rejects a write under a missing root. Idempotent.
+      ensureDocsDir: async (slug) => {
+        mkdirSync(joinPath(owner_home, 'Projects', slug, 'docs'), { recursive: true })
+      },
+    })
+    // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
+    // its title) and dispatches a board-bound build through the SAME chokepoint
+    // (`dispatchBoardBoundBuild`: required-item + ask-before-acting gate +
+    // attachRun binding) the `/code` command + the agent tools use. Gated on the
+    // same live-credential predicate as the trident loop (a build can only run
+    // when the loop can fire it), so the ▶ route degrades to 501 on an LLM-less
+    // box just like `work_board_dispatch_build` is unregistered there.
+    const boardStartBuild =
+      tridentFireInnerWorkflow !== null
+        ? async (slug: string, item: WorkBoardItem): Promise<WorkBoardStartResult> => {
+            const task = await workBoardSpecDoc.resolveTaskForItem(slug, {
+              title: item.title,
+              design_doc_ref: item.design_doc_ref,
+            })
+            const result = await dispatchBoardBoundBuild(
+              { board_item_id: item.id, task },
+              {
+                store: boardRunStore,
+                board: workBoardStore,
+                project_slug: slug,
+                repo_path: owner_home,
+                channel_kind: 'app_socket',
+              },
+            )
+            if (result.ok) return { ok: true, run_id: result.run.id }
+            return { ok: false, code: result.code, message: result.message }
+          }
+        : undefined
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run).
       trident_runs: boardRunStore,
+      // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
+      create_card: (slug, input) => workBoardSpecDoc.createCardWithOptionalSpec(slug, input),
+      // M1 — ▶ start/retry a build from the card's saved spec (undefined = 501).
+      ...(boardStartBuild !== undefined ? { start_build: boardStartBuild } : {}),
     })
     // Phase 2b — late-bind the dispatch board binder (declared above, before the
     // store could exist) to the canonical store now that it's constructed.
@@ -3478,7 +3529,7 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore },
+      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
@@ -3561,6 +3612,10 @@ export function buildOpenGraphComposer(
               work_board: workBoardStore,
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
+              // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
+              // spec (its plans/ doc, else its title) via the same service the
+              // HTTP ▶ route uses, so both build from the one on-disk spec.
+              resolve_task: (slug, item) => workBoardSpecDoc.resolveTaskForItem(slug, item),
             },
           }
         : {}),

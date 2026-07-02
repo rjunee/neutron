@@ -56,7 +56,10 @@ import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
  * satisfies this structurally (`get` / `attachRun`).
  */
 export interface TridentBoardBinder {
-  get(project_slug: string, id: string): (DispatchReadinessTarget & { id: string }) | null
+  get(
+    project_slug: string,
+    id: string,
+  ): (DispatchReadinessTarget & { id: string; linked_run_id?: string | null }) | null
   attachRun(project_slug: string, id: string, run_id: string): Promise<unknown>
 }
 

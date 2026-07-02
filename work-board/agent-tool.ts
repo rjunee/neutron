@@ -30,6 +30,7 @@ import {
   type WorkBoardStatus,
   type WorkBoardStore,
 } from './store.ts'
+import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
 
 export const WORK_BOARD_LIST_TOOL = 'work_board_list'
 export const WORK_BOARD_ADD_TOOL = 'work_board_add'
@@ -89,6 +90,7 @@ interface AddArgs {
   title?: unknown
   status?: unknown
   design_doc_ref?: unknown
+  spec?: unknown
 }
 interface UpdateArgs {
   id?: unknown
@@ -134,7 +136,17 @@ function ok(item: WorkBoardItem | null): { ok: true; item?: WorkBoardItem } {
 export function registerWorkBoardToolSurface(
   registry: ToolRegistry,
   store: WorkBoardStore,
+  opts?: {
+    /**
+     * When wired, `work_board_add` persists a spec doc for a non-trivial `spec`
+     * and points the card's `design_doc_ref` at it (M1 on-disk spec). Absent
+     * (legacy / LLM-less boxes) the add falls back to a title-only create and a
+     * supplied `spec` is ignored.
+     */
+    specDoc?: WorkBoardSpecDocService
+  },
 ): string[] {
+  const specDoc = opts?.specDoc
   registry.register({
     name: WORK_BOARD_LIST_TOOL,
     description:
@@ -153,14 +165,25 @@ export function registerWorkBoardToolSurface(
   registry.register({
     name: WORK_BOARD_ADD_TOOL,
     description:
-      'Add a new one-line item to the Work Board (appended at the end). Use this BEFORE acting on ' +
-      'a new piece of work so the board stays the source of truth. Returns the created item.',
+      'Add a new item to the Work Board (appended at the end). Use this BEFORE acting on a new ' +
+      'piece of work so the board stays the source of truth. `title` is the ONE-line label. For ' +
+      'anything more than a trivial one-liner, ALSO pass `spec` = the FULL context/ask (the ' +
+      "user's request + any clarifying detail): it is persisted to a per-project plans/ doc so it " +
+      "survives session resets and drives the ▶ build. A short one-liner needs no `spec`. Returns " +
+      'the created item.',
     input_schema: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'The ONE-line item text.' },
         status: statusProp,
         design_doc_ref: designDocRefProp,
+        spec: {
+          type: 'string',
+          description:
+            'The FULL context/ask for this item (multi-line ok). When substantial it is saved to a ' +
+            'plans/ doc and the item is linked to it; a short one-liner is left title-only. Omit ' +
+            'when `design_doc_ref` already points at a doc.',
+        },
       },
       required: ['title'],
       additionalProperties: false,
@@ -173,10 +196,21 @@ export function registerWorkBoardToolSurface(
       const title = asString(a.title) ?? ''
       const status = asStatus(a.status)
       const ref = asString(a.design_doc_ref)
-      const createInput: CreateWorkBoardItemInput = { title }
-      if (status !== undefined) createInput.status = status
-      if (ref !== undefined) createInput.design_doc_ref = ref
+      const spec = asString(a.spec)
       try {
+        if (specDoc !== undefined) {
+          return ok(
+            await specDoc.createCardWithOptionalSpec(ctx.project_slug, {
+              title,
+              ...(status !== undefined ? { status } : {}),
+              ...(ref !== undefined ? { design_doc_ref: ref } : {}),
+              ...(spec !== undefined ? { spec } : {}),
+            }),
+          )
+        }
+        const createInput: CreateWorkBoardItemInput = { title }
+        if (status !== undefined) createInput.status = status
+        if (ref !== undefined) createInput.design_doc_ref = ref
         return ok(await store.create(ctx.project_slug, createInput))
       } catch (err) {
         return asErrorResult(err)

@@ -10,6 +10,8 @@ import { describe, expect, it } from 'bun:test'
 import {
   WebWorkBoardClient,
   WorkBoardClientError,
+  docLinkLabel,
+  docPathFromDesignRef,
   parseWorkBoardItems,
   type WorkBoardItem,
 } from '../work-board-client.ts'
@@ -114,6 +116,21 @@ describe('WebWorkBoardClient', () => {
     expect(calls[0]!.url).toBe(`${BASE}/api/app/projects/acme/work-board/w1`)
   })
 
+  it('start POSTs /work-board/<id>/start and returns the run_id', async () => {
+    const { client, calls } = makeClient(jsonRes({ ok: true, started: 'w1', run_id: 'run-9' }))
+    const out = await client.start('acme', 'w1')
+    expect(out).toEqual({ ok: true, run_id: 'run-9' })
+    expect(calls[0]!.method).toBe('POST')
+    expect(calls[0]!.url).toBe(`${BASE}/api/app/projects/acme/work-board/w1/start`)
+  })
+
+  it('start surfaces a coded error (e.g. underspecified) as WorkBoardClientError', async () => {
+    const { client } = makeClient(
+      jsonRes({ ok: false, code: 'underspecified', message: 'ask first' }, 409),
+    )
+    await expect(client.start('acme', 'w1')).rejects.toBeInstanceOf(WorkBoardClientError)
+  })
+
   it('throws a coded WorkBoardClientError on a non-2xx', async () => {
     const { client } = makeClient(jsonRes({ ok: false, code: 'invalid_title', message: 'bad' }, 400))
     await expect(client.create('acme', { title: '' })).rejects.toBeInstanceOf(WorkBoardClientError)
@@ -191,5 +208,18 @@ describe('parseWorkBoardItems', () => {
     expect(out[0]!.run_progress?.phase_label).toBe('building')
     expect(out[0]!.run_progress?.round).toBe(2)
     expect(out[1]!.run_progress).toBeUndefined()
+  })
+})
+
+describe('doc-ref helpers (card ▸ spec-doc link)', () => {
+  it('docPathFromDesignRef extracts the docs-relative path', () => {
+    expect(docPathFromDesignRef('neutron-docs:plans/foo.md')).toBe('plans/foo.md')
+    expect(docPathFromDesignRef('/api/app/projects/p/docs/file?path=plans/foo.md')).toBe('plans/foo.md')
+    expect(docPathFromDesignRef('https://example.test/x')).toBeNull()
+    expect(docPathFromDesignRef(null)).toBeNull()
+  })
+  it('docLinkLabel is the basename without .md', () => {
+    expect(docLinkLabel('neutron-docs:plans/meditation-timer-abc.md')).toBe('meditation-timer-abc')
+    expect(docLinkLabel('https://example.test/x')).toBeNull()
   })
 })
