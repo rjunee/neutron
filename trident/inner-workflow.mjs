@@ -89,7 +89,18 @@ const {
   dbPath,
   runId,
   resumeCheckpoint = null,
+  // Per-project Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
+  // review. Threaded from the outer loop (resolved from NEUTRON_CODEX_HOME env /
+  // per-project config; Part B populates it via the admin panel). ABSENT (null/'')
+  // → codex is "not connected" → the review runs Claude-only + a note, never a
+  // blocker. PRESENT → the codex reviewer runs `trident/codex-review.sh` with this
+  // CODEX_HOME; an auth/call failure there is DEFERRED (never a silent APPROVE).
+  codexHome = null,
 } = normalizeWorkflowArgs(args)
+
+// Is a per-project codex credential configured for this run? Absent → skip the
+// codex panelist entirely (no wasted agent) and synthesise Claude-only.
+const codexConfigured = typeof codexHome === 'string' && codexHome.length > 0
 
 // `pr` mode → push to origin + open/reuse a GitHub PR. `local` mode (the store
 // default when there is no GitHub origin or `gh` is unavailable) → commit on the
@@ -128,6 +139,21 @@ const VERDICT_SCHEMA = {
         },
       },
     },
+  },
+}
+
+// The codex reviewer's verdict carries an extra `codexStatus` so the synthesis
+// can distinguish a real cross-model verdict ('connected') from the graceful
+// never-set-up path ('not_connected') and the never-silent-downgrade path
+// ('deferred' — configured but the codex call failed/timed out).
+const CODEX_VERDICT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'findings', 'codexStatus'],
+  properties: {
+    verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
+    findings: VERDICT_SCHEMA.properties.findings,
+    codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
   },
 }
 
@@ -290,12 +316,61 @@ function normalizeVerdict(v) {
   return v === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
 }
 
+// NEVER-SILENT-DOWNGRADE guard (mirrors Vajra's CODEX_REVIEW_PRECHECK_FAILED /
+// CODEX_REVIEW_TIMEOUT rule). Enforced DETERMINISTICALLY in code, not left to the
+// synthesis LLM: a codex review that was CONFIGURED but FAILED ('deferred') must
+// NEVER be silently upgraded to APPROVE. If synthesis said APPROVE while codex is
+// deferred, force REQUEST_CHANGES and surface the deferral as a blocker finding.
+// 'not_connected' (never set up) and 'connected' (ran fine) pass through — only a
+// configured-but-failed codex blocks. Pure + side-effect-free so it can be
+// unit-tested behaviorally (see inner-workflow.test.ts).
+function enforceCodexGate(synthesis, codexStatus) {
+  if (codexStatus === 'deferred' && synthesis && synthesis.verdict === 'APPROVE') {
+    return {
+      verdict: 'REQUEST_CHANGES',
+      findings: [
+        {
+          severity: 'blocker',
+          title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
+          evidence:
+            'codex was configured (CODEX_HOME set) but the review call failed/timed out; per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Re-run once codex auth is restored.',
+        },
+        ...((synthesis && synthesis.findings) || []),
+      ],
+    }
+  }
+  return synthesis
+}
+
+// The codex cross-model reviewer prompt. It shells out to the wrapper
+// (trident/codex-review.sh) SYNCHRONOUSLY in the foreground (never backgrounded)
+// with the per-project CODEX_HOME, then maps the wrapper's EXIT CODE to a
+// CODEX_VERDICT_SCHEMA result. Only built when a codex credential is configured.
+function codexReviewerPrompt() {
+  const outFile = `/tmp/trident-codex-${slug}.out`
+  const errFile = `/tmp/trident-codex-${slug}.err`
+  const script = `${repoPath}/trident/codex-review.sh`
+  return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
+  CODEX_HOME=${shSingleQuote(codexHome || '')} bash ${script} ${baseBranch} > ${outFile} 2> ${errFile}; echo "CODEX_EXIT=$?"
+Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
+- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
+Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
+}
+
 // Parallel adversarial review + asymmetric-gated synthesis. Returns the
 // synthesised verdict object (VERDICT_SCHEMA).
 async function reviewAndSynthesize(diffFile, round) {
   phase('Review')
-  log(`trident-v2 review: round=${round} diff=${diffFile}`)
-  const verdicts = await parallel([
+  log(
+    `trident-v2 review: round=${round} diff=${diffFile} codex=${codexConfigured ? 'configured' : 'not-connected'}`,
+  )
+  // The review PANEL: Claude rubric + Claude adversarial ALWAYS run; the codex
+  // cross-model reviewer joins ONLY when a per-project credential is configured
+  // (no wasted agent otherwise). All run in parallel.
+  const reviewers = [
     () =>
       agent(
         `${ARGUS_RUBRIC}
@@ -310,23 +385,52 @@ Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-
 TASK: ${task}`,
         { label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA },
       ),
-  ])
+  ]
+  if (codexConfigured) {
+    reviewers.push(() =>
+      agent(codexReviewerPrompt(), {
+        label: 'argus:codex',
+        phase: 'Review',
+        schema: CODEX_VERDICT_SCHEMA,
+      }),
+    )
+  }
+  const verdicts = await parallel(reviewers)
+  // Codex verdict: the real result when configured, else a synthetic
+  // not_connected marker (so the synthesis prompt is uniform + the never-silent
+  // gate has a status to act on).
+  const codexReview =
+    codexConfigured && verdicts[2]
+      ? verdicts[2]
+      : { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }
+  const codexStatus = codexReview.codexStatus || 'not_connected'
 
   // ASYMMETRIC GATING (minority-veto): findings BOTH reviewers confirm → confirmed;
   // ONE credible evidence-backed BLOCKER vetoes APPROVE; a single-reviewer
-  // non-blocker → labelled `unverified` (surfaced, not merge-blocking).
+  // non-blocker → labelled `unverified` (surfaced, not merge-blocking). The codex
+  // cross-model verdict is a full panelist when connected; a 'not_connected' codex
+  // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
-  const synthesis = await agent(
-    `Synthesise these two INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
-- A finding BOTH reviewers raise → keep it as confirmed.
+  const codexPanelLine =
+    codexStatus === 'connected'
+      ? `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(codexReview)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
+      : codexStatus === 'deferred'
+        ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+        : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  const synthesisRaw = await agent(
+    `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+- A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
-- Only return APPROVE when neither reviewer left a credible evidence-backed blocker.
-Verdict A (rubric): ${JSON.stringify(verdicts[0])}
-Verdict B (adversarial): ${JSON.stringify(verdicts[1])}`,
+- Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
+Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}
+Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}
+${codexPanelLine}`,
     { label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA },
   )
-  return synthesis
+  // Deterministic never-silent-downgrade guard — a configured-but-failed codex
+  // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
+  return enforceCodexGate(synthesisRaw, codexStatus)
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────

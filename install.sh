@@ -45,6 +45,8 @@
 #   --no-service   do NOT install the launchd/systemd boot+crash service
 #   --no-gbrain    do NOT install the GBrain memory binary (memory degrades to
 #                  entity pages on disk — no knowledge-graph / semantic recall)
+#   --no-codex     do NOT install the Codex CLI (trident cross-model review
+#                  degrades to Claude-only — codex is best-effort, NOT fatal)
 #   --no-backup    do NOT schedule the git data-backup timer
 #   --no-open      do NOT open the chat URL in a browser on macOS
 #   --start        accepted for back-compat (auto-start is now the default)
@@ -94,6 +96,15 @@ GBRAIN_REF=${NEUTRON_GBRAIN_REF:-github:garrytan/gbrain}
 # Set to 1 by ensure_gbrain once the `gbrain` binary is confirmed on PATH — the
 # final banner reads this so it never claims real memory when it silently degraded.
 GBRAIN_INSTALLED=0
+# Codex CLI powers trident's OPTIONAL cross-model (OpenAI ChatGPT-subscription)
+# code review. Unlike GBrain it is NOT install-fatal: a fresh self-host installs
+# it by default so cross-model review works out of the box, but any failure WARNS
+# and CONTINUES (the trident review degrades gracefully to Claude-only). Opt out
+# with --no-codex / NEUTRON_SKIP_CODEX=1.
+DO_CODEX=1
+# Set to 1 by ensure_codex once the `codex` binary is confirmed on PATH — the
+# final banner reads this so it can note whether cross-model review is available.
+CODEX_INSTALLED=0
 ASSUME_YES=0
 DIR_OVERRIDE=""
 # Offsite git remote for data backups. A --backup-remote <url> flag (or a live
@@ -715,6 +726,101 @@ ensure_gbrain() {
   Or re-run with --no-gbrain to install WITHOUT memory (degrades to on-disk entity pages; no KG/semantic recall)."
 }
 
+# CONTRACT: the Codex CLI is BEST-EFFORT, not required. It powers trident's
+# OPTIONAL cross-model review (OpenAI ChatGPT-subscription GPT-5 review alongside
+# Claude/Argus). We install it BY DEFAULT so a fresh self-host ships with
+# cross-model review available, but — UNLIKE ensure_gbrain — any failure WARNS
+# and CONTINUES: trident's review degrades gracefully to Claude-only (see
+# `trident/codex-review.sh` + the codex reviewer in `trident/inner-workflow.mjs`,
+# which treat "codex not connected" as a note, never a merge blocker). The auth
+# itself (`codex login`, a ChatGPT subscription — NEVER a metered API key) is a
+# separate host-level step under CODEX_HOME; this only puts the CLI on PATH.
+# Opt out with --no-codex / NEUTRON_SKIP_CODEX=1.
+ensure_codex() {
+  if [ "$DO_CODEX" != 1 ] || [ "${NEUTRON_SKIP_CODEX:-}" = 1 ]; then
+    warn "skipping Codex CLI install (--no-codex / NEUTRON_SKIP_CODEX)."
+    warn "  trident cross-model review degrades to Claude-only (no OpenAI GPT-5 panelist)."
+    warn "  Enable it later with:  brew install codex   (or: npm install -g @openai/codex), then \`codex login\`"
+    return 0
+  fi
+
+  # Global npm bins can land in a dir that isn't on THIS process's PATH yet; also
+  # honor a bun global bin (mirrors ensure_gbrain's PATH hygiene) so the post-
+  # install probe can find `codex`.
+  _bun_bin=${BUN_INSTALL:-$HOME/.bun}/bin
+  case ":$PATH:" in *":$_bun_bin:"*) : ;; *) PATH="$_bun_bin:$PATH"; export PATH ;; esac
+
+  # Idempotent: an existing codex (re-install, or hand-installed) → done.
+  if command -v codex >/dev/null 2>&1; then
+    CODEX_INSTALLED=1
+    info "Codex CLI already installed ($(command -v codex)) — trident cross-model review available (run \`codex login\` to auth)"
+    return 0
+  fi
+
+  # The test seam replaces the real install with an injected command; production
+  # prefers `brew install codex` (macOS + Linuxbrew, the Vajra pattern) and falls
+  # back to `npm install -g @openai/codex` when brew is unavailable (bare Linux).
+  if [ -n "${NEUTRON_CODEX_INSTALL_CMD:-}" ]; then
+    _cx_cmd="$NEUTRON_CODEX_INSTALL_CMD"
+  elif command -v brew >/dev/null 2>&1; then
+    _cx_cmd="brew install codex"
+  elif command -v npm >/dev/null 2>&1; then
+    _cx_cmd="npm install -g @openai/codex"
+  else
+    warn "Codex CLI not installed: neither brew nor npm found on PATH."
+    warn "  trident cross-model review degrades to Claude-only. Install codex manually + \`codex login\`, or re-run with --no-codex."
+    return 0
+  fi
+
+  spin_start "installing Codex CLI (cross-model review)"
+  _cx_log=$(mktemp 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/neutron-codex.$$")
+
+  # Retry transient failures (network blips, brew/npm registry hiccups).
+  # NEUTRON_CODEX_ATTEMPTS / NEUTRON_CODEX_RETRY_DELAY are test/override seams.
+  _cx_attempts=${NEUTRON_CODEX_ATTEMPTS:-3}
+  _cx_delay=${NEUTRON_CODEX_RETRY_DELAY:-2}
+  _cx_ok=0
+  _cx_n=1
+  while [ "$_cx_n" -le "$_cx_attempts" ]; do
+    if sh -c "$_cx_cmd" >"$_cx_log" 2>&1; then
+      _cx_ok=1
+      break
+    fi
+    if [ "$_cx_n" -lt "$_cx_attempts" ]; then
+      warn "Codex CLI install attempt $_cx_n/$_cx_attempts failed — retrying in ${_cx_delay}s…"
+      [ "$_cx_delay" = 0 ] || sleep "$_cx_delay"
+    fi
+    _cx_n=$((_cx_n + 1))
+  done
+
+  if [ "$_cx_ok" = 1 ]; then
+    case ":$PATH:" in *":$_bun_bin:"*) : ;; *) PATH="$_bun_bin:$PATH"; export PATH ;; esac
+    if command -v codex >/dev/null 2>&1; then
+      CODEX_INSTALLED=1
+      spin_end 0 "Codex CLI installed — trident cross-model review available (run \`codex login\` to auth)"
+      [ "$FANCY" = 1 ] || info "Codex CLI installed ($(command -v codex)) — run \`codex login\` (ChatGPT subscription) to enable cross-model review"
+      rm -f "$_cx_log"
+      return 0
+    fi
+    # Installed without error but not resolvable — a PATH gap. codex is best-
+    # effort, so WARN + continue (do NOT die, unlike gbrain).
+    spin_end 1
+    warn "Codex CLI install ran but 'codex' is not on PATH — trident cross-model review degrades to Claude-only."
+    warn "  Ensure the global bin dir is on your PATH and re-run, or install manually + \`codex login\`."
+    cat "$_cx_log" >&2
+    rm -f "$_cx_log"
+    return 0
+  fi
+
+  # Every attempt failed. codex is BEST-EFFORT — WARN + continue (NOT fatal).
+  spin_end 1
+  warn "Codex CLI install failed after $_cx_attempts attempt(s) — trident cross-model review degrades to Claude-only."
+  warn "  Install it manually later:  brew install codex   (or: npm install -g @openai/codex), then \`codex login\`."
+  cat "$_cx_log" >&2
+  rm -f "$_cx_log"
+  return 0
+}
+
 # Run `claude setup-token` and capture the long-lived `sk-ant-oat…` token it
 # prints to stdout, mirroring the Managed install-token flow (the
 # install-token-script renderer in the onboarding-api landing module).
@@ -902,6 +1008,7 @@ while [ $# -gt 0 ]; do
     --no-start) DO_START=0; shift ;;
     --no-service) DO_SERVICE=0; shift ;;
     --no-gbrain) DO_GBRAIN=0; shift ;;
+    --no-codex) DO_CODEX=0; shift ;;
     --no-backup) DO_BACKUP=0; shift ;;
     --no-open) DO_OPEN=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -1001,6 +1108,17 @@ if [ "${NEUTRON_INSTALL_PRINT_GBRAIN:-}" = "1" ]; then
   exit 0
 fi
 
+# Test seam (harness only): run the Codex CLI install/detect step in isolation
+# and exit. Lets the unit tests assert its branches (already-present / installed-
+# ok / install-failed→WARN-continue / opted-out) via NEUTRON_CODEX_INSTALL_CMD
+# without hitting the network. Unlike the gbrain seam this NEVER exits non-zero on
+# install failure — codex is best-effort.
+if [ "${NEUTRON_INSTALL_PRINT_CODEX:-}" = "1" ]; then
+  ensure_codex
+  printf 'CODEX_INSTALLED=%s\n' "$CODEX_INSTALLED"
+  exit 0
+fi
+
 if [ "$MODE" = "local" ]; then
   info "installing in place from existing checkout: $SRC_DIR"
 else
@@ -1051,6 +1169,11 @@ fi
 # with knowledge-graph + semantic recall instead of silently degrading to
 # on-disk entity pages. Non-fatal + opt-out aware (see ensure_gbrain).
 ensure_gbrain
+
+# Install the Codex CLI so trident's cross-model review works out of the box.
+# BEST-EFFORT: any failure WARNs and continues (the review degrades to Claude-
+# only). Opt-out aware (see ensure_codex).
+ensure_codex
 
 # ── config ───────────────────────────────────────────────────────────────────
 ui_phase "2/6" "Configuration"

@@ -74,6 +74,12 @@ export interface BuildTridentOrchestratorOptions {
   now?: () => string
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
+  /** Per-project Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
+   *  review, threaded into the inner workflow. Resolved from NEUTRON_CODEX_HOME
+   *  env / per-project config at wiring time (Part B populates it via the admin
+   *  panel). Undefined/null → codex "not connected" → the review is Claude-only
+   *  (never a merge blocker). */
+  codex_home?: string | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
@@ -224,6 +230,7 @@ export function buildTridentOrchestrator(
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
+      codex_home: opts.codex_home ?? null,
     })
     const tracked = firePromise.then(
       () => undefined,
