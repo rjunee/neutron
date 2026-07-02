@@ -206,6 +206,40 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     expect(newService().ensureMaterialized(OWNER)).toBe(false)
     expect(existsSync(codexAuthPath(codexHome))).toBe(false)
   })
+
+  test('status reports override_present so the UI can always remove a stale override', async () => {
+    const svc = newService()
+    // No override → false on a project query; the GLOBAL status never carries it.
+    expect(svc.status(OWNER, { project_id: PID }).override_present).toBe(false)
+    expect(svc.status(OWNER).override_present).toBeUndefined()
+    // A live override → present + scope project.
+    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    const live = svc.status(OWNER, { project_id: PID })
+    expect(live.override_present).toBe(true)
+    expect(live.scope).toBe('project')
+    // Removing it → false again.
+    await svc.disconnect(OWNER, { scope: 'project', project_id: PID })
+    expect(svc.status(OWNER, { project_id: PID }).override_present).toBe(false)
+  })
+
+  test('an EXPIRED override masks itself behind global, but override_present stays true (P2)', async () => {
+    const svc = newService()
+    await svc.connect(OWNER, subscriptionAuth()) // working global default
+    // Store an EXPIRED project override directly (expires_at in the past) — the
+    // resolver skips it, so status resolves the global default (scope=global)…
+    await store.set(OWNER, {
+      service: CODEX_CREDENTIAL_SERVICE,
+      plaintext: subscriptionAuth(),
+      scope: 'project',
+      project_id: PID,
+      expires_at: '2000-01-01T00:00:00.000Z',
+    })
+    const s = svc.status(OWNER, { project_id: PID })
+    expect(s.status).toBe('connected')
+    expect(s.scope).toBe('global')
+    // …but the stale override ROW is still flagged, so the UI can remove it.
+    expect(s.override_present).toBe(true)
+  })
 })
 
 describe('connect → codex-review.sh sees CONNECTED (exit 0)', () => {

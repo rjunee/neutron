@@ -498,14 +498,21 @@ export function SettingsTab({
           {codexStatus?.status === 'connected'
             ? codexStatus.scope === 'project'
               ? '✓ Connected (project override)'
-              : '✓ Connected (using the global default)'
+              : codexStatus.override_present === true
+                ? '⚠ Override expired — using the global default'
+                : '✓ Connected (using the global default)'
             : codexStatus?.status === 'expired'
               ? '⚠ Token expired — re-connect'
-              : '○ Not connected'}
+              : codexStatus?.override_present === true
+                ? '○ Override set but not usable — using the global default'
+                : '○ Not connected'}
           {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
         </p>
         {codexError !== null ? <p className="cset-error">{codexError}</p> : null}
-        {codexStatus?.status === 'connected' && codexStatus.scope === 'project' ? (
+        {/* Show removal whenever a project-override ROW exists — including an
+            expired one the resolver skipped (which masks itself behind the global
+            default), so a stale override is never un-removable. */}
+        {codexStatus?.override_present === true ? (
           <div className="cset-form-actions">
             <button
               type="button"

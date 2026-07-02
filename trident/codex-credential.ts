@@ -65,6 +65,11 @@ export interface CodexConnectResult {
 export interface CodexStatusResult extends CodexStatusDetail {
   /** The scope that supplied the resolved credential, or null when unset. */
   scope: CredentialScope | null
+  /** Whether a project-scoped OVERRIDE row exists for the queried project —
+   *  INCLUDING an expired one (which the resolver skips, so `scope` would report
+   *  the global fallback). Lets the UI always offer to remove a stale override.
+   *  Only meaningful when a `project_id` was supplied. */
+  override_present?: boolean
 }
 
 export interface CodexCredentialServiceDeps {
@@ -134,13 +139,22 @@ export class CodexCredentialService {
    * the global default. `scope` names which supplied it.
    */
   status(owner_slug: string, target?: CodexTarget): CodexStatusResult {
-    const project_id = target?.project_id
+    const project_id = (target?.project_id ?? '').trim()
     const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     const stored = resolved?.plaintext ?? null
     const scope = resolved?.scope ?? null
     const home = scope === 'project' ? codexProjectHome(this.codexHome, project_id) : this.codexHome
     const materialized = readMaterializedAuth(home) !== null
-    return { ...deriveCodexStatus(stored, { materialized, now: this.now }), scope }
+    // A project-override ROW (expired or not) — so the UI can always remove a
+    // stale override even when the resolver has fallen back to the global default.
+    const override_present =
+      project_id.length > 0 &&
+      this.store.getMeta(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE) !== null
+    return {
+      ...deriveCodexStatus(stored, { materialized, now: this.now }),
+      scope,
+      ...(project_id.length > 0 ? { override_present } : {}),
+    }
   }
 
   /**

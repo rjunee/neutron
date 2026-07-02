@@ -74,12 +74,21 @@ export interface BuildTridentOrchestratorOptions {
   now?: () => string
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
-  /** Per-project Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
+  /** Static Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
    *  review, threaded into the inner workflow. Resolved from NEUTRON_CODEX_HOME
-   *  env / per-project config at wiring time (Part B populates it via the admin
-   *  panel). Undefined/null → codex "not connected" → the review is Claude-only
-   *  (never a merge blocker). */
+   *  env / per-project config at wiring time. Undefined/null → codex "not
+   *  connected" → the review is Claude-only (never a merge blocker). Ignored when
+   *  `resolve_codex_home` is supplied. */
   codex_home?: string | null
+  /** Per-run CODEX_HOME resolver (preferred over `codex_home`). Called on every
+   *  tick with the launching run so the review resolves the credential through
+   *  the #149 store resolver (`CodexCredentialService.resolveActiveCodexHome`:
+   *  project override → global → unset) with self-healing materialization —
+   *  never a raw static path. Trident runs are instance-scoped by `project_slug`
+   *  (no per-project id), so a run resolves the GLOBAL default; the resolver
+   *  honors a project override wherever a real project id is supplied. Returns
+   *  null → codex not connected → Claude-only review. */
+  resolve_codex_home?: (run: TridentRun) => string | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
@@ -230,7 +239,11 @@ export function buildTridentOrchestrator(
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
-      codex_home: opts.codex_home ?? null,
+      // Prefer the per-run resolver (store-backed, self-healing) over any static
+      // dir; either resolves the CODEX_HOME the inner review threads.
+      codex_home: opts.resolve_codex_home
+        ? opts.resolve_codex_home(launchRun)
+        : (opts.codex_home ?? null),
     })
     const tracked = firePromise.then(
       () => undefined,

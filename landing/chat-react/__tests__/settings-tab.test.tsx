@@ -150,3 +150,49 @@ describe('SettingsTab archive action (happy-dom)', () => {
     root.unmount()
   })
 })
+
+describe('SettingsTab Codex override (happy-dom)', () => {
+  it('renders the override section labelled optional', async () => {
+    const { container, root } = await mount((url) => {
+      if (url.endsWith('/api/app/projects/acme/codex-auth')) {
+        return json({ ok: true, status: 'not_connected', scope: null, override_present: false })
+      }
+      return null
+    })
+    expect(container.textContent).toContain('Codex review — project override')
+    expect(container.textContent).toContain('Optional.')
+    // No override row → no remove button.
+    expect(btn(container, 'Remove override')).toBeUndefined()
+    root.unmount()
+  })
+
+  it('shows Remove override for a STALE/expired override (masked behind global) and DELETEs it (P2)', async () => {
+    let deleted = false
+    const { container, root, act, calls } = await mount((url, init) => {
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        // Expired override masks itself → resolver reports the global default,
+        // but override_present stays true so the row is removable.
+        return json({ ok: true, status: 'connected', scope: 'global', override_present: true })
+      }
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && init?.method === 'DELETE') {
+        deleted = true
+        return json({ ok: true, disconnected: true, scope: 'project' })
+      }
+      return null
+    })
+
+    expect(container.textContent).toContain('Override expired — using the global default')
+    const remove = btn(container, 'Remove override')
+    expect(remove).not.toBeUndefined()
+    await act(async () => {
+      remove.click()
+      await tick()
+      await tick()
+    })
+    expect(deleted).toBe(true)
+    expect(
+      calls.some((c) => c === 'DELETE https://sam.neutron.test/api/app/projects/acme/codex-auth'),
+    ).toBe(true)
+    root.unmount()
+  })
+})

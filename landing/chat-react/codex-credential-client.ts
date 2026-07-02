@@ -31,6 +31,10 @@ export interface CodexStatus {
   /** Which scope supplied the resolved credential (project override vs global
    *  default), or null when unset. Present on the effective-status responses. */
   scope?: CodexScope | null
+  /** Whether a project-scoped OVERRIDE row exists for the queried project —
+   *  including an expired one the resolver skipped. Lets the Settings UI always
+   *  offer to remove a stale override. Only on per-project status responses. */
+  override_present?: boolean
 }
 
 interface ErrorBody {

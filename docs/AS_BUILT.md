@@ -61,6 +61,25 @@ Live server (`NEUTRON_HOME=/tmp/wfcx PORT=7871 bun run open/server.ts`) boots
 clean and both `/api/app/codex-auth` + `/api/app/projects/<id>/codex-auth` return
 401 (mounted + auth-gated), not 404.
 
+**Codex cross-model review — addressed.**
+- **[P1] review resolves through the store resolver (not a static path).** The
+  trident orchestrator gained `resolve_codex_home?: (run) => string | null`
+  (preferred over the static `codex_home`); the composer wires it to
+  `CodexCredentialService.resolveActiveCodexHome(run.project_slug)` so the inner
+  review's CODEX_HOME is resolved per-run through the #149 resolver (project
+  override → global → unset, self-healing) rather than a raw dir. **Known
+  constraint:** trident runs are instance-scoped by `project_slug` (no per-project
+  id on a run — see `trident/store.ts` `TridentRun`), so a run resolves the GLOBAL
+  default; a per-project override cannot select a different cred *per trident run*
+  until runs carry a project id (a larger, separate change). The override
+  mechanism itself (store/resolver/status/UI) is fully implemented + tested.
+- **[P2] a stale/expired project override is always removable.** `status()` now
+  returns `override_present` (a project-scope row exists, even expired — the
+  resolver skips expired rows so `scope` would report the global fallback). The
+  Settings override section shows "Remove override" whenever `override_present`,
+  so an expired override that masks itself behind the global default can still be
+  cleaned up.
+
 ## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
 
 **Why.** Part A (#165) wired the trident cross-model reviewer (`codex-review.sh`

@@ -55,6 +55,8 @@ function buildHarness(opts: {
   mint_run_id?: () => string
   now?: () => string
   max_inflight_ms?: number
+  codex_home?: string | null
+  resolve_codex_home?: (run: TridentRun) => string | null
 }): Harness {
   const hostCalls: string[][] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
@@ -78,6 +80,8 @@ function buildHarness(opts: {
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
+  if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
+  if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({ store, step: orch.step })
   return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs }
@@ -343,5 +347,46 @@ describe('orchestrator — resume safety (no double-fire)', () => {
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
     expect(h.inputs).toHaveLength(1)
+  })
+})
+
+describe('orchestrator — CODEX_HOME resolution', () => {
+  test('prefers the per-run resolver over the static codex_home', async () => {
+    const seen: string[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      codex_home: '/static/global',
+      resolve_codex_home: (run) => {
+        seen.push(run.project_slug)
+        return `/resolved/${run.project_slug}`
+      },
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    // The resolver was called with the launching run and its output threaded to
+    // the inner workflow — NOT the static dir.
+    expect(seen).toContain('t1')
+    expect(h.inputs[0]?.codex_home).toBe('/resolved/t1')
+  })
+
+  test('falls back to the static codex_home when no resolver is supplied', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      codex_home: '/static/global',
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    expect(h.inputs[0]?.codex_home).toBe('/static/global')
+  })
+
+  test('a resolver returning null → codex not connected (null threaded)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      codex_home: '/static/global',
+      resolve_codex_home: () => null,
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    expect(h.inputs[0]?.codex_home).toBeNull()
   })
 })

@@ -397,13 +397,17 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
         }
-        // OPTIONAL cross-model review: thread the per-project Codex credential dir
-        // (CODEX_HOME) into the inner workflow. Part B: the composer resolves the
-        // per-project_slug CODEX_HOME via `resolveCodexHome({ owner_home })` and
-        // passes it here (`tridentWiring.codex_home`) — the SAME path the admin
-        // panel materializes `auth.json` into. Falls back to NEUTRON_CODEX_HOME
-        // env for manual dev overrides. Absent → codex "not connected" → the
-        // trident review runs Claude-only (never a merge blocker).
+        // OPTIONAL cross-model review: resolve the Codex credential dir
+        // (CODEX_HOME) for the inner workflow. PREFER the composer's per-run
+        // resolver (`resolve_codex_home` → `CodexCredentialService.resolveActiveCodexHome`:
+        // project override → global → unset, self-healing) so the review reads
+        // the credential through the #149 store resolver, never a stale static
+        // path. Fall back to the static `codex_home` / `NEUTRON_CODEX_HOME` env
+        // for manual dev overrides. Absent → codex "not connected" → Claude-only
+        // review (never a merge blocker).
+        if (tridentWiring.resolve_codex_home !== undefined) {
+          orchestratorOpts.resolve_codex_home = tridentWiring.resolve_codex_home
+        }
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome

@@ -3515,9 +3515,17 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: skillForgeOnRunTerminal,
-              // Part B — the per-project CODEX_HOME the trident loop threads into
-              // the inner workflow's optional codex reviewer. SAME path the admin
-              // panel materializes auth.json into (`resolveCodexHome`).
+              // The CODEX_HOME the trident loop threads into the inner workflow's
+              // optional codex reviewer. Resolved PER RUN through the credential
+              // service (`resolveActiveCodexHome`: project override → global →
+              // unset, self-healing) so a connect made AFTER boot + any project
+              // override are honored via the #149 store resolver. Trident runs are
+              // instance-scoped by `project_slug` (no per-project id), so a run
+              // resolves the GLOBAL default; the resolver still prefers an override
+              // for any project id it is given. `codex_home` (static global dir)
+              // stays as the dev/legacy fallback (see build-core-modules).
+              resolve_codex_home: (run) =>
+                codexCredentialService.resolveActiveCodexHome(run.project_slug),
               codex_home: codexHome,
             },
             // Work Board Phase 2b — the agent-native board-bound build dispatch
