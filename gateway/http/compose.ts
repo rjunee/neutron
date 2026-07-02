@@ -1143,10 +1143,11 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
         const credRes = await appProjectCredentials.handler(req)
         if (credRes !== null) return credRes
       }
-      // 0h1d. Part B — admin-panel Connect Codex surface. Owns
-      //       `/api/app/projects/<id>/codex-auth` (GET/POST/DELETE). Mounted
-      //       alongside credentials, BEFORE appProjects, so the per-project
-      //       `/codex-auth` child path is unambiguously owned.
+      // 0h1d. Connect Codex surface (trident cross-model review). Owns the
+      //       GLOBAL account-wide `/api/app/codex-auth` (primary — General admin
+      //       UI) AND the per-project OVERRIDE `/api/app/projects/<id>/codex-auth`
+      //       (GET/POST/DELETE). Mounted alongside credentials, BEFORE appProjects,
+      //       so the per-project `/codex-auth` child path is unambiguously owned.
       if (appCodexCredential !== undefined) {
         const codexRes = await appCodexCredential.handler(req)
         if (codexRes !== null) return codexRes

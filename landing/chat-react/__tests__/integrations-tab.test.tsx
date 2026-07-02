@@ -245,6 +245,55 @@ describe('IntegrationsTab render (happy-dom)', () => {
     root.unmount()
   })
 
+  it('renders the GLOBAL Codex section and Connect POSTs to /api/app/codex-auth', async () => {
+    const posted: Array<{ url: string; body: unknown }> = []
+    const { container, root, act, calls } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      // Global codex status starts not_connected.
+      if (url.endsWith('/api/app/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        return json({ ok: true, status: 'not_connected', scope: null })
+      }
+      if (url.endsWith('/api/app/codex-auth') && init?.method === 'POST') {
+        posted.push({ url, body: JSON.parse(init.body as string) })
+        return json({ ok: true, status: 'connected', scope: 'global' }, 201)
+      }
+      return null
+    })
+
+    // The section renders under the account-wide Admin surface.
+    expect(container.textContent).toContain('Codex cross-model review')
+    expect(container.textContent).toContain('account-wide credential')
+    expect(container.textContent).toContain('○ Not connected')
+
+    const textarea = container.querySelector('#cint-codex-auth') as HTMLTextAreaElement
+    const setVal = (Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )?.set as (v: string) => void) ?? (() => {})
+    await act(async () => {
+      setVal.call(textarea, '{"tokens":{"access_token":"a","refresh_token":"r"}}')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+
+    const connectBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Connect Codex',
+    ) as HTMLButtonElement
+    await act(async () => {
+      connectBtn.click()
+      await tick()
+      await tick()
+    })
+
+    expect(posted).toHaveLength(1)
+    expect((posted[0]!.body as { auth: string }).auth).toContain('refresh_token')
+    expect(calls.some((c) => c === 'POST https://sam.neutron.test/api/app/codex-auth')).toBe(true)
+    // Status flips to connected after the successful global connect.
+    expect(container.textContent).toContain('✓ Connected')
+    root.unmount()
+  })
+
   it('shows an empty state when there are no archived projects', async () => {
     const { container, root } = await mount((url) => {
       if (url.endsWith('/api/cores/integrations')) return json(STATUS)

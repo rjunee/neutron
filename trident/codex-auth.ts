@@ -166,13 +166,31 @@ export function validateCodexSubscriptionAuth(
 }
 
 /**
- * The canonical per-project CODEX_HOME directory. `owner_home` is already the
- * per-project_slug owner root (`resolveNeutronHome`), so `<owner_home>/.codex`
- * is a per-project CODEX_HOME — the ONE place both the admin-panel materialize
- * and the trident loop's env agree on.
+ * The canonical GLOBAL CODEX_HOME directory. `owner_home` is the per-owner_slug
+ * root (`resolveNeutronHome`), so `<owner_home>/.codex` is the instance-wide
+ * codex credential dir — the ONE place both the admin-panel materialize and the
+ * trident loop's env agree on for the GLOBAL (default) Codex subscription.
+ *
+ * The Codex subscription is a GLOBAL, trident-wide credential (trident runs
+ * across ANY project), so this global dir is the primary/default. A per-project
+ * OVERRIDE materializes to `codexProjectHome(globalHome, project_id)` — a nested
+ * `<global>/projects/<project_id>` dir — so a project's override auth.json never
+ * collides with the global one and the resolver can pick project → global.
  */
 export function resolveCodexHome(opts: { owner_home: string }): string {
   return join(opts.owner_home, '.codex')
+}
+
+/**
+ * The per-project OVERRIDE CODEX_HOME nested under the global codex dir. The
+ * `project_id` is sanitized to `[A-Za-z0-9_.-]` (defence-in-depth against path
+ * traversal — the credential surface already sanitizes it, but this helper is
+ * also reachable from the service directly). An empty/invalid id falls back to
+ * the global dir (no override).
+ */
+export function codexProjectHome(globalCodexHome: string, project_id: string | null | undefined): string {
+  const pid = (project_id ?? '').replace(/[^A-Za-z0-9_.-]/g, '').trim()
+  return pid.length > 0 ? join(globalCodexHome, 'projects', pid) : globalCodexHome
 }
 
 /** The absolute `auth.json` path inside a CODEX_HOME. */

@@ -482,25 +482,30 @@ export function SettingsTab({
         </form>
       </section>
 
-      {/* ── Codex review (Part B — trident cross-model reviewer credential) ── */}
-      <section className="cset-section" aria-label="Codex review">
-        <h2 className="cset-h">Codex cross-model review</h2>
+      {/* ── Codex review OVERRIDE (optional — the primary/global connect lives
+          in the General → Admin tab; this only overrides it for THIS project) ── */}
+      <section className="cset-section" aria-label="Codex review override">
+        <h2 className="cset-h">Codex review — project override</h2>
         <p className="cset-sub">
-          Connect a ChatGPT <strong>subscription</strong> so trident builds get an independent
-          GPT-5 (Codex) review alongside Claude. Run <code>codex login</code> on your machine, then
-          paste the contents of <code>~/.codex/auth.json</code> below. A metered
-          <code> OPENAI_API_KEY</code> is rejected — subscription only.
+          <strong>Optional.</strong> Codex is normally connected once, account-wide, in
+          <strong> General → Admin → Codex cross-model review</strong>, and used by trident across
+          every project. Only use this if <em>this</em> project needs a <em>different</em> ChatGPT
+          subscription — an override here wins over the global default for this project. Run
+          <code> codex login</code>, then paste that subscription’s <code>~/.codex/auth.json</code>.
+          A metered <code>OPENAI_API_KEY</code> is rejected — subscription only.
         </p>
         <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
           {codexStatus?.status === 'connected'
-            ? '✓ Connected'
+            ? codexStatus.scope === 'project'
+              ? '✓ Connected (project override)'
+              : '✓ Connected (using the global default)'
             : codexStatus?.status === 'expired'
               ? '⚠ Token expired — re-connect'
               : '○ Not connected'}
           {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
         </p>
         {codexError !== null ? <p className="cset-error">{codexError}</p> : null}
-        {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+        {codexStatus?.status === 'connected' && codexStatus.scope === 'project' ? (
           <div className="cset-form-actions">
             <button
               type="button"
@@ -508,7 +513,7 @@ export function SettingsTab({
               disabled={codexBusy}
               onClick={disconnectCodex}
             >
-              {codexBusy ? 'Working…' : 'Disconnect Codex'}
+              {codexBusy ? 'Working…' : 'Remove override'}
             </button>
           </div>
         ) : null}
@@ -520,7 +525,7 @@ export function SettingsTab({
           }}
         >
           <label className="cset-label" htmlFor="cset-codex-auth">
-            Paste ~/.codex/auth.json
+            Paste ~/.codex/auth.json (project override)
           </label>
           <textarea
             id="cset-codex-auth"
@@ -536,7 +541,7 @@ export function SettingsTab({
               className="cset-btn cset-btn-primary"
               disabled={codexBusy || codexAuth.trim().length === 0}
             >
-              {codexBusy ? 'Connecting…' : 'Connect Codex'}
+              {codexBusy ? 'Saving…' : 'Save project override'}
             </button>
           </div>
         </form>

@@ -77,4 +77,34 @@ describe('WebCodexCredentialClient', () => {
     expect(cap.calls[0]?.method).toBe('DELETE')
     expect(cap.calls[0]?.url).toBe(`${BASE}/api/app/projects/acme/codex-auth`)
   })
+
+  // ── GLOBAL (primary — General admin UI): the account-wide route ──
+  it('statusGlobal → GET /api/app/codex-auth (no project segment)', async () => {
+    const cap = capture(jsonRes({ ok: true, status: 'connected', scope: 'global' }))
+    const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
+    const s = await client.statusGlobal()
+    expect(s.status).toBe('connected')
+    expect(s.scope).toBe('global')
+    expect(cap.calls[0]?.url).toBe(`${BASE}/api/app/codex-auth`)
+    expect(cap.calls[0]?.method).toBe('GET')
+    expect(cap.calls[0]?.auth).toBe(`Bearer ${TOKEN}`)
+  })
+
+  it('connectGlobal → POST /api/app/codex-auth { auth }', async () => {
+    const cap = capture(jsonRes({ ok: true, status: 'connected', scope: 'global' }, 201))
+    const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
+    const s = await client.connectGlobal('{"tokens":{"access_token":"a","refresh_token":"r"}}')
+    expect(s.scope).toBe('global')
+    expect(cap.calls[0]?.url).toBe(`${BASE}/api/app/codex-auth`)
+    expect(cap.calls[0]?.method).toBe('POST')
+    expect((cap.calls[0]?.body as { auth: string }).auth).toContain('refresh_token')
+  })
+
+  it('disconnectGlobal → DELETE /api/app/codex-auth', async () => {
+    const cap = capture(jsonRes({ ok: true, disconnected: true }))
+    const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
+    await client.disconnectGlobal()
+    expect(cap.calls[0]?.method).toBe('DELETE')
+    expect(cap.calls[0]?.url).toBe(`${BASE}/api/app/codex-auth`)
+  })
 })

@@ -984,15 +984,21 @@ export function buildOpenGraphComposer(
     // `.neutron-aes-key` keyfile). Constructed HERE (before mountOpenCores) so the
     // Cores' credential accessors can bind to it.
     const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
-    // Codex subscription credential (Part B — trident cross-model review). The
-    // admin-panel "Connect Codex" flow + the `codex_connect`/`codex_status` agent
-    // tools dispatch this ONE service: validate a pasted ChatGPT-subscription
-    // auth.json (metered OPENAI_API_KEY rejected), store it encrypted in the #149
-    // credential store (service `codex`, global scope), and materialize it to the
-    // per-project CODEX_HOME that `trident/codex-review.sh` reads. `resolveCodexHome`
-    // is the ONE path both this and the trident loop (`build-core-modules`) agree
-    // on. `ensureMaterialized` self-heals the file if a stored credential exists
-    // but the on-disk auth.json is missing (fresh process / wiped tmp).
+    // Codex subscription credential (trident cross-model review). Codex is a
+    // GLOBAL, trident-wide credential (trident runs across ANY project), so the
+    // PRIMARY connect surface is the account-wide General admin UI; the store
+    // scope defaults to `global`. A per-project OVERRIDE (that project's Settings
+    // tab) wins over the global default for that project (store resolver:
+    // project → global → unset). The admin-panel Connect Codex surface + the
+    // `codex_connect`/`codex_status` agent tools dispatch this ONE service:
+    // validate a pasted ChatGPT-subscription auth.json (metered OPENAI_API_KEY
+    // rejected), store it encrypted in the #149 credential store (service `codex`),
+    // and materialize it to the CODEX_HOME `trident/codex-review.sh` reads — the
+    // GLOBAL dir (`resolveCodexHome`) for the default, or a nested per-project dir
+    // (`codexProjectHome`) for an override. The trident loop threads the GLOBAL
+    // CODEX_HOME (the trident-wide default); `ensureMaterialized` self-heals the
+    // global file if a stored credential exists but the on-disk auth.json is
+    // missing (fresh process / wiped tmp).
     const codexHome = resolveCodexHome({ owner_home })
     const codexCredentialService = new CodexCredentialService({
       store: projectCredentialStore,
