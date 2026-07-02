@@ -2,6 +2,52 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — Chat typing dots persist for the WHOLE processing window (incl. background builds)
+
+**Why.** Ryan live-test 2026-07-01: he asked the agent to build a meditation-timer
+app. Chat showed the cold-start ack ("⏳ Waking up, one moment…") then NOTHING,
+while the Plan tab flashed its active-work dot — so he had no signal the agent was
+still working. The typing indicator vanished the instant the ack turn settled even
+though the real (long/background) build kept running. No feature flags.
+
+**Root cause.** The chat `TypingIndicator` (`landing/chat-react/ChatApp.tsx`) rendered
+ONLY on `vm.awaitingFirstToken` (`= awaitingReply && no live stream`). `awaitingReply`
+clears on the first token / `agent_message` / `agent_typing end` — i.e. when the ack
+turn settles — so the dots disappeared while a dispatched build continued. The
+build's progress WAS surfaced to the client (the `work_board_changed` frame that
+drives the Plan-tab flashing dot) but that frame was handled out-of-band of the chat
+view model, so the chat never reacted to it.
+
+**What shipped.** The typing indicator now uses the standard animated dots (unchanged
+appearance) and stays visible for the full processing window: `awaitingFirstToken`
+**OR** `hasActiveWork`.
+
+- **New `ChatViewModel.hasActiveWork`** (`landing/chat-react/controller.ts`) — true
+  while the active project's Work Board has an `in_progress` item. Derived from a
+  dedicated `activeWorkBoardItems` cache that ONLY frames pertaining to the active
+  project update (matching `project_id`, or absent → "this project"); a sibling
+  project's board on the per-user app-ws topic is ignored so it can't stop the active
+  dots (Codex P2). `lastWorkBoard` stays the raw last-frame cache for `WorkBoardTab`
+  replay; the active cache clears on project switch.
+- **`work_board_changed` now also `publish()`es the chat vm** (was board-tab-only), so
+  a build starting/finishing flips the dots on/off. Everything else about the board
+  stays out-of-band of chat state.
+- **The gate** (`ChatApp.tsx`) is now `vm.awaitingFirstToken || vm.hasActiveWork`.
+- **No false-positive at load:** the server pushes `work_board_changed` only on a
+  mutation, never on connect, so `lastWorkBoard` is null until work actually happens
+  this session — a lingering item from a prior session can't spin the dots on open. A
+  trivial quick turn (no board mutation) behaves exactly as before. Dots stop the
+  moment the item flips to `done`.
+
+**Tests.** `controller.test.ts` — `hasActiveWork` true on `in_progress`, clears on
+`done`, ignores a foreign-project board (updated the "does NOT touch chat vm" test:
+board frames now republish so `hasActiveWork` can update; chat MESSAGES stay
+untouched). `component.test.tsx` — full render E2E: dots stay through a background
+build after the ack `agent_message`, then stop when the board item completes.
+
+**SYSTEM-OVERVIEW.md:** none (behavior fix reusing the existing `work_board_changed`
+frame — no new surface or client subscription).
+
 ## 2026-07-02 — Connect Codex is a GLOBAL admin credential (was per-project) + project override
 
 **Why.** #167 (Part B) put the Connect-Codex UI only in the per-PROJECT Settings

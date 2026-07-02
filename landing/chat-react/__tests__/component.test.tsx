@@ -327,6 +327,165 @@ describe('ChatApp render (happy-dom)', () => {
     })
   })
 
+  it('chat-typing persistence — dots STAY through a background build after the ack, then stop when work is done', async () => {
+    // Ryan live-test 2026-07-01: an ack turn settles (agent_message) but a
+    // long/background build keeps running. The typing dots must stay visible the
+    // whole time work is in flight (the same signal as the flashing Plan-tab
+    // dot) and stop the moment the board reports the work done.
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{
+      open: () => void
+      deliver: (o: unknown) => void
+      onopen: (() => void) | null
+      onmessage: ((ev: { data: unknown }) => void) | null
+      onclose: (() => void) | null
+      onerror: (() => void) | null
+      send: (d: string) => void
+      close: () => void
+    }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+        </AssistantRuntimeProvider>
+      )
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+    // User asks for a build; the agent acks and dispatches a background build.
+    await act(async () => {
+      await controller.send('build me a meditation timer app')
+      await tick()
+    })
+    const typingUp = () => container.querySelectorAll('.car-bubble-agent.car-typing').length
+    expect(typingUp()).toBe(1)
+
+    // The ack lands as a single agent_message — the turn settles, awaitingReply
+    // clears. WITHOUT the fix the dots would vanish here even though the build
+    // continues.
+    await act(async () => {
+      sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'ack1', seq: 1, body: 'On it — building now…', ts: 9 })
+      await tick()
+    })
+    expect(container.textContent).toContain('On it — building now…')
+
+    // The background build reports an in_progress work-board item (no project_id
+    // → "this project"). The dots must come back / stay on.
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'work_board_changed',
+        items: [
+          {
+            id: 'b1',
+            title: 'Scaffold the timer UI',
+            status: 'in_progress',
+            sort_order: 1,
+            design_doc_ref: null,
+            inline_active: true,
+            linked_run_id: null,
+            created_at: '2026-07-01T00:00:00Z',
+            updated_at: '2026-07-01T00:00:00Z',
+            completed_at: null,
+          },
+        ],
+        ts: 10,
+      })
+      await tick()
+    })
+    expect(typingUp()).toBe(1)
+
+    // Build completes: the item flips to done → the dots stop.
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1,
+        type: 'work_board_changed',
+        items: [
+          {
+            id: 'b1',
+            title: 'Scaffold the timer UI',
+            status: 'done',
+            sort_order: 1,
+            design_doc_ref: null,
+            inline_active: false,
+            linked_run_id: null,
+            created_at: '2026-07-01T00:00:00Z',
+            updated_at: '2026-07-01T00:00:00Z',
+            completed_at: '2026-07-01T00:05:00Z',
+          },
+        ],
+        ts: 11,
+      })
+      await tick()
+    })
+    expect(typingUp()).toBe(0)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
   it('renders agent button options and posts a button_choice on click (P1b)', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
