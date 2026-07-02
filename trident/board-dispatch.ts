@@ -20,6 +20,13 @@
  *      the dispatch is REJECTED (`underspecified`) and the caller's contract is
  *      to ask the owner a clarifying question rather than proceed on guesses.
  *
+ * Before creating the run it resolves THIS project's own git-initialized build
+ * workspace (`<owner_home>/Projects/<project_slug>/code`, `ensureProjectBuildWorkspace`)
+ * and writes that onto the run row's `repo_path` — so a brand-new project with
+ * no pre-existing code repo is still buildable (the inner workflow's
+ * `git worktree add` needs a real repo with a commit). A fresh local project has
+ * no GitHub origin, so merge mode degrades to `'local'` (branch + local merge).
+ *
  * On success it creates the run AND immediately binds it to the item
  * (`store.attachRun` → `linked_run_id` + status=in_progress), so the board
  * lights the fork `⑂` icon the moment the build starts. The durable
@@ -39,6 +46,7 @@ import {
   type DispatchReadinessTarget,
 } from '../work-board/dispatch-readiness.ts'
 import { detectMergeMode, defaultGitModeProbe, detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
+import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { slugifyTask } from './code-command.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 
@@ -62,7 +70,21 @@ export interface BoardBoundBuildDeps {
   store: TridentRunStore
   board: TridentBoardBinder
   project_slug: string
+  /**
+   * The owner HOME base under which per-project build workspaces are created —
+   * NOT the git repo itself. The chokepoint resolves each project's own
+   * git-initialized workspace `<owner_home>/Projects/<project_slug>/code` from
+   * it (`resolveBuildRepo`) and writes THAT onto the run row's `repo_path`, so a
+   * brand-new project (no pre-existing repo) is still buildable and every
+   * project's build is isolated. Both callers pass the owner HOME.
+   */
   repo_path: string
+  /**
+   * Resolve (and git-init-with-commit, idempotently) the per-project build
+   * workspace, returning its absolute path. Defaults to
+   * `ensureProjectBuildWorkspace` over the production fs/git probe. Test seam.
+   */
+  resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   /** Defaults to `detectMergeMode` over the production probe. Test seam. */
   resolveMergeMode?: () => Promise<MergeMode>
   /** Defaults to `detectRalphMode`. Test seam. */
@@ -121,17 +143,28 @@ export async function dispatchBoardBoundBuild(
     return { ok: false, code: 'underspecified', message: readiness.reason ?? 'Plan item is underspecified.' }
   }
 
+  // Resolve THIS project's own git-initialized build workspace from the owner
+  // HOME base. A brand-new project has no code repo; without this the run row's
+  // repo_path would be the HOME dir (not a git repo) and the inner workflow's
+  // `git worktree add` would fail at forge-init before Forge ever ran. Merge-mode
+  // + ralph detection then probe the RESOLVED workspace (a fresh local project
+  // has no origin, so merge mode correctly degrades to 'local').
+  let repo_path: string
   let merge_mode: MergeMode
   let ralph: boolean
   try {
-    merge_mode = await (deps.resolveMergeMode ??
-      (() => detectMergeMode(deps.repo_path, defaultGitModeProbe())))()
-    ralph = await (deps.resolveRalph ?? (() => detectRalphMode(deps.repo_path, defaultRalphModeProbe())))()
+    repo_path = await (deps.resolveBuildRepo ??
+      ((home, slug) => ensureProjectBuildWorkspace(home, slug).then((r) => r.build_repo_path)))(
+      deps.repo_path,
+      deps.project_slug,
+    )
+    merge_mode = await (deps.resolveMergeMode ?? (() => detectMergeMode(repo_path, defaultGitModeProbe())))()
+    ralph = await (deps.resolveRalph ?? (() => detectRalphMode(repo_path, defaultRalphModeProbe())))()
   } catch (err) {
     return {
       ok: false,
       code: 'backend_error',
-      message: `could not inspect the repo at ${deps.repo_path}: ${err instanceof Error ? err.message : String(err)}`,
+      message: `could not prepare the build workspace for "${deps.project_slug}": ${err instanceof Error ? err.message : String(err)}`,
     }
   }
 
@@ -140,7 +173,7 @@ export async function dispatchBoardBoundBuild(
     const run = await deps.store.create({
       slug,
       project_slug: deps.project_slug,
-      repo_path: deps.repo_path,
+      repo_path,
       task: input.task,
       merge_mode,
       ralph,

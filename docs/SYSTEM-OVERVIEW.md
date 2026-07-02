@@ -1284,6 +1284,16 @@ already renders are now LIT by real writers:
   (2) the item must EXIST; (3) **ask-before-acting** — `work-board/dispatch-readiness.ts`
   blocks an item with no `design_doc_ref` AND a terse (< 8-word) title, returning
   clarifying-question guidance instead of dispatching on assumptions.
+- **Per-project build workspace (new-project buildability).** The chokepoint no
+  longer hands the run row the owner HOME dir as `repo_path` (a non-repo, so the
+  inner workflow's `isolation:'worktree'` / `git worktree add` failed at forge-init
+  for any brand-new project). It resolves + git-inits (idempotent, with an
+  `--allow-empty` INITIAL COMMIT — `git worktree add` needs a HEAD)
+  `<owner_home>/Projects/<project_slug>/code` (`trident/build-workspace.ts:ensureProjectBuildWorkspace`)
+  and writes THAT per-project path onto the run row, so each project's build is
+  isolated and a project with no pre-existing code repo is buildable. A fresh local
+  project has no GitHub origin, so merge mode degrades to `'local'` (branch + local
+  merge, no PR) — the correct shape for a self-hoster's new project.
 - **Binding + reconcile.** Success → `WorkBoardStore.attachRun` (`linked_run_id` +
   `status=in_progress`, clears inline → fork `⑂`). On a terminal run the durable
   `TridentTickLoop`'s `on_terminal` observer (`trident/board-reconcile.ts`, composed

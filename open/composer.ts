@@ -3551,7 +3551,11 @@ export function buildOpenGraphComposer(
             // can fire it). `store` is a thin TridentRunStore over the SAME `db`
             // the loop reads, so a row created by the tool is fired + harvested
             // by the loop. `work_board` is the shared board store (the run
-            // binding + the ask-gate lookups). repo_path = the owner's repo.
+            // binding + the ask-gate lookups). `repo_path` here is the owner HOME
+            // BASE — the chokepoint resolves each project's own git-initialized
+            // workspace `<home>/Projects/<slug>/code` under it (so brand-new
+            // projects with no code repo are buildable), and writes THAT onto the
+            // run row.
             trident_build_dispatch: {
               store: new TridentRunStore(db),
               work_board: workBoardStore,

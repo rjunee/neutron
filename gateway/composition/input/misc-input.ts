@@ -200,7 +200,10 @@ export interface MiscCompositionInput {
   trident_build_dispatch?: {
     store: import('../../../trident/store.ts').TridentRunStore
     work_board: import('../../../trident/board-dispatch.ts').TridentBoardBinder
+    /** Owner HOME base — the chokepoint resolves each project's own
+     *  `<home>/Projects/<slug>/code` workspace under it (see `board-dispatch.ts`). */
     repo_path: string
+    resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
     resolveMergeMode?: () => Promise<import('../../../trident/store.ts').MergeMode>
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('../../../channels/types.ts').Topic['channel_kind']

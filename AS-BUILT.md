@@ -2,6 +2,61 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-02 — Trident: per-project git build workspace (brand-new projects are buildable)
+
+**Why.** A chat-dispatched trident build for a BRAND-NEW project (no existing
+code repo) failed ~2 min in: the run's `worktree` was never created, `repo_path`
+pointed at the owner HOME dir, `forge:build` produced no transcript, and the
+workflow jumped straight to cleanup. Root cause: the dispatch chokepoint wrote a
+single composition-time constant — the owner HOME (`resolveNeutronHome`) — as
+EVERY run's `repo_path`. HOME is not a git repo, so the inner workflow's
+`isolation:'worktree'` (`git worktree add`, which bases the build worktree on the
+git repo enclosing the agent cwd = `repo_path`) failed at forge-init before Forge
+ran. Builds only worked for a project that already happened to have a git repo.
+
+**Spec-conformance diff.** SPEC (WAVE 3.5 Work Board / trident, #140) intends
+per-project isolated builds bound to board items. CURRENT (pre-PR) = `repo_path` =
+owner_home constant for ALL builds → a non-repo path → `git worktree add` fails for
+any project without a pre-existing git workspace (i.e. every brand-new project).
+GAP = a new-project build has no git-initialized code workspace and dispatch never
+creates one. THIS PR = dispatch resolves + git-inits (WITH an initial commit) a
+per-project `Projects/<slug>/code` workspace before the run row is created, so the
+worktree add succeeds and `forge:build` runs. OUT-OF-SCOPE = the play-button /
+`design_doc_ref` work (separate PR), auto-mode (#104), Ralph/SPEC-driven builds.
+
+**The fix (one code path, no flag).** New `trident/build-workspace.ts:ensureProjectBuildWorkspace(owner_home, project_slug)`
+resolves `<owner_home>/Projects/<project_slug>/code`, and — idempotently — `git
+init --initial-branch=main` + an `--allow-empty` INITIAL COMMIT (a repo with no
+HEAD still fails `git worktree add`; `--allow-empty` gives a valid HEAD for a
+fileless new project without seeding a stray file). A healthy workspace (repo +
+commit) is returned untouched (never surprise-commits the working tree); a repo
+with a `.git` but no commit gets the initial commit only. `dispatchBoardBoundBuild`
+(`trident/board-dispatch.ts`) now resolves this workspace from the incoming HOME
+base FIRST, runs merge-mode / ralph detection against the RESOLVED workspace, and
+writes the resolved path onto the run row's `repo_path`. The old
+`repo_path = owner_home` assignment is deleted — the three dispatch dep interfaces
+(`board-dispatch.ts`, `work-board-build-tool.ts`, `code-command.ts`) now document
+`repo_path` as the owner HOME BASE, with an injectable `resolveBuildRepo` test seam
+defaulting to the real resolver. A brand-new local project has no GitHub origin, so
+`detectMergeMode` correctly degrades to `'local'` (branch + local merge, no PR) —
+the success signal for a new local project is a local BRANCH WITH COMMITS, not a PR.
+
+**Verification.** `tsc` clean (root + `trident/tsconfig.json`); full trident suite
+green (361 pass). New `trident/build-workspace.test.ts` (pure-probe + real-git +
+dispatch-level: brand-new project → `run.repo_path` = `Projects/<slug>/code`,
+`.git` + a commit present; two projects get DISTINCT workspaces). A real-git
+end-to-end (no LLM) REPRODUCED the original failure — `git worktree add` against
+the raw HOME dir → `fatal: not a git repository` — then drove the REAL production
+git mechanics against the resolved workspace: `ensureProjectBuildWorkspace` →
+`detectMergeMode`=local / `detectBaseBranch`=main → `git worktree add -b
+trident/<slug>` succeeds → a multi-file build branch WITH commits → the real
+`merge.ts:mergeLocal` merges into `main` + cleans the worktree (terminal
+merged-local state). The full autonomous-LLM `forge:build` leg (a live agent
+transcript showing Write/Bash tool_use) is #176 territory (the toolless-agent fix,
+already merged + verified) and was NOT re-driven inside this headless run — the git
+workspace was the missing precondition, and it is now proven to satisfy `git
+worktree add`. Manual full-server verification steps are in the PR body.
+
 ## 2026-07-01 — Trident codex cross-model review (Part A): CLI install + review-panel wiring
 
 **Why.** Trident's inner Forge→Argus loop reviewed with Claude ONLY (rubric +

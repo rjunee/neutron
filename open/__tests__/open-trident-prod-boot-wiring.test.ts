@@ -157,6 +157,10 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         board: tbd.work_board,
         project_slug: 'owner',
         repo_path: tbd.repo_path,
+        // Identity workspace resolver — this boot-wiring test asserts reachability,
+        // not the real git workspace (covered in build-workspace.test.ts); keep it
+        // off the real filesystem.
+        resolveBuildRepo: async (home) => home,
         resolveMergeMode: async () => 'local',
         resolveRalph: async () => false,
       },
