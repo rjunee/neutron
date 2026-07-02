@@ -2,6 +2,71 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — Fable-orchestrator model routing in trident's inner workflow
+
+**Why.** Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log
+2026-07-02): Fable 5 (max reasoning) is the ORCHESTRATOR — it does the high-value
+thinking (planning, decomposition, verdict synthesis); Opus/Sonnet are
+SUBORDINATE EXECUTORS carrying out Fable's specs. There is NO "escalate to Opus".
+Before this change every `agent()` in `trident/inner-workflow.mjs` inherited the
+launcher-default `opus` and the Ralph planner was FUSED into `forge:build`. No
+feature flags — this is the default.
+
+**What shipped.**
+
+- **`FABLE_MODEL = 'claude-fable-5'`** added to `runtime/models.ts` (the single
+  source of truth; env override `NEUTRON_FABLE_MODEL`). Verified routable
+  2026-07-02 (P-F0 smoke: a workflow `agent({model:'claude-fable-5',
+  effort:'max'})` returns cleanly; `workflowProgress.model === 'claude-fable-5'`).
+
+- **Split the fused planner out** (`inner-workflow.mjs`). A dedicated
+  `plan:fable` orchestrator `agent()` (Fable, effort `max`) now runs once per
+  Ralph iteration: it diffs SPEC.md vs the code, regenerates the
+  IMPLEMENTATION_PLAN.md body, picks the single top task, and emits a structured
+  EXECUTION SPEC (target files + acceptance criterion + test plan) plus a
+  `[mechanical]|[reasoning]` complexity tag (`PLAN_SCHEMA`). `forge:build` is now
+  a pure EXECUTOR that implements that one task from the spec and persists the
+  plan into its worktree (the planner is read-only — a workflow's agents have
+  separate cwds, so a base-branch write would never reach the PR).
+
+- **Per-role `label → {model, effort}` map** (`ROLE_MODEL` + `modelForTag` +
+  `routeModel` + `withModel`) threaded into every `agent()` opts: `plan:fable` +
+  `argus:synthesis` → Fable; `forge:build`/`forge:fix-round-N` → Sonnet for
+  `[mechanical]` / Opus for `[reasoning]` (bias to Opus when the tag is
+  missing/ambiguous — the unknown-label default is an Opus executor, never
+  Fable); `argus:claude`/`argus:adversarial` → Opus; `argus:codex` → unchanged
+  (codex runtime); `checkpoint:*`/`terminal-result`/`cleanup:worktree` → fast
+  (Haiku). The model IDS are resolved from `runtime/models.ts` in the launcher
+  (`buildWorkflowArgs`) and threaded via `args.models` — the CC Dynamic Workflow
+  script has no module resolution, so it can't import the registry and must NOT
+  hard-pin an id literal.
+
+- **Observability.** Every spawn logs `trident.agent label=<x> model=<y>
+  effort=<z>` (incl. `model=codex-runtime` for the codex peer) so a run is
+  tally-able: "N agents, M on Fable, K on Opus, J on Sonnet, C on Codex".
+
+- **Test guards rewritten** (`vajra-fixes.test.ts` FIX 8 + `inner-workflow.test.ts`
+  ralph-note): the 2026-06-13 export-control guard (`src` must never contain
+  "fable") is REVERSED — replaced by positive assertions of the intended routing
+  (plan:fable + argus:synthesis → `MODELS.fable`; forge:* by tag; argus reviewers
+  → `MODELS.opus`; unknown → Opus default) + a no-hard-pinned-literal guard
+  (`claude-fable-5`/`claude-opus-4-8`/`claude-sonnet-4-6` absent from the .mjs).
+
+**Verification.** P-F0 smoke (fable routes end-to-end) + a real-substrate routing
+probe exercising the byte-identical routing map across all 9 roles; the
+authoritative harness dispatch record (`workflowProgress[].model`) confirmed:
+plan:fable→claude-fable-5, forge[mechanical]→claude-sonnet-4-6,
+forge[reasoning]→claude-opus-4-8, argus:claude/adversarial→claude-opus-4-8,
+argus:synthesis→claude-fable-5, checkpoint/terminal/cleanup→claude-haiku-4-5.
+Tally: Fable×2, Opus×3, Sonnet×1, Haiku×3. tsc clean; 336 trident tests green.
+A full end-to-end Forge/Argus build was NOT run from the fleet session (the
+`Workflow` tool inherits the session cwd, so `isolation:'worktree'` would branch
+neutron, not an external scratch repo); the outer loop exercises it on deploy.
+
+**Note.** `docs/SYSTEM-OVERVIEW.md` in the Managed repo needs a model-routing
+update for the trident section — cannot be edited from here; the orchestrator
+syncs it on deploy. Auto-mode (#104) is OUT OF SCOPE (separate).
+
 ## 2026-07-01 — Documents tab renders `.html` docs as static styled HTML/CSS pages
 
 **Why.** Ryan's M1 live test: saving/opening an `.html` doc errored with

@@ -53,6 +53,24 @@ export const BEST_MODEL: string =
   process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-4-8'
 
 /**
+ * FABLE_MODEL — the ORCHESTRATOR / max-reasoning planning model (Ryan-locked
+ * doctrine, SPEC Decisions Log 2026-07-02). Fable 5 is the smartest THINKER: it
+ * does the high-value work — implementation-planning, spec-building,
+ * decomposition, and verdict synthesis — while `BEST_MODEL` (Opus) and
+ * `SONNET_MODEL` are demoted to SUBORDINATE EXECUTION models carrying out Fable's
+ * specs. There is deliberately NO "escalate to Opus": Opus is an executor, never
+ * a fallback target above Fable. Used by trident's inner workflow to route the
+ * `plan:fable` planner + `argus:synthesis` steps (threaded in via `args.models`
+ * — the CC Dynamic Workflow script has no module resolution, so it can't import
+ * this registry; keep the id here, the single source of truth, not a literal in
+ * the workflow). Verified routable 2026-07-02 (`claude-fable-5` returns cleanly).
+ *
+ * Override via `NEUTRON_FABLE_MODEL`. Defaults to Claude Fable 5.
+ */
+export const FABLE_MODEL: string =
+  process.env['NEUTRON_FABLE_MODEL'] ?? 'claude-fable-5'
+
+/**
  * P2-v2 S21 (2026-05-17) — Pass-2 Sonnet fallback model.
  *
  * Drawn from a separate Anthropic rate-limit bucket from `BEST_MODEL`

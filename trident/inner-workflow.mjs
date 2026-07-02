@@ -96,6 +96,14 @@ const {
   // blocker. PRESENT → the codex reviewer runs `trident/codex-review.sh` with this
   // CODEX_HOME; an auth/call failure there is DEFERRED (never a silent APPROVE).
   codexHome = null,
+  // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
+  // The per-role model IDS, resolved from the single-source-of-truth registry
+  // (runtime/models.ts) in the launcher (`buildWorkflowArgs`) and threaded in
+  // here: `{ fable, opus, sonnet, fast }`. This workflow script has NO module
+  // resolution, so it CANNOT import the registry — the ids MUST arrive via args,
+  // never as hard-pinned literals in this file. Absent (a dry source check) →
+  // fall back to the documented agent() symbolic aliases (see MODELS below).
+  models = null,
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -117,6 +125,70 @@ const resuming = resumeCheckpoint !== null || prNumber !== null
 // even if Forge fails before returning a result (see the finally block). Falls
 // back to `trident/<slug>` when the caller didn't thread an existing branch.
 const forgeBranch = branch || `trident/${slug}`
+
+// ── FABLE-ORCHESTRATOR model routing ─────────────────────────────────────────
+// Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log 2026-07-02):
+// Fable 5 is the ORCHESTRATOR — the max-reasoning THINKER. It does the
+// high-value work (plan:fable planning/decomposition + argus:synthesis
+// verdict-merge). Opus and Sonnet are SUBORDINATE EXECUTORS carrying out Fable's
+// specs; Opus is also the reviewer. There is NO "escalate to Opus" — Opus is an
+// executor, never a fallback target above Fable.
+//
+// The model IDS come from the single-source-of-truth registry (runtime/models.ts)
+// threaded in via `args.models`; this workflow script cannot import the registry,
+// so it must NOT hard-pin an id literal. When a caller threads no `models` (a dry
+// source check), fall back to the documented agent() symbolic aliases.
+const threadedModels = models && typeof models === 'object' ? models : {}
+const pickModel = (key, alias) =>
+  typeof threadedModels[key] === 'string' && threadedModels[key] ? threadedModels[key] : alias
+const MODELS = {
+  fable: pickModel('fable', 'fable'),
+  opus: pickModel('opus', 'opus'),
+  sonnet: pickModel('sonnet', 'sonnet'),
+  fast: pickModel('fast', 'haiku'),
+}
+
+// forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
+// tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
+// ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
+const modelForTag = (tag) =>
+  tag === 'mechanical'
+    ? { model: MODELS.sonnet, effort: 'medium' }
+    : { model: MODELS.opus, effort: 'high' }
+
+// label → {model, effort}. forge:* is resolved dynamically (modelForTag) since
+// its model depends on the task; the rest are static. Fable orchestrates
+// (plan:fable + argus:synthesis); Opus reviews (argus:claude/adversarial); the
+// cheap sqlite/bash bookkeeping steps use the fast model.
+const ROLE_MODEL = {
+  'plan:fable': { model: MODELS.fable, effort: 'max' },
+  'argus:claude': { model: MODELS.opus, effort: 'high' },
+  'argus:adversarial': { model: MODELS.opus, effort: 'high' },
+  'argus:synthesis': { model: MODELS.fable, effort: 'high' },
+  'checkpoint': { model: MODELS.fast, effort: 'low' },
+  'terminal-result': { model: MODELS.fast, effort: 'low' },
+  'cleanup:worktree': { model: MODELS.fast, effort: 'low' },
+}
+
+// Resolve {model, effort} for a spawn keyed on its label (+ optional complexity
+// tag for forge:*). Unknown label → Opus executor (safe default; never Fable).
+function routeModel(label, tag) {
+  if (label === 'forge:build' || label.startsWith('forge:fix-round-')) return modelForTag(tag)
+  if (label.startsWith('checkpoint:')) return ROLE_MODEL['checkpoint']
+  return ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high' }
+}
+
+// Merge the resolved {model, effort} into an agent() opts object (which carries
+// the label) and LOG the spawn so every run is TALLY-ABLE — Ryan tracks subagent
+// count + model per run ("N agents, M on Fable, K on Opus, J on Sonnet, C on
+// Codex"). Use for EVERY Claude agent() so its model is both routed and observed.
+function withModel(opts, tag) {
+  const route = routeModel(opts.label, tag)
+  log(
+    `trident.agent label=${opts.label} model=${route.model} effort=${route.effort}${tag ? ` tag=${tag}` : ''}`,
+  )
+  return { ...opts, model: route.model, effort: route.effort }
+}
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -168,6 +240,30 @@ const FORGE_SCHEMA = {
     prNumber: { type: ['number', 'null'] },
     diffFile: { type: 'string' },
     testsPassed: { type: 'boolean' },
+  },
+}
+
+// The Fable orchestrator/planner's structured output: the regenerated
+// IMPLEMENTATION_PLAN.md body, the SINGLE top-priority task to build this Ralph
+// iteration, its EXECUTION SPEC (target files + acceptance criterion + test
+// plan), the complexity TAG that routes the executor (Sonnet vs Opus), and the
+// count of tasks still unchecked AFTER this one.
+const PLAN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['implementationPlan', 'topTask', 'executionSpec', 'complexity', 'remainingTasks'],
+  properties: {
+    implementationPlan: {
+      type: 'string',
+      description: 'the full regenerated IMPLEMENTATION_PLAN.md body — a prioritized "- [ ]/[x]" checklist',
+    },
+    topTask: { type: 'string', description: 'the single top-priority UNCHECKED task to build this iteration' },
+    executionSpec: {
+      type: 'string',
+      description: 'structured spec for the top task: TARGET FILES, ACCEPTANCE CRITERION, TEST PLAN',
+    },
+    complexity: { type: 'string', enum: ['mechanical', 'reasoning'] },
+    remainingTasks: { type: 'number', description: 'count of tasks still unchecked AFTER the top task' },
   },
 }
 
@@ -238,13 +334,45 @@ Apply the Argus rubric: correctness, security, spec/as-built drift, and TEST-QUA
 OVERSIZED-DIFF GUARD: never read a >~3000-line diff in one shot (the documented silent-exit trigger) — review the meaty commits one by one instead and STATE what you could not verify.
 NEVER EXIT SILENTLY: if you cannot complete the review, return a TRUNCATED verdict explaining exactly what you could NOT verify — do not vanish.`
 
-// RALPH bootstrap note (from prompts.ts RALPH_BOOTSTRAP_NOTE) — appended to the
-// Forge build prompt when `ralph === true`: read SPEC.md, write
-// IMPLEMENTATION_PLAN.md, build ONLY the top task this iteration.
-const RALPH_NOTE = `\n\nRALPH MODE — this is a governed, spec-driven build:
-- Read SPEC.md (and AS-BUILT.md if present) at the repo root — SPEC.md is the master spec; do NOT invent a competing plan doc.
-- Write IMPLEMENTATION_PLAN.md at the repo root: a prioritized '- [ ] <task>' checklist of the discrete tasks needed to make the code match SPEC.md.
-- Implement ONLY the single top-priority unchecked task this iteration; check it off ('- [x]') and commit everything.`
+// RALPH PLANNING is now a DEDICATED `plan:fable` orchestrator step (P-F2),
+// SPLIT OUT of forge:build (which was the fused planner via the old RALPH_NOTE).
+// The Fable orchestrator does the hard thinking ONCE per Ralph iteration: diff
+// SPEC.md vs the actual code, regenerate IMPLEMENTATION_PLAN.md, pick the single
+// top task, and emit a crisp EXECUTION SPEC + complexity tag; the subordinate
+// executor (forge:build on Opus/Sonnet) just carries it out.
+//
+// It reads from repoPath (base branch) and returns the plan body — it does NOT
+// write files. A workflow's agents have SEPARATE cwds (forge builds in an
+// isolated worktree), so a base-branch file write would be invisible to Forge
+// and never reach the PR. forge:build persists the returned IMPLEMENTATION_PLAN
+// into its worktree so it lands on the branch/PR (see ralphExecuteNote).
+function planFablePrompt() {
+  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):
+1. Read SPEC.md (the master spec) and AS-BUILT.md if present at the repo root, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
+2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
+3. Choose the SINGLE top-priority UNCHECKED task to build THIS iteration (the Ralph one-task discipline). Return it as \`topTask\`.
+4. For that ONE task, emit an EXECUTION SPEC as \`executionSpec\`: the exact TARGET FILES, the ACCEPTANCE CRITERION (what "done" means), and the TEST PLAN (which tests to write/run). Make it precise enough that a cheaper model executes it WITHOUT re-reasoning the design.
+5. Tag the task \`complexity\`: 'mechanical' (boilerplate, tests, formatting, a single-file edit) vs 'reasoning' (multi-file, architecture-touching, tricky invariants). When genuinely uncertain choose 'reasoning' (Opus is the safer executor).
+6. Return \`remainingTasks\` = the count of tasks still unchecked AFTER this one (0 when this is the last).
+Return via the schema. NEVER exit silently.
+SPEC / TASK CONTEXT:
+${task}`
+}
+
+// Appended to the forge:build/forge:fix prompt in Ralph mode. Forge is now a PURE
+// EXECUTOR: it implements the ONE task from Fable's exec spec (no re-planning)
+// and PERSISTS the regenerated IMPLEMENTATION_PLAN.md into its worktree (with the
+// task checked off) so the plan lands on the branch/PR.
+function ralphExecuteNote(plan) {
+  return `\n\nRALPH MODE — you are the EXECUTOR. The plan was authored by the Fable orchestrator; do NOT re-plan or redesign — implement it.
+- Implement ONLY this one task: ${plan.topTask}
+- EXECUTION SPEC (follow it exactly):
+${plan.executionSpec}
+- Persist the plan: write IMPLEMENTATION_PLAN.md at the repo root with EXACTLY this body, but with the task above marked '- [x]':
+${plan.implementationPlan}
+- Commit IMPLEMENTATION_PLAN.md together with your code + tests.`
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -266,7 +394,7 @@ async function checkpoint(name, opts) {
   await agent(
     `Checkpoint step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "checkpoint ${name} ok":
 sqlite3 "${dbPath}" "UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id='${runId}'"`,
-    { label: `checkpoint:${name}`, phase: 'Build' },
+    withModel({ label: `checkpoint:${name}`, phase: 'Build' }),
   )
 }
 
@@ -306,7 +434,7 @@ async function writeTerminalResult(result) {
   await agent(
     `Terminal-result step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "terminal-result ok":
 printf '%s' ${shSingleQuote(json)} > ${tmp} && sqlite3 "${dbPath}" "UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id='${runId}'"`,
-    { label: 'terminal-result', phase: 'Synthesis' },
+    withModel({ label: 'terminal-result', phase: 'Synthesis' }),
   )
 }
 
@@ -386,17 +514,22 @@ async function reviewAndSynthesize(diffFile, round) {
         `${ARGUS_RUBRIC}
 Review the diff at ${diffFile} for the TASK below. Return your verdict + findings.
 TASK: ${task}`,
-        { label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA },
+        withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
     () =>
       agent(
         `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do NOT modify files. NEVER exit silently — if you cannot verify part of it, say so.
 TASK: ${task}`,
-        { label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA },
+        withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
   ]
   if (codexConfigured) {
+    // argus:codex runs on the CODEX runtime (an independent GPT-5 peer), not a
+    // Claude model — the thin claude agent just shells out to codex-review.sh, so
+    // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
+    // per-run tally still counts the cross-model reviewer ("C on Codex").
+    log('trident.agent label=argus:codex model=codex-runtime effort=n/a')
     reviewers.push(() =>
       agent(codexReviewerPrompt(diffFile), {
         label: 'argus:codex',
@@ -436,7 +569,7 @@ TASK: ${task}`,
 Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}
 Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}
 ${codexPanelLine}`,
-    { label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA },
+    withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
   )
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
@@ -474,16 +607,34 @@ try {
     isPr && (pr !== null || resumeCheckpoint !== null)
       ? `\n\nRESUME: a prior run already opened PR #${pr ?? '?'} on branch ${forgeBranch}. REUSE it — confirm with \`gh pr list --head ${forgeBranch}\` and push to the SAME branch. NEVER open a duplicate PR.`
       : ''
-  const ralphNote = ralph === true ? RALPH_NOTE : ''
+  // P-F2 — the Fable ORCHESTRATOR plans FIRST (once per Ralph iteration): it
+  // regenerates the plan, picks the single top task, and emits its execution spec
+  // + a complexity tag that ROUTES the executor (mechanical→Sonnet, reasoning→
+  // Opus). Only in Ralph mode; a plain (non-ralph) task has no plan doc and
+  // forge:build executes it directly (routed to Opus by the missing-tag default).
+  let complexityTag = null
+  let ralphNote = ''
+  if (ralph === true) {
+    const plan = await agent(
+      planFablePrompt(),
+      withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+    )
+    if (plan) {
+      complexityTag = plan.complexity
+      ralphNote = ralphExecuteNote(plan)
+      log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${plan.remainingTasks}`)
+    }
+  }
 
   // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
-  // CREATE the branch fresh.
+  // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
+  // planner's complexity tag.
   const forge = await agent(
     `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
 ${task}`,
-    { label: 'forge:build', phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
+    withModel({ label: 'forge:build', phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA }, complexityTag),
   )
 
   if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
@@ -516,7 +667,10 @@ ${JSON.stringify(synthesis.findings)}
 
 TASK:
 ${task}`,
-      { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
+      withModel(
+        { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
+        complexityTag,
+      ),
     )
     await checkpoint(`fix-round-${round}`, { pr })
     synthesis = await reviewAndSynthesize(diffFile, round)
@@ -598,6 +752,6 @@ ${task}`,
 ${branchTeardownStep}
 4. git worktree prune
 5. Verify with \`git worktree list\` that NO worktree remains on '${forgeBranch}'. Report the final worktree count and whether any orphan remained.`,
-    { label: 'cleanup:worktree', phase: 'Synthesis' },
+    withModel({ label: 'cleanup:worktree', phase: 'Synthesis' }),
   )
 }

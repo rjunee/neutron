@@ -353,16 +353,21 @@ describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
 })
 
 // ---------------------------------------------------------------------------
-// FIX 8 — Model routing / effort. Vajra routed every spawn to the fleet default
-// and the Fable opt-in was removed (export-control). Trident v2 analog: per-phase
-// model routing MOVED into the inner workflow's own agent() calls (the
-// orchestrator no longer carries forge_model/argus_model). The v2 invariant is
-// (a) the FIRE seam pins a NON-Fable model (default `opus`) for the launching
-// turn, while per-phase routing still lives in the workflow's own agent() calls,
-// and (b) export-control holds — the workflow never hard-pins a Fable id.
+// FIX 8 — FABLE-ORCHESTRATOR model routing (Ryan 2026-07-02, M1). This REVERSES
+// the 2026-06-13 export-control guard that FORBADE any Fable id in the workflow.
+// Doctrine (SPEC Decisions Log 2026-07-02): Fable 5 is the ORCHESTRATOR — it does
+// the high-value thinking (plan:fable planning/decomposition + argus:synthesis
+// verdict-merge); Opus/Sonnet are SUBORDINATE EXECUTORS carrying out Fable's
+// specs (forge:* → Sonnet for [mechanical], Opus for [reasoning]); Opus is the
+// reviewer (argus:claude/adversarial). There is NO "escalate to Opus". The
+// invariants are now: (a) the FIRE seam still pins a NON-Fable model (default
+// `opus`) for the LAUNCHING turn — per-role Fable routing lives INSIDE the
+// workflow's agent() calls, not the fire seam; and (b) the workflow ROUTES the
+// intended per-role models (guarded positively, no longer forbidden) and never
+// HARD-PINS an id literal (the ids are threaded from runtime/models.ts via args).
 // ---------------------------------------------------------------------------
-describe('FIX 8 — model routing delegated to the workflow (export-control holds)', () => {
-  test('the inner-loop FIRE seam pins a non-Fable model (default opus; per-phase routing lives in the workflow)', async () => {
+describe('FIX 8 — Fable-orchestrator model routing (per-role models in the workflow)', () => {
+  test('the inner-loop FIRE seam still pins a non-Fable model (default opus) for the launching turn', async () => {
     const specs: AgentSpec[] = []
     const substrate: Substrate = {
       start(spec: AgentSpec): SessionHandle {
@@ -386,13 +391,44 @@ describe('FIX 8 — model routing delegated to the workflow (export-control hold
     await fire({ prompt: 'launcher prompt', cwd: '/repo', settle_timeout_ms: 1000 })
     const pref = specs[0]!.model_preference
     expect(pref[0]).toBe('opus')
-    // Export-control: the fire turn never pins a Fable model id.
+    // The LAUNCHER turn stays Opus; per-role Fable routing lives INSIDE the
+    // workflow's agent() calls, not on the fire seam.
     expect(pref.join(' ').toLowerCase()).not.toContain('fable')
   })
 
-  test('export-control: the inner workflow source never hard-pins a Fable model id', () => {
+  test('the inner workflow routes the intended per-role models (Fable orchestrates; Opus/Sonnet execute; Opus reviews)', () => {
     const src = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
-    expect(src.toLowerCase()).not.toContain('fable')
+    // Fable ORCHESTRATES: the planner + the verdict synthesis.
+    expect(src).toContain("'plan:fable': { model: MODELS.fable")
+    expect(src).toContain("'argus:synthesis': { model: MODELS.fable")
+    // Opus REVIEWS.
+    expect(src).toContain("'argus:claude': { model: MODELS.opus")
+    expect(src).toContain("'argus:adversarial': { model: MODELS.opus")
+    // Executors route BY the planner's complexity tag: [mechanical]→Sonnet, else Opus.
+    expect(src).toContain("tag === 'mechanical'")
+    expect(src).toContain('model: MODELS.sonnet')
+    expect(src).toContain('model: MODELS.opus')
+    // No "escalate to Opus": the unknown-label default is an Opus EXECUTOR, never Fable.
+    expect(src).toContain("ROLE_MODEL[label] || { model: MODELS.opus")
+    // The model IDS are threaded from runtime/models.ts via args — the workflow
+    // must NOT hard-pin an id literal (it can't import the registry).
+    expect(src).not.toContain('claude-fable-5')
+    expect(src).not.toContain('claude-opus-4-8')
+    expect(src).not.toContain('claude-sonnet-4-6')
+    // Every spawn is logged with its resolved model so a run is TALLY-ABLE.
+    expect(src).toContain('trident.agent label=')
+    expect(src).toContain('model=codex-runtime')
+  })
+
+  test('FABLE_MODEL is defined in the model registry (single source of truth) and threaded via buildWorkflowArgs', () => {
+    const models = readFileSync(fileURLToPath(new URL('../runtime/models.ts', import.meta.url)), 'utf8')
+    expect(models).toContain('FABLE_MODEL')
+    expect(models).toContain("'claude-fable-5'")
+    // The launcher resolves the ids from the registry and threads them via args.
+    const loop = readFileSync(fileURLToPath(new URL('./inner-loop.ts', import.meta.url)), 'utf8')
+    expect(loop).toContain('FABLE_MODEL')
+    expect(loop).toContain('models: {')
+    expect(loop).toContain('fable: FABLE_MODEL')
   })
 })
 

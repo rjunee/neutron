@@ -52,6 +52,7 @@
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { SessionHandle } from '../runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
+import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '../runtime/models.ts'
 
 export interface InnerLoopInput {
   run: TridentRun
@@ -176,6 +177,21 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
     codexHome: input.codex_home ?? null,
+    // FABLE-ORCHESTRATOR model routing (SPEC § Fable-orchestrator, 2026-07-02).
+    // The single-source-of-truth model IDS resolved from runtime/models.ts and
+    // threaded to the inner workflow, which routes them per-role by agent label
+    // (plan:fable + argus:synthesis → fable; forge:* → sonnet/opus by the
+    // planner's complexity tag; argus:claude/adversarial → opus; bookkeeping →
+    // fast). The workflow script can't import this registry (no module
+    // resolution), so the ids MUST arrive via args — never hard-pinned literals
+    // in inner-workflow.mjs. `getBestModel()` (not the frozen BEST_MODEL const)
+    // so a watchdog model upgrade reaches the opus executor tier.
+    models: {
+      fable: FABLE_MODEL,
+      opus: getBestModel(),
+      sonnet: SONNET_MODEL,
+      fast: FAST_MODEL,
+    },
   }
 }
 
