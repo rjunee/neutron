@@ -75,31 +75,43 @@ import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'
 
 const LOG_TAG = '[live-agent-turn]'
 
-/** Per-turn wall-clock budget before the substrate handle is cancelled. */
-const DEFAULT_TIMEOUT_MS = 240_000
+/**
+ * ACTIVITY-BASED turn timeout (2026-07-01). The per-turn budget is NOT a fixed
+ * wall clock. The substrate abandons a turn only after `turn_timeout_ms` with NO
+ * PTY activity from the `claude` child (an actively-working turn resets that idle
+ * clock on every spinner tick / streamed token / tool-output byte), so a
+ * long-but-live turn runs as long as it needs. `TURN_INACTIVITY_MS` is the warm
+ * steady-state idle window sent as `spec.turn_timeout_ms`.
+ *
+ * Historical note: this fix replaced a fixed 180s (substrate) / 240s (composer)
+ * wall clock that hard-failed a slow-but-active turn — Ryan live-test 2026-07-01:
+ * a "weave timer+tracker together then do full e2e testing" turn died at
+ * elapsed_ms=180009 while the agent was still working, then showed a misleading
+ * "your AI connection may need attention in settings" dead-end.
+ */
+const TURN_INACTIVITY_MS = 90_000
 
 /**
- * Cold-spawn / onboarding-turn wall-clock budget (2026-06-30). A COLD first turn
- * into a topic — and EVERY onboarding turn (the welcome seed + per-project
- * opening + each interview answer) — pays a one-time heavy load: a fresh CC REPL
- * spawn, MCP/dev-channel bind, plugin load, and a large onboarding system prompt.
- * Under machine load that routinely runs past the persistent REPL's snappy
- * steady-state `DEFAULT_TURN_TIMEOUT_MS` (180s), which hard-failed a
- * slow-but-would-succeed cold turn into the `FAILURE_BODY` bubble. Give those
- * turns a generous budget so the cold spawn completes; warm steady-state turns
- * keep the tight default (a genuinely wedged warm turn still fails fast). Wired
- * BOTH to the composer's own AbortController AND to the substrate's per-turn
- * timer via `AgentSpec.turn_timeout_ms`, so neither layer kills the turn early.
- *
- * 2026-06-30 (fresh-install verify follow-up) — raised 360s → 600s. #138 set 360s
- * but a real onboarding work-question turn STILL hard-failed at ~5.5min under
- * fleet/dogfood load (the cold CC spawn + dev-channel bind + large onboarding
- * prompt is genuinely slow when the machine is busy). 10 minutes leaves
- * comfortable headroom over the observed worst case so a slow-but-completing
- * onboarding turn finishes instead of erroring; the seed-failure self-heal +
- * reload regeneration still cover the rare turn that exceeds even this.
+ * Larger inactivity window for a COLD first turn / onboarding turn. Those turns
+ * carry a heavier initial payload (a large system / onboarding prompt) whose first
+ * silent think — before the TUI starts rendering — can run longer under machine
+ * load. A more generous idle tolerance keeps a slow-but-progressing cold turn
+ * alive; the absolute ceiling below still bounds a genuinely hung one. (The cold
+ * SPAWN itself — REPL fork, MCP/dev-channel bind, plugin load — happens BEFORE the
+ * substrate's per-turn watchdog starts, so it is covered by the composer's
+ * absolute-ceiling AbortController, not this idle window.)
  */
-const COLD_TURN_TIMEOUT_MS = 600_000
+const COLD_TURN_INACTIVITY_MS = 180_000
+
+/**
+ * Absolute-ceiling backstop (ms) for a single turn — the hard upper bound, wired
+ * to BOTH the composer's AbortController AND the substrate
+ * (`spec.turn_absolute_ceiling_ms`). Bounds the cold-spawn phase and a
+ * live-but-livelocked child. Very high (45min) — a real turn, however long,
+ * settles well under it; this exists only so a truly-hung process can't live
+ * forever. Overridable via `input.timeout_ms` (tests pin a small value).
+ */
+const TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 
 /**
  * Reply rows are HISTORY, not pending questions — they must never hit the
@@ -244,9 +256,44 @@ const FALLBACK_PERSONA = [
   'about anything captured in their workspace. Be direct; no corporate filler.',
 ].join('\n')
 
-/** Friendly failure bubble — the anti-silence guarantee. */
+/**
+ * Friendly failure bubble — the anti-silence guarantee. Used ONLY for a genuine
+ * credential / connection / substrate failure (all-cooldown, binary-not-found,
+ * channel-wedged, empty reply). A freeze-TIMEOUT is NOT surfaced with this text —
+ * misdiagnosing a slow turn as a credential problem is exactly the dead-end Ryan
+ * flagged (2026-07-01). Timeouts get `TIMEOUT_BODY` + a Retry affordance instead.
+ */
 const FAILURE_BODY =
   'I hit a problem answering that. Give it another try in a moment — if it keeps happening, your AI connection may need attention in settings.'
+
+/**
+ * Freeze-timeout bubble (2026-07-01). Honest: a timeout is a slow / wedged turn,
+ * not a setup problem. Shown only after the automatic single retry ALSO froze;
+ * paired with a one-click Retry button (below) and `allow_freeform` so the user
+ * can simply send again. NEVER the misleading "AI connection may need attention"
+ * text — that misdiagnoses a timeout as a credential failure.
+ */
+export const TIMEOUT_BODY =
+  'That one took too long, so I stopped before finishing. This is usually a temporary hiccup, not a problem with your setup — tap Retry, or just send it again.'
+
+/**
+ * Retry-affordance routing value (2026-07-01). Emitted as the Retry button's
+ * `value` on the freeze-timeout bubble; a tap routes it back as the next turn.
+ * The runner special-cases it: recover the last real user message for this topic
+ * (`lastUserText`) and re-run on THAT — so Retry acts on what the user actually
+ * asked, not this opaque token. Short (≤ VALUE_BYTE_CAP), NOT a reserved option
+ * value (so it validates) and NOT a forbidden inbound sentinel (so the tap is not
+ * rejected at the wire guard). Distinctive enough that a user is exceedingly
+ * unlikely to type it verbatim.
+ */
+export const RETRY_TURN_VALUE = '__retry_turn__'
+
+/**
+ * Fallback re-prompt when a Retry tap arrives but no prior user message is
+ * recorded for the topic (e.g. a gateway restart cleared the in-process map).
+ * The turn still does something sensible rather than echoing the opaque sentinel.
+ */
+const RETRY_FALLBACK_TEXT = 'Please try my previous message again.'
 
 /**
  * Item 12 (2026-06-19, owner live-dogfood) — cold-start acknowledgement.
@@ -469,7 +516,12 @@ export function buildLiveAgentTurn(
   input: BuildLiveAgentTurnInput,
 ): (turn: LiveAgentTurnRequest) => Promise<LiveAgentTurnResult> {
   const now = input.now ?? ((): number => Date.now())
-  const timeout_ms = input.timeout_ms ?? DEFAULT_TIMEOUT_MS
+  // Absolute-ceiling backstop for a turn (composer AbortController + substrate
+  // `spec.turn_absolute_ceiling_ms`). This is NOT the fixed per-turn cap the old
+  // code used — the substrate's activity watchdog handles freeze detection; this
+  // only bounds the cold-spawn phase + a live-but-livelocked child. `input.timeout_ms`
+  // overrides it (tests pin a small value).
+  const absoluteCeilingMs = input.timeout_ms ?? TURN_ABSOLUTE_CEILING_MS
   const ack_delay_ms = input.ack_delay_ms ?? DEFAULT_COLD_START_ACK_DELAY_MS
   const tool_names = input.tool_names ?? DEFAULT_TOOL_NAMES
   /**
@@ -480,6 +532,17 @@ export function buildLiveAgentTurn(
    * context, never a correctness break.
    */
   const contextSent = new Set<string>()
+
+  /**
+   * Retry affordance (2026-07-01) — the last REAL user message per (instance,
+   * topic) THIS process. Recorded on every real user turn; consulted when a turn
+   * arrives carrying `RETRY_TURN_VALUE` (a tap on the freeze-timeout Retry button)
+   * so the retry re-runs on what the user actually asked, not the opaque sentinel.
+   * Lost on restart — a Retry tapped after a gateway restart falls back to
+   * `RETRY_FALLBACK_TEXT`, which is fine: a freeze + Retry is a same-session,
+   * seconds-to-minutes flow.
+   */
+  const lastUserText = new Map<string, string>()
 
   /**
    * Go-live race fix (2026-06-20) — per-(instance, topic) turn serialization.
@@ -545,6 +608,25 @@ export function buildLiveAgentTurn(
     turn: LiveAgentTurnRequest,
   ): Promise<LiveAgentTurnResult> {
     const observed_at = turn.observed_at ?? now()
+    const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    // Retry affordance (2026-07-01): a tap on the freeze-timeout Retry button
+    // routes back `RETRY_TURN_VALUE`. Recover the last real user message for this
+    // topic and re-run on THAT (so every downstream step — persistence, prompt,
+    // scribe — sees the real question, not the opaque sentinel). Rebind `turn`
+    // once, up front, so the rest of the body is retry-agnostic. Fall back to a
+    // gentle re-prompt if nothing was recorded (e.g. a restart cleared the map).
+    if (turn.user_text === RETRY_TURN_VALUE) {
+      const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
+      console.info(
+        `${LOG_TAG} event=retry_tap project=${turn.project_slug} topic=${turn.topic_id} recovered=${recovered !== RETRY_FALLBACK_TEXT}`,
+      )
+      turn = { ...turn, user_text: recovered }
+    }
+    // Record the last real user message so a later Retry tap can recover it. Skip
+    // the synthetic seed turn (no real message) and an empty body.
+    if (turn.seed_turn !== true && turn.user_text.length > 0) {
+      lastUserText.set(topicKey, turn.user_text)
+    }
     // Path 1 — is the owner still onboarding? Consulted once per turn so the
     // first-turn preamble, the upload affordance, and the post-turn scribe all
     // agree. A throwing seam degrades to steady-state (never kills the turn).
@@ -649,8 +731,7 @@ export function buildLiveAgentTurn(
       }
     }
 
-    // ── 2. Compose the prompt.
-    const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    // ── 2. Compose the prompt. (`topicKey` was resolved at the top of the body.)
     // Work Board (Phase 1a) — resolve the compact board DATA block ONCE for this
     // turn. Injected on EVERY turn so the orchestrator re-grounds on disk-truth
     // instead of a rotting transcript: the cold first turn folds it into
@@ -772,18 +853,17 @@ export function buildLiveAgentTurn(
     // install — spawns the latest served model, never a retired id that would
     // hang for the full per-turn timeout. An explicit `input.model` still wins.
     const model = input.model ?? getBestModel()
-    // Per-turn wall-clock budget. A COLD first turn into this topic OR any
-    // onboarding turn pays the one-time cold-spawn load that routinely runs past
-    // the substrate's snappy 180s steady-state ceiling under machine load, so
-    // give those turns the generous `COLD_TURN_TIMEOUT_MS`; warm steady-state
-    // turns keep the tight default. The budget is wired to BOTH the composer's
-    // AbortController (below) AND the substrate's own per-turn timer (via
-    // `spec.turn_timeout_ms`) so neither layer abandons the turn early — without
-    // the spec override the substrate's 180s would still kill a slow cold turn.
+    // ACTIVITY-BASED per-turn budgets (2026-07-01). Both are ADDITIVE spec fields
+    // the persistent-REPL adapter reads. `turn_timeout_ms` is the INACTIVITY window
+    // (idle-time-since-last-PTY-byte before a turn is deemed frozen) — an active
+    // turn resets it on every byte, so a long-but-working turn is never killed on a
+    // fixed clock. A COLD first turn / onboarding turn gets the larger idle window
+    // (heavier initial processing); warm steady-state stays snappy. `turn_absolute_
+    // ceiling_ms` is the hard backstop. The composer's own AbortController mirrors
+    // the ceiling (below) to bound the cold-spawn phase, which runs before the
+    // substrate's watchdog starts.
     const isColdOrOnboardingTurn = isColdFirstTurn || onboardingActive
-    const turnBudgetMs = isColdOrOnboardingTurn
-      ? Math.max(timeout_ms, COLD_TURN_TIMEOUT_MS)
-      : timeout_ms
+    const inactivityMs = isColdOrOnboardingTurn ? COLD_TURN_INACTIVITY_MS : TURN_INACTIVITY_MS
     const spec: AgentSpec = {
       prompt,
       tools,
@@ -793,41 +873,76 @@ export function buildLiveAgentTurn(
       // projectIdResolver is wired on this substrate (build-llm-call-
       // substrate.ts). Per-dispatch ⇒ race-free across concurrent topics.
       metering_context: { project_id: scope },
+      turn_timeout_ms: inactivityMs,
+      turn_absolute_ceiling_ms: absoluteCeilingMs,
     }
     if (input.max_tokens !== undefined) spec.max_tokens = input.max_tokens
-    // Only override the substrate ceiling for the cold/onboarding path; leave a
-    // warm steady-state turn on the substrate default so a wedged warm turn
-    // still trips the snappy timeout.
-    if (isColdOrOnboardingTurn) spec.turn_timeout_ms = turnBudgetMs
-    let text: string
-    const started = now()
-    try {
+
+    // Dispatch, collecting the reply text; the composer AbortController is a pure
+    // ABSOLUTE-CEILING backstop (the substrate's activity watchdog does freeze
+    // detection). Returns the text, or throws the substrate/abort error.
+    const dispatchOnce = async (): Promise<string> => {
       const handle = input.substrate.start(spec)
       const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(), turnBudgetMs)
+      const timer = setTimeout(() => ac.abort(), absoluteCeilingMs)
       try {
-        text = await collectTokensToString(handle, ac.signal)
+        return await collectTokensToString(handle, ac.signal)
       } finally {
         clearTimeout(timer)
         // Item 12 — the dispatch settled; cancel the cold-start ack if it
         // hasn't already fired (warm/fast turn → no spurious "waking up").
         clearAckTimer()
       }
-    } catch (err) {
-      console.warn(
-        `${LOG_TAG} event=turn_failed project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} elapsed_ms=${now() - started} err=${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
-      // A failed SEED turn (the synthetic auto-start welcome / opening) must NOT
-      // leave a `FAILURE_BODY` bubble: the app-ws reply path persists it into the
-      // durable chat_log, so reloading would replay the stuck error forever
-      // instead of re-firing the welcome. Stay silent on a seed failure — the
-      // receiver clears its per-process seeded-topic mark on the 'failed' result
-      // so the next reload/re-subscribe regenerates the seed (now on the larger
-      // cold-turn budget). A real user turn still gets the anti-silence bubble.
+    }
+
+    // Auto-retry a genuine FREEZE-timeout ONCE, silently. A freeze is the
+    // substrate's activity watchdog (or the composer ceiling) abandoning a wedged
+    // turn; the substrate poisons + respawns the warm REPL, so the retry lands on a
+    // clean session and the common transient case self-heals with NO dead-end
+    // bubble. A seed turn is never retried (reload regenerates it). A NON-freeze
+    // error (credentials / cooldown / binary / channel) is NOT retried — it is a
+    // real fault that keeps its own actionable message.
+    const maxAttempts = turn.seed_turn === true ? 1 : 2
+    const dispatchStartedAt = now()
+    let text: string | null = null
+    let lastErrMessage = ''
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const started = now()
+      try {
+        text = await dispatchOnce()
+        break
+      } catch (err) {
+        lastErrMessage = err instanceof Error ? err.message : String(err)
+        const frozen = isFreezeTimeout(lastErrMessage)
+        console.warn(
+          `${LOG_TAG} event=turn_failed project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} attempt=${attempt} frozen=${frozen} elapsed_ms=${now() - started} err=${lastErrMessage}`,
+        )
+        if (frozen && attempt + 1 < maxAttempts) {
+          console.info(
+            `${LOG_TAG} event=turn_auto_retry project=${turn.project_slug} topic=${turn.topic_id} scope=${scope}`,
+          )
+          continue
+        }
+        break
+      }
+    }
+
+    if (text === null) {
+      // Terminal failure after any auto-retry. A failed SEED turn (the synthetic
+      // auto-start welcome / opening) must NOT leave a bubble: the app-ws reply
+      // path persists it into the durable chat_log, so reloading would replay the
+      // stuck error instead of re-firing the welcome. Stay silent — the receiver
+      // clears its per-process seeded-topic mark on the 'failed' result so the next
+      // reload/re-subscribe regenerates the seed. A real user turn gets a bubble:
+      //   • freeze-TIMEOUT → the honest `TIMEOUT_BODY` + a one-click Retry button
+      //     (NEVER the misleading "AI connection may need attention" text).
+      //   • any other fault → the credential/connection `FAILURE_BODY`.
       if (turn.seed_turn !== true) {
-        sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
+        if (isFreezeTimeout(lastErrMessage)) {
+          await sendTimeoutRetry(input.buttonStore, turn)
+        } else {
+          sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
+        }
       }
       return { outcome: 'failed', reply_prompt_id: null }
     }
@@ -835,8 +950,9 @@ export function buildLiveAgentTurn(
       console.warn(
         `${LOG_TAG} event=empty_reply project=${turn.project_slug} topic=${turn.topic_id} scope=${scope}`,
       )
-      // Same seed-failure discipline as the catch above — never persist an error
-      // bubble for a synthetic seed turn; let reload regenerate it.
+      // Same seed-failure discipline as above — never persist an error bubble for a
+      // synthetic seed turn; let reload regenerate it. An empty reply is a
+      // substrate fault, not a timeout, so it keeps the generic failure bubble.
       if (turn.seed_turn !== true) {
         sendSafe(turn.send, { type: 'agent_message', body: FAILURE_BODY, topic_id: turn.topic_id })
       }
@@ -909,7 +1025,7 @@ export function buildLiveAgentTurn(
       /* audit-trail only */
     }
     console.info(
-      `${LOG_TAG} event=replied project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} chars=${text.length} elapsed_ms=${now() - started}`,
+      `${LOG_TAG} event=replied project=${turn.project_slug} topic=${turn.topic_id} scope=${scope} chars=${text.length} elapsed_ms=${now() - dispatchStartedAt}`,
     )
     // WAVE 2 P1 — fire-and-forget correction detection over THIS exchange. The
     // hook deterministically pre-gates (most turns carry no correction cue and
@@ -1314,4 +1430,61 @@ function sendSafe(send: (event: ChatOutbound) => void, event: ChatOutbound): voi
       `${LOG_TAG} event=send_failed err=${err instanceof Error ? err.message : String(err)}`,
     )
   }
+}
+
+/**
+ * Classify a dispatch error as a FREEZE-TIMEOUT (the turn was slow / wedged) vs a
+ * real credential / connection / substrate fault. The persistent-REPL adapter
+ * surfaces a frozen turn as `persistent-repl: turn timeout` and the composer's own
+ * absolute-ceiling AbortController surfaces `cc-llm-call: aborted`; both mean "the
+ * turn didn't finish in time", NOT "your setup is broken". Everything else
+ * (all-cooldown, invalid key, binary-not-found, channel-wedged, empty) is a real
+ * fault that must KEEP its own actionable message — the whole point of this fix is
+ * to stop misdiagnosing a timeout as a credential problem.
+ */
+export function isFreezeTimeout(message: string): boolean {
+  return /turn timeout/i.test(message) || /\baborted\b/i.test(message)
+}
+
+/**
+ * Surface the honest freeze-timeout bubble + a one-click Retry affordance. Persists
+ * the reply as a `button_prompt` (so the web client mints a `prompt_id` and the tap
+ * routes as a `button_choice`) carrying a single Retry option whose value is
+ * `RETRY_TURN_VALUE`; `allow_freeform` stays true so the user can simply send their
+ * message again. When the persist fails we still ship the live envelope (buttonless
+ * on a client that needs a prompt_id, but the message + freeform re-send still
+ * work). Called ONLY for a real (non-seed) user turn after the auto-retry.
+ */
+async function sendTimeoutRetry(
+  buttonStore: ButtonStore,
+  turn: LiveAgentTurnRequest,
+): Promise<void> {
+  const options = [{ label: OPTION_LABELS[0]!, body: 'Retry', value: RETRY_TURN_VALUE }]
+  let reply_prompt_id: string | null = null
+  try {
+    const prompt = buildButtonPrompt({
+      body: TIMEOUT_BODY,
+      options,
+      allow_freeform: true,
+      expires_in_ms: REPLY_ROW_TTL_MS,
+      uuid: randomUUID,
+    })
+    const emitted = await buttonStore.emit(prompt, { topic_id: turn.topic_id })
+    reply_prompt_id = emitted.prompt_id
+  } catch (err) {
+    console.warn(
+      `${LOG_TAG} event=timeout_retry_persist_failed project=${turn.project_slug} topic=${turn.topic_id} err=${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+  }
+  const envelope: ChatOutbound = {
+    type: 'agent_message',
+    body: TIMEOUT_BODY,
+    topic_id: turn.topic_id,
+    options,
+    allow_freeform: true,
+    ...(reply_prompt_id !== null ? { prompt_id: reply_prompt_id } : {}),
+  }
+  sendSafe(turn.send, envelope)
 }

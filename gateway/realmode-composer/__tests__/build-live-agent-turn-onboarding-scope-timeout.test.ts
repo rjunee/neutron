@@ -9,12 +9,15 @@
  *  so the project topic shows its deterministic opening instead of the agent
  *  improvising "…what should I call you?".
  *
- *  FIX 2 (cold-turn 180s hard-fail): a COLD first turn / onboarding turn raises
- *  the per-turn budget to `COLD_TURN_TIMEOUT_MS` (600s) on BOTH the composer
- *  AbortController and the substrate (`spec.turn_timeout_ms`); a warm
- *  steady-state turn sends no override (keeps the snappy default). A FAILED
- *  `seed_turn` stays silent (no persisted `FAILURE_BODY` bubble) so a reload can
- *  re-fire it; a failed real user turn still gets the anti-silence bubble.
+ *  FIX 2 (2026-07-01 activity-based timeout): the per-turn budget is no longer a
+ *  fixed wall clock. Every turn carries an INACTIVITY window (`spec.turn_timeout_ms`
+ *  — larger for a COLD/onboarding turn, snappy for warm) + an ABSOLUTE-CEILING
+ *  backstop (`spec.turn_absolute_ceiling_ms`); the substrate abandons a turn only
+ *  after the idle window with NO PTY activity, so a long-but-active turn is never
+ *  killed on a clock. A FAILED `seed_turn` stays silent (no bubble) so a reload can
+ *  re-fire it; a failed real user turn gets a bubble (a plain fault → the
+ *  anti-silence FAILURE_BODY; a freeze-timeout → TIMEOUT_BODY + Retry, covered in
+ *  build-live-agent-turn-timeout-retry.test.ts).
  *
  * Stubbed substrate (no real `claude` spawn); REAL ButtonStore over an on-disk
  * migrated project.db.
@@ -37,9 +40,11 @@ import {
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
-// Mirror of the production constant (build-live-agent-turn.ts). Raised 360s → 600s
-// on 2026-06-30 after a real onboarding turn still hard-failed at ~5.5min under load.
-const COLD_TURN_TIMEOUT_MS = 600_000
+// Mirrors the production constants (build-live-agent-turn.ts): the activity-based
+// inactivity windows + the absolute-ceiling backstop.
+const TURN_INACTIVITY_MS = 90_000
+const COLD_TURN_INACTIVITY_MS = 180_000
+const TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 
 let tmp: string
 let db: ProjectDb
@@ -171,34 +176,38 @@ describe('FIX 1 — onboarding is General-topic-only', () => {
   })
 })
 
-describe('FIX 2 — cold/onboarding turn timeout budget', () => {
-  test('a COLD first turn requests the 600s budget via spec.turn_timeout_ms', async () => {
+describe('FIX 2 — activity-based per-turn budgets', () => {
+  test('a COLD first turn carries the larger inactivity window + the absolute ceiling', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }) })
     await run(makeTurn({ sent }))
-    expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_TIMEOUT_MS)
+    expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_INACTIVITY_MS)
+    expect(specs[0]!.turn_absolute_ceiling_ms).toBe(TURN_ABSOLUTE_CEILING_MS)
   })
 
-  test('an ONBOARDING turn requests the 600s budget even when warm', async () => {
+  test('an ONBOARDING turn keeps the larger inactivity window even when warm', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }), onboarding: true })
     // First (cold) turn, then a second (warm) turn on the SAME topic.
     await run(makeTurn({ sent }))
     await run(makeTurn({ sent }))
-    // The warm onboarding turn STILL carries the larger budget (onboarding load).
-    expect(specs[1]!.turn_timeout_ms).toBe(COLD_TURN_TIMEOUT_MS)
+    // The warm onboarding turn STILL carries the larger idle window (onboarding load).
+    expect(specs[1]!.turn_timeout_ms).toBe(COLD_TURN_INACTIVITY_MS)
   })
 
-  test('a WARM steady-state turn sends NO override (keeps the snappy default)', async () => {
+  test('a WARM steady-state turn drops to the snappy inactivity window (ceiling unchanged)', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }) })
     await run(makeTurn({ sent })) // cold
     await run(makeTurn({ sent })) // warm
-    expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_TIMEOUT_MS)
-    expect(specs[1]!.turn_timeout_ms).toBeUndefined()
+    expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_INACTIVITY_MS)
+    expect(specs[1]!.turn_timeout_ms).toBe(TURN_INACTIVITY_MS)
+    // The absolute-ceiling backstop is on EVERY turn — a long-but-active turn is
+    // bounded only by this, never by the (activity-reset) idle window.
+    expect(specs[1]!.turn_absolute_ceiling_ms).toBe(TURN_ABSOLUTE_CEILING_MS)
   })
 })
 

@@ -764,3 +764,130 @@ describe('PersistentReplSubstrate — dev-channel MCP handshake race (P0 2026-06
     expect(events.some((e) => e.kind === 'error')).toBe(false)
   })
 })
+
+// ── ACTIVITY-BASED turn timeout (2026-07-01) ────────────────────────────────
+// The per-turn budget is an INACTIVITY window, not a fixed wall clock: PTY output
+// from the child (spinner ticks, streamed tokens, tool output) resets the idle
+// clock via `session.lastDataAt`, so a slow-but-actively-working turn runs as long
+// as it needs and only a GENUINELY frozen turn (no PTY output) is abandoned.
+describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout', () => {
+  /**
+   * A host that never replies to `/message`, but lets the test drive PTY output
+   * through the captured `onData` (simulating the `claude` child rendering). The
+   * host exposes `emit()` so a test can keep the turn "active" past the idle window.
+   */
+  function makeControllablePtyHost(): { host: PtyHost; emit: () => void } {
+    let onData: ((chunk: Uint8Array) => void) | undefined
+    const host: PtyHost = {
+      spawn(argv, opts) {
+        onData = opts.onData
+        const sid = extractSessionId(argv)
+        const { port: sinkPort, token } = getReplSinkInfo()
+        let hasExited = false
+        let exitResolve: (c: number | null) => void = () => {}
+        const exited = new Promise<number | null>((r) => {
+          exitResolve = r
+        })
+        const server = Bun.serve({
+          port: 0,
+          hostname: '127.0.0.1',
+          async fetch(req) {
+            const url = new URL(req.url)
+            if (url.pathname === '/health') return Response.json({ ok: true })
+            if (req.method === 'POST' && url.pathname === '/message') {
+              return Response.json({ status: 'delivered' }) // never replies
+            }
+            return new Response('nf', { status: 404 })
+          },
+        })
+        void fetch(`http://127.0.0.1:${sinkPort}/channel-ready`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify({ session_id: sid, channel_port: server.port, pid: 991 }),
+        }).catch(() => undefined)
+        void fetch(`http://127.0.0.1:${sinkPort}/channel-bound`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify({ session_id: sid, pid: 991 }),
+        }).catch(() => undefined)
+        return {
+          pid: 991,
+          write() {},
+          resize() {},
+          kill() {
+            if (hasExited) return
+            hasExited = true
+            try {
+              server.stop(true)
+            } catch {
+              /* ignore */
+            }
+            exitResolve(143)
+          },
+          exited,
+          hasExited: () => hasExited,
+        }
+      },
+    }
+    return { host, emit: () => onData?.(new TextEncoder().encode('.')) }
+  }
+
+  it('keeps an ACTIVE turn alive past the inactivity window (PTY activity resets the deadline)', async () => {
+    // Idle window 300ms. The child never replies but emits PTY output every 100ms
+    // for ~700ms — well past 300ms. A fixed wall clock would have killed it; the
+    // activity watchdog must NOT, because the turn keeps producing output. We then
+    // stop emitting and let it trip, proving it only dies once GENUINELY idle.
+    const { host, emit } = makeControllablePtyHost()
+    const sub = createPersistentReplSubstrate(
+      baseOptions(host, { turnTimeoutMs: 300, idleQuietMs: 0, idleMaxMs: 50 }),
+    )
+    const started = performance.now()
+    const ticker = setInterval(emit, 100)
+    // Stop the activity after ~700ms so the watchdog can finally observe idleness.
+    setTimeout(() => clearInterval(ticker), 700)
+    await expect(drain(sub.start(spec('long active build')))).rejects.toThrow(/turn timeout/)
+    const elapsed = performance.now() - started
+    // Survived WELL past the 300ms idle window (activity kept resetting it), then
+    // tripped only after activity ceased (~700ms + one idle window).
+    expect(elapsed).toBeGreaterThan(600)
+    clearInterval(ticker)
+  })
+
+  it('abandons a GENUINELY frozen turn after the inactivity window (no PTY activity)', async () => {
+    // No PTY output ever → idle from turn start → trips at ~250ms.
+    const { host } = makeControllablePtyHost()
+    const sub = createPersistentReplSubstrate(
+      baseOptions(host, { turnTimeoutMs: 250, idleQuietMs: 0, idleMaxMs: 50 }),
+    )
+    const started = performance.now()
+    await expect(drain(sub.start(spec('frozen turn')))).rejects.toThrow(/turn timeout/)
+    const elapsed = performance.now() - started
+    // Tripped near the idle window, not held open.
+    expect(elapsed).toBeLessThan(3_000)
+  })
+
+  it('enforces the ABSOLUTE CEILING even while the turn keeps producing PTY output', async () => {
+    // Idle window 200ms (continuously reset by activity), ceiling 600ms. The child
+    // emits output every 80ms forever (a live-but-livelocked child) — the
+    // inactivity watchdog never fires (activity keeps resetting it), but the
+    // absolute ceiling must still abandon the turn at ~600ms.
+    const { host, emit } = makeControllablePtyHost()
+    const sub = createPersistentReplSubstrate(
+      baseOptions(host, {
+        turnTimeoutMs: 200,
+        turnAbsoluteCeilingMs: 600,
+        idleQuietMs: 0,
+        idleMaxMs: 50,
+      }),
+    )
+    const started = performance.now()
+    const ticker = setInterval(emit, 80)
+    await expect(drain(sub.start(spec('livelocked')))).rejects.toThrow(/turn timeout/)
+    clearInterval(ticker)
+    const elapsed = performance.now() - started
+    // Activity kept the 200ms idle window from firing (survived well past it), and
+    // the 600ms ceiling bounded the livelocked turn.
+    expect(elapsed).toBeGreaterThan(400)
+    expect(elapsed).toBeLessThan(3_000)
+  })
+})

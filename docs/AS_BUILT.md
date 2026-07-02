@@ -54,6 +54,55 @@ persist personality; gate off with no import); minimal-vs-full STATUS.md +
 ProjectOpening` copy; `stripLeadingFrontmatter` (fence removed, body kept, bare
 rule + no-frontmatter untouched, CRLF). tsc clean, leak-gate silent, server boots
 clean on a fresh QUIET install (port 7869).
+## 2026-07-01 — Chat turn timeout is ACTIVITY-BASED; freezes auto-retry + get a Retry button
+
+**Why.** Ryan live-test 2026-07-01 (frustrated): a chat turn running a long-but-active
+build hard-failed at a FIXED 180s wall clock **while the agent was still working**
+(`turn_failed elapsed_ms=180009 err=persistent-repl: turn timeout`), then showed a
+dead-end "your AI connection may need attention in settings" message — misdiagnosing
+a slow turn as a credential problem. "If the agent is still working why arbitrarily
+timeout at 180s? Be smarter — look for activity, if it's not frozen keep waiting."
+
+**What shipped (no feature flags).**
+- **Inactivity watchdog replaces the fixed per-turn wall clock.**
+  `runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts` no longer
+  arms `setTimeout(perTurnTimeoutMs)`; it runs an interval watchdog that abandons a
+  turn ONLY after `turn_timeout_ms` with NO PTY activity. `session.lastDataAt`
+  advances on every byte the `claude` child writes (spinner ticks, streamed tokens,
+  tool output — the `onData` handler), so an actively-working turn keeps resetting
+  the idle clock and runs as long as it needs; only a genuinely frozen turn trips.
+  New `DEFAULT_TURN_INACTIVITY_MS` (90s) + `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min
+  hard backstop). The liveness keepalive pushes `status` but does NOT touch
+  `lastDataAt`, so an alive-but-frozen child is still detected as frozen.
+- **`AgentSpec.turn_timeout_ms` repurposed** from "wall-clock budget" to "inactivity
+  window"; new additive `AgentSpec.turn_absolute_ceiling_ms` (`runtime/substrate.ts`).
+  The composer (`gateway/realmode-composer/build-live-agent-turn.ts`) sends a snappy
+  90s idle window for warm turns and a larger 180s window for cold/onboarding turns;
+  its own AbortController is now a pure 45min absolute-ceiling backstop that covers
+  the cold-SPAWN phase (which runs before the substrate watchdog starts) — the cold
+  path's generous window folded into the same scheme, `COLD_TURN_TIMEOUT_MS` deleted.
+- **Auto-retry once + honest message + one-click Retry.** On a genuine freeze the
+  composer auto-retries the turn once, silently (the substrate poisons+respawns the
+  warm REPL, so the retry lands clean). If the retry also freezes, the user gets
+  `TIMEOUT_BODY` ("took too long … tap Retry, or just send it again") + a persisted
+  Retry button (`RETRY_TURN_VALUE`), `allow_freeform` open — NEVER the misleading
+  credential text. A Retry tap re-runs on the last real user message for the topic
+  (`lastUserText` in-process map; VALUE_BYTE_CAP is 37 bytes so the message can't
+  ride the button value). `isFreezeTimeout` distinguishes a freeze from a real
+  credential/connection fault, which keeps its own actionable `FAILURE_BODY`.
+
+**Tests.** `persistent-repl-substrate.test.ts` — activity resets keep an active turn
+alive past the idle window; a frozen turn trips at the idle window; the absolute
+ceiling bounds a livelocked-but-active turn. `build-live-agent-turn-timeout-retry.test.ts`
+— freeze → auto-retry (success → no bubble); retry-also-freezes → TIMEOUT_BODY + Retry
+button, not the connection text; non-freeze fault → FAILURE_BODY, no retry; Retry tap
+recovers + re-runs the last message; seed freeze stays silent.
+`build-live-agent-turn-onboarding-scope-timeout.test.ts` — updated to the new
+inactivity/ceiling spec fields.
+
+**Files.** `runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts`,
+`runtime/substrate.ts`, `gateway/realmode-composer/build-live-agent-turn.ts`,
+`docs/SYSTEM-OVERVIEW.md`, + the three test files above.
 
 ## 2026-07-01 — Notes / second-brain core: REMOVED entirely
 
