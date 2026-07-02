@@ -346,9 +346,18 @@ NEVER EXIT SILENTLY: if you cannot complete the review, return a TRUNCATED verdi
 // isolated worktree), so a base-branch file write would be invisible to Forge
 // and never reach the PR. forge:build persists the returned IMPLEMENTATION_PLAN
 // into its worktree so it lands on the branch/PR (see ralphExecuteNote).
-function planFablePrompt() {
+function planFablePrompt(resuming) {
+  // On a crash-resume (or a fix round > 1), a prior run already COMMITTED
+  // progress on forgeBranch; the planner runs at repoPath on the BASE branch, so
+  // it must inspect the reused branch — not just base — or it would regenerate a
+  // plan blind to checked-off tasks and existing changes and tell the executor to
+  // redo/overwrite that work (Codex [P2]). Before this split the fused in-Forge
+  // planner ran inside the re-entered worktree and saw branch state for free.
+  const resumeNote = resuming
+    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
+    : ''
   return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
-You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):
+You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):${resumeNote}
 1. Read SPEC.md (the master spec) and AS-BUILT.md if present at the repo root, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
 2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
 3. Choose the SINGLE top-priority UNCHECKED task to build THIS iteration (the Ralph one-task discipline). Return it as \`topTask\`.
@@ -616,14 +625,19 @@ try {
   let ralphNote = ''
   if (ralph === true) {
     const plan = await agent(
-      planFablePrompt(),
+      planFablePrompt(resuming),
       withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
     )
-    if (plan) {
-      complexityTag = plan.complexity
-      ralphNote = ralphExecuteNote(plan)
-      log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${plan.remainingTasks}`)
+    // NEVER continue Ralph without a plan (Codex [P2]). The old in-Forge
+    // RALPH_NOTE is gone, so a null plan (planner terminal error) would run
+    // forge:build with NO plan + NO one-task discipline — an unplanned build.
+    // Fail loudly; the catch{} persists a terminal failure result promptly.
+    if (!plan) {
+      throw new Error('plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode')
     }
+    complexityTag = plan.complexity
+    ralphNote = ralphExecuteNote(plan)
+    log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${plan.remainingTasks}`)
   }
 
   // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise

@@ -134,6 +134,15 @@ describe('inner-workflow.mjs — deterministic branch + worktree isolation', () 
     expect(SRC).toContain('IMPLEMENTATION_PLAN.md')
     expect(SRC).toContain('you are the EXECUTOR')
   })
+
+  test('Ralph fails loudly on a null plan (never runs Forge unplanned) + the planner inspects the reused branch on resume (Codex [P2])', () => {
+    // A null plan (planner terminal error) must NOT silently fall through to an
+    // unplanned forge:build now that the in-Forge RALPH_NOTE is gone.
+    expect(SRC).toContain('refusing to run Forge without a plan in Ralph mode')
+    // On resume the planner inspects the reused branch, not just the base branch.
+    expect(SRC).toContain('planFablePrompt(resuming)')
+    expect(SRC).toContain('RESUME — a prior run ALREADY committed progress')
+  })
 })
 
 describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
