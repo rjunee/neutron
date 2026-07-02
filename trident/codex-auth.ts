@@ -2,7 +2,7 @@
  * @neutronai/trident — Codex SUBSCRIPTION auth: validation, path resolution,
  * materialization, and connection status (trident cross-model review, Part B).
  *
- * Part A shipped `trident/codex-review.sh`, which reads a per-tenant
+ * Part A shipped `trident/codex-review.sh`, which reads a per-project
  * `CODEX_HOME/auth.json` (a ChatGPT-SUBSCRIPTION OAuth bundle) and runs the
  * `codex` CLI as an independent cross-model reviewer. This module is the Part-B
  * bridge that lets the owner CONNECT that credential from the admin panel:
@@ -12,7 +12,7 @@
  *      (`tokens.access_token` + `tokens.refresh_token`) is accepted + normalized;
  *      a metered `OPENAI_API_KEY` (auth_mode=apikey) is REJECTED — Ryan's hard
  *      rule is NEVER the metered path. A bare `sk-...` paste is likewise rejected.
- *   2. `resolveCodexHome({ owner_home })` — the canonical per-tenant CODEX_HOME
+ *   2. `resolveCodexHome({ owner_home })` — the canonical per-project CODEX_HOME
  *      directory. The materialize path AND the trident loop's env
  *      (`build-core-modules.ts`) resolve through THIS one function so they can
  *      never disagree about where `auth.json` lives.
@@ -166,9 +166,9 @@ export function validateCodexSubscriptionAuth(
 }
 
 /**
- * The canonical per-tenant CODEX_HOME directory. `owner_home` is already the
- * per-project_slug tenant root (`resolveNeutronHome`), so `<owner_home>/.codex`
- * is a per-tenant CODEX_HOME — the ONE place both the admin-panel materialize
+ * The canonical per-project CODEX_HOME directory. `owner_home` is already the
+ * per-project_slug owner root (`resolveNeutronHome`), so `<owner_home>/.codex`
+ * is a per-project CODEX_HOME — the ONE place both the admin-panel materialize
  * and the trident loop's env agree on.
  */
 export function resolveCodexHome(opts: { owner_home: string }): string {

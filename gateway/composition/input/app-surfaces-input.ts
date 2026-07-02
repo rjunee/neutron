@@ -281,7 +281,7 @@ export interface AppSurfacesCompositionInput {
    * `/api/app/projects/<id>/codex-auth` (GET status / POST connect / DELETE
    * disconnect). Validates a pasted ChatGPT-subscription auth.json (metered
    * OPENAI_API_KEY rejected), stores it in the #149 credential store, and
-   * materializes it to the per-tenant CODEX_HOME the trident codex reviewer
+   * materializes it to the per-project CODEX_HOME the trident codex reviewer
    * reads. Surface factory:
    * `gateway/http/codex-credential-surface.ts:createCodexCredentialSurface`.
    */

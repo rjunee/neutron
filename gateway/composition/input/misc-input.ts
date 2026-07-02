@@ -70,7 +70,7 @@ export interface MiscCompositionInput {
      */
     on_run_terminal?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
     /**
-     * Per-tenant CODEX_HOME dir for the OPTIONAL cross-model review (Part B).
+     * Per-owner CODEX_HOME dir for the OPTIONAL cross-model review (Part B).
      * When set, the trident loop threads it into the inner workflow so the codex
      * reviewer runs `trident/codex-review.sh` with this CODEX_HOME. The composer
      * resolves it via `resolveCodexHome({ owner_home })` — the SAME path the
@@ -201,7 +201,7 @@ export interface MiscCompositionInput {
    * module registers `codex_connect` + `codex_status`, agent-native parity with
    * the admin-panel Connect Codex flow. Both dispatch the SAME
    * `CodexCredentialService` (subscription-only validation, metered key rejected,
-   * store in the #149 credential store, materialize to the per-tenant CODEX_HOME).
+   * store in the #149 credential store, materialize to the per-project CODEX_HOME).
    */
   codex_credential?: {
     service: import('../../../trident/codex-credential.ts').CodexCredentialService

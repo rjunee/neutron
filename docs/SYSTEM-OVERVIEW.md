@@ -1106,6 +1106,35 @@ availability within one turn. Wiring the existing Cores to CALL the resolver is
 a named follow-up (needs per-call `project_id` threaded into each Core's token
 provider — the deferred Phase-3 Cores rework).
 
+### Connect Codex — subscription auth for the trident cross-model reviewer (Part B)
+
+The Settings tab also owns a **Connect Codex** flow that supplies the credential
+the trident cross-model reviewer (`trident/codex-review.sh`, Part A) needs. Codex
+has no headless device-flow, so the pragmatic UX is: the owner runs `codex login`
+(ChatGPT account) on their own machine once, then pastes the contents of their
+`~/.codex/auth.json` into the panel.
+
+- **Validation (subscription-only).** `trident/codex-auth.ts:validateCodexSubscriptionAuth`
+  accepts a bundle with `tokens.access_token` + `tokens.refresh_token` and
+  **REJECTS** a metered `OPENAI_API_KEY` (auth_mode=apikey) or a bare `sk-…` paste
+  — Ryan's standing rule is never the metered path. The accepted bundle is
+  normalized (API key stripped) before storage.
+- **Storage.** Stored encrypted in the `project_credentials` store (service
+  `codex`, GLOBAL scope — a ChatGPT subscription is account-wide), same
+  AES-256-GCM keyfile as every other credential.
+- **Materialization.** On save it is written to the per-owner CODEX_HOME
+  (`resolveCodexHome({ owner_home })` = `<owner_home>/.codex/auth.json`, mode
+  0600) — the SAME path the trident loop threads into the inner workflow
+  (`build-core-modules.ts` reads `trident.codex_home` from the composer, resolved
+  by the identical helper, so the loop and the store can never disagree). A
+  boot-time `ensureMaterialized` self-heals the file from the stored credential.
+- **Status.** GET returns `connected` / `expired` (access-token JWT `exp` in the
+  past) / `not_connected`.
+- **Surfaces.** HTTP `gateway/http/codex-credential-surface.ts`
+  (`/api/app/projects/<id>/codex-auth`, GET/POST/DELETE) + agent-native
+  `codex_connect` / `codex_status` tools (`trident/codex-credential-tool.ts`),
+  both dispatching the ONE `CodexCredentialService`.
+
 ## Work Board — orchestrator external memory + live work tracker (`work-board/`)
 
 Phase 1a (backend). The Work Board moves the orchestrator's per-feature state
@@ -1206,6 +1235,17 @@ already renders are now LIT by real writers:
   the caret `›` is the `inline_active` marker, settable via `work_board_update`.
 - **No migration** — `0090`'s `linked_run_id` + `inline_active` + the partial index
   carry it; reconcile keys off `linked_run_id`.
+- **Agent auto-invoke (Part B, M-K) — no `/code` needed.** The live chat agent
+  SELF-ROUTES a build request via a complexity heuristic in the operating-doctrine
+  fragment (`gateway/realmode-composer/operating-doctrine.ts:BUILD_ROUTING_DOCTRINE`,
+  spliced every turn) + the `work_board_dispatch_build` tool description: SIMPLE
+  work (single file, quick script, small self-contained edit) is built INLINE with
+  the agent's own Read/Write/Edit tools; COMPLEX work (multi-file, a real project or
+  shared code, warrants review, large/risky) is routed to trident — the agent adds a
+  Plan item (`work_board_add`) then calls `work_board_dispatch_build` bound to it,
+  and TELLS the owner it is routing to trident and why. The tool is already on the
+  live agent's surface (gated on the same Anthropic credential pool as the loop), so
+  the owner never types a command — the agent decides.
 
 See `docs/plans/2026-06-29-001-feat-work-board-master-plan.md` (§11 Phase 3/4).
 

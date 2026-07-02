@@ -208,7 +208,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // `codex_status` agent tools when the composer wired the service, so the
       // live agent has agent-native parity with the admin-panel Connect Codex
       // flow (same `CodexCredentialService`: subscription-only, metered key
-      // rejected, materialized to the per-tenant CODEX_HOME).
+      // rejected, materialized to the per-project CODEX_HOME).
       if (input.codex_credential !== undefined) {
         registerCodexCredentialToolSurface(reg, { service: input.codex_credential.service })
       }
@@ -397,7 +397,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
         }
-        // OPTIONAL cross-model review: thread the per-tenant Codex credential dir
+        // OPTIONAL cross-model review: thread the per-project Codex credential dir
         // (CODEX_HOME) into the inner workflow. Part B: the composer resolves the
         // per-project_slug CODEX_HOME via `resolveCodexHome({ owner_home })` and
         // passes it here (`tridentWiring.codex_home`) — the SAME path the admin

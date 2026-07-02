@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  BUILD_ROUTING_DOCTRINE,
   DOCTRINE_PRINCIPLES,
   buildOperatingDoctrineFragment,
 } from '../operating-doctrine.ts'
@@ -31,6 +32,23 @@ describe('operating-doctrine — principle set', () => {
     // It composes WITH the SOUL, deferring to a sharper owner rule.
     expect(frag.toLowerCase()).toContain('who you are')
     expect(frag.toLowerCase()).toContain('how you act')
+  })
+
+  test('build-routing heuristic (Part B, M-K) — self-route simple↔inline / complex↔trident', () => {
+    for (const scope of ['general', 'project'] as const) {
+      const frag = buildOperatingDoctrineFragment(
+        scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
+      )
+      // The heuristic is present every turn.
+      expect(frag).toContain(BUILD_ROUTING_DOCTRINE)
+      // It names the trident dispatch tool + tells the agent to self-route.
+      expect(frag).toContain('work_board_dispatch_build')
+      expect(frag.toLowerCase()).toContain('build routing')
+      // SIMPLE → inline; COMPLEX → trident + tell the owner why.
+      expect(frag).toContain('INLINE')
+      expect(frag.toLowerCase()).toContain('complex')
+      expect(frag.toLowerCase()).toContain('tell the owner')
+    }
   })
 
   test('the principle body is byte-identical across surfaces (consistency)', () => {

@@ -989,7 +989,7 @@ export function buildOpenGraphComposer(
     // tools dispatch this ONE service: validate a pasted ChatGPT-subscription
     // auth.json (metered OPENAI_API_KEY rejected), store it encrypted in the #149
     // credential store (service `codex`, global scope), and materialize it to the
-    // per-tenant CODEX_HOME that `trident/codex-review.sh` reads. `resolveCodexHome`
+    // per-project CODEX_HOME that `trident/codex-review.sh` reads. `resolveCodexHome`
     // is the ONE path both this and the trident loop (`build-core-modules`) agree
     // on. `ensureMaterialized` self-heals the file if a stored credential exists
     // but the on-disk auth.json is missing (fresh process / wiped tmp).
@@ -3509,7 +3509,7 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: skillForgeOnRunTerminal,
-              // Part B — the per-tenant CODEX_HOME the trident loop threads into
+              // Part B — the per-project CODEX_HOME the trident loop threads into
               // the inner workflow's optional codex reviewer. SAME path the admin
               // panel materializes auth.json into (`resolveCodexHome`).
               codex_home: codexHome,
@@ -3567,7 +3567,7 @@ export function buildOpenGraphComposer(
       // Per-project credential CRUD (`/api/app/projects/<id>/credentials`),
       // bearer-gated, dispatching the canonical ProjectCredentialStore.
       app_project_credentials_surface: { handler: projectCredentialsSurface.handler },
-      // Part B — admin-panel Connect Codex (subscription auth → per-tenant CODEX_HOME).
+      // Part B — admin-panel Connect Codex (subscription auth → per-project CODEX_HOME).
       app_codex_credential_surface: { handler: codexCredentialSurface.handler },
       // Part B — agent-native parity for the connect/status flow.
       codex_credential: { service: codexCredentialService },

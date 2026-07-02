@@ -14,7 +14,7 @@
  * the metered-key rejection + materialization all live in `CodexCredentialService`
  * — this surface is just auth + routing + JSON. A metered `OPENAI_API_KEY` paste
  * comes back as HTTP 400 `metered_key`; a good subscription bundle returns
- * `{ ok, status: 'connected' }` after materializing to the per-tenant CODEX_HOME.
+ * `{ ok, status: 'connected' }` after materializing to the per-project CODEX_HOME.
  */
 
 import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'

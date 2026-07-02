@@ -166,6 +166,21 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(board.get('owner', item.id)?.linked_run_id).toBe(res.ok ? res.run.id : '')
     expect(board.get('owner', item.id)?.status).toBe('in_progress')
 
+    // Part B — the Connect Codex surface + agent-tool service are wired, and the
+    // trident loop threads the per-project CODEX_HOME (resolveCodexHome). Anti
+    // "built-but-not-wired": connect a subscription auth via the wired service →
+    // status connected + the loop's codex_home points at the same materialized dir.
+    expect(composition.app_codex_credential_surface).toBeDefined()
+    expect(composition.codex_credential).toBeDefined()
+    expect(typeof composition.trident!.codex_home).toBe('string')
+    const codexSvc = composition.codex_credential!.service
+    const connect = await codexSvc.connect(
+      'owner',
+      JSON.stringify({ tokens: { access_token: 'a', refresh_token: 'r' }, last_refresh: 'x' }),
+    )
+    expect(connect.ok).toBe(true)
+    expect(codexSvc.status('owner').status).toBe('connected')
+
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
         cleanup()

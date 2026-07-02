@@ -6,7 +6,7 @@
  * surface (`gateway/http/codex-credential-surface.ts`) and these tools dispatch
  * the SAME `CodexCredentialService`, so validation (subscription-only, metered
  * `OPENAI_API_KEY` rejected), storage (#149 credential store), and materialization
- * to the per-tenant `CODEX_HOME/auth.json` happen in ONE place.
+ * to the per-project `CODEX_HOME/auth.json` happen in ONE place.
  *
  *   - `codex_status`  — connected / expired / not_connected (read, auto-approve)
  *   - `codex_connect` — paste a ChatGPT-subscription auth.json to connect (write,
@@ -25,7 +25,7 @@ const statusOutputSchema: JsonSchemaDocument = {
   type: 'object',
   properties: {
     status: { type: 'string', description: "'connected' | 'expired' | 'not_connected'" },
-    materialized: { type: 'boolean', description: 'Whether an auth.json is present at the tenant CODEX_HOME.' },
+    materialized: { type: 'boolean', description: 'Whether an auth.json is present at the owner CODEX_HOME.' },
     expires_at: { type: 'string' },
     detail: { type: 'string' },
   },

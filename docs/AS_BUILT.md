@@ -2,6 +2,49 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
+
+**Why.** Part A (#165) wired the trident cross-model reviewer (`codex-review.sh`
+reads a per-owner `CODEX_HOME/auth.json`) but nothing let the owner CONNECT that
+credential, and the live agent still built everything inline (no `/code`
+self-routing). SPEC.md Decisions Log 2026-07-01 "Codex cross-model review
+REQUIRED". No feature flags.
+
+**What shipped.**
+
+- **M-2 — Connect Codex (subscription auth via the admin panel).**
+  `trident/codex-auth.ts` validates a pasted `~/.codex/auth.json`: SUBSCRIPTION
+  auth (`tokens.access_token` + `tokens.refresh_token`) is accepted + normalized;
+  a metered `OPENAI_API_KEY` (auth_mode=apikey) or a bare `sk-…` paste is REJECTED
+  (never the metered path). `trident/codex-credential.ts:CodexCredentialService`
+  stores it encrypted in the #149 `project_credentials` store (service `codex`,
+  global scope) and MATERIALIZES it to the per-owner CODEX_HOME
+  (`resolveCodexHome({ owner_home })` = `<owner_home>/.codex/auth.json`, 0600) —
+  the SAME path the trident loop threads into the inner workflow
+  (`build-core-modules.ts` now reads `trident.codex_home` from the composer, so
+  the loop + the store can never disagree; falls back to `NEUTRON_CODEX_HOME`).
+  Status = connected / expired (access-token JWT `exp` past) / not_connected.
+  Surfaces: admin-panel HTTP `gateway/http/codex-credential-surface.ts`
+  (`/api/app/projects/<id>/codex-auth`), the SettingsTab "Codex cross-model
+  review" section (`landing/chat-react/SettingsTab.tsx` +
+  `codex-credential-client.ts`), and agent-native `codex_connect` / `codex_status`
+  tools (`trident/codex-credential-tool.ts`). A boot-time `ensureMaterialized`
+  self-heals the on-disk file from the stored credential.
+- **M-K — the agent auto-invokes trident for complex builds.** A build-routing
+  complexity heuristic in the operating-doctrine fragment
+  (`gateway/realmode-composer/operating-doctrine.ts:BUILD_ROUTING_DOCTRINE`,
+  spliced every turn) + the `work_board_dispatch_build` tool description tell the
+  live agent to self-route: SIMPLE → inline (Write/Edit); COMPLEX/multi-file/
+  needs-review → `work_board_add` + `work_board_dispatch_build`, telling the owner
+  why. The tool was already registered on the live agent's surface (verified by
+  the prod-boot wiring test); no `/code` command, no feature flag.
+
+**Tests.** `trident/codex-auth.test.ts`, `trident/codex-credential.test.ts` (incl.
+connect → `codex-review.sh` sees exit-0 CONNECTED with a mock codex),
+`trident/codex-credential-tool.test.ts`, `gateway/http/codex-credential-surface.test.ts`,
+`landing/chat-react/__tests__/codex-credential-client.test.ts`, doctrine +
+prod-boot-wiring assertions. tsc (root+trident+landing) clean, leak-gate silent.
+
 ## 2026-07-01 — SEV1 M1: gate projects on import completion + honest no-context projects + doc frontmatter strip
 
 **Why.** Ryan's M1 live test hit four related onboarding defects (SPEC.md

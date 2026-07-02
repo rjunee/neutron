@@ -6,7 +6,7 @@
  * `ProjectCredentialStore` (encrypted AES-256-GCM, same keyfile as every other
  * credential) under the reserved service name `codex`, GLOBAL scope — a ChatGPT
  * subscription is account-wide, not per-project — and MATERIALIZES it to the
- * per-tenant `CODEX_HOME/auth.json` that `trident/codex-review.sh` reads.
+ * per-project `CODEX_HOME/auth.json` that `trident/codex-review.sh` reads.
  *
  * One service, three entry points, all reachable from BOTH the admin-panel HTTP
  * surface AND the `codex_connect` / `codex_status` agent tools (agent-native
@@ -45,7 +45,7 @@ export interface CodexConnectResult {
 
 export interface CodexCredentialServiceDeps {
   store: ProjectCredentialStore
-  /** The per-tenant CODEX_HOME dir (`resolveCodexHome`). */
+  /** The per-project CODEX_HOME dir (`resolveCodexHome`). */
   codexHome: string
   now?: () => number
 }
