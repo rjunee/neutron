@@ -19,7 +19,6 @@
     "cores",
     "cores/sdk",
     "cores/runtime",
-    "cores/free/notes",
     "cores/free/reminders",
     "cores/free/tasks",
     "cores/free/calendar",

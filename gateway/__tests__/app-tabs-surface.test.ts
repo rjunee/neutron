@@ -202,16 +202,16 @@ describe('app-tabs surface — Core union (PR-2)', () => {
     const { store } = openStore()
     await store.record({
       project_slug: PROJECT_SLUG,
-      core_slug: 'notes',
-      package_name: '@neutronai/notes',
+      core_slug: 'calendar_core',
+      package_name: '@neutronai/calendar-core',
       package_version: '1.0.0',
       capabilities: [],
       data_layout: 'tables',
     })
     const cores = fakeCoresState({
-      slug: 'notes',
-      entry_point: '/projects/<project_id>/notes',
-      label: 'Notes',
+      slug: 'calendar_core',
+      entry_point: '/projects/<project_id>/calendar_core',
+      label: 'Calendar',
     })
     const harness = startGateway({ cores, installations: store })
     try {
@@ -223,13 +223,13 @@ describe('app-tabs surface — Core union (PR-2)', () => {
         'work_board',
         'documents',
         'settings',
-        'core:notes',
+        'core:calendar_core',
       ])
-      const notes = json.tabs.find((t) => t.key === 'core:notes')!
-      expect(notes.source).toBe('core')
-      expect(notes.core_slug).toBe('notes')
-      expect(notes.label).toBe('Notes')
-      expect(notes.mount).toEqual({ kind: 'webview', target: `/projects/${PROJECT_ID}/notes` })
+      const calendar = json.tabs.find((t) => t.key === 'core:calendar_core')!
+      expect(calendar.source).toBe('core')
+      expect(calendar.core_slug).toBe('calendar_core')
+      expect(calendar.label).toBe('Calendar')
+      expect(calendar.mount).toEqual({ kind: 'webview', target: `/projects/${PROJECT_ID}/calendar_core` })
     } finally {
       await harness.close()
     }
@@ -239,13 +239,13 @@ describe('app-tabs surface — Core union (PR-2)', () => {
     const { store } = openStore()
     await store.record({
       project_slug: PROJECT_SLUG,
-      core_slug: 'notes',
-      package_name: '@neutronai/notes',
+      core_slug: 'calendar_core',
+      package_name: '@neutronai/calendar-core',
       package_version: '1.0.0',
       capabilities: [],
       data_layout: 'tables',
     })
-    const cores = fakeCoresState({ slug: 'notes', entry_point: '/projects/<project_id>/notes' })
+    const cores = fakeCoresState({ slug: 'calendar_core', entry_point: '/projects/<project_id>/calendar_core' })
     const harness = startGateway({ cores, installations: store })
     try {
       const res = await authedFetch(harness.base, `/api/app/tabs`)

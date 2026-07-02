@@ -244,20 +244,6 @@ export interface CoresSurfaceHandler {
 }
 
 /**
- * Notes Core S1 — drawer-browser HTTP surface. Owns
- * `/api/cores/notes/...` routes (drawers / notes / search / traverse /
- * tunnel). Mounted ahead of the bundled-Cores admin surface so the
- * `/api/cores/notes/...` paths are unambiguously owned. Returns `null`
- * for non-owned paths so unrelated `/api/cores/...` paths fall through
- * (e.g. cores OAuth + cores admin).
- *
- * Per docs/plans/notes-core-tier1-brief.md § 3.3.
- */
-export interface NotesDrawerBrowserHandler {
-  handler: (req: Request) => Promise<Response | null>
-}
-
-/**
  * E2E onboarding walkthrough — synthetic session-mint surface. Owns
  * `POST /api/dev/mint-session`. The harness POSTs `{ project_slug,
  * user_id, signup_via? }` and the handler returns a start-token JWT +
@@ -619,16 +605,6 @@ export interface ComposeHttpHandlerInput {
    */
   cores?: CoresSurfaceHandler
   /**
-   * Notes Core S1 — optional drawer-browser HTTP surface. Owns
-   * `/api/cores/notes/...`. Mounted ahead of `cores` so the Notes
-   * paths are unambiguously owned. Returns `null` for non-owned
-   * paths so unrelated `/api/cores/...` paths fall through.
-   *
-   * Surface factory: `cores/free/notes/src/ui/drawer-browser-surface.ts:createNotesDrawerBrowserSurface`.
-   * Per docs/plans/notes-core-tier1-brief.md § 3.3.
-   */
-  notesDrawerBrowser?: NotesDrawerBrowserHandler
-  /**
    * Cores OAuth secret-resolution sprint — optional surface owning
    * `/api/cores/oauth/google/{start,ingest,disconnect/<label>,status}`.
    * Mounted BEFORE `cores` so the OAuth paths are unambiguous (cores
@@ -880,7 +856,6 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
     cores,
     coresOAuth,
     coresIntegrations,
-    notesDrawerBrowser,
     devMintSession,
     authGate,
     adminRespawn,
@@ -1244,17 +1219,6 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       if (appBackups !== undefined) {
         const backupsRes = await appBackups.handler(req)
         if (backupsRes !== null) return backupsRes
-      }
-      // 0m0. Notes Core S1 drawer-browser surface — owns
-      //      `/api/cores/notes/...`. Mounted BEFORE the bundled-Cores
-      //      admin + OAuth surfaces so the Notes routes are
-      //      unambiguous (Notes returns `null` for `/api/cores/oauth/`
-      //      and the bare `/api/cores` admin paths so the chain still
-      //      reaches them via the per-surface disclaim-with-null
-      //      contract).
-      if (notesDrawerBrowser !== undefined) {
-        const notesRes = await notesDrawerBrowser.handler(req)
-        if (notesRes !== null) return notesRes
       }
       // 0m1. Cores OAuth surface — Cores OAuth secret-resolution sprint.
       //      Owns `/api/cores/oauth/google/*`. Mounted BEFORE the

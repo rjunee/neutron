@@ -181,10 +181,9 @@ test('production composer mounts GET /api/app/projects/<id>/launcher', async () 
   expect(body.ok).toBe(true)
   expect(body.project_id).toBe(PROJECT)
   expect(Array.isArray(body.entries)).toBe(true)
-  // The default seed (notes + tasks_core + reminders) lands on a
+  // The default seed (tasks_core + reminders) lands on a
   // fresh (instance, project) pair.
   expect(body.entries.map((e) => e.slug)).toEqual([
-    'notes',
     'tasks_core',
     'reminders',
   ])
@@ -196,16 +195,16 @@ test('production composer mounts POST /api/app/projects/<id>/launcher/reorder', 
     `/api/app/projects/${PROJECT}/launcher/reorder`,
     {
       method: 'POST',
-      body: JSON.stringify({ slug: 'notes', new_index: 2 }),
+      body: JSON.stringify({ slug: 'tasks_core', new_index: 1 }),
     },
   )
   expect(res.status).toBe(200)
   const body = (await res.json()) as { ok: boolean; entries: LauncherEntry[] }
   expect(body.ok).toBe(true)
-  // After reorder, `notes` should be at index 2; the other entries
-  // compact to [0, 1].
-  const notesEntry = body.entries.find((e) => e.slug === 'notes')
-  expect(notesEntry?.reorder_index).toBe(2)
+  // After reorder, `tasks_core` should be at index 1; the other entries
+  // compact to [0].
+  const tasksEntry = body.entries.find((e) => e.slug === 'tasks_core')
+  expect(tasksEntry?.reorder_index).toBe(1)
 })
 
 test('production composer mounts POST /api/app/projects/<id>/launcher/uninstall', async () => {
@@ -214,13 +213,13 @@ test('production composer mounts POST /api/app/projects/<id>/launcher/uninstall'
     `/api/app/projects/${PROJECT}/launcher/uninstall`,
     {
       method: 'POST',
-      body: JSON.stringify({ slug: 'notes' }),
+      body: JSON.stringify({ slug: 'tasks_core' }),
     },
   )
   expect(res.status).toBe(200)
   const body = (await res.json()) as { ok: boolean; entries: LauncherEntry[] }
   expect(body.ok).toBe(true)
-  expect(body.entries.find((e) => e.slug === 'notes')).toBeUndefined()
+  expect(body.entries.find((e) => e.slug === 'tasks_core')).toBeUndefined()
 })
 
 test('production composer mounts POST /api/app/projects/<id>/launcher/rename', async () => {
@@ -229,14 +228,14 @@ test('production composer mounts POST /api/app/projects/<id>/launcher/rename', a
     `/api/app/projects/${PROJECT}/launcher/rename`,
     {
       method: 'POST',
-      body: JSON.stringify({ slug: 'notes', display_name: 'My Notes' }),
+      body: JSON.stringify({ slug: 'tasks_core', display_name: 'My Tasks' }),
     },
   )
   expect(res.status).toBe(200)
   const body = (await res.json()) as { ok: boolean; entries: LauncherEntry[] }
   expect(body.ok).toBe(true)
-  const notes = body.entries.find((e) => e.slug === 'notes')
-  expect(notes?.display_name).toBe('My Notes')
+  const tasks = body.entries.find((e) => e.slug === 'tasks_core')
+  expect(tasks?.display_name).toBe('My Tasks')
 })
 
 test('production composer mounts POST /api/app/chat/send (build-me path)', async () => {
@@ -266,9 +265,9 @@ test('production composer mounts POST /api/app/chat/send (build-me path)', async
 test('every launcher route requires a Bearer token (401 missing_bearer)', async () => {
   const paths: ReadonlyArray<[string, string, object | null]> = [
     [`/api/app/projects/${PROJECT}/launcher`, 'GET', null],
-    [`/api/app/projects/${PROJECT}/launcher/reorder`, 'POST', { slug: 'notes', new_index: 1 }],
-    [`/api/app/projects/${PROJECT}/launcher/uninstall`, 'POST', { slug: 'notes' }],
-    [`/api/app/projects/${PROJECT}/launcher/rename`, 'POST', { slug: 'notes', display_name: 'X' }],
+    [`/api/app/projects/${PROJECT}/launcher/reorder`, 'POST', { slug: 'tasks_core', new_index: 1 }],
+    [`/api/app/projects/${PROJECT}/launcher/uninstall`, 'POST', { slug: 'tasks_core' }],
+    [`/api/app/projects/${PROJECT}/launcher/rename`, 'POST', { slug: 'tasks_core', display_name: 'X' }],
   ]
   for (const [path, method, body] of paths) {
     const init: RequestInit = {

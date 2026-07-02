@@ -22,7 +22,7 @@ import type { ProposalEdits, ProposalRecord } from './types.ts'
 /** What the gateway's app-ws filter passes to `match`. Mirrors (structurally,
  *  no gateway dependency) the `ChatCommandFilter` shape in
  *  `gateway/http/app-ws-surface.ts` — the same pattern the free-Core filters use
- *  (`cores/free/notes/src/chat-bridge.ts`). */
+ *  (`cores/free/reminders/src/chat-bridge.ts`). */
 export interface SkillForgeChatCommandFilterInput {
   user_id: string
   project_slug: string

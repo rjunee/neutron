@@ -87,18 +87,6 @@ export interface CoresCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
-   * Notes Core S1 — drawer-browser HTTP surface. When supplied, the
-   * composed HTTP chain mounts `/api/cores/notes/...` (drawers /
-   * notes / search / traverse / tunnel) ahead of the bundled-Cores
-   * admin surface. HTTP-only, bearer-auth-gated.
-   *
-   * Surface factory: `cores/free/notes/src/ui/drawer-browser-surface.ts:createNotesDrawerBrowserSurface`.
-   * Per docs/plans/notes-core-tier1-brief.md § 3.3.
-   */
-  notes_drawer_browser_surface?: {
-    handler: (req: Request) => Promise<Response | null>
-  }
-  /**
    * Cores OAuth secret-resolution sprint — owns
    * `/api/cores/oauth/google/{start,ingest,disconnect/<label>,status}`.
    * Mounted ahead of `/api/cores` so the OAuth paths are unambiguous.

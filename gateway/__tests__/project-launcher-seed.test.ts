@@ -88,13 +88,13 @@ function fakeCoresState(
 describe('deriveLauncherSeedFromBundledCores', () => {
   test('filters to installed slugs only', () => {
     const cores = [
-      fakeBundledCore('notes'),
+      fakeBundledCore('reminders_core'),
       fakeBundledCore('tasks_core'),
       fakeBundledCore('calendar_core'),
     ]
-    const state = fakeCoresState(cores, ['notes', 'tasks_core']) // calendar_core fails to install
+    const state = fakeCoresState(cores, ['reminders_core', 'tasks_core']) // calendar_core fails to install
     const seed = deriveLauncherSeedFromBundledCores(state)
-    expect(seed.map((s) => s.slug)).toEqual(['notes', 'tasks_core'])
+    expect(seed.map((s) => s.slug)).toEqual(['reminders_core', 'tasks_core'])
   })
 
   test('uses well-known display names + emojis for known Tier 1 slugs', () => {
@@ -107,7 +107,7 @@ describe('deriveLauncherSeedFromBundledCores', () => {
   })
 
   test('returns empty array when no Cores installed', () => {
-    const state = fakeCoresState([fakeBundledCore('notes')], [])
+    const state = fakeCoresState([fakeBundledCore('calendar_core')], [])
     expect(deriveLauncherSeedFromBundledCores(state)).toEqual([])
   })
 
@@ -184,7 +184,7 @@ describe('deriveLauncherSeedFromBundledCores', () => {
 
   test('propagates long_press_menu + primary_action + app_tab_path (ISSUE #17)', () => {
     // Regression guard for ISSUE #17 — the launcher tiles for Tasks /
-    // Reminders / Notes / Email-Managed / Code-Gen declare
+    // Reminders / Calendar / Email-Managed / Code-Gen declare
     // `primary_action`, `app_tab_path`, and `long_press_menu` on their
     // `LAUNCHER_ICON` module. The pipeline must thread those fields
     // all the way from the LauncherIconMeta through the LauncherEntry
@@ -249,15 +249,15 @@ describe('deriveLauncherSeedFromBundledCores', () => {
     // A Core whose LAUNCHER_ICON is the v0.1.0 shape with NO
     // primary_action / app_tab_path / long_press_menu must continue to
     // surface as a launcher tile — just without the richer fields.
-    const cores = [fakeBundledCore('notes')]
+    const cores = [fakeBundledCore('calendar_core')]
     const state = fakeCoresState(
       cores,
-      ['notes'],
-      { notes: { emoji: '🧠', label: 'Notes' } },
+      ['calendar_core'],
+      { calendar_core: { emoji: '📅', label: 'Calendar' } },
     )
     const seed = deriveLauncherSeedFromBundledCores(state)
     expect(seed).toHaveLength(1)
-    expect(seed[0]?.slug).toBe('notes')
+    expect(seed[0]?.slug).toBe('calendar_core')
     expect(seed[0]?.primary_action).toBeUndefined()
     expect(seed[0]?.app_tab_path).toBeUndefined()
     expect(seed[0]?.long_press_menu).toBeUndefined()

@@ -212,7 +212,7 @@ test('three roots: precedence holds transitively (two duplicate events)', () => 
   writeCore(rootC, 'email', '@neutronai/email', '3.0.0')
   // C also declares a unique Core to prove the rest of the walk still
   // happens after a collision.
-  writeCore(rootC, 'notes', '@neutronai/notes', '1.0.0')
+  writeCore(rootC, 'demo-core', '@neutronai/demo-core', '1.0.0')
 
   const { events, sink } = recorder()
   const reg = buildBundledRegistry({
@@ -222,8 +222,8 @@ test('three roots: precedence holds transitively (two duplicate events)', () => 
 
   expect(reg.get('email')?.package_version).toBe('1.0.0')
   expect(reg.get('email')?.rootDir).toBe(rootA)
-  expect(reg.get('notes')?.rootDir).toBe(rootC)
-  expect(reg.list().map((c) => c.slug).sort()).toEqual(['email', 'notes'])
+  expect(reg.get('demo_core')?.rootDir).toBe(rootC)
+  expect(reg.list().map((c) => c.slug).sort()).toEqual(['demo_core', 'email'])
 
   // Exactly one event per losing duplicate — never per Core file read.
   expect(events).toEqual([

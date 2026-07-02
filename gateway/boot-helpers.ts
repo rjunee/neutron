@@ -495,14 +495,6 @@ export function resolveRepoRoot(env: NodeJS.ProcessEnv): string {
  * exact same code path the unit tests in
  * `cores/free/<slug>/__tests__/` verify).
  */
-// `buildEphemeralMemoryStore` (v0.1.0 helper) was deleted when Notes
-// Core S1 (2026-05-20) replaced the MemoryStore-adapter backend with a
-// per-project NotesStore + resolver. The factory above now constructs
-// a single per-instance `NotesStoreResolver` keyed on `owner_home`, so
-// Notes writes land in real per-project SQLite sidecars under
-// `<owner_home>/Projects/<project_id>/notes/notes.db` and survive
-// reboots without further wiring.
-
 /**
  * S1 — load a named Shape-C pattern body from `prompts/reminder-patterns.md`.
  * Threaded into the Reminders Core's smart-wrap composer via the
@@ -520,9 +512,9 @@ export function resolveRepoRoot(env: NodeJS.ProcessEnv): string {
  * inner filter peeks at the inbound; the first to claim ownership (by
  * returning a non-null result) wins, the rest fall through. New Tier 1
  * Cores append their per-Core filter to the chain in
- * `gateway/index.ts` as they ship — Notes ships `createNotesChatCommandFilter`,
- * Reminders ships `buildRemindersChatCommandFilter` (below), Tasks Core
- * S1 will ship its own follow-up.
+ * `gateway/index.ts` as they ship — Reminders ships
+ * `buildRemindersChatCommandFilter` (below), Tasks Core S1 will ship
+ * its own follow-up.
  */
 export function buildChainedChatCommandFilter(
   filters: ReadonlyArray<import('./http/app-ws-surface.ts').ChatCommandFilter>,
@@ -535,7 +527,7 @@ export function buildChainedChatCommandFilter(
           if (result !== null) return result
         } catch (err) {
           // Single filter throwing must NOT poison the chain — fall
-          // through to the next so a Notes-side bug never blocks the
+          // through to the next so one filter's bug never blocks the
           // /remind path (and vice versa). The surface itself catches
           // throws from the chain root too; this catch belt-and-
           // suspenders the per-filter boundary.
@@ -552,10 +544,10 @@ export function buildChainedChatCommandFilter(
 }
 
 /**
- * S1 — Reminders-Core `/remind` filter. Mirrors Notes Core's
- * `createNotesChatCommandFilter` shape (interface with a `match()`
- * method) so the chain composer above can treat both filters
- * interchangeably. The factory binds the substrate-backed adapter +
+ * S1 — Reminders-Core `/remind` filter. Implements the
+ * `ChatCommandFilter` shape (interface with a `match()` method) so the
+ * chain composer above can treat every filter interchangeably. The
+ * factory binds the substrate-backed adapter +
  * the smart-wrap composer; the closure handles every `/remind`
  * sub-command via `parseAndExecuteRemindCommand` from
  * `@neutronai/reminders-core`.
@@ -761,26 +753,10 @@ export async function buildCoresBackendFactories(
      */
     canonicalTaskStore?: TaskStoreType
     /**
-     * Per-instance data dir. Notes Core uses this to resolve the per-
-     * project sidecar path
-     * `<owner_home>/Projects/<project_id>/notes/notes.db`.
+     * Per-instance data dir. Cores use this to resolve their per-project
+     * sidecar paths under `<owner_home>/Projects/<project_id>/...`.
      */
     owner_home: string
-    /**
-     * Notes Core's per-instance store resolver. Shared between the
-     * Core's MCP-tool factory + the drawer-browser HTTP surface so a
-     * single set of SQLite handles serves every request (so chat
-     * `/note` captures and drawer-browser reads land on the same
-     * SQLite file).
-     */
-    notesResolver: import('../cores/free/notes/index.ts').NotesStoreResolver
-    /**
-     * Default project_id used by the legacy 4 `notes_*` MCP tools
-     * when the caller omits `project_id`. v1 uses the literal
-     * `default` slug; the per-project router (P5.4 pattern) will swap
-     * this in once tool-call context carries the active project.
-     */
-    notesDefaultProjectId: string
     /**
      * Email-Managed Core's per-instance per-project cache resolver.
      * Shared with the chat-command filter so triage audits and draft
@@ -914,8 +890,6 @@ export async function buildCoresBackendFactories(
   const {
     projectDb,
     canonicalTaskStore,
-    notesResolver,
-    notesDefaultProjectId,
     emailResolver,
     emailOAuthTokens,
     emailLlm,
@@ -929,28 +903,6 @@ export async function buildCoresBackendFactories(
   const googleOAuthAccessToken = opts.googleOAuthAccessToken ?? null
   const preBuiltCalendarClient = opts.calendarClient ?? null
   return {
-    // Notes — Notes Core S1 (2026-05-20): per-project SQLite sidecar
-    // at `<owner_home>/Projects/<project_id>/notes/notes.db`. The
-    // legacy `notes_*` MCP tools route through `buildNotesStoreBackend`
-    // against the per-instance resolver; new tools (drawer/search/etc.)
-    // resolve project scope explicitly via the same resolver instance.
-    notes: async () => {
-      const mod = await import('@neutronai/notes')
-      return {
-        backend: mod.buildNotesStoreBackend({
-          resolver: notesResolver,
-          default_project_id: notesDefaultProjectId,
-        }),
-        // The four S1 tools (create_drawer/drawer_list/search/traverse)
-        // resolve project scope explicitly against the SAME per-instance
-        // resolver. Threaded through `normalizeBackend` (which returns the
-        // object verbatim because `backend` is present) into the deps
-        // bundle so `buildExtraTools(deps)` can wire them. Without this
-        // seam those tools register as `not_implemented` stubs and boot
-        // logs `manifest_tool_unimplemented core=notes` (ISSUE #330).
-        resolver: notesResolver,
-      }
-    },
     tasks_core: async ({ project_slug }) => {
       // Wire the Core's tool surface to the SAME canonical task store
       // that backs the app's `/api/app/projects/<id>/tasks` and

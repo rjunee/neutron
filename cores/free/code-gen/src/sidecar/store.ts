@@ -2,8 +2,8 @@
  * @neutronai/codegen-core — per-project SQLite sidecar at
  * `<OWNER_HOME>/Projects/<project_id>/code-gen/code-gen.db`.
  *
- * Mirrors `cores/free/notes/src/store-resolver.ts` + `notes-store.ts`
- * shape: lazy-open + lazy-migrate per project, one Database handle per
+ * Mirrors the sibling free-Core store-resolver + store shape:
+ * lazy-open + lazy-migrate per project, one Database handle per
  * project cached for the gateway lifetime, init-promise dedup so two
  * concurrent first-writes wait on the same init.
  *

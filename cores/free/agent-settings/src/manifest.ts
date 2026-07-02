@@ -1,7 +1,7 @@
 /**
  * @neutronai/agent-settings — manifest loader + locked constants.
  *
- * Mirrors `cores/free/notes/src/manifest.ts`: reads `package.json` from
+ * Mirrors the sibling free-Core manifest loader: reads `package.json` from
  * a path (default: this Core's own package.json), extracts the
  * `"neutron"` block, and returns the parsed `NeutronManifest` via the
  * Sprint 24 `parseManifest`. Throws Zod validation errors on invalid

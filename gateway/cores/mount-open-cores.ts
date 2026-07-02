@@ -20,11 +20,10 @@
  *      composer hands to `composition.cores.backends` so `installBundledCores`
  *      registers every bundled Core's `buildTools(deps)` MCP surface.
  *   2. `buildChainedChatCommandFilter([...])` over the bundled free-Core filters
- *      (`/cal`, `/email`, `/note`, `/remind`, `/research`) — the SAME backend
+ *      (`/cal`, `/email`, `/remind`, `/research`) — the SAME backend
  *      instance powers a Core's MCP tools AND its chat-command filter
  *      (agent-native parity): the pre-built `calendarClient` seam, one shared
- *      `EmailProjectCacheResolver` / `NotesStoreResolver`, and the Research
- *      `project_backend`.
+ *      `EmailProjectCacheResolver`, and the Research `project_backend`.
  *
  * OPTIONAL-UNTIL-CREDENTIALED: a per-instance `OAuthTokenManager` over the shared
  * `SecretsStore`. When `NEUTRON_CORES_GOOGLE_CLIENT_ID` is unset (the zero-creds
@@ -72,7 +71,6 @@ import {
   createEmailChatCommandFilter,
   OAUTH_SECRET_LABEL as EMAIL_OAUTH_LABEL,
 } from '@neutronai/email-managed-core'
-import { NotesStoreResolver, createNotesChatCommandFilter } from '@neutronai/notes'
 import { buildReminderStoreBackend, buildSmartWrapComposer } from '@neutronai/reminders-core'
 import { buildProductionResearchCoreWiring } from '@neutronai/research-core'
 
@@ -245,10 +243,6 @@ export async function mountOpenCores(
       : buildInMemoryGmailClient()
   const emailResolver = new EmailProjectCacheResolver({ owner_home: input.owner_home })
 
-  // Notes: ONE resolver shared by the `notes` MCP tools + the `/note` filter so a
-  // chat capture and a tool read land on the same per-project SQLite sidecar.
-  const notesResolver = new NotesStoreResolver({ owner_home: input.owner_home })
-
   // Reminders: the chat-command-create backend (the fire-time dispatcher is wired
   // separately in the composer). `/remind` parses + persists a reminder row that
   // the existing tick loop fires.
@@ -286,8 +280,6 @@ export async function mountOpenCores(
   const backends = await buildCoresBackendFactories({
     projectDb: input.projectDb,
     owner_home: input.owner_home,
-    notesResolver,
-    notesDefaultProjectId: default_project_id,
     emailResolver,
     ...(emailOAuthTokens !== undefined ? { emailOAuthTokens } : {}),
     emailLlm,
@@ -329,7 +321,6 @@ export async function mountOpenCores(
       model: getBestModel,
       default_project_id,
     }),
-    createNotesChatCommandFilter({ resolver: notesResolver, default_project_id }),
     buildRemindersChatCommandFilter({
       backend: reminderBackend,
       smartWrap: reminderSmartWrap,

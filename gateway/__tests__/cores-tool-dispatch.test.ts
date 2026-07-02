@@ -4,15 +4,14 @@
  * Boots the bundled-Cores registry against the real `cores/free/` tree
  * with backend factories wired and asserts:
  *
- *   - Notes Core's `notes_write` dispatches end-to-end through the
- *     ToolRegistry → CapabilityGuard → MemoryStore backend.
+ *   - Reminders Core's `reminders_create` dispatches end-to-end through
+ *     the ToolRegistry → CapabilityGuard → reminder-store backend.
  *   - SecretAuditLog records a `tool_call` row for the dispatched tool.
  *   - Calling a non-existent tool surfaces as `undefined` from the
  *     registry (no exception, no auto-magic).
- *   - The other 4 installed Cores (Tasks, Reminders, Research,
- *     Code-Gen) have their declared tool names registered (one-line
- *     smoke per Core — full output shape is verified in per-Core
- *     `__tests__/tools.test.ts`).
+ *   - The other installed Cores (Tasks, Research, Code-Gen) have their
+ *     declared tool names registered (one-line smoke per Core — full
+ *     output shape is verified in per-Core `__tests__/tools.test.ts`).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -65,21 +64,6 @@ function makeBench(): Bench {
 
 function buildBackendFactories(db: ProjectDb, ownerHome: string): CoreBackendFactoryMap {
   return {
-    notes: async () => {
-      const mod = await import('@neutronai/notes')
-      const resolver = new mod.NotesStoreResolver({ owner_home: ownerHome })
-      return {
-        backend: mod.buildNotesStoreBackend({
-          resolver,
-          default_project_id: 'default',
-        }),
-        // The four S1 tools (create_drawer/drawer_list/search/traverse)
-        // resolve project scope against this SAME resolver via
-        // `buildExtraTools` — mirror the production factory
-        // (gateway/boot-helpers.ts) which returns `{ backend, resolver }`.
-        resolver,
-      }
-    },
     tasks_core: async ({ project_slug }) => {
       const mod = await import('@neutronai/tasks-core')
       return {
@@ -132,7 +116,7 @@ describe('cores tool dispatch — end-to-end', () => {
     bench = makeBench()
   })
 
-  test('notes_write dispatches through the registered handler', async () => {
+  test('reminders_create dispatches through the registered handler', async () => {
     await installBundledCores({
       project_slug: OWNER,
       projectDb: bench.db,
@@ -142,10 +126,10 @@ describe('cores tool dispatch — end-to-end', () => {
       rootDirs: [REPO_ROOT],
       backends: buildBackendFactories(bench.db, bench.ownerHome),
     })
-    const notesWrite = bench.tools.get('notes_write')
-    expect(notesWrite).toBeDefined()
-    const result = (await notesWrite!.handler(
-      { content: 'hello from smoke test', tags: ['t1'] },
+    const remindersCreate = bench.tools.get('reminders_create')
+    expect(remindersCreate).toBeDefined()
+    const result = (await remindersCreate!.handler(
+      { message: 'hello from smoke test', fire_at: 4102444800 },
       { project_slug: OWNER, topic_id: null, call_id: 'c1', speaker_user_id: null },
     )) as { id: string }
     expect(typeof result.id).toBe('string')
@@ -162,9 +146,9 @@ describe('cores tool dispatch — end-to-end', () => {
       rootDirs: [REPO_ROOT],
       backends: buildBackendFactories(bench.db, bench.ownerHome),
     })
-    const notesWrite = bench.tools.get('notes_write')!
-    await notesWrite.handler(
-      { content: 'audited content' },
+    const remindersCreate = bench.tools.get('reminders_create')!
+    await remindersCreate.handler(
+      { message: 'audited content', fire_at: 4102444800 },
       { project_slug: OWNER, topic_id: null, call_id: 'c2', speaker_user_id: null },
     )
     const rows = bench.db
@@ -173,9 +157,9 @@ describe('cores tool dispatch — end-to-end', () => {
         `SELECT op, label, core_slug, outcome FROM secret_audit_log WHERE op='tool_call'`,
       )
       .all()
-    const dispatched = rows.find((r) => r.label === 'notes_write')
+    const dispatched = rows.find((r) => r.label === 'reminders_create')
     expect(dispatched).toBeDefined()
-    expect(dispatched?.core_slug).toBe('notes')
+    expect(dispatched?.core_slug).toBe('reminders_core')
     expect(dispatched?.outcome).toBe('ok')
   })
 
@@ -203,9 +187,6 @@ describe('cores tool dispatch — end-to-end', () => {
       backends: buildBackendFactories(bench.db, bench.ownerHome),
     })
     const names = new Set(bench.tools.list().map((t) => t.name))
-    // Notes
-    expect(names.has('notes_write')).toBe(true)
-    expect(names.has('notes_recall')).toBe(true)
     // Tasks
     expect(names.has('tasks_create')).toBe(true)
     expect(names.has('tasks_list')).toBe(true)
@@ -257,52 +238,4 @@ describe('cores tool dispatch — end-to-end', () => {
     expect(Array.isArray(out.briefs)).toBe(true)
   })
 
-  test('Notes Core registers ALL 8 manifest-declared tools (ISSUE #330)', async () => {
-    await installBundledCores({
-      project_slug: OWNER,
-      projectDb: bench.db,
-      dataDir: bench.ownerHome,
-      tools: bench.tools,
-      secretsStore: bench.secrets,
-      rootDirs: [REPO_ROOT],
-      backends: buildBackendFactories(bench.db, bench.ownerHome),
-    })
-    // The 4 legacy + 4 S1 tools the manifest declares must ALL be live
-    // (no `not_implemented` fallback stub for any of them) — closes the
-    // buildExtraTools wire-up gap that logged `manifest_tool_unimplemented
-    // core=notes` ×4 on every owner boot.
-    const required = [
-      'notes_write',
-      'notes_recall',
-      'notes_list',
-      'notes_link',
-      'notes_create_drawer',
-      'notes_drawer_list',
-      'notes_search',
-      'notes_traverse',
-    ]
-    for (const name of required) {
-      expect(bench.tools.get(name)).toBeDefined()
-    }
-    // Verify an S1 extra dispatches through the CapabilityGuard +
-    // resolver-backed store (not the manifest-tool-unimplemented stub):
-    // create a drawer then list it back.
-    const createDrawer = bench.tools.get('notes_create_drawer')!
-    const created = (await createDrawer.handler(
-      { project_id: 'demo-project', name: 'Inbox2' },
-      { project_slug: OWNER, topic_id: null, call_id: 'c-drawer', speaker_user_id: null },
-    )) as { id: string }
-    expect(typeof created.id).toBe('string')
-    const drawerList = bench.tools.get('notes_drawer_list')!
-    const drawers = (await drawerList.handler(
-      { project_id: 'demo-project' },
-      { project_slug: OWNER, topic_id: null, call_id: 'c-dlist', speaker_user_id: null },
-    )) as { drawers: Array<{ id: string }> }
-    expect(drawers.drawers.some((d) => d.id === created.id)).toBe(true)
-  })
 })
-
-// `buildFakeMemoryStore` (the v0.1.0 helper) was removed when Notes Core
-// S1 (2026-05-20) replaced the MemoryStore-adapter backend with a
-// per-project NotesStore + resolver. The backend factories above now
-// construct a real NotesStoreResolver against the tmp owner_home.

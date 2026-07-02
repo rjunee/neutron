@@ -3,18 +3,18 @@
  *
  * Boots `installBundledCores(...)` against the real cores tree (the
  * registry's `findCoreDirs` walks `cores/<container>/<core>/`, so the
- * 8 Tier 1 free Cores under `cores/free/` AND the staging Tier 2
+ * 7 Tier 1 free Cores under `cores/free/` AND the staging Tier 2
  * Cores under `cores/paid-staging/` surface as discovered):
  *
- *   - registry discovers 9 Cores total (8 Tier 1 free + 1 DTC Analytics staging)
- *   - 7 install cleanly (no required secrets); 3 (Calendar, Email-
+ *   - registry discovers 8 Cores total (7 Tier 1 free + 1 DTC Analytics staging)
+ *   - 6 install cleanly (no required secrets); 3 (Calendar, Email-
  *     Managed, Google Workspace) fail with `manifest_invalid` because
  *     their manifests declare `required: true` OAuth/BYO-API secrets and
  *     the Noop prompter returns `null` — the brief's failure-isolation path
- *   - `core_installations` rows exist for the 7 successful installs
+ *   - `core_installations` rows exist for the 6 successful installs
  *   - Sidecar files live at the canonical path for every sidecar-layout install
  *   - The production `ToolRegistry` carries tools from the installed Cores
- *   - The composer's failure-rate gate does NOT trip (2 of 8 = 25%, below 50%)
+ *   - The composer's failure-rate gate does NOT trip (3 of 8 = 37%, below 50%)
  *
  * DTC Analytics lives at `cores/paid-staging/dtc-analytics/` as the
  * interim Tier 2 staging home until the Sprint C physical repo split
@@ -44,8 +44,8 @@ const OWNER = 'forge-cores-test'
 // `cores/<container>/<core>/` across REPO_ROOT; the Tier 2 staging Core
 // `dtc_analytics` lives under `cores/paid-staging/`, which the Sprint C
 // Open carve strips (leak-gate FORBIDDEN_PREFIX). So the monorepo / Managed
-// tree discovers 10 (installs 8) while the carved Open tree discovers 9
-// (installs 7). Derive the expected set from what's actually on disk rather
+// tree discovers 9 (installs 7) while the carved Open tree discovers 8
+// (installs 6). Derive the expected set from what's actually on disk rather
 // than hardcoding one tree's inventory.
 const HAS_PAID_STAGING = existsSync(join(REPO_ROOT, 'cores', 'paid-staging', 'dtc-analytics'))
 const DISCOVERED_SLUGS = [
@@ -53,7 +53,6 @@ const DISCOVERED_SLUGS = [
   'codegen_core',
   'email_managed_core',
   'google_workspace_core',
-  'notes',
   'reminders_core',
   'research_core',
   'scraping_core',
@@ -63,7 +62,6 @@ const DISCOVERED_SLUGS = [
 ].sort()
 const INSTALLED_SLUGS = [
   'codegen_core',
-  'notes',
   'reminders_core',
   'research_core',
   // Scraping Core (parity gap #6) installs cleanly — its `apify`
@@ -133,9 +131,9 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
       secretsStore: bench.secrets,
       rootDirs: [REPO_ROOT],
     })
-    // 9 Tier 1 free Cores + 1 Tier 2 staging Core (DTC Analytics) = 10
+    // 8 Tier 1 free Cores + 1 Tier 2 staging Core (DTC Analytics) = 9
     // discovered in the monorepo / Managed tree. The Sprint C Open carve
-    // strips `cores/paid-staging/`, so the carved Open tree discovers 9
+    // strips `cores/paid-staging/`, so the carved Open tree discovers 8
     // (the Managed adapter's multi-root walk re-surfaces the paid Core).
     // Per `docs/research/neutron-cores-marketplace-split-2026-05-17.md § 3`.
     expect(result.discovered).toBe(EXPECTED_DISCOVERED)
@@ -255,16 +253,6 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
       secretsStore: bench.secrets,
       rootDirs: [REPO_ROOT],
       backends: {
-        notes: async () => {
-          const mod = await import('@neutronai/notes')
-          const resolver = new mod.NotesStoreResolver({ owner_home: bench.ownerHome })
-          return {
-            backend: mod.buildNotesStoreBackend({
-              resolver,
-              default_project_id: 'default',
-            }),
-          }
-        },
         tasks_core: async ({ project_slug }) => {
           const mod = await import('@neutronai/tasks-core')
           return {
@@ -294,13 +282,11 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
       },
     })
 
-    // Sanity: the full installed set (6 Tier 1 + the Tier 2 staging DTC
+    // Sanity: the full installed set (5 Tier 1 + the Tier 2 staging DTC
     // Analytics when `cores/paid-staging/` is present).
     expect(result.installed.size).toBe(EXPECTED_INSTALLED)
     // Every installed Core's tool surface is in the registry.
     const toolNames = bench.tools.list().map((t) => t.name)
-    expect(toolNames).toContain('notes_write')
-    expect(toolNames).toContain('notes_recall')
     expect(toolNames).toContain('tasks_create')
     expect(toolNames).toContain('reminders_create')
     expect(toolNames).toContain('research_start')
@@ -316,8 +302,3 @@ describe('installBundledCores — bundled Tier 1 boot', () => {
     }
   })
 })
-
-// `buildFakeMemoryStore` (the v0.1.0 helper) was removed when Notes Core
-// S1 (2026-05-20) replaced the MemoryStore-adapter backend with a
-// per-project NotesStore + resolver. The backend factories above now
-// construct a real NotesStoreResolver against the tmp owner_home.

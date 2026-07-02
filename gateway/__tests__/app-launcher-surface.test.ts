@@ -48,7 +48,7 @@ const FIXTURE: ReadonlyArray<{
   display_name: string
   launcher_icon: { kind: 'emoji'; value: string }
 }> = [
-  { slug: 'notes', display_name: 'Notes', launcher_icon: { kind: 'emoji', value: '🧠' } },
+  { slug: 'calendar_core', display_name: 'Calendar', launcher_icon: { kind: 'emoji', value: '📅' } },
   { slug: 'tasks_core', display_name: 'Tasks', launcher_icon: { kind: 'emoji', value: '✅' } },
   { slug: 'reminders', display_name: 'Reminders', launcher_icon: { kind: 'emoji', value: '⏰' } },
 ]
@@ -108,9 +108,9 @@ describe('app-launcher surface — GET list', () => {
     expect(json.ok).toBe(true)
     expect(json.project_id).toBe(PROJECT_ID)
     expect(json.entries).toHaveLength(3)
-    expect(json.entries.map((e) => e.slug)).toEqual(['notes', 'tasks_core', 'reminders'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['calendar_core', 'tasks_core', 'reminders'])
     expect(json.entries.map((e) => e.reorder_index)).toEqual([0, 1, 2])
-    expect(json.entries[0]?.launcher_icon).toEqual({ kind: 'emoji', value: '🧠' })
+    expect(json.entries[0]?.launcher_icon).toEqual({ kind: 'emoji', value: '📅' })
   })
 
   it('rejects a malformed project_id', async () => {
@@ -146,7 +146,7 @@ describe('app-launcher surface — POST reorder', () => {
     )
     expect(res.status).toBe(200)
     const json = (await res.json()) as { entries: LauncherEntry[] }
-    expect(json.entries.map((e) => e.slug)).toEqual(['reminders', 'notes', 'tasks_core'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['reminders', 'calendar_core', 'tasks_core'])
     expect(json.entries.map((e) => e.reorder_index)).toEqual([0, 1, 2])
   })
 
@@ -154,16 +154,16 @@ describe('app-launcher surface — POST reorder', () => {
     // Argus r1 + Codex GPT-5 flagged a potential off-by-one for forward
     // moves (fromIdx < new_index). The contract: `new_index` is the
     // **final position** of the moved tile in the result array. Drop
-    // notes onto tasks_core at idx 1 → notes lands at idx 1; tasks_core
+    // calendar_core onto tasks_core at idx 1 → calendar_core lands at idx 1; tasks_core
     // shifts left to idx 0. This regression test pins that semantic.
     const res = await authedFetch(
       harness.base,
       `/api/app/projects/${PROJECT_ID}/launcher/reorder`,
-      { method: 'POST', body: JSON.stringify({ slug: 'notes', new_index: 1 }) },
+      { method: 'POST', body: JSON.stringify({ slug: 'calendar_core', new_index: 1 }) },
     )
     expect(res.status).toBe(200)
     const json = (await res.json()) as { entries: LauncherEntry[] }
-    expect(json.entries.map((e) => e.slug)).toEqual(['tasks_core', 'notes', 'reminders'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['tasks_core', 'calendar_core', 'reminders'])
     expect(json.entries.map((e) => e.reorder_index)).toEqual([0, 1, 2])
   })
 
@@ -174,31 +174,31 @@ describe('app-launcher surface — POST reorder', () => {
     })
     const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/launcher`)
     const json = (await res.json()) as { entries: LauncherEntry[] }
-    expect(json.entries.map((e) => e.slug)).toEqual(['reminders', 'notes', 'tasks_core'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['reminders', 'calendar_core', 'tasks_core'])
   })
 
   it('clamps out-of-range new_index', async () => {
     const res = await authedFetch(
       harness.base,
       `/api/app/projects/${PROJECT_ID}/launcher/reorder`,
-      { method: 'POST', body: JSON.stringify({ slug: 'notes', new_index: 999 }) },
+      { method: 'POST', body: JSON.stringify({ slug: 'calendar_core', new_index: 999 }) },
     )
     expect(res.status).toBe(200)
     const json = (await res.json()) as { entries: LauncherEntry[] }
-    expect(json.entries[json.entries.length - 1]?.slug).toBe('notes')
+    expect(json.entries[json.entries.length - 1]?.slug).toBe('calendar_core')
   })
 
   it('rejects malformed payloads', async () => {
     const bad: Array<{ body: string; expectedCode: string }> = [
       { body: 'not-json', expectedCode: 'malformed_json' },
-      { body: JSON.stringify({ slug: 'notes' }), expectedCode: 'missing_new_index' },
+      { body: JSON.stringify({ slug: 'calendar_core' }), expectedCode: 'missing_new_index' },
       { body: JSON.stringify({ new_index: 1 }), expectedCode: 'missing_slug' },
       {
         body: JSON.stringify({ slug: 'has spaces', new_index: 1 }),
         expectedCode: 'missing_slug',
       },
       {
-        body: JSON.stringify({ slug: 'notes', new_index: 'first' }),
+        body: JSON.stringify({ slug: 'calendar_core', new_index: 'first' }),
         expectedCode: 'missing_new_index',
       },
     ]
@@ -222,7 +222,7 @@ describe('app-launcher surface — POST reorder', () => {
     )
     expect(res.status).toBe(200)
     const json = (await res.json()) as { entries: LauncherEntry[] }
-    expect(json.entries.map((e) => e.slug)).toEqual(['notes', 'tasks_core', 'reminders'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['calendar_core', 'tasks_core', 'reminders'])
   })
 })
 
@@ -243,7 +243,7 @@ describe('app-launcher surface — POST uninstall', () => {
     )
     expect(res.status).toBe(200)
     const json = (await res.json()) as { entries: LauncherEntry[] }
-    expect(json.entries.map((e) => e.slug)).toEqual(['notes', 'reminders'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['calendar_core', 'reminders'])
     expect(json.entries.map((e) => e.reorder_index)).toEqual([0, 1])
   })
 
@@ -258,7 +258,7 @@ describe('app-launcher surface — POST uninstall', () => {
       `/api/app/projects/other-project/launcher`,
     )
     const json = (await otherRes.json()) as { entries: LauncherEntry[] }
-    expect(json.entries.map((e) => e.slug)).toEqual(['notes', 'tasks_core', 'reminders'])
+    expect(json.entries.map((e) => e.slug)).toEqual(['calendar_core', 'tasks_core', 'reminders'])
   })
 })
 
@@ -348,9 +348,9 @@ describe('app-launcher surface — long_press_menu serialisation (ISSUE #17)', (
       },
       {
         // Legacy-shape entry (no long_press_menu) must coexist.
-        slug: 'notes',
-        display_name: 'Notes',
-        launcher_icon: { kind: 'emoji', value: '🧠' },
+        slug: 'calendar_core',
+        display_name: 'Calendar',
+        launcher_icon: { kind: 'emoji', value: '📅' },
       },
     ])
     const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/launcher`)
@@ -373,12 +373,12 @@ describe('app-launcher surface — long_press_menu serialisation (ISSUE #17)', (
       action: 'chat_send',
       text: '/task focus',
     })
-    // Legacy-shape coexistence: notes entry has none of the new fields.
-    const notes = json.entries.find((e) => e.slug === 'notes')
-    expect(notes).toBeDefined()
-    expect(notes?.primary_action).toBeUndefined()
-    expect(notes?.app_tab_path).toBeUndefined()
-    expect(notes?.long_press_menu).toBeUndefined()
+    // Legacy-shape coexistence: calendar entry has none of the new fields.
+    const calendar = json.entries.find((e) => e.slug === 'calendar_core')
+    expect(calendar).toBeDefined()
+    expect(calendar?.primary_action).toBeUndefined()
+    expect(calendar?.app_tab_path).toBeUndefined()
+    expect(calendar?.long_press_menu).toBeUndefined()
   })
 })
 

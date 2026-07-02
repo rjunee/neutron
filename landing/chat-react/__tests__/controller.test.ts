@@ -349,7 +349,7 @@ describe('NeutronChatController — view model over chat-core', () => {
     controller.start()
     sockets[0]!.open()
     sockets[0]!.deliver(ready())
-    await controller.send('/note buy milk')
+    await controller.send('/remind me tomorrow')
     await tick()
     // After the send, the typing indicator is on (awaiting a reply).
     expect(controller.getViewModel().isRunning).toBe(true)
@@ -360,7 +360,7 @@ describe('NeutronChatController — view model over chat-core', () => {
       v: 1,
       type: 'chat_command_result',
       channel_topic_id: TOPIC,
-      text: '📝 Saved note: buy milk',
+      text: '⏰ Reminder set for tomorrow',
       ts: 5,
       client_msg_id: 'cmid-1',
     })
@@ -371,7 +371,7 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(vm.awaitingFirstToken).toBe(false)
     // The command output is rendered as an agent-style bubble, after the
     // user's command bubble.
-    expect(vm.messages.map((m) => m.text)).toEqual(['/note buy milk', '📝 Saved note: buy milk'])
+    expect(vm.messages.map((m) => m.text)).toEqual(['/remind me tomorrow', '⏰ Reminder set for tomorrow'])
     expect(vm.messages[1]?.role).toBe('agent')
   })
 

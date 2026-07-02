@@ -109,10 +109,10 @@ describe('tab registry — resolveTabs(scope) parity + immutability', () => {
 })
 
 describe('tab registry — Core union (PR-2)', () => {
-  const notes: CoreTabContribution = {
-    core_slug: 'notes',
-    label: 'Notes',
-    target: '/projects/p1/notes',
+  const reminders: CoreTabContribution = {
+    core_slug: 'reminders_core',
+    label: 'Reminders',
+    target: '/projects/p1/reminders_core',
   }
   const calendar: CoreTabContribution = {
     core_slug: 'calendar',
@@ -121,36 +121,36 @@ describe('tab registry — Core union (PR-2)', () => {
   }
 
   it('appends Core tabs AFTER the builtins, preserving install order', () => {
-    const tabs = resolveProjectTabs([notes, calendar])
+    const tabs = resolveProjectTabs([reminders, calendar])
     expect(tabs.map((t) => t.key)).toEqual([
       'chat',
       'work_board',
       'documents',
       'settings',
-      'core:notes',
+      'core:reminders_core',
       'core:calendar',
     ])
   })
 
   it('shapes a Core descriptor: source=core, core_slug set, webview mount', () => {
-    const tab = resolveProjectTabs([notes]).find((t) => t.key === 'core:notes')!
+    const tab = resolveProjectTabs([reminders]).find((t) => t.key === 'core:reminders_core')!
     expect(tab.source).toBe('core')
-    expect(tab.core_slug).toBe('notes')
-    expect(tab.label).toBe('Notes')
+    expect(tab.core_slug).toBe('reminders_core')
+    expect(tab.label).toBe('Reminders')
     expect(tab.scope).toBe('project')
-    expect(tab.mount).toEqual({ kind: 'webview', target: '/projects/p1/notes' })
+    expect(tab.mount).toEqual({ kind: 'webview', target: '/projects/p1/reminders_core' })
     // Core tabs sort after the last builtin (settings, order=15).
     expect(tab.order).toBeGreaterThan(15)
   })
 
   it('unions Core tabs into the GLOBAL scope too (scope stamped global)', () => {
-    const tabs = resolveGlobalTabs([{ ...notes, target: '/projects/<project_id>/notes' }])
-    expect(tabs.map((t) => t.key)).toEqual(['admin', 'core:notes'])
-    expect(tabs.find((t) => t.key === 'core:notes')!.scope).toBe('global')
+    const tabs = resolveGlobalTabs([{ ...reminders, target: '/projects/<project_id>/reminders_core' }])
+    expect(tabs.map((t) => t.key)).toEqual(['admin', 'core:reminders_core'])
+    expect(tabs.find((t) => t.key === 'core:reminders_core')!.scope).toBe('global')
   })
 
   it('passing the same contribution to project vs global stamps the right scope', () => {
-    expect(resolveProjectTabs([notes]).find((t) => t.source === 'core')!.scope).toBe('project')
-    expect(resolveGlobalTabs([notes]).find((t) => t.source === 'core')!.scope).toBe('global')
+    expect(resolveProjectTabs([reminders]).find((t) => t.source === 'core')!.scope).toBe('project')
+    expect(resolveGlobalTabs([reminders]).find((t) => t.source === 'core')!.scope).toBe('global')
   })
 })

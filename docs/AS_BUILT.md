@@ -2,6 +2,64 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Notes / second-brain core: REMOVED entirely
+
+**Why.** The `notes` core (`cores/free/notes`, `@neutronai/notes`) was a
+second-brain port — a per-project `notes.db` sidecar + eight `notes_*` MCP tools +
+the `/note` chat command. It is made redundant by the second-brain→GBrain
+rip-replace: **GBrain is now the SOLE per-owner memory store.** The notes core
+was silently broken until #158 wired its tools; Ryan directed "rip it out. we
+dont need notes core" (SPEC.md Decisions Log 2026-07-01). No dual path, no flag,
+no leftover.
+
+**What shipped (clean deletion).**
+
+- **Deleted the whole `cores/free/notes/` package** (source, tests, manifest,
+  UI surfaces, the per-Core migration `0001_drawers_notes_kg.sql`) and the
+  notes-only test `gateway/__tests__/notes-production-composer.test.ts`. Reverts
+  the effect of #158.
+- **Unwired from `gateway/cores/mount-open-cores.ts`:** the `@neutronai/notes`
+  import (was `:75`), the `NotesStoreResolver` construction (was `:248-250`), the
+  `notesResolver`/`notesDefaultProjectId` args into `buildCoresBackendFactories`
+  (was `:289-290`), and `createNotesChatCommandFilter` from the
+  `buildChainedChatCommandFilter([...])` chain (was `:332`). The `/note` chat
+  command no longer exists.
+- **`gateway/boot-helpers.ts`:** dropped the `notesResolver` + `notesDefaultProjectId`
+  interface params + destructuring and the entire `notes:` backend factory from
+  `buildCoresBackendFactories`.
+- **Notes drawer-browser HTTP surface** (dead plumbing only the deleted test ever
+  supplied): removed `NotesDrawerBrowserHandler` + `notesDrawerBrowser` from
+  `gateway/http/compose.ts`, `notes_drawer_browser_surface` from
+  `gateway/composition/input/cores-input.ts` + `gateway/composition.ts`.
+- **Launcher seed:** dropped the 🧠 "Notes" tile from `DEFAULT_LAUNCHER_SEED` +
+  `SLUG_DISPLAY_DEFAULTS` in `gateway/http/project-launcher-store.ts`; deleted the
+  orphan placeholder route `app/app/projects/[id]/notes.tsx`.
+- **Dependency:** removed `cores/free/notes` from root `package.json` workspaces
+  and `@neutronai/notes` from `gateway/package.json`; regenerated `bun.lock`.
+- **Tests:** decremented the discovered/installed core-count sets by 1 in
+  `cores-composition.test.ts` (10→9 discovered / 8→7 installed incl. paid-staging;
+  the neutron-open carve boots discovered=9 installed=6) and `cores-surface.test.ts`;
+  swapped the notes fixtures in `cores-tool-dispatch.test.ts`,
+  `launcher-production-composer.test.ts`, `app-tabs-surface.test.ts`,
+  `app-launcher-surface.test.ts`, `project-launcher-seed.test.ts`,
+  `tabs/__tests__/registry.test.ts`, and the `mount-open-cores` `/note` assertion
+  to surviving cores (`reminders_core` / `calendar_core` / `tasks_core`).
+
+**Migrations (safe).** The notes core's sole migration was a **per-Core** bundled
+migration inside the package (applied to a per-Core namespace DB at install), NOT
+a central `migrations/` entry — the central runner ledger (0001–0096) never
+referenced it, so its snapshot/runner tests stay green. It is removed with the
+package. On any already-deployed DB the old `notes.*` tables are harmless orphans
+(nothing in the runtime reads them). No forward drop migration was added (cheapest,
+safe — the task defaulted to leaving orphan tables).
+
+**Verify.** `tsc --noEmit` clean; the four core/launcher composition suites pass
+(29/29), the four surface/tab suites pass (55/55). Fresh QUIET install boot
+(`NEUTRON_HOME=/tmp/wfnotesrm bun run open/server.ts`) logs **no `core=notes` line
+at all** (gone from discovery, not install_ok/failed) and `project=dev
+discovered=9 installed=6 failed=3` — discovered dropped by exactly 1; no `/note`
+command registered; the GBrain memory path is unaffected.
+
 ## 2026-07-01 — Chat: fix one-line message bubble rendering ~2x tall
 
 **Why.** Ryan flagged (twice) that a single-line chat message bubble — e.g. the

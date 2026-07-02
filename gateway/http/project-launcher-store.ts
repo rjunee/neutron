@@ -7,15 +7,15 @@
  *
  * The launcher surface exposes per-project ordered lists of installed
  * Cores. In production each entry resolves to a Tier 1 free Core
- * (`cores/free/notes`, `cores/free/tasks`, …) or a Tier 2 paid Core; the
- * gateway surfaces them as iPhone-style tiles in the Expo app.
+ * (`cores/free/tasks`, `cores/free/reminders`, …) or a Tier 2 paid Core;
+ * the gateway surfaces them as iPhone-style tiles in the Expo app.
  *
  * For P5.3 the source of truth is in-memory and per-gateway-process:
  *
  *   - On first access for a (instance, project) pair the store seeds the
  *     ordered list from a configured "default seed". The seed is the
  *     canonical set of bundled Tier 1 free Cores. Production wires
- *     {Notes, Tasks, Reminders} as a forward-decl seed so the launcher
+ *     {Tasks, Reminders} as a forward-decl seed so the launcher
  *     has something to show before any owner has explicitly installed a
  *     Core.
  *
@@ -84,20 +84,18 @@ export interface LauncherEntry {
 /**
  * The set of bundled-Core defaults used to seed an empty
  * (instance, project) lookup. Surfaces the canonical Tier 1 free Cores
- * (Notes + Tasks already shipped; Reminders forward-decl per sprint
+ * (Tasks already shipped; Reminders forward-decl per sprint
  * roadmap § 3) so the launcher renders something useful in dev/web smoke
  * before any per-project install tracking is wired.
  *
  * Pulled from the Core manifests' `launcher_icon` blocks:
- *   - cores/free/notes/src/ui/launcher-icon.ts:LAUNCHER_ICON
  *   - cores/free/tasks/src/ui/launcher-icon.ts:LAUNCHER_ICON
  *
  * The Reminders Core ships in a later sprint; the launcher pre-knows
- * about it so the Notes/Tasks tile set lines up alongside Reminders on
+ * about it so the Tasks tile lines up alongside Reminders on
  * day 1 (no rearrangement when Reminders' real Core lands).
  */
 export const DEFAULT_LAUNCHER_SEED: ReadonlyArray<Omit<LauncherEntry, 'reorder_index'>> = [
-  { slug: 'notes', display_name: 'Notes', launcher_icon: { kind: 'emoji', value: '🧠' } },
   { slug: 'tasks_core', display_name: 'Tasks', launcher_icon: { kind: 'emoji', value: '✅' } },
   { slug: 'reminders', display_name: 'Reminders', launcher_icon: { kind: 'emoji', value: '⏰' } },
 ]
@@ -114,7 +112,6 @@ export const DEFAULT_LAUNCHER_SEED: ReadonlyArray<Omit<LauncherEntry, 'reorder_i
  * fixture Cores that omit the UI block.
  */
 const SLUG_DISPLAY_DEFAULTS: Readonly<Record<string, { display_name: string; emoji: string }>> = {
-  notes: { display_name: 'Notes', emoji: '🧠' },
   tasks_core: { display_name: 'Tasks', emoji: '✅' },
   reminders_core: { display_name: 'Reminders', emoji: '⏰' },
   calendar_core: { display_name: 'Calendar', emoji: '📅' },
