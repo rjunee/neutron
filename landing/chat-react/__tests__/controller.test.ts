@@ -982,6 +982,30 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     controller.stop()
   })
 
+  it('a foreign-project board frame does NOT clear the active project active-work signal (Codex P2)', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // p1 has work in flight.
+    sockets[0]!.deliver(changed([boardItem({ id: 'build', status: 'in_progress' })]))
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    // A sibling project's board arrives on the per-user socket (all-idle). It must
+    // NOT clobber p1's in-flight signal / stop p1's dots.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'work_board_changed',
+      items: [boardItem({ id: 'other', status: 'done' })],
+      project_id: 'p2',
+      ts: 2,
+    })
+    await tick()
+    expect(controller.getViewModel().hasActiveWork).toBe(true)
+    controller.stop()
+  })
+
   it('hasActiveWork ignores a board frame for a DIFFERENT project', async () => {
     const { controller, sockets } = setup('p1')
     controller.start()

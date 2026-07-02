@@ -328,6 +328,17 @@ export class NeutronChatController {
   /** The project the cached snapshot belongs to (the frame's `project_id`), so a
    *  late subscriber for a DIFFERENT project isn't replayed the wrong board. */
   private lastWorkBoardProjectId: string | undefined = undefined
+  /**
+   * The latest board snapshot that pertains to the ACTIVE project — the source
+   * for `hasActiveWork` (the typing indicator). Tracked SEPARATELY from
+   * `lastWorkBoard` (which caches the raw last frame for subscriber replay,
+   * regardless of project) because the per-user app-ws topic can deliver a
+   * sibling project's board on this socket: a foreign frame must NOT clobber the
+   * active project's in-flight signal and stop the dots prematurely. Only a frame
+   * whose `project_id` matches the active scope (or is absent → "this project")
+   * updates this; cleared on project switch.
+   */
+  private activeWorkBoardItems: WorkBoardItem[] | null = null
   private vm: ChatViewModel
   private seq = 0
   /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
@@ -453,6 +464,7 @@ export class NeutronChatController {
     this.pending = 0
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
+    this.activeWorkBoardItems = null
     if (this.importProgressTimer !== null) {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
@@ -693,6 +705,15 @@ export class NeutronChatController {
           : undefined
       this.lastWorkBoard = items
       this.lastWorkBoardProjectId = framePid
+      // Update the active-project board cache (drives `hasActiveWork`) ONLY when
+      // this frame pertains to the active project — a frame with no project_id is
+      // "this project"; a sibling project's board (per-user topic) is ignored so
+      // it can't stop the active project's typing dots. Mirrors WorkBoardTab's
+      // per-tab filter, but cached here so `computeHasActiveWork` survives
+      // interleaved foreign frames.
+      if (framePid === undefined || framePid.length === 0 || framePid === this.projectId) {
+        this.activeWorkBoardItems = items
+      }
       for (const fn of this.workBoardListeners) {
         try {
           fn(items, framePid)
@@ -1002,19 +1023,16 @@ export class NeutronChatController {
    * signal behind the Plan-tab flashing active-work dot, reused to keep the chat
    * typing dots visible while a long/background build runs.
    *
-   * `lastWorkBoard` is populated ONLY by live `work_board_changed` frames (the
-   * server pushes on every mutation, never on connect), so this is null until a
+   * Reads `activeWorkBoardItems`, which is populated ONLY by live
+   * `work_board_changed` frames that pertain to the active project (the server
+   * pushes on every mutation, never on connect), so this is null until a relevant
    * mutation lands this session — a lingering item from a prior session can't
-   * spin the dots at load time. Project scoping mirrors `WorkBoardTab`: a
-   * snapshot with no project id is "this project"; one naming a DIFFERENT project
-   * than the active chat scope is not ours (the app-ws topic is per-user, so a
-   * sibling project's board can arrive on this socket).
+   * spin the dots at load time, and a sibling project's board can't stop them.
    */
   private computeHasActiveWork(): boolean {
-    if (this.lastWorkBoard === null || this.lastWorkBoard.length === 0) return false
-    const pid = this.lastWorkBoardProjectId
-    if (pid !== undefined && pid.length > 0 && pid !== this.projectId) return false
-    return this.lastWorkBoard.some((it) => it.status === 'in_progress')
+    const items = this.activeWorkBoardItems
+    if (items === null || items.length === 0) return false
+    return items.some((it) => it.status === 'in_progress')
   }
 
   /** Monotonic local ordering key for streaming bubbles (no wall clock). */
