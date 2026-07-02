@@ -204,6 +204,142 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('renders a live run-progress sub-label for a bound run (item 1)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'Building row',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          round: 2,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 120000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const label = container.querySelector('.cwb-run-progress')
+    expect(label).not.toBeNull()
+    const text = label!.textContent ?? ''
+    expect(text).toContain('🔨 building')
+    expect(text).toContain('round 2')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a stalled warning + a merged PR label on the sub-label (item 1)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'Stalled row',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:00:30Z',
+          elapsed_ms: 900000,
+          stalled: true,
+          stalled_ms: 700000,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+      item({
+        id: 'b',
+        title: 'Merged row',
+        status: 'in_progress',
+        linked_run_id: 'run_2',
+        run_progress: {
+          run_id: 'run_2',
+          phase_label: 'merged',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:05:00Z',
+          elapsed_ms: 300000,
+          stalled: false,
+          stalled_ms: null,
+          pr: 123,
+          verdict: 'APPROVE',
+          failure_reason: null,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const labels = Array.from(container.querySelectorAll('.cwb-run-progress')).map(
+      (n) => n.textContent ?? '',
+    )
+    expect(labels.some((t) => t.includes('⚠️ stalled'))).toBe(true)
+    expect(labels.some((t) => t.includes('✅ merged') && t.includes('PR #123'))).toBe(true)
+    await act(async () => root.unmount())
+  })
+
+  it('confirm-before-delete uses cancel-build copy for a running item, lighter for idle (item 4)', async () => {
+    const rows = [
+      item({
+        id: 'run',
+        title: 'Running build',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+      item({ id: 'idle', title: 'Idle item', status: 'upcoming' }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const delButtons = Array.from(container.querySelectorAll('.cwb-btn-icon')).filter(
+      (b) => (b.getAttribute('aria-label') ?? '') === 'Delete item',
+    ) as HTMLButtonElement[]
+
+    // Running item → cancel-build copy.
+    await act(async () => {
+      delButtons[0]!.click()
+      await tick()
+    })
+    expect(container.querySelector('[role="dialog"]')!.textContent).toContain(
+      'Cancel this build and remove it?',
+    )
+    // Dismiss via the backdrop's Keep button.
+    const keep = Array.from(container.querySelectorAll('.cwb-confirm .cwb-btn')).find(
+      (b) => (b.textContent ?? '') === 'Keep',
+    ) as HTMLButtonElement
+    await act(async () => {
+      keep.click()
+      await tick()
+    })
+    expect(container.querySelector('[role="dialog"]')).toBeNull()
+
+    // Idle item → lighter copy.
+    await act(async () => {
+      delButtons[1]!.click()
+      await tick()
+    })
+    expect(container.querySelector('[role="dialog"]')!.textContent).toContain('Remove this item?')
+    await act(async () => root.unmount())
+  })
+
   it('adds an item (POST title + re-fetch)', async () => {
     let posted: Record<string, unknown> | null = null
     let listCount = 0
@@ -313,12 +449,26 @@ describe('WorkBoardTab (happy-dom)', () => {
     const delBtn = Array.from(container.querySelectorAll('.cwb-btn-icon')).find(
       (b) => (b.getAttribute('aria-label') ?? '') === 'Delete item',
     ) as HTMLButtonElement
+    // Item 4 — the X opens a confirm dialog FIRST; no DELETE fires yet.
     await act(async () => {
       delBtn.click()
+      await tick()
+    })
+    expect(deleted).toBe(false)
+    const dialog = container.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+
+    // Confirm — the danger button in the dialog fires the DELETE.
+    const confirmBtn = Array.from(
+      (dialog as Element).querySelectorAll('.cwb-btn-danger'),
+    )[0] as HTMLButtonElement
+    await act(async () => {
+      confirmBtn.click()
       await tick()
       await tick()
     })
     expect(deleted).toBe(true)
+    expect(container.querySelector('[role="dialog"]')).toBeNull()
 
     await act(async () => root.unmount())
   })

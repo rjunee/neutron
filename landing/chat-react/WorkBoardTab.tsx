@@ -38,6 +38,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { BootstrapConfig } from './config.ts'
 import {
   WebWorkBoardClient,
+  type RunPhaseLabel,
+  type RunProgress,
   type WorkBoardItem,
   type WorkBoardStatus,
 } from './work-board-client.ts'
@@ -91,6 +93,65 @@ function formatCompleted(completed_at: string | null): string {
   return m !== null ? (m[1] as string) : completed_at
 }
 
+/* ── Item 1: live run-progress sub-label ─────────────────────────────────── */
+
+/** Display warn threshold (mirror of `trident/run-progress.ts` STALLED_WARN_MS). */
+const STALLED_WARN_MS = 10 * 60_000
+
+const PHASE_GLYPH: Record<RunPhaseLabel, string> = {
+  planning: '📝',
+  building: '🔨',
+  reviewing: '🔍',
+  merged: '✅',
+  failed: '⚠️',
+  cancelled: '🚫',
+}
+
+const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled']
+
+/** Compact `1m` / `4m` / `1h 5m` duration; `<1m` under a minute. */
+function formatDuration(ms: number): string {
+  const totalMin = Math.floor(Math.max(0, ms) / 60_000)
+  if (totalMin < 1) return '<1m'
+  if (totalMin < 60) return `${totalMin}m`
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  return m === 0 ? `${h}h` : `${h}h ${m}m`
+}
+
+/**
+ * The compact sub-label for a bound run — e.g. "🔨 building · round 1 · 4m",
+ * "🔍 reviewing · round 2 · 6m", "✅ merged · PR #7", "⚠️ failed". Elapsed +
+ * stall ticks live off the run's timestamps (`nowMs`) between server polls.
+ */
+function runProgressText(rp: RunProgress, nowMs: number): string {
+  const startedMs = Date.parse(rp.started_at)
+  const elapsed = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : rp.elapsed_ms
+  const advancedMs = Date.parse(rp.last_advanced_at)
+  const sinceAdvance = Number.isFinite(advancedMs) ? Math.max(0, nowMs - advancedMs) : rp.stalled_ms ?? 0
+  const terminal = TERMINAL_PHASE_LABELS.includes(rp.phase_label)
+  const stalled = !terminal && (rp.stalled || sinceAdvance > STALLED_WARN_MS)
+
+  const parts: string[] = [`${PHASE_GLYPH[rp.phase_label]} ${rp.phase_label}`]
+  if (rp.phase_label === 'merged') {
+    if (rp.pr !== null) parts.push(`PR #${rp.pr}`)
+  } else if (!terminal) {
+    parts.push(`round ${rp.round}`)
+    parts.push(formatDuration(elapsed))
+  }
+  let text = parts.join(' · ')
+  if (stalled) text += ` · ⚠️ stalled ${formatDuration(sinceAdvance)}`
+  return text
+}
+
+/** True when the item is bound to a run that is still live (not terminal). */
+function isLinkedRunning(item: WorkBoardItem): boolean {
+  const linked = item.linked_run_id !== null && item.linked_run_id.length > 0
+  if (!linked) return false
+  const rp = item.run_progress
+  return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
+}
+
 export function WorkBoardTab({
   projectId,
   config,
@@ -131,28 +192,42 @@ export function WorkBoardTab({
   // Per-row in-flight guard so a double-click can't fire two mutations.
   const [busyId, setBusyId] = useState<string | null>(null)
 
+  // Item 4 — the item pending delete-confirmation (null = no dialog open).
+  const [confirmDelete, setConfirmDelete] = useState<WorkBoardItem | null>(null)
+
+  // Item 1 — a ticking clock so a bound run's elapsed/stall sub-label advances
+  // live between server polls. Only runs while a run is linked (see the effect).
+  const [nowTick, setNowTick] = useState<number>(() => Date.now())
+
   // Monotonic guard so a slow list fetch can't land after a newer one (rapid
   // project switches / StrictMode double-invoke).
   const listSeq = useMemo(() => ({ current: 0 }), [])
 
-  const refresh = useCallback((): void => {
-    const seq = (listSeq.current += 1)
-    setLoading(true)
-    setListError(null)
-    void client
-      .list(projectId)
-      .then((rows) => {
-        if (seq !== listSeq.current) return
-        setItems(rows)
-        setLoading(false)
-      })
-      .catch((err: unknown) => {
-        if (seq !== listSeq.current) return
-        setItems([])
-        setLoading(false)
-        setListError(err instanceof Error ? err.message : 'failed to load the board')
-      })
-  }, [client, projectId, listSeq])
+  // `quiet` (background poll) skips the loading flip so a periodic refetch never
+  // flashes the "Loading…" placeholder over a populated board.
+  const refresh = useCallback(
+    (quiet = false): void => {
+      const seq = (listSeq.current += 1)
+      if (!quiet) setLoading(true)
+      setListError(null)
+      void client
+        .list(projectId)
+        .then((rows) => {
+          if (seq !== listSeq.current) return
+          setItems(rows)
+          setLoading(false)
+        })
+        .catch((err: unknown) => {
+          if (seq !== listSeq.current) return
+          if (!quiet) {
+            setItems([])
+            setListError(err instanceof Error ? err.message : 'failed to load the board')
+          }
+          setLoading(false)
+        })
+    },
+    [client, projectId, listSeq],
+  )
 
   // Reset + load whenever the project changes. A stale board from project A must
   // never linger under project B's id.
@@ -162,6 +237,7 @@ export function WorkBoardTab({
     setNewTitle('')
     setEditingId(null)
     setBusyId(null)
+    setConfirmDelete(null)
     refresh()
   }, [refresh, projectId])
 
@@ -182,6 +258,24 @@ export function WorkBoardTab({
     })
     return unsub
   }, [liveSource, projectId, listSeq])
+
+  // Item 1 — while any item is bound to a LIVE (non-terminal) run, tick a clock
+  // (for the live elapsed/stall sub-label) AND quietly re-poll the board every
+  // 15s. Intermediate trident checkpoints (forge-done → reviewing, fix-round-N →
+  // building) don't mutate the board row, so they don't fire a
+  // `work_board_changed` push; the poll is what surfaces those phase/round/stall
+  // changes live. Gated on a LIVE link (via `isLinkedRunning`, not merely a
+  // present `linked_run_id`) so a finished/terminal linked run does NOT poll
+  // forever (Codex review [P2]).
+  const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
+  useEffect(() => {
+    if (!hasLiveRun) return
+    const interval = setInterval(() => {
+      setNowTick(Date.now())
+      refresh(true)
+    }, 15_000)
+    return () => clearInterval(interval)
+  }, [hasLiveRun, refresh])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()
@@ -298,6 +392,16 @@ export function WorkBoardTab({
     [client, projectId, busyId, refresh],
   )
 
+  // Item 4 — open the confirm dialog instead of deleting immediately. Prevents
+  // an accidental click from cancelling an expensive running build.
+  const requestRemove = useCallback(
+    (item: WorkBoardItem): void => {
+      if (busyId !== null) return
+      setConfirmDelete(item)
+    },
+    [busyId],
+  )
+
   const active = items.filter((it) => it.status !== 'done')
   const completed = items.filter((it) => it.status === 'done')
 
@@ -330,6 +434,40 @@ export function WorkBoardTab({
 
       {actionError !== null ? <div className="cwb-error">{actionError}</div> : null}
 
+      {confirmDelete !== null ? (
+        <div
+          className="cwb-confirm-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm delete"
+          onClick={() => setConfirmDelete(null)}
+        >
+          <div className="cwb-confirm" onClick={(e) => e.stopPropagation()}>
+            <p className="cwb-confirm-msg">
+              {isLinkedRunning(confirmDelete)
+                ? 'Cancel this build and remove it?'
+                : 'Remove this item?'}
+            </p>
+            <div className="cwb-confirm-actions">
+              <button type="button" className="cwb-btn" onClick={() => setConfirmDelete(null)}>
+                Keep
+              </button>
+              <button
+                type="button"
+                className="cwb-btn cwb-btn-danger"
+                onClick={() => {
+                  const item = confirmDelete
+                  setConfirmDelete(null)
+                  removeItem(item)
+                }}
+              >
+                {isLinkedRunning(confirmDelete) ? 'Cancel build & remove' : 'Remove'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="cwb-list" aria-label="Work Board">
         {loading ? (
           <div className="cwb-empty">Loading…</div>
@@ -361,7 +499,8 @@ export function WorkBoardTab({
                   onCancelEdit={() => setEditingId(null)}
                   onMoveUp={() => move(active, i, -1)}
                   onMoveDown={() => move(active, i, 1)}
-                  onRemove={() => removeItem(it)}
+                  onRemove={() => requestRemove(it)}
+                  nowMs={nowTick}
                 />
               ))}
             </ul>
@@ -389,7 +528,7 @@ export function WorkBoardTab({
                         <button
                           type="button"
                           className="cwb-btn cwb-btn-icon"
-                          onClick={() => removeItem(it)}
+                          onClick={() => requestRemove(it)}
                           disabled={busyId === it.id}
                           title="Delete item"
                           aria-label="Delete item"
@@ -424,6 +563,7 @@ function WorkBoardRow({
   onMoveUp,
   onMoveDown,
   onRemove,
+  nowMs,
 }: {
   item: WorkBoardItem
   busy: boolean
@@ -439,9 +579,12 @@ function WorkBoardRow({
   onMoveUp: () => void
   onMoveDown: () => void
   onRemove: () => void
+  /** Item 1 — a ticking clock so the run sub-label's elapsed/stall advances live. */
+  nowMs: number
 }): React.JSX.Element {
   const dot = statusMeta(item.status)
   const activity = activityGlyph(item)
+  const progress = item.run_progress
   return (
     <li className={`cwb-row cwb-row-${item.status}`}>
       <button
@@ -471,14 +614,24 @@ function WorkBoardRow({
           aria-label="Edit item title"
         />
       ) : (
-        <button
-          type="button"
-          className="cwb-title cwb-title-btn"
-          onClick={onStartEdit}
-          title={item.title}
-        >
-          {item.title}
-        </button>
+        <span className="cwb-title-col">
+          <button
+            type="button"
+            className="cwb-title cwb-title-btn"
+            onClick={onStartEdit}
+            title={item.title}
+          >
+            {item.title}
+          </button>
+          {progress !== undefined ? (
+            <span
+              className={`cwb-run-progress${progress.stalled ? ' cwb-run-progress-stalled' : ''}`}
+              aria-label={`Build progress: ${runProgressText(progress, nowMs)}`}
+            >
+              {runProgressText(progress, nowMs)}
+            </span>
+          ) : null}
+        </span>
       )}
       <div className="cwb-actions">
         <button

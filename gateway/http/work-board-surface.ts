@@ -29,13 +29,33 @@ import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
 import {
   WorkBoardValidationError,
+  type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
 } from '../../work-board/store.ts'
+import { isTerminalPhase } from '../../trident/state-machine.ts'
+import { runProgressForItem } from '../../trident/run-progress.ts'
+import type { TridentPhase, TridentRun } from '../../trident/store.ts'
+
+/**
+ * The minimal trident-run surface the board needs (M1 trident-UX hardening):
+ * READ a linked run to derive its live progress for the GET payload (item 1),
+ * and CANCEL a linked run when its Plan item is deleted (item 3). `TridentRunStore`
+ * satisfies it structurally (`get` / `update`). Optional — a board-less / trident-
+ * less boot omits it and both features degrade to no-ops.
+ */
+export interface TridentRunAccess {
+  get(id: string): TridentRun | null
+  update(id: string, patch: { phase: TridentPhase }): Promise<unknown>
+}
 
 export interface WorkBoardSurfaceOptions {
   store: WorkBoardStore
   auth: AppWsAuthResolver
+  /** Trident run access for live progress (item 1) + delete-cancels-run (item 3). */
+  trident_runs?: TridentRunAccess
+  /** Injectable clock (ms) for the run-progress derivation; defaults to wall-clock. */
+  now?: () => number
 }
 
 export interface WorkBoardSurface {
@@ -54,7 +74,24 @@ const MAX_ITEM_ID_LEN = 128
 const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
 
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
-  const { store, auth } = opts
+  const { store, auth, trident_runs } = opts
+  const nowMs = opts.now ?? (() => Date.now())
+
+  /**
+   * Attach each bound item's live run progress (item 1) so the HTTP GET carries
+   * the same phase/round/elapsed/stalled state the `work_board_changed` push
+   * ships. A no-op passthrough when no trident-run access is wired.
+   */
+  const withRunProgress = (items: WorkBoardItem[]): unknown[] => {
+    if (trident_runs === undefined) return items
+    const when = nowMs()
+    const lookup = (id: string): TridentRun | null => trident_runs.get(id)
+    return items.map((it) => {
+      const progress = runProgressForItem(it, lookup, when)
+      return progress === null ? it : { ...it, run_progress: progress }
+    })
+  }
+
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -84,7 +121,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
       // Bare collection path: `/work-board`.
       if (raw_item_id === '') {
         if (method === 'GET') {
-          return jsonOk({ items: store.list(project_slug), project_id })
+          return jsonOk({ items: withRunProgress(store.list(project_slug)), project_id })
         }
         if (method === 'POST') {
           return handleCreate(req, store, project_slug, project_id)
@@ -103,7 +140,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
           return handleUpdate(req, store, project_slug, project_id, item_id)
         }
         if (method === 'DELETE') {
-          return handleDelete(store, project_slug, project_id, item_id)
+          return handleDelete(store, project_slug, project_id, item_id, trident_runs)
         }
         return jsonError(
           405,
@@ -241,11 +278,36 @@ async function handleDelete(
   project_slug: string,
   project_id: string,
   item_id: string,
+  trident_runs: TridentRunAccess | undefined,
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
+  // Item 3 — deleting a card bound to a RUNNING build must not orphan the trident
+  // run (it would keep building headless). Cancel it FIRST: if the item names a
+  // non-terminal `linked_run_id`, set the run's phase to `stopped` (the existing
+  // trident stop path — `code-command.ts` executeStop) so the outer loop stops
+  // harvesting/advancing/merging it. Best-effort: a cancel failure never blocks
+  // the delete (the row is disposable; the run reap backstops liveness). Only
+  // THEN remove the board item.
+  let cancelled_run: string | undefined
+  const runId = owned.linked_run_id
+  if (trident_runs !== undefined && runId !== null && runId.length > 0) {
+    try {
+      const run = trident_runs.get(runId)
+      if (run !== null && !isTerminalPhase(run.phase)) {
+        await trident_runs.update(runId, { phase: 'stopped' })
+        cancelled_run = runId
+      }
+    } catch {
+      // Cancel is best-effort — proceed with the delete regardless.
+    }
+  }
   await store.delete(project_slug, item_id)
-  return jsonOk({ deleted: item_id, project_id })
+  return jsonOk({
+    deleted: item_id,
+    project_id,
+    ...(cancelled_run !== undefined ? { cancelled_run } : {}),
+  })
 }
 
 interface ResolvedAuth {

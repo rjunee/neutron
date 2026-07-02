@@ -102,6 +102,22 @@ export interface BuildTridentOrchestratorOptions {
    */
   max_inflight_ms?: number
   /**
+   * PER-AGENT HANG WATCHDOG (M1 trident-UX hardening, item 2). The PRIMARY
+   * fail-fast reap: a non-terminal run with an in-flight dispatch whose
+   * `last_advanced_at` has not moved for this long — with no harvestable
+   * `inner_result` — is treated as a suspected agent hang (the incident: a
+   * zero-token model hang stalled a run 30+ min with NO error because nothing
+   * detected it) and reaped to `failed`, so it surfaces on the Plan item + the
+   * terminal delivery notification fires instead of sitting silent.
+   *
+   * A HEALTHY build re-stamps `last_advanced_at` on every inner-workflow
+   * checkpoint (`forge-done`, `argus-*`, `fix-round-N`), so it never trips this;
+   * only a genuinely wedged agent() (or a stalled orphan) does. This is
+   * deliberately SHORTER than `max_inflight_ms` (the 2h absolute ceiling, kept
+   * as a defense-in-depth backstop). Default `NO_ADVANCE_HANG_MS` (25 min).
+   */
+  no_advance_hang_ms?: number
+  /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
    * restart case: the workflow was fired by a prior control-plane process and
@@ -151,6 +167,22 @@ export async function computeDiffLineCount(
 
 const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
 
+/**
+ * Per-agent hang watchdog default (M1 trident-UX hardening, item 2). A
+ * non-terminal run whose `last_advanced_at` has not moved for this long while a
+ * dispatch is in flight is reaped as a suspected agent hang.
+ *
+ * 25 min is a deliberate balance (Codex cross-model review [P1]): the ONLY
+ * long no-checkpoint window in a HEALTHY build is a single Forge/fix `agent()`
+ * step (checkpoints land between phases, not during one), and a large build can
+ * legitimately run 15–20 min in that one step — a 15-min threshold would falsely
+ * reap it. 25 min clears a normal large build while still catching the exact
+ * 30+ min SILENT wedge that motivated this, FAR faster than the old 2h ceiling.
+ * A reaped run is recoverable (re-run resumes from the last checkpoint). Tune via
+ * `no_advance_hang_ms`.
+ */
+const NO_ADVANCE_HANG_MS = 25 * 60_000
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
@@ -161,6 +193,7 @@ export function buildTridentOrchestrator(
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
+  const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -382,6 +415,29 @@ export function buildTridentOrchestrator(
       if (result !== null) {
         return applyResult(run, result)
       }
+    }
+
+    // (1b) HANG WATCHDOG (M1 trident-UX hardening, item 2) — the PRIMARY
+    //     fail-fast detector. A dispatch is in flight (subagent_run_id set) with
+    //     NO harvestable result (the harvest above already returned otherwise),
+    //     and `last_advanced_at` has not moved for `noAdvanceHangMs`. A healthy
+    //     build re-stamps that timestamp on every inner-workflow checkpoint, so
+    //     only a genuinely wedged agent() (the zero-token model hang that stalled
+    //     a run 30+ min with no error) — or a stalled orphan that hasn't been
+    //     redispatched — sits here. Reap it to `failed` NOW so the Plan item
+    //     flips to "failed" + the terminal delivery notification fires, rather
+    //     than waiting on the 2h `maxInflightMs` ceiling below. Checked BEFORE
+    //     orphan recovery so a wedged orphan is reaped instead of redispatched.
+    if (run.subagent_run_id !== null && elapsedSinceAdvance(run) > noAdvanceHangMs) {
+      fired.delete(run.id)
+      redispatched.delete(run.id)
+      const mins = Math.round(noAdvanceHangMs / 60_000)
+      const reaped = failedRun(
+        run,
+        `no progress for ${mins} min — suspected agent hang (inner workflow stopped advancing)`,
+        false,
+      )
+      return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (suspected hang)` }
     }
 
     // (2) ORPHAN RECOVERY. A persisted dispatch id this process never fired AND no

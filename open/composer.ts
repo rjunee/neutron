@@ -121,6 +121,7 @@ import {
   resolveAgentSkillsDir,
 } from '../runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '../trident/store.ts'
+import { runProgressForItem } from '../trident/run-progress.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
 import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
@@ -2130,25 +2131,36 @@ export function buildOpenGraphComposer(
     // `work_board_changed` full-snapshot push to the owner's app-ws topic. The
     // push is best-effort (the registry `send` is non-throwing; the wrapper
     // guards the snapshot read) so it can never roll back a committed write.
+    // Item 1 — a thin trident run store over the SAME `db` the loop reads, so the
+    // board push (below) + the HTTP GET surface can derive each bound item's live
+    // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
+    // row. Stateless wrapper — a second instance elsewhere is harmless.
+    const boardRunStore = new TridentRunStore(db)
     const workBoardStore = new WorkBoardStore(db, {
       onChange: (): void => {
         try {
+          const nowMs = Date.now()
           const frame: AppWsOutboundWorkBoardChanged = {
             v: 1,
             type: 'work_board_changed',
-            items: workBoardStore.list(project_slug).map((it) => ({
-              id: it.id,
-              title: it.title,
-              status: it.status,
-              sort_order: it.sort_order,
-              design_doc_ref: it.design_doc_ref,
-              inline_active: it.inline_active,
-              linked_run_id: it.linked_run_id,
-              created_at: it.created_at,
-              updated_at: it.updated_at,
-              completed_at: it.completed_at,
-            })),
-            ts: Date.now(),
+            items: workBoardStore.list(project_slug).map((it) => {
+              // Item 1 — attach the bound run's live progress (null when unbound).
+              const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
+              return {
+                id: it.id,
+                title: it.title,
+                status: it.status,
+                sort_order: it.sort_order,
+                design_doc_ref: it.design_doc_ref,
+                inline_active: it.inline_active,
+                linked_run_id: it.linked_run_id,
+                created_at: it.created_at,
+                updated_at: it.updated_at,
+                completed_at: it.completed_at,
+                ...(run_progress !== null ? { run_progress } : {}),
+              }
+            }),
+            ts: nowMs,
           }
           appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
         } catch (err) {
@@ -2160,7 +2172,12 @@ export function buildOpenGraphComposer(
         }
       },
     })
-    const workBoardSurface = createWorkBoardSurface({ store: workBoardStore, auth: appOwnerAuth })
+    const workBoardSurface = createWorkBoardSurface({
+      store: workBoardStore,
+      auth: appOwnerAuth,
+      // Item 1 (live progress on GET) + item 3 (delete cancels the linked run).
+      trident_runs: boardRunStore,
+    })
     // Phase 2b — late-bind the dispatch board binder (declared above, before the
     // store could exist) to the canonical store now that it's constructed.
     dispatchBoardHolder.store = workBoardStore

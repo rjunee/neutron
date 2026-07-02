@@ -1219,6 +1219,23 @@ has finished. The board is **instance-scoped by the server-derived
   `sanitizeProjectId`), dispatching the same canonical store. Threaded
   composer → `composition.ts` (`app_work_board_surface`) → `compose.ts`
   (`appWorkBoard`, mounted ahead of `appProjects`).
+- **Live trident progress + safe cancel (M1 trident-UX hardening).** A Plan item
+  bound to a trident run now carries a `run_progress` payload on BOTH the HTTP GET
+  and the `work_board_changed` push, derived (`trident/run-progress.ts`,
+  `deriveRunProgress`) from the linked `code_trident_runs` row: a human phase label
+  (planning/building/reviewing/merged/failed/cancelled — read off `phase` +
+  `inner_checkpoint`, since the outer `phase` stays `forge-init` during the whole
+  exec-model build), the round, elapsed since `started_at`, and a "stalled" flag
+  when `last_advanced_at` is older than `STALLED_WARN_MS` (10 min). The web Plan
+  tab renders it as a compact sub-label + polls every 15s while a run is live. **X
+  cancels the build**: the `DELETE` handler stops a non-terminal `linked_run_id`
+  (`phase='stopped'`, the existing trident stop path) BEFORE removing the card, so
+  deleting a card can't orphan a running build; the client shows a confirm dialog
+  first ("Cancel this build and remove it?"). Separately, the durable loop's
+  **hang watchdog** (`trident/orchestrator.ts`, `NO_ADVANCE_HANG_MS` = 25 min)
+  reaps a non-terminal run whose `last_advanced_at` has not moved — a suspected
+  zero-token agent hang — to `failed` with a named reason, so it surfaces on the
+  Plan item + fires the terminal notification instead of stalling silently.
 - **Per-turn injection** — `work-board/fragment.ts` `formatWorkBoardFragment`
   builds a compact `<work_board>` DATA block (active+next items, escaped +
   length-capped, + an advisory drift-guard line). `build-live-agent-turn.ts`

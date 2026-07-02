@@ -6,7 +6,66 @@ import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { createAppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
 import { WorkBoardStore } from '../../work-board/store.ts'
-import { createWorkBoardSurface, type WorkBoardSurface } from './work-board-surface.ts'
+import {
+  createWorkBoardSurface,
+  type TridentRunAccess,
+  type WorkBoardSurface,
+} from './work-board-surface.ts'
+import type { TridentPhase, TridentRun } from '../../trident/store.ts'
+
+/** A minimal fake trident run for the surface's progress + cancel deps. */
+function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
+  return {
+    id: 'run-1',
+    slug: 'demo',
+    project_slug: SLUG,
+    phase: 'forge-init',
+    round: 1,
+    max_rounds: 8,
+    ralph: false,
+    ralph_round: 0,
+    max_ralph_rounds: 20,
+    branch: 'trident/demo',
+    pr: null,
+    merge_mode: 'pr',
+    subagent_run_id: 'wf-1',
+    subagent_status: 'running',
+    repo_path: '/repo',
+    worktree: null,
+    task: 'build',
+    chat_id: null,
+    thread_id: null,
+    channel_kind: 'app_socket',
+    failure_reason: null,
+    workflow_run_id: 'wf-1',
+    inner_checkpoint: null,
+    inner_verdict: null,
+    inner_result: null,
+    started_at: '2026-07-02T00:00:00Z',
+    last_advanced_at: '2026-07-02T00:00:00Z',
+    ...over,
+  }
+}
+
+/** A fake `TridentRunAccess` recording every cancel (`update phase=stopped`). */
+function fakeRunAccess(runs: Record<string, TridentRun>): {
+  access: TridentRunAccess
+  updates: Array<{ id: string; phase: TridentPhase }>
+} {
+  const updates: Array<{ id: string; phase: TridentPhase }> = []
+  return {
+    access: {
+      get: (id) => runs[id] ?? null,
+      update: async (id, patch) => {
+        updates.push({ id, phase: patch.phase })
+        const existing = runs[id]
+        if (existing !== undefined) runs[id] = { ...existing, phase: patch.phase }
+        return null
+      },
+    },
+    updates,
+  }
+}
 
 let tmp: string
 let db: ProjectDb
@@ -123,5 +182,75 @@ describe('work-board HTTP surface', () => {
   test('unsupported method on the collection → 405', async () => {
     const res = await surface.handler(req('PUT', '/api/app/projects/proj1/work-board', { title: 'x' }))
     expect(res?.status).toBe(405)
+  })
+})
+
+describe('work-board HTTP surface — trident run integration (items 1 + 3)', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test('GET enriches a bound item with its live run_progress (item 1)', async () => {
+    const item = await store.create(SLUG, { title: 'Building' })
+    await store.bindRun(SLUG, item.id, 'run-1')
+    const { access } = fakeRunAccess({
+      'run-1': fakeRun({ id: 'run-1', phase: 'forge-init', inner_checkpoint: 'forge-done', pr: 9 }),
+    })
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+    const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as {
+      items: Array<{ id: string; run_progress?: { phase_label: string; pr: number | null } }>
+    }
+    const row = body.items.find((i) => i.id === item.id)
+    expect(row?.run_progress?.phase_label).toBe('reviewing')
+    expect(row?.run_progress?.pr).toBe(9)
+  })
+
+  test('GET omits run_progress on an unbound item', async () => {
+    const item = await store.create(SLUG, { title: 'Idle' })
+    const { access } = fakeRunAccess({})
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+    const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as { items: Array<{ id: string; run_progress?: unknown }> }
+    const row = body.items.find((i) => i.id === item.id)
+    expect(row?.run_progress).toBeUndefined()
+  })
+
+  test('DELETE cancels a non-terminal linked run (phase→stopped) then deletes (item 3)', async () => {
+    const item = await store.create(SLUG, { title: 'Running build' })
+    await store.bindRun(SLUG, item.id, 'run-1')
+    const { access, updates } = fakeRunAccess({ 'run-1': fakeRun({ id: 'run-1', phase: 'forge-init' }) })
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { cancelled_run?: string }
+    expect(body.cancelled_run).toBe('run-1')
+    // The run was stopped BEFORE the item was removed.
+    expect(updates).toEqual([{ id: 'run-1', phase: 'stopped' }])
+    expect(store.get(SLUG, item.id)).toBeNull()
+  })
+
+  test('DELETE does NOT cancel an already-terminal linked run', async () => {
+    const item = await store.create(SLUG, { title: 'Done build' })
+    await store.bindRun(SLUG, item.id, 'run-1')
+    const { access, updates } = fakeRunAccess({ 'run-1': fakeRun({ id: 'run-1', phase: 'done' }) })
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { cancelled_run?: string }
+    expect(body.cancelled_run).toBeUndefined()
+    expect(updates).toEqual([])
+    expect(store.get(SLUG, item.id)).toBeNull()
+  })
+
+  test('DELETE on an unbound item just deletes (no cancel)', async () => {
+    const item = await store.create(SLUG, { title: 'Plain item' })
+    const { access, updates } = fakeRunAccess({})
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+
+    const res = await s.handler(req('DELETE', `/api/app/projects/proj1/work-board/${item.id}`))
+    expect(res?.status).toBe(200)
+    expect(updates).toEqual([])
+    expect(store.get(SLUG, item.id)).toBeNull()
   })
 })
