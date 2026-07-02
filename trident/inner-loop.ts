@@ -147,7 +147,7 @@ export const DEFAULT_INNER_WORKFLOW_PATH = new URL('./inner-workflow.mjs', impor
  * the CC Workflow `agent()` primitive has no per-call `tools` option, so a worker
  * can only use what the launcher session was granted. The earlier `['Workflow']`-
  * only surface (which assumed the workers were "workflow-runtime globals") shipped
- * broken: on the first real end-to-end tenant run (2026-07-02) every spawned
+ * broken: on the first real end-to-end run (2026-07-02) every spawned
  * forge:build/bash worker reported "I don't have access to a bash execution tool
  * ... I only have reply and send_typing" → forge:build could not Write a single
  * file → the build failed instantly (terminal-result ok:false). Granting the full
