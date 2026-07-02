@@ -30,6 +30,7 @@ import {
   type BoardBoundBuildDeps,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
+import { isTerminalPhase } from './state-machine.ts'
 import type { MergeMode, TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
@@ -210,6 +211,21 @@ export function registerTridentBuildToolSurface(
         return {
           ok: false,
           error: `No Plan item "${board_item_id}" on this project's board. Use work_board_list to find the item id.`,
+        }
+      }
+      // Don't launch a SECOND build for a card that already has a LIVE run —
+      // `attachRun` would overwrite the binding and orphan the first build
+      // (uncancelable/unreconcilable from the board). Parity with the HTTP ▶
+      // route's `already_running` guard (Codex [P1]). A terminal linked run
+      // (failed/stopped/done) is fine — that's the RETRY case.
+      const linkedRunId = item.linked_run_id
+      if (typeof linkedRunId === 'string' && linkedRunId.length > 0) {
+        const run = deps.store.get(linkedRunId)
+        if (run !== null && !isTerminalPhase(run.phase)) {
+          return {
+            ok: false,
+            error: `Plan item "${board_item_id}" already has a live build (${linkedRunId}). Stop it (or wait for it) before starting another.`,
+          }
         }
       }
       const task =

@@ -26,6 +26,9 @@ let tmp: string
 let db: ProjectDb
 let store: TridentRunStore
 let attached: Array<{ id: string; run_id: string }>
+// A `linked_run_id` the board stub reports for the 'running' item (set by a test
+// that binds a live run to exercise the already-running guard).
+let runningRunId: string | null
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-wb-build-'))
@@ -33,6 +36,7 @@ beforeEach(() => {
   applyMigrations(db.raw())
   store = new TridentRunStore(db)
   attached = []
+  runningRunId = null
 })
 afterEach(() => {
   db.close()
@@ -46,7 +50,14 @@ function board(): TridentBoardBinder {
         ? { id: 'ready', title: 'wire the CSV export button to the new endpoint with tests', design_doc_ref: null }
         : id === 'terse'
           ? { id: 'terse', title: 'auth', design_doc_ref: null }
-          : null,
+          : id === 'running'
+            ? {
+                id: 'running',
+                title: 'a card with a live build already bound to it and running',
+                design_doc_ref: null,
+                linked_run_id: runningRunId,
+              }
+            : null,
     attachRun: async (_slug, id, run_id) => {
       attached.push({ id, run_id })
     },
@@ -178,4 +189,49 @@ describe('work_board_start tool (▶ agent-native parity)', () => {
     expect(out.ok).toBe(false)
     expect(String(out.error)).toContain('board_item_id')
   })
+
+  test('BLOCKS a card that already has a LIVE run — no second run, no orphan (Codex [P1])', async () => {
+    // Bind a live (non-terminal) run to the 'running' item.
+    const live = await store.create({
+      slug: 'live-build',
+      project_slug: 'proj-1',
+      repo_path: '/repo',
+      task: 'the in-flight build',
+      merge_mode: 'local',
+      ralph: false,
+      branch: 'trident/live-build',
+    })
+    runningRunId = live.id
+    expect(isTerminalPhaseCheck(live.id)).toBe(false)
+
+    const out = (await startToolFor().handler({ board_item_id: 'running' }, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(false)
+    expect(String(out.error).toLowerCase()).toContain('already has a live build')
+    // No SECOND run created, no re-bind that would orphan the first.
+    expect(attached.length).toBe(0)
+    expect(store.listNonTerminal().length).toBe(1) // only the original live run
+  })
+
+  test('ALLOWS retry when the linked run is TERMINAL (failed/stopped)', async () => {
+    const dead = await store.create({
+      slug: 'dead-build',
+      project_slug: 'proj-1',
+      repo_path: '/repo',
+      task: 'a build that failed',
+      merge_mode: 'local',
+      ralph: false,
+      branch: 'trident/dead-build',
+    })
+    await store.update(dead.id, { phase: 'failed' })
+    runningRunId = dead.id
+    const out = (await startToolFor().handler({ board_item_id: 'running' }, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    expect(attached).toEqual([{ id: 'running', run_id: out.run_id as string }])
+  })
 })
+
+/** Helper: is the run with `id` in a terminal phase? (false while forge-init.) */
+function isTerminalPhaseCheck(id: string): boolean {
+  const run = store.get(id)
+  return run !== null && ['done', 'failed', 'stopped'].includes(run.phase)
+}
