@@ -2,6 +2,54 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-01 — Documents tab renders `.html` docs as static styled HTML/CSS pages
+
+**Why.** Ryan's M1 live test: saving/opening an `.html` doc errored with
+`invalid_extension: path must end with .md or .markdown (got 'timer.html')`, and
+even once accepted the Documents tab had no way to render it. Ryan's revised
+(deliberately small) scope: render HTML/CSS statically; complex interactive JS
+apps belong in a separate app launcher, NOT the doc viewer. No feature flags —
+shipped as the default.
+
+**What shipped.**
+
+- **Docs store/API accepts `.html`/`.htm` end-to-end.** `gateway/http/doc-store.ts`
+  gains `HTML_EXTENSIONS` + `DOC_EXTENSIONS` (= markdown ∪ html) + `isDocLeaf`, the
+  single allowlist behind the `invalid_extension` gate. Both the tree walker
+  (surfaces `.html` leaves) and `validateRelativePath({ requireMd })` (read/list/
+  open/write) now use `isDocLeaf`; the error message is derived from the allowlist.
+  The duplicate history/comments/diff gate in `gateway/http/app-docs-surface.ts`
+  (`assertHistoryPath`) shares `isDocLeaf` so an opened `.html` doc can also load
+  its history/comments. `MARKDOWN_EXTENSIONS`/`isMarkdownLeaf` are retained
+  (markdown-specific callers unaffected); `doc-search/walk.ts` keeps its own
+  markdown-only constant (HTML is not FTS-indexed as markdown — out of scope).
+- **Documents renderer renders `.html` as a static styled page.** New
+  `landing/chat-react/HtmlDoc.tsx`: `isHtmlDoc(path)` selects the branch and
+  `sanitizeHtmlDoc(raw)` parses the doc via `DOMParser` and strips every
+  script-execution vector — `<script>` (incl. SVG script),
+  `<iframe>`/`<object>`/`<embed>`/`<base>`/`<meta>`/`<link>`/`<frame*>`/`<applet>`,
+  all `on*` handler attributes, and `javascript:`/`vbscript:`/`data:text/html`
+  URLs — while PRESERVING HTML structure, `<style>` blocks (head + body), and
+  inline `style`. The sanitized markup is injected into a **Shadow-DOM island**
+  so the doc's CSS is scoped and can't restyle the chat app (and injection via
+  `innerHTML` never runs `<script>`, per spec — defense in depth). `DocumentsTab`
+  Rendered view branches on `isHtmlDoc(file.path)`; `.md` renders via the existing
+  Markdown path unchanged, and Source/Edit still show/edit raw text of either.
+  **Design note:** chose a `DOMParser` DOM-walk sanitizer over DOMPurify because
+  DOMPurify's document-reconstruction path does not run faithfully under the
+  happy-dom test env (verified: it kept `<script>` and dropped `<style>`), which
+  would leave the security path untested; the DOM-walk is faithful in both the
+  browser and CI. Threat model is trusted single-owner content.
+
+**Tests.** `landing/chat-react/__tests__/html-doc.test.tsx` (sanitize keeps
+structure+CSS, strips scripts/handlers/js-URLs incl. an obfuscated `java\tscript:`;
+component mounts into a shadow root and no doc script executes) + `.html`/`.htm`
+read/list/write round-trip and `.txt`-still-rejected in
+`gateway/__tests__/app-docs-surface.test.ts`. tsc (root + gateway +
+`landing/chat-react`) clean; leak-gate silent; fresh `NEUTRON_HOME=/tmp/wfi`
+boot on :7874 serves the bundle with the `HtmlDoc` renderer and the docs routes
+wired.
+
 ## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
 
 **Why.** Part A (#165) wired the trident cross-model reviewer (`codex-review.sh`

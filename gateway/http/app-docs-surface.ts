@@ -59,6 +59,7 @@ import {
   DocSizeError,
   DocStore,
   MAX_DOC_BYTES,
+  isDocLeaf,
   type DocTreeNode,
   type ReadFileResult,
   type WriteFileResult,
@@ -552,13 +553,15 @@ function assertHistoryPath(path: string): void {
       )
     }
   }
-  // History/version/diff routes are markdown-only too — surfaces the
-  // same `invalid_extension` code as the read/write routes.
+  // History/version/diff routes accept the SAME doc extensions as the
+  // read/write routes (markdown + HTML) — surfaces the same
+  // `invalid_extension` code. Uses the shared `isDocLeaf` allowlist so an
+  // `.html` doc opened in the Documents tab can also load its history/comments.
   const last = segments[segments.length - 1] ?? ''
-  if (!/\.(md|markdown)$/i.test(last)) {
+  if (!isDocLeaf(last)) {
     throw new DocPathError(
       'invalid_extension',
-      `path must end with .md or .markdown (got '${last}')`,
+      `path must end with .md, .markdown, .html or .htm (got '${last}')`,
     )
   }
 }

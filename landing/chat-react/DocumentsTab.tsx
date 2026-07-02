@@ -30,6 +30,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Markdown } from './Markdown.tsx'
+import { HtmlDoc, isHtmlDoc } from './HtmlDoc.tsx'
 import type { BootstrapConfig } from './config.ts'
 import {
   WebDocsClient,
@@ -547,7 +548,14 @@ export function DocumentsTab({
                 {saveError !== null ? <div className="cdoc-comments-error">{saveError}</div> : null}
               </>
             ) : viewMode === 'rendered' ? (
-              <Markdown text={file.content} className="cdoc-md" stripFrontmatter />
+              // An `.html` / `.htm` doc renders as a STATIC styled HTML/CSS page
+              // (script execution stripped); every other doc renders as
+              // markdown. The Source toggle + Edit still show/edit the raw text.
+              isHtmlDoc(file.path) ? (
+                <HtmlDoc html={file.content} className="cdoc-md" />
+              ) : (
+                <Markdown text={file.content} className="cdoc-md" stripFrontmatter />
+              )
             ) : (
               <pre
                 ref={contentRef}

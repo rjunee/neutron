@@ -359,6 +359,66 @@ describe('app-docs surface — read file', () => {
     expect(existsSync(join(harness.docsRoot, 'fresh.markdown'))).toBe(true)
   })
 
+  it('reads, lists, and writes an .html doc (2026-07-01 HTML render)', async () => {
+    // The Documents tab renders `.html`/`.htm` docs as static styled pages, so
+    // the store must surface + accept them end-to-end (before this they errored
+    // with `invalid_extension: path must end with .md or .markdown`).
+    const page = '<!DOCTYPE html><html><head><style>h1{color:red}</style></head><body><h1>Timer</h1></body></html>'
+    writeFileSync(join(harness.docsRoot, 'timer.html'), page)
+
+    // READ round-trips the exact bytes.
+    const readRes = await authedFetch(
+      harness.base,
+      `/api/app/projects/${PROJECT_ID}/docs/file?path=timer.html`,
+    )
+    expect(readRes.status).toBe(200)
+    const readJson = (await readRes.json()) as { file: { path: string; content: string } }
+    expect(readJson.file.path).toBe('timer.html')
+    expect(readJson.file.content).toBe(page)
+
+    // LIST surfaces the .html leaf in the tree.
+    const treeRes = await authedFetch(
+      harness.base,
+      `/api/app/projects/${PROJECT_ID}/docs/tree`,
+    )
+    expect(treeRes.status).toBe(200)
+    const treeText = await treeRes.text()
+    expect(treeText).toContain('timer.html')
+
+    // WRITE a fresh .html (and .htm) doc end-to-end.
+    const writeRes = await authedFetch(
+      harness.base,
+      `/api/app/projects/${PROJECT_ID}/docs/file`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ path: 'fresh.html', content: '<p>hi</p>' }),
+      },
+    )
+    expect(writeRes.status).toBe(200)
+    expect(existsSync(join(harness.docsRoot, 'fresh.html'))).toBe(true)
+
+    const writeHtm = await authedFetch(
+      harness.base,
+      `/api/app/projects/${PROJECT_ID}/docs/file`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ path: 'legacy.htm', content: '<p>htm</p>' }),
+      },
+    )
+    expect(writeHtm.status).toBe(200)
+    expect(existsSync(join(harness.docsRoot, 'legacy.htm'))).toBe(true)
+  })
+
+  it('still rejects a non-doc extension (.txt) with invalid_extension', async () => {
+    const res = await authedFetch(
+      harness.base,
+      `/api/app/projects/${PROJECT_ID}/docs/file?path=README.txt`,
+    )
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { code: string }
+    expect(json.code).toBe('invalid_extension')
+  })
+
   it('rejects symlink escape via a malicious file in docs/', async () => {
     // Create a file outside docs/, then point a symlink at it from inside.
     const outside = join(harness.tmp, 'outside.md')
