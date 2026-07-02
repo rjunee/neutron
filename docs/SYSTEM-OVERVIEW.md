@@ -416,6 +416,12 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    viewer render sanitized GitHub-flavored markdown via `react-markdown` +
 >    `remark-gfm` + `rehype-sanitize` (shared `Markdown.tsx`). The Documents tab
 >    keeps a Rendered↔Source toggle so comment anchors still map to RAW offsets.
+>    The Documents viewer passes `stripFrontmatter` (SEV1 M1, 2026-07-01) so a
+>    doc's leading YAML frontmatter fence (`---\nkey: value\n---`) is hidden from
+>    the RENDERED body via `stripLeadingFrontmatter` — it otherwise renders as a
+>    bold run-on blob at the top of every doc (STATUS.md, README.md, …). The
+>    Source view + chat surface leave frontmatter untouched (a bare `---`
+>    horizontal rule with no closing fence is never stripped).
 
 > **Light/dark theme toggle (2026-07-01).** The web chat is CSS-variable-driven:
 > `chat-react.html`'s stylesheet has ONE dark `:root` var set (the historical
@@ -531,6 +537,43 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > catch that" is gone by construction; `NEUTRON_ONBOARDING_CONVERSATIONAL` is
 > collapsed (one path, no flag). Supersedes the deferred-BUG-0 note and
 > `docs/research/p2-v3-conversational-onboarding-design.md`.
+>
+> **Projects are gated on import completion (SEV1 M1, 2026-07-01).** Onboarding
+> must NOT create projects from thin chat answers while a history import is still
+> uploading/analyzing — the real project signal is the import. Three aligned
+> gates enforce this: (1) `probeInFlightImport` (open/composer.ts) now also
+> reports an in-progress **chunked upload** (`upload_sessions.status='uploading'`,
+> not just a live `import_jobs` row) so the whole client→server upload window
+> counts as "import in flight" — closing the hole where a turn settling the last
+> field mid-upload finalized before the `import_jobs` row even existed; (2) the
+> post-turn extractor drops the project-discovery fields (`primary_projects`,
+> `non_work_interests`, `dropped_projects`) from its `phase_state` write while an
+> import is in flight, so thin chat answers can't accumulate (import-INDEPENDENT
+> `user_first_name`/`agent_personality` still land, so the interview keeps
+> progressing); (3) a per-turn `<import_in_flight>` preamble fragment
+> (`onboarding-preamble.ts`) steers the live agent to skip project questions
+> during the upload and settle personality/voice instead. `finalizeImport
+> OnboardingIfReady` also treats `import_upload_pending` as a blocked phase.
+> Project discovery resumes the moment the import lands + is consumed (or was
+> never gated when the owner has no import).
+>
+> **No-context projects: honest opening + minimal STATUS (SEV1 M1, 2026-07-01).**
+> "Better nothing than a bad job." The materializer
+> (`onboarding/wow-moment/project-materializer.ts`) computes `has_context` =
+> matched transcript slices OR import/project-derived context
+> (`hasRealProjectContext`). A NO-context project (thin chat answer, no import
+> match, no related signal) gets a MINIMAL `STATUS.md` — clean frontmatter,
+> `one_liner:""`, one body line "Created during onboarding - no context yet." — and
+> NO `autonomous_overnight_enabled`, NO `## Autonomous Overnight Work` section, NO
+> seeded "Deepen + analyze from imported context" overnight task, and NO
+> `docs/overnight/seed-context.md` (all of which would queue phantom overnight
+> work against zero data). Its opening (`emitProjectOpenings` →
+> `buildNoContextProjectOpening`) asks for context directly ("I don't have any
+> context on X yet - tell me a bit about it, and what do you want to work on
+> first?") instead of fabricating a "here's where X stands ... active, P2"
+> summary. A project WITH real context keeps the full STATUS + overnight opt-in +
+> real summary opening. A no-context HOBBY still gets the kickoff's engaging
+> questions (its own meaty opening).
 >
 > **Post-onboarding claim redirect (Managed overlay, 2026-07-01).** At the
 > terminal `completed` transition `build-onboarding-finalize.ts` fires a one-shot

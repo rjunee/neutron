@@ -16,6 +16,15 @@
  *
  * The element styling is plain CSS under `.car-md` (defined in chat-react.html),
  * matching the existing dark theme tokens — no inline styles, no CSS-in-JS.
+ *
+ * ── Document frontmatter ──────────────────────────────────────────────────────
+ * Project docs (STATUS.md, README.md, …) carry a leading YAML frontmatter fence
+ * (`---\nkey: value\n---`). Rendered as markdown that fence becomes a run-on bold
+ * blob at the top of the doc (the first `---`/`---` pair reads as a setext
+ * heading), which is noise to a human reader. The Documents viewer passes
+ * `stripFrontmatter` so the fence is hidden from the rendered body; the raw view
+ * still shows it verbatim. Chat message bodies never carry frontmatter, so the
+ * chat surface leaves this off (default) and is unaffected.
  */
 
 import ReactMarkdown from 'react-markdown'
@@ -26,6 +35,28 @@ import { parseWebDocLinkHref } from './doc-link-nav.ts'
 
 const REMARK_PLUGINS = [remarkGfm]
 const REHYPE_PLUGINS = [rehypeSanitize]
+
+/**
+ * Strip a leading YAML frontmatter fence from a document body so it is not
+ * rendered as a bold blob. Only a fence at the very start of the text is
+ * removed: an optional BOM/leading whitespace, then `---`, the frontmatter
+ * lines, and a closing `---` on its own line. Text with no leading fence is
+ * returned unchanged (a bare `---` horizontal rule with no closing fence does
+ * NOT match). Pure + total — never throws.
+ *
+ * Exported for unit testing.
+ */
+export function stripLeadingFrontmatter(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return text
+  // ^ (optional BOM + one leading blank) --- <frontmatter> \n --- (eol|EOF).
+  // A bare `---` horizontal rule (no closing fence) never matches.
+  const fence = /^﻿?[ \t]*\r?\n?---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/
+  const m = fence.exec(text)
+  if (m === null) return text
+  // Drop the fence, then any blank lines immediately after it, so the rendered
+  // body starts at real content instead of a leading gap.
+  return text.slice(m[0].length).replace(/^(?:[ \t]*\r?\n)+/, '')
+}
 
 /** Render `text` as sanitized GitHub-flavored markdown inside a `.car-md` block.
  *  `className` lets a caller add a surface-specific modifier (e.g. the docs
@@ -41,6 +72,7 @@ export function Markdown({
   className,
   onDocLink,
   origin,
+  stripFrontmatter,
 }: {
   text: string
   className?: string
@@ -49,7 +81,11 @@ export function Markdown({
   onDocLink?: (projectId: string, path: string) => void
   /** Page origin — needed to recognise an absolute same-origin doc-link URL. */
   origin?: string
+  /** Documents viewer only — hide a leading YAML frontmatter fence from the
+   *  rendered body (see module header). Chat bodies leave this off. */
+  stripFrontmatter?: boolean
 }): React.JSX.Element {
+  const body = stripFrontmatter === true ? stripLeadingFrontmatter(text) : text
   return (
     <div className={className !== undefined ? `car-md ${className}` : 'car-md'}>
       <ReactMarkdown
@@ -75,7 +111,7 @@ export function Markdown({
           ),
         }}
       >
-        {text}
+        {body}
       </ReactMarkdown>
     </div>
   )

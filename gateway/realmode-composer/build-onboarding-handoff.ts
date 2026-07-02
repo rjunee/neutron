@@ -581,6 +581,27 @@ export function indexProposedProjects(
  *
  * Exported for unit testing.
  */
+/**
+ * HONEST no-context opening (2026-07-01 SEV1 — "STOP M2" b). For a project the
+ * materializer flagged as having NO real grounding (`MaterializeOutcome
+ * .has_context === false`): a thin chat answer with no import match, no matched
+ * transcript slices, no related import signal. Rather than fabricate a "here's
+ * where X stands" summary (the exact bug Ryan hit — a made-up status + "active,
+ * P2" for a project with zero data), we ask the owner for the context directly.
+ * "Better nothing than a bad job." Em-dash-free (Sam hard rule).
+ *
+ * The caller (`emitProjectOpenings`) routes here ONLY for a WORK project with no
+ * context; a no-context HOBBY gets the kickoff's engaging questions (its own
+ * meaty opening), and any project WITH context keeps the real summary opening.
+ *
+ * Exported for unit testing.
+ */
+export function buildNoContextProjectOpening(name: string): ProjectOpeningComposition {
+  return {
+    body: `I don't have any context on ${name} yet - tell me a bit about it, and what do you want to work on first?`,
+  }
+}
+
 export function buildDeterministicProjectOpening(
   name: string,
   matched: { name: string; rationale: string; suggested_topics: readonly string[] } | null,

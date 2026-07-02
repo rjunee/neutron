@@ -253,6 +253,52 @@ describe('project-materializer', () => {
     expect(status).toContain('one_liner: "Billing SaaS: \\"the money one\\"."')
   })
 
+  // ── No-context data-sufficiency gate (2026-07-01 SEV1) ────────────────────
+
+  test('a NO-CONTEXT project gets a MINIMAL STATUS.md + no overnight machinery', async () => {
+    const m = buildProjectMaterializer(buildDeps())
+    // Thin chat answer: no rationale, no import, no slices → no real context.
+    const out = await m.materialize({
+      project: { name: 'Mystery' },
+      slug: 'mystery',
+      import_result: null,
+    })
+    expect(out.reason).toBe('created')
+    expect(out.has_context).toBe(false)
+    const status = readFileSync(join(dir, 'Projects', 'mystery', 'STATUS.md'), 'utf8')
+    // Clean frontmatter, empty one_liner, one honest body line.
+    expect(status).toContain('name: mystery')
+    expect(status).toContain('one_liner: ""')
+    expect(status).toContain('Created during onboarding - no context yet.')
+    // NO overnight opt-in, NO overnight section, NO phantom seed task.
+    expect(status).not.toContain('autonomous_overnight_enabled')
+    expect(status).not.toContain('Autonomous Overnight Work')
+    expect(status).not.toContain('Deepen + analyze')
+    // No em dashes (Sam hard rule).
+    expect(status).not.toContain('—')
+    // The overnight seed-context doc is NOT written for a no-context project.
+    expect(existsSync(join(dir, 'Projects', 'mystery', 'docs', 'overnight', 'seed-context.md'))).toBe(
+      false,
+    )
+  })
+
+  test('a project WITH context keeps the full STATUS.md + overnight opt-in + seed doc', async () => {
+    const m = buildProjectMaterializer(buildDeps())
+    const out = await m.materialize({
+      project: { name: 'Topline', rationale: 'Billing SaaS the owner ships.' },
+      slug: 'topline',
+      import_result: null,
+    })
+    expect(out.has_context).toBe(true)
+    const status = readFileSync(join(dir, 'Projects', 'topline', 'STATUS.md'), 'utf8')
+    expect(status).toContain('autonomous_overnight_enabled: true')
+    expect(status).toContain('## Autonomous Overnight Work')
+    expect(status).toContain('Deepen + analyze Topline from imported context')
+    expect(existsSync(join(dir, 'Projects', 'topline', 'docs', 'overnight', 'seed-context.md'))).toBe(
+      true,
+    )
+  })
+
   test('repair path: a transient git/index failure on the first run self-heals on re-fire', async () => {
     // First run: git AND indexer both fail transiently.
     let gitCalls: string[][] = []

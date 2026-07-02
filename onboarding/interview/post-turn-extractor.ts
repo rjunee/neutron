@@ -69,6 +69,21 @@ const IMPORT_ACTIVE_PHASES: ReadonlySet<string> = new Set([
 // import-active phase the import-running cron advances from.
 const IMPORT_RUNNING_PHASE = 'import_running'
 
+/**
+ * Project-discovery phase_state fields the import-gate suppresses while a history
+ * import is in flight (2026-07-01 SEV1). These are the fields that go on to
+ * MATERIALIZE projects at finalize: `primary_projects` (work projects),
+ * `non_work_interests` (hobby/interest projects), and `dropped_projects` (only
+ * meaningful once there are projects to drop). Import-INDEPENDENT fields
+ * (`user_first_name`, `agent_personality`) are deliberately NOT listed — the
+ * interview keeps collecting them during the upload.
+ */
+const PROJECT_DISCOVERY_FIELDS: readonly string[] = [
+  'primary_projects',
+  'non_work_interests',
+  'dropped_projects',
+]
+
 export type ExtractorLog = (
   level: 'info' | 'warn' | 'error',
   msg: string,
@@ -186,9 +201,34 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     }
     const freshPhaseState: Record<string, unknown> = fresh?.phase_state ?? {}
 
+    // Resolve whether a history import is uploading/analyzing BEFORE building the
+    // persisted patch — the import-gate below suppresses project-discovery fields
+    // while it is, so it must be known first.
+    const importInFlight =
+      deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
+    const importActiveNow =
+      (fresh !== null && IMPORT_ACTIVE_PHASES.has(fresh.phase)) || importInFlight
+
     // Build the field patch against the FRESH phase_state so array merges extend
     // (rather than overwrite) any import-merged values.
     const patch = buildPhaseStatePatch(freshPhaseState, fields, turn.user_text)
+
+    // IMPORT-GATE (2026-07-01 SEV1 M1 blocker — "STOP M2" a): while a history
+    // import is uploading/analyzing, do NOT persist project-discovery fields.
+    // Project discovery is owned by the import — its analysis yields the proposed
+    // projects. Capturing thin chat answers here would materialize useless
+    // projects the moment the import lands (finalize UNIONs `primary_projects`
+    // with the import's proposals; engine-import-routing.advanceFromImportRunning
+    // OnComplete). The interview may still ask import-INDEPENDENT things during
+    // the upload — `user_first_name` and `agent_personality` (→ SOUL.md) survive
+    // this strip so the interview keeps making progress. Once the import lands
+    // and is consumed back into a conversational marker, `importActiveNow` is
+    // false again and project discovery resumes normally (or, with no import,
+    // was never gated).
+    if (importActiveNow) {
+      for (const field of PROJECT_DISCOVERY_FIELDS) delete patch[field]
+    }
+
     const hasPatch = Object.keys(patch).length > 0
 
     // ND-A (2026-06-28) — belt-and-suspenders to the engine's app-socket
@@ -203,11 +243,6 @@ export function buildPostTurnExtractor(deps: PostTurnExtractorDeps): PostTurnExt
     if (hasPatch && readString(freshPhaseState, 'signup_via') === null) {
       patch['signup_via'] = 'web'
     }
-
-    const importInFlight =
-      deps.hasInFlightImport !== undefined ? await deps.hasInFlightImport() : false
-    const importActiveNow =
-      (fresh !== null && IMPORT_ACTIVE_PHASES.has(fresh.phase)) || importInFlight
 
     // Persist newly-extracted fields. An EMPTY patch writes nothing — the
     // onboarding_state row is created lazily by the first turn that DOES extract

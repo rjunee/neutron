@@ -68,6 +68,7 @@ function outcome(over: Partial<MaterializeOutcome> = {}): MaterializeOutcome {
     llm_docs: false,
     git_ok: true,
     indexed: false,
+    has_context: false,
     ...over,
   }
 }
