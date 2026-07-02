@@ -347,8 +347,14 @@ function enforceCodexGate(synthesis, codexStatus) {
 // with the per-project CODEX_HOME, then maps the wrapper's EXIT CODE to a
 // CODEX_VERDICT_SCHEMA result. Only built when a codex credential is configured.
 function codexReviewerPrompt(diffFile) {
-  const outFile = `/tmp/trident-codex-${slug}.out`
-  const errFile = `/tmp/trident-codex-${slug}.err`
+  // GLOBALLY-UNIQUE temp files: trident runs detached workflows concurrently and
+  // slugs are only unique WITHIN a project, so two same-slug runs in different
+  // projects would collide on /tmp and cross-read each other's verdict. Key on
+  // runId (uuid) — matching writeTerminalResult's /tmp/trident-terminal-${runId}
+  // — falling back to slug only for a dry source check with no runId (Codex [P2]).
+  const uniq = runId || slug
+  const outFile = `/tmp/trident-codex-${uniq}.out`
+  const errFile = `/tmp/trident-codex-${uniq}.err`
   const script = `${repoPath}/trident/codex-review.sh`
   // Codex reviews the SAME diff FILE Forge wrote (as the other reviewers do), NOT
   // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
@@ -356,7 +362,7 @@ function codexReviewerPrompt(diffFile) {
   // could approve without reviewing the change (Codex review [P2]).
   return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${script} ${baseBranch} > ${outFile} 2> ${errFile}; echo "CODEX_EXIT=$?"
+  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.

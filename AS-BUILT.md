@@ -59,9 +59,20 @@ retry-then-succeed / `--no-codex` / `NEUTRON_SKIP_CODEX`).
   `enforceCodexGate` cases), `trident/inner-loop.test.ts` (codexHome threading).
 
 **Verify.** `tsc -p trident/tsconfig.json` clean; `tsc -p gateway/tsconfig.json`
-clean; full trident suite 297 pass / 0 fail; install-codex 7 pass; leak-gate
-SILENT. **Contract note:** the workflow `args` shape gained `codexHome` — a legacy
-launcher that omits it defaults to `null` (Claude-only), so no back-compat break.
+clean; full trident suite 305 pass / 0 fail; install-codex 7 pass; codex-review
+wrapper 7 pass; leak-gate SILENT. **Contract note:** the workflow `args` shape
+gained `codexHome` — a legacy launcher that omits it defaults to `null`
+(Claude-only), so no back-compat break.
+
+**Cross-model (Codex) review of this PR — 3 P2s fixed:** (1) the codex reviewer
+now reviews the SAME diff FILE Forge wrote (`NEUTRON_CODEX_DIFF_FILE`), not a
+`git diff` in `repoPath` — `repoPath` is still on the base branch (Forge builds
+in an isolated worktree), so a git-diff there is empty/stale and codex would
+approve without reviewing; (2) the wrapper path is shell-quoted
+(`shSingleQuote(script)`) so a `repoPath` with spaces doesn't split the command
+and falsely report `deferred`; (3) the codex `/tmp` output files are keyed on
+`runId` (globally unique), not `slug` (unique only within a project), so
+concurrent same-slug runs in different projects can't cross-read verdicts.
 
 ## 2026-07-01 — SEV1: chat rail stability — project-switch crash, error boundary, banner flicker, unread badge, URL scrub
 

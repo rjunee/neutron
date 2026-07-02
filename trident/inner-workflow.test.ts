@@ -216,6 +216,12 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     // (which is still on the base branch) — via NEUTRON_CODEX_DIFF_FILE (Codex [P2]).
     expect(SRC).toContain('NEUTRON_CODEX_DIFF_FILE=')
     expect(SRC).toContain('codexReviewerPrompt(diffFile)')
+    // Codex [P2]: the wrapper path is shell-quoted (repoPath may contain spaces),
+    // and the /tmp output files are keyed on runId (globally unique) not slug
+    // (unique only within a project → concurrent same-slug runs would collide).
+    expect(SRC).toContain('bash ${shSingleQuote(script)}')
+    expect(SRC).toContain('const uniq = runId || slug')
+    expect(SRC).toContain('/tmp/trident-codex-${uniq}.out')
     // Wired into the review panel only when a codex credential is configured.
     expect(SRC).toContain('if (codexConfigured)')
     expect(SRC).toContain("label: 'argus:codex'")
