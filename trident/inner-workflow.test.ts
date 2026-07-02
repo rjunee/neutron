@@ -208,10 +208,14 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
   })
 
   test('the codex reviewer runs trident/codex-review.sh SYNCHRONOUSLY with per-project CODEX_HOME (never backgrounded)', () => {
-    expect(SRC).toContain('function codexReviewerPrompt(')
+    expect(SRC).toContain('function codexReviewerPrompt(diffFile)')
     expect(SRC).toContain('/trident/codex-review.sh')
     expect(SRC).toContain('CODEX_HOME=')
     expect(SRC).toContain('do NOT background it')
+    // Codex reviews the SAME diff FILE Forge wrote — NOT `git diff` in repoPath
+    // (which is still on the base branch) — via NEUTRON_CODEX_DIFF_FILE (Codex [P2]).
+    expect(SRC).toContain('NEUTRON_CODEX_DIFF_FILE=')
+    expect(SRC).toContain('codexReviewerPrompt(diffFile)')
     // Wired into the review panel only when a codex credential is configured.
     expect(SRC).toContain('if (codexConfigured)')
     expect(SRC).toContain("label: 'argus:codex'")

@@ -73,11 +73,23 @@ if [ "$codex_auth_ok" -ne 1 ]; then
 fi
 
 # ── Build the review prompt from the branch diff ─────────────────────────────
-DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null | head -n "$DIFF_LINE_LIMIT")
+# Prefer an explicit diff FILE (NEUTRON_CODEX_DIFF_FILE). In the trident flow
+# Forge builds in an ISOLATED worktree and writes the branch diff to a file; the
+# review runs from repoPath, which is STILL on the base branch — so a `git diff`
+# here would see an EMPTY/stale diff and codex could "approve" without reviewing
+# the actual change. Every trident reviewer reviews that diff file; so does codex.
+# Fall back to `git diff base..HEAD` for standalone use (Vajra-style).
+if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; then
+  DIFF=$(head -n "$DIFF_LINE_LIMIT" "$NEUTRON_CODEX_DIFF_FILE")
+  DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
+else
+  DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null | head -n "$DIFF_LINE_LIMIT")
+  DIFF_SRC="${BASE_REF}..HEAD"
+fi
 if [ -z "$DIFF" ]; then
-  # No diff to review (empty branch / bad base) — surface it but don't fail hard;
-  # the reviewer treats an empty codex verdict as no-blocker.
-  echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${BASE_REF}..HEAD." >&2
+  # No diff to review (empty branch / bad base / missing diff file) — surface it
+  # but don't fail hard; the reviewer treats an empty codex verdict as no-blocker.
+  echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC}." >&2
 fi
 
 PROMPT="You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
@@ -87,7 +99,7 @@ Respond with your findings, then END with a SINGLE final line, exactly one of:
   VERDICT: REQUEST_CHANGES
 Use REQUEST_CHANGES if there is any evidence-backed blocker.
 
-DIFF (${BASE_REF}..HEAD):
+DIFF (${DIFF_SRC}):
 ${DIFF}"
 
 # ── Run the review SYNCHRONOUSLY (never backgrounded) ─────────────────────────

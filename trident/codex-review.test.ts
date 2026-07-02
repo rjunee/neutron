@@ -28,6 +28,8 @@ interface RunOpts {
   noCodexHome?: boolean
   /** Put a mock `codex` on PATH whose `login status` exits with this code. */
   codexLoginExit?: number | null
+  /** Write this content to a diff file and point NEUTRON_CODEX_DIFF_FILE at it. */
+  diffFileContent?: string
   env?: Record<string, string>
 }
 
@@ -56,6 +58,11 @@ function run(opts: RunOpts = {}): { status: number | null; stderr: string; stdou
     ...(opts.env ?? {}),
   }
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
+  if (opts.diffFileContent !== undefined) {
+    const df = join(dir, 'forge.diff')
+    writeFileSync(df, opts.diffFileContent)
+    env['NEUTRON_CODEX_DIFF_FILE'] = df
+  }
   // Run inside a git repo so `git diff` doesn't error — the temp dir is fine (no
   // repo → empty diff, which the script tolerates).
   const res = spawnSync('bash', [SCRIPT, 'main'], { cwd: dir, encoding: 'utf8', env })
@@ -96,6 +103,25 @@ describe('trident/codex-review.sh — exit-code contract', () => {
     })
     expect(status).toBe(0)
     expect(stdout).toContain('VERDICT: APPROVE')
+  })
+
+  test('reviews the explicit NEUTRON_CODEX_DIFF_FILE, not `git diff` in cwd (Codex [P2] fix)', () => {
+    // The cwd is a bare temp dir (no git repo) — a `git diff` would yield NOTHING.
+    // The diff file carries a unique marker; the codex prompt (piped to exec on
+    // stdin) must contain it, proving the file was read instead of git-diffing cwd.
+    const { status, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: 'diff --git a/x b/x\n+MARKER_FROM_DIFF_FILE_9f3a\n',
+      // Fail the exec unless the marker made it into the piped prompt → asserts the
+      // diff file content reached codex.
+      env: {
+        NEUTRON_CODEX_EXEC_CMD:
+          'if grep -q MARKER_FROM_DIFF_FILE_9f3a; then echo "VERDICT: APPROVE"; exit 0; fi; exit 9',
+      },
+    })
+    expect(status).toBe(0)
+    expect(stderr).not.toContain('EMPTY_DIFF')
   })
 
   test('configured + authed but the review CALL fails → exit 5 (DEFERRED)', () => {
