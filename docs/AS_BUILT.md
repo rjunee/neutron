@@ -70,6 +70,35 @@ migration (the `design_doc_ref` column already existed, unused for docs).
   path" instruction, the bidirectional write-back is left for a follow-up. No
   parallel user-facing plan doc is created; the worktree `IMPLEMENTATION_PLAN.md`
   is an existing build-internal artifact (not user-surfaced).
+## 2026-07-02 — Trident: per-project git build workspace (brand-new projects are buildable)
+
+**Why.** A trident build for a BRAND-NEW project (no code repo) died ~2 min in —
+`worktree` never created, `forge:build` produced no transcript, workflow jumped to
+cleanup. Root cause: the dispatch chokepoint wrote the owner HOME dir
+(`resolveNeutronHome`, a non-repo) as EVERY run's `repo_path`, so the inner
+workflow's `isolation:'worktree'` (`git worktree add`) failed at forge-init before
+Forge ran. Only projects that already had a git repo built.
+
+**What shipped.** New `trident/build-workspace.ts:ensureProjectBuildWorkspace`
+resolves + git-inits (idempotent, `--initial-branch=main` + an `--allow-empty`
+INITIAL COMMIT so `git worktree add` has a HEAD) a per-project
+`<owner_home>/Projects/<project_slug>/code` workspace. `dispatchBoardBoundBuild`
+(`trident/board-dispatch.ts`) now resolves this FIRST, runs merge-mode/ralph
+detection against the RESOLVED workspace, and writes that per-project path onto the
+run row's `repo_path` — replacing the old `repo_path = owner_home` assignment (one
+code path, no flag). The three dispatch dep interfaces now document `repo_path` as
+the owner HOME BASE with an injectable `resolveBuildRepo` test seam. A fresh local
+project has no origin → merge mode `'local'` (branch + local merge, no PR); success
+= a local BRANCH WITH COMMITS, not a PR#.
+
+**Verified.** `tsc` clean (root + trident); 361 trident tests green;
+`trident/build-workspace.test.ts` added (pure-probe + real-git + dispatch-level).
+A no-LLM real-git e2e reproduced the original `fatal: not a git repository` failure
+on the old path, then drove resolver → `detectMergeMode`=local/`detectBaseBranch`=main
+→ `git worktree add` → multi-file branch with commits → real `mergeLocal` →
+merged-local terminal state. The full autonomous-LLM `forge:build` leg (#176's
+already-verified toolless fix) was not re-driven in this headless run; the git
+workspace was the missing precondition and is now proven to satisfy `worktree add`.
 
 ## 2026-07-02 — M1 trident-UX hardening: live Plan progress, hang watchdog, X-cancels-run, confirm dialog
 

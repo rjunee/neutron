@@ -81,8 +81,14 @@ interface DispatchBuildArgs {
 export interface TridentBuildToolDeps {
   store: TridentRunStore
   work_board: TridentBoardBinder
-  /** Absolute repo path builds run in (Open: the owner's repo). */
+  /**
+   * The owner HOME base (Open: `resolveNeutronHome`). The chokepoint resolves
+   * each project's own git-initialized workspace `<home>/Projects/<slug>/code`
+   * under it — NOT the git repo directly — so brand-new projects are buildable.
+   */
   repo_path: string
+  /** Resolve the per-project git workspace; defaults to `ensureProjectBuildWorkspace`. */
+  resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   resolveMergeMode?: () => Promise<MergeMode>
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
@@ -150,6 +156,7 @@ export function registerTridentBuildToolSurface(
         board: deps.work_board,
         project_slug: ctx.project_slug,
         repo_path: deps.repo_path,
+        ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
@@ -240,6 +247,7 @@ export function registerTridentBuildToolSurface(
         board: deps.work_board,
         project_slug: ctx.project_slug,
         repo_path: deps.repo_path,
+        ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),

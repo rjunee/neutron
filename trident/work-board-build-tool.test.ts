@@ -72,6 +72,8 @@ function toolFor() {
     store,
     work_board: board(),
     repo_path: '/repo',
+    // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
+    resolveBuildRepo: async (home) => home,
     resolveMergeMode: async () => 'local',
     resolveRalph: async () => false,
   })
@@ -135,6 +137,8 @@ function startToolFor(resolve_task?: (slug: string, item: { title: string; desig
     store,
     work_board: board(),
     repo_path: '/repo',
+    // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
+    resolveBuildRepo: async (home) => home,
     resolveMergeMode: async () => 'local',
     resolveRalph: async () => false,
     ...(resolve_task !== undefined ? { resolve_task } : {}),
