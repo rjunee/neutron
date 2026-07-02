@@ -58,6 +58,36 @@ export interface WorkBoardItem {
   updated_at: string
   /** ISO-8601 UTC; null until status='done'. */
   completed_at: string | null
+  /**
+   * Item 1 — the bound trident run's LIVE progress, present ONLY when this item
+   * has a live `linked_run_id`. The tab renders it as a compact sub-label; absent
+   * on unbound/idle items.
+   */
+  run_progress?: RunProgress
+}
+
+/** Human-legible live phase of a bound run (mirror of `trident/run-progress.ts`). */
+export type RunPhaseLabel =
+  | 'planning'
+  | 'building'
+  | 'reviewing'
+  | 'merged'
+  | 'failed'
+  | 'cancelled'
+
+/** Item 1 — a bound run's live progress, as the tab consumes it. */
+export interface RunProgress {
+  run_id: string
+  phase_label: RunPhaseLabel
+  round: number
+  started_at: string
+  last_advanced_at: string
+  elapsed_ms: number
+  stalled: boolean
+  stalled_ms: number | null
+  pr: number | null
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  failure_reason: string | null
 }
 
 export interface CreateWorkBoardItemInput {
@@ -227,6 +257,7 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     if (typeof id !== 'string' || id.length === 0) continue
     if (typeof title !== 'string') continue
     if (status !== 'upcoming' && status !== 'in_progress' && status !== 'done') continue
+    const run_progress = parseRunProgress(r['run_progress'])
     out.push({
       id,
       title,
@@ -238,7 +269,43 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
       created_at: typeof r['created_at'] === 'string' ? (r['created_at'] as string) : '',
       updated_at: typeof r['updated_at'] === 'string' ? (r['updated_at'] as string) : '',
       completed_at: typeof r['completed_at'] === 'string' ? (r['completed_at'] as string) : null,
+      ...(run_progress !== null ? { run_progress } : {}),
     })
   }
   return out
+}
+
+const RUN_PHASE_LABELS: readonly RunPhaseLabel[] = [
+  'planning',
+  'building',
+  'reviewing',
+  'merged',
+  'failed',
+  'cancelled',
+]
+
+/** Parse a raw `run_progress` object (item 1) off a live frame; null when absent/malformed. */
+function parseRunProgress(raw: unknown): RunProgress | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const r = raw as Record<string, unknown>
+  const run_id = r['run_id']
+  const phase_label = r['phase_label']
+  if (typeof run_id !== 'string' || run_id.length === 0) return null
+  if (typeof phase_label !== 'string' || !RUN_PHASE_LABELS.includes(phase_label as RunPhaseLabel)) {
+    return null
+  }
+  const verdict = r['verdict']
+  return {
+    run_id,
+    phase_label: phase_label as RunPhaseLabel,
+    round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
+    started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
+    last_advanced_at: typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',
+    elapsed_ms: typeof r['elapsed_ms'] === 'number' ? (r['elapsed_ms'] as number) : 0,
+    stalled: r['stalled'] === true,
+    stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,
+    pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
+    verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
+    failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
+  }
 }

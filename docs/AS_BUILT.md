@@ -2,6 +2,68 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — M1 trident-UX hardening: live Plan progress, hang watchdog, X-cancels-run, confirm dialog
+
+**Why.** A live trident test wedged SILENTLY and surfaced four gaps: (1) a
+Plan item dispatched to a build showed only a fork `⑂` glyph — no phase, round,
+or elapsed, so a running build looked identical to an idle one; (2) a workflow
+`agent()` hung (a zero-token model hang) and NOTHING detected it — the run sat
+`forge-init` for 30+ min with no error; (3) deleting a Plan card left its trident
+run building headless (the `DELETE` never cancelled the run); (4) the X deleted
+instantly, so a fat-finger could cancel an expensive running build. One PR, no
+feature flags, no migration (all four derive from existing columns).
+
+**What shipped.**
+
+- **Live progress on Plan items (item 1).** New pure `trident/run-progress.ts`
+  (`deriveRunProgress`) maps a linked `code_trident_runs` row → `{phase_label,
+  round, elapsed_ms, stalled, pr, verdict, …}`. Critically the label is derived
+  from `phase` + `inner_checkpoint`, NOT `phase` alone — in the Phase-2a EXEC
+  model the outer `phase` stays `forge-init` for the whole inner workflow, so the
+  live granularity lives in the checkpoint (`forge-done`→reviewing,
+  `fix-round-N`→building round N, `argus-approved`→reviewing). Both the HTTP GET
+  surface AND the `work_board_changed` push (`open/composer.ts`) attach
+  `run_progress` per bound item; the wire type is `AppWsRunProgress`
+  (`channels/adapters/app-ws/envelope.ts`). The web Plan tab
+  (`landing/chat-react/WorkBoardTab.tsx`) renders a compact sub-label ("🔨 building
+  · round 1 · 4m", "🔍 reviewing · round 2", "✅ merged · PR #7") and shows a
+  "⚠️ stalled Nm" warning past `STALLED_WARN_MS` (10 min). Intermediate
+  checkpoints don't mutate the board row (no push), so the tab quietly re-polls
+  every 15s while any run is live + ticks elapsed off the timestamps.
+- **Per-agent hang watchdog (item 2).** `trident/orchestrator.ts` gains a
+  `NO_ADVANCE_HANG_MS` (15 min) fail-fast reap: a non-terminal run with an
+  in-flight dispatch whose `last_advanced_at` hasn't moved is treated as a
+  suspected agent hang → `failed` with a named reason, checked BEFORE orphan
+  recovery so a wedged orphan is reaped (not redispatched). A healthy build
+  re-stamps `last_advanced_at` on every checkpoint, so it never trips. The 2h
+  `max_inflight_ms` ceiling stays as a defense-in-depth backstop. The reaped
+  `failed` transition flows through the existing `on_terminal` hook → terminal
+  notification + board reconcile (item back to `upcoming`, fork glyph dark). Only
+  the OUTER detector ships — the deeper per-`agent()` inactivity guard isn't
+  cleanly reachable from the Workflow `.mjs` without destabilizing #173's routing
+  (there's no exposed token-activity stream to the script), so it's deferred.
+- **X cancels the linked run (item 3).** `gateway/http/work-board-surface.ts`
+  `DELETE` takes an optional `trident_runs` accessor; if the item names a
+  non-terminal `linked_run_id` it stops the run (`phase='stopped'`, the existing
+  `/code stop` path) BEFORE deleting the card, so a delete can't orphan a running
+  build. The detached workflow keeps running to completion in the background but
+  produces no effect (terminal runs are never harvested → never merged/delivered).
+- **Confirm dialog before X (item 4).** The Plan tab shows a lightweight confirm
+  dialog before any `DELETE` fires — "Cancel this build and remove it?" for a
+  running/linked item, the lighter "Remove this item?" for an idle one.
+
+**Managed-doc note.** `docs/SYSTEM-OVERVIEW.md` (a Managed doc the orchestrator
+syncs on deploy) got a Work-Board section note covering the progress display,
+hang watchdog, and X-cancel; flag for the deploy-time sync.
+
+**Tests.** `trident/run-progress.test.ts` (phase/checkpoint→label, stall,
+cross-project guard); `orchestrator.test.ts` hang-watchdog cases (in-flight +
+stale-orphan reap); `work-board-surface.test.ts` GET-enriches + DELETE-cancels
+(+ terminal/unbound no-cancel); `work-board-client.test.ts` `parseRunProgress`;
+`work-board-tab.test.tsx` sub-label render, stalled/merged labels, confirm-copy,
+and the delete round-trip updated to click through the confirm. tsc clean
+(root + chat-react), full relevant suite green.
+
 ## 2026-07-02 — Fable-orchestrator model routing in trident's inner workflow
 
 **Why.** Ryan-locked doctrine (SPEC § Fable-orchestrator, Decisions Log

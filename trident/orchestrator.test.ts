@@ -55,6 +55,7 @@ function buildHarness(opts: {
   mint_run_id?: () => string
   now?: () => string
   max_inflight_ms?: number
+  no_advance_hang_ms?: number
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
 }): Harness {
@@ -80,6 +81,7 @@ function buildHarness(opts: {
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
+  if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   const orch = buildTridentOrchestrator(o)
@@ -279,6 +281,55 @@ describe('orchestrator — stalled workflow guard', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.failure_reason).toContain('stalled')
+  })
+})
+
+describe('orchestrator — per-agent hang watchdog (item 2)', () => {
+  test('a fired run that makes no progress past no_advance_hang_ms is reaped as a suspected hang', async () => {
+    let t = 0
+    const h = buildHarness({
+      // Fire settles, but the workflow hangs — never checkpoints, never writes a result.
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000, // the 2h ceiling stays far away — the hang guard fires first
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce() // launch + fire (last_advanced_at = t=0)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    // Just under the hang threshold — still waiting, not reaped.
+    t = 30_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    // Past the hang threshold with no advance → reaped to failed with the hang reason.
+    t = 90_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('suspected agent hang')
+  })
+
+  test('a stale orphan past the hang threshold is reaped, not redispatched', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // An orphan (dispatch id from a prior process) that has not advanced for a while.
+    await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
+
+    t = 120_000 // well past the hang threshold
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('suspected agent hang')
+    // Reaped, NOT redispatched.
+    expect(h.inputs).toHaveLength(0)
   })
 })
 

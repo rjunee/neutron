@@ -465,6 +465,28 @@ export interface AppWsWorkBoardItem {
   created_at: string
   updated_at: string
   completed_at: string | null
+  /**
+   * Item 1 (M1 trident-UX hardening) — the bound trident run's LIVE progress,
+   * present ONLY on an item whose `linked_run_id` names a live run. Mirrors
+   * `RunProgress` (`trident/run-progress.ts`); the client renders it as a compact
+   * sub-label ("🔨 building · round 1 · 4m", "⚠️ stalled 11m", "✅ merged · PR #7").
+   */
+  run_progress?: AppWsRunProgress
+}
+
+/** Item 1 — the wire shape of a bound run's live progress (see `RunProgress`). */
+export interface AppWsRunProgress {
+  run_id: string
+  phase_label: 'planning' | 'building' | 'reviewing' | 'merged' | 'failed' | 'cancelled'
+  round: number
+  started_at: string
+  last_advanced_at: string
+  elapsed_ms: number
+  stalled: boolean
+  stalled_ms: number | null
+  pr: number | null
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  failure_reason: string | null
 }
 
 /**

@@ -158,4 +158,38 @@ describe('parseWorkBoardItems', () => {
       completed_at: null,
     })
   })
+
+  it('parses a valid run_progress and drops a malformed one (item 1)', () => {
+    const out = parseWorkBoardItems([
+      {
+        id: 'a',
+        title: 'Bound',
+        status: 'in_progress',
+        linked_run_id: 'run-1',
+        run_progress: {
+          run_id: 'run-1',
+          phase_label: 'building',
+          round: 2,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      },
+      // A bogus phase_label → run_progress dropped, but the item survives.
+      {
+        id: 'b',
+        title: 'Bad progress',
+        status: 'in_progress',
+        run_progress: { run_id: 'x', phase_label: 'nonsense' },
+      },
+    ])
+    expect(out[0]!.run_progress?.phase_label).toBe('building')
+    expect(out[0]!.run_progress?.round).toBe(2)
+    expect(out[1]!.run_progress).toBeUndefined()
+  })
 })
