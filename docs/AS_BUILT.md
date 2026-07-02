@@ -23,9 +23,12 @@ appearance) and stays visible for the full processing window: `awaitingFirstToke
 **OR** `hasActiveWork`.
 
 - **New `ChatViewModel.hasActiveWork`** (`landing/chat-react/controller.ts`) — true
-  while the active project's Work Board has an `in_progress` item. Computed by
-  `computeHasActiveWork()`, which mirrors `WorkBoardTab`'s project scoping (a snapshot
-  with no `project_id` is "this project"; a sibling project's board is ignored).
+  while the active project's Work Board has an `in_progress` item. Derived from a
+  dedicated `activeWorkBoardItems` cache that ONLY frames pertaining to the active
+  project update (matching `project_id`, or absent → "this project"); a sibling
+  project's board on the per-user app-ws topic is ignored so it can't stop the active
+  dots (Codex P2). `lastWorkBoard` stays the raw last-frame cache for `WorkBoardTab`
+  replay; the active cache clears on project switch.
 - **`work_board_changed` now also `publish()`es the chat vm** (was board-tab-only), so
   a build starting/finishing flips the dots on/off. Everything else about the board
   stays out-of-band of chat state.
