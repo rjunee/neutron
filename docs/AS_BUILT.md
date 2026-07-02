@@ -79,6 +79,29 @@ clean and both `/api/app/codex-auth` + `/api/app/projects/<id>/codex-auth` retur
   Settings override section shows "Remove override" whenever `override_present`,
   so an expired override that masks itself behind the global default can still be
   cleaned up.
+- **[P2] Settings reflects the EFFECTIVE status after save/remove.** Both
+  `connectCodex` and `disconnectCodex` now re-fetch the per-project status after
+  their write (the POST/DELETE replies omit `override_present` / the global
+  fallback), so the "Remove override" affordance appears right after saving and a
+  removed override immediately shows the global fallback (not a hard
+  "not connected").
+
+**DECISION FOR RYAN — per-project override does NOT reach a trident RUN (by
+design of trident, not this PR).** Trident runs are **instance-scoped by
+`project_slug`** (the owner boundary) and carry **no per-project credential id**
+(`trident/store.ts` `TridentRun`; runs are created with `project_slug` = owner,
+`slug` = task slug). So `resolveActiveCodexHome(run.project_slug)` resolves the
+GLOBAL default, and a per-project codex override — whose only consumer is the
+instance-scoped trident reviewer — cannot change which credential a given trident
+run uses. The override is fully built + tested at the store/resolver/status/UI
+layer (it honors project → global → unset wherever a real project id is supplied),
+the Settings copy is explicit that the trident review currently uses the global
+credential, and the override takes effect for trident once builds are
+project-scoped (a separate change: thread the originating project id onto the run
++ resolve with it). Ryan asked for a project override "if necessary" — flagging
+that for trident specifically it is a stored preference, not yet a per-run switch.
+Codex cross-model review re-raised this as the remaining item; it is an
+acknowledged trident-architecture constraint, not a defect in this diff.
 
 ## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
 

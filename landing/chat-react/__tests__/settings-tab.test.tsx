@@ -160,7 +160,7 @@ describe('SettingsTab Codex override (happy-dom)', () => {
       return null
     })
     expect(container.textContent).toContain('Codex review — project override')
-    expect(container.textContent).toContain('Optional.')
+    expect(container.textContent).toContain('Optional / advanced.')
     // No override row → no remove button.
     expect(btn(container, 'Remove override')).toBeUndefined()
     root.unmount()

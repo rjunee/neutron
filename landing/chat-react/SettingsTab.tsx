@@ -495,12 +495,19 @@ export function SettingsTab({
       <section className="cset-section" aria-label="Codex review override">
         <h2 className="cset-h">Codex review — project override</h2>
         <p className="cset-sub">
-          <strong>Optional.</strong> Codex is normally connected once, account-wide, in
-          <strong> General → Admin → Codex cross-model review</strong>, and used by trident across
-          every project. Only use this if <em>this</em> project needs a <em>different</em> ChatGPT
-          subscription — an override here wins over the global default for this project. Run
-          <code> codex login</code>, then paste that subscription’s <code>~/.codex/auth.json</code>.
-          A metered <code>OPENAI_API_KEY</code> is rejected — subscription only.
+          <strong>Optional / advanced.</strong> Codex is normally connected once, account-wide, in
+          <strong> General → Admin → Codex cross-model review</strong>, and the trident reviewer
+          uses that global credential. You can store a <em>project-scoped</em> override here; the
+          credential resolver prefers it over the global default wherever this project’s id is in
+          play (project → global → unset). Run <code>codex login</code>, then paste that
+          subscription’s <code>~/.codex/auth.json</code>. A metered <code>OPENAI_API_KEY</code> is
+          rejected — subscription only.
+          <br />
+          <small>
+            Note: the trident review loop is instance-scoped, so builds currently use the global
+            credential; a stored override takes effect for the trident review once builds are
+            project-scoped.
+          </small>
         </p>
         <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
           {codexStatus?.status === 'connected'
