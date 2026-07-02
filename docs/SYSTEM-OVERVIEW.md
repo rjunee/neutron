@@ -1106,34 +1106,47 @@ availability within one turn. Wiring the existing Cores to CALL the resolver is
 a named follow-up (needs per-call `project_id` threaded into each Core's token
 provider — the deferred Phase-3 Cores rework).
 
-### Connect Codex — subscription auth for the trident cross-model reviewer (Part B)
+### Connect Codex — a GLOBAL credential for the trident cross-model reviewer
 
-The Settings tab also owns a **Connect Codex** flow that supplies the credential
-the trident cross-model reviewer (`trident/codex-review.sh`, Part A) needs. Codex
-has no headless device-flow, so the pragmatic UX is: the owner runs `codex login`
-(ChatGPT account) on their own machine once, then pastes the contents of their
-`~/.codex/auth.json` into the panel.
+The trident cross-model reviewer (`trident/codex-review.sh`, Part A) needs a
+ChatGPT-subscription credential. Because **trident runs across ANY project**, that
+credential is **GLOBAL, not per-project**: the PRIMARY place to connect it is the
+account-wide **General → Admin** tab (`IntegrationsTab`), alongside the other
+global integrations. A **per-project OVERRIDE** exists for the edge case where one
+project needs a different subscription — an override wins over the global default
+for that project only (store resolver: **project → global → unset**, PR #149).
+Codex has no headless device-flow, so the UX is: run `codex login` (ChatGPT
+account) once, then paste the contents of `~/.codex/auth.json`.
 
 - **Validation (subscription-only).** `trident/codex-auth.ts:validateCodexSubscriptionAuth`
   accepts a bundle with `tokens.access_token` + `tokens.refresh_token` and
   **REJECTS** a metered `OPENAI_API_KEY` (auth_mode=apikey) or a bare `sk-…` paste
   — Ryan's standing rule is never the metered path. The accepted bundle is
   normalized (API key stripped) before storage.
-- **Storage.** Stored encrypted in the `project_credentials` store (service
-  `codex`, GLOBAL scope — a ChatGPT subscription is account-wide), same
-  AES-256-GCM keyfile as every other credential.
-- **Materialization.** On save it is written to the per-owner CODEX_HOME
-  (`resolveCodexHome({ owner_home })` = `<owner_home>/.codex/auth.json`, mode
-  0600) — the SAME path the trident loop threads into the inner workflow
-  (`build-core-modules.ts` reads `trident.codex_home` from the composer, resolved
-  by the identical helper, so the loop and the store can never disagree). A
-  boot-time `ensureMaterialized` self-heals the file from the stored credential.
+- **Storage (global by default).** Stored encrypted in the `project_credentials`
+  store (service `codex`), same AES-256-GCM keyfile as every other credential.
+  `connect()` defaults to `scope='global'`; a project override is `scope='project'`
+  under the REAL project id.
+- **Materialization.** The global default writes to the owner CODEX_HOME
+  (`resolveCodexHome({ owner_home })` = `<owner_home>/.codex/auth.json`, mode 0600)
+  — the SAME path the trident loop threads into the inner workflow
+  (`build-core-modules.ts` reads `trident.codex_home` from the composer). A project
+  override writes to a nested per-project dir
+  (`codexProjectHome(globalHome, project_id)` = `<owner_home>/.codex/projects/<id>/auth.json`).
+  `CodexCredentialService.resolveActiveCodexHome(owner, project_id)` is the
+  trident-review resolver (project override → global → `null`) with self-healing
+  re-materialization; a boot-time `ensureMaterialized` self-heals the GLOBAL file.
+  The trident loop threads the global CODEX_HOME (the trident-wide default).
 - **Status.** GET returns `connected` / `expired` (access-token JWT `exp` in the
-  past) / `not_connected`.
-- **Surfaces.** HTTP `gateway/http/codex-credential-surface.ts`
-  (`/api/app/projects/<id>/codex-auth`, GET/POST/DELETE) + agent-native
-  `codex_connect` / `codex_status` tools (`trident/codex-credential-tool.ts`),
-  both dispatching the ONE `CodexCredentialService`.
+  past) / `not_connected`, plus `scope` (which supplied the resolved credential —
+  `project` override vs `global` default, or `null` when unset).
+- **Surfaces.** HTTP `gateway/http/codex-credential-surface.ts` — the GLOBAL
+  `/api/app/codex-auth` (primary) + the per-project override
+  `/api/app/projects/<id>/codex-auth` (both GET/POST/DELETE) — plus agent-native
+  `codex_connect` / `codex_status` tools (`trident/codex-credential-tool.ts`,
+  global-scoped: the tool context carries only the owner boundary), all dispatching
+  the ONE `CodexCredentialService`. The per-project override UI is in that project's
+  Settings tab (`SettingsTab.tsx`), clearly labelled optional.
 
 ## Work Board — orchestrator external memory + live work tracker (`work-board/`)
 

@@ -25,6 +25,7 @@ import {
   type ApiKeyIntegration,
   type OAuthAccountIntegration,
 } from './integrations-client.ts'
+import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -68,6 +69,65 @@ export function IntegrationsTab({
   const [apiKeys, setApiKeys] = useState<ApiKeyIntegration[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // ── Codex cross-model review (GLOBAL, trident-wide credential) ──
+  // The PRIMARY place to connect Codex: it's an account-wide credential the
+  // trident reviewer uses across ANY project (not a per-project setting). A
+  // per-project override lives in that project's Settings tab.
+  const codexClient = useMemo(
+    () =>
+      new WebCodexCredentialClient(
+        fetchImpl !== undefined
+          ? { base_url: config.origin, token: config.token, fetchImpl }
+          : { base_url: config.origin, token: config.token },
+      ),
+    [config.origin, config.token, fetchImpl],
+  )
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
+  const [codexAuth, setCodexAuth] = useState('')
+  const [codexBusy, setCodexBusy] = useState(false)
+  const [codexError, setCodexError] = useState<string | null>(null)
+
+  const loadCodex = useCallback((): void => {
+    void codexClient
+      .statusGlobal()
+      .then((s) => setCodexStatus(s))
+      .catch(() => setCodexStatus({ status: 'not_connected' }))
+  }, [codexClient])
+
+  useEffect(() => loadCodex(), [loadCodex])
+
+  const connectCodex = useCallback((): void => {
+    if (codexAuth.trim().length === 0) return
+    setCodexBusy(true)
+    setCodexError(null)
+    void codexClient
+      .connectGlobal(codexAuth.trim())
+      .then((s) => {
+        setCodexStatus(s)
+        setCodexAuth('')
+        setCodexBusy(false)
+      })
+      .catch((err: unknown) => {
+        setCodexBusy(false)
+        setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
+      })
+  }, [codexClient, codexAuth])
+
+  const disconnectCodex = useCallback((): void => {
+    setCodexBusy(true)
+    setCodexError(null)
+    void codexClient
+      .disconnectGlobal()
+      .then(() => {
+        setCodexStatus({ status: 'not_connected' })
+        setCodexBusy(false)
+      })
+      .catch((err: unknown) => {
+        setCodexBusy(false)
+        setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
+      })
+  }, [codexClient])
 
   // Per-slot draft input + in-flight / per-slot error state, keyed by label.
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -329,6 +389,63 @@ export function IntegrationsTab({
                   })}
                 </ul>
               )}
+            </section>
+
+            {/* ── Codex cross-model review (GLOBAL, trident-wide) ── */}
+            <section className="cint-section" aria-label="Codex cross-model review">
+              <h3 className="cint-section-title">Codex cross-model review</h3>
+              <p className="cint-row-sub">
+                Connect a ChatGPT <strong>subscription</strong> so trident builds get an independent
+                GPT-5 (Codex) review alongside Claude, across <strong>every</strong> project. This is
+                an account-wide credential. Run <code>codex login</code> on your machine, then paste
+                the contents of <code>~/.codex/auth.json</code> below. A metered
+                <code> OPENAI_API_KEY</code> is rejected — subscription only. (Need a different
+                subscription for one project? Set a per-project override in that project’s Settings.)
+              </p>
+              <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
+                {codexStatus?.status === 'connected'
+                  ? '✓ Connected'
+                  : codexStatus?.status === 'expired'
+                    ? '⚠ Token expired — re-connect'
+                    : '○ Not connected'}
+                {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
+              </p>
+              {codexError !== null ? <div className="cdoc-comments-error">{codexError}</div> : null}
+              {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+                <div className="cint-key-actions">
+                  <button type="button" className="cdoc-btn" disabled={codexBusy} onClick={disconnectCodex}>
+                    {codexBusy ? 'Working…' : 'Disconnect Codex'}
+                  </button>
+                </div>
+              ) : null}
+              <form
+                className="cset-form"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  connectCodex()
+                }}
+              >
+                <label className="cint-row-label" htmlFor="cint-codex-auth">
+                  Paste ~/.codex/auth.json
+                </label>
+                <textarea
+                  id="cint-codex-auth"
+                  className="cint-key-input cset-codex-textarea"
+                  rows={4}
+                  placeholder='{ "tokens": { "access_token": "…", "refresh_token": "…" }, "last_refresh": "…" }'
+                  value={codexAuth}
+                  onChange={(e) => setCodexAuth(e.target.value)}
+                />
+                <div className="cint-key-actions">
+                  <button
+                    type="submit"
+                    className="cdoc-btn cdoc-btn-primary"
+                    disabled={codexBusy || codexAuth.trim().length === 0}
+                  >
+                    {codexBusy ? 'Connecting…' : 'Connect Codex'}
+                  </button>
+                </div>
+              </form>
             </section>
 
             {/* ── Archived projects ── */}

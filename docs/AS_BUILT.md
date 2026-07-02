@@ -2,6 +2,106 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — Connect Codex is a GLOBAL admin credential (was per-project) + project override
+
+**Why.** #167 (Part B) put the Connect-Codex UI only in the per-PROJECT Settings
+tab, calling `.connect(projectId, …)`, which made it read as a project-level
+setting. But Codex is the **trident cross-model reviewer credential, and trident
+runs across ANY project** — so it must be a **GLOBAL** setting in the General
+admin UI, not per-project (Ryan, 2026-07-02: "this is not a project-level
+setting… it should be a global setting, in the general admin UI. There can be a
+project-level override if necessary"). No feature flags.
+
+**What shipped.**
+
+- **Global connect is now the PRIMARY surface.** A new account-wide route
+  `GET/POST/DELETE /api/app/codex-auth` (`gateway/http/codex-credential-surface.ts`)
+  connects Codex at `scope='global'`. The **General → Admin** tab
+  (`landing/chat-react/IntegrationsTab.tsx`) renders a "Codex cross-model review"
+  section — paste `~/.codex/auth.json`, connection status, disconnect — alongside
+  the other global integrations. `codex-credential-client.ts` gained
+  `statusGlobal()` / `connectGlobal()` / `disconnectGlobal()`.
+- **Store defaults to GLOBAL.** `CodexCredentialService.connect()` now defaults to
+  `scope='global'` (materializes to the owner CODEX_HOME `<owner_home>/.codex`);
+  validation unchanged (subscription-only, metered `OPENAI_API_KEY` rejected).
+- **Per-project OVERRIDE kept, for the edge case.** The per-project Settings
+  section stays but is relabelled "Codex review — project override" (clearly
+  optional; the primary connect lives in General → Admin). It POSTs the existing
+  `/api/app/projects/<id>/codex-auth` route, which now stores `scope='project'`
+  under the REAL project id and materializes to a nested
+  `codexProjectHome()` = `<owner_home>/.codex/projects/<id>` dir.
+- **Resolution honors project → global → unset.** New
+  `CodexCredentialService.resolveActiveCodexHome(owner, project_id)` resolves the
+  effective CODEX_HOME via the #149 store resolver (project override wins, else
+  global, else `null`) with self-healing re-materialization. `status()` reports the
+  resolving `scope`. The trident loop threads the GLOBAL CODEX_HOME (the
+  trident-wide default); the `codex_connect`/`codex_status` agent tools stay
+  global-scoped (the tool context carries only the owner boundary).
+
+**Spec-conformance (5-line diff).** SPEC§ codex-review global cred / CURRENT #167
+per-project only / GAP: not global, wrong default / THIS PR: global connect in
+General admin + project-override + resolver project→global / OUT-OF-SCOPE: none.
+
+**Files.** `trident/codex-auth.ts` (`codexProjectHome` helper),
+`trident/codex-credential.ts` (scope-aware connect/status/disconnect +
+`resolveActiveCodexHome`), `gateway/http/codex-credential-surface.ts` (global
+route + project override), `gateway/http/compose.ts` (comment),
+`open/composer.ts` (comment), `landing/chat-react/IntegrationsTab.tsx` (global
+UI), `landing/chat-react/SettingsTab.tsx` (override relabel),
+`landing/chat-react/codex-credential-client.ts` (global methods + `scope`). Tests:
+service override/resolver, surface global+override routes, client global methods,
+IntegrationsTab global-connect render. tsc clean (trident/root/chat-react),
+leak-gate SILENT; live boot confirms both routes mounted + auth-gated.
+
+**Verify.** Real-component integration tests exercise connect(global) →
+materialize → `codex-review.sh` exit-0 CONNECTED; override stored under the
+project home; `resolveActiveCodexHome` project→global→unset; override wins;
+removing an override falls back to global; `ensureMaterialized` ignores overrides.
+Live server (`NEUTRON_HOME=/tmp/wfcx PORT=7871 bun run open/server.ts`) boots
+clean and both `/api/app/codex-auth` + `/api/app/projects/<id>/codex-auth` return
+401 (mounted + auth-gated), not 404.
+
+**Codex cross-model review — addressed.**
+- **[P1] review resolves through the store resolver (not a static path).** The
+  trident orchestrator gained `resolve_codex_home?: (run) => string | null`
+  (preferred over the static `codex_home`); the composer wires it to
+  `CodexCredentialService.resolveActiveCodexHome(run.project_slug)` so the inner
+  review's CODEX_HOME is resolved per-run through the #149 resolver (project
+  override → global → unset, self-healing) rather than a raw dir. **Known
+  constraint:** trident runs are instance-scoped by `project_slug` (no per-project
+  id on a run — see `trident/store.ts` `TridentRun`), so a run resolves the GLOBAL
+  default; a per-project override cannot select a different cred *per trident run*
+  until runs carry a project id (a larger, separate change). The override
+  mechanism itself (store/resolver/status/UI) is fully implemented + tested.
+- **[P2] a stale/expired project override is always removable.** `status()` now
+  returns `override_present` (a project-scope row exists, even expired — the
+  resolver skips expired rows so `scope` would report the global fallback). The
+  Settings override section shows "Remove override" whenever `override_present`,
+  so an expired override that masks itself behind the global default can still be
+  cleaned up.
+- **[P2] Settings reflects the EFFECTIVE status after save/remove.** Both
+  `connectCodex` and `disconnectCodex` now re-fetch the per-project status after
+  their write (the POST/DELETE replies omit `override_present` / the global
+  fallback), so the "Remove override" affordance appears right after saving and a
+  removed override immediately shows the global fallback (not a hard
+  "not connected").
+
+**DECISION FOR RYAN — per-project override does NOT reach a trident RUN (by
+design of trident, not this PR).** Trident runs are **instance-scoped by
+`project_slug`** (the owner boundary) and carry **no per-project credential id**
+(`trident/store.ts` `TridentRun`; runs are created with `project_slug` = owner,
+`slug` = task slug). So `resolveActiveCodexHome(run.project_slug)` resolves the
+GLOBAL default, and a per-project codex override — whose only consumer is the
+instance-scoped trident reviewer — cannot change which credential a given trident
+run uses. The override is fully built + tested at the store/resolver/status/UI
+layer (it honors project → global → unset wherever a real project id is supplied),
+the Settings copy is explicit that the trident review currently uses the global
+credential, and the override takes effect for trident once builds are
+project-scoped (a separate change: thread the originating project id onto the run
++ resolve with it). Ryan asked for a project override "if necessary" — flagging
+that for trident specifically it is a stored preference, not yet a per-run switch.
+Codex cross-model review re-raised this as the remaining item; it is an
+acknowledged trident-architecture constraint, not a defect in this diff.
 ## 2026-07-02 — SEV1 chat project-switch: fresh per-conversation assistant-ui runtime (seamless switch, no error card, no flicker)
 
 **Why.** M1 top-priority (Ryan, frustrated): switching projects (or cold-loading

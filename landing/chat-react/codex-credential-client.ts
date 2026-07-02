@@ -21,11 +21,20 @@
 
 export type CodexConnectionStatus = 'connected' | 'expired' | 'not_connected'
 
+export type CodexScope = 'project' | 'global'
+
 export interface CodexStatus {
   status: CodexConnectionStatus
   materialized?: boolean
   expires_at?: string
   detail?: string
+  /** Which scope supplied the resolved credential (project override vs global
+   *  default), or null when unset. Present on the effective-status responses. */
+  scope?: CodexScope | null
+  /** Whether a project-scoped OVERRIDE row exists for the queried project —
+   *  including an expired one the resolver skipped. Lets the Settings UI always
+   *  offer to remove a stale override. Only on per-project status responses. */
+  override_present?: boolean
 }
 
 interface ErrorBody {
@@ -64,21 +73,43 @@ export class WebCodexCredentialClient {
     this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init))
   }
 
+  /** The GLOBAL (account-wide) route — the primary Connect Codex surface. */
+  private readonly globalPath = '/api/app/codex-auth'
+
   private path(project_id: string): string {
     return `/api/app/projects/${encodeURIComponent(project_id)}/codex-auth`
   }
 
-  /** Current connection status. */
+  // ── GLOBAL (primary — General admin UI) ──
+
+  /** Global connection status (the trident-wide default). */
+  async statusGlobal(): Promise<CodexStatus> {
+    return this.req<CodexStatus>(this.globalPath)
+  }
+
+  /** Connect the GLOBAL Codex subscription. Throws on a metered key. */
+  async connectGlobal(auth: string): Promise<CodexStatus> {
+    return this.req<CodexStatus>(this.globalPath, { method: 'POST', body: { auth } })
+  }
+
+  /** Disconnect the GLOBAL Codex subscription. */
+  async disconnectGlobal(): Promise<void> {
+    await this.req<{ ok: boolean }>(this.globalPath, { method: 'DELETE' })
+  }
+
+  // ── PROJECT OVERRIDE (optional — per-project Settings) ──
+
+  /** Effective status for a project (project override → global default). */
   async status(project_id: string): Promise<CodexStatus> {
     return this.req<CodexStatus>(this.path(project_id))
   }
 
-  /** Connect by pasting a ChatGPT-subscription auth.json. Throws on a metered key. */
+  /** Connect a per-project OVERRIDE subscription. Throws on a metered key. */
   async connect(project_id: string, auth: string): Promise<CodexStatus> {
     return this.req<CodexStatus>(this.path(project_id), { method: 'POST', body: { auth } })
   }
 
-  /** Disconnect (delete the stored credential + materialized auth.json). */
+  /** Remove a project's OVERRIDE (the global default stays). */
   async disconnect(project_id: string): Promise<void> {
     await this.req<{ ok: boolean }>(this.path(project_id), { method: 'DELETE' })
   }

@@ -77,8 +77,19 @@ export interface MiscCompositionInput {
      * admin-panel "Connect Codex" flow materializes `auth.json` into — so the
      * loop and the credential store can never disagree. Falls back to the
      * `NEUTRON_CODEX_HOME` env when absent (legacy / manual dev override).
+     * Ignored when `resolve_codex_home` is supplied.
      */
     codex_home?: string
+    /**
+     * Per-run CODEX_HOME resolver (preferred over `codex_home`). The composer
+     * wires this to `CodexCredentialService.resolveActiveCodexHome`, so the
+     * trident review resolves the credential through the #149 store resolver
+     * (project override → global → unset) with self-healing materialization,
+     * rather than a raw static dir.
+     */
+    resolve_codex_home?: (
+      run: import('../../../trident/store.ts').TridentRun,
+    ) => string | null
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed

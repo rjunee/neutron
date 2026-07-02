@@ -150,3 +150,96 @@ describe('SettingsTab archive action (happy-dom)', () => {
     root.unmount()
   })
 })
+
+describe('SettingsTab Codex override (happy-dom)', () => {
+  it('renders the override section labelled optional', async () => {
+    const { container, root } = await mount((url) => {
+      if (url.endsWith('/api/app/projects/acme/codex-auth')) {
+        return json({ ok: true, status: 'not_connected', scope: null, override_present: false })
+      }
+      return null
+    })
+    expect(container.textContent).toContain('Codex review — project override')
+    expect(container.textContent).toContain('Optional / advanced.')
+    // No override row → no remove button.
+    expect(btn(container, 'Remove override')).toBeUndefined()
+    root.unmount()
+  })
+
+  it('saving an override refetches status so "Remove override" appears immediately (P2)', async () => {
+    let saved = false
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        // Before save: no override. After save: the refetch reports the override.
+        return saved
+          ? json({ ok: true, status: 'connected', scope: 'project', override_present: true })
+          : json({ ok: true, status: 'not_connected', scope: null, override_present: false })
+      }
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && init?.method === 'POST') {
+        saved = true
+        // NOTE: the POST reply intentionally omits `override_present`.
+        return json({ ok: true, status: 'connected', mode: 'subscription', scope: 'project' }, 201)
+      }
+      return null
+    })
+
+    expect(btn(container, 'Remove override')).toBeUndefined()
+    const textarea = container.querySelector('#cset-codex-auth') as HTMLTextAreaElement
+    const setVal = (Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )?.set as (v: string) => void) ?? (() => {})
+    await act(async () => {
+      setVal.call(textarea, '{"tokens":{"access_token":"a","refresh_token":"r"}}')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+    await act(async () => {
+      btn(container, 'Save project override').click()
+      await tick()
+      await tick()
+    })
+    // The refetch populated override_present → the remove affordance is present.
+    expect(container.textContent).toContain('Connected (project override)')
+    expect(btn(container, 'Remove override')).not.toBeUndefined()
+    root.unmount()
+  })
+
+  it('removes a STALE/expired override, then reflects the global fallback (not "not connected") (P2)', async () => {
+    let deleted = false
+    const { container, root, act, calls } = await mount((url, init) => {
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        // BEFORE removal: expired override masks itself → resolver reports the
+        // global default, but override_present stays true (removable). AFTER
+        // removal: the override is gone → plain global fallback.
+        return deleted
+          ? json({ ok: true, status: 'connected', scope: 'global', override_present: false })
+          : json({ ok: true, status: 'connected', scope: 'global', override_present: true })
+      }
+      if (url.endsWith('/api/app/projects/acme/codex-auth') && init?.method === 'DELETE') {
+        deleted = true
+        return json({ ok: true, disconnected: true, scope: 'project' })
+      }
+      return null
+    })
+
+    expect(container.textContent).toContain('Override expired — using the global default')
+    const remove = btn(container, 'Remove override')
+    expect(remove).not.toBeUndefined()
+    await act(async () => {
+      remove.click()
+      await tick()
+      await tick()
+    })
+    expect(deleted).toBe(true)
+    expect(
+      calls.some((c) => c === 'DELETE https://sam.neutron.test/api/app/projects/acme/codex-auth'),
+    ).toBe(true)
+    // After removal the effective status is the GLOBAL default — NOT "not connected".
+    expect(container.textContent).toContain('Connected (using the global default)')
+    expect(container.textContent).not.toContain('○ Not connected')
+    // Override row gone → no remove button.
+    expect(btn(container, 'Remove override')).toBeUndefined()
+    root.unmount()
+  })
+})
