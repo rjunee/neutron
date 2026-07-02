@@ -74,7 +74,7 @@ export interface BoardBoundBuildDeps {
    * The owner HOME base under which per-project build workspaces are created —
    * NOT the git repo itself. The chokepoint resolves each project's own
    * git-initialized workspace `<owner_home>/Projects/<project_slug>/code` from
-   * it (`resolveWorkspace`) and writes THAT onto the run row's `repo_path`, so a
+   * it (`resolveBuildRepo`) and writes THAT onto the run row's `repo_path`, so a
    * brand-new project (no pre-existing repo) is still buildable and every
    * project's build is isolated. Both callers pass the owner HOME.
    */
@@ -84,7 +84,7 @@ export interface BoardBoundBuildDeps {
    * workspace, returning its absolute path. Defaults to
    * `ensureProjectBuildWorkspace` over the production fs/git probe. Test seam.
    */
-  resolveWorkspace?: (owner_home: string, project_slug: string) => Promise<string>
+  resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   /** Defaults to `detectMergeMode` over the production probe. Test seam. */
   resolveMergeMode?: () => Promise<MergeMode>
   /** Defaults to `detectRalphMode`. Test seam. */
@@ -153,8 +153,8 @@ export async function dispatchBoardBoundBuild(
   let merge_mode: MergeMode
   let ralph: boolean
   try {
-    repo_path = await (deps.resolveWorkspace ??
-      ((home, slug) => ensureProjectBuildWorkspace(home, slug).then((r) => r.workspace_path)))(
+    repo_path = await (deps.resolveBuildRepo ??
+      ((home, slug) => ensureProjectBuildWorkspace(home, slug).then((r) => r.build_repo_path)))(
       deps.repo_path,
       deps.project_slug,
     )

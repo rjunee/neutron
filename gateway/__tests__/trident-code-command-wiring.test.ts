@@ -55,7 +55,7 @@ function ctxFor(): TridentCodeContext {
     },
     project_slug: 'proj-1',
     repo_path: '/repo',
-    resolveWorkspace: async (home) => home,
+    resolveBuildRepo: async (home) => home,
     resolveMergeMode: async () => 'local',
     resolveRalph: async () => false,
   }

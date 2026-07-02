@@ -36,7 +36,7 @@ base FIRST, runs merge-mode / ralph detection against the RESOLVED workspace, an
 writes the resolved path onto the run row's `repo_path`. The old
 `repo_path = owner_home` assignment is deleted — the three dispatch dep interfaces
 (`board-dispatch.ts`, `work-board-build-tool.ts`, `code-command.ts`) now document
-`repo_path` as the owner HOME BASE, with an injectable `resolveWorkspace` test seam
+`repo_path` as the owner HOME BASE, with an injectable `resolveBuildRepo` test seam
 defaulting to the real resolver. A brand-new local project has no GitHub origin, so
 `detectMergeMode` correctly degrades to `'local'` (branch + local merge, no PR) —
 the success signal for a new local project is a local BRANCH WITH COMMITS, not a PR.

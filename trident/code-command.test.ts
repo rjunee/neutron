@@ -76,7 +76,7 @@ function ctx(over: Partial<TridentCodeContext> = {}): TridentCodeContext {
     project_slug: 'proj-1',
     repo_path: '/repo',
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
-    resolveWorkspace: async (home) => home,
+    resolveBuildRepo: async (home) => home,
     resolveMergeMode: async () => 'pr',
     resolveRalph: async () => false,
     ...over,

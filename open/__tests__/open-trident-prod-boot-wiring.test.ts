@@ -160,7 +160,7 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         // Identity workspace resolver — this boot-wiring test asserts reachability,
         // not the real git workspace (covered in build-workspace.test.ts); keep it
         // off the real filesystem.
-        resolveWorkspace: async (home) => home,
+        resolveBuildRepo: async (home) => home,
         resolveMergeMode: async () => 'local',
         resolveRalph: async () => false,
       },

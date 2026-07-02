@@ -25,7 +25,7 @@ import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 
 /** Subdir under a project root that holds its git-tracked code (convention:
  *  `<owner_home>/Projects/<project_slug>/code`). */
-export const PROJECT_WORKSPACE_DIRNAME = 'code'
+export const PROJECT_CODE_DIRNAME = 'code'
 
 /**
  * Filesystem + git seam the resolver needs. Tests inject a stub; production
@@ -54,7 +54,7 @@ export function defaultBuildWorkspaceProbe(): BuildWorkspaceProbe {
 
 export interface EnsureBuildWorkspaceResult {
   /** Absolute path: `<owner_home>/Projects/<project_slug>/code`. */
-  workspace_path: string
+  build_repo_path: string
   /** True iff this call initialized the repo (fresh init + initial commit). */
   created: boolean
 }
@@ -88,20 +88,20 @@ export async function ensureProjectBuildWorkspace(
   project_slug: string,
   probe: BuildWorkspaceProbe = defaultBuildWorkspaceProbe(),
 ): Promise<EnsureBuildWorkspaceResult> {
-  const workspace_path = join(owner_home, 'Projects', project_slug, PROJECT_WORKSPACE_DIRNAME)
+  const build_repo_path = join(owner_home, 'Projects', project_slug, PROJECT_CODE_DIRNAME)
 
-  if (!probe.exists(workspace_path)) probe.mkdirp(workspace_path)
+  if (!probe.exists(build_repo_path)) probe.mkdirp(build_repo_path)
 
   // Already a repo WITH a commit? Nothing to do — never re-init or re-commit a
   // healthy workspace (that would surprise-commit the user's working tree).
-  if (probe.exists(join(workspace_path, '.git'))) {
-    const head = await probe.git(['rev-parse', '--verify', 'HEAD'], workspace_path)
-    if (head.ok) return { workspace_path, created: false }
+  if (probe.exists(join(build_repo_path, '.git'))) {
+    const head = await probe.git(['rev-parse', '--verify', 'HEAD'], build_repo_path)
+    if (head.ok) return { build_repo_path, created: false }
   } else {
-    const init = await probe.git(['init', '-q', '--initial-branch=main'], workspace_path)
+    const init = await probe.git(['init', '-q', '--initial-branch=main'], build_repo_path)
     if (!init.ok) {
       throw new Error(
-        `git init failed at ${workspace_path}: ${init.stderr || init.stdout || `exit ${init.exit_code}`}`,
+        `git init failed at ${build_repo_path}: ${init.stderr || init.stdout || `exit ${init.exit_code}`}`,
       )
     }
   }
@@ -111,13 +111,13 @@ export async function ensureProjectBuildWorkspace(
   // branch on; the empty tree is fine, Forge writes the first files.
   const commit = await probe.git(
     [...COMMIT_IDENTITY, 'commit', '-q', '--allow-empty', '-m', `chore: initialize ${project_slug} build workspace`],
-    workspace_path,
+    build_repo_path,
   )
   if (!commit.ok) {
     throw new Error(
-      `git initial commit failed at ${workspace_path}: ${commit.stderr || commit.stdout || `exit ${commit.exit_code}`}`,
+      `git initial commit failed at ${build_repo_path}: ${commit.stderr || commit.stdout || `exit ${commit.exit_code}`}`,
     )
   }
 
-  return { workspace_path, created: true }
+  return { build_repo_path, created: true }
 }

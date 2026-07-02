@@ -203,7 +203,7 @@ export interface MiscCompositionInput {
     /** Owner HOME base — the chokepoint resolves each project's own
      *  `<home>/Projects/<slug>/code` workspace under it (see `board-dispatch.ts`). */
     repo_path: string
-    resolveWorkspace?: (owner_home: string, project_slug: string) => Promise<string>
+    resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
     resolveMergeMode?: () => Promise<import('../../../trident/store.ts').MergeMode>
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('../../../channels/types.ts').Topic['channel_kind']

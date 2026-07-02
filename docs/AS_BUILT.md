@@ -19,7 +19,7 @@ INITIAL COMMIT so `git worktree add` has a HEAD) a per-project
 detection against the RESOLVED workspace, and writes that per-project path onto the
 run row's `repo_path` — replacing the old `repo_path = owner_home` assignment (one
 code path, no flag). The three dispatch dep interfaces now document `repo_path` as
-the owner HOME BASE with an injectable `resolveWorkspace` test seam. A fresh local
+the owner HOME BASE with an injectable `resolveBuildRepo` test seam. A fresh local
 project has no origin → merge mode `'local'` (branch + local merge, no PR); success
 = a local BRANCH WITH COMMITS, not a PR#.
 

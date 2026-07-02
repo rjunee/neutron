@@ -20,7 +20,7 @@ import { dispatchBoardBoundBuild } from './board-dispatch.ts'
 import {
   ensureProjectBuildWorkspace,
   defaultBuildWorkspaceProbe,
-  PROJECT_WORKSPACE_DIRNAME,
+  PROJECT_CODE_DIRNAME,
   type BuildWorkspaceProbe,
 } from './build-workspace.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
@@ -68,8 +68,8 @@ describe('ensureProjectBuildWorkspace (pure probe)', () => {
     const { probe, calls, made } = stubProbe(new Set(), () => ok)
     const res = await ensureProjectBuildWorkspace('/home', 'litewal', probe)
 
-    const expected = join('/home', 'Projects', 'litewal', PROJECT_WORKSPACE_DIRNAME)
-    expect(res.workspace_path).toBe(expected)
+    const expected = join('/home', 'Projects', 'litewal', PROJECT_CODE_DIRNAME)
+    expect(res.build_repo_path).toBe(expected)
     expect(res.created).toBe(true)
     expect(made).toContain(expected)
     // init then commit (with --allow-empty so a fileless new project still gets a HEAD).
@@ -79,7 +79,7 @@ describe('ensureProjectBuildWorkspace (pure probe)', () => {
   })
 
   test('existing repo WITH a commit → idempotent no-op (never re-commits)', async () => {
-    const workspace = join('/home', 'Projects', 'meditation', PROJECT_WORKSPACE_DIRNAME)
+    const workspace = join('/home', 'Projects', 'meditation', PROJECT_CODE_DIRNAME)
     const existing = new Set([workspace, join(workspace, '.git')])
     const { probe, calls } = stubProbe(existing, (args) =>
       args[0] === 'rev-parse' ? ok : fail,
@@ -92,7 +92,7 @@ describe('ensureProjectBuildWorkspace (pure probe)', () => {
   })
 
   test('repo dir exists but has NO commit → makes the initial commit (no re-init)', async () => {
-    const workspace = join('/home', 'Projects', 'half', PROJECT_WORKSPACE_DIRNAME)
+    const workspace = join('/home', 'Projects', 'half', PROJECT_CODE_DIRNAME)
     const existing = new Set([workspace, join(workspace, '.git')])
     const { probe, calls } = stubProbe(existing, (args) =>
       args[0] === 'rev-parse' ? fail : ok,
@@ -120,7 +120,7 @@ describe('ensureProjectBuildWorkspace (real git)', () => {
   test('creates a git repo with a commit that `git worktree add` can branch from', async () => {
     const res = await ensureProjectBuildWorkspace(home, 'dagrunner', defaultBuildWorkspaceProbe())
     const expected = join(home, 'Projects', 'dagrunner', 'code')
-    expect(res.workspace_path).toBe(expected)
+    expect(res.build_repo_path).toBe(expected)
     expect(res.created).toBe(true)
     expect(existsSync(join(expected, '.git'))).toBe(true)
 
@@ -143,11 +143,11 @@ describe('ensureProjectBuildWorkspace (real git)', () => {
 
   test('idempotent on a second call — same path, created=false, no new commit', async () => {
     const first = await ensureProjectBuildWorkspace(home, 'again', defaultBuildWorkspaceProbe())
-    const countBefore = (await git(first.workspace_path, 'rev-list', '--count', 'HEAD')).stdout
+    const countBefore = (await git(first.build_repo_path, 'rev-list', '--count', 'HEAD')).stdout
     const second = await ensureProjectBuildWorkspace(home, 'again', defaultBuildWorkspaceProbe())
-    expect(second.workspace_path).toBe(first.workspace_path)
+    expect(second.build_repo_path).toBe(first.build_repo_path)
     expect(second.created).toBe(false)
-    const countAfter = (await git(first.workspace_path, 'rev-list', '--count', 'HEAD')).stdout
+    const countAfter = (await git(first.build_repo_path, 'rev-list', '--count', 'HEAD')).stdout
     expect(countAfter).toBe(countBefore) // no surprise re-commit
   })
 })
