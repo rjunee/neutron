@@ -39,11 +39,19 @@ export interface UseNeutronChat {
   vm: ChatViewModel
 }
 
-export function useNeutronChat(
-  controller: NeutronChatController,
-  origin: string,
-  draft?: AttachmentDraft,
-): UseNeutronChat {
+/**
+ * Mirror the controller's synchronous view-model into React state and drive its
+ * lifecycle (start on mount, stop on unmount, pause/resume on tab visibility).
+ *
+ * This is DELIBERATELY separate from {@link useChatRuntime}: the controller
+ * lifecycle is keyed on the controller instance and MUST survive a project
+ * switch untouched (a switch re-scopes the same controller's socket — it does
+ * NOT restart the controller), whereas the assistant-ui runtime is rebuilt
+ * per-conversation (see {@link useChatRuntime}). Keeping them apart lets a
+ * caller remount the runtime on `convId` change without ever tearing down the
+ * subscription/lifecycle.
+ */
+export function useNeutronChatVm(controller: NeutronChatController): ChatViewModel {
   const [vm, setVm] = useState<ChatViewModel>(() => controller.getViewModel())
 
   useEffect(() => {
@@ -60,6 +68,33 @@ export function useNeutronChat(
     }
   }, [controller])
 
+  return vm
+}
+
+/**
+ * Build the assistant-ui `ExternalStoreRuntime` from the current view-model.
+ *
+ * SEV1 chat project-switch race (2026-07-02) — a project switch must mount a
+ * FRESH runtime, NOT reuse a single stable one. The assistant-ui message
+ * primitives resolve a part by INDEX into the runtime's live message list; if
+ * the same runtime is retained across a switch, `controller.setProject` empties
+ * `msgs` IN-PLACE and the shared runtime shrinks to length 0 while stale
+ * `MessagePart` subscribers from the outgoing project still index into it →
+ * `useClientLookup: Index N out of bounds (length: 0)` → the render throws and
+ * the #162 error boundary trips. The caller therefore mounts the host that
+ * calls THIS hook with `key={convId}` (see `ConversationRuntimeHost` in
+ * ChatApp.tsx): each conversation gets its own runtime, the outgoing runtime is
+ * discarded WHOLE (never shrunk in place), and the incoming one starts from the
+ * already-scoped (empty → hydrating) `msgs` — so no part ever indexes a stale
+ * position. This is the root-cause fix; the boundary stays only as a last
+ * resort that now (essentially) never fires on a normal switch/load.
+ */
+export function useChatRuntime(
+  controller: NeutronChatController,
+  vm: ChatViewModel,
+  origin: string,
+  draft?: AttachmentDraft,
+): ReturnType<typeof useExternalStoreRuntime> {
   const convertMessage = useMemo(
     () => (m: RenderMessage) => toThreadMessage(m, origin),
     [origin],
@@ -112,5 +147,21 @@ export function useNeutronChat(
 
   const runtime = useExternalStoreRuntime<RenderMessage>(adapter)
 
+  return runtime
+}
+
+/**
+ * Backward-compatible convenience wrapper: mirror the vm AND build a runtime in
+ * one call. Retained for the test harnesses that predate the per-conversation
+ * split; production code uses {@link useNeutronChatVm} + a `convId`-keyed host
+ * that calls {@link useChatRuntime} so the runtime resets per conversation.
+ */
+export function useNeutronChat(
+  controller: NeutronChatController,
+  origin: string,
+  draft?: AttachmentDraft,
+): UseNeutronChat {
+  const vm = useNeutronChatVm(controller)
+  const runtime = useChatRuntime(controller, vm, origin, draft)
   return { runtime, vm }
 }

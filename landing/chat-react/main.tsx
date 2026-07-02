@@ -14,7 +14,6 @@
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import { WebChatSession, createWebStore } from '@neutron/chat-core'
 
 import { ProjectShell } from './ProjectShell.tsx'
@@ -26,7 +25,7 @@ import {
   type WindowLike,
 } from './config.ts'
 import { NeutronChatController } from './controller.ts'
-import { useNeutronChat } from './useNeutronChat.ts'
+import { useNeutronChatVm } from './useNeutronChat.ts'
 import { useAttachmentDraft } from './useAttachmentDraft.ts'
 
 function Root({
@@ -37,15 +36,14 @@ function Root({
   config: BootstrapConfig
 }): React.JSX.Element {
   const draft = useAttachmentDraft({ token: config.token })
-  const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
-  // ProjectShell wraps ChatApp as the Chat tab and renders the project's
-  // registry-resolved tab bar (WAVE 3 PR-4). The runtime provider stays at the
-  // root so the chat session survives switching tabs.
-  return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ProjectShell vm={vm} controller={controller} config={config} draft={draft} />
-    </AssistantRuntimeProvider>
-  )
+  // Mirror the controller vm + drive its lifecycle here (stable across the
+  // whole session). The assistant-ui runtime is NO LONGER provided at the root:
+  // it's built per-conversation inside `ChatApp` (`ConversationRuntimeHost`,
+  // keyed by convId) so a project switch mounts a fresh runtime and can't index
+  // a stale message list (SEV1 switch-race fix). The chat session still survives
+  // tab switches because `ProjectShell` keeps `ChatApp` mounted.
+  const vm = useNeutronChatVm(controller)
+  return <ProjectShell vm={vm} controller={controller} config={config} draft={draft} />
 }
 
 function renderError(rootEl: HTMLElement, message: string): void {

@@ -2,6 +2,69 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — SEV1 chat project-switch: fresh per-conversation assistant-ui runtime (seamless switch, no error card, no flicker)
+
+**Why.** M1 top-priority (Ryan, frustrated): switching projects (or cold-loading
+one) frequently tripped the #162 error boundary ("This conversation hit a snag /
+Try again"), and "Try again" fixed it — a transient render race, not a real
+failure. Ryan: "an annoying useless error message is just as bad as a black
+screen. fix the underlying problem. This should be seamless." Same root also
+caused the tab-bar / input-box flicker on switch. No feature flags. The #162
+keyed error boundary was NOT the fix — it only *caught* the throw; the goal was
+to eliminate the underlying race so it essentially never fires.
+
+**Root cause (verified).** The assistant-ui message primitives resolve a part by
+INDEX into the runtime's live message list (`@assistant-ui/react`
+`useExternalStoreRuntime`; `useClientLookup` throws `Index N out of bounds
+(length: 0)`). The runtime was a SINGLE stable instance created once at the root
+(`main.tsx` `useNeutronChat` → `AssistantRuntimeProvider`). On a project switch,
+`controller.setProject` (`landing/chat-react/controller.ts:439`) sets `this.msgs
+= []` and publishes an EMPTY list; the ExternalStore adapter handed that emptied
+list to the SAME retained runtime while a stale `MessagePart` from the outgoing
+project still indexed a position into it → throw mid-render → #162 boundary
+trips. #162's keyed *render subtree* remount reduced but did not eliminate the
+one-frame race because the RUNTIME itself was never reset per conversation — the
+shared runtime shrank in place with old subscribers still attached.
+
+**What shipped.**
+
+- **Per-conversation runtime (root-cause fix).** Split
+  `landing/chat-react/useNeutronChat.ts` into `useNeutronChatVm` (vm mirror +
+  controller lifecycle — stable across the session, keyed on the controller) and
+  `useChatRuntime` (builds the `ExternalStoreRuntime` from the current vm). A new
+  `ConversationRuntimeHost` in `ChatApp.tsx` calls `useChatRuntime` and is mounted
+  with `key={convId}` (`conversationIdOf(projectId)`), so every conversation gets
+  its OWN runtime. On a switch the outgoing runtime is discarded WHOLE — never
+  shrunk in place — and the incoming one starts from the already-scoped (empty →
+  hydrating) list, so no part ever indexes a stale position. The provider moved
+  OFF the root (`main.tsx` now renders `ProjectShell` directly with a
+  `useNeutronChatVm` vm) and DOWN to wrap only the chat surface (thread +
+  composer), so the TabBar + project rail above it stay mounted.
+- **Atomic transition.** A genuinely empty project renders assistant-ui's
+  `ThreadPrimitive.Empty` ("Send a message to begin."), never an index into `[]`.
+- **Tab-bar flicker fix.** `ProjectShell.tsx` tab-resolution effect no longer
+  collapses `tabs` to `[CHAT_TAB]` on every switch before re-fetching (a visible
+  two-step flicker). It reconciles IN PLACE: keep the current descriptors mounted
+  until the new set resolves, mark the scope in-flight (`tabsScope = null`, which
+  the doc-link resolver keys off), and swap in one step — the always-present Chat
+  tab (stable key) never remounts. While the fetch is in flight the still-mounted
+  descriptors belong to the OUTGOING scope, so every non-Chat tab is DISABLED and
+  the active tab is clamped to Chat (Codex P2): a stale button can't be clicked to
+  mount a wrong-scope `TabContent` (e.g. the old project's Core iframe) mid-switch.
+- **Safety net kept.** The #162 `ChatErrorBoundary` stays as a last-resort catch
+  (not removed), but now essentially never fires on a normal switch/load.
+
+**Tests.** `landing/chat-react/__tests__/chat-rail-stability.test.tsx` extended:
+the laden-General → empty-project switch now also asserts the boundary card
+("This conversation hit a snag") is ABSENT — proving the RUNTIME RESET prevented
+the throw, not the boundary catching it. Added a rapid-switch stress test
+(General → alpha → beta → empty → General → … 8 hops) asserting no index throw,
+no boundary, clean empty state, and no stale-content bleed. Harnesses mirror
+production wiring (no external `AssistantRuntimeProvider`; `ChatApp` self-owns the
+runtime). Full `landing/chat-react` suite: 231 pass / 0 fail; `tsc -p
+landing/chat-react/tsconfig.json` clean; browser bundle + live iso server
+(`/chat`, lazy `/chat-react.js`) build and serve cleanly.
+
 ## 2026-07-01 — trident-parity Part B: Connect Codex (subscription auth) + agent auto-invokes trident
 
 **Why.** Part A (#165) wired the trident cross-model reviewer (`codex-review.sh`

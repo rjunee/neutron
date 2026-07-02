@@ -18,6 +18,7 @@ import {
   MessagePrimitive,
   ComposerPrimitive,
   MessagePartPrimitive,
+  AssistantRuntimeProvider,
   useMessage,
   useMessagePartText,
   useComposer,
@@ -25,6 +26,7 @@ import {
 } from '@assistant-ui/react'
 import { Markdown } from './Markdown.tsx'
 import { ChatErrorBoundary } from './ChatErrorBoundary.tsx'
+import { useChatRuntime } from './useNeutronChat.ts'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
 import type { ChatViewModel, RenderMessage, ImportProgressVM } from './controller.ts'
@@ -1142,18 +1144,17 @@ function ChatSurface({
     onDrop,
   }
 
-  // SEV1 chat-rail stability (2026-07-01) — the assistant-ui message primitives
-  // resolve a message/part by INDEX into the runtime's live list; a project
-  // switch publishes an EMPTY list before the new topic hydrates, so a stale
-  // `<MessagePartPrimitive.Text>` from the outgoing project would index past the
-  // end and throw (`useClientLookup: Index N out of bounds`). Keying the thread
-  // subtree by the active conversation REMOUNTS it on every switch, so no stale
-  // MessagePart survives to index into the emptied list (root-cause fix). The
-  // `ChatErrorBoundary` is defense-in-depth: keyed by the SAME id, it both
-  // resets on a switch and catches any residual render throw into a recoverable
-  // fallback instead of a dead black screen.
-  const convId = vm.projectId !== null && vm.projectId.length > 0 ? vm.projectId : '__general__'
-
+  // SEV1 chat project-switch race (2026-07-02) — the assistant-ui message
+  // primitives resolve a message/part by INDEX into the runtime's live list, so
+  // a runtime shared across a project switch (whose `msgs` empties IN-PLACE)
+  // let a stale `<MessagePartPrimitive.Text>` index past the end and throw
+  // (`useClientLookup: Index N out of bounds`). The ROOT-CAUSE fix now lives one
+  // level up: `ConversationRuntimeHost` mounts a FRESH runtime per conversation
+  // (keyed on `convId`), so this whole surface — thread AND composer — remounts
+  // atomically on a switch and the outgoing runtime is discarded whole (never
+  // shrunk in place). `ChatErrorBoundary` stays as a pure last-resort safety net
+  // that catches any residual render throw into a recoverable fallback instead
+  // of a dead black screen; it should essentially never fire on a normal switch.
   return (
     <main
       className={`car-main${dragOver && !importActive ? ' car-dragover' : ''}`}
@@ -1161,7 +1162,7 @@ function ChatSurface({
     >
       <ConnectionBanner status={vm.status} />
       <WebDropZoneOverlay visible={dragOver && importActive} source={importSourceLabel(uploadAffordance)} />
-      <ChatErrorBoundary key={convId} onBackToGeneral={() => controller.setProject(null)}>
+      <ChatErrorBoundary onBackToGeneral={() => controller.setProject(null)}>
       <ThreadPrimitive.Root className="car-thread">
         <ThreadPrimitive.Viewport className="car-viewport">
           <ThreadPrimitive.Empty>
@@ -1214,6 +1215,44 @@ function ChatSurface({
   )
 }
 
+/**
+ * The stable per-conversation identity — the project id, or a sentinel for the
+ * user-scoped General topic. Keying {@link ConversationRuntimeHost} on this
+ * gives every conversation its OWN assistant-ui runtime.
+ */
+export function conversationIdOf(projectId: string | null): string {
+  return projectId !== null && projectId.length > 0 ? projectId : '__general__'
+}
+
+/**
+ * Owns the assistant-ui `AssistantRuntimeProvider` for ONE conversation.
+ *
+ * SEV1 chat project-switch race (2026-07-02) — mounted with `key={convId}` so a
+ * project switch REMOUNTS it and builds a FRESH `useExternalStoreRuntime` (see
+ * {@link useChatRuntime}). Because the outgoing runtime is discarded whole —
+ * never emptied in place — no stale `MessagePart` from the previous project can
+ * index into a now-length-0 list mid-render. The provider wraps the entire chat
+ * surface (thread AND composer), since both consume the runtime context; the
+ * TabBar + project rail live ABOVE this in `ProjectShell` and stay mounted, so
+ * the switch swaps only the message list + composer, never the shell chrome.
+ */
+function ConversationRuntimeHost({
+  controller,
+  vm,
+  origin,
+  draft,
+  children,
+}: {
+  controller: NeutronChatController
+  vm: ChatViewModel
+  origin: string
+  draft: AttachmentDraft
+  children: React.ReactNode
+}): React.JSX.Element {
+  const runtime = useChatRuntime(controller, vm, origin, draft)
+  return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
+}
+
 export function ChatApp({
   vm,
   controller,
@@ -1260,19 +1299,33 @@ export function ChatApp({
   // `ProjectShell` (the rail is a persistent left column across ALL tabs; this
   // surface is only the chat pane). `ChatApp` stays mounted across tab switches
   // so the live session, stream, and scroll state survive.
+  //
+  // `ConversationRuntimeHost` is keyed by the active conversation so the
+  // assistant-ui runtime is rebuilt per project (the SEV1 switch-race fix). The
+  // message-bubble contexts stay ABOVE it: they carry no assistant-ui index
+  // state, so they can persist across the switch and just take fresh values.
+  const convId = conversationIdOf(vm.projectId)
   return (
     <DocLinkContext.Provider value={docLinkCtx}>
     <UploadsContext.Provider value={uploadsCtx}>
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
     <ButtonsContext.Provider value={buttonsCtx}>
-      <ChatSurface
-        vm={vm}
+      <ConversationRuntimeHost
+        key={convId}
         controller={controller}
-        config={config}
+        vm={vm}
+        origin={config.origin}
         draft={draft}
-        uploadAffordance={uploadAffordance}
-      />
+      >
+        <ChatSurface
+          vm={vm}
+          controller={controller}
+          config={config}
+          draft={draft}
+          uploadAffordance={uploadAffordance}
+        />
+      </ConversationRuntimeHost>
     </ButtonsContext.Provider>
     </EditsContext.Provider>
     </ReactionsContext.Provider>
