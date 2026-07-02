@@ -578,6 +578,14 @@ export interface ComposeHttpHandlerInput {
    */
   appProjectCredentials?: AppProjectCredentialsHandler
   /**
+   * Part B — admin-panel Connect Codex surface. When supplied, the composed
+   * handler routes `/api/app/projects/<id>/codex-auth` (GET/POST/DELETE) ahead
+   * of `appProjects`, mirroring the credentials precedence. Reuses the generic
+   * `{ handler }` shape. Surface factory:
+   * `gateway/http/codex-credential-surface.ts:createCodexCredentialSurface`.
+   */
+  appCodexCredential?: AppProjectCredentialsHandler
+  /**
    * P7.4 restore UI — Expo-app project-backups + restore surface. When
    * supplied, the composed HTTP chain mounts:
    *
@@ -852,6 +860,7 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
     appTabs,
     appWorkBoard,
     appProjectCredentials,
+    appCodexCredential,
     appBackups,
     cores,
     coresOAuth,
@@ -1133,6 +1142,14 @@ export function composeHttpHandler(input: ComposeHttpHandlerInput): ComposedHttp
       if (appProjectCredentials !== undefined) {
         const credRes = await appProjectCredentials.handler(req)
         if (credRes !== null) return credRes
+      }
+      // 0h1d. Part B — admin-panel Connect Codex surface. Owns
+      //       `/api/app/projects/<id>/codex-auth` (GET/POST/DELETE). Mounted
+      //       alongside credentials, BEFORE appProjects, so the per-project
+      //       `/codex-auth` child path is unambiguously owned.
+      if (appCodexCredential !== undefined) {
+        const codexRes = await appCodexCredential.handler(req)
+        if (codexRes !== null) return codexRes
       }
       // 0h2. Expo-app project-settings + project-list surface — P5.2
       //      + ISSUES #9. Owns:

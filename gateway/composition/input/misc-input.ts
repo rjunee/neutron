@@ -69,6 +69,16 @@ export interface MiscCompositionInput {
      * the call in try/catch so a hook error never un-terminates a finished run.
      */
     on_run_terminal?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
+    /**
+     * Per-owner CODEX_HOME dir for the OPTIONAL cross-model review (Part B).
+     * When set, the trident loop threads it into the inner workflow so the codex
+     * reviewer runs `trident/codex-review.sh` with this CODEX_HOME. The composer
+     * resolves it via `resolveCodexHome({ owner_home })` — the SAME path the
+     * admin-panel "Connect Codex" flow materializes `auth.json` into — so the
+     * loop and the credential store can never disagree. Falls back to the
+     * `NEUTRON_CODEX_HOME` env when absent (legacy / manual dev override).
+     */
+    codex_home?: string
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
@@ -185,6 +195,16 @@ export interface MiscCompositionInput {
     channel_kind?: import('../../../channels/types.ts').Topic['channel_kind']
     max_rounds?: number
     max_ralph_rounds?: number
+  }
+  /**
+   * Codex connect/status agent tools (Part B) — when supplied, the `tools`
+   * module registers `codex_connect` + `codex_status`, agent-native parity with
+   * the admin-panel Connect Codex flow. Both dispatch the SAME
+   * `CodexCredentialService` (subscription-only validation, metered key rejected,
+   * store in the #149 credential store, materialize to the per-project CODEX_HOME).
+   */
+  codex_credential?: {
+    service: import('../../../trident/codex-credential.ts').CodexCredentialService
   }
   /**
    * Create-project capability — when supplied, the `tools` module registers the

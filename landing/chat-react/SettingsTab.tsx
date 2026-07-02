@@ -32,6 +32,7 @@ import {
   type CredentialScope,
   type Rec,
 } from './project-credentials-client.ts'
+import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -69,6 +70,17 @@ export function SettingsTab({
     [fetchImpl],
   )
 
+  // Codex connect client (Part B — trident cross-model reviewer credential).
+  const codexClient = useMemo(
+    () =>
+      new WebCodexCredentialClient(
+        fetchImpl !== undefined
+          ? { base_url: config.origin, token: config.token, fetchImpl }
+          : { base_url: config.origin, token: config.token },
+      ),
+    [config.origin, config.token, fetchImpl],
+  )
+
   // ── credentials ──
   const [projectCreds, setProjectCreds] = useState<Rec[]>([])
   const [globalCreds, setGlobalCreds] = useState<Rec[]>([])
@@ -84,6 +96,51 @@ export function SettingsTab({
 
   // Per-row delete guard so a double-click can't fire two deletes.
   const [busyKey, setBusyKey] = useState<string | null>(null)
+
+  // ── codex connect (Part B) ──
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
+  const [codexAuth, setCodexAuth] = useState('')
+  const [codexBusy, setCodexBusy] = useState(false)
+  const [codexError, setCodexError] = useState<string | null>(null)
+
+  const loadCodex = useCallback((): void => {
+    void codexClient
+      .status(projectId)
+      .then((s) => setCodexStatus(s))
+      .catch(() => setCodexStatus({ status: 'not_connected' }))
+  }, [codexClient, projectId])
+
+  const connectCodex = useCallback((): void => {
+    if (codexAuth.trim().length === 0) return
+    setCodexBusy(true)
+    setCodexError(null)
+    void codexClient
+      .connect(projectId, codexAuth.trim())
+      .then((s) => {
+        setCodexStatus(s)
+        setCodexAuth('')
+        setCodexBusy(false)
+      })
+      .catch((err: unknown) => {
+        setCodexBusy(false)
+        setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
+      })
+  }, [codexClient, projectId, codexAuth])
+
+  const disconnectCodex = useCallback((): void => {
+    setCodexBusy(true)
+    setCodexError(null)
+    void codexClient
+      .disconnect(projectId)
+      .then(() => {
+        setCodexStatus({ status: 'not_connected' })
+        setCodexBusy(false)
+      })
+      .catch((err: unknown) => {
+        setCodexBusy(false)
+        setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
+      })
+  }, [codexClient, projectId])
 
   // ── project name ──
   const [name, setName] = useState('')
@@ -179,7 +236,8 @@ export function SettingsTab({
     setMembers([])
     loadCreds()
     loadSettings()
-  }, [loadCreds, loadSettings, projectId])
+    loadCodex()
+  }, [loadCreds, loadSettings, loadCodex, projectId])
 
   const addCredential = useCallback((): void => {
     const svc = service.trim()
@@ -419,6 +477,66 @@ export function SettingsTab({
               disabled={saving || service.trim().length === 0 || token.length === 0}
             >
               {saving ? 'Saving…' : 'Add credential'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      {/* ── Codex review (Part B — trident cross-model reviewer credential) ── */}
+      <section className="cset-section" aria-label="Codex review">
+        <h2 className="cset-h">Codex cross-model review</h2>
+        <p className="cset-sub">
+          Connect a ChatGPT <strong>subscription</strong> so trident builds get an independent
+          GPT-5 (Codex) review alongside Claude. Run <code>codex login</code> on your machine, then
+          paste the contents of <code>~/.codex/auth.json</code> below. A metered
+          <code> OPENAI_API_KEY</code> is rejected — subscription only.
+        </p>
+        <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
+          {codexStatus?.status === 'connected'
+            ? '✓ Connected'
+            : codexStatus?.status === 'expired'
+              ? '⚠ Token expired — re-connect'
+              : '○ Not connected'}
+          {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
+        </p>
+        {codexError !== null ? <p className="cset-error">{codexError}</p> : null}
+        {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+          <div className="cset-form-actions">
+            <button
+              type="button"
+              className="cset-btn"
+              disabled={codexBusy}
+              onClick={disconnectCodex}
+            >
+              {codexBusy ? 'Working…' : 'Disconnect Codex'}
+            </button>
+          </div>
+        ) : null}
+        <form
+          className="cset-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            connectCodex()
+          }}
+        >
+          <label className="cset-label" htmlFor="cset-codex-auth">
+            Paste ~/.codex/auth.json
+          </label>
+          <textarea
+            id="cset-codex-auth"
+            className="cset-input cset-codex-textarea"
+            rows={4}
+            placeholder='{ "tokens": { "access_token": "…", "refresh_token": "…" }, "last_refresh": "…" }'
+            value={codexAuth}
+            onChange={(e) => setCodexAuth(e.target.value)}
+          />
+          <div className="cset-form-actions">
+            <button
+              type="submit"
+              className="cset-btn cset-btn-primary"
+              disabled={codexBusy || codexAuth.trim().length === 0}
+            >
+              {codexBusy ? 'Connecting…' : 'Connect Codex'}
             </button>
           </div>
         </form>

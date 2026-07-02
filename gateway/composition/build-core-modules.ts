@@ -24,6 +24,7 @@ import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
 import { registerGBrainSearchToolSurface } from '../../gbrain-memory/agent-tool.ts'
 import { registerWorkBoardToolSurface } from '../../work-board/agent-tool.ts'
 import { registerTridentBuildToolSurface } from '../../trident/work-board-build-tool.ts'
+import { registerCodexCredentialToolSurface } from '../../trident/codex-credential-tool.ts'
 import { registerCreateProjectToolSurface } from '../realmode-composer/create-project-tool.ts'
 import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
 import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
@@ -202,6 +203,14 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // runId. Enforces the required-item + ask-before-acting chokepoint.
       if (input.trident_build_dispatch !== undefined) {
         registerTridentBuildToolSurface(reg, input.trident_build_dispatch)
+      }
+      // Codex connect/status (Part B) — register the `codex_connect` +
+      // `codex_status` agent tools when the composer wired the service, so the
+      // live agent has agent-native parity with the admin-panel Connect Codex
+      // flow (same `CodexCredentialService`: subscription-only, metered key
+      // rejected, materialized to the per-project CODEX_HOME).
+      if (input.codex_credential !== undefined) {
+        registerCodexCredentialToolSurface(reg, { service: input.codex_credential.service })
       }
       // Create-project (project-rail Create Project parity) — register the
       // `create_project` agent tool when the composer wired the service, so the
@@ -389,10 +398,13 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
         }
         // OPTIONAL cross-model review: thread the per-project Codex credential dir
-        // (CODEX_HOME) into the inner workflow. Resolved from NEUTRON_CODEX_HOME
-        // env for now; Part B populates it per project_slug via the admin panel.
-        // Absent → codex "not connected" → the trident review runs Claude-only.
-        const codexHome = process.env['NEUTRON_CODEX_HOME']
+        // (CODEX_HOME) into the inner workflow. Part B: the composer resolves the
+        // per-project_slug CODEX_HOME via `resolveCodexHome({ owner_home })` and
+        // passes it here (`tridentWiring.codex_home`) — the SAME path the admin
+        // panel materializes `auth.json` into. Falls back to NEUTRON_CODEX_HOME
+        // env for manual dev overrides. Absent → codex "not connected" → the
+        // trident review runs Claude-only (never a merge blocker).
+        const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome
         }

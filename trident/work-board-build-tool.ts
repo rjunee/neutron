@@ -100,7 +100,11 @@ export function registerTridentBuildToolSurface(
       'board_item_id — add the work to the Plan first if needed. If the item is underspecified ' +
       '(no design doc, terse title) the dispatch is REJECTED and you MUST ask the owner a ' +
       'clarifying question before retrying. Returns immediately; fire several (one per item) to ' +
-      'run builds in parallel.',
+      'run builds in parallel. ROUTE HERE for COMPLEX builds — multi-file, a real project or ' +
+      'shared code, anything that warrants code review, or large/risky work — and TELL the owner ' +
+      'you are routing to trident and why. Build SIMPLE work (a single file, a quick script, a ' +
+      'small self-contained edit) INLINE with your own Read/Write/Edit tools instead; do not ' +
+      'dispatch trivia here.',
     input_schema: inputSchema,
     output_schema: outputSchema,
     capability_required: 'agent:dispatch_subagent',
