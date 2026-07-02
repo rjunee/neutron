@@ -218,6 +218,14 @@ export interface NeutronChatControllerOptions {
    */
   importProgressStaleMs?: number
   /**
+   * Chat-rail stability — how long (ms) the project-switch `connecting` banner
+   * suppression lasts before a still-`connecting` socket surfaces the banner
+   * (Codex P2 — don't hide a genuinely stalled switch connection). A warm switch
+   * resolves to `open` in well under this; the window only matters for a stall.
+   * Defaults to 2500. Injectable so tests don't wait on a real timer.
+   */
+  switchConnectingGraceMs?: number
+  /**
    * Managed post-onboarding claim redirect target (from the page bootstrap
    * config's {@link BootstrapConfig.postOnboardingClaimUrl}). When set, the
    * controller navigates the browser here on the `onboarding_completed` frame;
@@ -268,6 +276,25 @@ export class NeutronChatController {
    */
   private readonly notices: RenderMessage[] = []
   private connStatus: ConnStatus = 'idle'
+  /**
+   * Chat-rail stability — true while a project switch's fresh socket is doing its
+   * INITIAL `connecting` handshake. A switch tears down the outgoing per-project
+   * socket and stands up a new one, whose first status is `connecting` — but that
+   * is EXPECTED plumbing, not a network drop, so the connection banner must stay
+   * hidden for it (a warm switch shouldn't flash "Connecting…"). Cleared the
+   * moment the socket resolves (`open`) or genuinely degrades (`reconnecting` /
+   * `closed`), so a REAL disconnect after a switch still surfaces the banner.
+   *
+   * TIME-BOXED (Codex P2) — the suppression is bounded by a grace timer so a
+   * switch whose fresh socket STALLS in `connecting` (captive portal, firewall,
+   * a handshake that never fails promptly) surfaces the banner after the window
+   * instead of hiding a genuinely-disconnected chat forever.
+   */
+  private switchConnecting = false
+  /** Grace timer that drops {@link switchConnecting} if the switch socket is
+   *  still `connecting` after {@link switchConnectingGraceMs}. */
+  private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly switchConnectingGraceMs: number
   private awaitingReply = false
   private pending = 0
   private projectId: string | null
@@ -312,6 +339,7 @@ export class NeutronChatController {
     this.projectId = opts.projectId ?? null
     this.projects = opts.projects ?? []
     this.importProgressStaleMs = opts.importProgressStaleMs ?? 12_000
+    this.switchConnectingGraceMs = opts.switchConnectingGraceMs ?? 2_500
     this.postOnboardingClaimUrl =
       typeof opts.postOnboardingClaimUrl === 'string' && opts.postOnboardingClaimUrl.length > 0
         ? opts.postOnboardingClaimUrl
@@ -360,6 +388,10 @@ export class NeutronChatController {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
     }
+    if (this.switchConnectingTimer !== null) {
+      clearTimeout(this.switchConnectingTimer)
+      this.switchConnectingTimer = null
+    }
     this.session.stop()
   }
 
@@ -387,6 +419,18 @@ export class NeutronChatController {
     // Tear down the outgoing per-project socket.
     this.session.stop()
     this.projectId = projectId
+    // Chat-rail stability (unread badge) — VIEWING a project marks it read, so
+    // drop its cached unread count NOW. Without this the badge is permanent: the
+    // server only re-fans `projects_changed` on new agent activity, so a stale
+    // count would keep re-appearing on the rail every time the user switched
+    // AWAY from a project they'd already read. The read receipts that
+    // `markVisibleAgentRead` sends once the transcript hydrates advance the
+    // server-side watermark too, so the next server frame agrees (unread = 0).
+    if (projectId !== null && projectId.length > 0) {
+      this.projects = this.projects.map((p) =>
+        p.id === projectId && (p.unread ?? 0) > 0 ? { ...p, unread: 0 } : p,
+      )
+    }
     // Reset per-CONVERSATION state — the new topic hydrates its own transcript.
     this.streaming.clear()
     this.notices.length = 0
@@ -403,7 +447,21 @@ export class NeutronChatController {
     this.importProgress = null
     // Stand up the session bound to the new scope, mirroring the current
     // started/active lifecycle so the new socket opens iff the controller is
-    // running.
+    // running. Arm the switch latch FIRST (after the old socket's `stop()` →
+    // `closed` has already fired) so the fresh socket's initial `connecting` is
+    // recognised as switch plumbing and the banner stays hidden for it.
+    this.switchConnecting = true
+    // Time-box the suppression (Codex P2): if the fresh socket is STILL
+    // `connecting` after the grace window, drop the latch so a genuinely stalled
+    // switch connection surfaces the banner instead of hiding it forever.
+    if (this.switchConnectingTimer !== null) clearTimeout(this.switchConnectingTimer)
+    this.switchConnectingTimer = setTimeout(() => {
+      this.switchConnectingTimer = null
+      if (this.switchConnecting) {
+        this.switchConnecting = false
+        this.publish()
+      }
+    }, this.switchConnectingGraceMs)
     this.session = this.createSessionFn(this.sinks, {
       projectId,
       topicId: this.topicForProject(projectId),
@@ -465,6 +523,18 @@ export class NeutronChatController {
 
   private handleStatus(status: ConnStatus): void {
     this.connStatus = status
+    // Chat-rail stability — the switch latch survives only the fresh socket's
+    // INITIAL `connecting`; any other status means the handshake resolved
+    // (`open`) or genuinely degraded (`reconnecting` / `closed`), so drop it and
+    // let the banner reflect reality again. Cancel the grace timer too — the
+    // switch has resolved, so the time-box no longer applies.
+    if (status !== 'connecting') {
+      this.switchConnecting = false
+      if (this.switchConnectingTimer !== null) {
+        clearTimeout(this.switchConnectingTimer)
+        this.switchConnectingTimer = null
+      }
+    }
     this.publish()
   }
 
@@ -896,7 +966,11 @@ export class NeutronChatController {
       messages,
       isRunning: this.awaitingReply || liveStreams.length > 0,
       awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
-      status: this.connStatus,
+      // Chat-rail stability — present a project-switch's initial `connecting` as
+      // `idle` so `ConnectionBanner` stays hidden across a warm switch. A real
+      // disconnect (which clears `switchConnecting`) still reports its true
+      // status, so the banner shows on genuine reconnects/drops.
+      status: this.switchConnecting && this.connStatus === 'connecting' ? 'idle' : this.connStatus,
       pending: this.pending,
       projectId: this.projectId,
       projects: this.projects,

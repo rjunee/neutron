@@ -1085,3 +1085,121 @@ describe('NeutronChatController — Managed post-onboarding claim redirect', () 
     controller.stop()
   })
 })
+
+describe('NeutronChatController — chat-rail stability (SEV1 2026-07-01)', () => {
+  const projectsChanged = (
+    projects: Array<{ id: string; label: string; emoji?: string; unread?: number }>,
+  ) => ({ v: 1, type: 'projects_changed', projects, ts: 1 })
+
+  it('suppresses the connecting banner across a warm project switch, but empties the thread', async () => {
+    const { controller, sockets } = setup(null)
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // Seed General with a couple of messages so the outgoing topic is non-empty.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a1', seq: 1, body: 'first', ts: 1 })
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a2', seq: 2, body: 'second', ts: 2 })
+    await tick()
+    expect(controller.getViewModel().status).toBe('open')
+    expect(controller.getViewModel().messages.map((m) => m.text)).toEqual(['first', 'second'])
+
+    // Switch into an empty project: the old socket closes, a fresh one connects.
+    controller.setProject('meditation')
+    const during = controller.getViewModel()
+    expect(during.projectId).toBe('meditation')
+    // The new topic hydrates empty — the thread must NOT still carry the old
+    // project's messages (which is what let a stale MessagePart index past the
+    // emptied list and crash the tree).
+    expect(during.messages).toEqual([])
+    // A second socket was stood up for the switch.
+    expect(sockets.length).toBe(2)
+    // The switch's initial `connecting` is presented as `idle` so the banner
+    // stays hidden — no "Connecting…" flash on a warm switch.
+    expect(during.status).toBe('idle')
+
+    // Once the new socket resolves, the real status surfaces again.
+    sockets[1]!.open()
+    sockets[1]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().status).toBe('open')
+    controller.stop()
+  })
+
+  it('still surfaces the banner on a GENUINE reconnect (no switch in flight)', async () => {
+    const { controller, sockets } = setup(null)
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().status).toBe('open')
+    // The socket drops unexpectedly → the ws client schedules a reconnect. This
+    // is a real disconnect (not a switch), so the banner MUST show.
+    sockets[0]!.onclose?.()
+    await tick()
+    expect(controller.getViewModel().status).toBe('reconnecting')
+    controller.stop()
+  })
+
+  it('clears a project unread badge on activation (viewing == read)', async () => {
+    const { controller, sockets } = setup(null)
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    // Server fans a rail refresh with an unread project.
+    sockets[0]!.deliver(
+      projectsChanged([{ id: 'meditation', label: 'Meditation', emoji: '🧘', unread: 3 }]),
+    )
+    await tick()
+    expect(
+      controller.getViewModel().projects.find((p) => p.id === 'meditation')?.unread,
+    ).toBe(3)
+
+    // Activating the project marks it read → its badge drops to 0 immediately.
+    controller.setProject('meditation')
+    expect(
+      controller.getViewModel().projects.find((p) => p.id === 'meditation')?.unread,
+    ).toBe(0)
+    controller.stop()
+  })
+
+  it('surfaces the banner if a switch socket STALLS in connecting past the grace window (Codex P2)', async () => {
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      // Tiny grace so the test doesn't wait on the real 2.5s window.
+      switchConnectingGraceMs: 20,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().status).toBe('open')
+
+    // Switch, but the fresh socket NEVER opens (captive-portal / firewall stall).
+    controller.setProject('meditation')
+    // Immediately after the switch, the connecting banner is suppressed.
+    expect(controller.getViewModel().status).toBe('idle')
+
+    // Once the grace window elapses and the socket is STILL connecting, the
+    // banner surfaces so the user isn't left staring at a silently-dead chat.
+    await new Promise((r) => setTimeout(r, 45))
+    expect(controller.getViewModel().status).toBe('connecting')
+    controller.stop()
+  })
+})

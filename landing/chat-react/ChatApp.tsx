@@ -24,6 +24,7 @@ import {
   useComposerRuntime,
 } from '@assistant-ui/react'
 import { Markdown } from './Markdown.tsx'
+import { ChatErrorBoundary } from './ChatErrorBoundary.tsx'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
 import type { ChatViewModel, RenderMessage, ImportProgressVM } from './controller.ts'
@@ -1141,6 +1142,18 @@ function ChatSurface({
     onDrop,
   }
 
+  // SEV1 chat-rail stability (2026-07-01) — the assistant-ui message primitives
+  // resolve a message/part by INDEX into the runtime's live list; a project
+  // switch publishes an EMPTY list before the new topic hydrates, so a stale
+  // `<MessagePartPrimitive.Text>` from the outgoing project would index past the
+  // end and throw (`useClientLookup: Index N out of bounds`). Keying the thread
+  // subtree by the active conversation REMOUNTS it on every switch, so no stale
+  // MessagePart survives to index into the emptied list (root-cause fix). The
+  // `ChatErrorBoundary` is defense-in-depth: keyed by the SAME id, it both
+  // resets on a switch and catches any residual render throw into a recoverable
+  // fallback instead of a dead black screen.
+  const convId = vm.projectId !== null && vm.projectId.length > 0 ? vm.projectId : '__general__'
+
   return (
     <main
       className={`car-main${dragOver && !importActive ? ' car-dragover' : ''}`}
@@ -1148,6 +1161,7 @@ function ChatSurface({
     >
       <ConnectionBanner status={vm.status} />
       <WebDropZoneOverlay visible={dragOver && importActive} source={importSourceLabel(uploadAffordance)} />
+      <ChatErrorBoundary key={convId} onBackToGeneral={() => controller.setProject(null)}>
       <ThreadPrimitive.Root className="car-thread">
         <ThreadPrimitive.Viewport className="car-viewport">
           <ThreadPrimitive.Empty>
@@ -1195,6 +1209,7 @@ function ChatSurface({
         <ImportStatus progress={vm.importProgress} upload={importState} />
         <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
       </ThreadPrimitive.Root>
+      </ChatErrorBoundary>
     </main>
   )
 }

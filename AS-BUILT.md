@@ -2,6 +2,80 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-01 — SEV1: chat rail stability — project-switch crash, error boundary, banner flicker, unread badge, URL scrub
+
+**The bug (black screen on project switch).** Live testing surfaced an uncaught
+`useClientLookup: Index 1 out of bounds (length: 0)` thrown inside assistant-ui's
+`<MessagePartPrimitive.Text>` on switching into a project — especially an EMPTY
+one (e.g. "meditation"). Root cause: the assistant-ui message primitives resolve a
+message (and its parts) by INDEX into the runtime's live list
+(`@assistant-ui/store` `useClientLookup` → `get({ index })`, which throws when the
+index is past the end). `NeutronChatController.setProject` re-scopes the session
+and publishes an EMPTY message list before the new topic hydrates; a
+`<MessagePartPrimitive.Text>` from the OUTGOING project, still mounted for one
+render, then indexed into the now-length-0 list and threw. With no error boundary,
+React unmounted the whole tree → dead black screen.
+
+**What shipped (all six spec items; NO feature flags — React is the only client):**
+
+1. **Root-cause crash fix — keyed remount of the thread subtree.** `ChatApp.tsx`
+   (`ChatSurface`) now wraps `<ThreadPrimitive.Root>` in `<ChatErrorBoundary
+   key={convId}>` where `convId = vm.projectId ?? '__general__'`. On a project
+   switch the key changes, so React tears the ENTIRE thread subtree (and every
+   stale `MessagePart`) down atomically and mounts a fresh one against the
+   current (empty/hydrating) list — no stale part survives to index past the end.
+   The empty project renders `ThreadPrimitive.Empty` ("Send a message to begin."),
+   never a crash.
+2. **Error boundary (defense-in-depth).** `ChatErrorBoundary.tsx` (NEW) — a class
+   error boundary (`getDerivedStateFromError` / `componentDidCatch`; React exposes
+   boundaries only via the class lifecycle) around the chat thread. ANY render
+   throw renders a recoverable fallback (Try again / Back to General / Reload)
+   instead of a blank screen — which React itself advised. `Back to General` calls
+   `controller.setProject(null)`. Styles: `.car-error-*` in `chat-react.html`.
+3. **`getSnapshot` warning / notify-storm.** `useNeutronChat.ts` now MEMOIZES the
+   ExternalStore adapter object (and the `onNew` callback, reading the draft
+   through a ref so it stays stable). assistant-ui's `useExternalStoreRuntime`
+   calls `runtime.setAdapter(store)` in an effect on EVERY render; its first line
+   is `if (this._store === store) return`, so the old fresh-object-literal re-ran
+   the full adapter sync + `_notifySubscribers()` on every unrelated re-render
+   (draft edits, StrictMode double-invoke). That redundant notify — with a
+   `getState()` that returns a fresh object each call — is what tripped React's
+   "getSnapshot should be cached to avoid an infinite loop". A stable identity lets
+   `setAdapter` early-return.
+4. **Connecting-banner flicker on every warm switch.** `controller.ts` — a
+   `switchConnecting` latch set on `setProject` (after the outgoing socket's
+   `close()`), so the fresh per-project socket's INITIAL `connecting` handshake is
+   presented to the view-model as `idle` (banner hidden). The latch clears the
+   moment the socket resolves (`open`) or GENUINELY degrades (`reconnecting` /
+   `closed`), so a real disconnect still surfaces the banner. No "Connecting…"
+   flash on a sub-second warm switch; real reconnects unaffected. The suppression
+   is TIME-BOXED (`switchConnectingGraceMs`, default 2500 — Codex P2): a switch
+   whose fresh socket STALLS in `connecting` (captive portal / firewall) surfaces
+   the banner after the window instead of hiding a dead chat forever.
+5. **Unread badge never cleared.** `controller.ts` `setProject` now zeroes the
+   activated project's cached `unread` (viewing == read), and `TopicRail`
+   (`ChatApp.tsx`) already forces the active row's badge to 0 — so a just-arrived
+   reply on the active project can't flash a stale count before the next server
+   frame. `markVisibleAgentRead` advances the server watermark so the next frame
+   agrees.
+6. **Vestigial `?client=react` scrub removed.** `chat-react.html` scrubs the start
+   token to the BARE pathname now (was `pathname + '?client=react'`). The vanilla
+   client was deleted 2026-06-26; nothing reads the param and there is no
+   client-selection branch left on the server. Cleaner URL.
+
+**Verification.** `landing/chat-react/tsconfig.json` tsc clean + root deploy-gate
+tsc clean. `bun test landing/chat-react/__tests__/` → 219 pass / 0 fail, including
+NEW coverage: `chat-rail-stability.test.tsx` (full assistant-ui composition
+switches from a 2-message General into an empty project WITHOUT throwing, then
+back; `ChatErrorBoundary` catches a forced child throw and recovers in-place on
+Retry) and 3 new `controller.test.ts` cases (warm-switch banner suppression +
+empty thread; genuine reconnect still surfaces the banner; unread badge clears on
+activation). Live iso boot (`NEUTRON_HOME=/tmp/wfrail PORT=7865`) confirmed the
+served `/chat` shell scrubs to the bare path and the `/chat-react.js` bundle
+carries the boundary. `Bun.build` of `main.tsx` succeeds (0.94 MB). Leak-gate on
+`landing/chat-react` adds zero findings (the pre-existing empty-LICENSE stub is a
+repo baseline, present on `main`).
+
 ## 2026-07-01 — Doc-reference deep-link 404 fix: SPA catch-all + boot-open (ISSUES follow-up to #148)
 
 **The bug.** #148 made a doc reference a friendly tappable link
