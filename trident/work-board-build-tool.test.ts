@@ -57,6 +57,8 @@ function toolFor() {
     store,
     work_board: board(),
     repo_path: '/repo',
+    // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
+    resolveWorkspace: async (home) => home,
     resolveMergeMode: async () => 'local',
     resolveRalph: async () => false,
   })

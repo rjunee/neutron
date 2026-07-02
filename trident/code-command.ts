@@ -133,8 +133,19 @@ export interface TridentCodeContext {
   work_board: TridentBoardBinder
   /** Project this `/code` belongs to → the run's `project_slug`. */
   project_slug: string
-  /** Absolute repo path the run builds in. */
+  /**
+   * The owner HOME base. The dispatch chokepoint resolves this project's own
+   * git-initialized workspace `<home>/Projects/<project_slug>/code` under it —
+   * NOT the git repo directly — so a brand-new project (no repo yet) still
+   * builds. That resolved path becomes the run row's `repo_path`.
+   */
   repo_path: string
+  /**
+   * Resolve (and git-init-with-commit, idempotently) the per-project build
+   * workspace under `repo_path` (the HOME base), returning its absolute path.
+   * Defaults to `ensureProjectBuildWorkspace`. Tests inject a stub.
+   */
+  resolveWorkspace?: (owner_home: string, project_slug: string) => Promise<string>
   /**
    * Resolve the git-mode for this repo. Defaults to `detectMergeMode` over
    * the production probe (GitHub origin + `gh` → `'pr'`, else `'local'`).
@@ -210,6 +221,7 @@ async function executeDispatch(
     board: ctx.work_board,
     project_slug: ctx.project_slug,
     repo_path: ctx.repo_path,
+    ...(ctx.resolveWorkspace !== undefined ? { resolveWorkspace: ctx.resolveWorkspace } : {}),
     ...(ctx.resolveMergeMode !== undefined ? { resolveMergeMode: ctx.resolveMergeMode } : {}),
     ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
     ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
