@@ -277,6 +277,18 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Part B — admin-panel Connect Codex surface. Owns
+   * `/api/app/projects/<id>/codex-auth` (GET status / POST connect / DELETE
+   * disconnect). Validates a pasted ChatGPT-subscription auth.json (metered
+   * OPENAI_API_KEY rejected), stores it in the #149 credential store, and
+   * materializes it to the per-tenant CODEX_HOME the trident codex reviewer
+   * reads. Surface factory:
+   * `gateway/http/codex-credential-surface.ts:createCodexCredentialSurface`.
+   */
+  app_codex_credential_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P7.4 restore UI — optional project-backups + restore surface.
    * Owns `/api/app/projects/<id>/backups[...]` +
    * `/api/app/projects/<id>/restore`. Surface factory:

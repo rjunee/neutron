@@ -230,6 +230,11 @@ async function buildComposedHttpFromComposition(
       handler: composition.app_project_credentials_surface.handler,
     }
   }
+  if (composition.app_codex_credential_surface !== undefined) {
+    composeInput.appCodexCredential = {
+      handler: composition.app_codex_credential_surface.handler,
+    }
+  }
   if (composition.app_backups_surface !== undefined) {
     composeInput.appBackups = {
       handler: composition.app_backups_surface.handler,
@@ -283,6 +288,7 @@ async function buildComposedHttpFromComposition(
     composition.app_tabs_surface !== undefined ||
     composition.app_work_board_surface !== undefined ||
     composition.app_project_credentials_surface !== undefined ||
+    composition.app_codex_credential_surface !== undefined ||
     composition.app_backups_surface !== undefined ||
     composition.cores_surface !== undefined ||
     composition.cores_oauth_surface !== undefined ||

@@ -67,6 +67,28 @@ export const DOCTRINE_PRINCIPLES: readonly string[] = [
 ]
 
 /**
+ * Build-routing heuristic (Part B, M-K): the live agent SELF-ROUTES a build
+ * request — SIMPLE work inline with its own file tools; COMPLEX work through the
+ * autonomous Forge→Argus→merge loop (`work_board_dispatch_build`) — WITHOUT the
+ * owner ever typing a `/code` command. Phrased conditionally ("if you have the
+ * work_board_dispatch_build tool") so it is a harmless no-op on a boot where the
+ * trident dispatch tool is not on the surface (no LLM credential resolved), and
+ * active guidance the moment it is.
+ */
+export const BUILD_ROUTING_DOCTRINE =
+  'Build routing. When the owner asks you to BUILD something and you have the ' +
+  '`work_board_dispatch_build` tool available, DECIDE how to run it — do not wait ' +
+  "for a slash command. A SIMPLE change (a single file, a quick script, a small " +
+  'self-contained edit, a throwaway) you build INLINE with your own Read/Write/Edit/Bash ' +
+  'tools, right now. A COMPLEX build (spans multiple files, touches a real project or ' +
+  'shared code, warrants code review, or is large/risky) you route to the autonomous ' +
+  'trident loop: add a Plan item with `work_board_add` if one does not exist, then call ' +
+  '`work_board_dispatch_build` bound to that item — Forge builds, Argus reviews, and it ' +
+  'merges autonomously. When you route to trident, TELL the owner you are doing so and WHY ' +
+  '(complexity/scope/review), and keep chatting; the result arrives later. If the item is ' +
+  'underspecified the dispatch is rejected — ask ONE clarifying question, then retry.'
+
+/**
  * Build the `<operating_doctrine>` fragment for the given surface.
  *
  * Pure + deterministic so the composer's system prompt stays a stable
@@ -85,6 +107,8 @@ export function buildOperatingDoctrineFragment(input: OperatingDoctrineInput): s
   )
   lines.push('')
   lines.push(principles)
+  lines.push('')
+  lines.push(BUILD_ROUTING_DOCTRINE)
   lines.push('')
   lines.push(weightingTail(input))
   lines.push('</operating_doctrine>')

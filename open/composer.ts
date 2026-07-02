@@ -182,7 +182,10 @@ import {
 } from '../channels/adapters/app-ws/envelope.ts'
 import { createWorkBoardSurface } from '../gateway/http/work-board-surface.ts'
 import { createProjectCredentialsSurface } from '../gateway/http/project-credentials-surface.ts'
+import { createCodexCredentialSurface } from '../gateway/http/codex-credential-surface.ts'
 import { ProjectCredentialStore } from '../project-credentials/store.ts'
+import { CodexCredentialService } from '../trident/codex-credential.ts'
+import { resolveCodexHome } from '../trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '../project-credentials/fragment.ts'
 import { WorkBoardStore } from '../work-board/store.ts'
 import { formatWorkBoardFragment } from '../work-board/fragment.ts'
@@ -981,6 +984,25 @@ export function buildOpenGraphComposer(
     // `.neutron-aes-key` keyfile). Constructed HERE (before mountOpenCores) so the
     // Cores' credential accessors can bind to it.
     const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
+    // Codex subscription credential (Part B — trident cross-model review). The
+    // admin-panel "Connect Codex" flow + the `codex_connect`/`codex_status` agent
+    // tools dispatch this ONE service: validate a pasted ChatGPT-subscription
+    // auth.json (metered OPENAI_API_KEY rejected), store it encrypted in the #149
+    // credential store (service `codex`, global scope), and materialize it to the
+    // per-tenant CODEX_HOME that `trident/codex-review.sh` reads. `resolveCodexHome`
+    // is the ONE path both this and the trident loop (`build-core-modules`) agree
+    // on. `ensureMaterialized` self-heals the file if a stored credential exists
+    // but the on-disk auth.json is missing (fresh process / wiped tmp).
+    const codexHome = resolveCodexHome({ owner_home })
+    const codexCredentialService = new CodexCredentialService({
+      store: projectCredentialStore,
+      codexHome,
+    })
+    try {
+      codexCredentialService.ensureMaterialized(project_slug)
+    } catch (err) {
+      console.warn(`[codex] ensureMaterialized failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     const coresWiring = await mountOpenCores({
@@ -2142,6 +2164,14 @@ export function buildOpenGraphComposer(
     // CRUD surface + the awareness injection all share it. Mount the CRUD surface.
     const projectCredentialsSurface = createProjectCredentialsSurface({
       store: projectCredentialStore,
+      auth: appOwnerAuth,
+    })
+    // Part B — the admin-panel "Connect Codex" surface
+    // (`/api/app/projects/<id>/codex-auth`), same bearer auth as the credentials
+    // surface. GET status, POST connect (validates + rejects metered key +
+    // materializes to CODEX_HOME), DELETE disconnect.
+    const codexCredentialSurface = createCodexCredentialSurface({
+      service: codexCredentialService,
       auth: appOwnerAuth,
     })
 
@@ -3479,6 +3509,10 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: skillForgeOnRunTerminal,
+              // Part B — the per-tenant CODEX_HOME the trident loop threads into
+              // the inner workflow's optional codex reviewer. SAME path the admin
+              // panel materializes auth.json into (`resolveCodexHome`).
+              codex_home: codexHome,
             },
             // Work Board Phase 2b — the agent-native board-bound build dispatch
             // (`work_board_dispatch_build`). Gated on the SAME live-credential
@@ -3533,6 +3567,10 @@ export function buildOpenGraphComposer(
       // Per-project credential CRUD (`/api/app/projects/<id>/credentials`),
       // bearer-gated, dispatching the canonical ProjectCredentialStore.
       app_project_credentials_surface: { handler: projectCredentialsSurface.handler },
+      // Part B — admin-panel Connect Codex (subscription auth → per-tenant CODEX_HOME).
+      app_codex_credential_surface: { handler: codexCredentialSurface.handler },
+      // Part B — agent-native parity for the connect/status flow.
+      codex_credential: { service: codexCredentialService },
       // P1b — Tasks tab backend + chat attachment upload, so every visible React
       // control has a live backend (no 404s behind a shown tab/button).
       app_tasks_surface: { handler: appTasksSurface.handler },
