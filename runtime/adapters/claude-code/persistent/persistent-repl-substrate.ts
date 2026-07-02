@@ -184,7 +184,31 @@ const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
 const DEFAULT_AGENT_BASE_PROMPT = join(HERE, 'repl-agent-base.md')
 
 const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
-const DEFAULT_TURN_TIMEOUT_MS = 180_000
+/**
+ * ACTIVITY-BASED turn timeout (2026-07-01). The per-turn budget is NOT a fixed
+ * wall clock — it is an INACTIVITY window. `session.lastDataAt` advances on every
+ * PTY byte the `claude` child emits (spinner ticks, streamed tokens, tool output),
+ * so an ACTIVELY-working turn keeps resetting the idle clock and runs as long as it
+ * needs (a long-but-live build no longer dies at an arbitrary 180s). Only a
+ * GENUINELY frozen turn — no PTY output for `DEFAULT_TURN_INACTIVITY_MS` — trips the
+ * timeout. Kept modest (~90s) so a truly wedged warm turn still fails reasonably
+ * fast; the composer auto-retries a freeze once and surfaces a Retry affordance.
+ *
+ * Historical note: this constant used to be `DEFAULT_TURN_TIMEOUT_MS = 180_000`, a
+ * FIXED wall-clock cap that hard-failed a slow-but-active turn (Ryan live-test
+ * 2026-07-01: a "weave timer+tracker together then do full e2e testing" turn was
+ * killed at elapsed_ms=180009 while the agent was still working). Now it is the
+ * idle window; `turnTimeoutMs` / `spec.turn_timeout_ms` override it per-turn.
+ */
+const DEFAULT_TURN_INACTIVITY_MS = 90_000
+/**
+ * ABSOLUTE-CEILING backstop for a single turn (2026-07-01). Even the
+ * activity-based watchdog keeps a hard upper bound so a live-but-livelocked child
+ * (emitting PTY noise forever without ever settling the turn) cannot run
+ * unbounded. Very high — a real turn, however long, settles well under this;
+ * `turnAbsoluteCeilingMs` / `spec.turn_absolute_ceiling_ms` override it.
+ */
+const DEFAULT_TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 /** Signature of the `--dangerously-load-development-channels` first-run
  *  disclaimer, matched against the PTY text with ALL ANSI escapes + whitespace
  *  stripped (the Ink TUI positions each word with cursor-move escapes, so the
@@ -760,8 +784,18 @@ export interface PersistentReplSubstrateOptions {
   claudeConfigDir?: string
   /** Skip the first-run trust/bypass pre-seed (tests with a fake host). */
   skipTrustSeed?: boolean
-  /** Per-turn timeout before emitting a retryable error. Default 180s. */
+  /** Per-turn INACTIVITY window (ms) — the turn is abandoned with a retryable
+   *  `turn timeout` error only after this long with NO PTY activity from the
+   *  child (an actively-working turn resets it on every byte). Default
+   *  `DEFAULT_TURN_INACTIVITY_MS` (90s). Overridable per-turn via
+   *  `spec.turn_timeout_ms`. NOT a fixed wall clock — see the constant's doc. */
   turnTimeoutMs?: number
+  /** Per-turn ABSOLUTE-CEILING backstop (ms) — the hard upper bound a single turn
+   *  can run even while it keeps producing PTY activity (a live-but-livelocked
+   *  child). Default `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min). Overridable
+   *  per-turn via `spec.turn_absolute_ceiling_ms`. Always coerced ≥ the inactivity
+   *  window. */
+  turnAbsoluteCeilingMs?: number
   /** Pre-inject idle-quiet window (ms the PTY must be silent before injecting
    *  the next turn). Default 900. Tests with a fake host set this to ~0. */
   idleQuietMs?: number
@@ -2658,7 +2692,9 @@ async function disposeEphemeralSession(session: ReplSession): Promise<void> {
 export function createPersistentReplSubstrate(options: PersistentReplSubstrateOptions): Substrate {
   const cwd = options.cwd ?? process.cwd()
   const sessionKey = poolKeyFor(options)
-  const turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS
+  const inactivityDefaultMs = options.turnTimeoutMs ?? DEFAULT_TURN_INACTIVITY_MS
+  const absoluteCeilingDefaultMs =
+    options.turnAbsoluteCeilingMs ?? DEFAULT_TURN_ABSOLUTE_CEILING_MS
   const idleQuietMs = options.idleQuietMs ?? DEFAULT_IDLE_QUIET_MS
   const idleMaxMs = options.idleMaxMs ?? DEFAULT_IDLE_MAX_MS
   const keepaliveMs = options.livenessKeepaliveMs ?? REPL_LIVENESS_KEEPALIVE_MS
@@ -2674,17 +2710,24 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // one-shot purposes never collapse into one shared transcript. A dispatch
       // carrying a real `spec.session` (a multi-turn resume) always pools.
       const ephemeral = options.ephemeral === true && spec.session === undefined
-      // Per-turn timeout override (additive `AgentSpec.turn_timeout_ms`): a cold
-      // first turn / onboarding turn pays a one-time heavy load (CC cold spawn +
-      // MCP bind + big onboarding system prompt) that can exceed the snappy
-      // steady-state ceiling under machine load, so the conversational composer
-      // raises the budget for those turns. Steady-state warm turns send no
-      // override and keep the construction-time `turnTimeoutMs` (a wedged warm
-      // turn still fails fast). Ignore a non-positive value defensively.
-      const perTurnTimeoutMs =
+      // Per-turn ACTIVITY-BASED timeout budgets (additive spec overrides). The
+      // inactivity window is the idle-time-since-last-PTY-byte before a turn is
+      // deemed frozen; the composer raises it for a cold/onboarding turn (heavier
+      // initial processing) and keeps it snappy for a warm steady-state turn. The
+      // absolute ceiling is the hard backstop a live-but-livelocked child can't
+      // exceed. Non-positive values fall back to the construction defaults; the
+      // ceiling is coerced ≥ the inactivity window (a ceiling below the idle
+      // window would pre-empt the freeze detector).
+      const inactivityMs =
         typeof spec.turn_timeout_ms === 'number' && spec.turn_timeout_ms > 0
           ? spec.turn_timeout_ms
-          : turnTimeoutMs
+          : inactivityDefaultMs
+      const absoluteCeilingMs = Math.max(
+        inactivityMs,
+        typeof spec.turn_absolute_ceiling_ms === 'number' && spec.turn_absolute_ceiling_ms > 0
+          ? spec.turn_absolute_ceiling_ms
+          : absoluteCeilingDefaultMs,
+      )
 
       const driver = (async (): Promise<void> => {
        try {
@@ -2865,26 +2908,65 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         }, keepaliveMs)
         ;(keepalive as { unref?: () => void }).unref?.()
 
-        const timer = setTimeout(() => {
-          if (!turn.settled) {
-            if (REPL_DEBUG && session !== undefined) {
-              const r = session.getRecentOutput()
-              process.stderr.write(`[repl-timeout] PTY tail:\n${normalizePtyText(r).slice(-1200)}\n`)
-            }
-            turn.settled = true
-            // ABANDON-POISON (2026-06-18): the turn budget elapsed but the REPL is
-            // still running it (a late reply will arrive after we've moved on).
-            // Mark the warm session so the NEXT dispatch respawns a clean REPL
-            // rather than landing on the busy/desynced one (the cascade fix).
-            if (!ephemeral && session !== undefined) session.poisoned = true
-            channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true })
-            channel.close()
-            turn.settle()
+        // ACTIVITY-BASED TIMEOUT WATCHDOG (2026-07-01). Replaces the old fixed
+        // `setTimeout(perTurnTimeoutMs)` wall clock that hard-failed a
+        // slow-but-actively-working turn. Two conditions abandon the turn:
+        //   1. INACTIVITY — the child produced NO PTY output for `inactivityMs`.
+        //      `session.lastDataAt` advances on every PTY byte (spinner ticks,
+        //      streamed tokens, tool output — see the `onData` handler), so a turn
+        //      that is genuinely making progress keeps resetting this and runs as
+        //      long as it needs. Only a FROZEN turn goes silent long enough to trip.
+        //      (The liveness keepalive above pushes `status` events but does NOT
+        //      touch `lastDataAt`, so an alive-but-frozen child — keepalive still
+        //      firing — is correctly detected as frozen here.)
+        //   2. ABSOLUTE CEILING — a hard upper bound so a live-but-livelocked child
+        //      (emitting PTY noise forever without ever settling) can't run unbounded.
+        // Both emit the SAME retryable `turn timeout` error the composer classifies
+        // (auto-retry once → Retry affordance) and poison the warm session so the
+        // next dispatch respawns a clean REPL.
+        const turnStartedAt = Date.now()
+        const watchdogTickMs = Math.max(50, Math.min(1_000, Math.floor(inactivityMs / 4)))
+        const failFrozen = (reason: 'inactivity' | 'ceiling'): void => {
+          if (turn.settled) return
+          if (REPL_DEBUG && session !== undefined) {
+            const r = session.getRecentOutput()
+            process.stderr.write(
+              `[repl-timeout:${reason}] PTY tail:\n${normalizePtyText(r).slice(-1200)}\n`,
+            )
           }
-        }, perTurnTimeoutMs)
+          turn.settled = true
+          // ABANDON-POISON (2026-06-18): the turn was abandoned but the REPL may
+          // still be running it (a late reply will arrive after we've moved on).
+          // Mark the warm session so the NEXT dispatch respawns a clean REPL rather
+          // than landing on the busy/desynced one (the cascade fix).
+          if (!ephemeral && session !== undefined) session.poisoned = true
+          channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true })
+          channel.close()
+          turn.settle()
+        }
+        const watchdog = setInterval(() => {
+          if (turn.settled || channel.closed) return
+          const nowMs = Date.now()
+          if (nowMs - turnStartedAt >= absoluteCeilingMs) {
+            clearInterval(watchdog)
+            failFrozen('ceiling')
+            return
+          }
+          // Idle since the later of turn-start and the last PTY byte. Clamping to
+          // `turnStartedAt` means a turn that begins with a stale `lastDataAt`
+          // (e.g. a warm REPL quiet since its prior turn) still gets a full
+          // inactivity window before it can be judged frozen.
+          const lastActivity =
+            session !== undefined ? Math.max(turnStartedAt, session.lastDataAt) : turnStartedAt
+          if (nowMs - lastActivity >= inactivityMs) {
+            clearInterval(watchdog)
+            failFrozen('inactivity')
+          }
+        }, watchdogTickMs)
+        ;(watchdog as { unref?: () => void }).unref?.()
 
         await settledP
-        clearTimeout(timer)
+        clearInterval(watchdog)
         clearInterval(keepalive)
         // Enqueue-on-crash (brief § 2 row #11 / § 6 acceptance #1): if the REPL
         // process exited mid-turn, this turn's inbound was dropped (the caller

@@ -72,13 +72,22 @@ export interface Message {
  *
  * - `max_tokens?: number` — upper bound on completion tokens.
  *
- * - `turn_timeout_ms?: number` — per-turn wall-clock budget BEFORE the substrate
- *   abandons the turn with a retryable error. Optional + additive (mirrors
- *   `max_tokens`): when unset the substrate uses its own construction-time
- *   default (180s on the persistent CC REPL). The conversational composer raises
- *   it for a COLD first turn / onboarding turn — a cold CC spawn + heavy
- *   onboarding system prompt + MCP bind can take >180s under machine load, and
- *   the snappy steady-state ceiling would hard-fail a slow-but-fine cold turn.
+ * - `turn_timeout_ms?: number` — per-turn INACTIVITY window (ms) BEFORE the
+ *   substrate abandons the turn with a retryable `turn timeout` error. Optional +
+ *   additive (mirrors `max_tokens`): when unset the persistent CC REPL uses its
+ *   construction default (90s idle window). This is NOT a fixed wall clock —
+ *   `session.lastDataAt` advances on every PTY byte the child emits (spinner
+ *   ticks, streamed tokens, tool output), so an actively-working turn keeps
+ *   resetting the idle clock and runs as long as it needs; only a GENUINELY frozen
+ *   turn (no PTY activity for this long) trips. The conversational composer raises
+ *   it for a COLD first turn / onboarding turn (heavier initial processing) and
+ *   keeps it snappy for warm steady-state. Only the persistent-REPL adapter reads
+ *   it; other substrates ignore it.
+ *
+ * - `turn_absolute_ceiling_ms?: number` — per-turn ABSOLUTE-CEILING backstop (ms):
+ *   the hard upper bound a single turn can run even while it keeps producing PTY
+ *   activity (a live-but-livelocked child). Optional; when unset the persistent CC
+ *   REPL uses its construction default (45min). Coerced ≥ the inactivity window.
  *   Only the persistent-REPL adapter reads it; other substrates ignore it.
  *
  * - `metering_context?: { project_id }` — populated ONLY for the
@@ -98,10 +107,17 @@ export interface AgentSpec {
   tools: ToolDef[]
   model_preference: string[]
   max_tokens?: number
-  /** Per-turn wall-clock budget (ms) before the substrate abandons with a
-   *  retryable error. Optional; unset → the substrate's construction default.
-   *  Read by the persistent CC REPL adapter only. See the doc-comment above. */
+  /** Per-turn INACTIVITY window (ms): the turn is abandoned with a retryable
+   *  `turn timeout` error only after this long with NO PTY activity (an active
+   *  turn resets it on every byte). Optional; unset → the substrate's construction
+   *  default. NOT a fixed wall clock. Read by the persistent CC REPL adapter only.
+   *  See the doc-comment above. */
   turn_timeout_ms?: number
+  /** Per-turn ABSOLUTE-CEILING backstop (ms): hard upper bound a turn can run even
+   *  while actively producing PTY output. Optional; unset → the substrate's
+   *  construction default. Coerced ≥ the inactivity window. Read by the persistent
+   *  CC REPL adapter only. See the doc-comment above. */
+  turn_absolute_ceiling_ms?: number
   metering_context?: { project_id: string }
 }
 
