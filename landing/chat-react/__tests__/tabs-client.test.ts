@@ -7,6 +7,7 @@ import { describe, expect, it } from 'bun:test'
 
 import {
   CHAT_TAB,
+  GENERAL_WORK_TAB,
   WebTabsClient,
   TabsClientError,
   sanitizeCoreTabUrl,
@@ -106,5 +107,18 @@ describe('CHAT_TAB', () => {
     expect(CHAT_TAB.key).toBe('chat')
     expect(CHAT_TAB.source).toBe('builtin')
     expect(CHAT_TAB.mount).toEqual({ kind: 'builtin', target: 'chat' })
+  })
+})
+
+describe('GENERAL_WORK_TAB', () => {
+  it('is the builtin Work descriptor injected into General so it gets a Work surface', () => {
+    // Same `workboard` mount named projects use → the ProjectShell showPane gate +
+    // narrow tab light up for General with no branch; scoped `global` (rides the
+    // General/global tab set), targeting General's owner_slug board.
+    expect(GENERAL_WORK_TAB.key).toBe('work_board')
+    expect(GENERAL_WORK_TAB.label).toBe('Work')
+    expect(GENERAL_WORK_TAB.scope).toBe('global')
+    expect(GENERAL_WORK_TAB.source).toBe('builtin')
+    expect(GENERAL_WORK_TAB.mount).toEqual({ kind: 'builtin', target: 'workboard' })
   })
 })

@@ -59,6 +59,7 @@ import type { BootstrapConfig } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import {
   CHAT_TAB,
+  GENERAL_WORK_TAB,
   WebTabsClient,
   sanitizeCoreTabUrl,
   type TabDescriptor,
@@ -328,7 +329,13 @@ export function ProjectShell({
         .listGlobalTabs()
         .then((globalTabs) => {
           if (cancelled) return
-          setTabs([CHAT_TAB, ...globalTabs])
+          // General gets the SAME Work surface every named project has: inject the
+          // `work_board` descriptor (after Chat) so the existing `showPane` gate +
+          // narrow-width tab light up for General, scoped to its `owner_slug` board.
+          // The engine's global set is Admin-only, so General had no `workboard`
+          // descriptor and thus no Work view (the gap this closes). Mirrors the
+          // mobile shell's `ensureWorkTab` injection — one code path, no branch.
+          setTabs([CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs])
           setTabsScope('')
         })
         .catch(() => {
@@ -439,6 +446,14 @@ export function ProjectShell({
   // scroll state survive — only its visibility toggles.
   const chatHidden = resolvedActiveKey !== CHAT_KEY
 
+  // A Work card's ▸ spec-doc link opens the doc in the Documents tab. General's
+  // tab set is Chat + Work + Admin — it has NO Documents tab, so `onOpenDocLink`
+  // would set a pending doc the resolver can never satisfy (it waits for a `docs`
+  // tab), leaving a dead button (Codex P2). So we DON'T wire `onOpenDoc` into
+  // General's Work surface: `WorkBoardTab` then renders the spec-doc ref as a
+  // STATIC label instead of a clickable no-op. Named projects keep the live link.
+  const workOpenDoc = isGeneral ? undefined : onOpenDocLink
+
   // Workspace-identity seat (left of the tabs): the active scope's emoji + name.
   // General → 💬 General; a project → its emoji (server, else generic) + label.
   // A just-switched-to project may not yet be in `vm.projects`; fall back to a
@@ -529,7 +544,7 @@ export function ProjectShell({
                   projectId={projectId ?? ''}
                   config={config}
                   controller={controller}
-                  onOpenDocLink={onOpenDocLink}
+                  {...(workOpenDoc !== undefined ? { onOpenDocLink: workOpenDoc } : {})}
                   {...(fetchImpl !== undefined ? { fetchImpl } : {})}
                   {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
                 />
@@ -546,7 +561,7 @@ export function ProjectShell({
               config={config}
               controller={controller}
               onOpenChange={setPaneOpen}
-              onOpenDoc={onOpenDocLink}
+              {...(workOpenDoc !== undefined ? { onOpenDoc: workOpenDoc } : {})}
               {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             />
           ) : null}

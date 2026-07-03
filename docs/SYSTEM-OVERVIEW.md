@@ -119,14 +119,25 @@ the owner slug, unchanged; the HTTP ▶/create surface already scope-keyed from 
 `project_id`. Forwarding the topic itself (so `ToolCallContext.topic_id` populates for
 `message_search`) remains the documented next slice.
 
-> **Known follow-up — General's Work view.** General is a genuine board bucket
-> (`owner_slug`) and the HTTP surface serves it, but the web chat's tab-set builder
-> (`landing/chat-react/ProjectShell.tsx`, the `if (isGeneral)` branch) still excludes
-> the **Work** tab for General (Chat + Admin only). Surfacing General's Work view is
-> deferred to the redesign PR that owns the Work-surface geometry (desktop Work tab →
-> slide-out): when it lands its Work surface, it should drop the `isGeneral` Work
-> exclusion so General gets the SAME surface every project has. Kept out of this PR to
-> avoid a collision in that same file.
+> **General's Work view — CLOSED.** General is a genuine board bucket
+> (`owner_slug`) and the HTTP surface serves it. General now has the SAME Work
+> surface every named project has, scoped to its own (`owner_slug`) board: on
+> desktop (≥1024px) the right-edge **Work** slide-out pane (`PlansPane`, with the
+> edge-handle + auto-open/close), and below 1024px a seated **Work** tab. The web
+> chat's tab-set builder (`landing/chat-react/ProjectShell.tsx`, the `if (isGeneral)`
+> branch) injects the builtin `work_board` descriptor into General's tab set
+> (`GENERAL_WORK_TAB`, mirroring the mobile shell's `ensureWorkTab`), so the
+> existing `showPane` gate + narrow-tab path light up for General with no branch.
+> The client scopes General as `projectId === ''` everywhere (so the live
+> `work_board_changed` filter — `(framePid ?? '') === projectId` — applies General's
+> no-`project_id` snapshot); the work-board HTTP client maps that empty id to the
+> literal `'general'` path segment (`workBoardPathSegment`) because the surface
+> keys General on `'general'` (→ `owner_slug`) and 400s on an empty segment. No
+> scope-key semantics changed (`work-board/store.ts` untouched). NOTE: mobile
+> General is not yet a navigable scope (its rail has no synthetic General entry,
+> unlike web), so there is no mobile Work-tab-for-General gap to close here — the
+> existing `ensureWorkTab` + badge machinery already applies to the `'general'` id
+> the moment General becomes navigable on mobile.
 
 ### Email-Managed Core (`cores/free/email/`)
 

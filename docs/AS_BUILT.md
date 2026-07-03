@@ -2,6 +2,62 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-03 — General gets a Work surface (desktop slide-out + narrow tab), scoped to its owner_slug board (no flags)
+
+**Why.** M1 follow-up closing the last item Ryan flagged directly ("there's no
+Work tab in General … an oversight"). After the M1 redesign, desktop Work is a
+right-edge slide-out pane (`PlansPane`, PR-4) and below 1024px it's a seated tab —
+both mount only for a scope whose tab set carries a `workboard` descriptor.
+General's tab set is Chat + Admin (the engine's global set is Admin-only), so
+General had NO Work view — even though General-scoped work (builds kicked from the
+General chat) lands on a real, backend-reachable board (the `owner_slug` scope key,
+`work-board/store.ts`). So that work was invisible. This surfaces it.
+
+**What shipped.**
+
+- **General Work surface, one code path** (`landing/chat-react/ProjectShell.tsx`):
+  the `if (isGeneral)` tab-set branch now injects the builtin `work_board`
+  descriptor (`GENERAL_WORK_TAB`, `tabs-client.ts`) after Chat —
+  `[CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs]` — mirroring how the mobile shell
+  injects its Work tab via `ensureWorkTab`. With the descriptor present, the
+  EXISTING machinery lights up for General with zero new branch: on desktop
+  (≥1024px) the `showPane` gate mounts the `PlansPane` slide-out (edge-handle +
+  auto-open-on-kickoff / auto-close, per PR-4); below 1024px Work stays a seated
+  tab. General keeps its Chat + Admin tabs — Work is ADDED, not swapped.
+
+- **General board scoping (the `''` ↔ `'general'` reconciliation)**
+  (`landing/chat-react/work-board-client.ts`): the web shell scopes General as the
+  empty project id `''` EVERYWHERE — the rail's General row is `vm.projectId ===
+  null`, and the live `work_board_changed` filter keys off `(framePid ?? '') ===
+  projectId`, so General MUST stay `''` for its no-`project_id` snapshot to be
+  applied (kickoff auto-open, live dot/tag walk). But the HTTP work-board surface
+  keys General on the literal `'general'` id (`workBoardScopeKey(owner_slug,
+  'general') → owner_slug`) and 400s on an empty path segment. So the new
+  `workBoardPathSegment` helper maps `'' → 'general'` at the URL boundary ONLY
+  (never the `//work-board` double-slash the ProjectShell Codex-P2 note flags);
+  named ids pass through untouched. No scope-key semantics changed — `store.ts` is
+  untouched.
+
+- **Mobile:** unchanged. Mobile General is not yet a navigable scope (its rail has
+  no synthetic General entry — `GENERAL_PROJECT_ID` is only used to *detect* a
+  General row, never to *construct* one — and `app/lib/projects.ts` has no General),
+  so there's no mobile Work-tab-for-General gap to close here without first building
+  the whole General-on-mobile surface (out of scope). The existing `ensureWorkTab` +
+  `workTabBadgeCount` machinery already applies to the `'general'` id the moment
+  General becomes navigable on mobile. Noted in the PR + SYSTEM-OVERVIEW.
+
+**Tests.** `work-board-client.test.ts` (`'' → 'general'` path mapping for
+list/create/start, named-id pass-through, no double-slash); `tabs-client.test.ts`
+(`GENERAL_WORK_TAB` shape); `project-shell.test.tsx` (narrow General = Chat + Work
++ Admin; desktop General mounts the pane, drops the Work tab, and its board query
+targets `/api/app/projects/general/work-board`); `component.test.tsx` create-project
+fetchImpls now serve the General board (the pane lists on mount under happy-dom's
+desktop viewport). tsc clean; leak-gate SILENT.
+
+**Files.** `landing/chat-react/ProjectShell.tsx`, `tabs-client.ts`,
+`work-board-client.ts` + the four test files; `docs/SYSTEM-OVERVIEW.md` (the
+"General's Work view" follow-up note flipped to CLOSED).
+
 ## 2026-07-03 — M1 UX redesign PR-6: Mobile project rail + seated tabs + Work-badge (LAST redesign PR, no flags)
 
 **Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-6 is the MOBILE

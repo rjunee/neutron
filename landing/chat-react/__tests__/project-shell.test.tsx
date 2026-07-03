@@ -372,7 +372,7 @@ describe('ProjectShell render (happy-dom)', () => {
     })
   })
 
-  it('shows Chat + Admin (global tabs) for the General / no-project view', async () => {
+  it('shows Chat + Work + Admin for the General / no-project view (narrow)', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
     const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
@@ -465,11 +465,14 @@ describe('ProjectShell render (happy-dom)', () => {
       await tick()
     })
 
-    // General shows the global tab set (Chat + Admin) in the SAME content pane;
-    // the per-project resolver is never hit, and the persistent rail renders.
+    // General now surfaces a Work tab (parity with named projects): the shell
+    // injects the `work_board` descriptor into the global set, so at narrow width
+    // (default in these tests) General renders Chat + Work + Admin. The desktop
+    // ≥1024px case turns Work into the slide-out pane (dedicated test below). The
+    // per-project resolver is never hit, and the persistent rail renders.
     const tabButtons = () =>
       Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
-    expect(tabButtons()).toEqual(['Chat', 'Admin'])
+    expect(tabButtons()).toEqual(['Chat', 'Work', 'Admin'])
     expect(projectResolverHits).toBe(0)
     expect(container.querySelector('.car-rail')).not.toBeNull()
     expect(container.textContent).toContain('Send')
@@ -706,6 +709,158 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     expect((container.querySelector('.car-stage') as HTMLElement).className).toContain(
       'car-stage-pane-open',
     )
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('mounts the Work pane for GENERAL too, scoped to its owner_slug board', async () => {
+    // Opt into the desktop viewport for THIS test only.
+    mediaMatches = (q) => q.includes('min-width: 1024px')
+
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    // Capture the board fetch so we can prove General's pane queries the General
+    // (owner_slug) board — the client maps the '' scope to the 'general' HTTP id,
+    // NEVER the `//work-board` double-slash (which would 400).
+    const boardUrls: string[] = []
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith('/api/app/tabs')) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'global', tabs: GLOBAL_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.includes('/work-board')) {
+        boardUrls.push(url)
+        // One item carrying an in-app spec-doc ref, to prove General's Work cards
+        // render the doc as a STATIC label (General has no Documents tab to open
+        // it in) rather than a dead clickable button (Codex P2).
+        const item = {
+          id: 'g1',
+          project_slug: 'sam',
+          title: 'General task',
+          status: 'upcoming',
+          sort_order: 1,
+          design_doc_ref: 'neutron-docs:plans/general-thing.md',
+          inline_active: false,
+          linked_run_id: null,
+          created_at: '2026-07-01T00:00:00Z',
+          updated_at: '2026-07-01T00:00:00Z',
+          completed_at: null,
+        }
+        return new Response(
+          JSON.stringify({ ok: true, items: [item], project_id: 'general' }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: null,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+
+    // Desktop General: Work becomes the slide-out pane, so the tab bar keeps only
+    // Chat + Admin (Work stripped), and the pane + its edge-handle mount.
+    const tabButtons = Array.from(container.querySelectorAll('button[role="tab"]')).map(
+      (b) => b.textContent ?? '',
+    )
+    expect(tabButtons).toEqual(['Chat', 'Admin'])
+    expect(container.querySelector('.car-plans')).not.toBeNull()
+    const handle = container.querySelector('.car-plans-handle') as HTMLButtonElement
+    expect(handle).not.toBeNull()
+    expect(handle.getAttribute('aria-label')).toBe('Show work')
+
+    // The pane's board query targets General's owner_slug board via the 'general'
+    // HTTP id — never a per-project id, never the `//work-board` double-slash.
+    expect(boardUrls.length).toBeGreaterThan(0)
+    expect(boardUrls[0]).toBe('https://sam.neutron.test/api/app/projects/general/work-board')
+    expect(boardUrls.every((u) => !u.includes('//work-board'))).toBe(true)
+
+    // General has no Documents tab, so a Work card's spec-doc ref renders as a
+    // STATIC label — NOT a clickable button that would no-op (Codex P2). The label
+    // text shows, but there is no `<button class="cwb-doc-link">`.
+    const staticDoc = container.querySelector('.cwb-doc-link-static')
+    expect(staticDoc).not.toBeNull()
+    expect(staticDoc!.textContent).toContain('general-thing')
+    expect(container.querySelector('button.cwb-doc-link')).toBeNull()
 
     await act(async () => {
       root.unmount()

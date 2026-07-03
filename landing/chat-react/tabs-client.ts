@@ -104,6 +104,30 @@ const CHAT_TAB_LITERAL: TabDescriptor = {
 }
 export const CHAT_TAB: TabDescriptor = Object.freeze(CHAT_TAB_LITERAL)
 
+/**
+ * The Work descriptor injected into GENERAL's tab set (M1 — "General has no Work
+ * view" fix). The engine's global tab set is Admin-only (`resolveGlobalTabs` in
+ * `tabs/registry.ts`), so General — which renders `[CHAT_TAB, ...globalTabs]` —
+ * had no `workboard` descriptor and thus no desktop slide-out pane / narrow Work
+ * tab, even though General's board IS backend-reachable (the `owner_slug` scope
+ * key). We inject the SAME builtin `work_board` descriptor named projects get, so
+ * the existing `ProjectShell` machinery (the `showPane` gate + the narrow-width
+ * tab) lights up for General with ZERO branch — mirroring how the mobile shell
+ * injects its Work tab via `ensureWorkTab`. Scoped `global` because it rides the
+ * General/global tab set; the surface it opens is General's `owner_slug` board
+ * (the client scopes General as `projectId === ''`, which the work-board client
+ * maps to the `'general'` HTTP id — see `workBoardPathSegment`).
+ */
+const GENERAL_WORK_TAB_LITERAL: TabDescriptor = {
+  key: 'work_board',
+  label: 'Work',
+  scope: 'global',
+  source: 'builtin',
+  order: 5,
+  mount: { kind: 'builtin', target: 'workboard' },
+}
+export const GENERAL_WORK_TAB: TabDescriptor = Object.freeze(GENERAL_WORK_TAB_LITERAL)
+
 export class WebTabsClient {
   private readonly base_url: string
   private readonly token: string
