@@ -446,6 +446,14 @@ export function ProjectShell({
   // scroll state survive — only its visibility toggles.
   const chatHidden = resolvedActiveKey !== CHAT_KEY
 
+  // A Work card's ▸ spec-doc link opens the doc in the Documents tab. General's
+  // tab set is Chat + Work + Admin — it has NO Documents tab, so `onOpenDocLink`
+  // would set a pending doc the resolver can never satisfy (it waits for a `docs`
+  // tab), leaving a dead button (Codex P2). So we DON'T wire `onOpenDoc` into
+  // General's Work surface: `WorkBoardTab` then renders the spec-doc ref as a
+  // STATIC label instead of a clickable no-op. Named projects keep the live link.
+  const workOpenDoc = isGeneral ? undefined : onOpenDocLink
+
   // Workspace-identity seat (left of the tabs): the active scope's emoji + name.
   // General → 💬 General; a project → its emoji (server, else generic) + label.
   // A just-switched-to project may not yet be in `vm.projects`; fall back to a
@@ -536,7 +544,7 @@ export function ProjectShell({
                   projectId={projectId ?? ''}
                   config={config}
                   controller={controller}
-                  onOpenDocLink={onOpenDocLink}
+                  {...(workOpenDoc !== undefined ? { onOpenDocLink: workOpenDoc } : {})}
                   {...(fetchImpl !== undefined ? { fetchImpl } : {})}
                   {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
                 />
@@ -553,7 +561,7 @@ export function ProjectShell({
               config={config}
               controller={controller}
               onOpenChange={setPaneOpen}
-              onOpenDoc={onOpenDocLink}
+              {...(workOpenDoc !== undefined ? { onOpenDoc: workOpenDoc } : {})}
               {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             />
           ) : null}

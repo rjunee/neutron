@@ -763,8 +763,24 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
       }
       if (url.includes('/work-board')) {
         boardUrls.push(url)
+        // One item carrying an in-app spec-doc ref, to prove General's Work cards
+        // render the doc as a STATIC label (General has no Documents tab to open
+        // it in) rather than a dead clickable button (Codex P2).
+        const item = {
+          id: 'g1',
+          project_slug: 'sam',
+          title: 'General task',
+          status: 'upcoming',
+          sort_order: 1,
+          design_doc_ref: 'neutron-docs:plans/general-thing.md',
+          inline_active: false,
+          linked_run_id: null,
+          created_at: '2026-07-01T00:00:00Z',
+          updated_at: '2026-07-01T00:00:00Z',
+          completed_at: null,
+        }
         return new Response(
-          JSON.stringify({ ok: true, items: [], project_id: 'general' }),
+          JSON.stringify({ ok: true, items: [item], project_id: 'general' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         )
       }
@@ -837,6 +853,14 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     expect(boardUrls.length).toBeGreaterThan(0)
     expect(boardUrls[0]).toBe('https://sam.neutron.test/api/app/projects/general/work-board')
     expect(boardUrls.every((u) => !u.includes('//work-board'))).toBe(true)
+
+    // General has no Documents tab, so a Work card's spec-doc ref renders as a
+    // STATIC label — NOT a clickable button that would no-op (Codex P2). The label
+    // text shows, but there is no `<button class="cwb-doc-link">`.
+    const staticDoc = container.querySelector('.cwb-doc-link-static')
+    expect(staticDoc).not.toBeNull()
+    expect(staticDoc!.textContent).toContain('general-thing')
+    expect(container.querySelector('button.cwb-doc-link')).toBeNull()
 
     await act(async () => {
       root.unmount()
