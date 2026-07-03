@@ -565,7 +565,8 @@ rather than waiting on the global diff-gate. Subscriber:
 >    "Create Project" button is gone). (`ChatApp.tsx` `TopicRail`/`AtomMark`.)
 > 2. **Telegram-style 2-line rail rows.** Each row (`RailItem`) is now an emoji
 >    "avatar" (40px, plain glyph) carrying a corner **work-activity dot** (from PR-1's
->    `activity`: `working` → pulsing `--work`, `attention` → static `--attention`,
+>    `activity`: `working` → pulsing building-blue (`--phase-build-fg`, matching the
+>    Work-list building dot — UX BATCH-2 #335), `attention` → static `--attention`,
 >    else none; General never shows one), a line 1 of name + right-aligned timestamp
 >    (`formatRailTime` from `last_activity_at`: today → `14:32`, this week → `Mon`,
 >    else → `Jun 28`), and a line 2 of the ellipsised `preview` (own messages prefixed
@@ -581,6 +582,25 @@ rather than waiting on the global diff-gate. Subscriber:
 >    (`ProjectShell`) — the active scope's `emoji + name` (General → `💬 General`),
 >    a clean "you're inside a workspace" anchor with NO activity dot (that lives on
 >    the rail — Ryan's de-dup). Both palettes preserved.
+
+> <!-- SYNC-ON-DEPLOY (UX BATCH-2, 2026-07-03) — flagged for the Managed
+> orchestrator's SYSTEM-OVERVIEW sync. -->
+> **UX BATCH-2 — chat/work-board polish (2026-07-03, #333/#335/#336/#338/#341).**
+> Five presentational/run-progress fixes, no feature flags: (#335) the rail
+> `working` dot pulses in the **building blue** (`--phase-build-fg` /
+> `PHASE.build.fg`), matching the Work-list building dot exactly — web + mobile
+> `ProjectRail`; amber `--attention` is reserved for a genuine stall/failed-not-done.
+> (#333) the transient cold-start "⏳ Waking up…" ack is **live-only**: it rides a
+> first-class `system_notice:true` flag (`AgentMessageOutbound` → adapter_options →
+> `AppWsAdapter.send`), fanned to the live socket but NEVER written to the durable
+> `chat_log`, so a reload can't re-hydrate it as a chat bubble. (#336) a **Fixing**
+> Work item shows the fix-round (round ≥ 2), derived off `inner_checkpoint` in
+> `deriveRunProgress` (the outer `code_trident_runs.round` stays 1 all build). (#338)
+> chat bubbles carry a subtle **timestamp** (`HH:MM`, full date on hover) + a centered
+> **day divider** ("Today / Yesterday / Mon Jul 1") on each calendar-day change
+> (`RenderMessage.timestampMs` + `buildMetaIndex`; `.car-time`/`.car-day-divider`).
+> (#341) the Work-item drag handle is **borderless grip-dots** (⠿, muted, grab
+> cursor) — no longer a bordered button next to ▶/✕.
 
 > **M1 UX REDESIGN — Work slide-out pane (PR-4, 2026-07-02).** On **desktop
 > (≥1024px)** the Work board is **no longer a tab** — it's a right-edge **slide-out

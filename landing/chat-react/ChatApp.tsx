@@ -330,6 +330,25 @@ interface ButtonsCtx {
 }
 const ButtonsContext = createContext<ButtonsCtx | null>(null)
 
+/**
+ * FIX #338 — per-message time metadata (iMessage/Telegram style): a subtle
+ * trailing `timeLabel` ("14:32"), the full `dateTitle` for the time's hover
+ * tooltip ("Jul 3, 2026, 2:32 PM"), and a `dayDivider` label ("Today" /
+ * "Yesterday" / "Mon Jul 1") rendered as a centered separator ABOVE the first
+ * message of a new calendar day (null otherwise). Computed once per render over
+ * the ordered message list (adjacency needs the whole list) and keyed by render
+ * id so each bubble looks up its own entry, like {@link ButtonsContext}.
+ */
+interface MetaEntry {
+  timeLabel: string
+  dateTitle: string
+  dayDivider: string | null
+}
+interface MetaCtx {
+  byRenderId: Map<string, MetaEntry>
+}
+const MetaContext = createContext<MetaCtx | null>(null)
+
 /** The human-readable choice text for a button. BUG 3 — render `body` (the real
  *  choice text, e.g. "Yes, ChatGPT export"), NOT `label` (the "A"/"B"/"C" letter
  *  legend the server still ships for Telegram's text rendering). `body` defaults
@@ -452,16 +471,49 @@ function MessageButtons(): React.JSX.Element | null {
   )
 }
 
+/** FIX #338 — a centered "Today / Yesterday / Mon Jul 1" separator rendered
+ *  ABOVE the first message of a new calendar day. Nothing when this message
+ *  doesn't open a new day (or carries no durable time). */
+function DayDivider(): React.JSX.Element | null {
+  const ctx = useContext(MetaContext)
+  const message = useMessage()
+  const entry = ctx?.byRenderId.get(message.id)
+  if (entry === undefined || entry.dayDivider === null) return null
+  return (
+    <div className="car-day-divider" role="separator" aria-label={entry.dayDivider}>
+      <span>{entry.dayDivider}</span>
+    </div>
+  )
+}
+
+/** FIX #338 — a subtle trailing timestamp ("14:32"); hovering shows the full
+ *  date via the `title` tooltip. Nothing for a streaming/ephemeral bubble. */
+function MessageTime(): React.JSX.Element | null {
+  const ctx = useContext(MetaContext)
+  const message = useMessage()
+  const entry = ctx?.byRenderId.get(message.id)
+  if (entry === undefined || entry.timeLabel.length === 0) return null
+  return (
+    <time className="car-time" title={entry.dateTitle}>
+      {entry.timeLabel}
+    </time>
+  )
+}
+
 function UserMessage(): React.JSX.Element {
   return (
-    <MessagePrimitive.Root className="car-row car-row-user">
-      <div className="car-bubble car-bubble-user">
-        <MessagePrimitive.Parts components={PART_COMPONENTS} />
-        <EditedMarker />
-        <MessageReactions />
-        <MessageActions />
-      </div>
-    </MessagePrimitive.Root>
+    <>
+      <DayDivider />
+      <MessagePrimitive.Root className="car-row car-row-user">
+        <div className="car-bubble car-bubble-user">
+          <MessagePrimitive.Parts components={PART_COMPONENTS} />
+          <MessageTime />
+          <EditedMarker />
+          <MessageReactions />
+          <MessageActions />
+        </div>
+      </MessagePrimitive.Root>
+    </>
   )
 }
 
@@ -480,17 +532,21 @@ function AssistantMessage(): React.JSX.Element | null {
   // agent messages are unaffected.
   if (message.metadata?.isOptimistic === true) return null
   return (
-    <MessagePrimitive.Root className="car-row car-row-agent">
-      <div className="car-avatar" aria-hidden="true">
-        N
-      </div>
-      <div className="car-bubble car-bubble-agent">
-        <MessagePrimitive.Parts components={PART_COMPONENTS} />
-        <MessageButtons />
-        <EditedMarker />
-        <MessageReactions />
-      </div>
-    </MessagePrimitive.Root>
+    <>
+      <DayDivider />
+      <MessagePrimitive.Root className="car-row car-row-agent">
+        <div className="car-avatar" aria-hidden="true">
+          N
+        </div>
+        <div className="car-bubble car-bubble-agent">
+          <MessagePrimitive.Parts components={PART_COMPONENTS} />
+          <MessageButtons />
+          <MessageTime />
+          <EditedMarker />
+          <MessageReactions />
+        </div>
+      </MessagePrimitive.Root>
+    </>
   )
 }
 
@@ -508,6 +564,35 @@ function buildButtonsIndex(messages: readonly RenderMessage[]): ButtonsCtx['byRe
         chosenValue: m.chosenValue,
       })
     }
+  }
+  return map
+}
+
+/** FIX #338 — build the render-id → time-metadata lookup the bubbles read.
+ *  Walks the ORDERED message list once, tagging each durable message with its
+ *  time labels + a day-divider label when it opens a new calendar day. Ephemeral
+ *  bubbles (streaming / notices, `timestampMs === null`) get empty labels + no
+ *  divider and never advance the day cursor. `now` is injected for the
+ *  Today/Yesterday wording (pure + unit-testable). */
+export function buildMetaIndex(
+  messages: readonly RenderMessage[],
+  now: Date,
+): Map<string, MetaEntry> {
+  const map = new Map<string, MetaEntry>()
+  let prevDayKey: string | null = null
+  for (const m of messages) {
+    if (m.timestampMs === null) {
+      map.set(m.id, { timeLabel: '', dateTitle: '', dayDivider: null })
+      continue
+    }
+    const dayKey = dayKeyOf(m.timestampMs)
+    const dayDivider = dayKey !== prevDayKey ? formatDayDivider(m.timestampMs, now) : null
+    prevDayKey = dayKey
+    map.set(m.id, {
+      timeLabel: formatMessageTime(m.timestampMs),
+      dateTitle: formatMessageDateTitle(m.timestampMs),
+      dayDivider,
+    })
   }
   return map
 }
@@ -758,6 +843,50 @@ export function formatRailTime(iso: string | undefined, now: Date): string {
   }
   if (dayDiff < 7) return RAIL_WEEKDAYS[d.getDay()] ?? ''
   return `${RAIL_MONTHS[d.getMonth()] ?? ''} ${d.getDate()}`
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0')
+
+/** FIX #338 — local calendar-day key (YYYY-MM-DD) for day-divider adjacency. */
+function dayKeyOf(ms: number): string {
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+/** FIX #338 — a message bubble's inline timestamp: 24h `HH:MM` (Telegram-style).
+ *  '' for an unparseable time. Pure. */
+export function formatMessageTime(ms: number): string {
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+/** FIX #338 — the full date+time shown on hover over a bubble's timestamp, e.g.
+ *  "Jul 3, 2026, 2:32 PM" (12h). '' for an unparseable time. Pure. */
+export function formatMessageDateTitle(ms: number): string {
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  const h24 = d.getHours()
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12
+  const ampm = h24 < 12 ? 'AM' : 'PM'
+  return `${RAIL_MONTHS[d.getMonth()] ?? ''} ${d.getDate()}, ${d.getFullYear()}, ${h12}:${pad2(d.getMinutes())} ${ampm}`
+}
+
+/** FIX #338 — a day-divider label: TODAY → "Today", YESTERDAY → "Yesterday",
+ *  same calendar year → "Mon Jul 1", older → "Mon Jul 1, 2025". `now` injected
+ *  for deterministic unit tests. '' for an unparseable time. Pure. */
+export function formatDayDivider(ms: number, now: Date): string {
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  const startOfDay = (x: Date): number =>
+    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000)
+  if (dayDiff <= 0) return 'Today'
+  if (dayDiff === 1) return 'Yesterday'
+  const wd = RAIL_WEEKDAYS[d.getDay()] ?? ''
+  const mon = RAIL_MONTHS[d.getMonth()] ?? ''
+  if (d.getFullYear() !== now.getFullYear()) return `${wd} ${mon} ${d.getDate()}, ${d.getFullYear()}`
+  return `${wd} ${mon} ${d.getDate()}`
 }
 
 /** The rail avatar's work-activity dot modifier class (or null for no dot):
@@ -1524,6 +1653,9 @@ export function ChatApp({
     byRenderId: buildButtonsIndex(vm.messages),
     onChoose: (renderId, promptId, value) => controller.onChoose(renderId, promptId, value),
   }
+  // FIX #338 — per-message time labels + day dividers, recomputed each render
+  // (the Today/Yesterday wording tracks the current clock).
+  const metaCtx: MetaCtx = { byRenderId: buildMetaIndex(vm.messages, new Date()) }
   const uploadAffordance = latestUploadAffordance(vm.messages)
   const uploadsCtx: UploadsCtx = fetchImpl !== undefined
     ? { token: config.token, origin: config.origin, fetchImpl }
@@ -1550,6 +1682,7 @@ export function ChatApp({
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
     <ButtonsContext.Provider value={buttonsCtx}>
+    <MetaContext.Provider value={metaCtx}>
       <ConversationRuntimeHost
         key={convId}
         controller={controller}
@@ -1569,6 +1702,7 @@ export function ChatApp({
           {...(fetchImpl !== undefined ? { fetchImpl } : {})}
         />
       </ConversationRuntimeHost>
+    </MetaContext.Provider>
     </ButtonsContext.Provider>
     </EditsContext.Provider>
     </ReactionsContext.Provider>

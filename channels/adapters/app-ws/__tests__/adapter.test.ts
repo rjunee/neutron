@@ -70,6 +70,51 @@ describe('AppWsAdapter.send — outgoing → envelope', () => {
     expect(id.startsWith('app-ws:dropped:')).toBe(true)
   })
 
+  // FIX #333 — a transient system-notice (the cold-start "Waking up…" ack) is
+  // fanned out LIVE but must NEVER be persisted, so a reload can't re-hydrate it
+  // as a stray bubble. A normal message on the same adapter IS persisted.
+  it('does NOT persist a system_notice message but still fans it out', async () => {
+    const registry = new InMemoryAppWsSessionRegistry()
+    const appended: string[] = []
+    let seq = 0
+    const chat_log = {
+      append: async (input: { body: string }) => {
+        appended.push(input.body)
+        return {
+          row: {
+            topic_id: 'app:sam', seq: ++seq, message_id: 'x', role: 'agent' as const,
+            body: input.body, client_msg_id: null, project_id: null, attachments: null,
+            created_at: FROZEN_NOW,
+          },
+          was_new: true,
+        }
+      },
+      replayAfter: async () => [],
+      maxSeq: async () => 0,
+    }
+    const adapter = new AppWsAdapter({
+      registry,
+      receiver: { receive: async () => {} },
+      now: () => FROZEN_NOW,
+      generate_message_id: () => 'msg-x',
+      chat_log,
+    })
+    const captured: AppWsOutbound[] = []
+    registry.register('app:sam', (e) => captured.push(e))
+
+    // A normal reply persists.
+    await adapter.send({ topic, text: 'a real reply' })
+    // The transient pill does NOT persist, but still reaches the live socket.
+    await adapter.send({ topic, text: '⏳ Waking up…', adapter_options: { system_notice: true } })
+
+    expect(appended).toEqual(['a real reply'])
+    expect(captured.length).toBe(2)
+    const pill = captured[1] as { body: string; system_notice?: boolean; seq?: number }
+    expect(pill.body).toBe('⏳ Waking up…')
+    expect(pill.system_notice).toBe(true)
+    expect(pill.seq).toBeUndefined() // never persisted → no ordering seq
+  })
+
   it('renders inline_choices as options', async () => {
     const { adapter, registry } = setup()
     const captured: AppWsOutbound[] = []

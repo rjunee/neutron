@@ -838,7 +838,16 @@ export function buildLiveAgentTurn(
     let ackTimer: ReturnType<typeof setTimeout> | null = null
     if (isColdFirstTurn && !onboardingActive) {
       ackTimer = setTimeout(() => {
-        sendSafe(turn.send, { type: 'agent_message', body: COLD_START_ACK_BODY, topic_id: turn.topic_id })
+        // FIX #333 — `system_notice: true` marks this a TRANSIENT live-only pill:
+        // the client renders it as a quiet centered "Waking up…" notice, and the
+        // persistence layer (`AppWsAdapter.send`) skips the durable chat_log row,
+        // so a reload/project-switch can't re-hydrate it as a stray chat bubble.
+        sendSafe(turn.send, {
+          type: 'agent_message',
+          body: COLD_START_ACK_BODY,
+          topic_id: turn.topic_id,
+          system_notice: true,
+        })
       }, ack_delay_ms)
     }
     const clearAckTimer = (): void => {

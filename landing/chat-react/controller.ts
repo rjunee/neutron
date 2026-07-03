@@ -89,6 +89,15 @@ export interface RenderMessage {
   streaming: boolean
   attachments: readonly string[] | null
   createdAt: number
+  /**
+   * FIX #338 — the message's real wall-clock time (ms epoch) for the bubble's
+   * timestamp + date-on-hover + day dividers. Set for DURABLE rows (from
+   * `ChatMessage.created_at`); null for a live streaming bubble / ephemeral
+   * notice (no real time yet — they render no timestamp until they persist).
+   * Distinct from {@link createdAt}, which is a mixed SORT key (real ms for
+   * durable rows, a monotonic seq for the streaming/notice tail).
+   */
+  timestampMs: number | null
   /** Delivery ladder for user messages (null for agent / streaming bubbles). */
   delivery: DeliveryState | null
   /** Track B Phase 4 — per-emoji reaction chips for this message (empty when
@@ -964,6 +973,8 @@ export class NeutronChatController {
       streaming: false,
       attachments: null,
       createdAt: seq,
+      // FIX #338 — an ephemeral notice has no durable wall-clock time.
+      timestampMs: null,
       delivery: null,
       reactions: [],
       edited: false,
@@ -1048,6 +1059,9 @@ export class NeutronChatController {
         streaming: false,
         attachments: m.attachments,
         createdAt: m.created_at,
+        // FIX #338 — durable rows carry a real ms-epoch time (0 for a not-yet-
+        // acked optimistic send → null, no timestamp until it persists).
+        timestampMs: m.created_at > 0 ? m.created_at : null,
         delivery: deliveryFor(m, this.deviceId),
         reactions: groupReactions(m.reactions, this.deviceId),
         edited: m.deleted !== true && m.edited_at !== null && m.edited_at !== undefined,
@@ -1081,6 +1095,9 @@ export class NeutronChatController {
         streaming: true,
         attachments: null,
         createdAt: entry.createdAt,
+        // FIX #338 — a live streaming bubble has no durable time yet; it renders
+        // no timestamp until its final row persists (which carries created_at).
+        timestampMs: null,
         delivery: null,
         reactions: [],
         edited: false,
