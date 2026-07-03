@@ -2,7 +2,7 @@
  * Component test for the web APP SHELL (rail/tab rework 2026-06-30). Renders
  * `ProjectShell` in happy-dom over a real chat-core `WebChatSession` (fake
  * socket) with an injected `fetchImpl` serving the tab resolver. Asserts:
- *   - PROJECT view: the bar renders the engine-resolved set (Chat + Plan +
+ *   - PROJECT view: the bar renders the engine-resolved set (Chat + Work +
  *     Documents + a Core tab), NO Tasks (removed) and NO Admin (global);
  *   - the persistent project rail renders alongside the tab content;
  *   - the Chat tab shows `ChatApp` and is active by default;
@@ -54,7 +54,7 @@ const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TO
 
 const RESOLVED_TABS = [
   { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
-  { key: 'work_board', label: 'Plan', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
+  { key: 'work_board', label: 'Work', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
   { key: 'documents', label: 'Documents', scope: 'project', source: 'builtin', order: 10, mount: { kind: 'builtin', target: 'docs' } },
   {
     key: 'core:analytics',
@@ -171,11 +171,11 @@ describe('ProjectShell render (happy-dom)', () => {
     // The resolver was hit for the active project's tabs.
     expect(fetchCalls.some((u) => u.endsWith(`/api/app/projects/${PROJECT}/tabs`))).toBe(true)
 
-    // The bar renders the engine-resolved set, not a hardcoded list — Plan (not
+    // The bar renders the engine-resolved set, not a hardcoded list — Work (not
     // "Work Board"), no Tasks (removed), no Admin (global, not folded in).
     const tabButtons = () =>
       Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
-    expect(tabButtons()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+    expect(tabButtons()).toEqual(['Chat', 'Work', 'Documents', 'Analytics'])
 
     // The persistent project rail renders alongside the tab content.
     expect(container.querySelector('.car-rail')).not.toBeNull()
@@ -250,7 +250,7 @@ describe('ProjectShell render (happy-dom)', () => {
     const BETA = 'beta'
     const BETA_TABS = [
       { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
-      { key: 'work_board', label: 'Plan', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
+      { key: 'work_board', label: 'Work', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
     ]
     // GATE the beta resolver: it stays pending until we release it, so we can
     // observe the in-flight (resolving) window deterministically.
@@ -322,7 +322,7 @@ describe('ProjectShell render (happy-dom)', () => {
       Array.from(container.querySelectorAll('button[role="tab"]')) as HTMLButtonElement[]
     const labels = () => tabBtns().map((b) => b.textContent ?? '')
     // Acme's full set resolved, all enabled.
-    expect(labels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+    expect(labels()).toEqual(['Chat', 'Work', 'Documents', 'Analytics'])
     expect(tabBtns().every((b) => !b.disabled)).toBe(true)
 
     // Switch to beta; its resolver is gated → we're now IN-FLIGHT.
@@ -333,10 +333,10 @@ describe('ProjectShell render (happy-dom)', () => {
     // Reconcile-in-place: the bar is NOT collapsed to Chat-only — acme's
     // descriptors stay mounted (no flicker) — BUT every non-Chat tab is now
     // DISABLED so a stale button can't mount a wrong-scope panel mid-switch.
-    expect(labels()).toEqual(['Chat', 'Plan', 'Documents', 'Analytics'])
+    expect(labels()).toEqual(['Chat', 'Work', 'Documents', 'Analytics'])
     const byLabel = (l: string) => tabBtns().find((b) => b.textContent === l)!
     expect(byLabel('Chat').disabled).toBe(false)
-    expect(byLabel('Plan').disabled).toBe(true)
+    expect(byLabel('Work').disabled).toBe(true)
     expect(byLabel('Documents').disabled).toBe(true)
     expect(byLabel('Analytics').disabled).toBe(true)
     // Clicking a disabled stale tab is a no-op: Chat stays the visible panel.
@@ -353,7 +353,7 @@ describe('ProjectShell render (happy-dom)', () => {
       await tick()
       await tick()
     })
-    expect(labels()).toEqual(['Chat', 'Plan'])
+    expect(labels()).toEqual(['Chat', 'Work'])
     expect(tabBtns().every((b) => !b.disabled)).toBe(true)
 
     await act(async () => {

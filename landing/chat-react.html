@@ -85,6 +85,14 @@
     --info-ring: rgba(140,198,255,.3);
     --success-fg: #7ddf9b;
     --success-border: rgba(125,223,155,.4);
+    /* M1 UX REDESIGN — Work-list phase tokens (dot + tag): a tinted bg + a
+       colored fg per build lifecycle step. Build=blue, review=purple, fix=amber,
+       merged=green, failed=red. Used by the pulse-in-tag-color dot + the phase tag. */
+    --phase-build-fg: #8cc6ff;   --phase-build-bg: rgba(140,198,255,.14);
+    --phase-review-fg: #a8a2ff;  --phase-review-bg: rgba(168,162,255,.14);
+    --phase-fix-fg: #ffd27d;     --phase-fix-bg: rgba(255,210,125,.14);
+    --phase-merged-fg: #7ddf9b;  --phase-merged-bg: rgba(125,223,155,.14);
+    --phase-failed-fg: #ff8a8a;  --phase-failed-bg: rgba(255,138,138,.14);
     /* Connection banners */
     --banner-warn-bg: #2a2410;   --banner-warn-fg: #ffd479;
     --banner-info-bg: #18222e;   --banner-info-fg: #8cc6ff;
@@ -138,6 +146,13 @@
     --info-ring: rgba(11,87,208,.25);
     --success-fg: #1a7f37;
     --success-border: rgba(26,127,55,.35);
+    /* M1 UX REDESIGN — Work-list phase tokens, light variants (per the prototype).
+       Darker fg for AA contrast on white; lighter tint bg. */
+    --phase-build-fg: #0b57d0;   --phase-build-bg: rgba(11,87,208,.10);
+    --phase-review-fg: #5b4bd6;  --phase-review-bg: rgba(91,75,214,.12);
+    --phase-fix-fg: #9a6a00;     --phase-fix-bg: rgba(154,106,0,.12);
+    --phase-merged-fg: #1a7f37;  --phase-merged-bg: rgba(26,127,55,.12);
+    --phase-failed-fg: #c9252d;  --phase-failed-bg: rgba(201,37,45,.10);
     --banner-warn-bg: #fff4d6;   --banner-warn-fg: #7a5b00;
     --banner-info-bg: #e6f0ff;   --banner-info-fg: #0b57d0;
     --banner-error-bg: #ffe5e5;  --banner-error-fg: #c9252d;
@@ -379,9 +394,12 @@
   /* ── Work Board tab (cwb-) — flat one-line rows, NOT cards (distinct from
      ctask). Reuses --accent (#6cf live-blue), --muted, --border, car-blink. ── */
   .cwb { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; width: 100%; }
-  .cwb-head {
-    display: flex; gap: 12px; align-items: center;
-    padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface);
+  /* Add-something-to-do lives at the BOTTOM (M1 redesign) — rarely used, so it
+     sits below the list instead of stealing the top. A top border + surface tint
+     seats it as a footer. */
+  .cwb-foot {
+    display: flex; gap: 12px; align-items: center; flex: 0 0 auto;
+    padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface);
   }
   .cwb-add { display: flex; gap: 6px; flex: 1 1 auto; min-width: 0; }
   .cwb-add-input {
@@ -404,24 +422,45 @@
     border: 1.5px solid var(--muted); background: transparent; cursor: pointer;
   }
   .cwb-dot:disabled { cursor: default; }
+  /* M1 redesign — the leading dot reflects the build lifecycle. Not-started is a
+     faint gray outline; running steps fill + PULSE in the phase's tag colour;
+     failed is a solid red; done is a solid green. (Replaces the old blink + the
+     ⑂/› activity glyph column — the dot + tag now carry that signal.) */
   .cwb-dot-upcoming { border-color: var(--muted); background: transparent; }
-  .cwb-dot-active { border-color: var(--accent); background: var(--accent); animation: car-blink 1.4s infinite both; }
-  .cwb-dot-done { border-color: var(--muted); background: var(--muted); opacity: .6; }
-  /* activity glyph — fork (sub-agent) vs caret (inline); live-blue, by silhouette. */
-  .cwb-activity { flex: 0 0 auto; color: var(--accent); font-size: 13px; line-height: 1; width: 12px; text-align: center; }
+  .cwb-dot-build   { border-color: var(--phase-build-fg);  background: var(--phase-build-fg); }
+  .cwb-dot-review  { border-color: var(--phase-review-fg); background: var(--phase-review-fg); }
+  .cwb-dot-fix     { border-color: var(--phase-fix-fg);    background: var(--phase-fix-fg); }
+  .cwb-dot-merge   { border-color: var(--phase-merged-fg); background: var(--phase-merged-fg); }
+  .cwb-dot-failed  { border-color: var(--phase-failed-fg); background: var(--phase-failed-fg); }
+  .cwb-dot-done    { border-color: var(--success-fg);      background: var(--success-fg); }
+  .cwb-dot-pulse   { animation: cwb-pulse 2s ease-in-out infinite; }
+  @keyframes cwb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  /* Phase TAG — a small typographic capsule (sentence-case), tinted bg + colored
+     fg, no border, no emoji. Sits trailing before the round + hover actions. */
+  .cwb-tag {
+    flex: 0 0 auto; font-size: 11px; font-weight: 600; line-height: 1;
+    padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+  }
+  .cwb-tag-build  { color: var(--phase-build-fg);  background: var(--phase-build-bg); }
+  .cwb-tag-review { color: var(--phase-review-fg); background: var(--phase-review-bg); }
+  .cwb-tag-fix    { color: var(--phase-fix-fg);    background: var(--phase-fix-bg); }
+  .cwb-tag-merge  { color: var(--phase-merged-fg); background: var(--phase-merged-bg); }
+  .cwb-tag-failed { color: var(--phase-failed-fg); background: var(--phase-failed-bg); }
+  /* round N — muted, next to the tag. No elapsed-minutes timer (M1: dropped). */
+  .cwb-round { flex: 0 0 auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  /* drag handle (⠿) — replaces the ▲▼ reorder arrows; grab cursor, hover-revealed. */
+  .cwb-drag { cursor: grab; }
+  .cwb-drag:active { cursor: grabbing; }
+  .cwb-row-dragging { opacity: .45; }
+  .cwb-row-dragover { background: var(--accent-tint); }
   .cwb-title {
     flex: 1 1 auto; min-width: 0; font-size: 14px; color: var(--fg);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .cwb-title-btn { background: transparent; border: 0; text-align: left; cursor: text; font: inherit; padding: 2px 0; }
-  /* title + live run-progress sub-label stacked in the middle column (item 1). */
+  /* title + spec-doc link stacked in the middle column. */
   .cwb-title-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .cwb-title-col .cwb-title { flex: 0 0 auto; }
-  .cwb-run-progress {
-    font-size: 11px; color: var(--muted); line-height: 1.2;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .cwb-run-progress-stalled { color: var(--error-fg); }
   /* card ▸ spec-doc link (M1) — a compact tappable link under the title. */
   .cwb-doc-link {
     align-self: flex-start; max-width: 100%; background: transparent; border: 0;
@@ -480,7 +519,7 @@
   /* one-shot flash when a row's snapshot changes; reduced-motion turns it off. */
   @keyframes cwb-flash { from { background: var(--accent-flash); } to { background: transparent; } }
   @media (prefers-reduced-motion: reduce) {
-    .cwb-dot-active { animation: none; }
+    .cwb-dot-pulse { animation: none; }
     .cwb-flash { animation: none; }
   }
   /* ── Project rail (rail-redesign) ──────────────────────────────────────────

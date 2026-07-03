@@ -21,9 +21,9 @@ describe('tab registry — project scope', () => {
   it('returns the builtin project tabs in order', () => {
     const tabs = resolveProjectTabs()
     // Tasks is NOT a builtin (Ryan directive — Core-contributed, WAVE 3); the
-    // work_board tab's user-facing label reads "Plan".
+    // work_board tab's user-facing label reads "Work".
     expect(tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'settings'])
-    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Plan', 'Documents', 'Settings'])
+    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Work', 'Documents', 'Settings'])
   })
 
   it('marks every project tab scope=project, source=builtin, mount.kind=builtin', () => {
