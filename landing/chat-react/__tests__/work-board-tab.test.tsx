@@ -548,10 +548,36 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(labels).toContain('Retry build')
     expect(playBtns.find((b) => b.getAttribute('aria-label') === 'Start build')!.textContent).toBe('▶')
     expect(playBtns.find((b) => b.getAttribute('aria-label') === 'Retry build')!.textContent).toBe('↻')
-    // The add affordance lives in the bottom footer, after the list.
-    const foot = container.querySelector('.cwb-foot')
-    expect(foot).not.toBeNull()
-    expect(foot!.querySelector('.cwb-add-input')).not.toBeNull()
+    // #344 — the add affordance now lives IN-FLOW at the bottom of the active
+    // list (the old bottom `.cwb-foot` footer below Done is gone).
+    expect(container.querySelector('.cwb-foot')).toBeNull()
+    const list = container.querySelector('.cwb-list')!
+    const activeUl = list.querySelector('.cwb-ul:not(.cwb-completed-ul)')!
+    const addForm = list.querySelector('.cwb-add')!
+    expect(addForm.querySelector('.cwb-add-input')).not.toBeNull()
+    // …and it sits AFTER the active list in DOM order.
+    expect(
+      activeUl.compareDocumentPosition(addForm) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    await act(async () => root.unmount())
+  })
+
+  it('#344 — orders active items → add box → Done disclosure', async () => {
+    const rows = [
+      item({ id: 'a', title: 'Active one', status: 'in_progress', sort_order: 1 }),
+      item({ id: 'd', title: 'Done one', status: 'done', sort_order: 2, completed_at: '2026-07-02T00:00:00Z' }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const list = container.querySelector('.cwb-list')!
+    // Direct children of the list (fragments don't create DOM nodes): the active
+    // <ul>, then the add form, then the Done section — in that order.
+    const order = Array.from(list.children).map((el) => el.className.split(' ')[0])
+    const ulAt = order.indexOf('cwb-ul')
+    const addAt = order.indexOf('cwb-add')
+    const doneAt = order.indexOf('cwb-completed')
+    expect(ulAt).toBeGreaterThanOrEqual(0)
+    expect(addAt).toBeGreaterThan(ulAt)
+    expect(doneAt).toBeGreaterThan(addAt)
     await act(async () => root.unmount())
   })
 

@@ -490,6 +490,18 @@ rather than waiting on the global diff-gate. Subscriber:
 >    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
 >    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
 >    General (durable rows under `app:<user>`), not the per-project chats.
+>    **Mounted-per-conversation surface cache (#343).** `ChatApp` no longer
+>    remounts the whole chat surface on a project switch (the old `key={convId}`
+>    on the sole runtime host tore down thread + composer, flashed the empty
+>    state, and dropped scroll/draft — the visible "rebuilding the screen"
+>    flicker). Each visited conversation now gets its OWN persistent
+>    `MountedConversation` (`.car-conv`) with its own assistant-ui runtime; only
+>    the active one is un-`hidden`. A per-convId frozen-vm cache feeds each
+>    surface ONLY its own conversation's messages (live when active, its last
+>    snapshot when not), so the SEV1 index-out-of-bounds fix is preserved
+>    structurally (no runtime is emptied in place by a foreign switch), scroll +
+>    composer draft survive per project, and switching back to an open project is
+>    instant (no refetch flash). Bounded by `MAX_MOUNTED_CONVERSATIONS` (LRU).
 >    **Cross-project exception — the project rail.** The left rail is a
 >    cross-project concern, so a `projects_changed` refresh (onboarding minting a
 >    project, or the "Create Project" button / `create_project` tool) must reach

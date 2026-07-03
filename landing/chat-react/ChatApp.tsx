@@ -12,7 +12,7 @@
  * CSS framework is bundled.
  */
 
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
@@ -1608,6 +1608,128 @@ function ConversationRuntimeHost({
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
 }
 
+/** FIX #343 — cap on simultaneously-mounted conversation surfaces. A user who
+ *  tours many projects keeps only the most-recently-active few alive (the rest
+ *  are evicted and cold-load on return), so mounted assistant-ui runtimes can't
+ *  grow without bound over a long session. The active surface is never evicted. */
+const MAX_MOUNTED_CONVERSATIONS = 8
+
+/**
+ * One MOUNTED conversation surface — its own message-bubble contexts, its own
+ * assistant-ui runtime (via {@link ConversationRuntimeHost}), and the
+ * {@link ChatSurface}. It reads a SINGLE conversation's view-model (`hostVm`),
+ * which {@link ChatApp} guarantees is ALWAYS this conversation's own data (live
+ * when active, its frozen last-snapshot when not) — so this surface's runtime is
+ * NEVER fed another project's messages and its list is never emptied in place by
+ * a foreign switch. That structural guarantee is what preserves the SEV1
+ * switch-race fix (no `useClientLookup` index-out-of-bounds) while letting the
+ * surface stay MOUNTED across switches: hidden when inactive, so its scroll
+ * position + composer draft survive and switching back is instant.
+ */
+function MountedConversation({
+  hostVm,
+  active,
+  controller,
+  config,
+  draft,
+  fetchImpl,
+  onOpenDocLink,
+  showPane,
+  paneProjectId,
+  paneOnOpenDoc,
+}: {
+  hostVm: ChatViewModel
+  active: boolean
+  controller: NeutronChatController
+  config: BootstrapConfig
+  draft: AttachmentDraft
+  fetchImpl?: FetchImpl
+  onOpenDocLink?: (projectId: string, path: string) => void
+  showPane: boolean
+  paneProjectId: string
+  paneOnOpenDoc?: (projectId: string, path: string) => void
+}): React.JSX.Element {
+  const messages = hostVm.messages
+  // Indexes are pure over `messages`; memoize on the message-list identity so an
+  // inactive (frozen) surface doesn't rebuild them on every parent render (the
+  // active conversation streams, re-rendering ChatApp — and thus every mounted
+  // surface — frequently).
+  const reactionsCtx = useMemo<ReactionsCtx>(
+    () => ({
+      byRenderId: buildReactionIndex(messages),
+      onReact: (messageId, emoji, reactedBySelf) =>
+        controller.react(messageId, emoji, reactedBySelf ? 'remove' : 'add'),
+    }),
+    [messages, controller],
+  )
+  const editsCtx = useMemo<EditsCtx>(
+    () => ({
+      byRenderId: buildEditIndex(messages),
+      onEdit: (messageId, body) => controller.editMessage(messageId, body),
+      onDelete: (messageId) => controller.deleteMessage(messageId),
+    }),
+    [messages, controller],
+  )
+  const buttonsCtx = useMemo<ButtonsCtx>(
+    () => ({
+      byRenderId: buildButtonsIndex(messages),
+      onChoose: (renderId, promptId, value) => controller.onChoose(renderId, promptId, value),
+    }),
+    [messages, controller],
+  )
+  // FIX #338 — per-message time labels + day dividers. Recomputed when the list
+  // changes (the Today/Yesterday wording tracks the clock closely enough).
+  const metaCtx = useMemo<MetaCtx>(
+    () => ({ byRenderId: buildMetaIndex(messages, new Date()) }),
+    [messages],
+  )
+  const uploadAffordance = useMemo(() => latestUploadAffordance(messages), [messages])
+  const uploadsCtx: UploadsCtx = fetchImpl !== undefined
+    ? { token: config.token, origin: config.origin, fetchImpl }
+    : { token: config.token, origin: config.origin }
+  const docLinkCtx: DocLinkCtx | null =
+    onOpenDocLink !== undefined
+      ? { origin: config.origin, onOpenDoc: onOpenDocLink }
+      : null
+
+  return (
+    <div className="car-conv" hidden={!active} aria-hidden={!active}>
+    <DocLinkContext.Provider value={docLinkCtx}>
+    <UploadsContext.Provider value={uploadsCtx}>
+    <ReactionsContext.Provider value={reactionsCtx}>
+    <EditsContext.Provider value={editsCtx}>
+    <ButtonsContext.Provider value={buttonsCtx}>
+    <MetaContext.Provider value={metaCtx}>
+      <ConversationRuntimeHost
+        controller={controller}
+        vm={hostVm}
+        origin={config.origin}
+        draft={draft}
+      >
+        <ChatSurface
+          vm={hostVm}
+          controller={controller}
+          config={config}
+          draft={draft}
+          uploadAffordance={uploadAffordance}
+          // Only the ACTIVE surface mounts the Work slide-out pane, so N hidden
+          // surfaces don't each poll a board.
+          showPane={active && showPane}
+          paneProjectId={paneProjectId}
+          {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
+          {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+        />
+      </ConversationRuntimeHost>
+    </MetaContext.Provider>
+    </ButtonsContext.Provider>
+    </EditsContext.Provider>
+    </ReactionsContext.Provider>
+    </UploadsContext.Provider>
+    </DocLinkContext.Provider>
+    </div>
+  )
+}
+
 export function ChatApp({
   vm,
   controller,
@@ -1639,75 +1761,86 @@ export function ChatApp({
    *  (e.g. General, which has no Documents tab). */
   paneOnOpenDoc?: (projectId: string, path: string) => void
 }): React.JSX.Element {
-  const reactionsCtx: ReactionsCtx = {
-    byRenderId: buildReactionIndex(vm.messages),
-    onReact: (messageId, emoji, reactedBySelf) =>
-      controller.react(messageId, emoji, reactedBySelf ? 'remove' : 'add'),
-  }
-  const editsCtx: EditsCtx = {
-    byRenderId: buildEditIndex(vm.messages),
-    onEdit: (messageId, body) => controller.editMessage(messageId, body),
-    onDelete: (messageId) => controller.deleteMessage(messageId),
-  }
-  const buttonsCtx: ButtonsCtx = {
-    byRenderId: buildButtonsIndex(vm.messages),
-    onChoose: (renderId, promptId, value) => controller.onChoose(renderId, promptId, value),
-  }
-  // FIX #338 — per-message time labels + day dividers, recomputed each render
-  // (the Today/Yesterday wording tracks the current clock).
-  const metaCtx: MetaCtx = { byRenderId: buildMetaIndex(vm.messages, new Date()) }
-  const uploadAffordance = latestUploadAffordance(vm.messages)
-  const uploadsCtx: UploadsCtx = fetchImpl !== undefined
-    ? { token: config.token, origin: config.origin, fetchImpl }
-    : { token: config.token, origin: config.origin }
-  const docLinkCtx: DocLinkCtx | null =
-    onOpenDocLink !== undefined
-      ? { origin: config.origin, onOpenDoc: onOpenDocLink }
-      : null
-
-  // ChatApp is now JUST the Chat-tab body (`ChatSurface` + its message-bubble
-  // contexts). The persistent project rail + the tab bar live one level up in
-  // `ProjectShell` (the rail is a persistent left column across ALL tabs; this
-  // surface is only the chat pane). `ChatApp` stays mounted across tab switches
-  // so the live session, stream, and scroll state survive.
-  //
-  // `ConversationRuntimeHost` is keyed by the active conversation so the
-  // assistant-ui runtime is rebuilt per project (the SEV1 switch-race fix). The
-  // message-bubble contexts stay ABOVE it: they carry no assistant-ui index
-  // state, so they can persist across the switch and just take fresh values.
+  // FIX #343 — keep the chat surface MOUNTED across project switches instead of
+  // remounting it on every switch (the old `key={convId}` on the sole
+  // ConversationRuntimeHost tore down the whole thread + composer, flashed the
+  // empty state, and lost scroll/draft — the visible "rebuilding the screen"
+  // flicker). Now each visited conversation gets its OWN persistent
+  // MountedConversation (its own runtime); only the active one is visible. This
+  // preserves the SEV1 switch-race fix structurally (each surface's runtime only
+  // ever sees ITS conversation's messages — never emptied in place by a foreign
+  // switch), keeps per-project scroll + draft, and makes switching back instant.
   const convId = conversationIdOf(vm.projectId)
+
+  // Per-conversation frozen-vm cache, keyed by convId. Updated during render for
+  // the ACTIVE conversation only, and only when the live vm actually carries this
+  // conversation's data — a mid-switch empty vm (the controller re-scoping +
+  // re-hydrating) must NOT blank a cached snapshot. Mutating a ref in render is
+  // the sanctioned React cache pattern (idempotent; survives StrictMode double
+  // invoke since the write is value-stable).
+  const cacheRef = useRef<Map<string, ChatViewModel>>(new Map())
+  const cache = cacheRef.current
+  const cachedActive = cache.get(convId)
+  if (
+    cachedActive === undefined ||
+    vm.messages.length > 0 ||
+    cachedActive.messages.length === 0
+  ) {
+    cache.set(convId, vm)
+  }
+
+  // The ordered set of mounted conversation ids (LRU; most-recently-active last).
+  const [mounted, setMounted] = useState<string[]>(() => [convId])
+  // Render the active conversation immediately even on the switch render (before
+  // the effect below commits the new `mounted` state) so the switch never shows a
+  // blank frame. The effect then persists the order + evicts stale surfaces.
+  const renderList = mounted.includes(convId) ? mounted : [...mounted, convId]
+
+  useEffect(() => {
+    setMounted((prev) => {
+      const next = prev.filter((id) => id !== convId)
+      next.push(convId)
+      while (next.length > MAX_MOUNTED_CONVERSATIONS) {
+        const evicted = next.shift()
+        if (evicted !== undefined && evicted !== convId) cache.delete(evicted)
+      }
+      return next
+    })
+  }, [convId, cache])
+
   return (
-    <DocLinkContext.Provider value={docLinkCtx}>
-    <UploadsContext.Provider value={uploadsCtx}>
-    <ReactionsContext.Provider value={reactionsCtx}>
-    <EditsContext.Provider value={editsCtx}>
-    <ButtonsContext.Provider value={buttonsCtx}>
-    <MetaContext.Provider value={metaCtx}>
-      <ConversationRuntimeHost
-        key={convId}
-        controller={controller}
-        vm={vm}
-        origin={config.origin}
-        draft={draft}
-      >
-        <ChatSurface
-          vm={vm}
-          controller={controller}
-          config={config}
-          draft={draft}
-          uploadAffordance={uploadAffordance}
-          showPane={showPane === true}
-          paneProjectId={paneProjectId ?? ''}
-          {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
-          {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-        />
-      </ConversationRuntimeHost>
-    </MetaContext.Provider>
-    </ButtonsContext.Provider>
-    </EditsContext.Provider>
-    </ReactionsContext.Provider>
-    </UploadsContext.Provider>
-    </DocLinkContext.Provider>
+    <>
+      {renderList.map((id) => {
+        const active = id === convId
+        const frozen = cache.get(id)
+        // The active surface reads the LIVE vm — UNLESS it's momentarily empty
+        // during a re-hydration and we still hold a non-empty snapshot, in which
+        // case we keep showing the snapshot to avoid an empty-state flash (and to
+        // avoid shrinking the runtime out from under its own mounted parts). An
+        // inactive surface always reads its frozen snapshot. Either way a surface
+        // never receives another conversation's messages.
+        const hostVm = active
+          ? vm.messages.length === 0 && frozen !== undefined && frozen.messages.length > 0
+            ? frozen
+            : vm
+          : (frozen ?? vm)
+        return (
+          <MountedConversation
+            key={id}
+            hostVm={hostVm}
+            active={active}
+            controller={controller}
+            config={config}
+            draft={draft}
+            {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+            {...(onOpenDocLink !== undefined ? { onOpenDocLink } : {})}
+            showPane={showPane === true}
+            paneProjectId={paneProjectId ?? ''}
+            {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
+          />
+        )
+      })}
+    </>
   )
 }
 

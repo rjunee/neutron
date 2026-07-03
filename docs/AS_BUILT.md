@@ -2,6 +2,70 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-03 — UX batch-3: no-flicker project switch · work add-box above Done · clean amber attention dot · bottom-right timestamps (#343/#344/#345/#346, no flags)
+
+**Why.** Four chat/work-board refinements from Ryan's live review 2026-07-03:
+(1) clicking between projects "rebuilt the whole screen with lots of flickering";
+(2) the work-board "Add something to do" box sat BELOW the Done disclosure instead
+of at the bottom of the active items; (3) the attention-dot color read as an ugly
+brown; (4) the per-message timestamp flipped side with the bubble (right on the
+blue user bubble, left on the grey agent bubble). NO feature flags; one code path;
+both light + dark preserved; leak-gate SILENT. Stayed clear of trident/build-
+lifecycle (#190, already merged).
+
+**What shipped.**
+
+- **#343 — project switch keeps the chat surface MOUNTED (no teardown flicker).**
+  `ChatApp.tsx` used to wrap the sole assistant-ui runtime host in `key={convId}`,
+  so every project switch UNMOUNTED + REMOUNTED the entire thread + composer,
+  flashed the empty state, and lost scroll/draft. Now each visited conversation
+  gets its own persistent `MountedConversation` (`.car-conv`) with its own runtime;
+  only the active one is un-`hidden`. A per-`convId` frozen-vm cache (`Map`, LRU-
+  bounded by `MAX_MOUNTED_CONVERSATIONS`) feeds each surface ONLY its own
+  conversation's messages — live when active, its last snapshot when not — so
+  switching back to an open project is INSTANT (no refetch flash) and scroll +
+  composer draft survive per project. Crucially this PRESERVES the SEV1 switch-race
+  fix structurally: no runtime is ever emptied in place by a foreign switch (each
+  surface only ever sees its own messages), so the `useClientLookup` index-out-of-
+  bounds can't reoccur. The active surface, during its own re-hydration, keeps
+  showing its cached snapshot until the live transcript lands (no empty-state flash
+  and no shrink). The `chat-rail-stability` regression suite was rewritten to assert
+  on the VISIBLE pane (`.car-conv:not([hidden])`) + the new preservation guarantee
+  (same DOM node across a round-trip, cached messages instant on return), and still
+  guards no-crash / no-boundary across rapid hops.
+
+- **#344 — work "Add something to do" box moves to the bottom of the active items,
+  ABOVE Done.** `WorkBoardTab.tsx` rendered the add box as a pinned bottom footer
+  (`.cwb-foot`) BELOW the "Done · N" disclosure. It now renders IN-FLOW at the
+  bottom of the active list and above Done — final order `[active items] → [＋ Add…]
+  → [Done · N]` — in both the populated and empty-board states. `.cwb-foot` CSS
+  removed; `.cwb-add` restyled for in-flow placement. (Web only — the mobile work
+  board keeps its always-reachable pinned-footer add bar, a platform-appropriate
+  pattern; see PR note.)
+
+- **#345 — the attention dot is a clean amber, not brown.** The `--attention`
+  token was `#9a6a00` (`chat-react.html`, the `data-theme="light"` block) which
+  read as a muddy brown; it's now `#e0a020`, a clean golden amber that stays
+  distinct from the build-blue (`--phase-build-fg`) and the failed-red
+  (`--phase-failed-fg`). The dark value (`#ffd27d`, `:root`) was already a clean
+  pale amber and is unchanged. (Note: the spec labelled the brown value "dark", but
+  in the current file `:root` is the dark palette and `data-theme="light"` is light,
+  so the brown `#9a6a00` was the LIGHT value — both themes now read clean amber,
+  verified in-browser.)
+
+- **#346 — per-message timestamp pinned BOTTOM-RIGHT for both roles.** `.car-time`
+  was left-aligned by default and only right-aligned inside the user bubble, so the
+  timestamp flipped side by role. It's now `text-align: right` for EVERY bubble
+  (grey assistant AND blue user); the full-date hover `title` and the #338 day
+  dividers are untouched.
+
+**Verify.** `bunx tsc -p landing/chat-react/tsconfig.json` clean; 307 chat-react
+tests pass (incl. the rewritten stability suite + a new work-board order test);
+`leak-gate.sh --tree .` SILENT. Booted a QUIET local server and confirmed against
+the real served/bundled assets: `--attention` = `#e0a020` (light) / `#ffd27d`
+(dark), `.car-time` computes `text-align: right`, and the `.car-conv` mounted-
+surface markup renders with rail + composer (no runtime crash from the refactor).
+
 ## 2026-07-03 — M1 redesign polish: atom favicon · inline delete confirm · Work pane inside the Chat view (full-width composer) · 2-line work rows (no flags)
 
 **Why.** Four chat-UI refinements Ryan asked for (with screenshots) after the M1
