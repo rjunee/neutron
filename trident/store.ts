@@ -300,6 +300,28 @@ export class TridentRunStore {
   }
 
   /**
+   * The MOST-RECENTLY-advanced run for a project scope, or null when the scope
+   * has never run a build. M1 UX REDESIGN: the rail's durable failure signal — a
+   * failed build is auto-detached from its board item on terminal reconcile
+   * (`board-reconcile.ts`), so the item alone can't keep surfacing `attention`
+   * (Codex review [P2]). The run ROW persists, so "the project's latest run is
+   * `failed`" is the durable "this build failed and hasn't been superseded"
+   * signal — a fresh live/done run for the same scope replaces it.
+   */
+  latestByProjectScope(project_slug: string): TridentRun | null {
+    const row = this.db
+      .prepare<TridentRunDbRow, [string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE project_slug = ?
+          ORDER BY last_advanced_at DESC
+          LIMIT 1`,
+      )
+      .get(project_slug)
+    return row === null ? null : rowToRun(row)
+  }
+
+  /**
    * Every run whose phase is NOT terminal, oldest-advanced first. This is
    * the tick driver's load query: it advances each returned run. Capped
    * at `limit` so a single tick stays bounded.

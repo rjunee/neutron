@@ -1580,6 +1580,21 @@ export function buildOpenGraphComposer(
           liveRunCount++
           if (deriveRunProgress(run, nowMs).stalled) hasStalledLiveRun = true
         }
+        // Durable failure signal — a failed build is detached from its item on
+        // terminal reconcile, so the bound-item check above only catches the brief
+        // pre-reconcile window. The run ROW persists: if this scope's MOST RECENT
+        // run is `failed` (not yet superseded by a fresh live/done run) AND the
+        // project still has an actionable (not-done) item, keep surfacing
+        // `attention` (Codex review [P2]).
+        if (!hasFailedNotDone) {
+          const latest = boardRunStore.latestByProjectScope(scopeKey)
+          if (latest !== null && latest.phase === 'failed') {
+            const hasOpenItem = workBoardStore
+              .list(scopeKey)
+              .some((it) => it.status !== 'done')
+            if (hasOpenItem) hasFailedNotDone = true
+          }
+        }
       } catch {
         // Board/run read failure → treat as no board signal (idle unless chat).
       }

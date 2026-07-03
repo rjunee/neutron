@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
 import { ProjectDb } from '../persistence/index.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
+import { STALLED_WARN_MS } from './run-progress.ts'
 import {
   stubAdvanceDeps,
   type AdvanceDeps,
@@ -338,6 +339,39 @@ describe('TridentTickLoop — on_transition (M1 UX REDESIGN live-progress fan)',
     expect(seen[3]!.phase).toBe('done')
 
     expect(loop.stats().transitions).toBe(4)
+  })
+
+  test('fans exactly once when a live run ages past the display-stall threshold', async () => {
+    const store = new TridentRunStore(db)
+    const r = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+    const advancedMs = Date.parse(store.get(r.id)!.last_advanced_at)
+
+    const seen: string[] = []
+    const on_transition = {
+      async onTransition(run: TridentRun): Promise<void> {
+        seen.push(run.id)
+      },
+    }
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => ({
+      run,
+      changed: false,
+      waiting: true,
+      note: 'waiting',
+    })
+
+    let nowMs = advancedMs + 1_000 // just after start — not stalled
+    const loop = new TridentTickLoop({ store, step, on_transition, now: () => nowMs })
+
+    await loop.runOnce() // first observation → fan
+    expect(seen.length).toBe(1)
+    await loop.runOnce() // unchanged + not stalled → no fan
+    expect(seen.length).toBe(1)
+
+    nowMs = advancedMs + STALLED_WARN_MS + 60_000 // crossed the stall threshold
+    await loop.runOnce() // stall crossing → fan
+    expect(seen.length).toBe(2)
+    await loop.runOnce() // still stalled, nothing else changed → no repeat fan
+    expect(seen.length).toBe(2)
   })
 
   test('a throwing on_transition never aborts the tick', async () => {

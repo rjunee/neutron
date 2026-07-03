@@ -2021,3 +2021,15 @@ full building→reviewing→fixing→reviewing→merging→done arc); `trident/t
 never on a no-op; a throwing fan never aborts the tick); `open/project-rail.test.ts`
 (activity precedence incl. attention-wins; preview markdown-strip + truncation).
 `tsc` clean (root + `trident` + `landing/chat-react` leaf); leak-gate SILENT.
+
+**Cross-model review fixes (Codex, 2 × P2).** (1) *Stalled runs now fan a rail
+refresh* — `progressSignature` (`trident/tick.ts`) includes a `stalled` boolean
+(off an injectable clock vs `STALLED_WARN_MS`), so the ONE moment a live run ages
+past the display-stall threshold flips the signature and fires `on_transition`
+(→ rail `attention`); it flips at most once per stall, so no per-tick churn. (2)
+*Failed builds stay surfaced as attention* — a failed run is auto-detached from
+its item on terminal reconcile, so the bound-item check alone was fleeting;
+`readProjectRailExtras` now also reads `TridentRunStore.latestByProjectScope` — if
+the scope's most-recent run is `failed` and the project still has a not-done item,
+`attention` persists until a fresh run supersedes it. Tests added for both (tick
+stall-crossing fan; `store.latestByProjectScope` scoping).

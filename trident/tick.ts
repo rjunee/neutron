@@ -22,6 +22,7 @@
 
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
+import { STALLED_WARN_MS } from './run-progress.ts'
 
 /**
  * The per-run advance function the loop applies each tick. PR-2 derives
@@ -96,11 +97,24 @@ export interface TridentTransitionHook {
  * `last_advanced_at` is the reliable single signal: `checkpoint()` re-stamps it
  * on every inner-workflow phase boundary, and the store re-stamps it on every
  * outer transition. `phase` is included so a terminal transition (which also
- * decrements the rail's live_runs) always fans. Elapsed/stall are DELIBERATELY
- * excluded — they drift every tick off the clock and would fan on every tick.
+ * decrements the rail's live_runs) always fans.
+ *
+ * The `stalled` BOOLEAN is included (computed off the injected clock vs
+ * `STALLED_WARN_MS`) so the ONE moment a live run ages past the display-stall
+ * threshold flips the signature and fans a rail refresh — otherwise a hung build
+ * would sit `working` forever, since no `last_advanced_at`/checkpoint field
+ * changes while it stalls (Codex review [P2]). It flips at most ONCE per stall
+ * (false→true), then stays stable, so it does NOT fan every tick; a later
+ * checkpoint (which moves `last_advanced_at`) flips it back and fans again.
+ * Continuous `elapsed_ms` is DELIBERATELY excluded — it would churn every tick.
  */
-function progressSignature(run: TridentRun): string {
-  return `${run.phase}|${run.inner_checkpoint ?? ''}|${run.round}|${run.pr ?? ''}|${run.last_advanced_at}`
+function progressSignature(run: TridentRun, nowMs: number): string {
+  const advancedMs = Date.parse(run.last_advanced_at)
+  const stalled =
+    !isTerminalPhase(run.phase) &&
+    Number.isFinite(advancedMs) &&
+    nowMs - advancedMs > STALLED_WARN_MS
+  return `${run.phase}|${run.inner_checkpoint ?? ''}|${run.round}|${run.pr ?? ''}|${run.last_advanced_at}|${stalled ? 'stalled' : ''}`
 }
 
 export interface TridentTickOptions {
@@ -138,6 +152,12 @@ export interface TridentTickOptions {
    * dev that don't fan live frames → the loop runs unchanged.
    */
   on_transition?: TridentTransitionHook
+  /**
+   * Injectable clock (ms) for the transition fan's stall detection. Defaults to
+   * `Date.now`. Tests pass a fixed clock to exercise the stall-crossing fan
+   * deterministically.
+   */
+  now?: () => number
 }
 
 export class TridentTickLoop {
@@ -147,6 +167,7 @@ export class TridentTickLoop {
   private readonly per_tick_limit: number
   private readonly on_terminal: TridentTerminalHook | null
   private readonly on_transition: TridentTransitionHook | null
+  private readonly now: () => number
   /** Last observed progress signature per run id — drives the transition fan. */
   private readonly lastSig = new Map<string, string>()
   private timer: ReturnType<typeof setInterval> | null = null
@@ -170,6 +191,7 @@ export class TridentTickLoop {
     this.per_tick_limit = options.per_tick_limit ?? 50
     this.on_terminal = options.on_terminal ?? null
     this.on_transition = options.on_transition ?? null
+    this.now = options.now ?? (() => Date.now())
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
@@ -218,7 +240,7 @@ export class TridentTickLoop {
           // its own try/catch so a fan outage never aborts the tick.
           if (this.on_transition !== null) {
             const nextRun = outcome.run
-            const sig = progressSignature(nextRun)
+            const sig = progressSignature(nextRun, this.now())
             if (this.lastSig.get(nextRun.id) !== sig) {
               this.lastSig.set(nextRun.id, sig)
               try {
