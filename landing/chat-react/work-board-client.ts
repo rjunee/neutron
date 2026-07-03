@@ -147,6 +147,27 @@ export class WorkBoardClientError extends Error {
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
+/**
+ * The reserved General board id. The web shell scopes General as the EMPTY
+ * project id ('') everywhere — the rail's General row is `vm.projectId === null`
+ * (→ `''`), and the live `work_board_changed` filter keys off
+ * `(framePid ?? '') === projectId`, so General MUST stay '' for a no-`project_id`
+ * snapshot to be applied (a General frame carries no `project_id`). But the HTTP
+ * work-board surface keys General on the literal `'general'` id
+ * (`workBoardScopeKey(owner_slug, 'general') → owner_slug`, `store.ts`) and 400s
+ * on an empty path segment (`sanitizeProjectId('')` → null → the `//work-board`
+ * double-slash the ProjectShell Codex-P2 note calls out as wrong-scope). So we
+ * normalize '' → 'general' at the URL boundary ONLY: General's board is reachable
+ * over HTTP while every other layer keeps treating it as ''. Named ids pass
+ * through untouched.
+ */
+export const GENERAL_WORK_BOARD_PROJECT_ID = 'general'
+
+/** Map the client-side scope id to its HTTP path segment ('' ⇒ General). */
+export function workBoardPathSegment(project_id: string): string {
+  return project_id.length === 0 ? GENERAL_WORK_BOARD_PROJECT_ID : project_id
+}
+
 export interface WorkBoardClientOptions {
   /** Page origin (`https://host`); the surface lives at `/api/app/...`. */
   base_url: string
@@ -169,14 +190,14 @@ export class WebWorkBoardClient {
 
   /** The full board: active+next first (board order), then completed (reverse-chron). */
   async list(project_id: string): Promise<WorkBoardItem[]> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board`
     const res = await this.req<ListResponse>(path)
     return res.items
   }
 
   /** Append a new item at the end of the board (the "add" affordance). */
   async create(project_id: string, input: CreateWorkBoardItemInput): Promise<WorkBoardItem> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board`
     const res = await this.req<ItemResponse>(path, { method: 'POST', body: input })
     return res.item
   }
@@ -187,14 +208,14 @@ export class WebWorkBoardClient {
     item_id: string,
     input: UpdateWorkBoardItemInput,
   ): Promise<WorkBoardItem> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}`
     const res = await this.req<ItemResponse>(path, { method: 'PATCH', body: input })
     return res.item
   }
 
   /** Mark an item done (stamps `completed_at`, moves it to the completed history). */
   async complete(project_id: string, item_id: string): Promise<WorkBoardItem> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/complete`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}/complete`
     const res = await this.req<ItemResponse>(path, { method: 'POST' })
     return res.item
   }
@@ -205,7 +226,7 @@ export class WebWorkBoardClient {
     item_id: string,
     target: { before?: string; after?: string },
   ): Promise<WorkBoardItem[]> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/reorder`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}/reorder`
     const res = await this.req<ListResponse>(path, { method: 'POST', body: target })
     return res.items
   }
@@ -218,14 +239,14 @@ export class WebWorkBoardClient {
    * `build_dispatch_unavailable`) on a non-2xx so the tab can surface it.
    */
   async start(project_id: string, item_id: string): Promise<StartBuildResult> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}/start`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}/start`
     const res = await this.req<{ ok: boolean; run_id?: string }>(path, { method: 'POST' })
     return { ok: res.ok === true, ...(typeof res.run_id === 'string' ? { run_id: res.run_id } : {}) }
   }
 
   /** Delete an item (the human board is full-CRUD for the owner). */
   async delete(project_id: string, item_id: string): Promise<void> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/work-board/${encodeURIComponent(item_id)}`
+    const path = `/api/app/projects/${encodeURIComponent(workBoardPathSegment(project_id))}/work-board/${encodeURIComponent(item_id)}`
     await this.req<{ ok: boolean; deleted: string }>(path, { method: 'DELETE' })
   }
 

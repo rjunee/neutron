@@ -59,6 +59,7 @@ import type { BootstrapConfig } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import {
   CHAT_TAB,
+  GENERAL_WORK_TAB,
   WebTabsClient,
   sanitizeCoreTabUrl,
   type TabDescriptor,
@@ -328,7 +329,13 @@ export function ProjectShell({
         .listGlobalTabs()
         .then((globalTabs) => {
           if (cancelled) return
-          setTabs([CHAT_TAB, ...globalTabs])
+          // General gets the SAME Work surface every named project has: inject the
+          // `work_board` descriptor (after Chat) so the existing `showPane` gate +
+          // narrow-width tab light up for General, scoped to its `owner_slug` board.
+          // The engine's global set is Admin-only, so General had no `workboard`
+          // descriptor and thus no Work view (the gap this closes). Mirrors the
+          // mobile shell's `ensureWorkTab` injection — one code path, no branch.
+          setTabs([CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs])
           setTabsScope('')
         })
         .catch(() => {

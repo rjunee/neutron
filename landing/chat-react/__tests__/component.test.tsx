@@ -853,6 +853,17 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
+      // General now mounts the Work pane (happy-dom reports a desktop viewport), so
+      // its WorkBoardTab lists the board on mount — serve it empty and DON'T record
+      // it so `calls` stays just the create POST.
+      if (url.includes('/work-board')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ok: true, items: [], project_id: 'general' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
       calls.push({ url, ...(init !== undefined ? { init } : {}) })
       return Promise.resolve(
         new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
@@ -981,6 +992,16 @@ describe('ChatApp render (happy-dom)', () => {
       if (url.endsWith('/tabs')) {
         return Promise.resolve(
           new Response(JSON.stringify({ ok: true, tabs: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
+      // General's Work pane lists its board on mount (desktop viewport) — serve it
+      // empty and don't record it, so `calls` reflects only the create flow.
+      if (url.includes('/work-board')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ok: true, items: [], project_id: 'general' }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),

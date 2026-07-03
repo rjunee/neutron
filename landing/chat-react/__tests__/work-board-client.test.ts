@@ -141,6 +141,33 @@ describe('WebWorkBoardClient', () => {
     await client.update('a/b', 'i d', { title: 'x' })
     expect(calls[0]!.url).toBe(`${BASE}/api/app/projects/a%2Fb/work-board/i%20d`)
   })
+
+  // General is scoped as the EMPTY project id ('') throughout the web shell (so
+  // the live `work_board_changed` filter matches its no-`project_id` snapshot),
+  // but the HTTP surface keys General on the literal 'general' id and 400s on an
+  // empty segment. The client normalizes '' → 'general' at the URL boundary ONLY.
+  it('maps the empty (General) project id to the /general HTTP segment', async () => {
+    const { client, calls } = makeClient(jsonRes({ ok: true, items: [row()], project_id: 'general' }))
+    await client.list('')
+    // Never the `//work-board` double-slash the ProjectShell Codex-P2 note flags.
+    expect(calls[0]!.url).toBe(`${BASE}/api/app/projects/general/work-board`)
+    expect(calls[0]!.url).not.toContain('//work-board')
+  })
+
+  it('maps General to /general for item routes too (create/start); named ids pass through', async () => {
+    const created = makeClient(jsonRes({ ok: true, item: row() }))
+    await created.client.create('', { title: 'Ship it' })
+    expect(created.calls[0]!.url).toBe(`${BASE}/api/app/projects/general/work-board`)
+
+    const started = makeClient(jsonRes({ ok: true, run_id: 'r1' }))
+    await started.client.start('', 'w1')
+    expect(started.calls[0]!.url).toBe(`${BASE}/api/app/projects/general/work-board/w1/start`)
+
+    // A named project id is a pass-through — the mapping fires ONLY for ''.
+    const named = makeClient(jsonRes({ ok: true, items: [row()], project_id: 'acme' }))
+    await named.client.list('acme')
+    expect(named.calls[0]!.url).toBe(`${BASE}/api/app/projects/acme/work-board`)
+  })
 })
 
 describe('parseWorkBoardItems', () => {
