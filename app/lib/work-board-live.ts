@@ -79,8 +79,10 @@ function buildWsUrl(
 
 /**
  * Decode one inbound socket message. Returns the parsed board items when the
- * frame is a `work_board_changed` for THIS project (or one carrying no
- * project_id), or null to ignore everything else.
+ * frame is a `work_board_changed` for THIS subscriber's board, or null to ignore
+ * everything else. A frame's board is its `project_id` (absent/empty ⇒ the
+ * General board); it is applied ONLY when that matches `project_id`, so a General
+ * or sibling-project board can never overwrite a per-project view.
  */
 export function decodeWorkBoardFrame(data: unknown, project_id: string): WorkBoardItem[] | null {
   let obj: unknown = data;
@@ -94,10 +96,11 @@ export function decodeWorkBoardFrame(data: unknown, project_id: string): WorkBoa
   if (typeof obj !== 'object' || obj === null) return null;
   const f = obj as Record<string, unknown>;
   if (f['type'] !== 'work_board_changed') return null;
-  // The app-ws topic is per-user, so a sibling project's board can arrive on
-  // this socket too; drop it when the frame names a different project.
-  const framePid = f['project_id'];
-  if (typeof framePid === 'string' && framePid.length > 0 && framePid !== project_id) return null;
+  // The app-ws topic is per-user, so a sibling project's board (and the untagged
+  // General board) can arrive on this socket too; apply only an EXACT board match.
+  const rawPid = f['project_id'];
+  const framePid = typeof rawPid === 'string' ? rawPid : '';
+  if (framePid !== project_id) return null;
   return parseWorkBoardItems(f['items']);
 }
 

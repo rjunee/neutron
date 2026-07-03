@@ -706,12 +706,13 @@ export class NeutronChatController {
       this.lastWorkBoard = items
       this.lastWorkBoardProjectId = framePid
       // Update the active-project board cache (drives `hasActiveWork`) ONLY when
-      // this frame pertains to the active project — a frame with no project_id is
-      // "this project"; a sibling project's board (per-user topic) is ignored so
-      // it can't stop the active project's typing dots. Mirrors WorkBoardTab's
+      // this frame pertains to the active board — a frame's board is `framePid`
+      // (absent/empty ⇒ the General board, whose `this.projectId` is null/'').
+      // A sibling — or the General board while a project is active — is ignored so
+      // it can't spin/stop the active project's typing dots. Mirrors WorkBoardTab's
       // per-tab filter, but cached here so `computeHasActiveWork` survives
       // interleaved foreign frames.
-      if (framePid === undefined || framePid.length === 0 || framePid === this.projectId) {
+      if ((framePid ?? '') === (this.projectId ?? '')) {
         this.activeWorkBoardItems = items
       }
       for (const fn of this.workBoardListeners) {

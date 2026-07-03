@@ -2,6 +2,67 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — trident/work-board correctness bundle (3 bugs a live parallel build test exposed)
+
+**Why.** A live test dispatched two trident builds (taskdag + waldb) in parallel
+for the same owner. Both built + committed fine, then three engine defects
+surfaced: (1) waldb FAILED at merge with `untracked working tree files would be
+overwritten: taskdag, dag.ts` — the OTHER build's files; (2) taskdag ended
+`subagent_status='completed'` but its `phase` stuck at `forge-init` forever; and
+(3) separately, every project's Plan tab showed the SAME list. One PR, no feature
+flags, no migration.
+
+**What shipped.**
+
+- **Bug 1 — per-workspace merge serialization.** Two builds in the same project
+  share ONE `code` workspace, so their local merges (`git checkout <base>` + `git
+  merge --no-ff` in the one working tree) race — A's committed-but-unmerged files
+  are untracked when B checks out base. `trident/merge.ts:mergeLocal` now runs
+  under a per-`repo_path` promise-chain lock (`withLocalMergeLock`): the 2nd merge
+  waits, then merges on a base that already has A's files TRACKED. Keyed on
+  `repo_path` so different-project workspaces still merge in parallel; a failed
+  predecessor never wedges the queue. PR-mode is untouched (it never merges in the
+  shared tree). Verified against REAL git: two concurrent `cleanupAfterMerge` calls
+  on one repo land BOTH branches on main with no untracked-overwrite.
+- **Bug 2 — robust terminal harvest.** The inner workflow writes
+  `subagent_status='completed'` in the same sqlite UPDATE that sets `inner_result`
+  via `readfile()`. If that readfile yields null, the run is left `completed` with a
+  null/garbled result: `parseInnerResult` returns null (harvest never fires) and the
+  completed-write re-stamps `last_advanced_at` (hang watchdog DEFEATED) → stuck at
+  `forge-init`. `trident/orchestrator.ts` now treats a terminal `subagent_status`
+  with no parseable `inner_result` as a TERMINAL FAILURE (never merges — no verified
+  result). Defense-in-depth: `writeTerminalResult` (`inner-workflow.mjs`) flips
+  `subagent_status` to `completed` only inside a CASE guarded on the same
+  `readfile()` being non-empty, so the columns can't disagree at the source.
+- **Bug 3 — per-project Plan board.** The HTTP surface keyed every store call on
+  the instance constant `resolved.project_slug`, so all projects collapsed onto one
+  board. It now keys on `workBoardScopeKey(owner_slug, <url project_id>)` (new, in
+  `work-board/store.ts`): the owner slug bounds the scope (single-owner box), the
+  validated URL `project_id` selects the project (General → the bare owner slug,
+  which also carries all pre-scoping legacy rows — no migration, no history
+  stranded). A cross-scope `store.get` miss stays a 404. The dispatch ▶ path threads
+  the same scope so a build resolves a per-project workspace + reconciles on the
+  right key. The `work_board_changed` push tags each frame with the per-project
+  `project_id` (`workBoardProjectIdForKey`); the app + web clients now apply a
+  frame ONLY on an EXACT board match — an untagged frame is the General board
+  (projectId `''`/null), NOT a broadcast (Codex P2 fix — else a General/agent
+  write clobbered an open project's live view). Interaction:
+  fixing #3 does NOT subsume #1 — two concurrent builds in the SAME project still
+  share one workspace, so #1's lock is still required.
+
+**Scope note.** The agent `work_board_*` tools + the per-turn injection still key on
+the instance slug (hard-overridden in `mcp/server.ts`), so the chat agent and the
+General Plan tab share the General board; per-project boards are human/HTTP + ▶
+scoped. A deeper per-project agent context is a separate change (out of scope).
+
+**Tests.** Deterministic coverage for all three GATES: merge mutex (serialize on
+same `repo_path`, parallel on different, failed-first doesn't wedge) + a real-git
+concurrent-merge check; harvest gate (completed+null → failed, completed+garbled →
+failed, running+null NOT reaped); surface per-project isolation (A vs B distinct,
+cross-scope 404, General→owner-slug legacy rows) + scope-key helpers + onChange
+key-passing. `bunx tsc --noEmit` clean; trident + work-board suites green (442 +
+84 targeted); leak-gate SILENT.
+
 ## 2026-07-02 — M1 Work Board ▶ play button + on-disk spec persistence
 
 **Why.** Two coupled gaps from the live trident test: (1) a Plan card that was

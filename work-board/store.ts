@@ -81,9 +81,11 @@ export interface WorkBoardStoreOptions {
   now?: () => string
   /** Injectable id generator for tests; defaults to a ULID. */
   ulid?: () => string
-  /** Fired AFTER each committed mutation so a push can fan out. Best-effort:
-   *  a throwing hook is swallowed so it can never roll back a committed write. */
-  onChange?: () => void
+  /** Fired AFTER each committed mutation so a push can fan out. Receives the
+   *  storage key (`project_slug` value) of the board that changed, so the
+   *  composer can list + tag the RIGHT project's snapshot. Best-effort: a
+   *  throwing hook is swallowed so it can never roll back a committed write. */
+  onChange?: (project_key: string) => void
 }
 
 /**
@@ -104,6 +106,68 @@ export class WorkBoardValidationError extends Error {
 export const MAX_TITLE_LEN = 256
 /** A defensive cap on a design-doc ref length. */
 export const MAX_DESIGN_DOC_REF_LEN = 2048
+
+/**
+ * The reserved General/instance board id. The clients treat General as a
+ * null/empty project id (web `ProjectShell.isGeneral = projectId == null ||
+ * len === 0`; the app subscribes with `''`), and the server-wide convention
+ * normalizes an absent project to `'general'` (`turn.project_id ?? 'general'`).
+ * Any of these map onto the General board.
+ */
+export const GENERAL_WORK_BOARD_PROJECT_ID = 'general'
+
+/**
+ * The per-project Work Board STORAGE KEY (the `project_slug` column value),
+ * scoped under the single owner.
+ *
+ * Neutron Open is single-owner: `owner_slug` (the bearer/instance project_slug)
+ * IS the owner boundary and every project lives under it. The board must be
+ * keyed per PROJECT — not per owner — or all projects collapse onto one board
+ * (the bug this fixes). The map:
+ *
+ *  - General (project_id absent / `''` / `'general'`) → the bare `owner_slug`.
+ *    Deliberate: it maps every PRE-EXISTING row (all written under the instance
+ *    owner slug before per-project scoping) onto the General board — the context
+ *    they were created in (the chat/agent tools + the instance Plan tab), so no
+ *    history is stranded. The agent `work_board_*` tools (keyed on the instance
+ *    slug via `mcp/server.ts`) also land here, so the agent and the General Plan
+ *    tab share one board.
+ *  - A real project (`project_id = 'acme'`)          → the project id verbatim.
+ *    Already sanitized to `[A-Za-z0-9_.-]` (no `':'`), so it is filesystem-safe
+ *    as a build-workspace / spec-doc directory component.
+ *
+ * Single-owner ∴ the bare project id is a sufficient key — there is no second
+ * owner whose `'acme'` could collide. (Mirrors the intent of
+ * `project-credentials/store.ts`'s `(owner_slug, project_id)` axis, collapsed to
+ * one column because the owner is constant.) EDGE: a real project whose id
+ * literally equals `owner_slug` would share the General bucket — not expected
+ * (owner_slug is the instance slug, project ids are user identifiers).
+ */
+export function workBoardScopeKey(
+  owner_slug: string,
+  project_id: string | null | undefined,
+): string {
+  const pid = typeof project_id === 'string' ? project_id.trim() : ''
+  if (pid.length === 0 || pid === GENERAL_WORK_BOARD_PROJECT_ID) return owner_slug
+  return pid
+}
+
+/**
+ * Reverse of {@link workBoardScopeKey} for the live `work_board_changed` frame's
+ * `project_id` tag: map a storage key back to the per-project id the clients
+ * filter on (`app/lib/work-board-live.decodeWorkBoardFrame` + the web
+ * controller). General (key === owner_slug) → `undefined`: the frame carries NO
+ * `project_id`, the clients' documented "no project_id = this/General board"
+ * broadcast (a concrete tag would be dropped by the General viewer, whose
+ * projectId is null/empty). A real project → its id, so only that project's
+ * viewers apply the frame and siblings drop it.
+ */
+export function workBoardProjectIdForKey(
+  owner_slug: string,
+  scope_key: string,
+): string | undefined {
+  return scope_key === owner_slug ? undefined : scope_key
+}
 
 const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
@@ -210,7 +274,7 @@ export class WorkBoardStore {
   private readonly db: ProjectDb
   private readonly now: () => string
   private readonly ulid: () => string
-  private readonly onChange: (() => void) | undefined
+  private readonly onChange: ((project_key: string) => void) | undefined
 
   constructor(db: ProjectDb, opts: WorkBoardStoreOptions = {}) {
     this.db = db
@@ -219,11 +283,12 @@ export class WorkBoardStore {
     this.onChange = opts.onChange
   }
 
-  /** Fire the change hook; never let a hook throw escape a committed write. */
-  private emitChange(): void {
+  /** Fire the change hook for the mutated board key; never let a hook throw
+   *  escape a committed write. */
+  private emitChange(project_key: string): void {
     if (this.onChange === undefined) return
     try {
-      this.onChange()
+      this.onChange(project_key)
     } catch {
       /* push is best-effort — a committed write must not roll back on it */
     }
@@ -285,7 +350,7 @@ export class WorkBoardStore {
         ],
       )
     })
-    this.emitChange()
+    this.emitChange(project_slug)
     return item
   }
 
@@ -401,7 +466,7 @@ export class WorkBoardStore {
       )
       return this.get(project_slug, id)
     })
-    if (result !== null) this.emitChange()
+    if (result !== null) this.emitChange(project_slug)
     return result
   }
 
@@ -450,7 +515,7 @@ export class WorkBoardStore {
         )
       }
     })
-    this.emitChange()
+    this.emitChange(project_slug)
   }
 
   /** Toggle the lightweight inline-work marker. */
@@ -460,7 +525,7 @@ export class WorkBoardStore {
         WHERE project_slug = ? AND id = ?`,
       [active ? 1 : 0, this.now(), project_slug, id],
     )
-    this.emitChange()
+    this.emitChange(project_slug)
   }
 
   /** Bind a trident run to this item (Phase 2 correlation key). */
@@ -470,7 +535,7 @@ export class WorkBoardStore {
         WHERE project_slug = ? AND id = ?`,
       [run_id, this.now(), project_slug, id],
     )
-    this.emitChange()
+    this.emitChange(project_slug)
   }
 
   /** Clear a bound trident run — but ONLY if `run_id` is still the run bound to
@@ -485,7 +550,7 @@ export class WorkBoardStore {
         WHERE project_slug = ? AND id = ? AND linked_run_id = ?`,
       [this.now(), project_slug, id, run_id],
     )
-    this.emitChange()
+    this.emitChange(project_slug)
   }
 
   /** Look up the item a run is bound to (the partial `linked_run_id` index).
@@ -541,7 +606,7 @@ export class WorkBoardStore {
       )
       return this.get(project_slug, id)
     })
-    if (result !== null) this.emitChange()
+    if (result !== null) this.emitChange(project_slug)
     return result
   }
 
@@ -582,7 +647,7 @@ export class WorkBoardStore {
       )
       return this.get(project_slug, current.id)
     })
-    if (result !== null) this.emitChange()
+    if (result !== null) this.emitChange(project_slug)
     return result
   }
 
@@ -592,6 +657,6 @@ export class WorkBoardStore {
       project_slug,
       id,
     ])
-    this.emitChange()
+    this.emitChange(project_slug)
   }
 }

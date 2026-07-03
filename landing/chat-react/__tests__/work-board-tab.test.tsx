@@ -482,10 +482,13 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(container.textContent).toContain('Original')
 
     await act(async () => {
-      emit([
-        item({ id: 'a', title: 'Original' }),
-        item({ id: 'b', title: 'Pushed live', status: 'in_progress' }),
-      ])
+      emit(
+        [
+          item({ id: 'a', title: 'Original' }),
+          item({ id: 'b', title: 'Pushed live', status: 'in_progress' }),
+        ],
+        PROJECT,
+      )
       await tick()
     })
     expect(container.textContent).toContain('Pushed live')

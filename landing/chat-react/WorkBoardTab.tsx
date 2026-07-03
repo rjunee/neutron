@@ -265,9 +265,10 @@ export function WorkBoardTab({
     if (liveSource === undefined || liveSource === null) return
     const unsub = liveSource.onWorkBoardChanged((next, framePid) => {
       // The app-ws topic is per-user, so a sibling project's board can arrive on
-      // this socket; drop a snapshot that names a DIFFERENT project (a frame with
-      // no project_id is treated as "this project" — single-project instances).
-      if (framePid !== undefined && framePid.length > 0 && framePid !== projectId) return
+      // this socket. A frame's board is `framePid` (absent/empty ⇒ the General
+      // board, whose projectId is ''); apply it ONLY when it matches THIS tab's
+      // project, so a General/sibling board can't overwrite a per-project view.
+      if ((framePid ?? '') !== projectId) return
       listSeq.current += 1
       setItems(next)
       setLoading(false)
