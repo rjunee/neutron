@@ -2,6 +2,58 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-03 — M1 UX redesign PR-6: Mobile project rail + seated tabs + Work-badge (LAST redesign PR, no flags)
+
+**Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-6 is the MOBILE
+counterpart of PR-3's desktop rail/tabs (the Expo app under `app/`). Ryan
+explicitly asked for the mobile project rail to show the emoji **and the project
+name below it** (Telegram-folder-style) — overriding the prototype's emoji-only
+icon rail. Depends on PR-1..5 (all merged). No feature flags — one code path.
+
+**What shipped.**
+
+- **Telegram-folder project rail** (`app/components/ProjectRail.tsx`, new) seated
+  on the LEFT of the workspace (`app/app/projects/[id]/_layout.tsx` restructured to
+  `[rail | (tabs + content)]` on the narrow/native path). Each entry: emoji +
+  **name directly below** (weight bumps on unread, 1-line ellipsis) + a corner
+  **work-activity dot** — `working` → pulsing `--work` @2.4s (reduced-motion-gated
+  via `AccessibilityInfo`), `attention` → static `--attention`, `idle`/General →
+  none. Active project highlighted; tap → `router.replace('/projects/<id>')`; a `+`
+  jumps to the project list. Dot logic is the pure `railDotKind`
+  (`app/lib/project-rail-view.ts`, unit-tested).
+
+- **Seated tabs** (`app/components/ProjectTabBar.tsx` `NarrowTabBar`): top-rounded
+  sheets on a `surface` band, active tab fused to the content sheet (mirrors PR-3
+  desktop). Replaces the old underline/pill treatment — one path.
+
+- **Work-tab live-run badge**: the registry emits no Work descriptor, so
+  `ensureWorkTab` (`app/lib/project-tabs.ts`) injects a Work tab after Chat over
+  BOTH the loading default and the fetched set (idempotent, one path), routed to
+  the existing `workboard.tsx`. The tab bar renders a phase-build-tinted `.cap`
+  badge for any tab with a positive count; the layout feeds the current project's
+  `live_runs`.
+
+- **Rail data (no re-derivation).** SET from `fetchProjects` (HTTP);
+  `activity`/`live_runs` overlaid LIVE from the app-ws `projects_changed` frame via
+  a new `app/lib/projects-rail-live.ts` subscriber (mirrors `work-board-live.ts`,
+  injectable socket). The mobile HTTP `/api/app/projects` never carried these
+  fields — the composer-fanned frame is the single source of truth (same as web).
+
+- **Server (minimal):** `on_session_open` (`open/composer.ts`) now pushes the
+  current projects snapshot straight to the just-connected topic, so a freshly-
+  connected mobile rail seeds on open instead of waiting on the global diff-gate.
+
+- **Theme:** added `work` (#66ccff) + `attention` (#ffd27d) tokens to
+  `app/lib/theme.ts` (mirror of the web `--work`/`--attention`); theme lock-test
+  updated.
+
+**Tests.** `project-rail-view.test.ts`, `projects-rail-live.test.ts` (fake
+socket), `project-tabs-work.test.ts` + theme lock-test — full app suite 693 pass.
+App `tsc` clean, root `tsc` clean, leak-gate SILENT.
+
+**Out of scope.** Desktop web (PR-1..5), docs drill-down (PR-5), a rail preview
+line, any activity/live_runs derivation outside the composer.
+
 ## 2026-07-02 — M1 UX redesign PR-4: Work slide-out pane (edge-handle + auto-open/close, no flags)
 
 **Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-4 replaces the desktop

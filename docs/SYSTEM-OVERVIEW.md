@@ -389,6 +389,34 @@ once the fetch resolves (their routes remain, reachable by deep-link); re-adding
 builtin is a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell
 consumption is PR-4 (reworked 2026-06-30 — see below).
 
+### Mobile rail + seated tabs + Work-badge (M1 UX REDESIGN PR-6)
+
+The Expo project workspace (`app/app/projects/[id]/_layout.tsx`) now seats a
+**Telegram-folder-style project rail** on the LEFT edge (`app/components/ProjectRail.tsx`):
+each entry is the project **emoji with the project NAME directly below it** (not
+emoji-only, per Ryan's sign-off override of the prototype's icon rail) plus a
+per-project **work-activity dot** on the emoji corner — `working` → pulsing
+`--work` @2.4s (reduced-motion-gated), `attention` → static `--attention`, `idle`
+/ General → none. The active project is highlighted; tapping switches project. The
+dot-choice is the pure `railDotKind` (`app/lib/project-rail-view.ts`, unit-tested).
+
+The tab band is now **seated** (`ProjectTabBar` `NarrowTabBar`): tabs are
+top-rounded sheets on a `surface` band and the active tab fuses to the content
+sheet (mirrors PR-3's desktop treatment). The **Work tab** carries a **live-run
+badge** (`live_runs` count, phase-build tinted) — the registry emits no Work
+descriptor, so the shell injects a Work tab after Chat over both the loading
+default and the fetched set (`ensureWorkTab`, one code path), routed to the
+existing `workboard.tsx`.
+
+**Rail data source (no re-derivation).** The rail's project SET comes from the
+HTTP list (`fetchProjects`); the PR-1 `activity` + `live_runs` overlay comes LIVE
+from the app-ws `projects_changed` frame — the SAME frame the web rail consumes,
+so the composer stays the single source of truth. A minimal server change makes
+`on_session_open` push the current snapshot straight to the just-connected topic
+(`open/composer.ts`) so a freshly-connected mobile socket seeds its rail on open
+rather than waiting on the global diff-gate. Subscriber:
+`app/lib/projects-rail-live.ts` (mirrors `work-board-live.ts`, injectable socket).
+
 ### Web client consumption (WAVE 3 PR-4)
 
 > **P0b (2026-06-26) — React is the ONLY web chat client.** The vanilla

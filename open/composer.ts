@@ -3421,6 +3421,15 @@ export function buildOpenGraphComposer(
         // FIX 1 (#85) — seed the projects rail baseline on connect (only records
         // the pre-existing set; the post-emit below catches a seed-driven change).
         emitProjectsChangedIfChanged(user_id)
+        // M1 UX REDESIGN PR-6 — the diff-gated seed above only SENDS on a real
+        // change, so a freshly-connected client (notably the mobile project rail)
+        // would show stale rail state (no activity dots / Work-tab badge) whenever
+        // another session already consumed the current snapshot. Push the current
+        // snapshot straight to the just-connected topic so its rail is correct on
+        // open. Targeted to this one topic (not a broadcast) and an idempotent
+        // full-list apply, so a redundant delivery to a co-topic session is a
+        // harmless no-op — it never disturbs the diff baseline.
+        appWsRegistry.send(channel_topic_id, buildProjectsChangedFrame())
         if (await isOnboardingActive(user_id)) {
           // RECOVERY (M1 E2E Round 4, 2026-06-29) — finalize a post-import
           // onboarding that was consumed back into the conversational marker but

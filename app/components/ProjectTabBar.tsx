@@ -22,6 +22,7 @@
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { PHASE } from '../lib/theme';
 import { PROJECT_TABS, type ProjectTabSpec } from '../lib/project-tabs';
 
 /**
@@ -45,58 +46,85 @@ export interface ProjectTabBarProps {
   active: string | null;
   onSelect: (key: string) => void;
   tabs?: readonly ProjectTabSpec[];
+  /**
+   * M1 UX REDESIGN PR-6 — per-tab-key badge counts (the Work tab's live-run
+   * count). A tab with a count `> 0` renders a tinted `.cap`-style badge; 0 /
+   * absent → no badge. Keyed by tab `key` so it stays generic.
+   */
+  badges?: ReadonlyMap<string, number>;
 }
 
-export function ProjectTabBar({ active, onSelect, tabs = PROJECT_TABS }: ProjectTabBarProps) {
+export function ProjectTabBar({ active, onSelect, tabs = PROJECT_TABS, badges }: ProjectTabBarProps) {
   const { width } = useWindowDimensions();
   const wide = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
   return wide ? (
-    <WideTabBar tabs={tabs} active={active} onSelect={onSelect} />
+    <WideTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} />
   ) : (
-    <NarrowTabBar tabs={tabs} active={active} onSelect={onSelect} />
+    <NarrowTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} />
   );
+}
+
+/** The tinted live-count badge (prototype `.tab .cap`). Renders only for `> 0`. */
+function TabBadge({ count }: { count: number }) {
+  return (
+    <View style={styles.cap} testID="tab-badge">
+      <Text style={styles.capText}>{count > 99 ? '99+' : count}</Text>
+    </View>
+  );
+}
+
+function badgeCountFor(
+  badges: ReadonlyMap<string, number> | undefined,
+  key: string,
+): number {
+  const n = badges?.get(key);
+  return typeof n === 'number' && n > 0 ? n : 0;
 }
 
 function NarrowTabBar({
   tabs,
   active,
   onSelect,
+  badges,
 }: {
   tabs: readonly ProjectTabSpec[];
   active: string | null;
   onSelect: (key: string) => void;
+  badges?: ReadonlyMap<string, number>;
 }) {
   return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={styles.narrowContent}
-      style={styles.narrowBar}
-      testID="project-tab-bar-narrow"
-    >
-      {tabs.map((tab) => {
-        const isActive = tab.key === active;
-        return (
-          <Pressable
-            key={tab.key}
-            accessibilityRole="tab"
-            accessibilityLabel={`${tab.label} tab`}
-            accessibilityState={{ selected: isActive }}
-            testID={`tab-${tab.key}`}
-            onPress={() => {
-              if (!isActive) onSelect(tab.key);
-            }}
-            style={({ pressed }) => [
-              styles.narrowItem,
-              isActive && styles.narrowItemActive,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Text style={[styles.narrowLabel, isActive && styles.narrowLabelActive]}>{tab.label}</Text>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
+    <View style={styles.narrowBand} testID="project-tab-bar-narrow">
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.narrowContent}
+      >
+        {tabs.map((tab) => {
+          const isActive = tab.key === active;
+          const badge = badgeCountFor(badges, tab.key);
+          return (
+            <Pressable
+              key={tab.key}
+              accessibilityRole="tab"
+              accessibilityLabel={`${tab.label} tab${badge > 0 ? `, ${badge} running` : ''}`}
+              accessibilityState={{ selected: isActive }}
+              testID={`tab-${tab.key}`}
+              onPress={() => {
+                if (!isActive) onSelect(tab.key);
+              }}
+              style={({ pressed }) => [
+                styles.seatTab,
+                isActive && styles.seatTabActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={[styles.seatLabel, isActive && styles.seatLabelActive]}>{tab.label}</Text>
+              {badge > 0 ? <TabBadge count={badge} /> : null}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -104,20 +132,23 @@ function WideTabBar({
   tabs,
   active,
   onSelect,
+  badges,
 }: {
   tabs: readonly ProjectTabSpec[];
   active: string | null;
   onSelect: (key: string) => void;
+  badges?: ReadonlyMap<string, number>;
 }) {
   return (
     <View style={styles.wideBar} testID="project-tab-bar-wide">
       {tabs.map((tab) => {
         const isActive = tab.key === active;
+        const badge = badgeCountFor(badges, tab.key);
         return (
           <Pressable
             key={tab.key}
             accessibilityRole="tab"
-            accessibilityLabel={`${tab.label} tab`}
+            accessibilityLabel={`${tab.label} tab${badge > 0 ? `, ${badge} running` : ''}`}
             accessibilityState={{ selected: isActive }}
             testID={`tab-${tab.key}`}
             onPress={() => {
@@ -131,6 +162,7 @@ function WideTabBar({
           >
             <View style={[styles.wideAccent, isActive && styles.wideAccentActive]} />
             <Text style={[styles.wideLabel, isActive && styles.wideLabelActive]}>{tab.label}</Text>
+            {badge > 0 ? <TabBadge count={badge} /> : null}
           </Pressable>
         );
       })}
@@ -141,37 +173,71 @@ function WideTabBar({
 const WIDE_SIDEBAR_WIDTH = 200;
 const WIDE_ITEM_ACCENT_WIDTH = 3;
 
+const TAB_SEAT_RADIUS = 9;
+
 const styles = StyleSheet.create({
-  narrowBar: {
+  // Seated tab band (M1 UX REDESIGN PR-6, mirror of PR-3 web `.tabs`): a
+  // `surface` band with a bottom hairline; tabs sit on it as top-rounded
+  // sheets, the active one fused to the content sheet below.
+  narrowBand: {
     flexGrow: 0,
+    backgroundColor: THEME.surface,
     borderBottomWidth: 1,
     borderBottomColor: THEME.hairline,
-    backgroundColor: THEME.background,
   },
   narrowContent: {
     paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    gap: SPACING.xs,
+    paddingTop: SPACING.sm,
+    gap: SPACING.xs / 2,
+    alignItems: 'flex-end',
+  },
+  // One seated tab (prototype `.tab`): top-rounded, transparent 1px border,
+  // muted label. Touch-sized padding.
+  seatTab: {
+    flexDirection: 'row',
     alignItems: 'center',
-  },
-  narrowItem: {
+    gap: SPACING.xs + 2,
     paddingHorizontal: SPACING.md + SPACING.xs,
-    paddingVertical: SPACING.sm,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: 'transparent',
+    paddingVertical: SPACING.sm + 2,
+    borderTopLeftRadius: TAB_SEAT_RADIUS,
+    borderTopRightRadius: TAB_SEAT_RADIUS,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    borderBottomWidth: 0,
   },
-  narrowItemActive: {
-    backgroundColor: THEME.surface_raised,
+  // Active tab (prototype `.tab.active`): fuses to the content sheet — content
+  // `background`, hairline border, and a -1px bottom margin so it overlaps the
+  // band's bottom hairline (the seated "fused" look).
+  seatTabActive: {
+    backgroundColor: THEME.background,
+    borderColor: THEME.hairline,
+    marginBottom: -1,
   },
-  narrowLabel: {
+  seatLabel: {
     color: THEME.text_muted,
     fontSize: TYPOGRAPHY.body_small.fontSize,
     lineHeight: TYPOGRAPHY.body_small.lineHeight,
     fontWeight: '500',
   },
-  narrowLabelActive: {
+  seatLabelActive: {
     color: THEME.text_primary,
     fontWeight: '600',
+  },
+  // The live-run count badge (prototype `.tab .cap`): phase-build tinted pill.
+  cap: {
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 5,
+    borderRadius: TAB_SEAT_RADIUS,
+    backgroundColor: PHASE.build.bg,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  capText: {
+    color: PHASE.build.fg,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '700',
   },
   wideBar: {
     width: WIDE_SIDEBAR_WIDTH,
