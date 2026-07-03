@@ -35,7 +35,7 @@ import { loadAppConfig } from '../../../lib/config';
 import { useAuthSession } from '../../../lib/session';
 import { SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
 import { WorkBoardClient, type WorkBoardItem } from '../../../lib/work-board-client';
-import { reorderTarget, splitBoard } from '../../../lib/work-board-helpers';
+import { dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
 import { startWorkBoardLive } from '../../../lib/work-board-live';
 
 function makeDeviceId(): string {
@@ -162,32 +162,6 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
 
   return (
     <View style={styles.container}>
-      <View style={styles.addRow}>
-        <TextInput
-          style={styles.addInput}
-          placeholder="Add an item…"
-          placeholderTextColor={THEME.text_muted}
-          value={newTitle}
-          onChangeText={setNewTitle}
-          onSubmitEditing={addItem}
-          accessibilityLabel="New work item title"
-          testID="workboard-add-input"
-        />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Add item"
-          disabled={adding || newTitle.trim().length === 0}
-          onPress={addItem}
-          style={({ pressed }) => [
-            styles.addBtn,
-            pressed && styles.pressed,
-            (adding || newTitle.trim().length === 0) && styles.addBtnDisabled,
-          ]}
-        >
-          <Text style={styles.addBtnText}>{adding ? '…' : 'Add'}</Text>
-        </Pressable>
-      </View>
-
       {actionError !== null ? <Text style={styles.error}>{actionError}</Text> : null}
 
       {loading ? (
@@ -211,8 +185,8 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
               key={it.id}
               item={it}
               busy={busyId === it.id}
-              canMoveUp={i > 0}
-              canMoveDown={i < active.length - 1}
+              index={i}
+              laneCount={active.length}
               onAdvance={() =>
                 runMutation(
                   it.id,
@@ -225,13 +199,10 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
               onRename={(title) =>
                 runMutation(it.id, client.update(projectId, it.id, { title }), 'failed to rename item')
               }
-              onMoveUp={() => {
-                const target = reorderTarget(active, i, -1);
-                if (target !== null)
-                  runMutation(it.id, client.reorder(projectId, it.id, target), 'failed to reorder');
-              }}
-              onMoveDown={() => {
-                const target = reorderTarget(active, i, 1);
+              onReorderTo={(targetIndex) => {
+                const targetItem = active[targetIndex];
+                if (targetItem === undefined) return;
+                const target = dragReorderTarget(active, it.id, targetItem.id);
                 if (target !== null)
                   runMutation(it.id, client.reorder(projectId, it.id, target), 'failed to reorder');
               }}
@@ -249,13 +220,13 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
               <Pressable
                 accessibilityRole="button"
                 accessibilityState={{ expanded: completedOpen }}
-                accessibilityLabel={`Completed, ${completed.length} items`}
+                accessibilityLabel={`Done, ${completed.length} items`}
                 onPress={() => setCompletedOpen((v) => !v)}
                 style={styles.completedToggle}
                 testID="workboard-completed-toggle"
               >
                 <Text style={styles.completedToggleText}>
-                  {completedOpen ? '▾' : '▸'}  Completed · {completed.length}
+                  {completedOpen ? '▾' : '▸'}  Done · {completed.length}
                 </Text>
               </Pressable>
               {completedOpen ? (
@@ -276,6 +247,32 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
           ) : null}
         </ScrollView>
       )}
+
+      <View style={styles.addRow}>
+        <TextInput
+          style={styles.addInput}
+          placeholder="Add something to do…"
+          placeholderTextColor={THEME.text_muted}
+          value={newTitle}
+          onChangeText={setNewTitle}
+          onSubmitEditing={addItem}
+          accessibilityLabel="New work item title"
+          testID="workboard-add-input"
+        />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Add item"
+          disabled={adding || newTitle.trim().length === 0}
+          onPress={addItem}
+          style={({ pressed }) => [
+            styles.addBtn,
+            pressed && styles.pressed,
+            (adding || newTitle.trim().length === 0) && styles.addBtnDisabled,
+          ]}
+        >
+          <Text style={styles.addBtnText}>{adding ? '…' : 'Add'}</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -285,7 +282,7 @@ const styles = StyleSheet.create({
   centered: { alignItems: 'center', justifyContent: 'center' },
   grow: { flex: 1 },
   listContent: { paddingBottom: SPACING.xl },
-  addRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm },
+  addRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginTop: SPACING.sm },
   addInput: {
     flex: 1,
     color: THEME.text_primary,

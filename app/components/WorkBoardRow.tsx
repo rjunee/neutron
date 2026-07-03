@@ -1,87 +1,193 @@
 /**
- * @neutronai/app — WORK BOARD row (Work Board Phase 1b).
+ * @neutronai/app — WORK BOARD row (Work Board Phase 1b; M1 UX redesign).
  *
  * A FLAT one-line row (NOT a card — that's Tasks). Left-to-right: a status dot
- * (tap to advance), an optional activity glyph (sub-agent ⑂ / inline ›), the
- * one-line title (tap to edit), then up/down/delete controls. The completed
- * variant is dimmed with a right-aligned monospace datestamp.
+ * that reflects the build lifecycle (tap to advance status), the one-line
+ * title (tap to edit), a phase TAG capsule + a muted `round N` trail for a
+ * bound run, then a drag grip / ▶-or-↻ / ✕ action cluster. The completed
+ * variant is dimmed with a strikethrough title + a right-aligned "Merged · Jul
+ * 2" datestamp.
  *
- * Live-blue (`THEME.link`, #5fb6ff) marks "running" — NOT the gray `THEME.accent`
- * (per the master plan §6: never use the gray accent for the live state). All
- * sizing comes from `theme.ts` tokens + named module constants (no inline magic
- * numbers, mirroring `TaskRow`). Sub-agent vs inline is distinguished by glyph +
- * `accessibilityLabel`, never by color alone.
+ * M1 REDESIGN (mirrors `landing/chat-react/WorkBoardTab.tsx`):
+ *   - The old fork/inline activity glyph column is GONE — the dot + tag now
+ *     carry that signal (color + pulse + tag text), so a second glyph was
+ *     redundant noise.
+ *   - The ▲▼ up/down buttons are GONE, replaced by a `⠿` drag grip: a real
+ *     `PanResponder` pointer-drag (row-height-quantized, no extra deps) PLUS
+ *     `accessibilityActions` increment/decrement for keyboard/VoiceOver parity
+ *     (mirrors the web grip's arrow-key handler) — both paths persist through
+ *     the SAME `onReorderTo(targetIndex)` callback, i.e. the same
+ *     `client.reorder()` route the web tab uses.
+ *   - Delete now confirms first (`Alert.alert`) — a linked-running item gets
+ *     the "cancel the build" copy, matching the web confirm dialog.
+ *
+ * All sizing comes from `theme.ts` tokens + named module constants (no inline
+ * magic numbers, mirroring `TaskRow`). Dot pulse honors
+ * `AccessibilityInfo.isReduceMotionEnabled()` (same pattern as
+ * `ProjectSettingsDrawer` / `CommentsSidePane` / `Toast`).
  */
 
-import { memo, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { memo, useEffect, useRef, useState } from 'react';
 import {
-  activityFor,
-  dotKind,
-  formatCompletedDate,
+  AccessibilityInfo,
+  Alert,
+  Animated,
+  Easing,
+  PanResponder,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+
+import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import {
+  canPlay,
+  dotState,
+  formatCompletedShort,
+  isLinkedRunning,
+  isRetry,
+  roundText,
   statusLabel,
+  stepTag,
+  type DotColorKey,
 } from '../lib/work-board-helpers';
 import { docLinkLabel, type WorkBoardItem } from '../lib/work-board-client';
 
-const DOT_SIZE = 10;
+const DOT_SIZE = 9;
 const DOT_BORDER = 1.5;
 const ROW_MIN_HEIGHT = SPACING.xl + SPACING.md; // 36
-const GLYPH_WIDTH = SPACING.md + SPACING.xs; // 16
 const ICON_HIT = SPACING.xl + SPACING.md; // 36 — comfortable tap target
+const DRAG_ACTIVE_OPACITY = 0.85;
 
 export interface WorkBoardRowProps {
   item: WorkBoardItem;
   busy: boolean;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
+  /** This row's position within the ACTIVE lane (drag/a11y-action math). */
+  index: number;
+  /** Total active-lane row count (drag/a11y-action bounds). */
+  laneCount: number;
   onAdvance: () => void;
   onRename: (title: string) => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
+  /** Drag drop OR accessibility increment/decrement resolved to a target index. */
+  onReorderTo: (targetIndex: number) => void;
+  /** Fires only after the confirm dialog is accepted. */
   onDelete: () => void;
-  /** ▶ — START/RETRY a build from the card's saved spec. */
+  /** ▶/↻ — START/RETRY a build from the card's saved spec. */
   onPlay?: () => void;
   /** Open the card's linked spec-doc; undefined = no doc / no nav. */
   onOpenDoc?: () => void;
 }
 
-/**
- * True when the ▶ (play) control should render: NOT in_progress, NOT done, and
- * no bound run. On terminal reconcile a failed build clears the binding + moves
- * the card back to `upcoming`, so this covers both START and RETRY.
- */
-function canPlay(item: WorkBoardItem): boolean {
-  const linked = item.linked_run_id !== null && item.linked_run_id.length > 0;
-  return item.status !== 'in_progress' && item.status !== 'done' && !linked;
+/** Solid dot color for a phase bucket; the faint muted outline for 'upcoming'. */
+function dotColor(colorKey: DotColorKey): string {
+  return colorKey === 'upcoming' ? THEME.text_muted : PHASE[colorKey].fg;
 }
 
-function dotStyle(kind: ReturnType<typeof dotKind>) {
-  if (kind === 'in_progress') return styles.dotActive;
-  if (kind === 'done') return styles.dotDone;
-  return styles.dotUpcoming;
+/** Reduce-motion preference, live-updated. Same pattern as `ProjectSettingsDrawer`. */
+function useReduceMotion(): boolean {
+  const [reduceMotion, setReduceMotion] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    AccessibilityInfo.isReduceMotionEnabled()
+      .then((rm) => {
+        if (!cancelled) setReduceMotion(rm);
+      })
+      .catch(() => {
+        if (!cancelled) setReduceMotion(false);
+      });
+    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', (rm: boolean) =>
+      setReduceMotion(rm),
+    );
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
+  }, []);
+  return reduceMotion;
 }
 
 function WorkBoardRowImpl({
   item,
   busy,
-  canMoveUp,
-  canMoveDown,
+  index,
+  laneCount,
   onAdvance,
   onRename,
-  onMoveUp,
-  onMoveDown,
+  onReorderTo,
   onDelete,
   onPlay,
   onOpenDoc,
 }: WorkBoardRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.title);
-  const activity = activityFor(item);
-  const kind = dotKind(item.status);
+  const [dragging, setDragging] = useState(false);
+
+  const dot = dotState(item);
+  const tag = stepTag(item.run_progress);
+  const round = roundText(item.run_progress);
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
+  const retry = isRetry(item);
+
+  const reduceMotion = useReduceMotion();
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!dot.pulse || reduceMotion) {
+      pulseAnim.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.4,
+          duration: MOTION.pulse,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: MOTION.pulse,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [dot.pulse, reduceMotion, pulseAnim]);
+
+  // Keep the latest index/laneCount/callback reachable from the PanResponder's
+  // handlers without recreating the responder every render.
+  const dragRef = useRef({ index, laneCount, onReorderTo });
+  dragRef.current = { index, laneCount, onReorderTo };
+
+  const dragY = useRef(new Animated.Value(0)).current;
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: (_e, gesture) => Math.abs(gesture.dy) > 2,
+      onPanResponderGrant: () => {
+        dragY.setValue(0);
+        setDragging(true);
+      },
+      onPanResponderMove: Animated.event([null, { dy: dragY }], { useNativeDriver: false }),
+      onPanResponderRelease: (_e, gesture) => {
+        const { index: i, laneCount: n, onReorderTo: reorder } = dragRef.current;
+        const delta = Math.round(gesture.dy / ROW_MIN_HEIGHT);
+        const target = Math.min(Math.max(i + delta, 0), Math.max(n - 1, 0));
+        Animated.timing(dragY, { toValue: 0, duration: MOTION.fast, useNativeDriver: false }).start();
+        setDragging(false);
+        if (target !== i) reorder(target);
+      },
+      onPanResponderTerminate: () => {
+        Animated.timing(dragY, { toValue: 0, duration: MOTION.fast, useNativeDriver: false }).start();
+        setDragging(false);
+      },
+    }),
+  ).current;
 
   const commit = (): void => {
     const next = draft.trim();
@@ -90,8 +196,28 @@ function WorkBoardRowImpl({
     else setDraft(item.title);
   };
 
+  const requestDelete = (): void => {
+    const linked = isLinkedRunning(item);
+    Alert.alert(
+      linked ? 'Cancel this build and remove it?' : 'Remove this item?',
+      undefined,
+      [
+        { text: 'Keep', style: 'cancel' },
+        { text: linked ? 'Cancel build & remove' : 'Remove', style: 'destructive', onPress: onDelete },
+      ],
+      { cancelable: true },
+    );
+  };
+
   return (
-    <View style={styles.row} testID={`wb-row-${item.id}`}>
+    <Animated.View
+      style={[
+        styles.row,
+        dragging && styles.rowDragging,
+        { transform: [{ translateY: dragY }] },
+      ]}
+      testID={`wb-row-${item.id}`}
+    >
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${statusLabel(item.status)}. Advance status`}
@@ -99,20 +225,17 @@ function WorkBoardRowImpl({
         onPress={onAdvance}
         style={styles.dotHit}
       >
-        <View style={[styles.dot, dotStyle(kind)]} />
+        <Animated.View
+          style={[
+            styles.dot,
+            {
+              borderColor: dotColor(dot.colorKey),
+              backgroundColor: dot.colorKey === 'upcoming' ? 'transparent' : dotColor(dot.colorKey),
+              opacity: dot.pulse ? pulseAnim : 1,
+            },
+          ]}
+        />
       </Pressable>
-
-      {activity !== null ? (
-        <Text
-          style={styles.activity}
-          accessibilityLabel={activity.label}
-          accessible
-        >
-          {activity.glyph}
-        </Text>
-      ) : (
-        <View style={styles.activitySpacer} />
-      )}
 
       {editing ? (
         <TextInput
@@ -154,29 +277,47 @@ function WorkBoardRowImpl({
         </View>
       )}
 
+      {tag !== null ? (
+        <View style={[styles.tag, { backgroundColor: PHASE[tag.colorKey].bg }]}>
+          <Text style={[styles.tagText, { color: PHASE[tag.colorKey].fg }]}>{tag.label}</Text>
+        </View>
+      ) : null}
+      {round !== null ? <Text style={styles.round}>{round}</Text> : null}
+
       <View style={styles.actions}>
+        <View
+          {...panResponder.panHandlers}
+          accessible
+          accessibilityRole="adjustable"
+          accessibilityLabel={`Reorder ${item.title}. Item ${index + 1} of ${laneCount}.`}
+          accessibilityActions={[
+            { name: 'increment', label: 'Move down' },
+            { name: 'decrement', label: 'Move up' },
+          ]}
+          onAccessibilityAction={(e) => {
+            if (busy) return;
+            if (e.nativeEvent.actionName === 'increment') onReorderTo(index + 1);
+            else if (e.nativeEvent.actionName === 'decrement') onReorderTo(index - 1);
+          }}
+          style={styles.iconBtn}
+        >
+          <Text style={styles.iconGlyph}>⠿</Text>
+        </View>
         {showPlay ? (
           <IconButton
-            label={item.linked_run_id !== null ? 'Retry build' : 'Start build'}
-            glyph="▶"
+            label={retry ? 'Retry build' : 'Start build'}
+            glyph={retry ? '↻' : '▶'}
             disabled={busy}
             onPress={onPlay ?? (() => {})}
           />
         ) : null}
-        <IconButton label="Move up" glyph="▲" disabled={busy || !canMoveUp} onPress={onMoveUp} />
-        <IconButton
-          label="Move down"
-          glyph="▼"
-          disabled={busy || !canMoveDown}
-          onPress={onMoveDown}
-        />
-        <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={onDelete} />
+        <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
-/** The dimmed completed-history row: dot + title + mono datestamp + delete. */
+/** The dimmed completed-history row: green dot + strikethrough title + mono datestamp + delete. */
 function WorkBoardCompletedRowImpl({
   item,
   busy,
@@ -186,6 +327,12 @@ function WorkBoardCompletedRowImpl({
   busy: boolean;
   onDelete: () => void;
 }) {
+  const requestDelete = (): void => {
+    Alert.alert('Remove this item?', undefined, [
+      { text: 'Keep', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: onDelete },
+    ]);
+  };
   return (
     <View style={[styles.row, styles.rowDone]} testID={`wb-done-${item.id}`}>
       <View style={styles.dotHit}>
@@ -194,10 +341,8 @@ function WorkBoardCompletedRowImpl({
       <Text style={[styles.title, styles.titleFill, styles.titleDone]} numberOfLines={1} ellipsizeMode="tail">
         {item.title}
       </Text>
-      <Text style={styles.date} accessibilityLabel={`Completed ${formatCompletedDate(item.completed_at)}`}>
-        {formatCompletedDate(item.completed_at)}
-      </Text>
-      <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={onDelete} />
+      <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
+      <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
     </View>
   );
 }
@@ -238,6 +383,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.sm,
     borderRadius: SPACING.sm,
   },
+  rowDragging: { opacity: DRAG_ACTIVE_OPACITY, backgroundColor: THEME.surface_raised },
   rowDone: { opacity: 0.55 },
   dotHit: {
     width: ICON_HIT - SPACING.md,
@@ -252,18 +398,7 @@ const styles = StyleSheet.create({
     borderRadius: DOT_SIZE / 2,
     borderWidth: DOT_BORDER,
   },
-  dotUpcoming: { borderColor: THEME.text_muted, backgroundColor: 'transparent' },
-  dotActive: { borderColor: THEME.link, backgroundColor: THEME.link },
-  dotDone: { borderColor: THEME.text_muted, backgroundColor: THEME.text_muted },
-  activity: {
-    width: GLYPH_WIDTH,
-    textAlign: 'center',
-    color: THEME.link,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  activitySpacer: { width: GLYPH_WIDTH },
-  titleWrap: { flex: 1, justifyContent: 'center' },
+  dotDone: { borderColor: PHASE.merge.fg, backgroundColor: PHASE.merge.fg },
   titleCol: { flex: 1, justifyContent: 'center' },
   titleFill: { flex: 1 },
   title: {
@@ -287,6 +422,21 @@ const styles = StyleSheet.create({
     borderRadius: SPACING.xs,
     paddingHorizontal: SPACING.sm,
     paddingVertical: SPACING.xs,
+  },
+  tag: {
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    borderRadius: DENSITY.chip_radius,
+  },
+  tagText: {
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+    fontWeight: '600',
+  },
+  round: {
+    color: THEME.text_muted,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
   },
   date: {
     color: THEME.text_muted,

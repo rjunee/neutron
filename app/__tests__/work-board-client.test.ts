@@ -140,6 +140,63 @@ describe('parseWorkBoardItems', () => {
   it('returns [] for a non-array', () => {
     expect(parseWorkBoardItems(null)).toEqual([]);
   });
+
+  it('parses an explicit run_progress.step_label off the wire (M1 redesign)', () => {
+    const out = parseWorkBoardItems([
+      {
+        ...item({ id: 'a', linked_run_id: 'run_1' }),
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          step_label: 'fixing',
+          round: 3,
+          started_at: '',
+          last_advanced_at: '',
+          elapsed_ms: 0,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      },
+    ]);
+    expect(out[0]!.run_progress?.step_label).toBe('fixing');
+    expect(out[0]!.run_progress?.round).toBe(3);
+  });
+
+  it('falls back to stepLabelFromPhase when step_label is absent (legacy server)', () => {
+    const out = parseWorkBoardItems([
+      {
+        ...item({ id: 'a', linked_run_id: 'run_1' }),
+        run_progress: { run_id: 'run_1', phase_label: 'reviewing' },
+      },
+    ]);
+    expect(out[0]!.run_progress?.step_label).toBe('reviewing');
+
+    const merged = parseWorkBoardItems([
+      {
+        ...item({ id: 'b', linked_run_id: 'run_2' }),
+        run_progress: { run_id: 'run_2', phase_label: 'merged' },
+      },
+    ]);
+    expect(merged[0]!.run_progress?.step_label).toBe('done');
+
+    const failed = parseWorkBoardItems([
+      {
+        ...item({ id: 'c', linked_run_id: 'run_3' }),
+        run_progress: { run_id: 'run_3', phase_label: 'cancelled' },
+      },
+    ]);
+    expect(failed[0]!.run_progress?.step_label).toBe('failed');
+  });
+
+  it('is undefined when run_progress is absent/malformed', () => {
+    const out = parseWorkBoardItems([item({ id: 'a' })]);
+    expect(out[0]!.run_progress).toBeUndefined();
+    const malformed = parseWorkBoardItems([{ ...item({ id: 'b' }), run_progress: { phase_label: 'building' } }]);
+    expect(malformed[0]!.run_progress).toBeUndefined();
+  });
 });
 
 describe('WorkBoardClient.start + doc-ref helpers', () => {
