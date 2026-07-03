@@ -222,8 +222,19 @@
   }
   .car-wsseat-emoji { flex: 0 0 auto; font-size: 16px; line-height: 1; }
   .car-wsseat-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* FIX #350 — the band no longer scrolls horizontally; overflowing tabs
+     collapse into a "⋯" menu (measured in JS). `position: relative` anchors both
+     the hidden measurement mirror and the overflow dropdown; `overflow: visible`
+     lets the dropdown escape the band (JS keeps inline tabs within the width, so
+     nothing spills in practice). */
   .car-tabs {
-    display: flex; align-items: flex-end; gap: 2px; flex: 1 1 auto; min-width: 0; overflow-x: auto;
+    display: flex; align-items: flex-end; gap: 2px; flex: 1 1 auto; min-width: 0;
+    position: relative; overflow: visible;
+  }
+  /* Off-layout measurement copy of every tab at its natural width. */
+  .car-tabs-mirror {
+    position: absolute; top: 0; left: 0; z-index: -1;
+    display: flex; gap: 2px; visibility: hidden; pointer-events: none; white-space: nowrap;
   }
   .car-tab {
     appearance: none; background: transparent; color: var(--muted);
@@ -256,6 +267,89 @@
   .car-theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .car-theme-glyph { font-size: 15px; line-height: 1; }
   .car-theme-auto { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  /* FIX #350 — the LABELED theme control now lives in General → Admin → Appearance
+     (the top-bar cycling toggle was removed from every viewport). A 3-way
+     segmented radiogroup: System / Light / Dark. */
+  .car-theme-seg {
+    display: inline-flex; gap: 2px; flex: 0 0 auto;
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px;
+  }
+  .car-theme-seg-btn {
+    appearance: none; background: transparent; color: var(--muted);
+    border: 0; border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 13px;
+    cursor: pointer; white-space: nowrap; transition: color .12s, background .12s;
+  }
+  .car-theme-seg-btn:hover { color: var(--fg); }
+  .car-theme-seg-btn-on { background: var(--accent); color: var(--on-accent); }
+  .car-theme-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* FIX #350 — the "⋯ more" overflow menu (holds tabs that don't fit the band). */
+  .car-tabmore { position: relative; flex: 0 0 auto; align-self: flex-end; }
+  .car-tabmore-btn { padding-left: 12px; padding-right: 12px; font-weight: 590; }
+  .car-tabmore-menu {
+    position: absolute; top: 100%; right: 0; z-index: 50; min-width: 168px;
+    margin-top: 3px; padding: 4px; display: flex; flex-direction: column; gap: 1px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.22);
+  }
+  .car-tabmore-item {
+    appearance: none; background: transparent; border: 0; text-align: left;
+    color: var(--fg); font: inherit; font-size: 13.5px; padding: 8px 12px;
+    border-radius: 7px; cursor: pointer; white-space: nowrap;
+  }
+  .car-tabmore-item:hover { background: var(--hover-bg); }
+  .car-tabmore-item-active { color: var(--accent); font-weight: 590; }
+  .car-tabmore-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* FIX #348 — mobile Work tab pulses a soft build-blue while a build runs. Uses
+     the same `--phase-build-*` tokens as the desktop rail dot; reduced-motion
+     drops to a static tint. Applied ONLY at mobile widths (gated in JS). */
+  .car-tab-workpulse { color: var(--phase-build-fg); animation: car-tab-workpulse 2s ease-in-out infinite; }
+  @keyframes car-tab-workpulse {
+    0%, 100% { background: transparent; }
+    50% { background: var(--phase-build-bg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .car-tab-workpulse { animation: none; background: var(--phase-build-bg); }
+  }
+  /* FIX #350 — mobile stacks the top bar: the workspace title on its own line,
+     the tab band on the row below (no more title/tabs competing for one row).
+     Desktop (>=1024px) keeps the single-row layout. 1023.98px is the exact
+     complement of the JS `(min-width: 1024px)` desktop breakpoint. */
+  @media (max-width: 1023.98px) {
+    .car-topbar { flex-direction: column; align-items: stretch; gap: 0; padding: 6px 8px 0; }
+    .car-wsseat { padding: 4px 6px 6px; font-size: 15px; }
+  }
+  /* FIX #349 — mobile "job starting" top drawer: slides down from the top when a
+     build kicks off, auto-retracts after ~3s, swipe-up / ✕ to dismiss. Rendered
+     only on mobile (gated in JS); reduced-motion shows/hides without the slide.
+     z-index above every in-tree overlay (highest existing is 40). */
+  .car-jobdrawer {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top));
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    box-shadow: 0 4px 16px rgba(0,0,0,.18);
+    transform: translateY(-110%); transition: transform .3s var(--ease-out);
+  }
+  .car-jobdrawer-open { transform: translateY(0); }
+  .car-jobdrawer-dot {
+    flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--phase-build-fg); animation: cwb-pulse 2s ease-in-out infinite;
+  }
+  .car-jobdrawer-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .car-jobdrawer-title {
+    font-size: 14px; font-weight: 590; color: var(--fg);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .car-jobdrawer-sub { font-size: 12px; color: var(--phase-build-fg); }
+  .car-jobdrawer-x {
+    flex: 0 0 auto; appearance: none; background: transparent; border: 0;
+    color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; padding: 4px 6px;
+  }
+  .car-jobdrawer-x:hover { color: var(--fg); }
+  @media (prefers-reduced-motion: reduce) {
+    .car-jobdrawer { transition: none; }
+    .car-jobdrawer-dot { animation: none; }
+  }
   .car-tabpanels { flex: 1 1 auto; position: relative; min-height: 0; min-width: 0; display: flex; }
   .car-tabpanel { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; }
   .car-tabpanel[hidden] { display: none; }

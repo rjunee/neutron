@@ -474,6 +474,21 @@ rather than waiting on the global diff-gate. Subscriber:
 > AFTER every API/asset/operator surface in the precedence chain, so it never
 > masks a real 404.
 
+> **UX Batch-4 (2026-07-03, #347/#348/#349/#350) — mobile chat-react polish.**
+> The cold-start "Waking up…" notice is a single centered ephemeral pill that
+> clears when the reply streams — never persisted or duplicated: the controller
+> latches "reply started" to drop a late ack, filters any durable ack body out of
+> the bubble list, and the gateway cancels the delayed ack on the first reply
+> token (`collectTokensToString` `onFirstToken`). On mobile the `ProjectShell` top
+> bar stacks the project title ABOVE the tab band, the light/dark control moved
+> out of the tab bar (removed on all viewports) into General → Admin →
+> **Appearance** (a labeled System/Light/Dark segmented control), and tabs that
+> don't fit collapse into an accessible "⋯" overflow menu (`tab-overflow.tsx`)
+> instead of scrolling horizontally. The mobile Work tab pulses build-blue while a
+> build runs, and a transient top drawer (`work-activity.tsx` `JobStartDrawer`)
+> slides down to announce a newly-started build (auto-retracts ~3s, swipe-up to
+> dismiss). All mobile-gated at the `1024px` breakpoint; desktop unchanged.
+
 > **Web-client rework (2026-06-30) — per-project chat + rail/tab layout +
 > markdown.** Five linked changes to `landing/chat-react/`:
 > 1. **Real per-project chat.** Each project owns its OWN app-ws topic. The

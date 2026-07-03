@@ -26,6 +26,7 @@ import {
   type OAuthAccountIntegration,
 } from './integrations-client.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
+import { ThemeControl } from './ThemeToggle.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -292,6 +293,20 @@ export function IntegrationsTab({
         </header>
 
         {error !== null ? <div className="cdoc-comments-error">{error}</div> : null}
+
+        {/* ── Appearance (FIX #350) ── the light/dark control lives here now
+            (moved out of the tab bar, deduped across viewports). Independent of
+            the integrations fetch, so it's always available. */}
+        <section className="cint-section" aria-label="Appearance">
+          <h3 className="cint-section-title">Appearance</h3>
+          <div className="cint-row">
+            <div className="cint-row-main">
+              <span className="cint-row-label">Theme</span>
+              <span className="cint-row-sub">Light, dark, or follow your system setting.</span>
+            </div>
+            <ThemeControl />
+          </div>
+        </section>
 
         {loading ? (
           <div className="cdoc-empty">Loading…</div>

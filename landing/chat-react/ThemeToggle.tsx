@@ -11,6 +11,9 @@
 import { useTheme } from './useTheme.ts'
 import { cyclePreference, type ThemePreference, type ResolvedTheme } from './theme.ts'
 
+/** The three explicit preferences, in display order, for the settings control. */
+const THEME_OPTIONS: readonly ThemePreference[] = ['system', 'light', 'dark']
+
 /** Human label for a preference — used in the tooltip + accessible name. */
 function preferenceLabel(pref: ThemePreference): string {
   if (pref === 'light') return 'Light'
@@ -46,5 +49,38 @@ export function ThemeToggle(): React.JSX.Element {
         </span>
       ) : null}
     </button>
+  )
+}
+
+/**
+ * FIX #350 — the LABELED light/dark control for the settings surface. The
+ * top-bar cycling {@link ThemeToggle} was removed from every viewport; the
+ * theme preference now lives here (General → Admin → Appearance) as an explicit
+ * three-way segmented control so the choice is discoverable, not a mystery cycle.
+ * Shares the exact same {@link useTheme} state (localStorage + `data-theme`), so
+ * it drives the whole UI's theme the same way the old toggle did.
+ */
+export function ThemeControl(): React.JSX.Element {
+  const { preference, resolved, setPreference } = useTheme()
+  return (
+    <div className="car-theme-seg" role="radiogroup" aria-label="Theme">
+      {THEME_OPTIONS.map((opt) => {
+        const selected = preference === opt
+        const suffix = opt === 'system' ? ` (${resolved})` : ''
+        return (
+          <button
+            key={opt}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            className={`car-theme-seg-btn${selected ? ' car-theme-seg-btn-on' : ''}`}
+            onClick={() => setPreference(opt)}
+          >
+            {preferenceLabel(opt)}
+            {suffix}
+          </button>
+        )
+      })}
+    </div>
   )
 }

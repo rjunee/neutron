@@ -2516,3 +2516,59 @@ service.test.ts` (board get/attach/clear all key on the threaded scope; default 
 owner slug), `agent-dispatch/surface.test.ts` (the tool builds the req with the
 active-project `board_scope`). The dormant `/dispatch` *chat command* is not wired in
 Open (like `/code`); it keeps the owner-slug default, unchanged.
+
+## UX Batch-4 (#347/#348/#349/#350) — mobile/web-mobile chat-react polish (2026-07-03)
+
+Four fixes from Ryan's live dogfood, all in the responsive web chat-react client
+(no feature flags, one code path, both light+dark + desktop preserved).
+
+**#347 — the cold-start "Waking up…" pill duplicated + persisted as a timestamped
+bubble.** The pill is a single-slot `systemNotice` rendered as a centered
+ephemeral pill *outside* the message list, so duplicates/bubbles came from two
+races, now closed on three sides:
+1. `landing/chat-react/controller.ts` — a `replyStartedThisTurn` latch (set on the
+   first stream token AND on a durable agent reply, reset on each `send()`). Once
+   a real reply has started, a LATE cold-start ack frame is DROPPED instead of
+   re-arming the pill below the answer.
+2. `controller.ts` `computeVm` — durable rows whose body matches `isColdStartAck`
+   are filtered out of the bubble list entirely, so a legacy/leaked persisted ack
+   can never hydrate as a timestamped/avatar agent bubble (the sync engine
+   persists a durable `agent_message` even though `onFrame` also shows it as a
+   pill — that double-render was the bug).
+3. `gateway/realmode-composer/build-llm-call-substrate.ts` + `build-live-agent-turn.ts`
+   — `collectTokensToString` takes an optional `onFirstToken` callback; the live
+   turn passes `clearAckTimer` so the delayed cold-start ack is cancelled the
+   moment the first reply token streams (not only at turn-settle).
+Tests: `controller.test.ts` (late-ack dropped + fresh turn re-opens the pill;
+durable ack never a bubble); substrate suite green.
+
+**#350 — mobile tab-bar overhaul.** `landing/chat-react/ProjectShell.tsx` +
+`chat-react.html`:
+- Mobile (`<1024px`, the complement of the JS `min-width:1024px` desktop gate)
+  stacks `.car-topbar` into a column: the workspace title on its own line, the
+  tab band on the row below. Desktop keeps the single row.
+- The cycling `<ThemeToggle/>` was removed from the top bar on ALL viewports; a
+  labeled 3-way `ThemeControl` (System/Light/Dark segmented radiogroup, new export
+  in `ThemeToggle.tsx`) now lives in General → Admin → **Appearance**
+  (`IntegrationsTab.tsx`).
+- Overflowing tabs collapse into a right-aligned "⋯" menu instead of
+  `overflow-x: auto` scrolling. New `tab-overflow.tsx`: pure `computeVisibleCount`
+  (unit-tested), a `useTabOverflow` measurement hook (hidden mirror row +
+  `ResizeObserver`), and an accessible `OverflowMenu` (button `aria-haspopup`/
+  `aria-expanded`; `role=menu`/`menuitem`; Esc + outside-click close; focus the
+  first item on open, return focus on close; Arrow/Home/End navigation).
+Tests: `tab-overflow.test.ts`. Browser-verified at 390×844: title stacked, no
+viewport h-scroll (`.car-app { overflow:hidden }` clips the mirror), ⋯ lists the
+overflow tabs, theme control flips `data-theme` + persists.
+
+**#348 — mobile Work tab pulses blue while a build runs.** `.car-tab-workpulse`
+(new keyframe, `--phase-build-*` tokens, reduced-motion → static tint) is applied
+to the `workboard` tab button only when `!isDesktop && summarize(items).running>0`.
+
+**#349 — mobile "job starting" top drawer.** New `work-activity.tsx`:
+`useWorkActivity` subscribes once to the active scope's `onWorkBoardChanged`,
+seeds silently on the first frame, and announces a RISING running count as
+`justStarted`; `JobStartDrawer` (mounted first child of `.car-app`, mobile-only)
+slides down (`--ease-out`, reduced-motion → no slide), auto-retracts after ~3s,
+and swipe-up / ✕ dismisses. Tests: `work-activity.test.tsx` (itemRunning; seed vs
+announce; per-project filter; drawer render/auto-close/✕). Browser-verified visual.

@@ -51,7 +51,8 @@ import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
-import { ThemeToggle } from './ThemeToggle.tsx'
+import { useTabOverflow, OverflowMenu } from './tab-overflow.tsx'
+import { useWorkActivity, JobStartDrawer } from './work-activity.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -81,17 +82,42 @@ function TabBar({
   activeKey,
   onSelect,
   resolving,
+  workRunning,
+  mobile,
 }: {
   tabs: readonly TabDescriptor[]
   activeKey: string
   onSelect: (key: string) => void
   resolving: boolean
+  /** FIX #348 — a build is live on this scope's board (drives the mobile Work-tab pulse). */
+  workRunning: boolean
+  /** True below the desktop breakpoint — gates the Work-tab pulse to mobile. */
+  mobile: boolean
 }): React.JSX.Element {
+  // FIX #350 — measure the band and collapse tabs that don't fit into a "⋯"
+  // menu instead of horizontally scrolling. `visibleCount` leading tabs render
+  // inline; the rest go to the overflow menu.
+  const keysId = tabs.map((t) => t.key).join('|')
+  const { bandRef, mirrorRef, overflowRef, visibleCount } = useTabOverflow(tabs.length, keysId)
+  const visible = tabs.slice(0, visibleCount)
+  const overflow = tabs.slice(visibleCount)
+
   return (
-    <nav className="car-tabs" role="tablist" aria-label="Sections">
-      {tabs.map((t) => {
+    <nav className="car-tabs" role="tablist" aria-label="Sections" ref={bandRef}>
+      {/* Hidden measurement mirror — all tabs at natural width, so `visibleCount`
+          is stable no matter which are currently inline. Never interactive. */}
+      <div className="car-tabs-mirror" aria-hidden="true" ref={mirrorRef}>
+        {tabs.map((t) => (
+          <span key={t.key} className="car-tab">
+            {t.label}
+          </span>
+        ))}
+      </div>
+      {visible.map((t) => {
         const active = t.key === activeKey
         const disabled = resolving && t.key !== CHAT_KEY
+        const isWork = t.mount.kind === 'builtin' && t.mount.target === 'workboard'
+        const pulse = isWork && workRunning && mobile
         return (
           <button
             key={t.key}
@@ -100,7 +126,7 @@ function TabBar({
             aria-selected={active}
             disabled={disabled}
             aria-disabled={disabled}
-            className={`car-tab${active ? ' car-tab-active' : ''}`}
+            className={`car-tab${active ? ' car-tab-active' : ''}${pulse ? ' car-tab-workpulse' : ''}`}
             onClick={() => {
               if (disabled) return
               onSelect(t.key)
@@ -110,6 +136,9 @@ function TabBar({
           </button>
         )
       })}
+      {overflow.length > 0 ? (
+        <OverflowMenu tabs={overflow} activeKey={activeKey} onSelect={onSelect} buttonRef={overflowRef} />
+      ) : null}
     </nav>
   )
 }
@@ -406,6 +435,14 @@ export function ProjectShell({
   const showPane = isDesktop && tabsScope !== null && workboardTab !== undefined
   const visibleTabs = showPane ? tabs.filter((t) => t.mount.target !== 'workboard') : tabs
 
+  // FIX #348/#349 — mobile work-activity: one subscription to the active scope's
+  // board drives both the Work-tab pulse (a build is live) and the job-start
+  // drawer (a build just kicked off). Desktop already surfaces this via the
+  // right-edge pane, so the drawer signal is disabled on desktop (`!isDesktop`) —
+  // a build that starts while desktop is never retained, so shrinking to mobile
+  // later can't flash a stale drawer (Codex P2).
+  const work = useWorkActivity(controller, projectId, !isDesktop)
+
   // The previous active tab can vanish when the set changes (scope switch / Core
   // uninstall) — or, on desktop, because the Work tab was dropped in favor of the
   // pane. Fall back to Chat so we never highlight a missing tab. While a scope
@@ -496,6 +533,9 @@ export function ProjectShell({
 
   return (
     <div className="car-app">
+      {/* FIX #349 — mobile-only "job starting" top drawer. First child of the
+          always-mounted shell root so it can overlay the rail + tab band. */}
+      {!isDesktop ? <JobStartDrawer job={work.justStarted} onDismiss={work.clearStarted} /> : null}
       <TopicRail
         projects={vm.projects}
         activeId={vm.projectId}
@@ -504,14 +544,22 @@ export function ProjectShell({
         creating={creatingProject}
       />
       <div className="car-content">
-        {/* Tab band (seated tabs): the workspace-identity seat, then the section
-            tabs (fills the row), with the light/dark theme toggle bottom-right.
-            The toggle owns the whole UI's theme (a user preference, not per-tab),
-            so it lives at the shell root. */}
+        {/* Tab band (seated tabs): the workspace-identity seat (title), then the
+            section tabs. FIX #350 — on mobile the title sits on its own line with
+            the tab band below it (CSS stacks `.car-topbar` at <1024px); the
+            light/dark toggle no longer lives here (it moved to General → Admin →
+            Appearance, deduped across viewports). Overflowing tabs collapse into
+            a "⋯" menu rather than scrolling. */}
         <div className="car-topbar">
           <WorkspaceSeat emoji={seatEmoji} name={seatName} />
-          <TabBar tabs={visibleTabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} resolving={resolving} />
-          <ThemeToggle />
+          <TabBar
+            tabs={visibleTabs}
+            activeKey={resolvedActiveKey}
+            onSelect={setActiveKey}
+            resolving={resolving}
+            workRunning={work.running > 0}
+            mobile={!isDesktop}
+          />
         </div>
         {/* The chat STAGE (below the band): the tab panels. The desktop Work
             slide-out no longer lives here — it's mounted INSIDE the Chat view

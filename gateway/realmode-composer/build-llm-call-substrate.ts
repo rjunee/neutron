@@ -793,9 +793,15 @@ export function renderMessagesArray(
 export async function collectTokensToString(
   handle: SessionHandle,
   signal?: AbortSignal,
+  /** FIX #347 — invoked once, the moment the FIRST reply token arrives. Lets a
+   *  caller cancel the delayed cold-start "Waking up…" ack as soon as the reply
+   *  is actually streaming (not only when the whole turn settles), so a fast-
+   *  after-slow turn never fires a spurious pill. Optional + fired at most once. */
+  onFirstToken?: () => void,
 ): Promise<string> {
   let abortListener: (() => void) | undefined
   let aborted = false
+  let firstTokenSeen = false
   if (signal !== undefined) {
     if (signal.aborted) {
       await handle.cancel()
@@ -814,6 +820,16 @@ export async function collectTokensToString(
         throw new Error('cc-llm-call: aborted')
       }
       if (ev.kind === 'token') {
+        // FIX #347 — signal the first real token exactly once so the caller can
+        // cancel the pending cold-start ack before it fires.
+        if (!firstTokenSeen && ev.text.length > 0) {
+          firstTokenSeen = true
+          try {
+            onFirstToken?.()
+          } catch {
+            /* an ack-cancel callback must never break token collection */
+          }
+        }
         buf += ev.text
         continue
       }
