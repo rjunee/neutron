@@ -29,7 +29,7 @@ import { ChatErrorBoundary } from './ChatErrorBoundary.tsx'
 import { useChatRuntime } from './useNeutronChat.ts'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
-import type { ChatViewModel, RenderMessage, ImportProgressVM } from './controller.ts'
+import type { ChatViewModel, RenderMessage, ImportProgressVM, SystemNoticeVM } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
@@ -680,6 +680,23 @@ function TypingIndicator(): React.JSX.Element {
   )
 }
 
+/**
+ * M1 UX REDESIGN — a quiet, centered SYSTEM-notification pill (cold-start
+ * "Waking up…", a quota notice). This is the ONLY thing rendered in the
+ * system-message style — errors and command results are ordinary chat bubbles.
+ * A small spinner + short muted text; NOT a chat bubble. Renders nothing when
+ * there's no notice.
+ */
+function SystemNotice({ notice }: { notice: SystemNoticeVM | null }): React.JSX.Element | null {
+  if (notice === null) return null
+  return (
+    <div className="car-system-pill" role="status" aria-live="polite">
+      <span className="car-system-pill-spinner" aria-hidden="true" />
+      <span className="car-system-pill-text">{notice.text}</span>
+    </div>
+  )
+}
+
 function ConnectionBanner({ status }: { status: ChatViewModel['status'] }): React.JSX.Element | null {
   if (status === 'open' || status === 'idle') return null
   const label =
@@ -1213,6 +1230,7 @@ function ChatSurface({
           ↓
         </ThreadPrimitive.ScrollToBottom>
         <PendingBadge pending={vm.pending} />
+        <SystemNotice notice={vm.systemNotice} />
         <ImportStatus progress={vm.importProgress} upload={importState} />
         <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
       </ThreadPrimitive.Root>

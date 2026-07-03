@@ -649,6 +649,22 @@
   .car-bubble img { max-width: 100%; border-radius: 12px; display: block; margin-top: 6px; }
   .car-typing { display: inline-flex; gap: 4px; align-items: center; }
   .car-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: car-blink 1.4s infinite both; }
+  /* M1 UX REDESIGN — quiet centered SYSTEM-notification pill (cold-start
+     "Waking up…", quota). NOT a chat bubble — small, muted, a tiny spinner + short
+     text. Reserved for genuine notifications; errors stay chat bubbles. */
+  .car-system-pill {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 6px auto; max-width: var(--chat-col); padding: 5px 12px;
+    font-size: 12px; color: var(--muted);
+  }
+  .car-system-pill-spinner {
+    width: 11px; height: 11px; flex: 0 0 auto; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--muted);
+    animation: car-spin 0.8s linear infinite;
+  }
+  .car-system-pill-text { min-width: 0; }
+  @keyframes car-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .car-system-pill-spinner { animation: none; } }
   .car-dot:nth-child(2) { animation-delay: .2s; }
   .car-dot:nth-child(3) { animation-delay: .4s; }
   @keyframes car-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
