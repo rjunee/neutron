@@ -314,6 +314,13 @@ export function buildMergeCleanupDeps(
         //     poisoned index makes every later merge fail "resolve your current
         //     index first" (the verified kvwal failure).
         await recoverStaleGitState(run_host, repo)
+        // (0a) Move the shared checkout OFF any feature branch back onto base. A
+        //     recovered stale rebase/merge of THIS branch (legacy poison, or an
+        //     `--abort` that returns HEAD to the branch it started on) can leave the
+        //     shared checkout still ON `branch` — the merge worktree's `git checkout
+        //     <branch>` below would then fail "already checked out at <shared repo>".
+        //     Clean after the reset, so this checkout is safe (Codex [P1]).
+        must('git checkout base', await run_host(['git', '-C', repo, 'checkout', base], repo))
         // (1) ISOLATION (FIX 1): provision this run's OWN detached worktree and run
         //     the whole rebase there. A rebase conflict that hard-fails can only
         //     dirty THIS throwaway worktree — never the shared checkout — so one

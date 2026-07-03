@@ -195,6 +195,54 @@ describe('REAL git — defensive stale-state recovery (#351/#352)', () => {
     expect(existsSync(join(repo, 'feat.txt'))).toBe(true)
     expect(await status(repo)).toBe('')
   }, 30_000)
+
+  test('a poisoned shared checkout left ON the feature branch (interrupted rebase) recovers onto base + lands (Codex P1)', async () => {
+    // The legacy failure mode: the OLD mergeLocal ran `git checkout <branch>; git
+    // rebase <base>` IN the shared checkout and a conflict left it mid-rebase, ON
+    // the feature branch. If recovery only aborted the rebase (HEAD back on the
+    // branch), the new merge worktree's `git checkout <branch>` would fail "already
+    // checked out at <shared repo>". Recovery MUST move the shared checkout to base.
+    const repo = await makeBaseRepo()
+    // A feature branch that CONFLICTS with a later main edit on README.md.
+    await git(repo, 'branch', 'trident/feat', 'main')
+    const bwt = join(repo, '.mk-feat')
+    await git(repo, 'worktree', 'add', '-q', bwt, 'trident/feat')
+    writeFileSync(join(bwt, 'README.md'), 'feat-side\n')
+    writeFileSync(join(bwt, 'feat.txt'), 'feat\n')
+    await git(bwt, 'add', '.')
+    await git(bwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edit')
+    await git(repo, 'worktree', 'remove', '--force', bwt)
+    // Advance main so a rebase of feat conflicts.
+    writeFileSync(join(repo, 'README.md'), 'main-side\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main edit')
+    // POISON: leave the shared checkout ON trident/feat, mid-rebase.
+    await git(repo, 'checkout', '-q', 'trident/feat')
+    const reb = await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(reb.ok).toBe(false) // conflicted → shared checkout is now on feat, mid-rebase
+    expect(existsSync(join(repo, '.git', 'rebase-merge')) || existsSync(join(repo, '.git', 'rebase-apply'))).toBe(true)
+
+    // A real resolver: resolve every conflicted file + `git add` (never continue).
+    const resolve = async (input: { repo_path: string; conflicted_files: string[] }) => {
+      for (const f of input.conflicted_files) {
+        writeFileSync(join(input.repo_path, f), 'resolved\n')
+        await git(input.repo_path, 'add', f)
+      }
+      return { resolved: true as const }
+    }
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main', resolve_conflict: resolve })
+
+    // The build recovers (aborts the rebase + moves the shared checkout to base),
+    // then rebases feat in its OWN worktree (resolver fixes the README conflict) + lands.
+    await cleanupAfterMerge(localRun(repo, 'ffffffff', 'trident/feat'), deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(existsSync(join(repo, 'feat.txt'))).toBe(true)
+    expect(await status(repo)).toBe('')
+    expect(existsSync(join(repo, '.git', 'rebase-merge'))).toBe(false)
+    expect(existsSync(join(repo, '.git', 'rebase-apply'))).toBe(false)
+    expect(await worktreeCount(repo)).toBe(1)
+  }, 30_000)
 })
 
 describe('REAL git — failure isolation: an unrecoverable conflict never poisons the base repo (#352)', () => {

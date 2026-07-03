@@ -67,7 +67,16 @@ path; leak-gate SILENT. Backend trident only (no chat-react UI touched).
   git stderr) AND leaves the shared checkout pristine (main unchanged, clean) so a
   LATER build still succeeds. Plus deterministic unit coverage for every
   `interpretFailure` class (no raw-stderr leak invariant). `tsc` clean (root +
-  trident); trident (422) + work-board (73) + gateway/open (154) suites green.
+  trident); trident (423) + work-board (73) + gateway/open (154) suites green.
+
+- **Codex cross-model review [P1] fixed.** After `recoverStaleGitState` aborts a
+  stale rebase/merge OF the feature branch, the shared checkout could be left still
+  ON that branch (a legacy poison, or an `--abort` returning HEAD to it), so the
+  merge worktree's `git checkout <branch>` would fail "already checked out at
+  <shared repo>". `mergeLocal` now `git checkout <base>`s the shared checkout back to
+  base right after recovery (before provisioning), and a real-git regression test
+  reproduces the exact poison (shared checkout ON the branch mid-rebase → recovers +
+  lands).
 
 **Spec-conformance (5-line diff).**
 - SPEC (Ryan-locked 2026-07-03): concurrent same-project builds run in ISOLATED git
