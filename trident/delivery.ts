@@ -119,6 +119,27 @@ function isAuthoredConflictQuestion(reason: string): boolean {
 }
 
 /**
+ * #361 (same class as #175) — detect a "tools not enabled in this context"
+ * failure: a build/resolver CC subprocess launched WITHOUT the file/shell tools
+ * it needed (an empty `--tools` grant), so it reported it could not open/edit/run
+ * anything. This is a PURELY INTERNAL misconfiguration — never the operator's
+ * concern — so it is classified as `infra` (clearly-internal, retry) and the raw
+ * "re-run with file/shell tools enabled" / "I don't have access to a bash tool"
+ * stderr is NEVER surfaced to the user.
+ */
+function isToolsNotEnabled(reasonLower: string): boolean {
+  return (
+    reasonLower.includes('tools not enabled') ||
+    reasonLower.includes('tool is not enabled') ||
+    reasonLower.includes('not enabled in this context') ||
+    reasonLower.includes('file/shell tools') ||
+    reasonLower.includes('re-run with') ||
+    reasonLower.includes('access to a bash') ||
+    reasonLower.includes('only have reply and send_typing')
+  )
+}
+
+/**
  * #352 — INTERPRET a terminal failure into a plain-language summary + the specific
  * input needed, NEVER a raw error paste. Pure + deterministic (a bounded classifier
  * over the authored `failure_reason` — no LLM, so it is reliable + unit-testable):
@@ -131,15 +152,28 @@ function isAuthoredConflictQuestion(reason: string): boolean {
 export function interpretFailure(run: TridentRun): FailureInterpretation {
   const reason = (run.failure_reason ?? '').trim()
   const r = reason.toLowerCase()
-  const branch = run.branch !== null ? `\`${run.branch}\`` : 'the build branch'
   const retry = 'Reply to retry the build, or take it from here manually.'
+  const saved = 'Your progress is saved.'
+
+  // #361 — a toolless CC subprocess (empty `--tools` grant) is a PURELY INTERNAL
+  // misconfiguration; classify it clearly-internal and NEVER leak the raw
+  // "re-run with file/shell tools enabled" stderr. Checked FIRST so a stray
+  // "conflict"/"git" token in the raw message can't misroute it to a user-facing
+  // class.
+  if (isToolsNotEnabled(r)) {
+    return {
+      klass: 'infra',
+      summary: 'The build hit an internal configuration error and could not finish.',
+      input_needed: retry,
+    }
+  }
 
   // Suspected agent hang / stalled inner workflow — already a plain reason.
   if (r.includes('suspected agent hang') || r.includes('no progress for') || r.includes('stalled')) {
     return {
       klass: 'hang',
       summary: 'The build stopped making progress and I stopped it before it could hang indefinitely.',
-      input_needed: `${retry} (its last progress is saved on ${branch}.)`,
+      input_needed: `${retry} ${saved}`,
     }
   }
 
@@ -148,7 +182,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     return {
       klass: 'review-unresolved',
       summary: `The build ran its review rounds but the reviewer still had blocking findings, so I did not merge it.`,
-      input_needed: `${branch} is saved for you to review — reply to send it back for another fix pass, or take it over.`,
+      input_needed: `${saved} Reply to send it back for another fix pass, or take it over.`,
     }
   }
 
@@ -184,7 +218,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     return {
       klass: 'merge-mechanics',
       summary: 'The build finished but a git step failed while landing the branch, so it was not merged.',
-      input_needed: `${branch} is saved. ${retry}`,
+      input_needed: `${saved} ${retry}`,
     }
   }
 
@@ -221,8 +255,19 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
   return {
     klass: 'unknown',
     summary: safe && oneLine.length > 0 ? oneLine : 'The build did not complete.',
-    input_needed: `${branch} is saved. ${retry}`,
+    input_needed: `${saved} ${retry}`,
   }
+}
+
+/**
+ * The human-readable name for the work — the `work_board_items.title` the run
+ * was dispatched from (the board build-tool persists the item's linked design
+ * doc, else its title, verbatim as `run.task`). Every result message LEADS with
+ * this (#361 humanize) so the operator sees the WORK in plain words, not the
+ * machine `slug`. Cleaned + clamped to a one-line header.
+ */
+function workTitle(run: TridentRun): string {
+  return truncateTask(run.task, 80)
 }
 
 /**
@@ -232,28 +277,22 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
  * terminal rows).
  *
  * Trident merges autonomously on Argus APPROVE, so `done` means "already
- * merged + cleaned up" — the message reports the landed result rather than
+ * merged + deployed" — the message reports the landed result rather than
  * offering a merge button (the human-in-the-loop merge is Vajra's
- * Forge-delivery model; trident is the autonomous loop). Branch / PR
- * identifiers ride inline so the operator can open them.
+ * Forge-delivery model; trident is the autonomous loop).
+ *
+ * #361 HUMANIZE — the copy names the work by its TITLE (not the raw run slug),
+ * says "merged and deployed" plainly, and drops branch/round jargon. A PR-mode
+ * run still carries its PR number (an openable artifact, not jargon).
  */
 export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | null {
   if (!isTerminalPhase(run.phase)) return null
-  // #339 — the completion message leads with the build's SLUG (the same handle
-  // the Work list shows) + a short context line from the task.
-  const slug = run.slug
-  const task = truncateTask(run.task)
-  const rounds = run.round > 1 ? ` after ${run.round} review round${run.round === 2 ? '' : 's'}` : ''
+  const title = workTitle(run)
 
   switch (run.phase) {
     case 'done': {
-      const where =
-        run.merge_mode === 'pr' && run.pr !== null
-          ? `merged PR #${run.pr}${run.branch !== null ? ` (\`${run.branch}\`)` : ''}`
-          : run.branch !== null
-            ? `merged \`${run.branch}\` locally`
-            : 'merged'
-      return { text: `✅ \`${slug}\` — build done, ${where}${rounds}.\n${task}` }
+      const prRef = run.merge_mode === 'pr' && run.pr !== null ? ` (PR #${run.pr})` : ''
+      return { text: `✅ ${title} — merged and deployed.${prRef}` }
     }
     case 'failed': {
       // #352 — INTERPRET the failure into plain language + the specific input
@@ -265,14 +304,14 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
         run.merge_mode === 'pr' && run.pr !== null
           ? `\nPR #${run.pr} left open for review.`
           : ''
-      return { text: `❌ \`${slug}\` — ${interp.summary}\n${task}\n${interp.input_needed}${trail}` }
+      return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }
     }
     case 'stopped':
       // `/code stop` flips a row straight to `stopped` via the store (not
       // the tick loop) and replies to the user synchronously, so the loop's
       // on_terminal hook never sees a stopped row in practice. Composed
       // anyway for completeness / direct callers.
-      return { text: `🛑 \`${slug}\` — build stopped.\n${task}` }
+      return { text: `🛑 ${title} — build stopped.` }
     default:
       return null
   }
