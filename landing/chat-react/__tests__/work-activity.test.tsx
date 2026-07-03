@@ -130,15 +130,40 @@ describe('useWorkActivity', () => {
     act(() => h.root.unmount())
   })
 
-  it('announces the FIRST live build of a fresh session (nothing to replay)', async () => {
-    const live = fakeLive() // no replay → fresh session baseline is empty
+  it('seeds the first MATCHING frame (a run already there is not announced), then announces a later rise', async () => {
+    const live = fakeLive() // no replay → the first live frame IS the seed
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
-      live.emit([item({ id: 'a', title: 'First build', linked_run_id: 'r1' })], 'acme')
+      live.emit([item({ id: 'a', title: 'Pre-existing', linked_run_id: 'r1' })], 'acme')
+      await tick()
+    })
+    // The first matching frame only seeds — no false drawer for a pre-existing run.
+    expect(h.latest().running).toBe(1)
+    expect(h.latest().justStarted).toBeNull()
+    // A subsequent rise (a genuinely new run) IS announced.
+    await act(async () => {
+      live.emit(
+        [item({ id: 'a', linked_run_id: 'r1' }), item({ id: 'b', title: 'New run', linked_run_id: 'r2' })],
+        'acme',
+      )
+      await tick()
+    })
+    expect(h.latest().justStarted).toEqual({ id: 'b', title: 'New run' } as StartedJob)
+    act(() => h.root.unmount())
+  })
+
+  it('does NOT falsely announce on a project switch whose replay was another project (Codex P2)', async () => {
+    // The controller replays its LAST snapshot — here another project's board —
+    // which the pid filter drops. The new project's first matching frame (an
+    // already-running build) must SEED, not open the drawer.
+    const live = fakeLive({ items: [item({ id: 'other', linked_run_id: 'rX' })], pid: 'other' })
+    const h = mountActivity(live.source, 'acme')
+    await act(async () => {
+      live.emit([item({ id: 'a', title: 'Already building', linked_run_id: 'r1' })], 'acme')
       await tick()
     })
     expect(h.latest().running).toBe(1)
-    expect(h.latest().justStarted).toEqual({ id: 'a', title: 'First build' } as StartedJob)
+    expect(h.latest().justStarted).toBeNull()
     act(() => h.root.unmount())
   })
 

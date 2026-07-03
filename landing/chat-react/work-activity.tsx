@@ -66,12 +66,19 @@ export interface WorkActivity {
  * drawer signals. Filters frames to `projectId` (the live source multiplexes
  * every project's board), and re-seeds its baseline on a project switch.
  *
- * The baseline is seeded by whatever the live source replays SYNCHRONOUSLY at
- * subscribe (the controller replays its last snapshot to a late subscriber) —
- * that pre-existing state is NOT announced. Every subsequent frame is a real
- * change, so a fresh session's very first live build (no prior snapshot to
- * replay) IS announced (Codex P2: don't swallow the "open page, start first
- * build" case).
+ * The baseline is seeded by the FIRST frame that matches the active project —
+ * whether that's the controller's synchronous replay of its last snapshot or the
+ * server's `on_session_open` seed — and that pre-existing state is NOT announced.
+ * Only a SUBSEQUENT matching frame with a higher running count announces. Seeding
+ * on the first MATCHING frame (not merely on subscribe) is deliberate: on a
+ * project switch the replayed snapshot may belong to a DIFFERENT project, so
+ * priming purely on subscribe would make the new project's first frame falsely
+ * announce a pre-existing run (Codex P2). The safe invariant is "never flash a
+ * drawer for a run that didn't just start"; the rare cost is that a build whose
+ * VERY first board frame coincides with the session's first matching frame isn't
+ * announced (the Work-tab pulse + board still reflect it). In practice the
+ * `on_session_open` snapshot seeds the baseline before a user-dispatched build,
+ * so a genuinely new build after open still announces.
  *
  * `announce` gates the drawer signal: when false (e.g. desktop, where the pane
  * owns this), a starting build is NOT retained — so shrinking to mobile later
@@ -102,18 +109,16 @@ export function useWorkActivity(
       const runningItems = items.filter(itemRunning)
       const ids = new Set(runningItems.map((i) => i.id))
       if (primed.current && announceRef.current && ids.size > prevRunningIds.current.size) {
-        // The running count ROSE — a new run started. Announce the first id that
-        // wasn't running a frame ago (0→1 and 1→2 both count).
+        // The running count ROSE since a prior MATCHING frame — a new run
+        // started. Announce the first id that wasn't running before (0→1, 1→2).
         const fresh = runningItems.find((i) => !prevRunningIds.current.has(i.id))
         if (fresh !== undefined) setJustStarted({ id: fresh.id, title: fresh.title })
       }
+      // Seed on the FIRST matching frame; announce only on the ones after it.
+      primed.current = true
       prevRunningIds.current = ids
       setRunning(ids.size)
     })
-    // Any SYNCHRONOUS replay above has now seeded the baseline; treat every later
-    // frame as a real change. Without this, a fresh session with nothing to
-    // replay would silently seed (and swallow) the user's first build.
-    primed.current = true
     return unsub
   }, [source, pid])
 
