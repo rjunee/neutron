@@ -1614,6 +1614,14 @@ function ConversationRuntimeHost({
  *  grow without bound over a long session. The active surface is never evicted. */
 const MAX_MOUNTED_CONVERSATIONS = 8
 
+/** FIX #343 / Codex P2 — grace window after a switch during which an active
+ *  conversation's empty live vm is treated as a transient re-hydration and masked
+ *  by its cached snapshot. Once it elapses with the transcript still empty, the
+ *  empty is accepted as authoritative (the snapshot is dropped + the surface
+ *  remounted), so a genuinely cleared/expired transcript can't be masked forever.
+ *  Comfortably longer than a local OPFS transcript hydration. */
+const HYDRATION_GRACE_MS = 600
+
 /**
  * One MOUNTED conversation surface — its own message-bubble contexts, its own
  * assistant-ui runtime (via {@link ConversationRuntimeHost}), and the
@@ -1789,6 +1797,36 @@ export function ChatApp({
     cache.set(convId, vm)
   }
 
+  // Codex P2 — the frozen-vm fallback below shows a conversation's cached messages
+  // while its live transcript re-hydrates (so a switch-back doesn't flash empty).
+  // If the live transcript is AUTHORITATIVELY empty (cleared/expired), that
+  // fallback would otherwise mask it forever. Bound it: after HYDRATION_GRACE_MS,
+  // if the active conversation's live vm is STILL empty while a non-empty snapshot
+  // is cached, drop the snapshot and bump the conversation's remount epoch — the
+  // surface REMOUNTS onto the (empty) live vm rather than shrinking its runtime in
+  // place, so the empty is accepted without risking the SEV1 index-out-of-bounds.
+  const liveVmRef = useRef(vm)
+  liveVmRef.current = vm
+  const epochRef = useRef<Map<string, number>>(new Map())
+  const [, bumpEpoch] = useState(0)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const live = liveVmRef.current
+      const frozen = cache.get(convId)
+      if (
+        conversationIdOf(live.projectId) === convId &&
+        live.messages.length === 0 &&
+        frozen !== undefined &&
+        frozen.messages.length > 0
+      ) {
+        cache.delete(convId)
+        epochRef.current.set(convId, (epochRef.current.get(convId) ?? 0) + 1)
+        bumpEpoch((n) => n + 1)
+      }
+    }, HYDRATION_GRACE_MS)
+    return () => clearTimeout(t)
+  }, [convId, cache])
+
   // The ordered set of mounted conversation ids (LRU; most-recently-active last).
   const [mounted, setMounted] = useState<string[]>(() => [convId])
   // Render the active conversation immediately even on the switch render (before
@@ -1825,8 +1863,10 @@ export function ChatApp({
             : vm
           : (frozen ?? vm)
         return (
+          // The epoch suffix lets an authoritative-empty transition (Codex P2)
+          // REMOUNT this surface instead of shrinking its runtime in place.
           <MountedConversation
-            key={id}
+            key={`${id}#${epochRef.current.get(id) ?? 0}`}
             hostVm={hostVm}
             active={active}
             controller={controller}

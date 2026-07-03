@@ -385,7 +385,7 @@ describe('chat-rail stability — project switch never crashes the thread', () =
       await tick()
     })
     // The General surface is the sole mounted `.car-conv`. Capture its node.
-    const generalNode = container.querySelector('.car-conv')
+    const generalNode = container.querySelector('.car-conv')!
     expect(generalNode).not.toBeNull()
 
     // Switch away: General's surface stays in the DOM (hidden) as the SAME node —
@@ -408,6 +408,108 @@ describe('chat-rail stability — project switch never crashes the thread', () =
     const generalVisible = container.querySelector('.car-conv:not([hidden])')
     expect(generalVisible).toBe(generalNode)
     expect(generalVisible!.textContent).toContain('second msg')
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('Codex P2 — accepts an authoritative EMPTY transcript after the grace window (no permanent stale mask, no crash)', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChatVm } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    // Fresh per-scope store, so returning to General re-hydrates EMPTY — a stand-in
+    // for a transcript that was cleared/expired server-side.
+    const controller = new NeutronChatController({
+      projectId: null,
+      projects: [{ id: 'meditation', label: 'Meditation', emoji: '🧘' }],
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [{ id: 'meditation', label: 'Meditation', emoji: '🧘' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const vm = useNeutronChatVm(controller)
+      return <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a1', seq: 1, body: 'first msg', ts: 1 })
+      sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a2', seq: 2, body: 'second msg', ts: 2 })
+      await tick()
+    })
+    await act(async () => {
+      controller.setProject('meditation')
+      await tick()
+    })
+    // Back to General: during the grace window it shows the cached messages (no
+    // empty flash).
+    await act(async () => {
+      controller.setProject(null)
+      await tick()
+    })
+    expect(visibleText(container)).toContain('second msg')
+
+    // Wait past the grace window: the still-empty transcript is now accepted as
+    // authoritative — the surface remounts onto the empty vm (no in-place shrink),
+    // shows the empty state, and nothing throws (boundary absent).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 750))
+    })
+    expect(visibleText(container)).not.toContain('second msg')
+    expect(visibleText(container)).toContain('Send a message to begin.')
+    expect(container.textContent).not.toContain('This conversation hit a snag')
 
     await act(async () => {
       root.unmount()

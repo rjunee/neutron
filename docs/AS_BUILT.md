@@ -29,7 +29,12 @@ lifecycle (#190, already merged).
   surface only ever sees its own messages), so the `useClientLookup` index-out-of-
   bounds can't reoccur. The active surface, during its own re-hydration, keeps
   showing its cached snapshot until the live transcript lands (no empty-state flash
-  and no shrink). The `chat-rail-stability` regression suite was rewritten to assert
+  and no shrink). Codex P2 (cross-model review): that snapshot fallback is bounded
+  by a grace window (`HYDRATION_GRACE_MS`) — if the transcript is AUTHORITATIVELY
+  empty (cleared/expired), after the window the stale snapshot is dropped and the
+  surface REMOUNTS onto the empty vm (a remount via a per-conversation epoch key,
+  never an in-place shrink), so a genuinely empty transcript can't be masked
+  forever. The `chat-rail-stability` regression suite was rewritten to assert
   on the VISIBLE pane (`.car-conv:not([hidden])`) + the new preservation guarantee
   (same DOM node across a round-trip, cached messages instant on return), and still
   guards no-crash / no-boundary across rapid hops.
