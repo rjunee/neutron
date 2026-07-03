@@ -131,7 +131,7 @@ export interface ChatViewModel {
   awaitingFirstToken: boolean
   /**
    * Chat-typing persistence — true while the active project's Work Board has at
-   * least one `in_progress` item (the SAME signal that flashes the Plan-tab
+   * least one `in_progress` item (the SAME signal that flashes the Work-tab
    * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
    * so the dots stay visible for the WHOLE processing window — including a long
    * or background build that continues AFTER the ack turn settles (the agent
@@ -1128,7 +1128,7 @@ export class NeutronChatController {
 
   /**
    * True when the active project's Work Board has an `in_progress` item — the
-   * signal behind the Plan-tab flashing active-work dot, reused to keep the chat
+   * signal behind the Work-tab flashing active-work dot, reused to keep the chat
    * typing dots visible while a long/background build runs.
    *
    * Reads `activeWorkBoardItems`, which is populated ONLY by live

@@ -535,12 +535,12 @@ test('finalize emits a General closing message + one per-project opening (items 
   const finalizer = buildOnboardingFinalize(deps)
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
 
-  // Exactly one General closing (project_id === null) pointing at the rail + Plan.
+  // Exactly one General closing (project_id === null) pointing at the rail + Work.
   const closings = emitted.filter((e) => e.project_id === null)
   expect(closings).toHaveLength(1)
   expect(closings[0]!.user_id).toBe(USER_ID)
   expect(closings[0]!.body).toMatch(/left rail/i)
-  expect(closings[0]!.body).toMatch(/Plan/)
+  expect(closings[0]!.body).toMatch(/Work/)
   // No em dashes leaked into the closing (Sam hard rule).
   expect(closings[0]!.body).not.toContain('—')
   // Stable dedupe key so a re-finalize collapses onto the same row (idempotency).

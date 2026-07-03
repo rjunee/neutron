@@ -1221,7 +1221,7 @@ function ChatSurface({
           {/* Chat-typing persistence — show the standard typing dots for the WHOLE
               processing window, not just the pre-first-token wait. `hasActiveWork`
               (the active project's Work Board has an `in_progress` item — the same
-              signal as the flashing Plan-tab dot) keeps the dots visible while a
+              signal as the flashing Work-tab dot) keeps the dots visible while a
               long/background build runs on after the ack turn settles, and stops
               them the moment the board reports the work done. */}
           {vm.awaitingFirstToken || vm.hasActiveWork ? <TypingIndicator /> : null}
