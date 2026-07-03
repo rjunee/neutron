@@ -113,6 +113,20 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     expect(roundText(rp)).toBeNull();
   });
 
+  it('derives from phase_label when step_label is missing (legacy/rolling-deploy GET)', () => {
+    // The HTTP list() path returns raw server rows; a legacy gateway can omit
+    // step_label. stepTag must derive from phase_label instead of returning
+    // undefined (which the row would treat as non-null → crash). Codex P2.
+    const legacy = progress({ phase_label: 'reviewing', round: 2 });
+    delete (legacy as { step_label?: unknown }).step_label;
+    expect(stepTag(legacy)).toEqual({ label: 'Reviewing', colorKey: 'review' });
+    expect(roundText(legacy)).toBe('round 2');
+    const legacyMerged = progress({ phase_label: 'merged' });
+    delete (legacyMerged as { step_label?: unknown }).step_label;
+    expect(stepTag(legacyMerged)).toEqual({ label: 'Merged', colorKey: 'merge' });
+    expect(roundText(legacyMerged)).toBeNull();
+  });
+
   it('is null/idle for an unbound item (no run_progress)', () => {
     expect(stepTag(undefined)).toBeNull();
     expect(roundText(undefined)).toBeNull();

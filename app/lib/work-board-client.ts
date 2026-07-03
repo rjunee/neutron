@@ -331,6 +331,23 @@ function stepLabelFromPhase(phase: RunPhaseLabel): RunStepLabel {
   }
 }
 
+/**
+ * The EFFECTIVE inner-step label — `step_label` when the server sent a recognized
+ * one, else derived from `phase_label`. The HTTP `list()` path returns raw server
+ * rows (NOT run through `parseRunProgress`), so a legacy/rolling-deploy gateway
+ * that omits `step_label` would otherwise leave it `undefined` and crash the
+ * tag/dot derivation (Codex P2). The row helpers switch on THIS, never
+ * `rp.step_label` directly. Mirror of the web client's `resolveStepLabel`.
+ */
+export function resolveStepLabel(rp: {
+  step_label?: unknown;
+  phase_label: RunPhaseLabel;
+}): RunStepLabel {
+  return RUN_STEP_LABELS.includes(rp.step_label as RunStepLabel)
+    ? (rp.step_label as RunStepLabel)
+    : stepLabelFromPhase(rp.phase_label);
+}
+
 /** Parse a raw `run_progress` object off a live frame; null when absent/malformed. */
 function parseRunProgress(raw: unknown): RunProgress | null {
   if (typeof raw !== 'object' || raw === null) return null;

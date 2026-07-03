@@ -16,7 +16,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
-import type { WorkBoardItem } from '../work-board-client.ts'
+import type { RunProgress, WorkBoardItem } from '../work-board-client.ts'
 
 beforeAll(() => {
   GlobalRegistrator.register({ url: 'https://sam.neutron.test/chat?client=react' })
@@ -253,6 +253,36 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(container.querySelector('.cwb-run-progress')).toBeNull()
     expect(container.textContent).not.toContain('🔨')
     expect(container.textContent).not.toContain('4m')
+    await act(async () => root.unmount())
+  })
+
+  it('renders a derived tag for a LEGACY run_progress missing step_label (no crash)', async () => {
+    // A rolling-deploy / legacy gateway HTTP GET can return run_progress with only
+    // phase_label (no step_label). The row must derive the tag from phase_label
+    // instead of crashing (Codex P2). `step_label` intentionally omitted.
+    const legacyProgress = {
+      run_id: 'run_1',
+      phase_label: 'building',
+      round: 1,
+      started_at: '2026-07-02T00:00:00Z',
+      last_advanced_at: '2026-07-02T00:01:00Z',
+      elapsed_ms: 60000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      verdict: null,
+      failure_reason: null,
+    } as unknown as RunProgress
+    const rows = [
+      item({ id: 'a', title: 'Legacy row', status: 'in_progress', linked_run_id: 'run_1', run_progress: legacyProgress }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const tag = container.querySelector('.cwb-tag')
+    expect(tag).not.toBeNull()
+    // phase_label 'building' → derived step 'building' → 'Building' tag.
+    expect(tag!.textContent).toBe('Building')
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-build')
     await act(async () => root.unmount())
   })
 

@@ -54,6 +54,7 @@ import {
   WebWorkBoardClient,
   docLinkLabel,
   docPathFromDesignRef,
+  resolveStepLabel,
   type RunPhaseLabel,
   type RunProgress,
   type WorkBoardItem,
@@ -127,7 +128,7 @@ interface PhaseTag {
  */
 function stepTag(rp: RunProgress | undefined): PhaseTag | null {
   if (rp === undefined) return null
-  switch (rp.step_label) {
+  switch (resolveStepLabel(rp)) {
     case 'building':
       return { label: 'Building', cls: 'cwb-tag-build' }
     case 'reviewing':
@@ -157,7 +158,7 @@ interface DotState {
 function dotState(item: WorkBoardItem): DotState {
   const rp = item.run_progress
   if (rp !== undefined) {
-    switch (rp.step_label) {
+    switch (resolveStepLabel(rp)) {
       case 'building':
         return { cls: 'cwb-dot-build', pulse: true }
       case 'reviewing':
@@ -180,7 +181,8 @@ function dotState(item: WorkBoardItem): DotState {
 /** `round N` for a live (non-terminal) run; null once merged/failed or when idle. */
 function roundText(rp: RunProgress | undefined): string | null {
   if (rp === undefined) return null
-  if (rp.step_label === 'done' || rp.step_label === 'failed') return null
+  const step = resolveStepLabel(rp)
+  if (step === 'done' || step === 'failed') return null
   return `round ${rp.round}`
 }
 
