@@ -40,6 +40,12 @@ export interface NeutronTheme {
   warning: string;
   /** Link color (markdown links, citation chip text). */
   link: string;
+  /** M1 UX REDESIGN — rail work-activity dot: a project with a live build /
+   *  running turn. Mirror of the web `--work` token. */
+  work: string;
+  /** M1 UX REDESIGN — rail attention dot: a failed-not-done item or a stalled
+   *  live run. Mirror of the web `--attention` token. */
+  attention: string;
 }
 
 export const THEME: NeutronTheme = Object.freeze({
@@ -54,6 +60,8 @@ export const THEME: NeutronTheme = Object.freeze({
   danger: '#ff5c5c',
   warning: '#ffae42',
   link: '#5fb6ff',
+  work: '#66ccff',
+  attention: '#ffd27d',
 });
 
 /** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */

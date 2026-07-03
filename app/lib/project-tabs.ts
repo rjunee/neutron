@@ -222,3 +222,36 @@ export function sanitizeCoreTabUrl(raw: unknown): string | null {
 export function lastTabValueForLeaf(leaf: string): LastTabValue | null {
   return isLegalTab(leaf) ? leaf : null;
 }
+
+/**
+ * The stable key + route leaf for the mobile Work tab (M1 UX REDESIGN PR-6).
+ * Points at the existing `app/app/projects/[id]/workboard.tsx` screen. Not a
+ * persistable `LastTabValue` (deliberately absent from `LEGAL_TABS`) so it
+ * highlights + renders its live-run badge without being remembered as the
+ * default reopened tab — `lastTabValueForLeaf('workboard')` returns null.
+ */
+export const WORK_TAB_KEY = 'workboard';
+const WORK_TAB_LABEL = 'Work';
+
+/**
+ * Ensure the mobile Work tab is present in the rendered set, inserted right
+ * after Chat (mirroring the signed-off mobile prototype's Chat · Work · Docs
+ * order). The Work board screen ships as a route but the tab registry does not
+ * emit a Work descriptor, so the mobile shell injects it here — ONE code path
+ * over BOTH the loading default and the fetched registry set (idempotent: a set
+ * that already carries a `workboard` tab is returned unchanged). This is where
+ * the current project's `live_runs` badge lands (PR-1 #180).
+ */
+export function ensureWorkTab(tabs: readonly ResolvedTab[], project_id: string): ResolvedTab[] {
+  if (tabs.some((t) => t.key === WORK_TAB_KEY)) return [...tabs];
+  const workTab: ResolvedTab = {
+    key: WORK_TAB_KEY,
+    label: WORK_TAB_LABEL,
+    route: `/projects/${encodeURIComponent(project_id)}/${WORK_TAB_KEY}`,
+  };
+  const chatIdx = tabs.findIndex((t) => t.key === 'chat');
+  if (chatIdx < 0) return [...tabs, workTab];
+  const out = [...tabs];
+  out.splice(chatIdx + 1, 0, workTab);
+  return out;
+}

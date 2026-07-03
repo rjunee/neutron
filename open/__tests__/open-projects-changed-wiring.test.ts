@@ -161,8 +161,14 @@ describe('Open projects_changed live-refresh wiring', () => {
     // and, seeing the set changed, fans projects_changed over this socket.
     ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'hi', client_msg_id: 'c-1' }))
 
-    await waitFor(() => events.some((e) => e.type === 'projects_changed'), 25_000)
-    const frame = events.find((e) => e.type === 'projects_changed')
+    // PR-6 seeds a projects_changed frame on connect (mobile-rail freshness), so the
+    // FIRST frame is the empty pre-insert snapshot; assert on the onboarding frame that
+    // actually carries the new project (preserves this test's intent).
+    await waitFor(
+      () => events.some((e) => e.type === 'projects_changed' && e.projects.some((p) => p.id === 'acme')),
+      25_000,
+    )
+    const frame = events.find((e) => e.type === 'projects_changed' && e.projects.some((p) => p.id === 'acme'))
     if (frame === undefined || frame.type !== 'projects_changed') {
       throw new Error('expected a projects_changed frame')
     }
@@ -244,8 +250,13 @@ describe('Open projects_changed live-refresh wiring', () => {
 
     // The scoped socket (viewing 'acme') is where #132 dropped the frame — it
     // MUST now carry the new project so the rail updates without a reload.
-    await waitFor(() => scopedEvents.some((e) => e.type === 'projects_changed'), 25_000)
-    const scopedFrame = scopedEvents.find((e) => e.type === 'projects_changed')
+    // PR-6 connect-seed emits a projects_changed frame before 'beta' exists; select the
+    // frame that carries the newly-created project, not the first (connect) frame.
+    await waitFor(
+      () => scopedEvents.some((e) => e.type === 'projects_changed' && e.projects.some((p) => p.id === 'beta')),
+      25_000,
+    )
+    const scopedFrame = scopedEvents.find((e) => e.type === 'projects_changed' && e.projects.some((p) => p.id === 'beta'))
     if (scopedFrame === undefined || scopedFrame.type !== 'projects_changed') {
       throw new Error('expected a projects_changed frame on the project-scoped socket')
     }
@@ -255,8 +266,11 @@ describe('Open projects_changed live-refresh wiring', () => {
     expect((scopedBeta?.emoji ?? '').length).toBeGreaterThan(0)
 
     // No regression — the General socket still receives the same refresh.
-    await waitFor(() => generalEvents.some((e) => e.type === 'projects_changed'), 25_000)
-    const generalFrame = generalEvents.find((e) => e.type === 'projects_changed')
+    await waitFor(
+      () => generalEvents.some((e) => e.type === 'projects_changed' && e.projects.some((p) => p.id === 'beta')),
+      25_000,
+    )
+    const generalFrame = generalEvents.find((e) => e.type === 'projects_changed' && e.projects.some((p) => p.id === 'beta'))
     if (generalFrame === undefined || generalFrame.type !== 'projects_changed') {
       throw new Error('expected a projects_changed frame on the General socket')
     }

@@ -12,7 +12,7 @@ import { describe, expect, it } from 'bun:test';
 import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 
 describe('THEME', () => {
-  it('exports the locked P5.0 dark palette plus the P5.1 warning + link tokens', () => {
+  it('exports the locked P5.0 dark palette plus the P5.1 warning + link + PR-6 rail tokens', () => {
     expect(THEME).toEqual({
       background: '#0a0a0a',
       surface: '#121212',
@@ -25,6 +25,9 @@ describe('THEME', () => {
       danger: '#ff5c5c',
       warning: '#ffae42',
       link: '#5fb6ff',
+      // M1 UX REDESIGN PR-6 — rail work-activity dot tokens (mirror web).
+      work: '#66ccff',
+      attention: '#ffd27d',
     });
   });
 

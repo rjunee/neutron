@@ -41,19 +41,37 @@ import { InviteModal, type InviteModalResult } from '../../../components/InviteM
 import { copyToClipboard } from '../../../lib/clipboard';
 import { canInviteToProject } from '../../../lib/invite-helpers';
 import { PROJECT_TABS, ProjectTabBar } from '../../../components/ProjectTabBar';
+import { ProjectRail, type RailOverlayEntry } from '../../../components/ProjectRail';
 import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
 import { loadAppConfig } from '../../../lib/config';
 import { lastTabStorage } from '../../../lib/last-tab-storage';
 import {
   activeTabKeyFromSegments,
   descriptorsToResolvedTabs,
+  ensureWorkTab,
   lastTabValueForLeaf,
   loadingTabsForProject,
+  WORK_TAB_KEY,
   type ResolvedTab,
 } from '../../../lib/project-tabs';
+import { workTabBadgeCount, type RailProjectView } from '../../../lib/project-rail-view';
+import {
+  fetchProjects,
+  projectCardInteractivity,
+  sortProjectsByActivity,
+  type Project,
+} from '../../../lib/projects';
+import { startProjectsRailLive, type RailProject } from '../../../lib/projects-rail-live';
 import { ProjectStateProvider, useProjectState } from '../../../lib/project-state';
 import { useAuthSession } from '../../../lib/session';
 import { TabsClient } from '../../../lib/tabs-client';
+
+/** Best-effort random device id for the rail's read-only app-ws socket. */
+function makeRailDeviceId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID !== undefined) return `rail-${c.randomUUID()}`;
+  return `rail-${Math.floor(Math.random() * 1e9).toString(36)}`;
+}
 
 export default function ProjectLayout() {
   const router = useRouter();
@@ -131,10 +149,55 @@ function ProjectShell({ project_id }: { project_id: string }) {
     };
   }, [user, config.base_url, project_id]);
 
+  // The Work tab is not emitted by the tab registry, so the mobile shell always
+  // injects it (after Chat) over BOTH the loading default and the fetched set —
+  // one code path, idempotent. This is the tab the live-run badge lands on.
   const displayTabs = useMemo<ResolvedTab[]>(
-    () => fetchedTabs ?? loadingTabsForProject(project_id),
+    () => ensureWorkTab(fetchedTabs ?? loadingTabsForProject(project_id), project_id),
     [fetchedTabs, project_id],
   );
+
+  // ── Project rail (M1 UX REDESIGN PR-6) ────────────────────────────────────
+  // The rail's project SET comes from the HTTP list; its per-project rail state
+  // (`activity` dot / `live_runs` badge) is overlaid live from the app-ws
+  // `projects_changed` frame (PR-1 #180) — the composer is the single source of
+  // truth, mirroring the web rail. `railProjects` is null until the first fetch.
+  const [railProjects, setRailProjects] = useState<Project[] | null>(null);
+  const [railOverlay, setRailOverlay] = useState<ReadonlyMap<string, RailOverlayEntry>>(
+    () => new Map(),
+  );
+  const deviceId = useMemo(() => makeRailDeviceId(), []);
+
+  useEffect(() => {
+    if (user === null) return;
+    let cancelled = false;
+    fetchProjects({ base_url: config.base_url, token: user.token })
+      .then(({ projects }) => {
+        if (!cancelled) setRailProjects(projects);
+      })
+      .catch(() => {
+        // Non-fatal: the rail falls back to the current project alone.
+        if (!cancelled) setRailProjects(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, config.base_url, project_id]);
+
+  useEffect(() => {
+    if (user === null) return;
+    const live = startProjectsRailLive({
+      base_url: config.base_url,
+      token: user.token,
+      device_id: deviceId,
+      onSnapshot: (projects: RailProject[]) => {
+        setRailOverlay(
+          new Map(projects.map((p) => [p.id, { activity: p.activity, live_runs: p.live_runs }])),
+        );
+      },
+    });
+    return () => live.stop();
+  }, [user, config.base_url, deviceId]);
 
   // `null` on a non-tab sub-route (chat-sync/notes/backups/bare cores) AND on a
   // legacy leaf no longer in the registry set: no tab is highlighted there and
@@ -218,6 +281,42 @@ function ProjectShell({ project_id }: { project_id: string }) {
     router.replace(target.route);
   };
 
+  // Rail view list: the navigable (solo) projects, most-recent-first, mapped to
+  // the minimal rail shape. Seed with the current project so the rail is never
+  // empty on first paint (before the HTTP list resolves). Computed inline (not a
+  // hook) — this runs only past the early returns above, where `project` is
+  // guaranteed non-null.
+  const railList: RailProjectView[] = (() => {
+    const navigable = (railProjects ?? []).filter((p) => projectCardInteractivity(p).navigable);
+    const views: RailProjectView[] = sortProjectsByActivity(navigable).map((p) => ({
+      id: p.id,
+      name: p.name,
+      emoji: p.emoji,
+      unread_count: p.unread_count,
+      origin_instance: p.origin_instance,
+    }));
+    if (!views.some((v) => v.id === project_id)) {
+      views.unshift({
+        id: project_id,
+        name: project.name,
+        emoji: project.emoji.length > 0 ? project.emoji : '📁',
+        unread_count: 0,
+        origin_instance: 'local',
+      });
+    }
+    return views;
+  })();
+
+  // The Work-tab live-run badge = the current project's live_runs (overlay).
+  const workBadge = workTabBadgeCount(railOverlay.get(project_id)?.live_runs);
+  const tabBadges = workBadge !== null ? new Map([[WORK_TAB_KEY, workBadge]]) : undefined;
+
+  const onRailSelect = (id: string): void => {
+    if (id !== project_id) router.replace(`/projects/${encodeURIComponent(id)}`);
+  };
+  // The `+` affordance jumps to the project list, which owns Create Project.
+  const onRailCreate = (): void => router.push('/projects');
+
   // Show the Invite pill only when the gateway can actually mint a link:
   // the caller is an owner/admin AND the project is a group (not
   // personal). Personal projects — ~100% of prod today — have no
@@ -237,7 +336,12 @@ function ProjectShell({ project_id }: { project_id: string }) {
       />
       {wide ? (
         <View style={styles.wideBody}>
-          <ProjectTabBar active={activeTab} onSelect={handleTabSelect} tabs={displayTabs} />
+          <ProjectTabBar
+            active={activeTab}
+            onSelect={handleTabSelect}
+            tabs={displayTabs}
+            badges={tabBadges}
+          />
           <View style={styles.wideContent}>
             <SlotFader keyId={slotKey}>
               <Slot />
@@ -245,14 +349,30 @@ function ProjectShell({ project_id }: { project_id: string }) {
           </View>
         </View>
       ) : (
-        <>
-          <ProjectTabBar active={activeTab} onSelect={handleTabSelect} tabs={displayTabs} />
-          <View style={styles.narrowContent}>
-            <SlotFader keyId={slotKey}>
-              <Slot />
-            </SlotFader>
+        // Mobile: Telegram-folder rail on the left, seated tabs + content on the
+        // right (mirrors the signed-off mobile prototype's `body` grid).
+        <View style={styles.railBody}>
+          <ProjectRail
+            projects={railList}
+            overlay={railOverlay}
+            activeProjectId={project_id}
+            onSelect={onRailSelect}
+            onCreate={onRailCreate}
+          />
+          <View style={styles.railMain}>
+            <ProjectTabBar
+              active={activeTab}
+              onSelect={handleTabSelect}
+              tabs={displayTabs}
+              badges={tabBadges}
+            />
+            <View style={styles.narrowContent}>
+              <SlotFader keyId={slotKey}>
+                <Slot />
+              </SlotFader>
+            </View>
           </View>
-        </>
+        </View>
       )}
       <ProjectSettingsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <InviteModal
@@ -393,6 +513,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
   },
   wideContent: { flex: 1 },
+  // Mobile: rail (fixed) + main column (tabs + content).
+  railBody: {
+    flex: 1,
+    flexDirection: 'row',
+  },
+  railMain: { flex: 1 },
   narrowContent: { flex: 1 },
   fader: { flex: 1 },
   errorTitle: {
