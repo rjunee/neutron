@@ -364,20 +364,32 @@
   .cdoc-md p, .cdoc-md li { line-height: 1.6; }
   /* WAVE 3 PR-5 — web Documents tab (list · viewer · comments). */
   .cdoc { display: flex; flex: 1 1 auto; min-height: 0; width: 100%; }
-  .cdoc-list {
-    flex: 0 0 220px; min-width: 0; overflow-y: auto;
-    border-right: 1px solid var(--border); background: var(--surface); padding: 8px 0;
+  /* Structured left nav (PR-5): Pinned → Recent → folder tree. Flat rows,
+     indentation + disclosure carets (▸ closed / ▾ open) — no nested cards. */
+  .cdoc-side {
+    flex: 0 0 260px; min-width: 0; overflow-y: auto;
+    border-right: 1px solid var(--border); background: var(--surface); padding: 12px 6px;
   }
-  .cdoc-list-ul { list-style: none; margin: 0; padding: 0; }
-  .cdoc-list-item {
-    display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
-    appearance: none; background: transparent; border: 0; color: var(--fg);
-    padding: 7px 12px; font: inherit; cursor: pointer;
+  .cdoc-sec { margin-bottom: 2px; }
+  .cdoc-seclbl {
+    font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted); padding: 8px 10px 4px;
   }
-  .cdoc-list-item:hover { background: var(--hover-bg); }
-  .cdoc-list-item-active { background: var(--active-bg); }
-  .cdoc-list-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cdoc-list-dir { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cdoc-drow {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    appearance: none; background: transparent; border: 0; font: inherit; font-size: 13px;
+    color: var(--fg-2); padding: 6px 10px; border-radius: 7px; cursor: pointer;
+  }
+  .cdoc-drow:hover { background: var(--hover-bg); }
+  .cdoc-drow-active { background: var(--active-bg); color: var(--fg); }
+  .cdoc-drow-folder { color: var(--muted); font-weight: 590; }
+  .cdoc-drow-icon { flex: 0 0 auto; }
+  .cdoc-drow-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cdoc-drow-time {
+    margin-left: auto; flex: 0 0 auto; font-size: 12px; color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .cdoc-caret { flex: 0 0 auto; width: 12px; color: var(--muted); font-size: 10px; text-align: center; }
   .cdoc-view { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
   .cdoc-view-head {
     flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
@@ -444,7 +456,7 @@
   .cdoc-reply-box { border-top: 0; padding: 6px 0 0; background: transparent; }
   .cdoc-resolved-head { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 10px 0 6px; padding: 0 4px; }
   @media (max-width: 720px) {
-    .cdoc-list { flex-basis: 140px; }
+    .cdoc-side { flex-basis: 180px; }
     .cdoc-comments { flex-basis: 200px; }
   }
   /* ── Tasks tab (WAVE 3 PR-8) ── */

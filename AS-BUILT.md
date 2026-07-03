@@ -2,6 +2,48 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-02 — M1 UX redesign PR-5: Documents interface (desktop 2-pane + mobile drill-down)
+
+**Why.** The signed-off M1 UX redesign (proposal §4) restructures the docs
+interface: desktop web docs were a FLAT file list (`flattenDocFiles` → `.cdoc-list`);
+mobile phones squeezed two panes + a toggle at 720px. The redesign gives desktop a
+structured **Pinned → Recent → folder-tree** left nav, and phones a single-pane
+**iOS Files-style drill-down**.
+
+**Spec-conformance diff.** SPEC (signed-off proposal §4) = desktop docs 2 panes
+[LEFT 260px Pinned→Recent→tree, RIGHT existing doc]; mobile single-pane drill-down
+(folder pushes scoped list, file pushes viewer); tablet keeps 2-pane. CURRENT
+(pre-PR) = desktop flat list (`.cdoc-list` + `flattenDocFiles`); mobile 2 panes
+squeezed at 720px. GAP = no Pinned/Recent/tree on desktop, no mobile drill-down.
+THIS PR = `DocSidebar` (desktop) + `DocsDrillList` (mobile). OUT-OF-SCOPE = doc
+viewer/editor/comments internals (unchanged), rail/tabs/Work (PR-1..4), mobile-rail
+(PR-6), General Work view.
+
+**What shipped.**
+- **Desktop web (`landing/chat-react/`).** New `DocSidebar.tsx` (260px) replaces
+  the flat `.cdoc-list`: sections Pinned (`PINNED_DOC_PATHS`/STATUS.md) → Recent (5
+  newest by `modified_at`, pinned excluded, `formatDocTime` relative labels) →
+  folder tree (consumes the hierarchical `/docs/tree` directly; folders toggle with
+  ▸/▾ disclosure carets, default expanded; flat rows + indentation, no nested
+  cards). `DocumentsTab.tsx` holds the raw tree (was `flattenDocFiles(res.tree)`)
+  and mounts `<DocSidebar>` as the left column; viewer/editor/comments UNCHANGED.
+  New `.cdoc-side`/`.cdoc-drow`/`.cdoc-seclbl`/`.cdoc-caret` CSS in
+  `chat-react.html`, both light+dark palettes. `flattenDocFiles` stays exported
+  (docs-client unit tests still use it).
+- **Mobile (`app/`).** New `components/DocsDrillList.tsx` (single-pane list) + pure
+  `lib/docs-drill.ts` (`scopeToFolder`, `collectPinnedNodes`, `collectRecentNodes`,
+  `folderTitle`, `formatDocTime`). `docs.tsx` reads `?folder=<rel>`: on phones the
+  tree pane becomes the drill list (folder tap → `router.push(?folder)`, file tap →
+  `router.push(?path)` = the iOS Files stack), a file open (`?path`) renders the
+  viewer full-screen, and a Back affordance + breadcrumb title appear. Wide/tablet
+  (≥720px) keeps the inline 2-pane `TreeBranch` + viewer — the only fork is the
+  responsive `wideViewport` branch; viewer/editor/comments internals untouched.
+
+**No feature flags** — one code path per viewport (flat desktop list deleted).
+Verified: `landing/chat-react` tsc + 292 tests (new `doc-sidebar.test.tsx`, updated
+`documents-tab.test.tsx`); `app` tsc + 670 tests (new `docs-drill.test.ts`);
+leak-gate SILENT. Depends on PR-1..4 (all merged).
+
 ## 2026-07-02 — Trident: per-project git build workspace (brand-new projects are buildable)
 
 **Why.** A chat-dispatched trident build for a BRAND-NEW project (no existing

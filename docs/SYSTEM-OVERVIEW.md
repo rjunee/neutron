@@ -1082,14 +1082,22 @@ The builtin **Documents** tab (`mount.target === 'docs'`) renders
 read · **edit** · comment (PR-5 shipped read+comment; PR-6 added editing). It
 adds **no `documents` table**: bodies stay filesystem-backed, served by the
 existing gateway docs surface (`gateway/http/app-docs-surface.ts`). The tab is a
-three-pane layout — doc **list** (left) · markdown **viewer/editor** (centre) ·
+three-pane layout — structured **left nav** (Pinned→Recent→tree, PR-5) · markdown **viewer/editor** (centre) ·
 **comments** side-pane (right) — over `chat-react/docs-client.ts` (`WebDocsClient`,
 the web twin of `app/lib/docs-client.ts`: bearer-authed off `config.token`, base
 URL `config.origin`, wire types re-declared client-side so the bundle stays
 gateway-free):
 
-- **List** = `GET /docs/tree` flattened to its markdown leaves (`flattenDocFiles`;
-  folders + binaries dropped).
+- **Left nav** (M1 UX redesign PR-5) = a structured **`DocSidebar`** — top→bottom
+  **Pinned → Recent → folder tree** — consuming the hierarchical `GET /docs/tree`
+  **directly** (the old flat `flattenDocFiles` desktop list is **retired**; the
+  helper stays exported for `docs-client.ts` unit tests). Pinned = `PINNED_DOC_PATHS`
+  (STATUS.md) present in the tree; Recent = the 5 most-recently-modified docs
+  (newest first, pinned excluded, `modified_at` epoch-ms via `formatDocTime`); the
+  tree renders folders with standard disclosure carets (▸ closed / ▾ open, default
+  expanded) + indentation — flat rows, no nested cards. Both light + dark palettes
+  (`.cdoc-side` / `.cdoc-drow` / `.cdoc-seclbl` tokens in `chat-react.html`). Tests:
+  `chat-react/__tests__/doc-sidebar.test.tsx`.
 - **Viewer** = `GET /docs/file?path=` rendered as **selectable RAW markdown** in
   a single text node. Anchors are character offsets into the raw content (the
   same bytes the gateway re-anchors against), so the viewer maps the DOM
@@ -1150,6 +1158,19 @@ read/list/write round-trip in `gateway/__tests__/app-docs-surface.test.ts`.
 (The mobile docs tab `app/app/projects/[id]/docs.tsx` still renders markdown
 only; an `.html` doc now surfaces in its list but its static HTML render is a
 follow-up.)
+
+**Mobile docs = single-pane iOS drill-down (M1 UX redesign PR-5).** On PHONES the
+docs tab is a single-pane list (`components/DocsDrillList.tsx`): screen 1 shows
+**Pinned → Recent → root** files/folders; tapping a **folder** pushes the SAME
+list scoped to that folder (`?folder=<rel>`), tapping a **file** pushes the
+full-screen viewer/editor (`?path=<rel>`) — each a `router.push`, so the native
+back gesture / hardware back walks up the stack (the iOS Files pattern; the header
+breadcrumb IS the nav stack). Scoping + Pinned/Recent/time helpers are pure in
+`lib/docs-drill.ts` (`scopeToFolder` / `collectPinnedNodes` / `collectRecentNodes`
+/ `folderTitle` / `formatDocTime`; tests `__tests__/docs-drill.test.ts`). **Wide /
+tablet (≥720px) keeps the inline two-pane** (`TreeBranch` + viewer) unchanged — the
+only fork is the responsive `wideViewport` branch. The viewer/editor/comments
+internals are untouched by PR-5.
 
 **Obsidian retired (WAVE 3 close-out, PR-6).** With web edit parity shipped, the
 per-project **Documents tab is the primary and only daily doc surface** on both

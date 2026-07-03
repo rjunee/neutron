@@ -31,7 +31,7 @@
  * 720 px.
  */
 
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -49,6 +49,13 @@ import {
 } from 'react-native';
 
 import { CommentsSidePane } from '../../../components/CommentsSidePane';
+import { DocsDrillList } from '../../../components/DocsDrillList';
+import {
+  collectPinnedNodes,
+  collectRecentNodes,
+  folderTitle,
+  scopeToFolder,
+} from '../../../lib/docs-drill';
 import {
   computeAnchorLines,
   formatAnchorLineLabel,
@@ -116,13 +123,21 @@ export default function DocsTab() {
     path: pathParam,
     line: lineParam,
     range: rangeParam,
+    folder: folderParam,
   } = useLocalSearchParams<{
     id: string;
     path?: string;
     line?: string;
     range?: string;
+    folder?: string;
   }>();
   const project_id = typeof id === 'string' ? id : '';
+  const router = useRouter();
+  // PR-5 — phone DOCS drill-down: `?folder=<rel>` scopes the single-pane list to
+  // a subfolder (a router push per level = the iOS Files pattern). Absent /
+  // empty = the root level.
+  const folderPath =
+    typeof folderParam === 'string' && folderParam.length > 0 ? folderParam : null;
   // P7.3 — when the tab is opened via a `neutron://docs/<project_id>/<path>`
   // deep link, the deep-link handler in `app/_layout.tsx` routes here with
   // `?path=<encoded path>`. We auto-select the file on mount once the
@@ -969,6 +984,35 @@ export default function DocsTab() {
     [client, project_id, selectedPath, fetchTree, fetchFile, mutateGate],
   );
 
+  // PR-5 — phone drill-down navigation. A folder tap pushes a scoped list; a
+  // file tap pushes the full-screen viewer. Each push is a new screen so the
+  // native back gesture / hardware back returns up the stack (the iOS Files
+  // pattern). Wide/tablet keeps the inline 2-pane and never calls these.
+  const openFolder = useCallback(
+    (dirPath: string) => {
+      router.push(
+        `/projects/${encodeURIComponent(project_id)}/docs?folder=${encodeURIComponent(dirPath)}`,
+      );
+    },
+    [router, project_id],
+  );
+  const openFileScreen = useCallback(
+    (filePath: string) => {
+      router.push(
+        `/projects/${encodeURIComponent(project_id)}/docs?path=${encodeURIComponent(filePath)}`,
+      );
+    },
+    [router, project_id],
+  );
+  // The node list at the current drill level: whole tree at root, a folder's
+  // children when drilled in, or null for an unresolvable folder path.
+  const scopedNodes = useMemo(() => scopeToFolder(tree, folderPath), [tree, folderPath]);
+
+  // Phone shows EITHER the drill list (no open file) OR the full-screen viewer
+  // (a file is open via `?path`). Wide/tablet always shows the inline 2-pane.
+  const showDrillList = !wideViewport && deepLinkPath === null;
+  const showBack = !wideViewport && (folderPath !== null || deepLinkPath !== null);
+
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
@@ -981,10 +1025,29 @@ export default function DocsTab() {
     <View style={styles.container}>
       <View style={styles.header}>
         <View style={styles.intro}>
-          <Text style={styles.title}>Docs</Text>
-          <Text style={styles.subtitle}>
-            Project-scoped markdown — edit lives in the right pane.
-          </Text>
+          {showBack ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Back"
+              testID="docs-drill-back"
+              onPress={() => router.back()}
+              style={({ pressed }) => [styles.backRow, pressed && styles.pressed]}
+            >
+              <Text style={styles.backChevron}>‹</Text>
+              <Text style={styles.title} numberOfLines={1}>
+                {folderPath !== null ? folderTitle(folderPath) : 'Docs'}
+              </Text>
+            </Pressable>
+          ) : (
+            <>
+              <Text style={styles.title}>Docs</Text>
+              {wideViewport ? (
+                <Text style={styles.subtitle}>
+                  Project-scoped markdown — edit lives in the right pane.
+                </Text>
+              ) : null}
+            </>
+          )}
         </View>
         <View style={styles.headerActions}>
           {Platform.OS === 'web' && (
@@ -1014,13 +1077,32 @@ export default function DocsTab() {
         </View>
       )}
 
+      {showDrillList ? (
+        loadingTree ? (
+          <View style={[styles.body, styles.centeredBody]}>
+            <ActivityIndicator color="#cfcfcf" />
+          </View>
+        ) : tree.length === 0 ? (
+          <View style={styles.body}>
+            <Text style={styles.treeEmpty}>No docs yet — tap “+ New file” to create one.</Text>
+          </View>
+        ) : scopedNodes === null ? (
+          <View style={styles.body}>
+            <Text style={styles.treeEmpty}>This folder isn’t here anymore.</Text>
+          </View>
+        ) : (
+          <DocsDrillList
+            nodes={scopedNodes}
+            pinned={folderPath === null ? collectPinnedNodes(tree) : []}
+            recent={folderPath === null ? collectRecentNodes(tree) : []}
+            onOpenFolder={openFolder}
+            onOpenFile={openFileScreen}
+          />
+        )
+      ) : (
       <View style={[styles.body, wideViewport ? styles.bodyWide : styles.bodyNarrow]}>
-        <View
-          style={[
-            styles.treePane,
-            wideViewport ? styles.treePaneWide : styles.treePaneNarrow,
-          ]}
-        >
+        {wideViewport ? (
+        <View style={[styles.treePane, styles.treePaneWide]}>
           {loadingTree ? (
             <ActivityIndicator color="#cfcfcf" />
           ) : (
@@ -1041,6 +1123,7 @@ export default function DocsTab() {
             </ScrollView>
           )}
         </View>
+        ) : null}
 
         <View
           style={[
@@ -1451,6 +1534,7 @@ export default function DocsTab() {
           </View>
         )}
       </View>
+      )}
 
       {wideViewport && file !== null && (
         <CommentsProvider project_id={project_id} doc_path={file.path}>
@@ -2080,6 +2164,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#1c1c1c',
   },
   intro: { flexShrink: 1 },
+  backRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  backChevron: { color: '#cfcfcf', fontSize: 26, marginTop: -2 },
   title: { color: '#fafafa', fontSize: 20, fontWeight: '700' },
   subtitle: { color: '#9a9a9a', fontSize: 12, lineHeight: 16 },
   headerActions: { flexDirection: 'row', gap: 8 },
@@ -2134,6 +2220,7 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.5 },
 
   body: { flex: 1 },
+  centeredBody: { alignItems: 'center', justifyContent: 'center' },
   bodyWide: { flexDirection: 'row' },
   bodyNarrow: { flexDirection: 'column' },
   treePane: {
