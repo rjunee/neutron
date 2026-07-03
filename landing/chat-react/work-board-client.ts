@@ -75,10 +75,19 @@ export type RunPhaseLabel =
   | 'failed'
   | 'cancelled'
 
+/**
+ * M1 UX REDESIGN — the inner-step label the redesigned Work item renders live
+ * (mirror of `trident/run-progress.ts` `RunStepLabel`): building → reviewing →
+ * fixing → merging → terminal done/failed.
+ */
+export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'done' | 'failed'
+
 /** Item 1 — a bound run's live progress, as the tab consumes it. */
 export interface RunProgress {
   run_id: string
   phase_label: RunPhaseLabel
+  /** M1 redesign — the inner-step label (building/reviewing/fixing/merging + terminal). */
+  step_label: RunStepLabel
   round: number
   started_at: string
   last_advanced_at: string
@@ -341,6 +350,36 @@ const RUN_PHASE_LABELS: readonly RunPhaseLabel[] = [
   'cancelled',
 ]
 
+const RUN_STEP_LABELS: readonly RunStepLabel[] = [
+  'building',
+  'reviewing',
+  'fixing',
+  'merging',
+  'done',
+  'failed',
+]
+
+/**
+ * Derive a fallback `step_label` from a `phase_label` for a legacy/absent wire
+ * value — keeps the redesign renderable against an older server that predates the
+ * explicit `step_label` field. Coarse (no fixing/merging distinction), which is
+ * exactly the pre-redesign granularity.
+ */
+function stepLabelFromPhase(phase: RunPhaseLabel): RunStepLabel {
+  switch (phase) {
+    case 'building':
+    case 'planning':
+      return 'building'
+    case 'reviewing':
+      return 'reviewing'
+    case 'merged':
+      return 'done'
+    case 'failed':
+    case 'cancelled':
+      return 'failed'
+  }
+}
+
 /** Parse a raw `run_progress` object (item 1) off a live frame; null when absent/malformed. */
 function parseRunProgress(raw: unknown): RunProgress | null {
   if (typeof raw !== 'object' || raw === null) return null
@@ -352,9 +391,14 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     return null
   }
   const verdict = r['verdict']
+  const rawStep = r['step_label']
+  const step_label: RunStepLabel = RUN_STEP_LABELS.includes(rawStep as RunStepLabel)
+    ? (rawStep as RunStepLabel)
+    : stepLabelFromPhase(phase_label as RunPhaseLabel)
   return {
     run_id,
     phase_label: phase_label as RunPhaseLabel,
+    step_label,
     round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
     started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
     last_advanced_at: typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',

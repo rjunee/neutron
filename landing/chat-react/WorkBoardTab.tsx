@@ -278,12 +278,14 @@ export function WorkBoardTab({
 
   // Item 1 — while any item is bound to a LIVE (non-terminal) run, tick a clock
   // (for the live elapsed/stall sub-label) AND quietly re-poll the board every
-  // 15s. Intermediate trident checkpoints (forge-done → reviewing, fix-round-N →
-  // building) don't mutate the board row, so they don't fire a
-  // `work_board_changed` push; the poll is what surfaces those phase/round/stall
-  // changes live. Gated on a LIVE link (via `isLinkedRunning`, not merely a
-  // present `linked_run_id`) so a finished/terminal linked run does NOT poll
-  // forever (Codex review [P2]).
+  // 15s. M1 UX REDESIGN: intermediate trident checkpoints (forge-done →
+  // reviewing, fix-round-N → building, argus-approved → merging) NOW fan a
+  // `work_board_changed` push — the tick loop observes each checkpoint advance
+  // and fires the fan (`on_run_transition`), so phase/step changes arrive live.
+  // This 15s poll is retained only as a FALLBACK (a dropped frame / a socket blip)
+  // and to keep the elapsed/stall clock ticking between pushes. Gated on a LIVE
+  // link (via `isLinkedRunning`, not merely a present `linked_run_id`) so a
+  // finished/terminal linked run does NOT poll forever (Codex review [P2]).
   const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
   useEffect(() => {
     if (!hasLiveRun) return

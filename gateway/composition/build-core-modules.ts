@@ -55,7 +55,7 @@ import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
 import { ReminderStore } from '../../reminders/store.ts'
 import { ReminderTickLoop } from '../../reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '../../trident/store.ts'
-import { TridentTickLoop, type TridentTerminalHook } from '../../trident/tick.ts'
+import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '../../trident/tick.ts'
 import { stubAdvanceDeps } from '../../trident/state-machine.ts'
 import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
 import { buildWorkflowFirer } from '../../trident/inner-loop.ts'
@@ -380,6 +380,16 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         combinedObserver === undefined
           ? delivery
           : withTerminalObserver(delivery, combinedObserver)
+      // M1 UX REDESIGN — the LIVE-PROGRESS fan. When the composer wired an
+      // `on_run_transition` observer, adapt it to the loop's `TridentTransitionHook`
+      // so a checkpoint advance (building→reviewing→fixing→merging), a launch, or a
+      // terminal transition fans the bound Work item + the project rail live. Spread
+      // conditionally so the option is simply absent (loop unchanged) when unwired.
+      const runTransitionObserver = tridentWiring?.on_run_transition
+      const transitionOpt: { on_transition?: TridentTransitionHook } =
+        runTransitionObserver === undefined
+          ? {}
+          : { on_transition: { onTransition: (run) => runTransitionObserver(run) } }
       let loop: TridentTickLoop
       if (tridentWiring !== undefined) {
         // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
@@ -415,9 +425,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           orchestratorOpts.codex_home = codexHome
         }
         const { step } = buildTridentOrchestrator(orchestratorOpts)
-        loop = new TridentTickLoop({ store, step, on_terminal })
+        loop = new TridentTickLoop({ store, step, on_terminal, ...transitionOpt })
       } else {
-        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal })
+        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
       }
       loop.start()
       return { store, loop }

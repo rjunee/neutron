@@ -423,6 +423,41 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    Source view + chat surface leave frontmatter untouched (a bare `---`
 >    horizontal rule with no closing fence is never stripped).
 
+> <!-- SYNC-ON-DEPLOY (M1 UX REDESIGN PR-1, 2026-07-02) — flagged for the Managed
+> orchestrator's SYSTEM-OVERVIEW sync. -->
+> **M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02).** Two
+> design-independent backend contracts the redesigned Work pane + rail consume
+> (no visual change ships in PR-1):
+> 1. **Per-run INNER-STEP + a live push (retires the 15 s poll).** A bound Work
+>    item now derives a `run_progress.step_label` in the redesign's vocabulary —
+>    `building → reviewing → fixing → merging` + terminal `done`/`failed`
+>    (`trident/run-progress.ts` `deriveStepLabel`, mirrored client-side in
+>    `landing/chat-react/work-board-client.ts`). It is DERIVED from the inner
+>    workflow's `inner_checkpoint` (which `trident/inner-workflow.mjs` `checkpoint()`
+>    already re-stamps at every phase boundary), since checkpoints are end-of-phase
+>    markers (`forge-done`→reviewing, `argus-request-changes`→fixing,
+>    `fix-round-N`→reviewing, `argus-approved`→merging). CRITICALLY, the durable
+>    tick loop (`trident/tick.ts`) now carries an `on_transition` hook: it re-loads
+>    every non-terminal run each tick and, when a run's progress signature
+>    (`phase|inner_checkpoint|round|pr|last_advanced_at`) advances, fans a
+>    `work_board_changed` frame on the DETACHED inner workflow's behalf (the
+>    workflow can only `sqlite3`-write, not reach the app-ws registry). The composer
+>    wires `on_run_transition` → `fanWorkBoardChanged(run.project_slug)` +
+>    `emitProjectsChangedIfChanged`. The client's 15 s board poll
+>    (`WorkBoardTab.tsx`) is RETAINED only as a fallback + to tick the elapsed/stall
+>    clock.
+> 2. **Per-project RAIL fields.** `projects_changed` + the page bootstrap +
+>    `readProjectRows` (`open/composer.ts`) now carry four derived per-project
+>    fields: `activity` (`idle`/`working`/`attention` — working = a live chat turn
+>    ∪ a live bound run ∪ an inline-active item; attention WINS = a failed-not-done
+>    item ∪ a stalled live run), `preview` + `preview_from` (the last chat message,
+>    markdown-stripped + server-truncated to ~90 chars, with the sender), and
+>    `live_runs` (count of live bound runs, for the Work-tab badge). The pure
+>    derivation lives in `open/project-rail.ts` (`deriveProjectActivity` +
+>    `truncatePreview`); the live chat-turn signal rides the `agent_typing`
+>    start/end seam. The client parses them in `controller.ts` / `config.ts`
+>    (`ProjectTab`), all optional on the wire for back-compat.
+
 > **Light/dark theme toggle (2026-07-01).** The web chat is CSS-variable-driven:
 > `chat-react.html`'s stylesheet has ONE dark `:root` var set (the historical
 > default) and a `:root[data-theme="light"]` override set with an

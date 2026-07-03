@@ -189,6 +189,34 @@ describe('TridentRunStore', () => {
     expect(store.listNonTerminal()).toEqual([])
   })
 
+  test('latestByProjectScope returns the most-recently-advanced run, scoped', async () => {
+    let clock = '2026-01-01T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    // No run for a scope → null.
+    expect(store.latestByProjectScope('t1')).toBeNull()
+
+    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't' })
+    clock = '2026-01-01T00:01:00.000Z'
+    const b = await store.create({ slug: 'b', project_slug: 't1', repo_path: '/r', task: 't' })
+    // A DIFFERENT scope's run must not leak in.
+    await store.create({ slug: 'x', project_slug: 't2', repo_path: '/r', task: 't' })
+
+    // b is newest for t1.
+    expect(store.latestByProjectScope('t1')?.id).toBe(b.id)
+
+    // Re-advancing a (a failed terminal) makes it the latest — the durable
+    // failure signal the rail reads.
+    clock = '2026-01-01T00:05:00.000Z'
+    await store.save({ ...a, phase: 'failed', failure_reason: 'boom' })
+    const latest = store.latestByProjectScope('t1')
+    expect(latest?.id).toBe(a.id)
+    expect(latest?.phase).toBe('failed')
+
+    // Scope isolation holds.
+    expect(store.latestByProjectScope('t2')?.slug).toBe('x')
+    expect(store.latestByProjectScope('nope')).toBeNull()
+  })
+
   test('delete removes a run', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })

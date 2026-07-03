@@ -22,6 +22,7 @@
 
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
+import { STALLED_WARN_MS } from './run-progress.ts'
 
 /**
  * The per-run advance function the loop applies each tick. PR-2 derives
@@ -67,6 +68,55 @@ export interface TridentTerminalHook {
   onTerminal(run: TridentRun): Promise<void>
 }
 
+/**
+ * M1 UX REDESIGN — the LIVE-PROGRESS transition seam. Fired ONCE per tick for
+ * each run whose observable progress changed since the loop last saw it — i.e.
+ * the inner workflow re-stamped a checkpoint (`inner_checkpoint`/`last_advanced_at`
+ * moved), the run launched, or it went terminal. This is what lets a bound Work
+ * item + the project rail update the INSTANT a build crosses building → reviewing
+ * → fixing → merging, instead of waiting on the client's 15 s poll fallback.
+ *
+ * Why the loop and not the inner workflow: the inner workflow runs DETACHED (a CC
+ * Dynamic Workflow whose only reach into the process is a `sqlite3` Bash step), so
+ * it can persist a checkpoint but cannot fan an app-ws frame. The tick loop is the
+ * single in-process reader that re-loads every non-terminal row each tick, so it
+ * OBSERVES the checkpoint advance and fans the frame on the workflow's behalf.
+ *
+ * The composer wires this to fan `work_board_changed` (the bound item) +
+ * `projects_changed` (the rail's activity/live_runs). Failure-safe + best-effort:
+ * a throw is caught + logged and never blocks the tick (the row is already
+ * committed; a missed fan degrades to the poll fallback).
+ */
+export interface TridentTransitionHook {
+  onTransition(run: TridentRun): Promise<void>
+}
+
+/**
+ * A compact signature of a run's OBSERVABLE progress. Two ticks that yield the
+ * same signature mean nothing the UI cares about advanced, so no fan is due.
+ * `last_advanced_at` is the reliable single signal: `checkpoint()` re-stamps it
+ * on every inner-workflow phase boundary, and the store re-stamps it on every
+ * outer transition. `phase` is included so a terminal transition (which also
+ * decrements the rail's live_runs) always fans.
+ *
+ * The `stalled` BOOLEAN is included (computed off the injected clock vs
+ * `STALLED_WARN_MS`) so the ONE moment a live run ages past the display-stall
+ * threshold flips the signature and fans a rail refresh — otherwise a hung build
+ * would sit `working` forever, since no `last_advanced_at`/checkpoint field
+ * changes while it stalls (Codex review [P2]). It flips at most ONCE per stall
+ * (false→true), then stays stable, so it does NOT fan every tick; a later
+ * checkpoint (which moves `last_advanced_at`) flips it back and fans again.
+ * Continuous `elapsed_ms` is DELIBERATELY excluded — it would churn every tick.
+ */
+function progressSignature(run: TridentRun, nowMs: number): string {
+  const advancedMs = Date.parse(run.last_advanced_at)
+  const stalled =
+    !isTerminalPhase(run.phase) &&
+    Number.isFinite(advancedMs) &&
+    nowMs - advancedMs > STALLED_WARN_MS
+  return `${run.phase}|${run.inner_checkpoint ?? ''}|${run.round}|${run.pr ?? ''}|${run.last_advanced_at}|${stalled ? 'stalled' : ''}`
+}
+
 export interface TridentTickOptions {
   store: TridentRunStore
   /**
@@ -94,6 +144,20 @@ export interface TridentTickOptions {
    * aborts the tick. Omitted in tests / Open dev that don't post results.
    */
   on_terminal?: TridentTerminalHook
+  /**
+   * M1 UX REDESIGN — live-progress fan (see {@link TridentTransitionHook}). When
+   * supplied, the loop fires `on_transition.onTransition(run)` once per tick for
+   * each run whose observable progress changed since the loop last saw it (a
+   * checkpoint advance, a launch, or a terminal transition). Omitted in tests /
+   * dev that don't fan live frames → the loop runs unchanged.
+   */
+  on_transition?: TridentTransitionHook
+  /**
+   * Injectable clock (ms) for the transition fan's stall detection. Defaults to
+   * `Date.now`. Tests pass a fixed clock to exercise the stall-crossing fan
+   * deterministically.
+   */
+  now?: () => number
 }
 
 export class TridentTickLoop {
@@ -102,11 +166,16 @@ export class TridentTickLoop {
   private readonly interval_ms: number
   private readonly per_tick_limit: number
   private readonly on_terminal: TridentTerminalHook | null
+  private readonly on_transition: TridentTransitionHook | null
+  private readonly now: () => number
+  /** Last observed progress signature per run id — drives the transition fan. */
+  private readonly lastSig = new Map<string, string>()
   private timer: ReturnType<typeof setInterval> | null = null
   private running = false
   private skippedTicks = 0
   private advancedCount = 0
   private deliveredCount = 0
+  private transitionCount = 0
 
   constructor(options: TridentTickOptions) {
     this.store = options.store
@@ -121,6 +190,8 @@ export class TridentTickLoop {
     this.interval_ms = options.tick_interval_ms ?? 90_000
     this.per_tick_limit = options.per_tick_limit ?? 50
     this.on_terminal = options.on_terminal ?? null
+    this.on_transition = options.on_transition ?? null
+    this.now = options.now ?? (() => Date.now())
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
@@ -158,6 +229,35 @@ export class TridentTickLoop {
           if (outcome.changed) {
             await this.store.save(outcome.run)
             advanced++
+          }
+          // M1 UX REDESIGN — live-progress fan. `outcome.run` always carries the
+          // latest observable state: the transitioned row when the step changed
+          // it, or the freshly-loaded row (with the inner workflow's newest
+          // checkpoint) when the step is still waiting in-flight. Fan whenever
+          // that signature differs from what we last saw for this run — a
+          // checkpoint advance (building→reviewing→fixing→merging), a launch, OR a
+          // terminal transition (which the rail needs to drop live_runs). Runs in
+          // its own try/catch so a fan outage never aborts the tick.
+          if (this.on_transition !== null) {
+            const nextRun = outcome.run
+            const sig = progressSignature(nextRun, this.now())
+            if (this.lastSig.get(nextRun.id) !== sig) {
+              this.lastSig.set(nextRun.id, sig)
+              try {
+                await this.on_transition.onTransition(nextRun)
+                this.transitionCount++
+              } catch (err) {
+                console.error(
+                  `trident transition fan failed for run ${run.id} (${run.slug}):`,
+                  err,
+                )
+              }
+              // A terminal run won't be returned by `listNonTerminal` again —
+              // drop its signature so the map can't grow unbounded across runs.
+              if (isTerminalPhase(nextRun.phase)) this.lastSig.delete(nextRun.id)
+            }
+          }
+          if (outcome.changed) {
             // Async result delivery (gap-audit P0-1). `listNonTerminal`
             // only ever returns non-terminal rows, so a `changed` outcome
             // whose next phase is terminal is, by construction, a FRESH
@@ -191,11 +291,12 @@ export class TridentTickLoop {
     return { advanced, skipped_due_to_overlap: false }
   }
 
-  stats(): { advanced: number; skipped_ticks: number; delivered: number } {
+  stats(): { advanced: number; skipped_ticks: number; delivered: number; transitions: number } {
     return {
       advanced: this.advancedCount,
       skipped_ticks: this.skippedTicks,
       delivered: this.deliveredCount,
+      transitions: this.transitionCount,
     }
   }
 }

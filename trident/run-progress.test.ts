@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 
-import { deriveRunProgress, runProgressForItem, STALLED_WARN_MS } from './run-progress.ts'
+import {
+  deriveRunProgress,
+  deriveStepLabel,
+  runProgressForItem,
+  STALLED_WARN_MS,
+} from './run-progress.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 
 const T0 = Date.parse('2026-07-02T00:00:00Z')
@@ -132,5 +137,56 @@ describe('runProgressForItem', () => {
     const r = run({ id: 'run-x', project_slug: 'other' })
     const p = runProgressForItem({ linked_run_id: 'run-x', project_slug: 'owner' }, lookup(r), T0)
     expect(p).toBeNull()
+  })
+})
+
+describe('deriveStepLabel — M1 UX REDESIGN inner-step vocabulary', () => {
+  test('no checkpoint (round-1 build in flight) → building', () => {
+    expect(deriveStepLabel('forge-init', null)).toBe('building')
+  })
+
+  test('forge-done → reviewing (build done, review running)', () => {
+    expect(deriveStepLabel('forge-init', 'forge-done')).toBe('reviewing')
+  })
+
+  test('argus-request-changes → fixing (changes asked, fix building)', () => {
+    expect(deriveStepLabel('forge-init', 'argus-request-changes')).toBe('fixing')
+  })
+
+  test('fix-round-N → reviewing (fix built, re-review running)', () => {
+    expect(deriveStepLabel('forge-init', 'fix-round-2')).toBe('reviewing')
+    expect(deriveStepLabel('forge-init', 'fix-round-13')).toBe('reviewing')
+  })
+
+  test('argus-approved → merging (approved, outer loop merging)', () => {
+    expect(deriveStepLabel('forge-init', 'argus-approved')).toBe('merging')
+  })
+
+  test('inner-error / unrecognised checkpoint → building (about to fail)', () => {
+    expect(deriveStepLabel('forge-init', 'inner-error')).toBe('building')
+    expect(deriveStepLabel('forge-init', 'something-else')).toBe('building')
+  })
+
+  test('terminal phases win over any checkpoint', () => {
+    expect(deriveStepLabel('done', 'argus-approved')).toBe('done')
+    expect(deriveStepLabel('failed', 'forge-done')).toBe('failed')
+    expect(deriveStepLabel('stopped', 'fix-round-2')).toBe('failed')
+  })
+
+  test('a full building→reviewing→fixing→reviewing→merging→done arc', () => {
+    // The exact checkpoint sequence the inner workflow writes across a fix round.
+    expect(deriveStepLabel('forge-init', null)).toBe('building')
+    expect(deriveStepLabel('forge-init', 'forge-done')).toBe('reviewing')
+    expect(deriveStepLabel('forge-init', 'argus-request-changes')).toBe('fixing')
+    expect(deriveStepLabel('forge-init', 'fix-round-2')).toBe('reviewing')
+    expect(deriveStepLabel('forge-init', 'argus-approved')).toBe('merging')
+    expect(deriveStepLabel('done', 'argus-approved')).toBe('done')
+  })
+
+  test('deriveRunProgress surfaces step_label alongside phase_label', () => {
+    const p = deriveRunProgress(run({ inner_checkpoint: 'argus-approved' }), T0)
+    expect(p.step_label).toBe('merging')
+    // phase_label keeps its legacy vocabulary (reviewing) — step_label refines it.
+    expect(p.phase_label).toBe('reviewing')
   })
 })

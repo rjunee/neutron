@@ -39,6 +39,26 @@ export type RunPhaseLabel =
   | 'cancelled'
 
 /**
+ * M1 UX REDESIGN — the compact INNER-STEP label the redesigned Work item renders
+ * live (building → reviewing → fixing → merging → terminal). It is a REFINEMENT
+ * of `phase_label` with the redesign's exact vocabulary, DERIVED from the inner
+ * workflow's `inner_checkpoint` (which the inner loop re-stamps at every phase
+ * boundary — `trident/inner-workflow.mjs` `checkpoint()`), NOT the outer `phase`
+ * (stuck on `forge-init` the whole build). Because checkpoints are written at the
+ * END of each inner phase, each value maps to the phase the run is CURRENTLY in:
+ *   - (none, round-1 build in flight)  → building
+ *   - `forge-done`                     → reviewing  (build done, review running)
+ *   - `argus-request-changes`          → fixing     (changes asked, fix building)
+ *   - `fix-round-N`                    → reviewing  (fix built, re-review running)
+ *   - `argus-approved`                 → merging    (approved, outer loop merging)
+ *   - terminal `done`                  → done
+ *   - terminal `failed`/`stopped`      → failed
+ * `fixing` = a post-review Forge fix-round (round ≥ 2); `merging` = the outer
+ * loop's merge step. The redesign consumes this to show the item working live.
+ */
+export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'done' | 'failed'
+
+/**
  * The compact run-derived progress attached to a bound board item. All fields
  * are snapshot-at-derivation EXCEPT `started_at`/`last_advanced_at`, which the
  * client can use to tick `elapsed`/`stalled` live between polls.
@@ -47,6 +67,12 @@ export interface RunProgress {
   /** Which run this progress is for (correlates with `linked_run_id`). */
   run_id: string
   phase_label: RunPhaseLabel
+  /**
+   * M1 UX REDESIGN — the inner-step label (building/reviewing/fixing/merging +
+   * terminal done/failed) the redesigned Work item renders live. Derived from the
+   * inner workflow's checkpoint (see {@link RunStepLabel}). Always present.
+   */
+  step_label: RunStepLabel
   /** Review/fix cycle count (1 during the first build+review; N during fix-round-N). */
   round: number
   /** ISO-8601 UTC run start — the client ticks live elapsed off this. */
@@ -88,6 +114,26 @@ function baseLabel(phase: TridentPhase): RunPhaseLabel {
 }
 
 /**
+ * M1 UX REDESIGN — map the outer phase + inner checkpoint to the redesign's
+ * inner-step vocabulary. Pure + total (every input yields a label). Terminal
+ * phases win; otherwise the live checkpoint (end-of-phase marker) names the phase
+ * the run is CURRENTLY in — see {@link RunStepLabel} for the full mapping.
+ */
+export function deriveStepLabel(phase: TridentPhase, inner_checkpoint: string | null): RunStepLabel {
+  if (phase === 'done') return 'done'
+  if (phase === 'failed' || phase === 'stopped') return 'failed'
+  // Live (non-terminal) — refine off the inner workflow's checkpoint.
+  const cp = inner_checkpoint
+  if (cp === null) return 'building' // round-1 build in flight (no checkpoint yet)
+  if (cp === 'argus-approved') return 'merging' // approved → outer loop merging
+  if (cp === 'argus-request-changes') return 'fixing' // changes asked → fix building
+  if (cp === 'forge-done') return 'reviewing' // build done → review running
+  if (/^fix-round-\d+$/.test(cp)) return 'reviewing' // fix built → re-review running
+  // `inner-error` / any unrecognised checkpoint → still building (about to fail).
+  return 'building'
+}
+
+/**
  * Derive the live progress summary for a run. Pure + clock-injected (`nowMs`)
  * so both the HTTP surface and the push helper compute an identical snapshot.
  */
@@ -123,6 +169,7 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
   return {
     run_id: run.id,
     phase_label,
+    step_label: deriveStepLabel(run.phase, run.inner_checkpoint),
     round,
     started_at: run.started_at,
     last_advanced_at: run.last_advanced_at,
