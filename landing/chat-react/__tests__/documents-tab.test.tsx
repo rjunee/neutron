@@ -177,13 +177,13 @@ describe('DocumentsTab (happy-dom)', () => {
     }
     const { container, root, act } = await mount(handler)
 
-    // Doc list shows both markdown leaves (folders flattened away).
-    const listItems = Array.from(container.querySelectorAll('.cdoc-list-item')).map((b) => b.textContent ?? '')
+    // The structured left nav surfaces both markdown leaves (Recent + tree).
+    const listItems = Array.from(container.querySelectorAll('.cdoc-drow-file')).map((b) => b.textContent ?? '')
     expect(listItems.some((t) => t.includes('intro.md'))).toBe(true)
     expect(listItems.some((t) => t.includes('readme.md'))).toBe(true)
 
     // Open the first doc.
-    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-drow-file')).find(
       (b) => (b.textContent ?? '').includes('intro.md'),
     ) as HTMLButtonElement
     await act(async () => {
@@ -224,7 +224,7 @@ describe('DocumentsTab (happy-dom)', () => {
     }
     const { container, root, act } = await mount(handler)
 
-    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-drow-file')).find(
       (b) => (b.textContent ?? '').includes('intro.md'),
     ) as HTMLButtonElement
     await act(async () => {
@@ -303,7 +303,7 @@ describe('DocumentsTab (happy-dom)', () => {
     }
     const { container, root, act } = await mount(handler)
 
-    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-drow-file')).find(
       (b) => (b.textContent ?? '').includes('intro.md'),
     ) as HTMLButtonElement
     await act(async () => {
@@ -347,7 +347,7 @@ describe('DocumentsTab (happy-dom)', () => {
     }
     const { container, root, act } = await mount(handler)
 
-    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-drow-file')).find(
       (b) => (b.textContent ?? '').includes('intro.md'),
     ) as HTMLButtonElement
     await act(async () => {
@@ -439,7 +439,7 @@ describe('DocumentsTab (happy-dom)', () => {
     }
     const { container, root, act } = await mount(handler)
 
-    const introBtn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+    const introBtn = Array.from(container.querySelectorAll('.cdoc-drow-file')).find(
       (b) => (b.textContent ?? '').includes('intro.md'),
     ) as HTMLButtonElement
     await act(async () => {
@@ -531,7 +531,7 @@ describe('DocumentsTab (happy-dom)', () => {
     })
 
     const open = async (name: string): Promise<void> => {
-      const btn = Array.from(container.querySelectorAll('.cdoc-list-item')).find(
+      const btn = Array.from(container.querySelectorAll('.cdoc-drow-file')).find(
         (b) => (b.textContent ?? '').includes(name),
       ) as HTMLButtonElement
       await act(async () => {

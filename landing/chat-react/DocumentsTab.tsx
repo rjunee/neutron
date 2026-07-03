@@ -31,12 +31,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Markdown } from './Markdown.tsx'
 import { HtmlDoc, isHtmlDoc } from './HtmlDoc.tsx'
+import { DocSidebar } from './DocSidebar.tsx'
 import type { BootstrapConfig } from './config.ts'
 import {
   WebDocsClient,
   DocsClientError,
   buildAnchor,
-  flattenDocFiles,
   type DocFile,
   type DocTreeNode,
   type ThreadSummary,
@@ -112,7 +112,7 @@ export function DocumentsTab({
     [config.origin, config.token, fetchImpl],
   )
 
-  const [files, setFiles] = useState<DocTreeNode[]>([])
+  const [tree, setTree] = useState<DocTreeNode[]>([])
   const [treeError, setTreeError] = useState<string | null>(null)
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const [file, setFile] = useState<DocFile | null>(null)
@@ -159,7 +159,7 @@ export function DocumentsTab({
   // Reset everything when the project changes — a stale open doc from project A
   // must never linger under project B's id.
   useEffect(() => {
-    setFiles([])
+    setTree([])
     setTreeError(null)
     setSelectedPath(null)
     setFile(null)
@@ -184,7 +184,7 @@ export function DocumentsTab({
       .tree(projectId)
       .then((res) => {
         if (cancelled) return
-        setFiles(flattenDocFiles(res.tree))
+        setTree(res.tree)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -438,32 +438,8 @@ export function DocumentsTab({
 
   return (
     <div className="cdoc">
-      {/* ── doc list ── */}
-      <aside className="cdoc-list" aria-label="Documents">
-        {treeError !== null ? (
-          <div className="cdoc-empty">{treeError}</div>
-        ) : files.length === 0 ? (
-          <div className="cdoc-empty">No documents yet.</div>
-        ) : (
-          <ul className="cdoc-list-ul">
-            {files.map((f) => (
-              <li key={f.path}>
-                <button
-                  type="button"
-                  className={`cdoc-list-item${f.path === selectedPath ? ' cdoc-list-item-active' : ''}`}
-                  onClick={() => openDoc(f.path)}
-                  title={f.path}
-                >
-                  <span className="cdoc-list-name">{f.name}</span>
-                  {f.path.includes('/') ? (
-                    <span className="cdoc-list-dir">{f.path.slice(0, f.path.lastIndexOf('/'))}</span>
-                  ) : null}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </aside>
+      {/* ── structured left nav (Pinned → Recent → folder tree) ── */}
+      <DocSidebar tree={tree} selectedPath={selectedPath} onOpen={openDoc} treeError={treeError} />
 
       {/* ── viewer ── */}
       <section className="cdoc-view" aria-label="Document">
