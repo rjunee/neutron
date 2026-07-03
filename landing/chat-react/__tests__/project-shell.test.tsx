@@ -11,8 +11,15 @@
  *   - GENERAL view: the bar shows Chat + Admin (the global tabs), NOT chat-only.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
+
+// Controllable media matcher. happy-dom's native matchMedia reports a ~1024px
+// viewport (so `(min-width:1024px)` would spuriously match and drop the desktop
+// Work tab). We install a deterministic stub instead: default = NON-desktop
+// (`(min-width:1024px)` → false), so the legacy tab-bar tests keep Work as a tab
+// (its ≥1024 slide-out is exercised by the dedicated desktop test below).
+let mediaMatches: (query: string) => boolean = () => false
 
 beforeAll(() => {
   // `disableIframePageLoading` stops happy-dom from making a real network fetch
@@ -23,18 +30,18 @@ beforeAll(() => {
   })
   const g = globalThis as unknown as Record<string, unknown>
   g['IS_REACT_ACT_ENVIRONMENT'] = true
-  if (typeof window.matchMedia !== 'function') {
-    window.matchMedia = ((q: string) => ({
-      matches: false,
-      media: q,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })) as unknown as typeof window.matchMedia
-  }
+  // Install the controllable stub UNCONDITIONALLY (overriding happy-dom's native
+  // matchMedia) so `useMediaQuery` reads our `mediaMatches` matcher.
+  window.matchMedia = ((q: string) => ({
+    matches: mediaMatches(q),
+    media: q,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia
   if (typeof g['ResizeObserver'] !== 'function') {
     g['ResizeObserver'] = class {
       observe(): void {}
@@ -45,6 +52,10 @@ beforeAll(() => {
 })
 afterAll(async () => {
   await GlobalRegistrator.unregister()
+})
+beforeEach(() => {
+  // Reset to NON-desktop between tests; the desktop test opts in explicitly.
+  mediaMatches = () => false
 })
 
 const TOPIC = 'app:sam'
@@ -571,5 +582,248 @@ describe('WorkspaceSeat — seated tabs identity anchor (M1 UX redesign)', () =>
     expect(seat.querySelector('.car-wsseat-emoji')!.textContent).toBe('🧪')
     expect(seat.querySelector('.car-wsseat-name')!.textContent).toBe('Acme')
     await cleanup()
+  })
+})
+
+describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
+  it('drops the Work TAB and mounts the edge-handle pane instead', async () => {
+    // Opt into the desktop viewport for THIS test only.
+    mediaMatches = (q) => q.includes('min-width: 1024px')
+
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      // The pane's WorkBoardTab list 404s — chrome is independent of board data.
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+
+    // The tab bar shows Chat + Documents + Analytics — NO Work tab (it became the
+    // slide-out pane on desktop).
+    const tabButtons = () =>
+      Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
+    expect(tabButtons()).toEqual(['Chat', 'Documents', 'Analytics'])
+
+    // The pane + its edge-handle are mounted; the handle is the only open control.
+    const handle = container.querySelector('.car-plans-handle') as HTMLButtonElement
+    expect(handle).not.toBeNull()
+    expect(handle.getAttribute('aria-label')).toBe('Show work')
+    expect(container.querySelector('.car-plans')).not.toBeNull()
+    // Closed by default → the shell grid isn't expanded.
+    expect((container.querySelector('.car-stage') as HTMLElement).className).not.toContain(
+      'car-stage-pane-open',
+    )
+
+    // Clicking the handle opens the pane → the chat stage grid expands.
+    await act(async () => {
+      handle.click()
+      await tick()
+    })
+    expect(handle.getAttribute('aria-label')).toBe('Hide work')
+    expect((container.querySelector('.car-stage') as HTMLElement).className).toContain(
+      'car-stage-pane-open',
+    )
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('does NOT mount the pane while a scope switch is still resolving (Codex P2)', async () => {
+    mediaMatches = (q) => q.includes('min-width: 1024px')
+
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    // GATE the tab resolver so the shell sits in the `resolving` (tabsScope ===
+    // null) window deterministically — the pane must NOT mount there even though
+    // the outgoing `tabs` still carries a Work descriptor.
+    let releaseTabs: () => void = () => {}
+    const tabsPending = new Promise<void>((res) => {
+      releaseTabs = res
+    })
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
+        await tabsPending
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+
+    // Resolving (gated fetch still pending) → NO pane, NO handle.
+    expect(container.querySelector('.car-plans-handle')).toBeNull()
+    expect(container.querySelector('.car-plans')).toBeNull()
+
+    // Release the resolver → the pane mounts for the now-resolved scope.
+    await act(async () => {
+      releaseTabs()
+      await tick()
+      await tick()
+    })
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
   })
 })

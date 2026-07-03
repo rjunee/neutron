@@ -2,6 +2,63 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — M1 UX redesign PR-4: Work slide-out pane (edge-handle + auto-open/close, no flags)
+
+**Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-4 replaces the desktop
+"Work" TAB with a right-edge **slide-out pane INSIDE the chat** — the authoritative
+prototype (`neutron-redesign-proto.netlify.app`) behavior, with Ryan's sign-off
+overrides winning over the design doc's toggle-chip proposal: **an edge-handle is
+the only manual control (no toggle button / no X / no close chevron)**, and
+**auto-open-on-kickoff / auto-close-when-all-done** is the primary behavior. Depends
+on PR-1 (#180 activity/live-run), PR-2 (#181 Work-list rows), PR-3 (#182 rail +
+seated tabs). No feature flags — one code path per viewport. Web
+`landing/chat-react/` only (NOT docs [PR-5] or mobile rail + Work-badge [PR-6]).
+
+**What shipped.**
+
+- **Desktop (≥1024px): Work is a pane, not a tab** (`ProjectShell.tsx`). Via
+  `useMediaQuery('(min-width:1024px)')`, the `workboard` descriptor is dropped from
+  the seated tab bar and a new `PlansPane` is mounted instead. **Below 1024px Work
+  stays a tab** (mobile Work badge is PR-6) — one implementation per viewport, no
+  dual tab-and-pane path. When the Work tab is dropped, an active-tab clamp falls
+  back to Chat (reuses the existing resolving-scope guard, now over `visibleTabs`).
+
+- **`PlansPane.tsx` — chrome around the shipped `WorkBoardTab` body** (rows
+  unchanged: dot + tag + round, collapsible Done, drag-reorder, ✕-confirm, ▶
+  start/retry, add-at-bottom). The pane adds a quiet caps `WORK` header + a live
+  count (`● N running` / `● N failed`, activity dot), the edge-handle, and the
+  floating-panel container.
+
+- **Edge-handle = the ONLY manual control** (`.car-plans-handle`, a real `<button>`
+  with an aria-label "Show work"/"Hide work", Enter/Space operable). It rides the
+  pane's left seam — at the window's right edge when closed (the way in), riding to
+  the pane's left seam when open. NO toggle button, NO X, NO close chevron anywhere.
+
+- **Auto-open / auto-close (`usePlansPaneController`).** Opens when a plan is kicked
+  off (a board item gains a live non-terminal run → the `WorkBoardTab` `onSummary`
+  roll-up's `running` rises); stays open while any run is live; keeps open on a
+  **failed** run (attention); auto-closes ~5s after ALL runs are clear (running +
+  failed both zero). A manual handle toggle pins + persists per-project
+  (`localStorage`) until the next auto-kickoff. `WorkBoardTab` gains a pure
+  `summarize()` export + an `onSummary` callback (fired on every board change).
+
+- **Floating panel, not a wall** (`chat-react.html`). The chat STAGE below the tab
+  band is a 2-column CSS grid (`.car-stage`) whose pane column animates
+  `0 → --pane-width` (340px), so the chat column shrinks in lock-step (chat is never
+  overlaid). The panel (`.car-plans`) floats flush to the right edge with ~16px
+  top/bottom breathing room, rounded left corners (`14px 0 0 14px`), and a soft
+  shadow; closed = translated off-screen + `visibility:hidden` (its controls leave
+  the tab order). New tokens `--pane-width` + `--ease-out`
+  (`cubic-bezier(0.32,0.72,0,1)`); motion gated by `prefers-reduced-motion`. Both
+  light + dark palettes preserved.
+
+- **Tests.** `plans-pane.test.tsx` (controller: kickoff-opens / settle-auto-closes
+  / failed-stays-open / manual-pin-persists; `PlansPane`: edge-handle is the only
+  control + toggles; live running item auto-opens end-to-end) +
+  `project-shell.test.tsx` desktop test (Work tab absent at ≥1024px, handle mounted,
+  clicking expands the stage grid). Verified locally at 1280×… both themes: no Work
+  tab, floating pane below the band, chat shrinks, sticky survives a restart.
+
 ## 2026-07-02 — M1 UX redesign PR-3: rail 2-line rows + seated tabs + ⚛ branding (no flags)
 
 **Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-3 reskins the web chat
