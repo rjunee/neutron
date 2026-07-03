@@ -26,6 +26,7 @@ import {
 } from '@assistant-ui/react'
 import { Markdown } from './Markdown.tsx'
 import { ChatErrorBoundary } from './ChatErrorBoundary.tsx'
+import { PlansPane } from './PlansPane.tsx'
 import { useChatRuntime } from './useNeutronChat.ts'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
@@ -1230,12 +1231,24 @@ function ChatSurface({
   config,
   draft,
   uploadAffordance,
+  showPane,
+  paneProjectId,
+  paneOnOpenDoc,
+  fetchImpl,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
   config: BootstrapConfig
   draft: AttachmentDraft
   uploadAffordance: ChatMessageUploadAffordance | null
+  /** M1 polish (item 3+5) — mount the desktop Work slide-out pane inside this
+   *  Chat view (to the right of the messages, above the full-width composer). */
+  showPane: boolean
+  /** Board scope for the pane ('' = General); also keys the pane. */
+  paneProjectId: string
+  /** Open a Work card's spec-doc in the Documents tab; undefined = static label. */
+  paneOnOpenDoc?: (projectId: string, path: string) => void
+  fetchImpl?: FetchImpl
 }): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
@@ -1349,6 +1362,12 @@ function ChatSurface({
       <WebDropZoneOverlay visible={dragOver && importActive} source={importSourceLabel(uploadAffordance)} />
       <ChatErrorBoundary onBackToGeneral={() => controller.setProject(null)}>
       <ThreadPrimitive.Root className="car-thread">
+        {/* M1 polish (item 3+5) — the message column + the Work pane share a row
+            (the pane slides in on the right, LIFTED above the composer), and the
+            composer is a FULL-WIDTH footer spanning both below. The pane lives
+            here (inside the Chat view), so it never bleeds onto other tabs. */}
+        <div className="car-chatstage">
+        <div className="car-chatmain">
         <ThreadPrimitive.Viewport className="car-viewport">
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
@@ -1400,6 +1419,21 @@ function ChatSurface({
         <PendingBadge pending={vm.pending} />
         <SystemNotice notice={vm.systemNotice} />
         <ImportStatus progress={vm.importProgress} upload={importState} />
+        </div>
+        {/* Desktop Work slide-out — mounted inside the Chat view so it's scoped to
+            this tab (never Documents/Settings) and sits ABOVE the composer footer.
+            Keyed by scope so its auto-open/close controller resets on a switch. */}
+        {showPane ? (
+          <PlansPane
+            key={paneProjectId}
+            projectId={paneProjectId}
+            config={config}
+            controller={controller}
+            {...(paneOnOpenDoc !== undefined ? { onOpenDoc: paneOnOpenDoc } : {})}
+            {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+          />
+        ) : null}
+        </div>
         <Composer draft={draft} controller={controller} importActive={importActive} onFiles={handleFiles} />
       </ThreadPrimitive.Root>
       </ChatErrorBoundary>
@@ -1452,6 +1486,9 @@ export function ChatApp({
   draft,
   fetchImpl,
   onOpenDocLink,
+  showPane,
+  paneProjectId,
+  paneOnOpenDoc,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -1462,6 +1499,16 @@ export function ChatApp({
   /** P-A — open a doc referenced by an agent chat link in the Documents tab.
    *  Supplied by `ProjectShell`; omit to leave doc links as plain anchors. */
   onOpenDocLink?: (projectId: string, path: string) => void
+  /** M1 polish (item 3+5) — host the desktop Work slide-out pane INSIDE this Chat
+   *  view (≥1024px on a resolved scope with a Work board). The shell decides;
+   *  omitting/false renders no pane (narrow width, or non-Work scope). */
+  showPane?: boolean
+  /** The scope the pane's board is for ('' = General). Also keys the pane so its
+   *  auto-open/close controller resets cleanly on a project switch. */
+  paneProjectId?: string
+  /** Open a Work card's spec-doc in the Documents tab; undefined = static label
+   *  (e.g. General, which has no Documents tab). */
+  paneOnOpenDoc?: (projectId: string, path: string) => void
 }): React.JSX.Element {
   const reactionsCtx: ReactionsCtx = {
     byRenderId: buildReactionIndex(vm.messages),
@@ -1516,6 +1563,10 @@ export function ChatApp({
           config={config}
           draft={draft}
           uploadAffordance={uploadAffordance}
+          showPane={showPane === true}
+          paneProjectId={paneProjectId ?? ''}
+          {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
+          {...(fetchImpl !== undefined ? { fetchImpl } : {})}
         />
       </ConversationRuntimeHost>
     </ButtonsContext.Provider>

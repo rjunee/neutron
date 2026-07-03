@@ -2,6 +2,66 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-03 — M1 redesign polish: atom favicon · inline delete confirm · Work pane inside the Chat view (full-width composer) · 2-line work rows (no flags)
+
+**Why.** Four chat-UI refinements Ryan asked for (with screenshots) after the M1
+redesign shipped: (1) the browser-tab favicon was a generic mark, not the ⚛ atom
+in the rail header; (2) deleting a work item took over the whole screen with a
+modal; (3) the Work slide-out pane bled onto Documents/Settings (it was mounted at
+the shell level, outside the tab hierarchy) and the chat input bar stopped at the
+chat column with the pane running beside it to the window bottom (a side-by-side
+seam); (4) work rows were single-line with the title cut off ("Ship dagcore: T…").
+
+**What shipped.**
+
+- **Favicon = the ⚛ atom mark** (`landing/favicon.svg`). Reproduces the `AtomMark`
+  geometry from `ChatApp.tsx` (center dot + 3 rotated orbit ellipses) in a FIXED
+  accent hex (`#007aff`, the light-theme `--accent`) — a favicon can't read page
+  CSS vars. The served `/favicon.svg` (`landing/boot.ts` + `landing/server.ts`
+  static route) now matches the rail-header icon on the browser tab.
+
+- **Work-item delete confirm is INLINE-in-row, not a modal** (`WorkBoardTab.tsx`,
+  `chat-react.html`). Deleted the `.cwb-confirm-backdrop` / `aria-modal` full-screen
+  dialog + its CSS; the ✕ now reveals a compact `.cwb-confirm-inline`
+  `role="group"` strip WITHIN the item's own row (`InlineConfirm`): a "Remove?" /
+  "Cancel build?" prompt + Cancel + a destructive Remove. No backdrop, no screen
+  takeover — the board stays visible + interactive. Autofocuses Cancel, Escape
+  cancels, focus returns to the ✕ on dismiss. The confirm STATE machine
+  (`confirmDelete`, `requestRemove`, the #174 linked-run cancel) is unchanged —
+  only the render moved modal → in-row. One `confirmDelete` still means one row
+  confirms at a time. Applies to active AND done rows.
+
+- **The Work pane lives INSIDE the Chat view, composer = full-width footer**
+  (`ProjectShell.tsx`, `ChatApp.tsx`, `chat-react.html`). The desktop slide-out
+  (`PlansPane`) moved OUT of the `ProjectShell` shell level (where it was a sibling
+  of the whole tab band, so it bled onto every tab) and INTO `ChatApp`/`ChatSurface`.
+  The Chat view's `.car-thread` is now a flex column: a growing `.car-chatstage`
+  row (the message column `.car-chatmain` + the pane, which animates its own width)
+  ABOVE a full-width `.car-composer` footer. So the chat input bar spans the whole
+  content width with the pane LIFTED above it (no bottom seam), and the pane is
+  scoped to the Chat tab — hidden with the Chat tabpanel on Documents/Settings,
+  state preserved across a round-trip. The shell still owns the `showPane` gate +
+  drops the `workboard` tab on desktop; the `.car-stage` grid + `car-stage-pane-open`
+  modifier were retired for a plain flex box. `PlansPane` itself is unchanged.
+
+- **Work rows are 2-line (title / tag+round), 1-line when queued** (`WorkBoardTab.tsx`
+  web + `app/components/WorkBoardRow.tsx` mobile, `chat-react.html`). Each row stacks
+  a `.cwb-row-line1` (dot + FULL title + hover actions) over a muted `.cwb-row-meta`
+  (phase tag + `round N`), gated on `hasStatus` (`tag !== null`): a bare queued card
+  is a single title line (no empty second line), a bound run shows "Building · round
+  1" on line 2, and a done row carries "Merged · <date>" on line 2. Titles no longer
+  truncate prematurely (tag/round left line 1).
+
+**Verified.** `tsc` clean (chat-react + app); 297 chat-react unit tests pass
+(inline-confirm assertions replace the modal ones; new 2-line/1-line-queued row
+test; the desktop pane test asserts the pane lives inside the chat tabpanel and the
+`.car-plans-col` open-class shrink). Local dogfood (fresh QUIET install, headless
+agent-browser, ≥1024px, BOTH light + dark): tab favicon = the atom; ✕ → inline
+Remove?/Cancel/Remove in-row (no backdrop), Escape cancels, focus returns; the
+composer spans the full width along the bottom with the Work pane above it; the pane
+is GONE on Admin and restored on returning to Chat; a queued item is 1-line with the
+full title. `leak-gate.sh --tree .` SILENT.
+
 ## 2026-07-03 — General gets a Work surface (desktop slide-out + narrow tab), scoped to its owner_slug board (no flags)
 
 **Why.** M1 follow-up closing the last item Ryan flagged directly ("there's no

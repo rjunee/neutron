@@ -49,7 +49,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChatApp, TopicRail, GENERAL_EMOJI, railEmojiFor, useMediaQuery } from './ChatApp.tsx'
 import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
-import { PlansPane } from './PlansPane.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
@@ -387,10 +386,14 @@ export function ProjectShell({
   }, [pendingDoc, projectId, tabs, tabsScope])
 
   // PR-4 — on desktop (≥1024px) the Work board is NOT a seated tab; it lives in
-  // the right-edge slide-out pane (mounted below). Drop the `workboard`
-  // descriptor from the tab bar and mount the pane instead. Below 1024px Work
-  // STAYS a tab (the mobile Work badge is PR-6) — one implementation per
-  // platform, never a dual tab-and-pane path on the same viewport.
+  // the right-edge slide-out pane. M1 polish (item 3+5): the pane is now mounted
+  // INSIDE the Chat view (`ChatApp`) rather than at this shell level, so it is
+  // scoped to the Chat tab and NEVER bleeds onto Documents / Settings / any other
+  // tab, and the chat composer becomes a full-width footer with the pane lifted
+  // above it. Here we only DECIDE whether the Chat view should host the pane
+  // (`showPane`) and drop the `workboard` descriptor from the tab bar. Below
+  // 1024px Work STAYS a tab (the mobile Work badge is PR-6) — one implementation
+  // per platform, never a dual tab-and-pane path on the same viewport.
   const isDesktop = useMediaQuery('(min-width: 1024px)')
   const workboardTab = tabs.find((t) => t.mount.target === 'workboard')
   // Gate the pane on a RESOLVED scope (`tabsScope !== null`). During a scope
@@ -402,15 +405,6 @@ export function ProjectShell({
   // belong to the current scope.
   const showPane = isDesktop && tabsScope !== null && workboardTab !== undefined
   const visibleTabs = showPane ? tabs.filter((t) => t.mount.target !== 'workboard') : tabs
-
-  // Pane open state is owned by `PlansPane` (auto-open/close + manual handle);
-  // it reports up here so the shell grid's 3rd column can grow in lock-step
-  // (chat shrinks, never overlaid). Reset when the pane unmounts (resize below
-  // 1024px, or a scope with no Work board) so the grid can't stay expanded.
-  const [paneOpen, setPaneOpen] = useState(false)
-  useEffect(() => {
-    if (!showPane) setPaneOpen(false)
-  }, [showPane])
 
   // The previous active tab can vanish when the set changes (scope switch / Core
   // uninstall) — or, on desktop, because the Work tab was dropped in favor of the
@@ -519,14 +513,18 @@ export function ProjectShell({
           <TabBar tabs={visibleTabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} resolving={resolving} />
           <ThemeToggle />
         </div>
-        {/* The chat STAGE (below the band): the chat/tab panels + the desktop Work
-            slide-out. A CSS grid so the pane's column can grow (chat shrinks,
-            never overlaid) while the pane floats within this region — below the
-            band, not over it. */}
-        <div className={`car-stage${showPane && paneOpen ? ' car-stage-pane-open' : ''}`}>
+        {/* The chat STAGE (below the band): the tab panels. The desktop Work
+            slide-out no longer lives here — it's mounted INSIDE the Chat view
+            (`ChatApp`) so it's scoped to the Chat tab and never bleeds onto
+            Documents / Settings (item 5), with the composer as its full-width
+            footer (item 3). */}
+        <div className="car-stage">
           <div className="car-tabpanels" ref={panelsRef}>
             {/* Chat stays mounted across tab switches so the live session, stream,
-                and scroll state survive — only its visibility toggles. */}
+                and scroll state survive — only its visibility toggles. The Chat
+                view hosts the desktop Work pane when `showPane` (≥1024px + a
+                resolved scope with a Work board); `paneProjectId` scopes + resets
+                the pane on a project switch. */}
             <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
               <ChatApp
                 vm={vm}
@@ -534,6 +532,9 @@ export function ProjectShell({
                 config={config}
                 draft={draft}
                 onOpenDocLink={onOpenDocLink}
+                showPane={showPane}
+                paneProjectId={projectId ?? ''}
+                {...(workOpenDoc !== undefined ? { paneOnOpenDoc: workOpenDoc } : {})}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
               />
             </div>
@@ -551,20 +552,6 @@ export function ProjectShell({
               </div>
             ) : null}
           </div>
-          {/* PR-4 — the desktop WORK slide-out. Mounted (not a tab) only ≥1024px
-              on a scope that has a Work board; keyed by project so its
-              auto-open/close controller resets cleanly on a project switch. */}
-          {showPane ? (
-            <PlansPane
-              key={projectId ?? ''}
-              projectId={projectId ?? ''}
-              config={config}
-              controller={controller}
-              onOpenChange={setPaneOpen}
-              {...(workOpenDoc !== undefined ? { onOpenDoc: workOpenDoc } : {})}
-              {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-            />
-          ) : null}
         </div>
       </div>
     </div>

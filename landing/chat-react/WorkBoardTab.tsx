@@ -47,7 +47,7 @@
  * `prefers-reduced-motion` (see `cwb-` styles in chat-react.html).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BootstrapConfig } from './config.ts'
 import {
@@ -497,14 +497,25 @@ export function WorkBoardTab({
     [onOpenDoc, projectId],
   )
 
-  // Open the confirm dialog instead of deleting immediately. Prevents an
-  // accidental click from cancelling an expensive running build.
+  // Item 4 — open the INLINE confirm (rendered within the item's own row, not a
+  // screen-takeover modal) instead of deleting immediately. Prevents an
+  // accidental click from cancelling an expensive running build. Only ONE row can
+  // be in confirm state at a time (single `confirmDelete` state), so opening a
+  // second confirm cancels the first.
   const requestRemove = useCallback(
     (item: WorkBoardItem): void => {
       if (busyId !== null) return
       setConfirmDelete(item)
     },
     [busyId],
+  )
+  const cancelRemove = useCallback((): void => setConfirmDelete(null), [])
+  const confirmRemove = useCallback(
+    (item: WorkBoardItem): void => {
+      setConfirmDelete(null)
+      removeItem(item)
+    },
+    [removeItem],
   )
 
   const active = items.filter((it) => it.status !== 'done')
@@ -555,40 +566,6 @@ export function WorkBoardTab({
     <div className="cwb">
       {actionError !== null ? <div className="cwb-error">{actionError}</div> : null}
 
-      {confirmDelete !== null ? (
-        <div
-          className="cwb-confirm-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Confirm delete"
-          onClick={() => setConfirmDelete(null)}
-        >
-          <div className="cwb-confirm" onClick={(e) => e.stopPropagation()}>
-            <p className="cwb-confirm-msg">
-              {isLinkedRunning(confirmDelete)
-                ? 'Cancel this build and remove it?'
-                : 'Remove this item?'}
-            </p>
-            <div className="cwb-confirm-actions">
-              <button type="button" className="cwb-btn" onClick={() => setConfirmDelete(null)}>
-                Keep
-              </button>
-              <button
-                type="button"
-                className="cwb-btn cwb-btn-danger"
-                onClick={() => {
-                  const item = confirmDelete
-                  setConfirmDelete(null)
-                  removeItem(item)
-                }}
-              >
-                {isLinkedRunning(confirmDelete) ? 'Cancel build & remove' : 'Remove'}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       <div className="cwb-list" aria-label="Work">
         {loading ? (
           <div className="cwb-empty">Loading…</div>
@@ -621,6 +598,9 @@ export function WorkBoardTab({
                   onSaveEdit={() => saveEdit(it)}
                   onCancelEdit={() => setEditingId(null)}
                   onRemove={() => requestRemove(it)}
+                  confirming={confirmDelete?.id === it.id}
+                  onConfirmRemove={() => confirmRemove(it)}
+                  onCancelRemove={cancelRemove}
                   onPlay={() => startBuild(it)}
                   onDragStart={() => setDragId(it.id)}
                   onDragEnterRow={() => {
@@ -657,23 +637,36 @@ export function WorkBoardTab({
                   <ul className="cwb-ul cwb-completed-ul" aria-label="Done">
                     {completed.map((it) => (
                       <li key={it.id} className="cwb-row cwb-row-done">
-                        <span className="cwb-dot cwb-dot-done" aria-label="Done" />
-                        <span className="cwb-title" title={it.title}>
-                          {it.title}
-                        </span>
-                        <span className="cwb-date">
-                          Merged · {formatCompletedShort(it.completed_at)}
-                        </span>
-                        <button
-                          type="button"
-                          className="cwb-btn cwb-btn-icon"
-                          onClick={() => requestRemove(it)}
-                          disabled={busyId === it.id}
-                          title="Delete item"
-                          aria-label="Delete item"
-                        >
-                          ✕
-                        </button>
+                        <div className="cwb-row-line1">
+                          <span className="cwb-dot cwb-dot-done" aria-label="Done" />
+                          <span className="cwb-title" title={it.title}>
+                            {it.title}
+                          </span>
+                          {confirmDelete?.id === it.id ? (
+                            <InlineConfirm
+                              running={false}
+                              onConfirm={() => confirmRemove(it)}
+                              onCancel={cancelRemove}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="cwb-btn cwb-btn-icon"
+                              onClick={() => requestRemove(it)}
+                              disabled={busyId === it.id}
+                              title="Delete item"
+                              aria-label="Delete item"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                        {/* A completed row always carries its "Merged · <date>" on line 2. */}
+                        <div className="cwb-row-meta">
+                          <span className="cwb-date">
+                            Merged · {formatCompletedShort(it.completed_at)}
+                          </span>
+                        </div>
                       </li>
                     ))}
                   </ul>
@@ -728,6 +721,9 @@ function WorkBoardRow({
   onSaveEdit,
   onCancelEdit,
   onRemove,
+  confirming,
+  onConfirmRemove,
+  onCancelRemove,
   onPlay,
   onOpenDoc,
   onDragStart,
@@ -751,6 +747,12 @@ function WorkBoardRow({
   onSaveEdit: () => void
   onCancelEdit: () => void
   onRemove: () => void
+  /** Item 4 — this row is showing its inline delete-confirm strip. */
+  confirming: boolean
+  /** Confirm the delete (fires the DELETE / cancels a linked run per #174). */
+  onConfirmRemove: () => void
+  /** Dismiss the inline confirm without deleting. */
+  onCancelRemove: () => void
   /** ▶/↻ — START/RETRY a build from the card's saved spec. */
   onPlay: () => void
   /** Open the card's linked spec-doc in the Documents tab; undefined = no nav. */
@@ -768,6 +770,21 @@ function WorkBoardRow({
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
+
+  // Item 4 — the phase TAG (+ round) moves to a SECOND line, muted, but ONLY when
+  // the item has a run to report on. A bare queued/not-started card (no bound run
+  // → no tag) stays single-line: just the title. `hasStatus` gates the meta line.
+  const hasStatus = tag !== null
+
+  // Item 2 (a11y) — when the inline confirm closes via Cancel, return focus to the
+  // ✕ that opened it (on Confirm the row unmounts, so this is a no-op there).
+  const deleteBtnRef = useRef<HTMLButtonElement>(null)
+  const wasConfirming = useRef(confirming)
+  useEffect(() => {
+    if (wasConfirming.current && !confirming) deleteBtnRef.current?.focus()
+    wasConfirming.current = confirming
+  }, [confirming])
+
   return (
     <li
       className={`cwb-row cwb-row-${item.status}${dragging ? ' cwb-row-dragging' : ''}${dragOver ? ' cwb-row-dragover' : ''}`}
@@ -780,105 +797,162 @@ function WorkBoardRow({
         onDropRow()
       }}
     >
-      <button
-        type="button"
-        className={`cwb-dot ${dot.cls}${dot.pulse ? ' cwb-dot-pulse' : ''}`}
-        onClick={onAdvance}
-        disabled={busy}
-        title={`${statusLabel(item.status)} — advance`}
-        aria-label={`${statusLabel(item.status)}. Advance status`}
-      />
-      {editing ? (
-        <input
-          className="cwb-edit-input"
-          value={editTitle}
-          autoFocus
-          onChange={(e) => onChangeEdit(e.target.value)}
-          onBlur={onSaveEdit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') onSaveEdit()
-            else if (e.key === 'Escape') onCancelEdit()
-          }}
-          aria-label="Edit item title"
+      <div className="cwb-row-line1">
+        <button
+          type="button"
+          className={`cwb-dot ${dot.cls}${dot.pulse ? ' cwb-dot-pulse' : ''}`}
+          onClick={onAdvance}
+          disabled={busy}
+          title={`${statusLabel(item.status)} — advance`}
+          aria-label={`${statusLabel(item.status)}. Advance status`}
         />
-      ) : (
-        <span className="cwb-title-col">
-          <button
-            type="button"
-            className="cwb-title cwb-title-btn"
-            onClick={onStartEdit}
-            title={item.title}
-          >
-            {item.title}
-          </button>
-          {docLabel !== null ? (
-            onOpenDoc !== undefined ? (
+        {editing ? (
+          <input
+            className="cwb-edit-input"
+            value={editTitle}
+            autoFocus
+            onChange={(e) => onChangeEdit(e.target.value)}
+            onBlur={onSaveEdit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onSaveEdit()
+              else if (e.key === 'Escape') onCancelEdit()
+            }}
+            aria-label="Edit item title"
+          />
+        ) : (
+          <span className="cwb-title-col">
+            <button
+              type="button"
+              className="cwb-title cwb-title-btn"
+              onClick={onStartEdit}
+              title={item.title}
+            >
+              {item.title}
+            </button>
+            {docLabel !== null ? (
+              onOpenDoc !== undefined ? (
+                <button
+                  type="button"
+                  className="cwb-doc-link"
+                  onClick={onOpenDoc}
+                  title={`Open spec: ${docLabel}`}
+                  aria-label={`Open spec doc: ${docLabel}`}
+                >
+                  📄 {docLabel}
+                </button>
+              ) : (
+                <span className="cwb-doc-link cwb-doc-link-static" title={`Spec: ${docLabel}`}>
+                  📄 {docLabel}
+                </span>
+              )
+            ) : null}
+          </span>
+        )}
+        {confirming ? (
+          <InlineConfirm
+            running={isLinkedRunning(item)}
+            onConfirm={onConfirmRemove}
+            onCancel={onCancelRemove}
+          />
+        ) : (
+          <div className="cwb-actions">
+            <button
+              type="button"
+              className="cwb-btn cwb-btn-icon cwb-drag"
+              draggable
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  onMoveUp()
+                } else if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  onMoveDown()
+                }
+              }}
+              disabled={busy}
+              title="Drag to reorder"
+              aria-label={`Reorder ${item.title}. Item ${index + 1} of ${laneCount}. Use arrow keys to move.`}
+            >
+              ⠿
+            </button>
+            {showPlay ? (
               <button
                 type="button"
-                className="cwb-doc-link"
-                onClick={onOpenDoc}
-                title={`Open spec: ${docLabel}`}
-                aria-label={`Open spec doc: ${docLabel}`}
+                className="cwb-btn cwb-btn-icon cwb-btn-play"
+                onClick={onPlay}
+                disabled={busy}
+                title={retry ? 'Retry build' : 'Start build'}
+                aria-label={retry ? 'Retry build' : 'Start build'}
               >
-                📄 {docLabel}
+                {retry ? '↻' : '▶'}
               </button>
-            ) : (
-              <span className="cwb-doc-link cwb-doc-link-static" title={`Spec: ${docLabel}`}>
-                📄 {docLabel}
-              </span>
-            )
-          ) : null}
-        </span>
-      )}
-      {tag !== null ? (
-        <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span>
-      ) : null}
-      {round !== null ? <span className="cwb-round">{round}</span> : null}
-      <div className="cwb-actions">
-        <button
-          type="button"
-          className="cwb-btn cwb-btn-icon cwb-drag"
-          draggable
-          onDragStart={onDragStart}
-          onDragEnd={onDragEnd}
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowUp') {
-              e.preventDefault()
-              onMoveUp()
-            } else if (e.key === 'ArrowDown') {
-              e.preventDefault()
-              onMoveDown()
-            }
-          }}
-          disabled={busy}
-          title="Drag to reorder"
-          aria-label={`Reorder ${item.title}. Item ${index + 1} of ${laneCount}. Use arrow keys to move.`}
-        >
-          ⠿
-        </button>
-        {showPlay ? (
-          <button
-            type="button"
-            className="cwb-btn cwb-btn-icon cwb-btn-play"
-            onClick={onPlay}
-            disabled={busy}
-            title={retry ? 'Retry build' : 'Start build'}
-            aria-label={retry ? 'Retry build' : 'Start build'}
-          >
-            {retry ? '↻' : '▶'}
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="cwb-btn cwb-btn-icon"
-          onClick={onRemove}
-          disabled={busy}
-          title="Delete item"
-          aria-label="Delete item"
-        >
-          ✕
-        </button>
+            ) : null}
+            <button
+              ref={deleteBtnRef}
+              type="button"
+              className="cwb-btn cwb-btn-icon"
+              onClick={onRemove}
+              disabled={busy}
+              title="Delete item"
+              aria-label="Delete item"
+            >
+              ✕
+            </button>
+          </div>
+        )}
       </div>
+      {hasStatus ? (
+        <div className="cwb-row-meta">
+          {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
+          {round !== null ? <span className="cwb-round">{round}</span> : null}
+        </div>
+      ) : null}
     </li>
+  )
+}
+
+/**
+ * Item 4 (item 2 in the redesign polish) — the INLINE delete confirm, rendered
+ * WITHIN a work-board row's own line 1 (no backdrop, no `aria-modal`, no screen
+ * takeover — the rest of the board stays visible + interactive). A `role="group"`
+ * cluster: a short prompt + Cancel + a destructive Remove. Autofocuses Cancel on
+ * open (the safe default) and Escape cancels; the row restores focus to its ✕ on
+ * dismiss. Only one row is ever in confirm state (single `confirmDelete`).
+ */
+function InlineConfirm({
+  running,
+  onConfirm,
+  onCancel,
+}: {
+  running: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}): React.JSX.Element {
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    cancelRef.current?.focus()
+  }, [])
+  return (
+    <div
+      className="cwb-confirm-inline"
+      role="group"
+      aria-label="Confirm remove"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.stopPropagation()
+          onCancel()
+        }
+      }}
+    >
+      <span className="cwb-confirm-inline-msg">{running ? 'Cancel build?' : 'Remove?'}</span>
+      <button ref={cancelRef} type="button" className="cwb-btn" onClick={onCancel}>
+        Cancel
+      </button>
+      <button type="button" className="cwb-btn cwb-btn-danger" onClick={onConfirm}>
+        {running ? 'Cancel & remove' : 'Remove'}
+      </button>
+    </div>
   )
 }

@@ -695,20 +695,38 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     expect(handle).not.toBeNull()
     expect(handle.getAttribute('aria-label')).toBe('Show work')
     expect(container.querySelector('.car-plans')).not.toBeNull()
-    // Closed by default → the shell grid isn't expanded.
-    expect((container.querySelector('.car-stage') as HTMLElement).className).not.toContain(
-      'car-stage-pane-open',
+    // Item 5 — the pane lives INSIDE the Chat view (chat tabpanel), not at the
+    // shell level, so it can never bleed onto Documents / Settings.
+    expect(container.querySelector('.car-tabpanel .car-plans')).not.toBeNull()
+    // Closed by default → the pane column isn't expanded (chat isn't shrunk).
+    expect((container.querySelector('.car-plans-col') as HTMLElement).className).not.toContain(
+      'car-plans-open',
     )
 
-    // Clicking the handle opens the pane → the chat stage grid expands.
+    // Clicking the handle opens the pane → the pane column expands (chat shrinks).
     await act(async () => {
       handle.click()
       await tick()
     })
     expect(handle.getAttribute('aria-label')).toBe('Hide work')
-    expect((container.querySelector('.car-stage') as HTMLElement).className).toContain(
-      'car-stage-pane-open',
+    expect((container.querySelector('.car-plans-col') as HTMLElement).className).toContain(
+      'car-plans-open',
     )
+
+    // Item 5 — switch to Documents: the Chat panel that HOSTS the pane is hidden,
+    // so the Work pane is gone from the visible surface (it never bleeds onto a
+    // non-Chat tab). The pane stays MOUNTED inside that hidden panel, so switching
+    // back to Chat restores its open state.
+    const docsBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
+      (b) => b.textContent === 'Documents',
+    ) as HTMLButtonElement
+    await act(async () => {
+      docsBtn.click()
+      await tick()
+    })
+    const chatPanel = container.querySelector('.car-tabpanel') as HTMLElement
+    expect(chatPanel.hasAttribute('hidden')).toBe(true)
+    expect(chatPanel.querySelector('.car-plans')).not.toBeNull()
 
     await act(async () => {
       root.unmount()

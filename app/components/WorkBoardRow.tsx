@@ -59,6 +59,9 @@ const DOT_SIZE = 9;
 const DOT_BORDER = 1.5;
 const ROW_MIN_HEIGHT = SPACING.xl + SPACING.md; // 36
 const ICON_HIT = SPACING.xl + SPACING.md; // 36 — comfortable tap target
+// Line-2 indent so the phase tag/round align under the title (past the dot column
+// + its gap): dotHit width (ICON_HIT - md) + its negative marginLeft (-xs) + gap (sm).
+const META_INDENT = ICON_HIT - SPACING.md - SPACING.xs + SPACING.sm; // 28
 const DRAG_ACTIVE_OPACITY = 0.85;
 
 export interface WorkBoardRowProps {
@@ -209,6 +212,11 @@ function WorkBoardRowImpl({
     );
   };
 
+  // M1 polish (item 4) — mirror the web 2-line model: line 1 = dot + title +
+  // actions; line 2 = the muted phase tag + round, rendered ONLY when the item has
+  // a bound run to report (`tag !== null`). A bare queued card is single-line.
+  const hasStatus = tag !== null;
+
   return (
     <Animated.View
       style={[
@@ -218,101 +226,107 @@ function WorkBoardRowImpl({
       ]}
       testID={`wb-row-${item.id}`}
     >
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`${statusLabel(item.status)}. Advance status`}
-        disabled={busy}
-        onPress={onAdvance}
-        style={styles.dotHit}
-      >
-        <Animated.View
-          style={[
-            styles.dot,
-            {
-              borderColor: dotColor(dot.colorKey),
-              backgroundColor: dot.colorKey === 'upcoming' ? 'transparent' : dotColor(dot.colorKey),
-              opacity: dot.pulse ? pulseAnim : 1,
-            },
-          ]}
-        />
-      </Pressable>
+      <View style={styles.line1}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${statusLabel(item.status)}. Advance status`}
+          disabled={busy}
+          onPress={onAdvance}
+          style={styles.dotHit}
+        >
+          <Animated.View
+            style={[
+              styles.dot,
+              {
+                borderColor: dotColor(dot.colorKey),
+                backgroundColor: dot.colorKey === 'upcoming' ? 'transparent' : dotColor(dot.colorKey),
+                opacity: dot.pulse ? pulseAnim : 1,
+              },
+            ]}
+          />
+        </Pressable>
 
-      {editing ? (
-        <TextInput
-          style={styles.editInput}
-          value={draft}
-          autoFocus
-          onChangeText={setDraft}
-          onBlur={commit}
-          onSubmitEditing={commit}
-          accessibilityLabel="Edit item title"
-          testID={`wb-edit-${item.id}`}
-        />
-      ) : (
-        <View style={styles.titleCol}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Edit ${item.title}`}
-            onPress={() => {
-              setDraft(item.title);
-              setEditing(true);
-            }}
-          >
-            <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
-              {item.title}
-            </Text>
-          </Pressable>
-          {docLabel !== null ? (
+        {editing ? (
+          <TextInput
+            style={styles.editInput}
+            value={draft}
+            autoFocus
+            onChangeText={setDraft}
+            onBlur={commit}
+            onSubmitEditing={commit}
+            accessibilityLabel="Edit item title"
+            testID={`wb-edit-${item.id}`}
+          />
+        ) : (
+          <View style={styles.titleCol}>
             <Pressable
-              accessibilityRole={onOpenDoc !== undefined ? 'button' : 'text'}
-              accessibilityLabel={`Spec doc: ${docLabel}`}
-              disabled={onOpenDoc === undefined}
-              onPress={onOpenDoc}
+              accessibilityRole="button"
+              accessibilityLabel={`Edit ${item.title}`}
+              onPress={() => {
+                setDraft(item.title);
+                setEditing(true);
+              }}
             >
-              <Text style={styles.docLink} numberOfLines={1} ellipsizeMode="tail">
-                📄 {docLabel}
+              <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
+                {item.title}
               </Text>
             </Pressable>
-          ) : null}
-        </View>
-      )}
+            {docLabel !== null ? (
+              <Pressable
+                accessibilityRole={onOpenDoc !== undefined ? 'button' : 'text'}
+                accessibilityLabel={`Spec doc: ${docLabel}`}
+                disabled={onOpenDoc === undefined}
+                onPress={onOpenDoc}
+              >
+                <Text style={styles.docLink} numberOfLines={1} ellipsizeMode="tail">
+                  📄 {docLabel}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        )}
 
-      {tag !== null ? (
-        <View style={[styles.tag, { backgroundColor: PHASE[tag.colorKey].bg }]}>
-          <Text style={[styles.tagText, { color: PHASE[tag.colorKey].fg }]}>{tag.label}</Text>
+        <View style={styles.actions}>
+          <View
+            {...panResponder.panHandlers}
+            accessible
+            accessibilityRole="adjustable"
+            accessibilityLabel={`Reorder ${item.title}. Item ${index + 1} of ${laneCount}.`}
+            accessibilityActions={[
+              { name: 'increment', label: 'Move down' },
+              { name: 'decrement', label: 'Move up' },
+            ]}
+            onAccessibilityAction={(e) => {
+              if (busy) return;
+              if (e.nativeEvent.actionName === 'increment') onReorderTo(index + 1);
+              else if (e.nativeEvent.actionName === 'decrement') onReorderTo(index - 1);
+            }}
+            style={styles.iconBtn}
+          >
+            <Text style={styles.iconGlyph}>⠿</Text>
+          </View>
+          {showPlay ? (
+            <IconButton
+              label={retry ? 'Retry build' : 'Start build'}
+              glyph={retry ? '↻' : '▶'}
+              disabled={busy}
+              onPress={onPlay ?? (() => {})}
+            />
+          ) : null}
+          <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
+        </View>
+      </View>
+
+      {hasStatus ? (
+        <View style={styles.meta}>
+          {tag !== null ? (
+            <View style={[styles.tag, { backgroundColor: PHASE[tag.colorKey].bg }]}>
+              <Text style={[styles.tagText, { color: PHASE[tag.colorKey].fg }]}>{tag.label}</Text>
+            </View>
+          ) : null}
+          {round !== null ? <Text style={styles.round}>{round}</Text> : null}
         </View>
       ) : null}
-      {round !== null ? <Text style={styles.round}>{round}</Text> : null}
-
-      <View style={styles.actions}>
-        <View
-          {...panResponder.panHandlers}
-          accessible
-          accessibilityRole="adjustable"
-          accessibilityLabel={`Reorder ${item.title}. Item ${index + 1} of ${laneCount}.`}
-          accessibilityActions={[
-            { name: 'increment', label: 'Move down' },
-            { name: 'decrement', label: 'Move up' },
-          ]}
-          onAccessibilityAction={(e) => {
-            if (busy) return;
-            if (e.nativeEvent.actionName === 'increment') onReorderTo(index + 1);
-            else if (e.nativeEvent.actionName === 'decrement') onReorderTo(index - 1);
-          }}
-          style={styles.iconBtn}
-        >
-          <Text style={styles.iconGlyph}>⠿</Text>
-        </View>
-        {showPlay ? (
-          <IconButton
-            label={retry ? 'Retry build' : 'Start build'}
-            glyph={retry ? '↻' : '▶'}
-            disabled={busy}
-            onPress={onPlay ?? (() => {})}
-          />
-        ) : null}
-        <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
-      </View>
     </Animated.View>
   );
 }
@@ -335,14 +349,19 @@ function WorkBoardCompletedRowImpl({
   };
   return (
     <View style={[styles.row, styles.rowDone]} testID={`wb-done-${item.id}`}>
-      <View style={styles.dotHit}>
-        <View style={[styles.dot, styles.dotDone]} />
+      <View style={styles.line1}>
+        <View style={styles.dotHit}>
+          <View style={[styles.dot, styles.dotDone]} />
+        </View>
+        <Text style={[styles.title, styles.titleFill, styles.titleDone]} numberOfLines={1} ellipsizeMode="tail">
+          {item.title}
+        </Text>
+        <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
       </View>
-      <Text style={[styles.title, styles.titleFill, styles.titleDone]} numberOfLines={1} ellipsizeMode="tail">
-        {item.title}
-      </Text>
-      <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
-      <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
+      {/* A completed row always carries its "Merged · <date>" on line 2. */}
+      <View style={styles.meta}>
+        <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
+      </View>
     </View>
   );
 }
@@ -376,12 +395,26 @@ export const WorkBoardCompletedRow = memo(WorkBoardCompletedRowImpl);
 
 const styles = StyleSheet.create({
   row: {
+    flexDirection: 'column',
+    gap: 1,
+    paddingHorizontal: SPACING.sm,
+    borderRadius: SPACING.sm,
+  },
+  // Line 1 — dot + title + actions (the former single-line row layout).
+  line1: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
     minHeight: ROW_MIN_HEIGHT,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: SPACING.sm,
+  },
+  // Line 2 — muted phase tag + round (or the completed datestamp), indented under
+  // the title. Renders only when the item has status to show (item 4).
+  meta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    marginLeft: META_INDENT,
+    paddingBottom: SPACING.xs / 2,
   },
   rowDragging: { opacity: DRAG_ACTIVE_OPACITY, backgroundColor: THEME.surface_raised },
   rowDone: { opacity: 0.55 },
