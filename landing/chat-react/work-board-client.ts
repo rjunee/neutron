@@ -35,7 +35,7 @@
 
 /* ─── wire types (mirror work-board/store.ts) ─── */
 
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done'
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
 
 /**
  * One board item, in the shape the tab renders. `project_slug` is server-only
@@ -343,7 +343,13 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     const status = r['status']
     if (typeof id !== 'string' || id.length === 0) continue
     if (typeof title !== 'string') continue
-    if (status !== 'upcoming' && status !== 'in_progress' && status !== 'done') continue
+    if (
+      status !== 'upcoming' &&
+      status !== 'in_progress' &&
+      status !== 'done' &&
+      status !== 'failed'
+    )
+      continue
     const run_progress = parseRunProgress(r['run_progress'])
     out.push({
       id,

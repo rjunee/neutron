@@ -65,18 +65,20 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
 }
 
 describe('composeTerminalDelivery', () => {
-  test('done / pr mode → reports the merged PR number + branch', () => {
+  test('done / pr mode → reports the merged PR number + branch (slug-forward)', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 42 }))
     expect(out).not.toBeNull()
     expect(out!.text).toContain('✅')
-    expect(out!.text).toContain('build complete')
+    // #339 — leads with the build slug + "build done, merged".
+    expect(out!.text).toContain('`add-flag`')
+    expect(out!.text).toContain('build done, merged')
     expect(out!.text).toContain('add a feature flag')
     expect(out!.text).toContain('PR #42')
   })
 
   test('done / local mode → reports the merged branch', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'local' }))
-    expect(out!.text).toContain('Merged `trident/add-flag` locally')
+    expect(out!.text).toContain('merged `trident/add-flag` locally')
     expect(out!.text).not.toContain('PR #')
   })
 
@@ -94,17 +96,25 @@ describe('composeTerminalDelivery', () => {
     const out = composeTerminalDelivery(
       runWith({ phase: 'failed', failure_reason: 'reached max_rounds (8) without Argus APPROVE' }),
     )
-    expect(out!.text).toContain('⚠️')
+    expect(out!.text).toContain('❌')
     expect(out!.text).toContain('build failed')
     expect(out!.text).toContain('reached max_rounds (8)')
-    expect(out!.text).toContain('left in place for manual review')
+    expect(out!.text).toContain('left in place for review')
   })
 
   test('failed / pr mode → points at the open PR', () => {
     const out = composeTerminalDelivery(
       runWith({ phase: 'failed', merge_mode: 'pr', pr: 7, failure_reason: 'merge failed: conflict' }),
     )
-    expect(out!.text).toContain('PR #7 left open for manual review')
+    expect(out!.text).toContain('PR #7 left open for review')
+  })
+
+  test('failed → the failure reason (e.g. a merge-conflict question) rides the message verbatim', () => {
+    const question =
+      'ringbuf and walstore both changed flush() — drop-oldest vs block; which do you want?'
+    const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: question }))
+    expect(out!.text).toContain('❌')
+    expect(out!.text).toContain(question)
   })
 
   test('stopped → a plain stopped notice', () => {

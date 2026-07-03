@@ -553,6 +553,40 @@ rather than waiting on the global diff-gate. Subscriber:
 >    start/end seam. The client parses them in `controller.ts` / `config.ts`
 >    (`ProjectTab`), all optional on the wire for back-compat.
 
+> <!-- SYNC-ON-DEPLOY (trident parallel builds + lifecycle, 2026-07-03) — flagged
+> for the Managed orchestrator's SYSTEM-OVERVIEW sync. -->
+> **Trident/Work Board — parallel same-project builds + build lifecycle (2026-07-03).**
+> Five Ryan-locked behaviours (no feature flags, one code path):
+> 1. **3+ concurrent same-project builds now land.** Each build already runs in its
+>    own worktree; the LOCAL merge (`trident/merge.ts` `mergeLocal`, serialized per
+>    `repo_path` by `withLocalMergeLock`) now REBASES the build's branch onto the
+>    latest base before merging, so the 2nd/3rd build replays on top of a sibling's
+>    merge instead of hard-failing. A real content conflict dispatches a **bounded
+>    Forge** (`trident/conflict-resolver.ts`, over the composer's ephemeral substrate)
+>    to resolve it in the conflicted worktree; a genuinely ambiguous conflict
+>    ESCALATES a specific question to chat (`TridentMergeConflictEscalation` →
+>    `orchestrator.applyResult` fails the run with the question as its reason).
+> 2. **A failed build shows FAILED (red) + keeps its run link.** The terminal
+>    reconcile (`work-board/store.ts` `detachRun('failed')`) sets `status='failed'`
+>    (new lane, migration `0097`) and KEEPS `linked_run_id`, so the client derives a
+>    red dot + "Failed" tag + the run's `failure_reason` one-liner + the ▶/↻ retry —
+>    instead of the old revert-to-upcoming-and-unlink (which lost the failure).
+> 3. **Terminal builds announce in chat.** The tick loop's terminal delivery
+>    (`trident/delivery.ts`) posts "✅ `<slug>` — build done, merged" / "❌ `<slug>` —
+>    build failed: `<reason>`" to the originating chat via the run's `channel_kind`.
+>    On Open (app_socket) delivery now goes through the durable **app-ws adapter**
+>    sink (`open/composer.ts` → `trident.delivery_sink`) — the bare `ChannelRouter`
+>    has no app_socket adapter, so completions were silently dropped. Board-dispatched
+>    runs now carry the originating chat topic (`resolve_delivery` maps the tool
+>    call's `project_id` → app-ws topic; the ▶ route + `/code` thread it too).
+> 4. **Every build creates a trackable card.** The build-routing doctrine
+>    (`gateway/realmode-composer/operating-doctrine.ts`) now REQUIRES a Work Board
+>    card for EVERY build — inline OR trident, any project — so no build is invisible.
+> 5. **Underspecified builds ask in chat.** The ▶ route on an `underspecified`
+>    rejection posts a short clarifying question to chat (`open/composer.ts`
+>    `buildClarifyPoster`) and returns 200 (`work-board-surface.ts`) — never the raw
+>    internal guard text into the work pane.
+
 > <!-- SYNC-ON-DEPLOY (M1 UX REDESIGN PR-3, 2026-07-02) — flagged for the Managed
 > orchestrator's SYSTEM-OVERVIEW sync. -->
 > **M1 UX REDESIGN — rail + seated tabs + ⚛ branding (PR-3, 2026-07-02).** The web

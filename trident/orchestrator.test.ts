@@ -58,6 +58,7 @@ function buildHarness(opts: {
   no_advance_hang_ms?: number
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
+  resolve_conflict?: import('./merge.ts').MergeConflictResolver
 }): Harness {
   const hostCalls: string[][] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
@@ -84,6 +85,7 @@ function buildHarness(opts: {
   if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
+  if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({ store, step: orch.step })
   return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs }
@@ -142,6 +144,53 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(joined).toContain('git -C /repo checkout main')
     expect(joined.some((c) => c.startsWith('git -C /repo merge --no-ff feat-x'))).toBe(true)
     expect(joined.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+  })
+})
+
+describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', () => {
+  // A host whose initial rebase conflicts (then succeeds after --continue).
+  const conflictingHost = (): ((cmd: string[]) => HostCommandResult) => {
+    let rebased = false
+    return (cmd) => {
+      if (cmd.includes('rebase') && !cmd.includes('--continue') && !cmd.includes('--abort')) {
+        if (!rebased) {
+          rebased = true
+          return { ok: false, stdout: '', stderr: 'CONFLICT (content): Merge conflict in shared.ts', exit_code: 1 }
+        }
+      }
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) {
+        return { ok: true, stdout: 'shared.ts', stderr: '', exit_code: 0 }
+      }
+      return ok()
+    }
+  }
+
+  test('the Forge resolver fixes the conflict → the build still lands (done)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: conflictingHost(),
+      resolve_conflict: async () => ({ resolved: true }),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('rebase --continue'))).toBe(true)
+  })
+
+  test('an ambiguous conflict → failed with the SPECIFIC question as the reason (not "merge failed")', async () => {
+    const question = 'shared.ts: which flush() behaviour do you want?'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: conflictingHost(),
+      resolve_conflict: async () => ({ resolved: false, question }),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    // The failure reason IS the specific question (the terminal delivery posts it
+    // verbatim to chat) — never a raw "merge failed".
+    expect(final.failure_reason).toBe(question)
+    expect(final.failure_reason).not.toContain('merge failed')
   })
 })
 

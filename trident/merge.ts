@@ -44,6 +44,46 @@ export class TridentMergeError extends Error {
 }
 
 /**
+ * Thrown when a rebase conflict is genuinely un-resolvable/ambiguous and the
+ * bounded Forge resolver ESCALATED (or automatic resolution was unavailable).
+ * The OUTER loop (`orchestrator.applyResult`) maps this to a `failed` run whose
+ * `failure_reason` is the SPECIFIC question — the terminal delivery posts that
+ * question to chat, never a raw "merge failed" (#342 step 3).
+ */
+export class TridentMergeConflictEscalation extends Error {
+  constructor(readonly question: string) {
+    super(question)
+    this.name = 'TridentMergeConflictEscalation'
+  }
+}
+
+/**
+ * A bounded Forge that resolves a git REBASE conflict IN the repo's working
+ * tree (mid-rebase, conflict markers present). Production is
+ * `buildForgeConflictResolver` (`conflict-resolver.ts`) over the composer's
+ * ephemeral substrate factory; tests inject a stub. It resolves + `git add`s the
+ * conflicts (the OUTER `mergeLocal` runs `git rebase --continue`), returning:
+ *   - `{ resolved: true }`               → conflicts staged, safe to continue.
+ *   - `{ resolved: false; question }`    → ambiguous → escalate to chat.
+ */
+export interface MergeConflictResolver {
+  (input: {
+    /** The repo working tree (cwd, mid-rebase). */
+    repo_path: string
+    /** The build's branch being rebased. */
+    branch: string
+    /** The base branch it is rebasing onto. */
+    base_branch: string
+    run: TridentRun
+    /** Files with unresolved conflict markers (`--diff-filter=U`). */
+    conflicted_files: string[]
+  }): Promise<{ resolved: true } | { resolved: false; question: string }>
+}
+
+/** Bound the rebase-continue loop so a pathological history can't spin forever. */
+const MAX_CONFLICT_ROUNDS = 12
+
+/**
  * Resolve the base branch to merge into. Tries `origin/HEAD`'s symbolic
  * target, then a local `main`/`master`, defaulting to `main`. Never
  * throws — a probe failure degrades to `main`.
@@ -125,7 +165,7 @@ function must(step: string, res: HostCommandResult): HostCommandResult {
  */
 export function buildMergeCleanupDeps(
   run_host: RunHostCommand,
-  opts: { base_branch?: string } = {},
+  opts: { base_branch?: string; resolve_conflict?: MergeConflictResolver } = {},
 ): MergeCleanupDeps {
   return {
     async mergePr(run: TridentRun): Promise<void> {
@@ -161,9 +201,17 @@ export function buildMergeCleanupDeps(
         })
       }
       // Serialize per working tree — parallel same-project builds share this
-      // `repo_path`; a concurrent checkout+merge in the one tree collides.
+      // `repo_path`; a concurrent checkout/rebase/merge in the one tree collides.
+      // The lock makes N same-project builds land in order (#342): each waits for
+      // the prior merge, THEN rebases onto the now-updated base + merges.
       await withLocalMergeLock(repo, async () => {
         const base = opts.base_branch ?? (await detectBaseBranch(run_host, repo))
+        // (1) REBASE the build's branch onto the LATEST base so it replays on top
+        //     of any sibling build that merged before it. On a real content
+        //     conflict, dispatch the bounded Forge resolver; on a genuinely
+        //     ambiguous one, escalate to chat (throws TridentMergeConflictEscalation).
+        await rebaseBranchOntoBase(run_host, repo, base, branch, run, opts.resolve_conflict)
+        // (2) The branch now CONTAINS base, so the no-ff merge cannot conflict.
         must('git checkout base', await run_host(['git', '-C', repo, 'checkout', base], repo))
         must(
           'git merge',
@@ -174,6 +222,101 @@ export function buildMergeCleanupDeps(
         await removeWorktree(run_host, run)
       })
     },
+  }
+}
+
+/** True when a git result's output names a merge/rebase conflict. */
+function isRebaseConflict(res: HostCommandResult): boolean {
+  const s = `${res.stdout}\n${res.stderr}`.toLowerCase()
+  return (
+    s.includes('conflict') ||
+    s.includes('could not apply') ||
+    s.includes('needs merge') ||
+    s.includes('resolve all conflicts')
+  )
+}
+
+/** The files with unresolved conflict markers (`git diff --diff-filter=U`). */
+async function listConflictedFiles(run_host: RunHostCommand, repo: string): Promise<string[]> {
+  const res = await run_host(['git', '-C', repo, 'diff', '--name-only', '--diff-filter=U'], repo)
+  if (!res.ok) return []
+  return res.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+/** Abort an in-progress rebase and return the working tree to `base`. Best-effort. */
+async function abortRebase(run_host: RunHostCommand, repo: string, base: string): Promise<void> {
+  await run_host(['git', '-C', repo, 'rebase', '--abort'], repo)
+  await run_host(['git', '-C', repo, 'checkout', base], repo)
+}
+
+/**
+ * Rebase `branch` onto `base` in the shared working tree, resolving any content
+ * conflict with the bounded Forge `resolver`. Assumes the caller holds the
+ * per-repo merge lock (so the tree is exclusively ours). On success the branch
+ * has been replayed on top of `base` and the working tree is left on `branch`;
+ * the caller then checks out `base` + merges (a clean no-ff). Throws:
+ *   - `TridentMergeConflictEscalation` when the resolver escalates (ambiguous)
+ *     OR no resolver is configured on a conflict — the OUTER loop turns this into
+ *     a chat-delivered specific question.
+ *   - `TridentMergeError` for any other (non-conflict) rebase failure.
+ */
+async function rebaseBranchOntoBase(
+  run_host: RunHostCommand,
+  repo: string,
+  base: string,
+  branch: string,
+  run: TridentRun,
+  resolver: MergeConflictResolver | undefined,
+): Promise<void> {
+  must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
+  let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
+  let rounds = 0
+  while (!res.ok && isRebaseConflict(res)) {
+    if (rounds >= MAX_CONFLICT_ROUNDS) {
+      await abortRebase(run_host, repo, base)
+      throw new TridentMergeConflictEscalation(
+        `merging \`${branch}\` into \`${base}\` hit conflicts across more than ${MAX_CONFLICT_ROUNDS} commits — it needs a manual rebase before I can land it.`,
+      )
+    }
+    rounds++
+    const conflicted = await listConflictedFiles(run_host, repo)
+    if (resolver === undefined) {
+      await abortRebase(run_host, repo, base)
+      throw new TridentMergeConflictEscalation(
+        `\`${branch}\` conflicts with \`${base}\` in ${conflicted.join(', ') || 'the branch'} and I have no way to auto-resolve it here — it needs a manual merge.`,
+      )
+    }
+    const outcome = await resolver({
+      repo_path: repo,
+      branch,
+      base_branch: base,
+      run,
+      conflicted_files: conflicted,
+    })
+    if (!outcome.resolved) {
+      await abortRebase(run_host, repo, base)
+      throw new TridentMergeConflictEscalation(outcome.question)
+    }
+    // The resolver staged its resolutions; advance the rebase (which may surface
+    // the NEXT conflicting commit → loop). `core.editor=true` so the replayed
+    // commit never blocks on an interactive editor in this headless path.
+    res = await run_host(
+      ['git', '-C', repo, '-c', 'core.editor=true', 'rebase', '--continue'],
+      repo,
+    )
+  }
+  if (!res.ok) {
+    // A non-conflict rebase failure (or the resolver staged nothing so
+    // `--continue` had no changes) — abort + fail loudly.
+    await abortRebase(run_host, repo, base)
+    throw new TridentMergeError(
+      `git rebase of ${branch} onto ${base} failed: ${res.stderr || res.stdout || `exit ${res.exit_code}`}`,
+      'rebase',
+      res,
+    )
   }
 }
 

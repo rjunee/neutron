@@ -93,6 +93,9 @@ function truncateTask(task: string, n = 60): string {
  */
 export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | null {
   if (!isTerminalPhase(run.phase)) return null
+  // #339 — the completion message leads with the build's SLUG (the same handle
+  // the Work list shows) + a short context line from the task.
+  const slug = run.slug
   const task = truncateTask(run.task)
   const rounds = run.round > 1 ? ` after ${run.round} review round${run.round === 2 ? '' : 's'}` : ''
 
@@ -100,28 +103,30 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
     case 'done': {
       const where =
         run.merge_mode === 'pr' && run.pr !== null
-          ? `Merged PR #${run.pr}${run.branch !== null ? ` (\`${run.branch}\`)` : ''}`
+          ? `merged PR #${run.pr}${run.branch !== null ? ` (\`${run.branch}\`)` : ''}`
           : run.branch !== null
-            ? `Merged \`${run.branch}\` locally`
-            : 'Merged'
-      return { text: `✅ \`/code\` build complete: ${task}\n${where}${rounds}.` }
+            ? `merged \`${run.branch}\` locally`
+            : 'merged'
+      return { text: `✅ \`${slug}\` — build done, ${where}${rounds}.\n${task}` }
     }
     case 'failed': {
+      // #340 — a specific reason (a merge-conflict question, a hang, exhausted
+      // rounds). The build's branch/PR is left in place for manual follow-up.
       const reason = run.failure_reason ?? 'no reason recorded'
       const trail =
         run.merge_mode === 'pr' && run.pr !== null
-          ? `\nPR #${run.pr} left open for manual review.`
+          ? `\nPR #${run.pr} left open for review.`
           : run.branch !== null
-            ? `\nBranch \`${run.branch}\` left in place for manual review.`
+            ? `\nBranch \`${run.branch}\` left in place for review.`
             : ''
-      return { text: `⚠️ \`/code\` build failed: ${task}\n${reason}${trail}` }
+      return { text: `❌ \`${slug}\` — build failed: ${reason}\n${task}${trail}` }
     }
     case 'stopped':
       // `/code stop` flips a row straight to `stopped` via the store (not
       // the tick loop) and replies to the user synchronously, so the loop's
       // on_terminal hook never sees a stopped row in practice. Composed
       // anyway for completeness / direct callers.
-      return { text: `🛑 \`/code\` build stopped: ${task}` }
+      return { text: `🛑 \`${slug}\` — build stopped.\n${task}` }
     default:
       return null
   }

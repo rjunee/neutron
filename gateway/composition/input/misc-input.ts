@@ -101,6 +101,25 @@ export interface MiscCompositionInput {
     resolve_codex_home?: (
       run: import('../../../trident/store.ts').TridentRun,
     ) => string | null
+    /**
+     * Bounded Forge merge-conflict resolver (#342). Threaded into the trident
+     * orchestrator's merge deps so a LOCAL-mode merge that hits a rebase conflict
+     * (a 2nd/3rd parallel same-project build replaying onto a sibling's merge) is
+     * auto-resolved by a fresh Forge in the conflicted tree rather than
+     * hard-failing. The composer wires this to `buildForgeConflictResolver` over
+     * the ephemeral substrate factory. Absent → a conflict escalates to chat.
+     */
+    resolve_conflict?: import('../../../trident/merge.ts').MergeConflictResolver
+    /**
+     * Terminal-result delivery sink (#339). The trident module posts each run's
+     * terminal completion message ("✅ done, merged" / "❌ failed: <reason>")
+     * through this sink instead of the bare `ChannelRouter` — which on Open has
+     * NO app_socket adapter registered, so a completion message was silently
+     * dropped (walstore completed but the chat stayed silent). Open wires this to
+     * the durable app-ws adapter (`AppWsAdapter.send`: persists to the chat log +
+     * fans live to any open socket). Absent → the module falls back to the router.
+     */
+    delivery_sink?: import('../../../trident/delivery.ts').OutboundSink
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
@@ -235,6 +254,13 @@ export interface MiscCompositionInput {
       project_slug: string,
       item: { title: string; design_doc_ref: string | null },
     ) => Promise<string>
+    /**
+     * #339 — resolve the originating chat topic (from the tool call's project_id)
+     * so a board-dispatched build's terminal result announces back to chat.
+     */
+    resolve_delivery?: (
+      project_id: string | null,
+    ) => { chat_id: string | null; thread_id: string | null }
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

@@ -106,6 +106,18 @@ export interface TridentBuildToolDeps {
     project_slug: string,
     item: { title: string; design_doc_ref: string | null },
   ) => Promise<string>
+  /**
+   * #339 — resolve the originating chat topic for a build from the composing
+   * turn's project scope, so a board-dispatched build's terminal result
+   * announces back to the right chat. Called with the tool call's
+   * `ctx.project_id` (correctly populated even though the warm-REPL
+   * `ToolCallContext.topic_id` is null). The composer maps it to the app-ws
+   * channel topic. Absent → the run carries no chat_id (delivery no-ops, the
+   * legacy behaviour).
+   */
+  resolve_delivery?: (
+    project_id: string | null,
+  ) => { chat_id: string | null; thread_id: string | null }
 }
 
 interface StartArgs {
@@ -157,6 +169,9 @@ export function registerTridentBuildToolSurface(
       // while chatting in project X lands on X's board (not General). Mirrors the
       // HTTP ▶ route (`work-board-surface.ts`), which scope-keys from the URL.
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      // #339 — stamp the originating chat topic (resolved from the turn's
+      // project_id) so the build's terminal result announces back to its chat.
+      const delivery = deps.resolve_delivery?.(ctx.project_id)
       const buildDeps: BoardBoundBuildDeps = {
         store: deps.store,
         board: deps.work_board,
@@ -166,6 +181,7 @@ export function registerTridentBuildToolSurface(
         ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
+        ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       }
@@ -251,6 +267,8 @@ export function registerTridentBuildToolSurface(
               design_doc_ref: item.design_doc_ref,
             })
           : item.title
+      // #339 — same chat-topic stamping as the dispatch tool (retry re-announces).
+      const delivery = deps.resolve_delivery?.(ctx.project_id)
       const buildDeps: BoardBoundBuildDeps = {
         store: deps.store,
         board: deps.work_board,
@@ -260,6 +278,7 @@ export function registerTridentBuildToolSurface(
         ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
+        ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       }

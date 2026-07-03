@@ -204,6 +204,7 @@ import {
 } from './project-rail.ts'
 import { WorkBoardSpecDocService } from '../work-board/spec-doc-service.ts'
 import { dispatchBoardBoundBuild } from '../trident/board-dispatch.ts'
+import { buildForgeConflictResolver } from '../trident/conflict-resolver.ts'
 import type { WorkBoardStartResult } from '../gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '../work-board/fragment.ts'
 // Chat transport — durable per-topic message log + receipt/reaction/edit logs
@@ -2311,6 +2312,23 @@ export function buildOpenGraphComposer(
         mkdirSync(joinPath(owner_home, 'Projects', slug, 'docs'), { recursive: true })
       },
     })
+    // #339 — the originating app-ws chat topic for a build, reconstructed from a
+    // board scope. The React/Expo client subscribes to the General base topic (no
+    // project) or `<base>:<project_id>` for a project — the SAME topic the
+    // live-agent reply + the work_board_changed fan target. Stamped onto the run's
+    // `chat_id` so terminal-result delivery routes the completion message back to
+    // the surface the build came from (board-dispatched runs previously carried a
+    // null chat_id → the delivery no-op'd → silent completions).
+    const tridentDeliveryChatId = (projectId: string | null): string =>
+      projectId !== null && projectId.length > 0
+        ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
+        : appWsTopicId(OWNER_USER_ID)
+    // #337 — late-bound clarifying-question poster (assigned once the app-ws
+    // adapter exists, below). When the ▶ route trips the ask-before-acting gate
+    // on an underspecified card, we post a SHORT clarifying question to the CHAT
+    // (not the raw internal guard text into the work pane) and leave the item
+    // quietly pending. Mirrors the `appWsHolder` late-binding pattern.
+    const buildClarifyPoster: { post?: (chatId: string, text: string) => void } = {}
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
     // its title) and dispatches a board-bound build through the SAME chokepoint
     // (`dispatchBoardBoundBuild`: required-item + ask-before-acting gate +
@@ -2325,6 +2343,11 @@ export function buildOpenGraphComposer(
               title: item.title,
               design_doc_ref: item.design_doc_ref,
             })
+            // #339 — stamp the originating chat topic so the terminal result
+            // announces back here (slug is the board scope key; map it to project_id).
+            const chatId = tridentDeliveryChatId(
+              workBoardProjectIdForKey(project_slug, slug) ?? null,
+            )
             const result = await dispatchBoardBoundBuild(
               { board_item_id: item.id, task },
               {
@@ -2333,9 +2356,23 @@ export function buildOpenGraphComposer(
                 project_slug: slug,
                 repo_path: owner_home,
                 channel_kind: 'app_socket',
+                chat_id: chatId,
+                thread_id: null,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
+            // #337 — an underspecified card must NOT dump the internal guard text
+            // into the work pane. Post a short clarifying question to the CHAT and
+            // leave the item quietly pending; the surface maps this to a 200 (no
+            // error banner). Other rejection codes stay as errors.
+            if (result.code === 'underspecified') {
+              buildClarifyPoster.post?.(
+                tridentDeliveryChatId(workBoardProjectIdForKey(project_slug, slug) ?? null),
+                `🛠 "${item.title}" needs a bit more detail before I can build it — what platform, ` +
+                  `the key features, and any design reference should it target? Add that (or link a ` +
+                  `design doc) and hit ▶ again.`,
+              )
+            }
             return { ok: false, code: result.code, message: result.message }
           }
         : undefined
@@ -3407,6 +3444,22 @@ export function buildOpenGraphComposer(
       reaction_log: new AppChatReactionStore({ db }),
       edit_log: new AppChatEditStore({ db }),
     })
+    // #337 — bind the clarifying-question poster now the app-ws adapter exists.
+    // `AppWsAdapter.send` persists the message (durable, survives reconnect) AND
+    // fans it live, so the ▶ route's clarifying question lands in the chat topic
+    // exactly like a normal agent reply.
+    buildClarifyPoster.post = (chatId: string, text: string): void => {
+      void appWsHolder.adapter?.send({
+        topic: {
+          topic_id: '',
+          channel_kind: 'app_socket',
+          channel_topic_id: chatId,
+          project_id: null,
+          privacy_mode: 'regular',
+        },
+        text,
+      })
+    }
     const appWsSurface = createAppWsSurface({
       adapter: appWsHolder.adapter,
       registry: appWsRegistry,
@@ -3628,6 +3681,32 @@ export function buildOpenGraphComposer(
       },
     })
 
+    // #339 — durable app-ws delivery sink for trident terminal results.
+    // `AppWsAdapter.send` persists to the chat log (survives reconnect) AND fans
+    // live to any open socket (the proven steady-state reply path). The bare
+    // ChannelRouter that `build-core-modules` would otherwise use has NO
+    // app_socket adapter registered on Open, so a completion posted through it was
+    // silently dropped — that is why a finished build (e.g. walstore) flipped the
+    // Work list to done but never announced in chat. app_socket only (Open has no
+    // other outbound channel); anything else no-ops.
+    const tridentDeliverySink = {
+      async send(message: OutgoingMessage): Promise<string> {
+        if (message.topic.channel_kind !== 'app_socket') return ''
+        return (await appWsHolder.adapter?.send(message)) ?? ''
+      },
+    }
+    // #342 — bounded Forge merge-conflict resolver: a fresh ephemeral REPL rooted
+    // in the conflicted worktree, reusing the SAME per-cwd factory the dispatch
+    // family uses. Gated on the live-credential predicate (a resolver can only run
+    // where builds run). Absent → a rebase conflict escalates a specific question
+    // to chat rather than auto-resolving.
+    const tridentConflictResolver =
+      tridentFireInnerWorkflow !== null
+        ? buildForgeConflictResolver({
+            build_substrate: makeEphemeralSubstrate('cc-trident-resolve'),
+          })
+        : undefined
+
     return {
       db,
       project_slug,
@@ -3763,6 +3842,14 @@ export function buildOpenGraphComposer(
               resolve_codex_home: (run) =>
                 codexCredentialService.resolveActiveCodexHome(run.project_slug),
               codex_home: codexHome,
+              // #339 — post terminal completion messages through the durable
+              // app-ws adapter (the bare router has no app_socket adapter on Open).
+              delivery_sink: tridentDeliverySink,
+              // #342 — auto-resolve a parallel-build rebase conflict via a bounded
+              // Forge instead of hard-failing the run.
+              ...(tridentConflictResolver !== undefined
+                ? { resolve_conflict: tridentConflictResolver }
+                : {}),
             },
             // Work Board Phase 2b — the agent-native board-bound build dispatch
             // (`work_board_dispatch_build`). Gated on the SAME live-credential
@@ -3784,6 +3871,14 @@ export function buildOpenGraphComposer(
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.
               resolve_task: (slug, item) => workBoardSpecDoc.resolveTaskForItem(slug, item),
+              // #339 — resolve the originating chat topic from the composing turn's
+              // project scope so a board-dispatched (agent-native) build's terminal
+              // result announces back to that project's chat (the tool's warm-REPL
+              // ToolCallContext is topic-agnostic, but its project_id is correct).
+              resolve_delivery: (projectId: string | null) => ({
+                chat_id: tridentDeliveryChatId(projectId),
+                thread_id: null,
+              }),
             },
           }
         : {}),
