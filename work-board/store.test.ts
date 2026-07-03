@@ -300,6 +300,18 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(done?.linked_run_id).toBeNull()
   })
 
+  test('manually advancing a failed card off the failed lane DETACHES the terminal run', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'requeue me' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'failed')
+    // The status-dot advance: nextStatus('failed') → 'upcoming'. The stale failed
+    // run link must go, or the card renders red-dot/failed with status='upcoming'.
+    const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.status).toBe('upcoming')
+    expect(requeued?.linked_run_id).toBeNull()
+  })
+
   test('detachRun is a safe no-op when no item is bound to the run', async () => {
     const store = new WorkBoardStore(db)
     expect(await store.detachRun(SLUG, 'ghost-run', 'done')).toBeNull()

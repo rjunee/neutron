@@ -458,6 +458,16 @@ export class WorkBoardStore {
             )
             .get(project_slug)
           push('sort_order', max?.next ?? 1)
+        } else if (current.status === 'failed') {
+          // Re-queue OFF failed (nextStatus('failed') → 'upcoming', or a dismiss):
+          // DETACH the terminal failed run so the card stops deriving the red dot
+          // + 'failed' step_label + failure_reason from it. detachRun keeps the
+          // link (#340) so the FAILED card can render + retry; but once the human
+          // manually advances it out of the failed lane the stale terminal link
+          // must go, or the card renders failed with status='upcoming' and a
+          // second advance strands it in_progress with a terminal link (no retry).
+          // A genuine retry re-dispatches via attachRun (a fresh linked_run_id).
+          push('linked_run_id', null)
         }
         // active→active (e.g. upcoming→in_progress): no completed_at/sort_order change.
       }

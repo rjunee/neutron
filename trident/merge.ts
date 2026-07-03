@@ -206,6 +206,13 @@ export function buildMergeCleanupDeps(
       // the prior merge, THEN rebases onto the now-updated base + merges.
       await withLocalMergeLock(repo, async () => {
         const base = opts.base_branch ?? (await detectBaseBranch(run_host, repo))
+        // (0) FREE the branch from any lingering build worktree FIRST. The rebase
+        //     below checks out `branch` in the shared tree; if the inner workflow's
+        //     cleanup left the worktree registered, git refuses ("already checked
+        //     out at <path>") and the whole merge fails. The old merge-by-ref path
+        //     never checked the branch out, so this precondition is new to #342.
+        //     Best-effort + idempotent (prunes a stale admin entry either way).
+        await removeWorktree(run_host, run)
         // (1) REBASE the build's branch onto the LATEST base so it replays on top
         //     of any sibling build that merged before it. On a real content
         //     conflict, dispatch the bounded Forge resolver; on a genuinely
@@ -219,7 +226,6 @@ export function buildMergeCleanupDeps(
         )
         // Branch teardown after a successful merge (best-effort).
         await run_host(['git', '-C', repo, 'branch', '-D', branch], repo)
-        await removeWorktree(run_host, run)
       })
     },
   }

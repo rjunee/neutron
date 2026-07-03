@@ -274,6 +274,23 @@ describe('buildMergeCleanupDeps — local mode rebase-onto-latest + conflict res
     expect(resolverCalls).toBe(0)
   })
 
+  test('FREES a lingering build worktree BEFORE checking the branch out (#342 regression)', async () => {
+    const { host, calls } = recordingHost()
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    // The run row still carries its build worktree (inner cleanup missed it): the
+    // branch is checked out there, so the rebase's `git checkout feat-x` in the
+    // shared tree would fail "already checked out" unless we free it first.
+    const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/shared', worktree: '/shared/.wt/feat-x' })
+    await cleanupAfterMerge(run, deps)
+    const joined = calls.map((c) => c.join(' '))
+    const removeIdx = joined.findIndex((c) => c.includes('worktree remove --force /shared/.wt/feat-x'))
+    const checkoutIdx = joined.findIndex((c) => c === 'git -C /shared checkout feat-x')
+    expect(removeIdx).toBeGreaterThanOrEqual(0)
+    expect(checkoutIdx).toBeGreaterThanOrEqual(0)
+    // The worktree is freed strictly BEFORE the branch checkout.
+    expect(removeIdx).toBeLessThan(checkoutIdx)
+  })
+
   test('a rebase CONFLICT → the Forge resolver resolves it → rebase --continue → merge lands', async () => {
     const calls: string[] = []
     let rebasedOnce = false
