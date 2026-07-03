@@ -459,6 +459,35 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    start/end seam. The client parses them in `controller.ts` / `config.ts`
 >    (`ProjectTab`), all optional on the wire for back-compat.
 
+> <!-- SYNC-ON-DEPLOY (M1 UX REDESIGN PR-3, 2026-07-02) — flagged for the Managed
+> orchestrator's SYSTEM-OVERVIEW sync. -->
+> **M1 UX REDESIGN — rail + seated tabs + ⚛ branding (PR-3, 2026-07-02).** The web
+> chat shell's left rail and tab band are reskinned to the Ryan-signed-off design
+> (no feature flags, one code path — the old rail-row + underline-tab CSS deleted):
+> 1. **⚛ Neutron branding header.** The rail's old "PROJECTS" caps label is replaced
+>    by an inline-SVG atom mark (`--accent`-lit, 3 rotated ellipses + a center dot)
+>    + the "Neutron" wordmark; the new-project affordance is the `+` on the right of
+>    the header (`.car-rail-newp`, toggling the inline create form — the old bottom
+>    "Create Project" button is gone). (`ChatApp.tsx` `TopicRail`/`AtomMark`.)
+> 2. **Telegram-style 2-line rail rows.** Each row (`RailItem`) is now an emoji
+>    "avatar" (40px, plain glyph) carrying a corner **work-activity dot** (from PR-1's
+>    `activity`: `working` → pulsing `--work`, `attention` → static `--attention`,
+>    else none; General never shows one), a line 1 of name + right-aligned timestamp
+>    (`formatRailTime` from `last_activity_at`: today → `14:32`, this week → `Mon`,
+>    else → `Jun 28`), and a line 2 of the ellipsised `preview` (own messages prefixed
+>    `You:` when `preview_from==='user'`) + the unread badge. New tokens `--work`,
+>    `--attention`, `--fg-2`, `--faint` in both `chat-react.html` palettes.
+> 3. **Narrow (<1200px) icon rail.** A JS `narrow` render branch (`useMediaQuery`)
+>    collapses the rail to a 68px icon rail — avatar + corner dot + a small corner
+>    count badge, names in the row `title` — supporting PR-4's rail auto-collapse.
+> 4. **Seated tabs + workspace-identity seat.** The tab band is a `--surface` strip
+>    whose ACTIVE tab lifts onto the content sheet (bg = `--bg`, a border minus its
+>    bottom edge, `margin-bottom:-1px` fusing it to the page); the sliding
+>    `--accent` underline is DELETED. Left of the tabs sits a `WorkspaceSeat`
+>    (`ProjectShell`) — the active scope's `emoji + name` (General → `💬 General`),
+>    a clean "you're inside a workspace" anchor with NO activity dot (that lives on
+>    the rail — Ryan's de-dup). Both palettes preserved.
+
 > **Light/dark theme toggle (2026-07-01).** The web chat is CSS-variable-driven:
 > `chat-react.html`'s stylesheet has ONE dark `:root` var set (the historical
 > default) and a `:root[data-theme="light"]` override set with an

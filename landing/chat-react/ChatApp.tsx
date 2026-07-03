@@ -723,9 +723,94 @@ function PendingBadge({ pending }: { pending: number }): React.JSX.Element | nul
 
 /** The General (no-project) scope glyph + a generic fallback for a project the
  *  server didn't send an emoji for (older row / degraded frame). Kept in sync
- *  with the server's `GENERAL_EMOJI` / `GENERIC_EMOJI` (default-emoji.ts). */
-const GENERAL_EMOJI = '💬'
-const GENERIC_PROJECT_EMOJI = '📁'
+ *  with the server's `GENERAL_EMOJI` / `GENERIC_EMOJI` (default-emoji.ts).
+ *  Exported so the workspace-identity seat (ProjectShell) resolves the same
+ *  glyphs the rail uses. */
+export const GENERAL_EMOJI = '💬'
+export const GENERIC_PROJECT_EMOJI = '📁'
+
+/** Resolve a project's rail glyph: the server emoji, else the generic fallback. */
+export function railEmojiFor(emoji: string | undefined): string {
+  return emoji !== undefined && emoji.length > 0 ? emoji : GENERIC_PROJECT_EMOJI
+}
+
+const RAIL_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
+const RAIL_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const
+
+/** Format a rail row's right-aligned timestamp from an ISO activity time, à la
+ *  Telegram: TODAY → `14:32` (24h), THIS WEEK → weekday (`Mon`), older → `Jun 28`.
+ *  Pure — `now` is injected so it unit-tests deterministically. Returns '' for a
+ *  missing/unparseable time (the row then renders no timestamp). */
+export function formatRailTime(iso: string | undefined, now: Date): string {
+  if (iso === undefined || iso.length === 0) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const startOfDay = (x: Date): number =>
+    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86_400_000)
+  if (dayDiff <= 0) {
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    return `${hh}:${mm}`
+  }
+  if (dayDiff < 7) return RAIL_WEEKDAYS[d.getDay()] ?? ''
+  return `${RAIL_MONTHS[d.getMonth()] ?? ''} ${d.getDate()}`
+}
+
+/** The rail avatar's work-activity dot modifier class (or null for no dot):
+ *  `working` → pulsing --work, `attention` → static --attention, else none.
+ *  General never shows a dot (it has no bound runs). */
+export function railDotClass(
+  activity: 'idle' | 'working' | 'attention' | undefined,
+  isGeneral: boolean,
+): 'car-rail-dot-work' | 'car-rail-dot-attention' | null {
+  if (isGeneral) return null
+  if (activity === 'working') return 'car-rail-dot-work'
+  if (activity === 'attention') return 'car-rail-dot-attention'
+  return null
+}
+
+/** The ⚛ atom mark (accent-lit): 3 rotated ellipses + a center dot. Inline SVG so
+ *  it inherits `currentColor` (the accent) and ships no external asset. */
+function AtomMark(): React.JSX.Element {
+  return (
+    <svg
+      className="car-rail-atom"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none" />
+      <ellipse cx="12" cy="12" rx="10" ry="4.3" />
+      <ellipse cx="12" cy="12" rx="10" ry="4.3" transform="rotate(60 12 12)" />
+      <ellipse cx="12" cy="12" rx="10" ry="4.3" transform="rotate(120 12 12)" />
+    </svg>
+  )
+}
+
+/** Subscribe to a CSS media query (SSR/test-safe: false when `matchMedia` is
+ *  unavailable). Drives the rail's narrow (icon-only) render branch. */
+export function useMediaQuery(query: string): boolean {
+  const read = (): boolean =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(query).matches
+      : false
+  const [matches, setMatches] = useState<boolean>(read)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mql = window.matchMedia(query)
+    const onChange = (): void => setMatches(mql.matches)
+    onChange()
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [query])
+  return matches
+}
 
 /** Telegram-style unread badge. Renders nothing when caught up; caps the
  *  displayed count at 99+ so a busy project can't blow out the row width. */
@@ -739,35 +824,82 @@ function UnreadBadge({ count }: { count: number }): React.JSX.Element | null {
   )
 }
 
-/** One rail row: emoji chip · label · unread badge. A single presentational
- *  component shared by General + every project so their look stays identical. */
+/** One rail row — a Telegram-style 2-line row: an emoji "avatar" with a corner
+ *  work-activity dot, name + timestamp on line 1, an ellipsised preview (own
+ *  messages prefixed `You:`) + unread badge on line 2. On the narrow (<1200px)
+ *  rail it collapses to the avatar + a corner count badge, with the name in the
+ *  row `title`. A single presentational component shared by General + every
+ *  project so their look stays identical. */
 function RailItem({
   emoji,
   label,
   active,
   unread,
+  activity,
+  preview,
+  previewFrom,
+  lastActivityAt,
+  isGeneral,
+  narrow,
+  now,
   onClick,
 }: {
   emoji: string
   label: string
   active: boolean
   unread: number
+  activity?: 'idle' | 'working' | 'attention'
+  preview?: string | null
+  previewFrom?: 'user' | 'agent' | null
+  lastActivityAt?: string
+  isGeneral: boolean
+  narrow: boolean
+  now: Date
   onClick: () => void
 }): React.JSX.Element {
+  const dotClass = railDotClass(activity, isGeneral)
+  const timeText = formatRailTime(lastActivityAt, now)
+  const previewText = preview !== undefined && preview !== null ? preview : ''
+  const showYou = previewFrom === 'user' && previewText.length > 0
+  const countText = unread > 99 ? '99+' : String(unread)
   return (
     <button
       type="button"
-      className={`car-rail-item${active ? ' car-rail-item-active' : ''}${
-        unread > 0 && !active ? ' car-rail-item-unread' : ''
-      }`}
+      className={`car-rail-item${narrow ? ' car-rail-item-narrow' : ''}${
+        active ? ' car-rail-item-active' : ''
+      }${unread > 0 && !active ? ' car-rail-item-unread' : ''}`}
       onClick={onClick}
       aria-current={active ? 'true' : undefined}
+      {...(narrow ? { title: label } : {})}
     >
-      <span className="car-rail-emoji" aria-hidden="true">
-        {emoji}
+      <span className="car-rail-avatar">
+        <span className="car-rail-emoji" aria-hidden="true">
+          {emoji}
+        </span>
+        {dotClass !== null ? (
+          <span className={`car-rail-dot ${dotClass}`} aria-hidden="true" />
+        ) : null}
+        {narrow && unread > 0 ? (
+          <span className="car-rail-count" aria-label={`${unread} unread`}>
+            {countText}
+          </span>
+        ) : null}
       </span>
-      <span className="car-rail-label">{label}</span>
-      <UnreadBadge count={unread} />
+      {narrow ? null : (
+        <span className="car-rail-meta">
+          <span className="car-rail-line1">
+            <span className="car-rail-name">{label}</span>
+            {timeText.length > 0 ? <span className="car-rail-time">{timeText}</span> : null}
+          </span>
+          <span className="car-rail-line2">
+            <span className="car-rail-preview">
+              {showYou ? <span className="car-rail-you">You: </span> : null}
+              {previewText}
+            </span>
+            <UnreadBadge count={unread} />
+          </span>
+        </span>
+      )}
     </button>
   )
 }
@@ -778,6 +910,8 @@ export function TopicRail({
   onSelect,
   onCreate,
   creating,
+  narrow: narrowOverride,
+  now,
 }: {
   projects: ProjectTab[]
   activeId: string | null
@@ -785,11 +919,19 @@ export function TopicRail({
   /** POSTs the new project; resolves to an error string to show inline, or null on success. */
   onCreate: (name: string) => Promise<string | null>
   creating: boolean
+  /** Test override for the narrow (icon-rail) branch; the live app derives it
+   *  from the viewport via `useMediaQuery('(max-width: 1200px)')`. */
+  narrow?: boolean
+  /** Injected "now" for deterministic rail-timestamp formatting in tests. */
+  now?: Date
 }): React.JSX.Element {
-  // Inline create-project input (mirrors mobile `app/app/projects`): a closed
-  // "+ Create Project" button toggles to a name field with Enter→submit /
-  // Esc→cancel, replacing the native window.prompt. `createError` renders the
-  // failure inline instead of a blocking window.alert.
+  const autoNarrow = useMediaQuery('(max-width: 1200px)')
+  const narrow = narrowOverride ?? autoNarrow
+  const nowDate = now ?? new Date()
+  // Inline create-project input (mirrors mobile `app/app/projects`): the header
+  // "+" toggles a name field with Enter→submit / Esc→cancel, replacing the
+  // native window.prompt. `createError` renders the failure inline instead of a
+  // blocking window.alert.
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
@@ -820,34 +962,29 @@ export function TopicRail({
   }
 
   return (
-    <aside className="car-rail" aria-label="Projects">
-      <div className="car-rail-title">Projects</div>
-      <div className="car-rail-list">
-        <RailItem
-          emoji={GENERAL_EMOJI}
-          label="General"
-          active={activeId === null}
-          unread={0}
-          onClick={() => onSelect(null)}
-        />
-        {projects.map((p) => (
-          <RailItem
-            key={p.id}
-            emoji={p.emoji !== undefined && p.emoji.length > 0 ? p.emoji : GENERIC_PROJECT_EMOJI}
-            label={p.label}
-            active={activeId === p.id}
-            // The project the user is viewing is, by definition, read — zero its
-            // badge locally so a just-arrived reply on the ACTIVE project doesn't
-            // flash a stale count before the next server frame catches up.
-            unread={activeId === p.id ? 0 : (p.unread ?? 0)}
-            onClick={() => onSelect(p.id)}
-          />
-        ))}
+    <aside className={`car-rail${narrow ? ' car-rail-narrow' : ''}`} aria-label="Projects">
+      {/* ⚛ Neutron branding lockup — replaces the old "PROJECTS" caps label. The
+          new-project "+" sits on the right of the header (toggles the inline
+          create form below). */}
+      <div className="car-rail-head">
+        <AtomMark />
+        <span className="car-rail-wordmark">Neutron</span>
+        <button
+          type="button"
+          className="car-rail-newp"
+          onClick={() => {
+            if (creating) return
+            setCreateError(null)
+            setCreateOpen((v) => !v)
+          }}
+          disabled={creating}
+          aria-label="New project"
+          aria-expanded={createOpen}
+          title="New project"
+        >
+          +
+        </button>
       </div>
-      {/* Pinned to the bottom (the rail is a flex column; the closed button /
-          open form both carry `margin-top:auto`). Always visible, even when only
-          General exists, so a skip-import owner can jump straight into a fresh
-          project + its tabs. */}
       {createOpen ? (
         <div className="car-rail-create-form">
           <input
@@ -893,20 +1030,39 @@ export function TopicRail({
             </button>
           </div>
         </div>
-      ) : (
-        <button
-          type="button"
-          className="car-rail-create"
-          onClick={() => {
-            setCreateError(null)
-            setCreateOpen(true)
-          }}
-          disabled={creating}
-          aria-label="Create a new project"
-        >
-          + Create Project
-        </button>
-      )}
+      ) : null}
+      <div className="car-rail-list">
+        <RailItem
+          emoji={GENERAL_EMOJI}
+          label="General"
+          active={activeId === null}
+          unread={0}
+          isGeneral
+          narrow={narrow}
+          now={nowDate}
+          onClick={() => onSelect(null)}
+        />
+        {projects.map((p) => (
+          <RailItem
+            key={p.id}
+            emoji={railEmojiFor(p.emoji)}
+            label={p.label}
+            active={activeId === p.id}
+            // The project the user is viewing is, by definition, read — zero its
+            // badge locally so a just-arrived reply on the ACTIVE project doesn't
+            // flash a stale count before the next server frame catches up.
+            unread={activeId === p.id ? 0 : (p.unread ?? 0)}
+            {...(p.activity !== undefined ? { activity: p.activity } : {})}
+            preview={p.preview ?? null}
+            previewFrom={p.preview_from ?? null}
+            {...(p.last_activity_at !== undefined ? { lastActivityAt: p.last_activity_at } : {})}
+            isGeneral={false}
+            narrow={narrow}
+            now={nowDate}
+            onClick={() => onSelect(p.id)}
+          />
+        ))}
+      </div>
     </aside>
   )
 }

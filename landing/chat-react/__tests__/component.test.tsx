@@ -9,6 +9,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
+import type { ProjectTab } from '../config.ts'
+
 beforeAll(() => {
   GlobalRegistrator.register({ url: 'https://sam.neutron.test/chat?client=react' })
   // assistant-ui touches a couple of browser APIs happy-dom doesn't ship.
@@ -876,10 +878,11 @@ describe('ChatApp render (happy-dom)', () => {
       root.render(<Harness />)
     })
 
-    // The closed button is always present, even with zero projects (only General).
-    const createBtn = container.querySelector('.car-rail-create') as HTMLButtonElement | null
+    // The header "+" new-project affordance is always present (even with zero
+    // projects — only General). It replaced the old bottom "Create Project" button.
+    const createBtn = container.querySelector('.car-rail-newp') as HTMLButtonElement | null
     expect(createBtn).not.toBeNull()
-    expect(createBtn!.textContent).toContain('Create Project')
+    expect(createBtn!.textContent).toContain('+')
 
     // Clicking it opens the INLINE name input (no native window.prompt).
     await act(async () => {
@@ -888,8 +891,8 @@ describe('ChatApp render (happy-dom)', () => {
     })
     const input = container.querySelector('.car-rail-input') as HTMLInputElement | null
     expect(input).not.toBeNull()
-    // The closed button is replaced by the form.
-    expect(container.querySelector('.car-rail-create')).toBeNull()
+    // The header "+" stays put (it's a toggle); the inline form is now open.
+    expect(container.querySelector('.car-rail-create-form')).not.toBeNull()
 
     // Type a name into the controlled input (native setter + input event), then
     // submit with Enter.
@@ -917,9 +920,9 @@ describe('ChatApp render (happy-dom)', () => {
     expect(headers.get('authorization')).toBe('Bearer dev:sam')
     // …and navigated into the new project.
     expect(controller.getViewModel().projectId).toBe('taxes')
-    // …and the inline form closed back to the button on success.
+    // …and the inline form closed on success (the header "+" stays present).
     expect(container.querySelector('.car-rail-input')).toBeNull()
-    expect(container.querySelector('.car-rail-create')).not.toBeNull()
+    expect(container.querySelector('.car-rail-newp')).not.toBeNull()
 
     await act(async () => {
       root.unmount()
@@ -1004,9 +1007,9 @@ describe('ChatApp render (happy-dom)', () => {
       root.render(<Harness />)
     })
 
-    // Open the inline form.
+    // Open the inline form via the header "+".
     await act(async () => {
-      ;(container.querySelector('.car-rail-create') as HTMLButtonElement).click()
+      ;(container.querySelector('.car-rail-newp') as HTMLButtonElement).click()
       await tick()
     })
     const input = container.querySelector('.car-rail-input') as HTMLInputElement | null
@@ -1020,14 +1023,14 @@ describe('ChatApp render (happy-dom)', () => {
     expect(calls.length).toBe(0)
     expect(container.querySelector('.car-rail-create-error')).not.toBeNull()
 
-    // Escape closes the form back to the button (still no POST).
+    // Escape closes the form (still no POST); the header "+" stays present.
     await act(async () => {
       input!.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
       await tick()
     })
     expect(calls.length).toBe(0)
     expect(container.querySelector('.car-rail-input')).toBeNull()
-    expect(container.querySelector('.car-rail-create')).not.toBeNull()
+    expect(container.querySelector('.car-rail-newp')).not.toBeNull()
 
     await act(async () => {
       root.unmount()
@@ -1155,6 +1158,7 @@ describe('TopicRail render (rail-redesign)', () => {
           onSelect: () => {},
           onCreate: async () => null,
           creating: false,
+          narrow: false,
         }),
       )
     })
@@ -1197,6 +1201,7 @@ describe('TopicRail render (rail-redesign)', () => {
           onSelect: () => {},
           onCreate: async () => null,
           creating: false,
+          narrow: false,
         }),
       )
     })
@@ -1205,5 +1210,157 @@ describe('TopicRail render (rail-redesign)', () => {
       root.unmount()
     })
     container.remove()
+  })
+})
+
+describe('rail helpers (M1 UX redesign — pure)', () => {
+  it('formatRailTime: today→HH:MM, this week→weekday, older→Mon Day, blank on missing', async () => {
+    const { formatRailTime } = await import('../ChatApp.tsx')
+    const now = new Date('2026-07-02T14:32:00')
+    // Same calendar day → 24h clock.
+    expect(formatRailTime('2026-07-02T09:05:00', now)).toBe('09:05')
+    expect(formatRailTime('2026-07-02T00:00:00', now)).toBe('00:00')
+    // Within the last week (but not today) → weekday abbreviation.
+    expect(formatRailTime('2026-06-29T10:00:00', now)).toMatch(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/)
+    // Older than a week → "Mon Day".
+    expect(formatRailTime('2026-06-15T10:00:00', now)).toBe('Jun 15')
+    // Missing / unparseable → empty (row renders no timestamp).
+    expect(formatRailTime(undefined, now)).toBe('')
+    expect(formatRailTime('', now)).toBe('')
+    expect(formatRailTime('not-a-date', now)).toBe('')
+  })
+
+  it('railDotClass: working→work, attention→attention, idle/undefined→none, General→none', async () => {
+    const { railDotClass } = await import('../ChatApp.tsx')
+    expect(railDotClass('working', false)).toBe('car-rail-dot-work')
+    expect(railDotClass('attention', false)).toBe('car-rail-dot-attention')
+    expect(railDotClass('idle', false)).toBeNull()
+    expect(railDotClass(undefined, false)).toBeNull()
+    // General never shows a dot even if a stray activity slips through.
+    expect(railDotClass('working', true)).toBeNull()
+  })
+
+  it('railEmojiFor: server emoji wins, generic fallback otherwise', async () => {
+    const { railEmojiFor } = await import('../ChatApp.tsx')
+    expect(railEmojiFor('🚀')).toBe('🚀')
+    expect(railEmojiFor(undefined)).toBe('📁')
+    expect(railEmojiFor('')).toBe('📁')
+  })
+})
+
+describe('TopicRail 2-line rows + branding (M1 UX redesign)', () => {
+  const renderRail = async (
+    props: { projects: ProjectTab[]; activeId: string | null; narrow?: boolean; now?: Date },
+  ): Promise<{ container: HTMLElement; cleanup: () => Promise<void> }> => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const React = await import('react')
+    const { TopicRail } = await import('../ChatApp.tsx')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        React.createElement(TopicRail, {
+          onSelect: () => {},
+          onCreate: async () => null,
+          creating: false,
+          ...props,
+        }),
+      )
+    })
+    return {
+      container,
+      cleanup: async () => {
+        await act(async () => {
+          root.unmount()
+        })
+        container.remove()
+      },
+    }
+  }
+
+  it('renders the ⚛ atom + Neutron wordmark header with the "+" new-project affordance', async () => {
+    const { container, cleanup } = await renderRail({ projects: [], activeId: null, narrow: false })
+    // No old "PROJECTS" caps label.
+    expect(container.querySelector('.car-rail-title')).toBeNull()
+    expect(container.querySelector('.car-rail-atom')).not.toBeNull()
+    expect(container.querySelector('.car-rail-atom')!.tagName.toLowerCase()).toBe('svg')
+    expect(container.querySelector('.car-rail-wordmark')!.textContent).toBe('Neutron')
+    const newp = container.querySelector('.car-rail-newp') as HTMLButtonElement
+    expect(newp).not.toBeNull()
+    expect(newp.getAttribute('aria-label')).toBe('New project')
+    await cleanup()
+  })
+
+  it('wide rows carry emoji+dot, name+timestamp, preview with a You: prefix on own messages', async () => {
+    const now = new Date('2026-07-02T14:32:00')
+    const { container, cleanup } = await renderRail({
+      now,
+      activeId: null,
+      narrow: false,
+      projects: [
+        {
+          id: 'p1',
+          label: 'Neutron',
+          emoji: '🚀',
+          unread: 2,
+          activity: 'working',
+          preview: 'Building the task engine…',
+          preview_from: 'agent',
+          last_activity_at: '2026-07-02T09:05:00',
+        },
+        {
+          id: 'p2',
+          label: 'Pristine',
+          emoji: '🧪',
+          unread: 0,
+          activity: 'attention',
+          preview: 'remind me to review the pipeline',
+          preview_from: 'user',
+          last_activity_at: '2026-06-15T10:00:00',
+        },
+      ],
+    })
+    const rows = Array.from(container.querySelectorAll('.car-rail-item'))
+    // General + 2 projects.
+    expect(rows.length).toBe(3)
+    // General (row 0) has no work-activity dot.
+    expect(rows[0]!.querySelector('.car-rail-dot')).toBeNull()
+    // p1 pulses a work dot; p2 shows the static attention dot.
+    expect(rows[1]!.querySelector('.car-rail-dot-work')).not.toBeNull()
+    expect(rows[2]!.querySelector('.car-rail-dot-attention')).not.toBeNull()
+    // Names + timestamps on line 1.
+    expect(rows[1]!.querySelector('.car-rail-name')!.textContent).toBe('Neutron')
+    expect(rows[1]!.querySelector('.car-rail-time')!.textContent).toBe('09:05')
+    expect(rows[2]!.querySelector('.car-rail-time')!.textContent).toBe('Jun 15')
+    // p1's preview (agent) has NO You: prefix; p2's (user) does.
+    expect(rows[1]!.querySelector('.car-rail-you')).toBeNull()
+    expect(rows[2]!.querySelector('.car-rail-you')!.textContent).toBe('You: ')
+    expect(rows[2]!.querySelector('.car-rail-preview')!.textContent).toContain(
+      'remind me to review the pipeline',
+    )
+    await cleanup()
+  })
+
+  it('narrow rail collapses to icon rows: no meta, a corner count badge, name in the title', async () => {
+    const { container, cleanup } = await renderRail({
+      activeId: null,
+      narrow: true,
+      projects: [{ id: 'p1', label: 'Neutron', emoji: '🚀', unread: 2, activity: 'working' }],
+    })
+    const rows = Array.from(container.querySelectorAll('.car-rail-item'))
+    expect(rows.every((r) => r.className.includes('car-rail-item-narrow'))).toBe(true)
+    // The 2-line meta is not rendered in the icon rail…
+    expect(container.querySelector('.car-rail-meta')).toBeNull()
+    expect(container.querySelector('.car-rail-badge')).toBeNull()
+    // …the unread count moves to the corner overlay, and the name lives in title.
+    const project = rows[1] as HTMLElement
+    expect(project.querySelector('.car-rail-count')!.textContent).toBe('2')
+    expect(project.querySelector('.car-rail-emoji')!.textContent).toBe('🚀')
+    expect(project.getAttribute('title')).toBe('Neutron')
+    // The work dot still rides the avatar in the collapsed rail.
+    expect(project.querySelector('.car-rail-dot-work')).not.toBeNull()
+    await cleanup()
   })
 })
