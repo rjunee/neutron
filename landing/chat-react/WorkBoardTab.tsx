@@ -24,7 +24,8 @@
  * reorder by DRAG (a ⠿ grip; arrow-keys on the grip for keyboard parity) instead
  * of ▲▼ arrows; delete asks to confirm first; ▶ starts a not-yet-started card
  * and ↻ retries a failed one. The add-something-to-do affordance lives at the
- * BOTTOM of the list.
+ * BOTTOM of the active/upcoming items, ABOVE the collapsible "Done · N" section
+ * (#344).
  *
  * ── Order is the engine's ───────────────────────────────────────────────────
  * The store returns active+next first (by `sort_order`) then completed
@@ -287,7 +288,7 @@ export function WorkBoardTab({
   const [actionError, setActionError] = useState<string | null>(null)
   const [completedOpen, setCompletedOpen] = useState(false)
 
-  // Add composer (now at the BOTTOM of the list).
+  // Add composer (bottom of the active items, above Done — #344).
   const [newTitle, setNewTitle] = useState('')
   const [adding, setAdding] = useState(false)
 
@@ -575,6 +576,35 @@ export function WorkBoardTab({
     [active, reorderTo],
   )
 
+  // Item #344 — the add-something-to-do composer now sits at the BOTTOM of the
+  // active/upcoming items and ABOVE the collapsible "Done · N" section (it used
+  // to be a pinned footer BELOW Done). Rendered in-flow so it scrolls with the
+  // list; shared between the populated and empty branches.
+  const addForm = (
+    <form
+      className="cwb-add"
+      onSubmit={(e) => {
+        e.preventDefault()
+        addItem()
+      }}
+    >
+      <input
+        className="cwb-add-input"
+        placeholder="Add something to do…"
+        value={newTitle}
+        onChange={(e) => setNewTitle(e.target.value)}
+        aria-label="New work item"
+      />
+      <button
+        type="submit"
+        className="cwb-btn cwb-btn-primary"
+        disabled={adding || newTitle.trim().length === 0}
+      >
+        {adding ? 'Adding…' : 'Add'}
+      </button>
+    </form>
+  )
+
   return (
     <div className="cwb">
       {actionError !== null ? <div className="cwb-error">{actionError}</div> : null}
@@ -585,9 +615,12 @@ export function WorkBoardTab({
         ) : listError !== null ? (
           <div className="cwb-empty">{listError}</div>
         ) : active.length === 0 && completed.length === 0 ? (
-          <div className="cwb-empty cwb-empty-zero">
-            No work tracked yet. Ask Neutron to start something, or add an item.
-          </div>
+          <>
+            <div className="cwb-empty cwb-empty-zero">
+              No work tracked yet. Ask Neutron to start something, or add an item.
+            </div>
+            {addForm}
+          </>
         ) : (
           <>
             <ul className="cwb-ul" aria-label="Active and upcoming">
@@ -634,6 +667,9 @@ export function WorkBoardTab({
                 />
               ))}
             </ul>
+
+            {/* #344 — add box at the bottom of active items, ABOVE Done. */}
+            {addForm}
 
             {completed.length > 0 ? (
               <div className="cwb-completed">
@@ -689,32 +725,6 @@ export function WorkBoardTab({
           </>
         )}
       </div>
-
-      {/* Add-something-to-do — at the BOTTOM (M1 redesign). */}
-      <footer className="cwb-foot">
-        <form
-          className="cwb-add"
-          onSubmit={(e) => {
-            e.preventDefault()
-            addItem()
-          }}
-        >
-          <input
-            className="cwb-add-input"
-            placeholder="Add something to do…"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            aria-label="New work item"
-          />
-          <button
-            type="submit"
-            className="cwb-btn cwb-btn-primary"
-            disabled={adding || newTitle.trim().length === 0}
-          >
-            {adding ? 'Adding…' : 'Add'}
-          </button>
-        </form>
-      </footer>
     </div>
   )
 }
