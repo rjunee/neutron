@@ -2903,6 +2903,10 @@ export function buildOpenGraphComposer(
         if (out.upload_affordance !== undefined) {
           adapter_options['upload_affordance'] = out.upload_affordance
         }
+        // FIX #333 — a transient system notice (the cold-start "Waking up…" ack)
+        // is live-only: carry the flag so `AppWsAdapter.send` fans it out WITHOUT
+        // persisting a chat_log row (no stray bubble on reload).
+        if (out.system_notice === true) adapter_options['system_notice'] = true
         if (Object.keys(adapter_options).length > 0) msg.adapter_options = adapter_options
         void appWsHolder.adapter?.send(msg)
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
@@ -2911,7 +2915,10 @@ export function buildOpenGraphComposer(
         // its unread badge updates live. Best-effort + General-exempt (a General
         // reply carries no project_id). The stamp is a tiny UPDATE; the fan is
         // an idempotent full-snapshot push, so doing it per agent turn is fine.
-        if (project_id !== undefined && project_id.length > 0) {
+        // FIX #333 — a transient system notice (cold-start ack) is NOT real
+        // activity: it's never persisted, so it must not pop the project or
+        // touch `last_activity_at`.
+        if (out.system_notice !== true && project_id !== undefined && project_id.length > 0) {
           // Stamp THEN emit — the re-fanned frame is ordered by
           // `last_activity_at`, so the UPDATE must commit before we rebuild it or
           // this project wouldn't yet have popped to the top. Async IIFE keeps

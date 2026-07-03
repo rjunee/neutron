@@ -577,9 +577,17 @@
   .cwb-tag-failed { color: var(--phase-failed-fg); background: var(--phase-failed-bg); }
   /* round N — muted, next to the tag. No elapsed-minutes timer (M1: dropped). */
   .cwb-round { flex: 0 0 auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
-  /* drag handle (⠿) — replaces the ▲▼ reorder arrows; grab cursor, hover-revealed. */
-  .cwb-drag { cursor: grab; }
+  /* FIX #341 — drag handle: bare ⠿ grip-dots, NO border/button chrome, so it
+     reads as a draggable grip rather than a third action button beside ▶/✕.
+     Muted (`--faint`, brightening to `--muted` on hover) with a grab/grabbing
+     cursor. It is a <button> (keyboard-reorder a11y), so reset its default chrome. */
+  .cwb-drag {
+    background: transparent; border: 0; margin: 0; padding: 2px 4px;
+    color: var(--faint); font-size: 13px; line-height: 1; cursor: grab;
+  }
+  .cwb-drag:hover:not(:disabled) { color: var(--muted); }
   .cwb-drag:active { cursor: grabbing; }
+  .cwb-drag:disabled { opacity: .35; cursor: default; }
   .cwb-row-dragging { opacity: .45; }
   .cwb-row-dragover { background: var(--accent-tint); }
   .cwb-title {
@@ -708,9 +716,12 @@
     width: 8px; height: 8px; border-radius: 50%;
     box-shadow: 0 0 0 2px var(--surface);
   }
-  .car-rail-dot-work { background: var(--work); animation: car-rail-pulse 2.4s ease-in-out infinite; }
+  /* FIX #335 — a working project's rail dot MATCHES the work-list building dot
+     exactly: the building blue (`--phase-build-fg`, NOT the separate `--work`
+     token) with the shared `cwb-pulse` (opacity 1→.4→1, 2s). `attention` stays a
+     STATIC amber (`--attention`) reserved for a genuine stall/failed-not-done. */
+  .car-rail-dot-work { background: var(--phase-build-fg); animation: cwb-pulse 2s ease-in-out infinite; }
   .car-rail-dot-attention { background: var(--attention); }
-  @keyframes car-rail-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
   @media (prefers-reduced-motion: reduce) { .car-rail-dot-work { animation: none; } }
   .car-rail-meta { min-width: 0; }
   .car-rail-line1 { display: flex; align-items: baseline; gap: 8px; }
@@ -825,6 +836,26 @@
   .car-bubble-user { background: var(--user-bubble); color: var(--user-fg); border-bottom-right-radius: 4px; }
   .car-bubble-agent { background: var(--agent-bubble); color: var(--agent-fg); border-bottom-left-radius: 4px; }
   .car-bubble img { max-width: 100%; border-radius: 12px; display: block; margin-top: 6px; }
+  /* FIX #338 — subtle per-message timestamp (iMessage/Telegram-style). Inherits
+     the bubble's own fg via currentColor (legible on both the tinted user bubble
+     and the agent bubble) at low opacity; hovering shows the full date (title
+     tooltip). Trailing edge: right in a user bubble, left in an agent bubble. */
+  .car-time {
+    display: block; margin-top: 2px; font-size: 10px; line-height: 1;
+    opacity: .55; font-variant-numeric: tabular-nums; cursor: default;
+  }
+  .car-bubble-user .car-time { text-align: right; }
+  /* FIX #338 — centered "Today / Yesterday / Mon Jul 1" day divider between
+     messages when the calendar day changes; hairline rules flank the label. */
+  .car-day-divider {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; max-width: var(--chat-col); margin: 12px auto 6px;
+    color: var(--muted); font-size: 11px; font-weight: 600;
+  }
+  .car-day-divider::before, .car-day-divider::after {
+    content: ''; flex: 1 1 auto; height: 1px; background: var(--border);
+  }
+  .car-day-divider span { flex: 0 0 auto; }
   .car-typing { display: inline-flex; gap: 4px; align-items: center; }
   .car-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: car-blink 1.4s infinite both; }
   /* M1 UX REDESIGN — quiet centered SYSTEM-notification pill (cold-start

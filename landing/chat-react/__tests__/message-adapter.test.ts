@@ -13,6 +13,7 @@ function msg(over: Partial<RenderMessage> = {}): RenderMessage {
     streaming: false,
     attachments: null,
     createdAt: 1,
+    timestampMs: null,
     delivery: null,
     reactions: [],
     edited: false,

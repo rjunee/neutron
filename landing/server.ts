@@ -257,6 +257,15 @@ export interface AgentMessageOutbound {
    * inbound handler covers § 6.3.
    */
   upload_affordance?: { source: 'chatgpt' | 'claude' }
+  /**
+   * FIX #333 — mark a TRANSIENT system notification (e.g. the cold-start
+   * "⏳ Waking up…" ack): rendered LIVE as a quiet centered system pill and
+   * NEVER persisted to the durable chat_log, so a project switch/reload can't
+   * re-hydrate it as a stray chat bubble. The client already routes
+   * `system_notice === true` to the pill channel; the persistence layer
+   * (`AppWsAdapter.send`) treats it as ephemeral (live fan-out only, no row).
+   */
+  system_notice?: boolean
 }
 
 /**

@@ -171,6 +171,14 @@ export class AppWsAdapter implements ChannelAdapter {
    */
   async send(message: OutgoingMessage): Promise<string> {
     const envelope = this.outgoingToEnvelope(message)
+    // FIX #333 — a TRANSIENT system notification (the cold-start "Waking up…"
+    // ack) is EPHEMERAL: fan it out to the live socket so the client shows the
+    // pill, but NEVER persist it (no chat_log row, no seq, no delivered receipt),
+    // so a reload/project-switch can't re-hydrate it as a stray chat bubble.
+    if (envelope.system_notice === true) {
+      const delivered = this.registry.send(message.topic.channel_topic_id, envelope)
+      return delivered ? `app-ws:${envelope.message_id}` : `app-ws:dropped:${envelope.message_id}`
+    }
     if (this.chat_log !== undefined) {
       try {
         const result = await this.chat_log.append({
@@ -780,6 +788,9 @@ export class AppWsAdapter implements ChannelAdapter {
       }
       const allowFreeform = opts['allow_freeform']
       if (typeof allowFreeform === 'boolean') env.allow_freeform = allowFreeform
+      // FIX #333 — transient system-notice (cold-start ack) marker. Drives the
+      // client's quiet-pill render AND `send()`'s ephemeral (no-persist) path.
+      if (opts['system_notice'] === true) env.system_notice = true
       // P5.2 — agent topic-handlers carry `project_id` from the
       // inbound `IncomingEvent.adapter_metadata` onto their outbound
       // OutgoingMessage.adapter_options so the agent reply lands in

@@ -27,6 +27,7 @@ import {
 } from 'react-native';
 
 import { SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { PHASE } from '../lib/theme';
 import {
   railDotKind,
   type ProjectActivity,
@@ -82,7 +83,9 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
     return () => loop.stop();
   }, [kind, reduceMotion, opacity]);
 
-  const color = kind === 'attention' ? THEME.attention : THEME.work;
+  // FIX #335 — the pulsing `work` dot uses the building blue (`PHASE.build.fg`),
+  // matching the Work-list building dot exactly; `attention` stays a static amber.
+  const color = kind === 'attention' ? THEME.attention : PHASE.build.fg;
   return (
     <Animated.View
       testID={`rail-dot-${kind}`}

@@ -62,6 +62,21 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.phase_label).toBe('building')
   })
 
+  // FIX #336 — a `fixing` step (post-review) must show round ≥ 2, never the
+  // contradictory "round 1" (the outer `run.round` stays 1 for the whole
+  // in-process workflow; the round is derived off the inner checkpoint).
+  test('argus-request-changes (fixing) surfaces round 2, not the outer round 1', () => {
+    const p = deriveRunProgress(run({ round: 1, inner_checkpoint: 'argus-request-changes' }), T0)
+    expect(p.step_label).toBe('fixing')
+    expect(p.round).toBe(2)
+  })
+
+  test('a first build (no checkpoint) stays round 1', () => {
+    const p = deriveRunProgress(run({ round: 1, inner_checkpoint: null }), T0)
+    expect(p.step_label).toBe('building')
+    expect(p.round).toBe(1)
+  })
+
   test('fix-round-N checkpoint → building round N', () => {
     const p = deriveRunProgress(run({ inner_checkpoint: 'fix-round-3' }), T0)
     expect(p.phase_label).toBe('building')

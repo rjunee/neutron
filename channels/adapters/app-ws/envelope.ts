@@ -270,6 +270,13 @@ export interface AppWsOutboundAgentMessage {
    */
   delivered_by?: ReadonlyArray<string>
   read_by?: ReadonlyArray<string>
+  /**
+   * FIX #333 — a TRANSIENT system notification (the cold-start "⏳ Waking up…"
+   * ack): the client renders it as a quiet centered system pill, and it is
+   * NEVER persisted to the durable chat_log (no `seq`), so a reload can't
+   * re-hydrate it as a chat bubble. Absent for a normal agent reply.
+   */
+  system_notice?: boolean
 }
 
 /**

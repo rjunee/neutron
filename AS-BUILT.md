@@ -2,6 +2,56 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-03 — UX BATCH-2: 5 chat/work-board polish fixes (#333/#335/#336/#338/#341)
+
+**Why.** Five small UI defects from Ryan's live review 2026-07-03. All presentational /
+run-progress; no feature flags; kept clear of trident/merge + build-dispatch (a
+separate forge owns #334/#337/#339/#340/#342).
+
+**Spec-conformance diff.** SPEC = rail dot pulses in work-blue; transient system pills
+never persisted; Fixing shows round 2+; chat has timestamps+date-hover+day-dividers;
+drag handle is grip-dots no-border. CURRENT (pre-PR) = rail dot used the separate
+`--work` token; waking-up pill persisted→re-hydrated as a bubble on reload; Fixing
+showed round 1; chat had no timestamps; drag handle was a bordered `.cwb-btn` box.
+GAP = all five. THIS PR = all five. OUT = build-dispatch behavior + trident-parallel.
+
+**What shipped.**
+- **#335 rail activity dot (web + mobile).** The `working` rail dot now MATCHES the
+  Work-list building dot exactly: the building blue (`--phase-build-fg` /
+  `PHASE.build.fg`, not the separate `--work` token) with the shared `cwb-pulse`
+  (opacity 1→.4→1, 2s, prefers-reduced-motion gated). `attention` stays a STATIC
+  amber (`--attention`) reserved for a genuine stall/failed-not-done.
+  (`landing/chat-react.html` `.car-rail-dot-work`; `app/components/ProjectRail.tsx`
+  `ActivityDot`.)
+- **#333 transient system pills are live-only.** The cold-start "⏳ Waking up…" ack
+  now rides a first-class `system_notice: true` flag end-to-end
+  (`AgentMessageOutbound` → `buildAppWsSendReply` adapter_options →
+  `AppWsAdapter.send`): the adapter fans it out to the live socket but SKIPS the
+  durable `chat_log` row (and the project `last_activity_at` stamp), so a
+  reload/project-switch can't re-hydrate it as a stray chat bubble. The client
+  already routed `system_notice` to the quiet pill.
+- **#336 Fixing shows the fix-round.** `deriveRunProgress` derives the displayed
+  `round` from the inner checkpoint (the outer `code_trident_runs.round` stays 1 for
+  the whole in-process workflow — `checkpoint()` never bumps it): a
+  `argus-request-changes` (fixing) step now floors the round at 2; `fix-round-N`
+  carries N; a first build stays round 1. (`trident/run-progress.ts` only — no
+  inner-workflow edit, to stay clear of the trident forge.)
+- **#338 chat timestamps + date-on-hover + day dividers.** `RenderMessage` gains a
+  real-wallclock `timestampMs` (durable rows only); a context-keyed meta index
+  (`buildMetaIndex`) tags each bubble with a subtle trailing `HH:MM` time (full date
+  on hover via `title`) and a centered "Today / Yesterday / Mon Jul 1" day divider
+  above the first message of a new calendar day. (`landing/chat-react/controller.ts`,
+  `ChatApp.tsx`, `.car-time`/`.car-day-divider` CSS.)
+- **#341 drag handle is grip-dots.** The reorder handle drops the `.cwb-btn`
+  bordered-box chrome — just the ⠿ grip glyph, muted (`--faint`→`--muted` on hover),
+  grab/grabbing cursor — so it reads as a draggable grip, not a third action button
+  next to ▶/✕. (`landing/chat-react/WorkBoardTab.tsx` + `.cwb-drag` CSS.)
+
+**Verify.** tsc clean (root + chat-react + trident + app); 415+ chat-react/app-ws
+suites green + new tests for the round derivation, the ephemeral-send no-persist path,
+and the time/divider helpers; leak-gate SILENT. Both light+dark preserved;
+prefers-reduced-motion gated.
+
 ## 2026-07-02 — M1 UX redesign PR-5: Documents interface (desktop 2-pane + mobile drill-down)
 
 **Why.** The signed-off M1 UX redesign (proposal §4) restructures the docs

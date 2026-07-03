@@ -858,7 +858,7 @@ function WorkBoardRow({
           <div className="cwb-actions">
             <button
               type="button"
-              className="cwb-btn cwb-btn-icon cwb-drag"
+              className="cwb-drag"
               draggable
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}

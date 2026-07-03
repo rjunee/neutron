@@ -145,6 +145,20 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
   const terminal = TERMINAL_PHASES.includes(run.phase)
 
   let phase_label = baseLabel(run.phase)
+  // FIX #336 — the DISPLAYED round is the inner fix-iteration, NOT the outer
+  // `code_trident_runs.round`. The review→fix cycle happens ENTIRELY inside the
+  // in-process inner workflow (`inner-workflow.mjs`); its `checkpoint()` only ever
+  // re-stamps `inner_checkpoint` and never bumps the outer `round` column, so
+  // `run.round` is pinned at 1 for the whole build. Deriving the round off the
+  // checkpoint fixes a `fixing` item (a POST-review fix round) showing the
+  // contradictory "round 1". Contract (see {@link RunStepLabel}):
+  //   building (first)          → round 1   (cp null)
+  //   reviewing (forge-done)    → round 1   (first review of the first build)
+  //   fixing (request-changes)  → round ≥ 2 (a post-review fix round is starting)
+  //   reviewing (fix-round-N)   → round N   (Nth fix built, re-review running)
+  // The exact fix-round is unambiguous from `fix-round-N`; a bare
+  // `argus-request-changes` only tells us a fix round is IMMINENT (≥ 2), so we
+  // floor it at 2 (the very next checkpoint `fix-round-N` carries the precise N).
   let round = run.round > 0 ? run.round : 1
 
   // Refine the LIVE (non-terminal) label with the inner workflow's checkpoint —
@@ -159,7 +173,8 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
       // Build finished → reviewing (or approved, about to merge).
       phase_label = 'reviewing'
     } else if (cp === 'argus-request-changes') {
-      // Review asked for changes → a fix round is starting.
+      // Review asked for changes → a fix round (round ≥ 2) is starting.
+      round = Math.max(round, 2)
       phase_label = 'building'
     }
     // `inner-error` / any other checkpoint → keep the base label (about to fail).
