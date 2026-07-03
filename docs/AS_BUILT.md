@@ -2,6 +2,88 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-03 — Trident build reliability: worktree isolation + self-healing merge + interpreted failures (#351/#352, no flags)
+
+**Why.** Ryan re-ran two same-project builds on `tabs` (dagflow + kvwal) on
+2026-07-03; kvwal FAILED at merge with `git checkout branch failed: error: you need
+to resolve your current index first`. Root cause: ALL builds for a project shared
+ONE checkout `Projects/<proj>/code` with `code_trident_runs.worktree` empty for every
+run. A pre-#342 dagcore failure had hard-failed a rebase conflict WITHOUT
+`git merge --abort`, leaving `.git/MERGE_HEAD` (timestamped 17:01) in that shared
+checkout — so every LATER build's `mergeLocal` tripped over the poisoned index. The
+#342 merge logic is correct, but its tests MOCK git (`RunHostCommand` stub), so the
+shared-working-tree hazard was never exercised. Ryan-locked: "Builds need isolated
+worktrees" + "when a build fails … interpret it, try to solve it, else describe in
+simple terms what happened and what input is needed." NO feature flags; one code
+path; leak-gate SILENT. Backend trident only (no chat-react UI touched).
+
+**What shipped.**
+
+- **FIX 1 (#351, P1) — real per-run git-worktree isolation.** `trident/merge.ts`
+  `mergeLocal` now provisions a DEDICATED worktree per run
+  (`<repo>/.trident-worktrees/<slug>-<id8>`, `runWorktreePath` — deterministic +
+  distinct per run, so N concurrent same-project builds never share one) via
+  `git worktree add --detach --force … <base>` (detached → no collision with base
+  checked out in the shared repo). The whole rebase-onto-latest-base + #342 Forge
+  conflict-resolution runs INSIDE that worktree, so a rebase that hard-fails can only
+  dirty the throwaway worktree — never the shared checkout. The LAND onto base
+  (`git checkout <base>` + `git merge --no-ff <branch>`, still serialized per
+  `repo_path` by `withLocalMergeLock`) is the ONLY op touching the shared checkout and
+  is conflict-free by construction (the branch already contains base). The worktree
+  is torn down on EVERY terminal path (success OR a thrown escalation) via a
+  `finally`; a lingering build worktree still holding the branch is freed first
+  (`freeBranchFromWorktrees`, parses `git worktree list --porcelain`). The
+  orchestrator (`applyResult`) records the path onto `code_trident_runs.worktree`
+  (was ALWAYS empty) before the merge, so it's durable for cleanup even on failure.
+
+- **FIX 2 (#351b, P1) — defensive stale-state auto-recovery.** Before touching the
+  base repo, `mergeLocal` runs `recoverStaleGitState`: it aborts any lingering
+  `MERGE_HEAD` / `rebase-merge` / `rebase-apply` (`git merge --abort` /
+  `git rebase --abort`, whose exit code is an accurate "was-dirty" probe) and
+  `git reset --hard`s to a clean base. One poisoned checkout can no longer strand
+  every future build in that repo — the merge path is self-healing. (Deliberately no
+  `git clean` — the shared checkout may hold a real project's untracked files.)
+
+- **FIX 3 (#352, P2) — failed builds are INTERPRETED, never a raw error paste.**
+  `trident/delivery.ts` `interpretFailure` (a deterministic classifier — reliable +
+  unit-testable, no LLM in the hot path) maps a terminal `failure_reason` to a
+  plain-language summary + the SPECIFIC input needed, applied to ALL failure classes
+  (not just merge conflicts): `merge-conflict` surfaces the #342 question verbatim;
+  `merge-mechanics` DISCARDS raw git stderr ("a git step failed while landing the
+  branch"); `review-unresolved`, `hang`, `stale-state`, `infra`, `underspecified`
+  each get a human sentence + a retry/review action. The recoverable classes are
+  already auto-recovered upstream (stale state → FIX 2; content conflict → the #342
+  Forge resolver → no failure message at all), so a run reaching the announce is
+  genuinely unrecoverable. `composeTerminalDelivery`'s `failed` branch now renders
+  `❌ <slug> — <summary>\n<task>\n<input needed>`.
+
+- **Verified with REAL (non-mocked) git.** `trident/merge-realgit.test.ts` drives
+  `mergeLocal` against actual temp repos via `spawnCapture` (the existing
+  `merge.test.ts` mocks git — exactly why the bug shipped): (1) 3 concurrent
+  same-project builds each in their OWN worktree all land + base repo CLEAN (no
+  `MERGE_HEAD`, no stray worktrees, `git worktree list` == 1); (2) a `MERGE_HEAD`-
+  poisoned base repo auto-heals + the build lands (never "resolve your current index
+  first"); (3) an unrecoverable rebase conflict escalates a PLAIN question (no raw
+  git stderr) AND leaves the shared checkout pristine (main unchanged, clean) so a
+  LATER build still succeeds. Plus deterministic unit coverage for every
+  `interpretFailure` class (no raw-stderr leak invariant). `tsc` clean (root +
+  trident); trident (422) + work-board (73) + gateway/open (154) suites green.
+
+**Spec-conformance (5-line diff).**
+- SPEC (Ryan-locked 2026-07-03): concurrent same-project builds run in ISOLATED git
+  worktrees; the merge path defensively aborts stale merge/rebase state before
+  proceeding; a failed build is interpreted + auto-recovered if possible, else
+  explained in plain language with the specific input needed (never raw error paste).
+- CURRENT (before): all builds shared ONE checkout `Projects/<proj>/code`
+  (`worktree` empty); no stale-state cleanup so one old failure poisoned the repo
+  (kvwal hit this); failures pasted raw git stderr to chat.
+- GAP: all three.
+- THIS PR: per-run worktree isolation (`mergeLocal` + `runWorktreePath`, recorded on
+  the row) + stale-state auto-abort (`recoverStaleGitState`) + failure
+  interpretation/plain-language (`interpretFailure`).
+- OUT OF SCOPE (unchanged): the chat-react UI (batch-3/batch-4); the #342 merge LOGIC
+  itself (kept — rebase-onto-base + Forge resolver + per-repo serialization).
+
 ## 2026-07-03 — UX batch-3: no-flicker project switch · work add-box above Done · clean amber attention dot · bottom-right timestamps (#343/#344/#345/#346, no flags)
 
 **Why.** Four chat/work-board refinements from Ryan's live review 2026-07-03:

@@ -193,7 +193,9 @@ describe('TridentTickLoop.runOnce', () => {
       expect(sent.length).toBe(1)
       // chat_id only (no thread) → bare channel_topic_id.
       expect(sent[0]!.topic.channel_topic_id).toBe('999')
-      expect(sent[0]!.text).toContain('build failed')
+      // #352 — the terminal-failure announce is INTERPRETED into plain language
+      // (leading ❌ + a human-facing summary), not a raw "build failed: <reason>".
+      expect(sent[0]!.text).toContain('❌')
       expect(sent[0]!.text).toContain('sub-agent crashed')
     })
 

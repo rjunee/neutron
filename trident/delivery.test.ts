@@ -11,6 +11,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildTridentDelivery,
   composeTerminalDelivery,
+  interpretFailure,
   topicForRun,
   type OutboundSink,
 } from './delivery.ts'
@@ -92,14 +93,19 @@ describe('composeTerminalDelivery', () => {
     expect(out!.text).not.toContain('review round')
   })
 
-  test('failed → surfaces the failure reason and leaves the branch for review', () => {
+  test('failed (exhausted rounds) → plain-language review outcome, no raw reason paste (#352)', () => {
     const out = composeTerminalDelivery(
-      runWith({ phase: 'failed', failure_reason: 'reached max_rounds (8) without Argus APPROVE' }),
+      runWith({
+        phase: 'failed',
+        branch: 'trident/add-flag',
+        failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE',
+      }),
     )
     expect(out!.text).toContain('❌')
-    expect(out!.text).toContain('build failed')
-    expect(out!.text).toContain('reached max_rounds (8)')
-    expect(out!.text).toContain('left in place for review')
+    // Plain language — NOT the raw internal reason string.
+    expect(out!.text).toContain('blocking findings')
+    expect(out!.text).not.toContain('inner loop exhausted')
+    expect(out!.text).toContain('`trident/add-flag`') // names the branch to review
   })
 
   test('failed / pr mode → points at the open PR', () => {
@@ -109,12 +115,31 @@ describe('composeTerminalDelivery', () => {
     expect(out!.text).toContain('PR #7 left open for review')
   })
 
-  test('failed → the failure reason (e.g. a merge-conflict question) rides the message verbatim', () => {
+  test('failed (merge-mechanics) → NEVER pastes raw git stderr (#352)', () => {
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        branch: 'trident/add-flag',
+        failure_reason:
+          'merge failed: git checkout base failed: error: you need to resolve your current index first',
+      }),
+    )
+    expect(out!.text).toContain('❌')
+    // The raw git stderr is DISCARDED — plain language only.
+    expect(out!.text).not.toContain('resolve your current index')
+    expect(out!.text).not.toContain('git checkout')
+    expect(out!.text.toLowerCase()).toContain('git step failed')
+  })
+
+  test('failed → an authored merge-conflict question rides the message verbatim (specific input needed)', () => {
     const question =
-      'ringbuf and walstore both changed flush() — drop-oldest vs block; which do you want?'
+      "couldn't auto-resolve the merge conflict in flush.ts for `trident/x` — it needs your call before I can land it."
     const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: question }))
     expect(out!.text).toContain('❌')
+    // The specific decision the operator must make is surfaced verbatim.
     expect(out!.text).toContain(question)
+    // ...framed with a plain-language summary of what happened.
+    expect(out!.text).toContain('edited the same code')
   })
 
   test('stopped → a plain stopped notice', () => {
@@ -135,6 +160,98 @@ describe('composeTerminalDelivery', () => {
     expect(out!.text).toContain('…')
     // the truncated task is ≤ 60 chars
     expect(out!.text.includes('x'.repeat(61))).toBe(false)
+  })
+})
+
+describe('interpretFailure (#352) — plain-language classification, never a raw error paste', () => {
+  const RAW_GIT_TOKENS = [
+    'resolve your current index',
+    'CONFLICT (content)',
+    'error: ',
+    'fatal: ',
+    'exit code',
+    'stderr',
+    'MERGE_HEAD',
+    'rebase --continue',
+  ]
+
+  // Every class'd message must be free of raw git/tool leakage.
+  function assertNoRawLeak(text: string): void {
+    for (const tok of RAW_GIT_TOKENS) {
+      expect(text.toLowerCase()).not.toContain(tok.toLowerCase())
+    }
+  }
+
+  test('hang → plain "stopped making progress" + retry', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: 'no progress for 25 min — suspected agent hang (inner workflow stopped advancing)' }),
+    )
+    expect(interp.klass).toBe('hang')
+    expect(interp.summary.toLowerCase()).toContain('progress')
+    expect(interp.input_needed.toLowerCase()).toContain('retry')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('review-unresolved → plain "blocking findings" + review the branch', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE' }),
+    )
+    expect(interp.klass).toBe('review-unresolved')
+    expect(interp.summary.toLowerCase()).toContain('blocking findings')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('merge-conflict (authored question) → surfaces the specific question as the input needed', () => {
+    const q = "couldn't auto-resolve the merge conflict in flush.ts for `trident/x` — it needs your call before I can land it."
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: q }))
+    expect(interp.klass).toBe('merge-conflict')
+    expect(interp.input_needed).toBe(q)
+    expect(interp.summary.toLowerCase()).toContain('same code')
+  })
+
+  test('merge-mechanics (raw git stderr) → the raw stderr is DISCARDED', () => {
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason:
+          'merge failed: git checkout base failed: error: you need to resolve your current index first',
+      }),
+    )
+    expect(interp.klass).toBe('merge-mechanics')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+    expect(interp.summary.toLowerCase()).toContain('git step failed')
+  })
+
+  test('stale-state → plain, never surfaces "resolve your current index first"', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: 'error: you need to resolve your current index first' }),
+    )
+    expect(interp.klass).toBe('stale-state')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+    expect(interp.input_needed.toLowerCase()).toContain('retry')
+  })
+
+  test('infra → plain internal-error + retry (provenance gate etc.)', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: 'inner workflow reported APPROVE but no recorded argus-approved checkpoint (provenance gate)' }),
+    )
+    expect(interp.klass).toBe('infra')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('underspecified → surfaces the (already plain) guidance', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: 'Plan item is underspecified — add a design doc or a detailed title.' }),
+    )
+    expect(interp.klass).toBe('underspecified')
+    expect(interp.input_needed.length).toBeGreaterThan(0)
+  })
+
+  test('unknown/empty → a safe generic message, never a multi-line raw paste', () => {
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: null }))
+    expect(interp.klass).toBe('unknown')
+    expect(interp.summary.length).toBeGreaterThan(0)
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
   })
 })
 

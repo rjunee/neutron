@@ -80,6 +80,152 @@ function truncateTask(task: string, n = 60): string {
 }
 
 /**
+ * The recognised terminal-failure classes (#352). A build's `failure_reason`
+ * (authored by the merge/orchestrator layer) is classified into ONE of these so
+ * the chat announce is INTERPRETED — plain language + the specific input the
+ * operator must give — instead of a raw git/tool error paste.
+ */
+export type FailureClass =
+  | 'merge-conflict'
+  | 'stale-state'
+  | 'merge-mechanics'
+  | 'review-unresolved'
+  | 'hang'
+  | 'infra'
+  | 'underspecified'
+  | 'unknown'
+
+export interface FailureInterpretation {
+  klass: FailureClass
+  /** One plain-language sentence: what happened, in terms a non-engineer follows.
+   *  NEVER contains raw git/tool stderr. */
+  summary: string
+  /** The SPECIFIC decision/input needed to move the build forward. */
+  input_needed: string
+}
+
+/** True when the reason is one of OUR authored, plain-language escalation
+ *  questions (from `merge.ts` / `conflict-resolver.ts`) rather than a git error
+ *  message — those are already safe + specific, so we surface them verbatim. */
+function isAuthoredConflictQuestion(reason: string): boolean {
+  const r = reason.toLowerCase()
+  return (
+    r.includes("couldn't auto-resolve") ||
+    r.includes('hit conflicts across') ||
+    r.includes('needs a manual') ||
+    r.includes('needs your call') ||
+    (r.includes('conflict') && !r.includes('failed:'))
+  )
+}
+
+/**
+ * #352 — INTERPRET a terminal failure into a plain-language summary + the specific
+ * input needed, NEVER a raw error paste. Pure + deterministic (a bounded classifier
+ * over the authored `failure_reason` — no LLM, so it is reliable + unit-testable):
+ * every recoverable class (stale merge/rebase state, transient infra) is already
+ * auto-recovered upstream in the merge path (`recoverStaleGitState`) or the #342
+ * Forge conflict-resolver, so a run that reaches HERE is genuinely unrecoverable and
+ * needs a human. Raw git stderr (a `TridentMergeError`-wrapped `merge failed: git …`
+ * message) is DISCARDED — the operator sees only what happened + what to do.
+ */
+export function interpretFailure(run: TridentRun): FailureInterpretation {
+  const reason = (run.failure_reason ?? '').trim()
+  const r = reason.toLowerCase()
+  const branch = run.branch !== null ? `\`${run.branch}\`` : 'the build branch'
+  const retry = 'Reply to retry the build, or take it from here manually.'
+
+  // Suspected agent hang / stalled inner workflow — already a plain reason.
+  if (r.includes('suspected agent hang') || r.includes('no progress for') || r.includes('stalled')) {
+    return {
+      klass: 'hang',
+      summary: 'The build stopped making progress and I stopped it before it could hang indefinitely.',
+      input_needed: `${retry} (its last progress is saved on ${branch}.)`,
+    }
+  }
+
+  // Argus still had blocking findings after the round budget — a review outcome.
+  if (r.includes('without argus approve') || r.includes('request_changes') || r.includes('exhausted')) {
+    return {
+      klass: 'review-unresolved',
+      summary: `The build ran its review rounds but the reviewer still had blocking findings, so I did not merge it.`,
+      input_needed: `${branch} is saved for you to review — reply to send it back for another fix pass, or take it over.`,
+    }
+  }
+
+  // An AMBIGUOUS content conflict the resolver escalated — the reason IS the
+  // authored, specific question. Surface it (plain by construction, no stderr).
+  if (isAuthoredConflictQuestion(reason) && !r.startsWith('merge failed')) {
+    return {
+      klass: 'merge-conflict',
+      summary:
+        'The build finished, but two changes edited the same code in ways I could not reconcile automatically.',
+      input_needed: reason,
+    }
+  }
+
+  // A stale shared-checkout index surfaced DIRECTLY (a bare git error, not wrapped
+  // in a `merge failed:` TridentMergeError — those are the mechanics class below).
+  // Should be self-healed now, but classified for completeness — never surface the
+  // raw "resolve your current index first".
+  if (
+    !r.startsWith('merge failed') &&
+    (r.includes('resolve your current index') || r.includes('merge_head') || r.includes('unmerged'))
+  ) {
+    return {
+      klass: 'stale-state',
+      summary:
+        'The build finished but the shared checkout was left mid-merge by an earlier build, which blocked this merge.',
+      input_needed: `${retry} (I clean this up automatically now, so a retry should go through.)`,
+    }
+  }
+
+  // Any other git-mechanics failure landing the branch — DISCARD the raw stderr.
+  if (r.startsWith('merge failed') || r.includes('git ') || r.includes('rebase') || r.includes('checkout')) {
+    return {
+      klass: 'merge-mechanics',
+      summary: 'The build finished but a git step failed while landing the branch, so it was not merged.',
+      input_needed: `${branch} is saved. ${retry}`,
+    }
+  }
+
+  // The task itself was too vague to act on.
+  if (r.includes('underspecified') || r.includes('specified enough')) {
+    return {
+      klass: 'underspecified',
+      summary: 'I could not start this build because the task was not specific enough to act on.',
+      input_needed: reason.length > 0 ? reason : 'Add a short description or a design doc and dispatch it again.',
+    }
+  }
+
+  // Couldn't start / internal / garbled result — an infrastructure failure.
+  if (
+    r.includes('fire failed') ||
+    r.includes('could not prepare') ||
+    r.includes('backend') ||
+    r.includes('garbled') ||
+    r.includes('missing') ||
+    r.includes('provenance')
+  ) {
+    return {
+      klass: 'infra',
+      summary: 'The build hit an internal error and could not finish.',
+      input_needed: retry,
+    }
+  }
+
+  // Fallback — a reason we don't specifically classify. Keep it plain: show the
+  // authored reason if it's short + question-like, else a generic line. Still
+  // never a multi-line raw paste.
+  const oneLine = reason.replace(/\s+/g, ' ').trim()
+  const safe = oneLine.length > 0 && oneLine.length <= 200 && !oneLine.includes('failed:')
+  return {
+    klass: 'unknown',
+    summary: safe && oneLine.length > 0 ? oneLine : 'The build did not complete.',
+    input_needed: `${branch} is saved. ${retry}`,
+  }
+}
+
+/**
  * Compose the result message for a terminal run. Pure — no I/O — so the
  * exact copy per terminal state is unit-testable in isolation. Returns
  * `null` for a NON-terminal run (defensive: the loop only ever hands this
@@ -110,16 +256,16 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       return { text: `✅ \`${slug}\` — build done, ${where}${rounds}.\n${task}` }
     }
     case 'failed': {
-      // #340 — a specific reason (a merge-conflict question, a hang, exhausted
-      // rounds). The build's branch/PR is left in place for manual follow-up.
-      const reason = run.failure_reason ?? 'no reason recorded'
+      // #352 — INTERPRET the failure into plain language + the specific input
+      // needed, never a raw git/tool error paste. The recoverable classes were
+      // already auto-recovered upstream (stale merge state, the #342 conflict
+      // resolver), so a run reaching here is genuinely unrecoverable.
+      const interp = interpretFailure(run)
       const trail =
         run.merge_mode === 'pr' && run.pr !== null
           ? `\nPR #${run.pr} left open for review.`
-          : run.branch !== null
-            ? `\nBranch \`${run.branch}\` left in place for review.`
-            : ''
-      return { text: `❌ \`${slug}\` — build failed: ${reason}\n${task}${trail}` }
+          : ''
+      return { text: `❌ \`${slug}\` — ${interp.summary}\n${task}\n${interp.input_needed}${trail}` }
     }
     case 'stopped':
       // `/code stop` flips a row straight to `stopped` via the store (not

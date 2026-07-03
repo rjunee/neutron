@@ -8,6 +8,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, type SimPlan } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
+import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
@@ -144,6 +145,11 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(joined).toContain('git -C /repo checkout main')
     expect(joined.some((c) => c.startsWith('git -C /repo merge --no-ff feat-x'))).toBe(true)
     expect(joined.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    // #351 — the run row now RECORDS its dedicated merge worktree (was always
+    // empty), and the rebase ran inside it (isolation), not the shared checkout.
+    expect(final.worktree).toBe(runWorktreePath('/repo', final))
+    expect(joined.some((c) => c.includes(`worktree add --detach --force ${final.worktree}`))).toBe(true)
+    expect(joined.some((c) => c === `git -C ${final.worktree} rebase main`)).toBe(true)
   })
 })
 
