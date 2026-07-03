@@ -394,6 +394,12 @@ export class NeutronChatController {
   private systemNoticeTimer: ReturnType<typeof setTimeout> | null = null
   /** M1 — grace window a system-notice pill survives before it self-clears. */
   private readonly systemNoticeStaleMs = 15_000
+  /** FIX #347 — once a REAL reply has begun for the current turn (first stream
+   *  token OR a durable agent_message), a late cold-start "Waking up…" ack must be
+   *  DROPPED rather than re-armed as a pill below the answer. Reset on each user
+   *  send. Guards the duplicate/late-pill race the server timing can't fully
+   *  prevent (the ack is a delayed `setTimeout` on the gateway). */
+  private replyStartedThisTurn = false
   /** Managed post-onboarding claim redirect target (null = Open self-host / no
    *  redirect). Read on the `onboarding_completed` frame. */
   private readonly postOnboardingClaimUrl: string | null
@@ -592,6 +598,10 @@ export class NeutronChatController {
    */
   async send(body: string, attachments?: readonly string[]): Promise<void> {
     this.awaitingReply = true
+    // FIX #347 — a new turn begins: allow this turn's cold-start pill to show
+    // (until its real reply starts), and clear any stale pill from the prior turn.
+    this.replyStartedThisTurn = false
+    this.clearSystemNotice()
     this.publish()
     const opts: { project_id?: string; attachments?: readonly string[] } = {}
     if (this.projectId !== null && this.projectId.length > 0) opts.project_id = this.projectId
@@ -635,7 +645,10 @@ export class NeutronChatController {
         if (delta.length === 0) return
         // A real token has begun — clear the "awaiting" bracket + any lingering
         // "Waking up…" system pill (the reply is here; the notification is done).
+        // FIX #347 — latch the turn as "reply started" so a LATE ack frame (the
+        // gateway's delayed setTimeout) can't re-arm the pill below the answer.
         this.awaitingReply = false
+        this.replyStartedThisTurn = true
         this.clearSystemNotice()
         this.streaming.set(messageId, { text: delta, createdAt: this.nextSeq() })
       } else {
@@ -658,6 +671,12 @@ export class NeutronChatController {
       // keep spinning while the workspace wakes.
       const body = typeof f['body'] === 'string' ? (f['body'] as string) : ''
       if (f['system_notice'] === true || isColdStartAck(body)) {
+        // FIX #347 — DROP a cold-start ack that arrives AFTER the real reply has
+        // already begun for this turn. The gateway's ack is a delayed setTimeout,
+        // so under a slow-then-fast turn it can land just after the answer; re-
+        // arming the pill then leaves a spurious "Waking up…" hanging below the
+        // reply. Never show the pill once the reply has started.
+        if (this.replyStartedThisTurn) return
         if (body.length > 0) this.setSystemNotice(body)
         return
       }
@@ -666,7 +685,9 @@ export class NeutronChatController {
       // ever arrived. The streaming buffer is pruned once the persisted row
       // shows up (see handleChange). A genuine reply also clears any stale
       // "Waking up…" pill.
+      // FIX #347 — latch "reply started" so a trailing late ack is dropped.
       this.awaitingReply = false
+      this.replyStartedThisTurn = true
       this.clearSystemNotice()
       this.publish()
       return
@@ -1048,7 +1069,14 @@ export class NeutronChatController {
   }
 
   private computeVm(): ChatViewModel {
-    const rendered: RenderMessage[] = this.msgs.map((m) => {
+    // FIX #347 — a cold-start "Waking up…" ack is an EPHEMERAL centered pill
+    // (`systemNotice`), never a chat bubble. It's normally fanned live-only
+    // (no chat_log row), but if one ever reaches the durable store (a legacy
+    // row, or any path that dropped the `system_notice` flag) it would otherwise
+    // hydrate as a timestamped/avatar agent bubble below the answer. Filter it
+    // out of the bubble list unconditionally so the pill is the only surface.
+    const durable = this.msgs.filter((m) => !(m.role === 'agent' && isColdStartAck(m.body)))
+    const rendered: RenderMessage[] = durable.map((m) => {
       const id = m.client_msg_id.length > 0 ? m.client_msg_id : (m.message_id ?? `seq:${m.seq ?? 0}`)
       return {
         id,

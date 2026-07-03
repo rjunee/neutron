@@ -144,6 +144,47 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(vm.messages.find((m) => m.streaming)?.text).toBe('Hey!')
   })
 
+  it('FIX #347 — DROPS a late cold-start ack that arrives AFTER the reply has started (no pill below the answer)', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    // The real reply begins streaming first…
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm1', body_delta: 'Hey!', ts: 1 })
+    await tick()
+    // …then a LATE cold-start ack lands (the gateway's delayed setTimeout raced
+    // the fast reply). It must be dropped, not re-armed as a pill.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', body: '⏳ Waking up, one moment...', ts: 2 })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.systemNotice).toBeNull()
+    // A fresh send re-opens the pill channel for the NEXT turn.
+    await controller.send('again')
+    await tick()
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', body: '⏳ Waking up, one moment...', ts: 3 })
+    await tick()
+    expect(controller.getViewModel().systemNotice?.text).toBe('⏳ Waking up, one moment...')
+  })
+
+  it('FIX #347 — a PERSISTED cold-start ack never renders as a timestamped chat bubble', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    // A DURABLE agent row (message_id + seq) whose body is the cold-start ack —
+    // a legacy/leaked chat_log row that the sync engine persists to the store —
+    // must be filtered out of the bubble list entirely (it's a pill, not a
+    // timestamped bubble below the answer).
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'wake-1', seq: 1, body: '⏳ Waking up, one moment...', ts: 2 })
+    await tick()
+    const vm = controller.getViewModel()
+    expect(vm.messages.some((m) => m.role === 'agent' && m.text.includes('Waking up'))).toBe(false)
+  })
+
   it('an ordinary error frame stays a chat bubble, NOT a system pill', async () => {
     const { controller, sockets } = setup()
     controller.start()

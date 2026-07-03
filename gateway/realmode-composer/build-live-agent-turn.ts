@@ -899,7 +899,11 @@ export function buildLiveAgentTurn(
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), absoluteCeilingMs)
       try {
-        return await collectTokensToString(handle, ac.signal)
+        // FIX #347 — cancel the pending cold-start ack the moment the FIRST
+        // token streams (not only when the whole turn settles below), so a turn
+        // that starts replying before the ack delay elapses never fires a
+        // spurious "Waking up…" pill after the answer has begun.
+        return await collectTokensToString(handle, ac.signal, clearAckTimer)
       } finally {
         clearTimeout(timer)
         // Item 12 — the dispatch settled; cancel the cold-start ack if it
