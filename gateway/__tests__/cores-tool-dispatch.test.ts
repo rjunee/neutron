@@ -130,7 +130,7 @@ describe('cores tool dispatch — end-to-end', () => {
     expect(remindersCreate).toBeDefined()
     const result = (await remindersCreate!.handler(
       { message: 'hello from smoke test', fire_at: 4102444800 },
-      { project_slug: OWNER, topic_id: null, call_id: 'c1', speaker_user_id: null },
+      { project_slug: OWNER, project_id: null, topic_id: null, call_id: 'c1', speaker_user_id: null },
     )) as { id: string }
     expect(typeof result.id).toBe('string')
     expect(result.id.length).toBeGreaterThan(0)
@@ -149,7 +149,7 @@ describe('cores tool dispatch — end-to-end', () => {
     const remindersCreate = bench.tools.get('reminders_create')!
     await remindersCreate.handler(
       { message: 'audited content', fire_at: 4102444800 },
-      { project_slug: OWNER, topic_id: null, call_id: 'c2', speaker_user_id: null },
+      { project_slug: OWNER, project_id: null, topic_id: null, call_id: 'c2', speaker_user_id: null },
     )
     const rows = bench.db
       .raw()
@@ -233,7 +233,7 @@ describe('cores tool dispatch — end-to-end', () => {
     const list = bench.tools.get('research_list')!
     const out = (await list.handler(
       { project_id: 'demo-project' },
-      { project_slug: OWNER, topic_id: null, call_id: 'c-list', speaker_user_id: null },
+      { project_slug: OWNER, project_id: null, topic_id: null, call_id: 'c-list', speaker_user_id: null },
     )) as { briefs: unknown[] }
     expect(Array.isArray(out.briefs)).toBe(true)
   })

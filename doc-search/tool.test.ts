@@ -11,6 +11,7 @@ import { DOC_READ_TOOL, DOC_SEARCH_TOOL, registerDocSearchToolSurface } from './
 
 const ctx: ToolCallContext = {
   project_slug: 'p',
+  project_id: null,
   topic_id: null,
   call_id: 'c1',
   speaker_user_id: null,

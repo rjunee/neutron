@@ -70,20 +70,24 @@ describe('dispatch_agent tool', () => {
     const tool = reg.get(DISPATCH_AGENT_TOOL)!
     const out = (await tool.handler(
       { kind: 'research', task: 'dig into X', board_item_id: 'it1' },
-      { project_slug: 'p', topic_id: null, call_id: 'c1', speaker_user_id: null },
+      { project_slug: 'p', project_id: 'acme', topic_id: null, call_id: 'c1', speaker_user_id: null },
     )) as Record<string, unknown>
     expect(out.status).toBe('dispatched')
     expect(out.kind).toBe('research')
     expect(out.agent_kind).toBe('atlas')
     expect(typeof out.run_id).toBe('string')
-    expect(calls).toEqual([{ kind: 'research', task: 'dig into X', board_item_id: 'it1' }])
+    // The tool threads the ACTIVE project's board scope so the service looks the
+    // item up on the same board work_board_add wrote it to.
+    expect(calls).toEqual([
+      { kind: 'research', task: 'dig into X', board_item_id: 'it1', board_scope: 'acme' },
+    ])
   })
 
   test('handler rejects an unknown kind + an empty task', async () => {
     const reg = new ToolRegistry()
     registerDispatchToolSurface(reg, recordingService([]))
     const tool = reg.get(DISPATCH_AGENT_TOOL)!
-    const ctx = { project_slug: 'p', topic_id: null, call_id: 'c', speaker_user_id: null }
+    const ctx = { project_slug: 'p', project_id: null, topic_id: null, call_id: 'c', speaker_user_id: null }
     await expect(tool.handler({ kind: 'nope', task: 't', board_item_id: 'it1' }, ctx)).rejects.toThrow(/kind/)
     await expect(tool.handler({ kind: 'research', task: '   ', board_item_id: 'it1' }, ctx)).rejects.toThrow(
       /task/,
@@ -94,7 +98,7 @@ describe('dispatch_agent tool', () => {
     const reg = new ToolRegistry()
     registerDispatchToolSurface(reg, recordingService([]))
     const tool = reg.get(DISPATCH_AGENT_TOOL)!
-    const ctx = { project_slug: 'p', topic_id: null, call_id: 'c', speaker_user_id: null }
+    const ctx = { project_slug: 'p', project_id: null, topic_id: null, call_id: 'c', speaker_user_id: null }
     await expect(tool.handler({ kind: 'research', task: 'do a thing' }, ctx)).rejects.toThrow(
       /board_item_id/,
     )
@@ -189,7 +193,7 @@ describe('agent-native parity — tool + command share one backend', () => {
       .get(DISPATCH_AGENT_TOOL)!
       .handler(
         { kind: 'research', task: 'trace the leak', board_item_id: 'it1' },
-        { project_slug: 'p', topic_id: null, call_id: 'c', speaker_user_id: null },
+        { project_slug: 'p', project_id: null, topic_id: null, call_id: 'c', speaker_user_id: null },
       )
 
     // Both reached the same backend with the same kind+task.

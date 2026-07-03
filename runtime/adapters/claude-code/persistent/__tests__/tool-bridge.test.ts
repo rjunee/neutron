@@ -244,6 +244,37 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
     setReplToolBridge(fakeBridge([]))
     expect((await sinkPost('/tool-call', { args: {} })).status).toBe(400)
   })
+
+  it('threads the calling session’s ACTIVE project scope into dispatch.project_id (P0 work-board fix)', async () => {
+    // A bridge that records the project_id it was dispatched with.
+    const seen: Array<string | null | undefined> = []
+    setReplToolBridge({
+      listToolSchemas: () => [
+        { name: 'work_board_add', description: 'add', input_schema: { type: 'object', properties: {} } },
+      ],
+      dispatch: async (input) => {
+        seen.push(input.project_id)
+        return { ok: true }
+      },
+    })
+    // Spawn a warm REPL bound to project "acme" (project_id folds into the pool
+    // key, so this session serves exactly the acme scope).
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, user_id: 'u-scope', project_id: 'acme', credential_identity: 'cred-scope' }),
+    )
+    await drain(sub.start(spec('hi')))
+    // Recover the session_id the spawn used (the tools-bridge POSTs it verbatim).
+    const argv = argvs[0]!
+    const sidIdx = argv.indexOf('--session-id')
+    const sessionId = argv[sidIdx + 1]!
+    // A tool call from THAT session must carry project_id = 'acme'.
+    await sinkPost('/tool-call', { session_id: sessionId, tool_name: 'work_board_add', args: { title: 'x' }, call_id: 'k' })
+    expect(seen).toEqual(['acme'])
+    // A tool call from an UNKNOWN session degrades to null (General / owner slug).
+    await sinkPost('/tool-call', { session_id: 'no-such-session', tool_name: 'work_board_add', args: {}, call_id: 'k2' })
+    expect(seen).toEqual(['acme', null])
+  })
 })
 
 describe('P0-1 — McpServer satisfies ReplToolBridge', () => {

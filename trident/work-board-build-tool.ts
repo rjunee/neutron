@@ -31,6 +31,7 @@ import {
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
+import { workBoardScopeKey } from '../work-board/store.ts'
 import type { MergeMode, TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
@@ -151,10 +152,15 @@ export function registerTridentBuildToolSurface(
       if (task.length === 0) {
         return { ok: false, error: 'task is required and must be a non-empty string' }
       }
+      // Scope the build to the ACTIVE project of the composing turn — the run row's
+      // `project_slug` AND the bound board item both key here, so a build started
+      // while chatting in project X lands on X's board (not General). Mirrors the
+      // HTTP ▶ route (`work-board-surface.ts`), which scope-keys from the URL.
+      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
       const buildDeps: BoardBoundBuildDeps = {
         store: deps.store,
         board: deps.work_board,
-        project_slug: ctx.project_slug,
+        project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
@@ -213,7 +219,10 @@ export function registerTridentBuildToolSurface(
       if (board_item_id.length === 0) {
         return { ok: false, error: 'board_item_id is required and must be a non-empty string' }
       }
-      const item = deps.work_board.get(ctx.project_slug, board_item_id)
+      // Active-project scope (see `work_board_dispatch_build` above) — the item
+      // lookup, the spec resolve, and the run creation all key on the same scope.
+      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      const item = deps.work_board.get(scope, board_item_id)
       if (item === null) {
         return {
           ok: false,
@@ -237,7 +246,7 @@ export function registerTridentBuildToolSurface(
       }
       const task =
         deps.resolve_task !== undefined
-          ? await deps.resolve_task(ctx.project_slug, {
+          ? await deps.resolve_task(scope, {
               title: item.title,
               design_doc_ref: item.design_doc_ref,
             })
@@ -245,7 +254,7 @@ export function registerTridentBuildToolSurface(
       const buildDeps: BoardBoundBuildDeps = {
         store: deps.store,
         board: deps.work_board,
-        project_slug: ctx.project_slug,
+        project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),

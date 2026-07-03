@@ -55,7 +55,7 @@ function fakeBackend(pending: ProposalRecord[], rec: Recorder): SkillForgeBacken
   }
 }
 
-const CTX = { project_slug: 'owner', topic_id: null, call_id: 'c1', speaker_user_id: null }
+const CTX = { project_slug: 'owner', project_id: null, topic_id: null, call_id: 'c1', speaker_user_id: null }
 
 describe('registerSkillForgeToolSurface', () => {
   test('registers both tools with read/write capability + approval split', () => {

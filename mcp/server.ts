@@ -64,7 +64,21 @@ export class McpServer {
    * already bound a context frame. Throws on unknown tool, capability
    * gate fail, or handler error.
    */
-  async dispatch(input: { tool_name: string; args: unknown; call_id: string }): Promise<unknown> {
+  async dispatch(input: {
+    tool_name: string
+    args: unknown
+    call_id: string
+    /**
+     * The ACTIVE project of the composing turn. The topic-AGNOSTIC warm-REPL
+     * `/tool-call` sink has no bound `TopicContext`, so it passes the active
+     * project here (resolved from the session's per-project scope) — without it,
+     * `currentTopicContextOrSystem` falls back to the owner/instance slug and
+     * every named-project work-board write lands on General (the bug this fixes).
+     * The `resolveBound` path leaves it undefined and reads the bound context's
+     * own `project_id` instead.
+     */
+    project_id?: string | null
+  }): Promise<unknown> {
     const reg = this.registry.get(input.tool_name)
     if (!reg) {
       throw new Error(`mcp: unknown tool '${input.tool_name}'`)
@@ -74,9 +88,10 @@ export class McpServer {
         `mcp: tool '${input.tool_name}' requires capability '${reg.capability_required}' which the project has not granted`,
       )
     }
-    const ctx = currentTopicContextOrSystem(input.call_id, this.project_slug)
+    const ctx = currentTopicContextOrSystem(input.call_id, this.project_slug, input.project_id)
     return reg.handler(input.args, {
       project_slug: ctx.project_slug,
+      project_id: ctx.project_id,
       topic_id: ctx.topic_id,
       call_id: ctx.call_id,
       speaker_user_id: ctx.speaker_user_id,
@@ -117,20 +132,35 @@ export class McpServer {
 function currentTopicContextOrSystem(
   call_id: string,
   project_slug: string,
+  fallbackProjectId?: string | null,
 ): {
   project_slug: string
+  project_id: string | null
   topic_id: string | null
   call_id: string
   speaker_user_id: string | null
 } {
   const ctx = currentTopicContext()
   if (ctx) {
+    // A bound TopicContext (the `resolveBound` adapter path) already knows the
+    // originating topic's project — prefer it over any caller-supplied fallback.
     return {
       project_slug,
+      project_id: ctx.project_id,
       topic_id: ctx.topic_id,
       call_id: ctx.call_id || call_id,
       speaker_user_id: ctx.speaker_user_id,
     }
   }
-  return { project_slug, topic_id: null, call_id, speaker_user_id: null }
+  // No bound context (the warm-REPL `/tool-call` sink path): use the active
+  // project the caller threaded in. `project_slug` stays the owner/instance slug
+  // (unchanged for owner-scoped tools); `project_id` carries the per-project
+  // dimension the work-board / build tools scope on.
+  return {
+    project_slug,
+    project_id: fallbackProjectId ?? null,
+    topic_id: null,
+    call_id,
+    speaker_user_id: null,
+  }
 }

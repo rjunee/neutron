@@ -21,6 +21,7 @@ import { GBRAIN_SEARCH_TOOL, registerGBrainSearchToolSurface } from '../agent-to
 
 const ctx: ToolCallContext = {
   project_slug: 'p',
+  project_id: null,
   topic_id: null,
   call_id: 'c1',
   speaker_user_id: null,

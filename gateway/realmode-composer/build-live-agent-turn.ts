@@ -456,15 +456,19 @@ export interface BuildLiveAgentTurnInput {
   /**
    * Work Board (Phase 1a) — the orchestrator's external-memory re-grounding
    * seam. Returns a COMPACT, ALREADY-FORMATTED `<work_board>` DATA block for
-   * the given `project_slug` (active+next items + the drift-guard advisory), or
-   * null when there is nothing to inject / the read failed. Injected on EVERY
-   * turn: the cold first turn adds it as an unconditional `instance_fragments`
-   * entry; warm turns splice it before the user's message (since
-   * `instance_fragments` is assembled only on the cold turn, a fragment-only
-   * wiring would re-ground once per session, not every turn). Best-effort: a
+   * the active project (active+next items + the drift-guard advisory), or null
+   * when there is nothing to inject / the read failed. Keyed on BOTH the instance
+   * `project_slug` (owner boundary) and the real per-turn `project_id` (the
+   * per-project dimension; undefined on General) so the injected board matches
+   * the project the agent's `work_board_*` writes scope to — otherwise the agent
+   * re-grounds on General's board while writing to the project's, or vice-versa.
+   * Injected on EVERY turn: the cold first turn adds it as an unconditional
+   * `instance_fragments` entry; warm turns splice it before the user's message
+   * (since `instance_fragments` is assembled only on the cold turn, a fragment-
+   * only wiring would re-ground once per session, not every turn). Best-effort: a
    * throwing/absent seam degrades to no block, never kills the turn.
    */
-  workBoardSnapshot?: (project_slug: string) => string | null
+  workBoardSnapshot?: (project_slug: string, project_id: string | undefined) => string | null
   /**
    * Per-project "available services" awareness (Settings-tab credentials).
    * Returns the ALREADY-FORMATTED, escaped `<available_services>` DATA block
@@ -743,7 +747,7 @@ export function buildLiveAgentTurn(
     let workBoardFragment: string | null = null
     if (input.workBoardSnapshot !== undefined) {
       try {
-        workBoardFragment = input.workBoardSnapshot(turn.project_slug)
+        workBoardFragment = input.workBoardSnapshot(turn.project_slug, turn.project_id)
       } catch (err) {
         console.warn(
           `${LOG_TAG} event=work_board_snapshot_failed project=${turn.project_slug} err=${

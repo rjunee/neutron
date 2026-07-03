@@ -64,7 +64,7 @@ function board(): TridentBoardBinder {
   }
 }
 
-const ctx = { project_slug: 'proj-1', topic_id: null, call_id: 'c1', speaker_user_id: null }
+const ctx = { project_slug: 'proj-1', project_id: null, topic_id: null, call_id: 'c1', speaker_user_id: null }
 
 function toolFor() {
   const reg = new ToolRegistry()
@@ -128,6 +128,88 @@ describe('work_board_dispatch_build tool', () => {
     const out = (await toolFor().handler({ board_item_id: 'ready', task: '   ' }, ctx)) as Record<string, unknown>
     expect(out.ok).toBe(false)
     expect(String(out.error)).toContain('task')
+  })
+})
+
+describe('active-project scoping (P0: a named-project build lands on that project’s board)', () => {
+  // A board stub that RECORDS the scope key it is asked for, so we can assert the
+  // dispatch keyed on the active project — not the owner/General slug.
+  function recordingBoard(seen: { getSlugs: string[]; attachSlugs: string[] }): TridentBoardBinder {
+    return {
+      get: (slug, id) => {
+        seen.getSlugs.push(slug)
+        return id === 'ready'
+          ? { id: 'ready', title: 'wire the CSV export button to the new endpoint with tests', design_doc_ref: null }
+          : null
+      },
+      attachRun: async (slug, id, run_id) => {
+        seen.attachSlugs.push(slug)
+        attached.push({ id, run_id })
+      },
+    }
+  }
+
+  function dispatchToolWith(board_stub: TridentBoardBinder) {
+    const reg = new ToolRegistry()
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: board_stub,
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+    })
+    return reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
+  }
+
+  test('work_board_dispatch_build in project "acme" scopes the run + binding to acme, NOT the owner slug', async () => {
+    const seen = { getSlugs: [] as string[], attachSlugs: [] as string[] }
+    const tool = dispatchToolWith(recordingBoard(seen))
+    const acmeCtx = { project_slug: 'proj-1', project_id: 'acme', topic_id: null, call_id: 'c1', speaker_user_id: null }
+    const out = (await tool.handler({ board_item_id: 'ready', task: 'build kvlog' }, acmeCtx)) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    // The board lookup + the run binding both keyed on the ACTIVE project scope.
+    expect(seen.getSlugs).toEqual(['acme'])
+    expect(seen.attachSlugs).toEqual(['acme'])
+    // And the persisted run row is scoped to acme (not the owner/General slug).
+    const run = store.get(out.run_id as string)!
+    expect(run.project_slug).toBe('acme')
+  })
+
+  test('work_board_dispatch_build with NO active project (General) scopes to the owner slug (regression guard)', async () => {
+    const seen = { getSlugs: [] as string[], attachSlugs: [] as string[] }
+    const tool = dispatchToolWith(recordingBoard(seen))
+    // project_id null → General → the owner/instance slug (proj-1), the prior behaviour.
+    const out = (await tool.handler({ board_item_id: 'ready', task: 'build' }, ctx)) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    expect(seen.getSlugs).toEqual(['proj-1'])
+    expect(seen.attachSlugs).toEqual(['proj-1'])
+    expect(store.get(out.run_id as string)!.project_slug).toBe('proj-1')
+  })
+
+  test('work_board_start in project "acme" resolves the spec + run under acme', async () => {
+    const seen = { getSlugs: [] as string[], attachSlugs: [] as string[] }
+    const reg = new ToolRegistry()
+    const resolveSlugs: string[] = []
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: recordingBoard(seen),
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+      resolve_task: async (slug) => {
+        resolveSlugs.push(slug)
+        return 'resolved spec for acme'
+      },
+    })
+    const start = reg.get(WORK_BOARD_START_TOOL)!
+    const acmeCtx = { project_slug: 'proj-1', project_id: 'acme', topic_id: null, call_id: 'c1', speaker_user_id: null }
+    const out = (await start.handler({ board_item_id: 'ready' }, acmeCtx)) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    expect(seen.getSlugs).toContain('acme')
+    expect(resolveSlugs).toEqual(['acme'])
+    expect(store.get(out.run_id as string)!.project_slug).toBe('acme')
   })
 })
 

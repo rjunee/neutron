@@ -136,6 +136,60 @@ describe('DispatchService — register → spawn → report wiring', () => {
     expect(report.payload.deliverables).toContain('https://example.com/pull/42')
   })
 
+  test('board_scope threads the ACTIVE project into board get/attachRun/clearRun (P0 work-board fix)', async () => {
+    const seen = { get: [] as string[], attach: [] as string[], clear: [] as string[] }
+    const h = makeHarness({
+      board: {
+        get: (slug: string, id: string) => {
+          seen.get.push(slug)
+          return { id, title: 'a fully specified plan item with plenty of detail to act on', design_doc_ref: null }
+        },
+        attachRun: async (slug: string) => {
+          seen.attach.push(slug)
+        },
+        clearRun: async (slug: string) => {
+          seen.clear.push(slug)
+        },
+      },
+    })
+    // A dispatch bound to an item on project "acme"'s board (the scope the
+    // work_board_* tools now write under).
+    const handle = await h.service.dispatch({
+      board_item_id: 'it-svc',
+      kind: 'adhoc',
+      task: 'ship it',
+      board_scope: 'acme',
+    })
+    h.resolveTurn({ result: 'done', status: 'completed' })
+    await handle.completion
+    // Existence check, binding, and terminal unbind all key on acme — NOT the
+    // service's owner slug (proj-1).
+    expect(seen.get).toEqual(['acme'])
+    expect(seen.attach).toEqual(['acme'])
+    expect(seen.clear).toEqual(['acme'])
+  })
+
+  test('board_scope defaults to the service owner slug when absent (General / regression guard)', async () => {
+    const seen = { get: [] as string[], attach: [] as string[] }
+    const h = makeHarness({
+      board: {
+        get: (slug: string, id: string) => {
+          seen.get.push(slug)
+          return { id, title: 'a fully specified plan item with plenty of detail to act on', design_doc_ref: null }
+        },
+        attachRun: async (slug: string) => {
+          seen.attach.push(slug)
+        },
+        clearRun: async () => undefined,
+      },
+    })
+    const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'adhoc', task: 'x' })
+    h.resolveTurn({ result: 'done', status: 'completed' })
+    await handle.completion
+    expect(seen.get).toEqual(['proj-1'])
+    expect(seen.attach).toEqual(['proj-1'])
+  })
+
   test('review dispatch maps to sentinel + folds the sentinel persona', async () => {
     const h = makeHarness()
     const handle = await h.service.dispatch({ board_item_id: 'it-svc', kind: 'review', task: 'check the brief' })
