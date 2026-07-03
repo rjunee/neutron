@@ -172,6 +172,15 @@ export interface DispatchRequest {
    * enough (the ask-before-acting gate); on success the run is bound to it.
    */
   board_item_id: string
+  /**
+   * The Work Board STORAGE SCOPE the `board_item_id` lives under — the active
+   * project's scope key (`workBoardScopeKey(owner_slug, project_id)`). The
+   * `work_board_*` tools scope a created/listed item to the ACTIVE project, so a
+   * board-bound dispatch MUST look the item up under the SAME scope or it 404s as
+   * `unknown_board_item`. Defaults to the service's bound `project_slug` (the
+   * owner/General slug) when absent — General turns + legacy callers unchanged.
+   */
+  board_scope?: string
   /** Working dir the agent runs in. Defaults to the service's bound path. */
   repo_path?: string
   /** Model id. Defaults to the service's bound default. */
@@ -288,7 +297,10 @@ export class DispatchService {
           'work to the Plan first (work_board_add), then dispatch against that item id.',
       )
     }
-    const item = this.deps.board.get(this.deps.project_slug, board_item_id)
+    // The board scope of the ACTIVE project (from the tool ctx) — the item was
+    // created/listed under it, so the existence check + binding must key here too.
+    const board_scope = req.board_scope ?? this.deps.project_slug
+    const item = this.deps.board.get(board_scope, board_item_id)
     if (item === null) {
       throw new DispatchValidationError(
         'unknown_board_item',
@@ -330,14 +342,14 @@ export class DispatchService {
     // `⑂`). The terminal report clears it. Best-effort: a board write outage
     // must not turn a valid dispatch into a rejected one.
     try {
-      await this.deps.board.attachRun(this.deps.project_slug, board_item_id, record.run_id)
+      await this.deps.board.attachRun(board_scope, board_item_id, record.run_id)
     } catch {
       // swallow — the dispatch still proceeds; the icon just won't light.
     }
 
     // Fresh run → flip to running + launch the substrate turn in the background.
     const running = this.deps.registry.update(record.run_id, { status: 'running' })
-    const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id)
+    const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
     this.inflight.set(record.run_id, handle)
     return handle
   }
@@ -380,6 +392,7 @@ export class DispatchService {
     req: DispatchRequest,
     delivery_target: DeliveryTarget | undefined,
     board_item_id: string,
+    board_scope: string,
   ): DispatchHandle {
     const run_id = record.run_id
     const repo_path = req.repo_path ?? this.deps.repo_path
@@ -430,7 +443,7 @@ export class DispatchService {
         cur !== undefined &&
         (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled')
       ) {
-        return this.report(cur, kind, agent_kind, turn.result, delivery_target, board_item_id)
+        return this.report(cur, kind, agent_kind, turn.result, delivery_target, board_item_id, board_scope)
       }
 
       // Normally cancellation runs through cancelRun/failRun (which set the
@@ -450,7 +463,7 @@ export class DispatchService {
       if (turn.status === 'timed_out') patch.failure_reason = 'stuck'
       const updated = this.deps.registry.update(run_id, patch)
       this.deps.control.cancellers.delete(run_id)
-      return this.report(updated, kind, agent_kind, turn.result, delivery_target, board_item_id)
+      return this.report(updated, kind, agent_kind, turn.result, delivery_target, board_item_id, board_scope)
     })()
 
     // The completion promise can never reject (every path is caught), so a
@@ -465,13 +478,14 @@ export class DispatchService {
     result: string,
     delivery_target: DeliveryTarget | undefined,
     board_item_id: string,
+    board_scope: string,
   ): Promise<DispatchOutcome> {
     // Terminal reconcile — clear the run binding so the item's fork `⑂` icon
     // goes dark. Status is left as-is (the orchestrator decides completion via
     // work_board_complete); a non-build dispatch finishing ≠ the item being
     // done. Best-effort: a board write outage never breaks the report path.
     try {
-      await this.deps.board.clearRun(this.deps.project_slug, board_item_id, record.run_id)
+      await this.deps.board.clearRun(board_scope, board_item_id, record.run_id)
     } catch {
       // swallow
     }

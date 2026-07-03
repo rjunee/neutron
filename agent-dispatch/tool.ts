@@ -21,6 +21,7 @@
 
 import type { JsonSchemaDocument } from '../core-sdk/types.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
+import { workBoardScopeKey } from '../work-board/store.ts'
 import { DISPATCH_KINDS, type DispatchKind } from './prompts.ts'
 import type { DispatchRequest, DispatchService } from './service.ts'
 
@@ -95,7 +96,7 @@ export function registerDispatchToolSurface(
     output_schema: outputSchema,
     capability_required: 'agent:dispatch_subagent',
     approval_policy: 'prompt-user',
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const a = (args ?? {}) as DispatchArgs
       if (!isDispatchKind(a.kind)) {
         throw new Error(
@@ -116,7 +117,15 @@ export function registerDispatchToolSurface(
       // The service enforces the existence + ask-before-acting gate and throws a
       // DispatchValidationError (incl. the clarifying-question guidance) which
       // propagates to the agent as the tool error — exactly the intended block.
-      const req: DispatchRequest = { kind: a.kind, task, board_item_id }
+      // Scope the board lookup/binding to the ACTIVE project (the same scope the
+      // `work_board_*` tools write under), so an item created while chatting in
+      // project X is found here; General (no active project) → the owner slug.
+      const req: DispatchRequest = {
+        kind: a.kind,
+        task,
+        board_item_id,
+        board_scope: workBoardScopeKey(ctx.project_slug, ctx.project_id),
+      }
       const handle = await service.dispatch(req)
       return {
         run_id: handle.run_id,

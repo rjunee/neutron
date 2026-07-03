@@ -2208,3 +2208,17 @@ caller `project_id` with no bound context; null otherwise). `tool-bridge.test.ts
 `/tool-call` from a session spawned under project "acme" threads `project_id:'acme'`
 into dispatch; an unknown session → null). `tsc` clean (root + `trident`); leak-gate
 SILENT.
+
+**Cross-model review fix (Codex, 1 × P2).** *`dispatch_agent` now scopes to the
+active project too.* The agent-native `dispatch_agent` tool is also board-bound, but
+its `DispatchService` looked the `board_item_id` up (+ `attachRun`/`clearRun`) under
+the service's own owner `project_slug` — so after this PR moved `work_board_add` onto
+the active project, an agent that created/listed an item in project X and then
+`dispatch_agent`'d against it would 404 as `unknown_board_item`. Threaded a
+`DispatchRequest.board_scope` (defaults to the owner slug) through
+`dispatch → launch → report`; the tool sets it to
+`workBoardScopeKey(ctx.project_slug, ctx.project_id)`. Tests: `agent-dispatch/
+service.test.ts` (board get/attach/clear all key on the threaded scope; default =
+owner slug), `agent-dispatch/surface.test.ts` (the tool builds the req with the
+active-project `board_scope`). The dormant `/dispatch` *chat command* is not wired in
+Open (like `/code`); it keeps the owner-slug default, unchanged.
