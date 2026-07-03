@@ -25,6 +25,8 @@
  * (it must not undo a completed merge).
  */
 
+import { join } from 'node:path'
+
 import type { HostCommandResult } from './git-mode.ts'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
@@ -158,6 +160,105 @@ function must(step: string, res: HostCommandResult): HostCommandResult {
   return res
 }
 
+/** Where a run's dedicated MERGE worktree lives: `<repo>/.trident-worktrees/<slug>-<id8>`.
+ *  Pure + deterministic (keyed on the run so N same-project builds get DISTINCT
+ *  paths), so the store's `worktree` column, the provisioning, and the teardown all
+ *  agree without threading a path around. `.trident-worktrees/` is inside the
+ *  project's own storage (the leak-gate + fseventsd-CPU lesson: never scatter
+ *  worktrees outside the repo). */
+export function runWorktreePath(repo_path: string, run: Pick<TridentRun, 'id' | 'slug'>): string {
+  const id8 = run.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8) || 'run'
+  const slug = run.slug.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 40) || 'build'
+  return join(repo_path, '.trident-worktrees', `${slug}-${id8}`)
+}
+
+/**
+ * FIX 2 (#351/#352) — DEFENSIVE stale-state auto-recovery. Before ANY merge/rebase
+ * touches the shared base repo, abort a lingering merge/rebase left by a PRIOR
+ * build (a crash, or a pre-#342 hard-fail) and hard-reset to a clean base. Without
+ * this, ONE poisoned checkout (`.git/MERGE_HEAD` / `.git/rebase-merge` /
+ * `.git/rebase-apply` present) makes EVERY later build in that repo trip
+ * "you need to resolve your current index first" (the verified 2026-07-03 kvwal
+ * failure). Self-healing: `git merge --abort` / `git rebase --abort` each succeed
+ * ONLY when that operation was actually in progress, so their exit code is an
+ * accurate "was-dirty" probe; a `reset --hard` then restores a clean HEAD. All
+ * best-effort — a clean repo makes every command a harmless no-op.
+ */
+export async function recoverStaleGitState(run_host: RunHostCommand, repo: string): Promise<boolean> {
+  const mergeAbort = await run_host(['git', '-C', repo, 'merge', '--abort'], repo)
+  const rebaseAbort = await run_host(['git', '-C', repo, 'rebase', '--abort'], repo)
+  const wasDirty = mergeAbort.ok || rebaseAbort.ok
+  if (wasDirty) {
+    // A merge/rebase WAS in progress and is now aborted; hard-reset restores the
+    // index+working tree to HEAD so the next checkout/merge starts from clean.
+    // Deliberately NOT `git clean` — the shared checkout may hold a real project's
+    // untracked files, and a build never depends on wiping them.
+    await run_host(['git', '-C', repo, 'reset', '--hard'], repo)
+  }
+  return wasDirty
+}
+
+/** Remove a specific worktree path (best-effort) + prune stale admin entries. */
+async function removeWorktreePath(run_host: RunHostCommand, repo: string, wt: string): Promise<void> {
+  try {
+    await run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
+    await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+  } catch {
+    // Swallow — a cleanup miss is cosmetic; the merge/refs are already durable.
+  }
+}
+
+/**
+ * FIX 1 (#351) — provision the run's DEDICATED merge worktree, detached at `base`.
+ * Detached (`--detach`) so it never collides with `base` being checked out in the
+ * shared repo ("`<base>` is already checked out"). Idempotent: any stale worktree
+ * at the path (a crash-resumed run reusing the deterministic path) is removed +
+ * pruned first. The whole rebase (the conflict-prone step) then runs HERE, so a
+ * failed rebase can only dirty THIS throwaway worktree — never the shared checkout.
+ */
+async function provisionRunWorktree(
+  run_host: RunHostCommand,
+  repo: string,
+  wt: string,
+  base: string,
+): Promise<void> {
+  await removeWorktreePath(run_host, repo, wt)
+  must(
+    'git worktree add',
+    await run_host(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', wt, base], repo),
+  )
+}
+
+/**
+ * Free `branch` from ANY lingering worktree (other than `keepPath`) that still has
+ * it checked out — the inner-workflow build worktree the harness/inner-cleanup may
+ * have missed. Without this, checking `branch` out in the merge worktree would fail
+ * "already checked out at <path>". Parses `git worktree list --porcelain`. Best-effort.
+ */
+async function freeBranchFromWorktrees(
+  run_host: RunHostCommand,
+  repo: string,
+  branch: string,
+  keepPath: string,
+): Promise<void> {
+  const list = await run_host(['git', '-C', repo, 'worktree', 'list', '--porcelain'], repo)
+  if (!list.ok) return
+  const wantRef = `refs/heads/${branch}`
+  let curPath: string | null = null
+  for (const raw of list.stdout.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line.startsWith('worktree ')) {
+      curPath = line.slice('worktree '.length).trim()
+    } else if (line.startsWith('branch ')) {
+      const ref = line.slice('branch '.length).trim()
+      if (ref === wantRef && curPath !== null && curPath !== keepPath) {
+        await run_host(['git', '-C', repo, 'worktree', 'remove', '--force', curPath], repo)
+      }
+    }
+  }
+  await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+}
+
 /**
  * Build the `MergeCleanupDeps` (mergePr / mergeLocal) over a host
  * command runner. The `cleanupAfterMerge` switch picks the right one
@@ -200,30 +301,56 @@ export function buildMergeCleanupDeps(
           exit_code: -1,
         })
       }
-      // Serialize per working tree — parallel same-project builds share this
-      // `repo_path`; a concurrent checkout/rebase/merge in the one tree collides.
-      // The lock makes N same-project builds land in order (#342): each waits for
-      // the prior merge, THEN rebases onto the now-updated base + merges.
+      // Serialize per BASE repo — parallel same-project builds share this
+      // `repo_path`; the final land onto `base` (the one op that touches the shared
+      // checkout) must not interleave. The lock makes N same-project builds land in
+      // order (#342): each waits for the prior merge, THEN rebases onto the
+      // now-updated base + merges. Keyed on `repo_path` so DIFFERENT projects still
+      // merge fully in parallel.
       await withLocalMergeLock(repo, async () => {
         const base = opts.base_branch ?? (await detectBaseBranch(run_host, repo))
-        // (0) FREE the branch from any lingering build worktree FIRST. The rebase
-        //     below checks out `branch` in the shared tree; if the inner workflow's
-        //     cleanup left the worktree registered, git refuses ("already checked
-        //     out at <path>") and the whole merge fails. The old merge-by-ref path
-        //     never checked the branch out, so this precondition is new to #342.
-        //     Best-effort + idempotent (prunes a stale admin entry either way).
-        await removeWorktree(run_host, run)
-        // (1) REBASE the build's branch onto the LATEST base so it replays on top
-        //     of any sibling build that merged before it. On a real content
-        //     conflict, dispatch the bounded Forge resolver; on a genuinely
-        //     ambiguous one, escalate to chat (throws TridentMergeConflictEscalation).
-        await rebaseBranchOntoBase(run_host, repo, base, branch, run, opts.resolve_conflict)
-        // (2) The branch now CONTAINS base, so the no-ff merge cannot conflict.
+        // (0) DEFENSIVE stale-state recovery (FIX 2): heal any merge/rebase a PRIOR
+        //     build left in the shared checkout BEFORE we touch it — else one old
+        //     poisoned index makes every later merge fail "resolve your current
+        //     index first" (the verified kvwal failure).
+        await recoverStaleGitState(run_host, repo)
+        // (0a) Move the shared checkout OFF any feature branch back onto base. A
+        //     recovered stale rebase/merge of THIS branch (legacy poison, or an
+        //     `--abort` that returns HEAD to the branch it started on) can leave the
+        //     shared checkout still ON `branch` — the merge worktree's `git checkout
+        //     <branch>` below would then fail "already checked out at <shared repo>".
+        //     Clean after the reset, so this checkout is safe (Codex [P1]).
         must('git checkout base', await run_host(['git', '-C', repo, 'checkout', base], repo))
-        must(
-          'git merge',
-          await run_host(['git', '-C', repo, 'merge', '--no-ff', branch, '-m', `Merge ${branch}`], repo),
-        )
+        // (1) ISOLATION (FIX 1): provision this run's OWN detached worktree and run
+        //     the whole rebase there. A rebase conflict that hard-fails can only
+        //     dirty THIS throwaway worktree — never the shared checkout — so one
+        //     build's failed merge can never poison another's.
+        const wt = run.worktree ?? runWorktreePath(repo, run)
+        // Free the branch from any lingering build worktree first (else the merge
+        //     worktree's `git checkout <branch>` fails "already checked out").
+        await freeBranchFromWorktrees(run_host, repo, branch, wt)
+        await provisionRunWorktree(run_host, repo, wt, base)
+        try {
+          // (2) REBASE the build's branch onto the LATEST base IN THE WORKTREE so it
+          //     replays on top of any sibling build that merged before it. On a real
+          //     content conflict, dispatch the bounded Forge resolver; on a genuinely
+          //     ambiguous one, escalate to chat (TridentMergeConflictEscalation).
+          await rebaseBranchOntoBase(run_host, wt, base, branch, run, opts.resolve_conflict)
+          // (3) LAND onto base in the shared checkout — the branch now CONTAINS base
+          //     (rebased on top), so this no-ff merge is fast-forwardable and CANNOT
+          //     conflict. Heal-then-land defensively (the repo is still clean here).
+          await recoverStaleGitState(run_host, repo)
+          must('git checkout base', await run_host(['git', '-C', repo, 'checkout', base], repo))
+          must(
+            'git merge',
+            await run_host(['git', '-C', repo, 'merge', '--no-ff', branch, '-m', `Merge ${branch}`], repo),
+          )
+        } finally {
+          // (4) Tear down the per-run worktree on EVERY terminal path (success OR a
+          //     thrown escalation) — never orphan a changed worktree (the fseventsd
+          //     CPU-peg lesson). Frees the branch so the delete below succeeds.
+          await removeWorktreePath(run_host, repo, wt)
+        }
         // Branch teardown after a successful merge (best-effort).
         await run_host(['git', '-C', repo, 'branch', '-D', branch], repo)
       })

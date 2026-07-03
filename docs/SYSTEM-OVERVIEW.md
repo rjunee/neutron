@@ -614,6 +614,44 @@ rather than waiting on the global diff-gate. Subscriber:
 >    `buildClarifyPoster`) and returns 200 (`work-board-surface.ts`) — never the raw
 >    internal guard text into the work pane.
 
+> <!-- SYNC-ON-DEPLOY (trident build reliability #351/#352, 2026-07-03) — flagged
+> for the Managed orchestrator's SYSTEM-OVERVIEW sync. -->
+> **Trident/Work Board — build reliability: worktree isolation + self-healing merge
+> + interpreted failures (#351/#352, 2026-07-03).** Three Ryan-locked guarantees (no
+> feature flags, one code path), fixing the verified 2026-07-03 kvwal failure where a
+> pre-#342 hard-failed conflict left `.git/MERGE_HEAD` in the ONE shared
+> `Projects/<proj>/code` checkout and every later build tripped "you need to resolve
+> your current index first":
+> 1. **Each concurrent build now merges in an ISOLATED git worktree, never the shared
+>    checkout.** `trident/merge.ts` `mergeLocal` provisions a dedicated per-run
+>    worktree (`<repo>/.trident-worktrees/<slug>-<id8>`, detached at base — recorded
+>    in `code_trident_runs.worktree`, `runWorktreePath`, was ALWAYS empty) and runs
+>    the whole rebase + #342 conflict-resolution THERE. The land onto base
+>    (`git merge --no-ff`, serialized per `repo_path` by `withLocalMergeLock`) is the
+>    only op touching the shared checkout and is conflict-free by construction (the
+>    branch already contains base). The worktree is torn down on EVERY terminal path
+>    (success OR escalation) via a `finally`. Net: one build's failed rebase can never
+>    poison another's checkout.
+> 2. **The merge path is SELF-HEALING.** Before touching the base repo, `mergeLocal`
+>    runs `recoverStaleGitState` — it aborts any lingering `MERGE_HEAD` /
+>    `rebase-merge` / `rebase-apply` (`git merge --abort` / `git rebase --abort`, whose
+>    exit code is an accurate "was-dirty" probe) and `git reset --hard`s to a clean
+>    base — so a checkout poisoned by a prior crash/build heals automatically instead
+>    of stranding every future build.
+> 3. **A failed build is INTERPRETED, never a raw error paste.** The terminal-failure
+>    announce (`trident/delivery.ts` `interpretFailure`, a deterministic classifier)
+>    maps `failure_reason` to a plain-language summary + the SPECIFIC input needed
+>    (`merge-conflict` surfaces the #342 question; `merge-mechanics` DISCARDS raw git
+>    stderr; `review-unresolved` / `hang` / `stale-state` / `infra` / `underspecified`
+>    each get a human sentence + a retry/review action). Recoverable classes are
+>    already auto-recovered upstream (stale state → recovery above; content conflict →
+>    the #342 Forge resolver), so a run reaching the announce is genuinely unrecoverable.
+> Verified by a REAL-git integration test (`trident/merge-realgit.test.ts`, temp repos
+> via `spawnCapture`, NOT the mocked `RunHostCommand` that let this bug ship): 3
+> concurrent builds each in their own worktree all land + base repo clean; a
+> `MERGE_HEAD`-poisoned repo auto-heals; an unrecoverable conflict escalates a plain
+> question AND leaves the shared checkout pristine so later builds still succeed.
+
 > <!-- SYNC-ON-DEPLOY (M1 UX REDESIGN PR-3, 2026-07-02) — flagged for the Managed
 > orchestrator's SYSTEM-OVERVIEW sync. -->
 > **M1 UX REDESIGN — rail + seated tabs + ⚛ branding (PR-3, 2026-07-02).** The web

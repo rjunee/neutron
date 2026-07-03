@@ -55,6 +55,7 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  runWorktreePath,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
   type RunHostCommand,
@@ -358,11 +359,18 @@ export function buildTridentOrchestrator(
     const argusApproved = run.inner_checkpoint === 'argus-approved'
 
     if (result.verdict === 'APPROVE' && argusApproved) {
+      // FIX 1 (#351) — record this run's DEDICATED merge worktree on the row BEFORE
+      // the merge, so `code_trident_runs.worktree` is populated (was always empty)
+      // and the isolated path is durable for cleanup even if the merge escalates or
+      // crashes. Local mode only — pr mode merges the remote (`gh pr merge`) and
+      // never provisions a local worktree.
+      const worktree = run.merge_mode === 'local' ? runWorktreePath(run.repo_path, run) : run.worktree
       const doneRun: TridentRun = {
         ...run,
         phase: 'done',
         pr,
         branch,
+        worktree,
         inner_checkpoint: result.checkpoint ?? 'argus-approved',
         inner_verdict: 'APPROVE',
         subagent_status: 'completed',

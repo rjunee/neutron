@@ -113,9 +113,12 @@ export type {
 export {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  recoverStaleGitState,
+  runWorktreePath,
   TridentMergeError,
+  TridentMergeConflictEscalation,
 } from './merge.ts'
-export type { RunHostCommand } from './merge.ts'
+export type { RunHostCommand, MergeConflictResolver } from './merge.ts'
 
 export {
   buildTridentOrchestrator,
