@@ -386,7 +386,14 @@ export function ProjectShell({
   // platform, never a dual tab-and-pane path on the same viewport.
   const isDesktop = useMediaQuery('(min-width: 1024px)')
   const workboardTab = tabs.find((t) => t.mount.target === 'workboard')
-  const showPane = isDesktop && workboardTab !== undefined
+  // Gate the pane on a RESOLVED scope (`tabsScope !== null`). During a scope
+  // switch `tabs` intentionally still holds the OUTGOING scope's descriptors, so
+  // an ungated `showPane` would mount the pane — and fire a wrong-scope
+  // (`/projects//work-board`, or the previous project's) board fetch — for the new
+  // scope before its tabs resolve, exactly the stale-scope hazard the disabled tab
+  // buttons already guard against (Codex P2). Once resolved, `tabs`/`workboardTab`
+  // belong to the current scope.
+  const showPane = isDesktop && tabsScope !== null && workboardTab !== undefined
   const visibleTabs = showPane ? tabs.filter((t) => t.mount.target !== 'workboard') : tabs
 
   // Pane open state is owned by `PlansPane` (auto-open/close + manual handle);

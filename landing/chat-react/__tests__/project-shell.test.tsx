@@ -712,4 +712,118 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     })
     container.remove()
   })
+
+  it('does NOT mount the pane while a scope switch is still resolving (Codex P2)', async () => {
+    mediaMatches = (q) => q.includes('min-width: 1024px')
+
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void; onopen: (() => void) | null; onmessage: ((ev: { data: unknown }) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; send: (d: string) => void; close: () => void }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    // GATE the tab resolver so the shell sits in the `resolving` (tabsScope ===
+    // null) window deterministically — the pane must NOT mount there even though
+    // the outgoing `tabs` still carries a Work descriptor.
+    let releaseTabs: () => void = () => {}
+    const tabsPending = new Promise<void>((res) => {
+      releaseTabs = res
+    })
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
+        await tabsPending
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+
+    // Resolving (gated fetch still pending) → NO pane, NO handle.
+    expect(container.querySelector('.car-plans-handle')).toBeNull()
+    expect(container.querySelector('.car-plans')).toBeNull()
+
+    // Release the resolver → the pane mounts for the now-resolved scope.
+    await act(async () => {
+      releaseTabs()
+      await tick()
+      await tick()
+    })
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
 })
