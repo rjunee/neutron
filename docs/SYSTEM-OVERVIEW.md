@@ -139,6 +139,35 @@ the owner slug, unchanged; the HTTP ▶/create surface already scope-keyed from 
 > existing `ensureWorkTab` + badge machinery already applies to the `'general'` id
 > the moment General becomes navigable on mobile.
 
+> **M1 redesign polish (Ryan 2026-07-03) — CLOSED.** Four chat-UI refinements,
+> no feature flags, one code path each:
+> - **Favicon = the ⚛ atom mark.** `landing/favicon.svg` now reproduces the
+>   `AtomMark` geometry from `ChatApp.tsx` (center dot + 3 rotated orbit ellipses)
+>   in a FIXED accent hex (`#007aff` — a favicon can't read page CSS vars), so the
+>   browser tab matches the rail-header icon.
+> - **Work-item delete confirm is INLINE-in-row, not a modal.** The old
+>   full-screen `.cwb-confirm-backdrop` / `aria-modal` dialog was deleted; the ✕
+>   now reveals a `.cwb-confirm-inline` `role="group"` strip WITHIN the item's own
+>   row (`InlineConfirm` in `WorkBoardTab.tsx`) — Cancel + a destructive Remove,
+>   Escape cancels, focus returns to the ✕. The confirm STATE machine
+>   (`confirmDelete`, `requestRemove`, the #174 linked-run cancel) is unchanged;
+>   only the render moved modal → in-row.
+> - **The Work pane lives INSIDE the Chat view, with the composer as a full-width
+>   footer.** The desktop slide-out (`PlansPane`) moved OUT of the `ProjectShell`
+>   shell level and INTO `ChatApp`/`ChatSurface` (`.car-chatstage` = a row of the
+>   message column + the pane, above a full-width `.car-composer` footer). So the
+>   chat input bar spans the whole content width with the pane LIFTED above it,
+>   and the pane is scoped to the Chat tab — it no longer bleeds onto Documents /
+>   Settings (it's hidden with the Chat tabpanel; state survives a round-trip).
+>   The shell still owns the `showPane` gate; the `.car-stage` grid was retired for
+>   a plain flex box and `.car-plans-col` animates its own width (chat shrinks).
+> - **Work rows are 2-line (title / tag+round), collapsing to 1-line when queued.**
+>   `WorkBoardRow` (web `WorkBoardTab.tsx` + mobile `app/components/WorkBoardRow.tsx`)
+>   stacks a `.cwb-row-line1` (dot + full title + hover actions) over a muted
+>   `.cwb-row-meta` (phase tag + `round N`), gated on `hasStatus` (`tag !== null`)
+>   so a bare queued card is a single title line and a done row carries "Merged ·
+>   <date>" on line 2. Titles no longer truncate prematurely.
+
 ### Email-Managed Core (`cores/free/email/`)
 
 Tier 1 Gmail Core. Installs against the owner's Google account via a

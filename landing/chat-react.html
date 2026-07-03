@@ -193,19 +193,13 @@
      + content column (tab bar over the active tab body). */
   .car-app { display: flex; height: 100dvh; min-height: 0; width: 100%; overflow: hidden; }
   .car-content { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  /* Chat stage (PR-4): the region BELOW the tab band — a 2-column grid whose 2nd
-     column (the Work pane) animates 0 → --pane-width, so the chat column shrinks
-     in lock-step when the pane opens (chat is NEVER overlaid). The pane floats
-     WITHIN this stage (below the band, not over it). Below 1024px the pane isn't
-     mounted (Work stays a tab) so the 2nd track stays 0 and the stage is just the
-     chat. `overflow: hidden` clips the panel while it's translated off-screen
-     right (no horizontal scrollbar) + centers the handle's own clip region. */
+  /* Chat stage: the region BELOW the tab band, holding the tab panels. M1 polish
+     (item 3+5) — the desktop Work pane no longer lives here (it moved INTO the Chat
+     view so it's scoped to the Chat tab, with the composer as a full-width footer),
+     so the stage is a plain flex box, not a 2-column grid. */
   .car-stage {
-    flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; overflow: hidden;
-    display: grid; grid-template-columns: 1fr 0;
-    transition: grid-template-columns .32s var(--ease-out);
+    flex: 1 1 auto; min-height: 0; min-width: 0; position: relative; display: flex;
   }
-  .car-stage-pane-open { grid-template-columns: 1fr var(--pane-width); }
   /* Top bar row: the section tab bar fills the row; the theme toggle is pinned
      to the far right. The band's surface + bottom border live here so the tabs
      and the toggle share one seamless strip. */
@@ -262,21 +256,37 @@
   .car-tabpanels { flex: 1 1 auto; position: relative; min-height: 0; min-width: 0; display: flex; }
   .car-tabpanel { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; }
   .car-tabpanel[hidden] { display: none; }
+  /* M1 polish (item 3+5) — the Chat view's inner layout. `.car-thread`
+     (ThreadPrimitive.Root) is a flex COLUMN: a growing top row (`.car-chatstage`)
+     holding the message column + the Work pane, then the full-width composer
+     footer. So the composer spans the whole width (chat + pane) and the pane is
+     LIFTED above it. `overflow: hidden` clips the panel while it's slid off-right. */
+  .car-chatstage {
+    flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; position: relative; overflow: hidden;
+  }
+  .car-chatmain {
+    flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative;
+  }
   .car-tab-frame { flex: 1 1 auto; width: 100%; height: 100%; border: 0; background: var(--bg); }
   .car-tab-placeholder {
     margin: auto; text-align: center; color: var(--muted); padding: 40px 20px;
   }
   .car-tab-placeholder-title { font-size: 20px; color: var(--fg); margin-bottom: 6px; }
   .car-tab-placeholder-sub { font-size: 14px; }
-  /* ── M1 UX REDESIGN PR-4 — the desktop WORK slide-out pane ─────────────────
-     The pane occupies the shell grid's 3rd column (`.car-plans-col`), a full-
-     height relative box pinned to the right edge. The panel (`.car-plans`) is an
-     absolutely-positioned FLOATING card: flush right, inset top/bottom for
-     breathing room, rounded LEFT corners, soft shadow — it reads as a panel that
-     slid in next to the chat, not a wall. Closed = translated fully off-screen
-     right + visibility:hidden (its controls leave the tab order); open = slid
-     home. The rows INSIDE stay the flat PR-2 rows (no cards-in-pane). */
-  .car-plans-col { position: relative; min-width: 0; }
+  /* ── M1 UX REDESIGN PR-4 (+ item 3+5 polish) — the desktop WORK slide-out pane ──
+     The pane is a flex column INSIDE `.car-chatstage` (to the right of the message
+     column, ABOVE the composer footer): a relative box whose width animates 0 →
+     --pane-width so the chat column shrinks in lock-step (chat is NEVER overlaid).
+     The panel (`.car-plans`) is an absolutely-positioned FLOATING card: flush
+     right, inset top/bottom for breathing room, rounded LEFT corners, soft shadow —
+     it reads as a panel that slid in next to the chat, not a wall. Closed =
+     translated fully off-screen right + visibility:hidden (its controls leave the
+     tab order); open = slid home. The rows INSIDE stay the flat PR-2 rows. */
+  .car-plans-col {
+    position: relative; flex: 0 0 auto; width: 0; min-width: 0; align-self: stretch;
+    transition: width .32s var(--ease-out);
+  }
+  .car-plans-col.car-plans-open { width: var(--pane-width); }
   .car-plans {
     position: absolute; top: 16px; bottom: 16px; right: 0; width: var(--pane-width);
     display: flex; flex-direction: column; min-height: 0;
@@ -317,7 +327,7 @@
   .car-plans-cnt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
   .car-plans-cnt .cwb-dot { display: inline-block; width: 8px; height: 8px; cursor: default; }
   @media (prefers-reduced-motion: reduce) {
-    .car-stage, .car-plans, .car-plans-handle { transition: none; }
+    .car-plans-col, .car-plans, .car-plans-handle { transition: none; }
   }
   /* Sanitized markdown (react-markdown + remark-gfm) — shared by agent chat
      bubbles + the Documents viewer. Dark theme; tight vertical rhythm so a chat
@@ -524,10 +534,16 @@
   .cwb-empty { color: var(--muted); font-size: 13px; padding: 24px 14px; text-align: center; }
   .cwb-empty-zero { padding: 40px 24px; }
   .cwb-ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  /* M1 redesign polish (item 4) — a row is a 2-LINE stack: line 1 = dot + title +
+     hover actions; line 2 = the muted phase tag + round. Line 2 renders ONLY when
+     the item has a bound run to report — a bare queued card is single-line. */
   .cwb-row {
-    display: flex; align-items: center; gap: 8px;
+    display: flex; flex-direction: column; gap: 1px;
     min-height: 34px; padding: 3px 8px; border-radius: 8px;
   }
+  .cwb-row-line1 { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+  /* line 2 — indented under the title (past the 9px dot + 8px gap), smaller + muted. */
+  .cwb-row-meta { display: flex; align-items: center; gap: 6px; margin-left: 17px; padding-bottom: 1px; }
   .cwb-row:hover { background: var(--hover-bg); }
   /* status dot — fixed-width leftmost column; a clickable button that advances. */
   .cwb-dot {
@@ -605,18 +621,11 @@
   .cwb-btn-play:hover:not(:disabled) { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
   .cwb-btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   .cwb-btn-danger { background: var(--error-fg); color: #fff; border-color: transparent; font-weight: 600; }
-  /* delete-confirm dialog (item 4) — a lightweight centered modal over a scrim. */
-  .cwb-confirm-backdrop {
-    position: fixed; inset: 0; z-index: 50; display: flex; align-items: center;
-    justify-content: center; background: rgba(0, 0, 0, .45); padding: 24px;
-  }
-  .cwb-confirm {
-    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-    border-radius: 12px; padding: 18px 20px; max-width: 340px; width: 100%;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, .3);
-  }
-  .cwb-confirm-msg { margin: 0 0 14px; font-size: 14px; line-height: 1.4; }
-  .cwb-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  /* delete-confirm (M1 polish item 2) — an INLINE strip within the row's own line 1
+     (no backdrop / no modal / no screen takeover). A short prompt + Cancel + a
+     destructive Remove, pushed to the right where the hover actions sat. */
+  .cwb-confirm-inline { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+  .cwb-confirm-inline-msg { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .cwb-row-done { opacity: .55; }
   .cwb-row-done .cwb-title { text-decoration: line-through; }
   /* completed disclosure — collapsed at the bottom, its own scroll region. */
@@ -952,8 +961,11 @@
     border: 1px solid var(--border); background: var(--surface, rgba(255,255,255,0.04)); color: inherit;
   }
   .car-edit-save { border-color: var(--accent); color: var(--accent); }
+  /* Anchored to `.car-chatmain` (the message column) — the composer is now a
+     sibling footer BELOW that column, so the button sits just above the messages'
+     bottom edge (16px), not lifted to clear an in-column composer. */
   .car-scroll-bottom {
-    position: absolute; right: 16px; bottom: 78px; z-index: 5;
+    position: absolute; right: 16px; bottom: 16px; z-index: 5;
     width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);
     background: var(--surface); color: var(--fg); cursor: pointer; font-size: 16px;
   }

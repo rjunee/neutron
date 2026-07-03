@@ -338,7 +338,49 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
-  it('confirm-before-delete uses cancel-build copy for a running item, lighter for idle (item 4)', async () => {
+  it('renders 2 lines (title / tag+round) for a bound run but 1 line for a queued item (item 4)', async () => {
+    const rows = [
+      item({
+        id: 'building',
+        title: 'Building item',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          step_label: 'building',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+      item({ id: 'queued', title: 'Just queued', status: 'upcoming' }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const liRows = Array.from(
+      container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) .cwb-row'),
+    )
+    // Building row → line 1 (title) + a SECOND line carrying the muted tag + round.
+    const buildingRow = liRows[0]!
+    expect(buildingRow.querySelector('.cwb-row-line1 .cwb-title')!.textContent).toBe('Building item')
+    const meta = buildingRow.querySelector('.cwb-row-meta')
+    expect(meta).not.toBeNull()
+    expect(meta!.querySelector('.cwb-tag')!.textContent).toBe('Building')
+    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('round 1')
+    // Queued row → title only, NO second line (item 4: 1-line when queued).
+    const queuedRow = liRows[1]!
+    expect(queuedRow.querySelector('.cwb-title')!.textContent).toBe('Just queued')
+    expect(queuedRow.querySelector('.cwb-row-meta')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('confirm-before-delete renders an INLINE confirm (no modal) — cancel-build copy for a running item, lighter for idle (item 2)', async () => {
     const rows = [
       item({
         id: 'run',
@@ -367,30 +409,37 @@ describe('WorkBoardTab (happy-dom)', () => {
       (b) => (b.getAttribute('aria-label') ?? '') === 'Delete item',
     ) as HTMLButtonElement[]
 
-    // Running item → cancel-build copy.
+    // Running item → an INLINE confirm (no backdrop, no aria-modal) with the
+    // cancel-build copy, rendered WITHIN the running item's own row.
     await act(async () => {
       delButtons[0]!.click()
       await tick()
     })
-    expect(container.querySelector('[role="dialog"]')!.textContent).toContain(
-      'Cancel this build and remove it?',
-    )
-    // Dismiss via the backdrop's Keep button.
-    const keep = Array.from(container.querySelectorAll('.cwb-confirm .cwb-btn')).find(
-      (b) => (b.textContent ?? '') === 'Keep',
+    expect(container.querySelector('.cwb-confirm-backdrop')).toBeNull()
+    expect(container.querySelector('[aria-modal="true"]')).toBeNull()
+    const confirm = container.querySelector('.cwb-confirm-inline')
+    expect(confirm).not.toBeNull()
+    expect(confirm!.getAttribute('role')).toBe('group')
+    expect(confirm!.getAttribute('aria-label')).toBe('Confirm remove')
+    expect(confirm!.textContent).toContain('Cancel build?')
+    // It's inline in the row — the board stays visible + interactive around it.
+    expect(confirm!.closest('.cwb-row')).not.toBeNull()
+    // Cancel dismisses it.
+    const cancel = Array.from(confirm!.querySelectorAll('.cwb-btn')).find(
+      (b) => (b.textContent ?? '') === 'Cancel',
     ) as HTMLButtonElement
     await act(async () => {
-      keep.click()
+      cancel.click()
       await tick()
     })
-    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(container.querySelector('.cwb-confirm-inline')).toBeNull()
 
     // Idle item → lighter copy.
     await act(async () => {
       delButtons[1]!.click()
       await tick()
     })
-    expect(container.querySelector('[role="dialog"]')!.textContent).toContain('Remove this item?')
+    expect(container.querySelector('.cwb-confirm-inline')!.textContent).toContain('Remove?')
     await act(async () => root.unmount())
   })
 
@@ -575,26 +624,24 @@ describe('WorkBoardTab (happy-dom)', () => {
     const delBtn = Array.from(container.querySelectorAll('.cwb-btn-icon')).find(
       (b) => (b.getAttribute('aria-label') ?? '') === 'Delete item',
     ) as HTMLButtonElement
-    // Item 4 — the X opens a confirm dialog FIRST; no DELETE fires yet.
+    // Item 2 — the X opens an INLINE confirm FIRST; no DELETE fires yet.
     await act(async () => {
       delBtn.click()
       await tick()
     })
     expect(deleted).toBe(false)
-    const dialog = container.querySelector('[role="dialog"]')
-    expect(dialog).not.toBeNull()
+    const confirm = container.querySelector('.cwb-confirm-inline')
+    expect(confirm).not.toBeNull()
 
-    // Confirm — the danger button in the dialog fires the DELETE.
-    const confirmBtn = Array.from(
-      (dialog as Element).querySelectorAll('.cwb-btn-danger'),
-    )[0] as HTMLButtonElement
+    // Confirm — the danger button in the inline confirm fires the DELETE.
+    const confirmBtn = (confirm as Element).querySelector('.cwb-btn-danger') as HTMLButtonElement
     await act(async () => {
       confirmBtn.click()
       await tick()
       await tick()
     })
     expect(deleted).toBe(true)
-    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(container.querySelector('.cwb-confirm-inline')).toBeNull()
 
     await act(async () => root.unmount())
   })
