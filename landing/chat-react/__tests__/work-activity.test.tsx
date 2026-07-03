@@ -63,7 +63,10 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 const rp = (phase: RunProgress['phase_label']): RunProgress =>
   ({ run_id: 'r', phase_label: phase, step_label: 'building', round: 1, started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null, pr: null, verdict: null, failure_reason: null })
 
-function fakeLive(): {
+/** A controllable live source. `replay` (if set) is delivered SYNCHRONOUSLY on
+ *  subscribe — mirroring the controller replaying its last snapshot to a late
+ *  subscriber, which must seed the baseline WITHOUT announcing. */
+function fakeLive(replay?: { items: WorkBoardItem[]; pid?: string }): {
   source: WorkBoardLiveSource
   emit: (items: WorkBoardItem[], pid?: string) => void
 } {
@@ -72,6 +75,7 @@ function fakeLive(): {
     source: {
       onWorkBoardChanged(fn) {
         cb = fn
+        if (replay !== undefined) fn(replay.items, replay.pid)
         return () => {
           cb = null
         }
@@ -95,43 +99,52 @@ describe('itemRunning', () => {
 })
 
 /** Mount `useWorkActivity` in a probe component and expose its latest value. */
-function mountActivity(source: WorkBoardLiveSource, projectId: string | null): {
+function mountActivity(source: WorkBoardLiveSource, projectId: string | null, announce = true): {
   root: Root
   latest: () => WorkActivity
   container: HTMLElement
 } {
   let latest: WorkActivity = { running: 0, justStarted: null, clearStarted: () => {} }
-  function Probe(): React.JSX.Element {
-    latest = useWorkActivity(source, projectId)
+  function Probe({ announce: a }: { announce: boolean }): React.JSX.Element {
+    latest = useWorkActivity(source, projectId, a)
     return <div />
   }
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
-  act(() => root.render(<Probe />))
+  act(() => root.render(<Probe announce={announce} />))
   return { root, latest: () => latest, container }
 }
 
 describe('useWorkActivity', () => {
-  it('seeds silently on the first frame (a pre-existing run is NOT announced)', async () => {
-    const live = fakeLive()
+  it('seeds a REPLAYED pre-existing run silently (not announced)', async () => {
+    // The controller replays its last snapshot synchronously to a late
+    // subscriber — that pre-existing run is the baseline, not a new start.
+    const live = fakeLive({ items: [item({ id: 'a', linked_run_id: 'r1' })], pid: 'acme' })
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
-      live.emit([item({ id: 'a', linked_run_id: 'r1' })], 'acme')
       await tick()
     })
     expect(h.latest().running).toBe(1)
-    expect(h.latest().justStarted).toBeNull() // seeded, not announced
+    expect(h.latest().justStarted).toBeNull()
+    act(() => h.root.unmount())
+  })
+
+  it('announces the FIRST live build of a fresh session (nothing to replay)', async () => {
+    const live = fakeLive() // no replay → fresh session baseline is empty
+    const h = mountActivity(live.source, 'acme')
+    await act(async () => {
+      live.emit([item({ id: 'a', title: 'First build', linked_run_id: 'r1' })], 'acme')
+      await tick()
+    })
+    expect(h.latest().running).toBe(1)
+    expect(h.latest().justStarted).toEqual({ id: 'a', title: 'First build' } as StartedJob)
     act(() => h.root.unmount())
   })
 
   it('announces a RISING running count as justStarted', async () => {
-    const live = fakeLive()
+    const live = fakeLive({ items: [], pid: 'acme' }) // replayed empty baseline
     const h = mountActivity(live.source, 'acme')
-    await act(async () => {
-      live.emit([], 'acme') // seed: nothing running
-      await tick()
-    })
     await act(async () => {
       live.emit([item({ id: 'a', title: 'New build', linked_run_id: 'r1' })], 'acme')
       await tick()
@@ -141,12 +154,22 @@ describe('useWorkActivity', () => {
     act(() => h.root.unmount())
   })
 
-  it('ignores frames for a DIFFERENT project', async () => {
+  it('with announce=false (desktop) never sets justStarted, but still tracks running', async () => {
     const live = fakeLive()
+    const h = mountActivity(live.source, 'acme', false)
+    await act(async () => {
+      live.emit([item({ id: 'a', title: 'Desktop build', linked_run_id: 'r1' })], 'acme')
+      await tick()
+    })
+    expect(h.latest().running).toBe(1) // pulse still works
+    expect(h.latest().justStarted).toBeNull() // no stale drawer to resurface on resize
+    act(() => h.root.unmount())
+  })
+
+  it('ignores frames for a DIFFERENT project', async () => {
+    const live = fakeLive({ items: [], pid: 'acme' })
     const h = mountActivity(live.source, 'acme')
     await act(async () => {
-      live.emit([], 'acme')
-      await tick()
       live.emit([item({ id: 'x', linked_run_id: 'r1' })], 'other')
       await tick()
     })

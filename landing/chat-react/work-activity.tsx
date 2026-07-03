@@ -65,20 +65,33 @@ export interface WorkActivity {
  * Subscribe to the active project's work board and derive the mobile pulse +
  * drawer signals. Filters frames to `projectId` (the live source multiplexes
  * every project's board), and re-seeds its baseline on a project switch.
+ *
+ * The baseline is seeded by whatever the live source replays SYNCHRONOUSLY at
+ * subscribe (the controller replays its last snapshot to a late subscriber) —
+ * that pre-existing state is NOT announced. Every subsequent frame is a real
+ * change, so a fresh session's very first live build (no prior snapshot to
+ * replay) IS announced (Codex P2: don't swallow the "open page, start first
+ * build" case).
+ *
+ * `announce` gates the drawer signal: when false (e.g. desktop, where the pane
+ * owns this), a starting build is NOT retained — so shrinking to mobile later
+ * can't surface a stale "building…" drawer for an old event (Codex P2).
  */
 export function useWorkActivity(
   source: WorkBoardLiveSource | null | undefined,
   projectId: string | null | undefined,
+  announce = true,
 ): WorkActivity {
   const [running, setRunning] = useState(0)
   const [justStarted, setJustStarted] = useState<StartedJob | null>(null)
   const prevRunningIds = useRef<Set<string>>(new Set())
   const primed = useRef(false)
+  const announceRef = useRef(announce)
+  announceRef.current = announce
   const pid = projectId ?? ''
 
   useEffect(() => {
-    // A project switch resets the baseline: the first frame for the new scope
-    // seeds without announcing, so we never flash a drawer for an in-flight run.
+    // A project switch resets the baseline.
     prevRunningIds.current = new Set()
     primed.current = false
     setRunning(0)
@@ -88,18 +101,27 @@ export function useWorkActivity(
       if ((framePid ?? '') !== pid) return
       const runningItems = items.filter(itemRunning)
       const ids = new Set(runningItems.map((i) => i.id))
-      if (primed.current && ids.size > prevRunningIds.current.size) {
+      if (primed.current && announceRef.current && ids.size > prevRunningIds.current.size) {
         // The running count ROSE — a new run started. Announce the first id that
         // wasn't running a frame ago (0→1 and 1→2 both count).
         const fresh = runningItems.find((i) => !prevRunningIds.current.has(i.id))
         if (fresh !== undefined) setJustStarted({ id: fresh.id, title: fresh.title })
       }
-      primed.current = true
       prevRunningIds.current = ids
       setRunning(ids.size)
     })
+    // Any SYNCHRONOUS replay above has now seeded the baseline; treat every later
+    // frame as a real change. Without this, a fresh session with nothing to
+    // replay would silently seed (and swallow) the user's first build.
+    primed.current = true
     return unsub
   }, [source, pid])
+
+  // Drop a pending announcement when announcing is disabled (desktop), so it
+  // can't resurface stale if announcing re-enables (the viewport shrinks).
+  useEffect(() => {
+    if (!announce) setJustStarted(null)
+  }, [announce])
 
   const clearStarted = useCallback(() => setJustStarted(null), [])
   return { running, justStarted, clearStarted }

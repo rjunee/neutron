@@ -438,8 +438,10 @@ export function ProjectShell({
   // FIX #348/#349 — mobile work-activity: one subscription to the active scope's
   // board drives both the Work-tab pulse (a build is live) and the job-start
   // drawer (a build just kicked off). Desktop already surfaces this via the
-  // right-edge pane, so the pulse + drawer are gated to `!isDesktop` at render.
-  const work = useWorkActivity(controller, projectId)
+  // right-edge pane, so the drawer signal is disabled on desktop (`!isDesktop`) —
+  // a build that starts while desktop is never retained, so shrinking to mobile
+  // later can't flash a stale drawer (Codex P2).
+  const work = useWorkActivity(controller, projectId, !isDesktop)
 
   // The previous active tab can vanish when the set changes (scope switch / Core
   // uninstall) — or, on desktop, because the Work tab was dropped in favor of the
