@@ -478,3 +478,98 @@ describe('ProjectShell render (happy-dom)', () => {
     })
   })
 })
+
+describe('WorkspaceSeat — seated tabs identity anchor (M1 UX redesign)', () => {
+  const mount = async (
+    projectId: string | null,
+    projects: import('../config.ts').ProjectTab[],
+  ): Promise<{ container: HTMLElement; cleanup: () => Promise<void> }> => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const makeSocket = () =>
+      ({ onopen: null, onmessage: null, onclose: null, onerror: null, send: () => {}, close: () => {} }) as never
+    const controller = new NeutronChatController({
+      projectId,
+      projects,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId,
+      projects,
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    // Serve an empty tab set so the shell settles to the guaranteed Chat tab.
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(JSON.stringify({ ok: true, tabs: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+    return {
+      container,
+      cleanup: async () => {
+        await act(async () => {
+          root.unmount()
+        })
+        container.remove()
+      },
+    }
+  }
+
+  it('General scope seats 💬 General', async () => {
+    const { container, cleanup } = await mount(null, [])
+    const seat = container.querySelector('.car-wsseat') as HTMLElement
+    expect(seat).not.toBeNull()
+    expect(seat.querySelector('.car-wsseat-emoji')!.textContent).toBe('💬')
+    expect(seat.querySelector('.car-wsseat-name')!.textContent).toBe('General')
+    await cleanup()
+  })
+
+  it('project scope seats the active project emoji + name', async () => {
+    const { container, cleanup } = await mount('acme', [{ id: 'acme', label: 'Acme', emoji: '🧪' }])
+    const seat = container.querySelector('.car-wsseat') as HTMLElement
+    expect(seat.querySelector('.car-wsseat-emoji')!.textContent).toBe('🧪')
+    expect(seat.querySelector('.car-wsseat-name')!.textContent).toBe('Acme')
+    await cleanup()
+  })
+})

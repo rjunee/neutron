@@ -2,6 +2,55 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — M1 UX redesign PR-3: rail 2-line rows + seated tabs + ⚛ branding (no flags)
+
+**Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-3 reskins the web chat
+shell's left rail and tab band to the authoritative prototype
+(`neutron-redesign-proto.netlify.app`): a Telegram-style 2-line project rail with
+a work-activity dot + preview, an ⚛ Neutron branding header, and real seated tabs
+with a workspace-identity seat. Consumes PR-1 (#180) rail fields
+(`activity`/`preview`/`preview_from`/`last_activity_at`). No feature flags — one
+code path, the old rail-row + underline-tab CSS deleted. Web `landing/chat-react/`
+only (NOT the Work slide-out pane [PR-4], docs [PR-5], or mobile [PR-6]).
+
+**What shipped.**
+
+- **⚛ Neutron branding header** (`ChatApp.tsx` `TopicRail` + new `AtomMark`;
+  `chat-react.html` `.car-rail-head`). The "PROJECTS" caps label is replaced by an
+  inline-SVG atom (`--accent`, 3 rotated ellipses + center dot) + the "Neutron"
+  wordmark (16px/700). The new-project `+` moves to the right of the header
+  (`.car-rail-newp`) and toggles the inline create form; the old bottom
+  "Create Project" button is deleted.
+
+- **Telegram-style 2-line rail rows** (`RailItem`; `.car-rail-item` grid). Emoji
+  "avatar" (40px plain glyph) + a corner **work-activity dot** (`railDotClass`:
+  `working` → pulsing `--work` @2.4s, `attention` → static `--attention`, else
+  none; General has no dot; `prefers-reduced-motion` disables the pulse). Line 1 =
+  name (15px/590, 700 unread) + right-aligned timestamp (`formatRailTime` off
+  `last_activity_at`: today → `14:32`, this week → `Mon`, older → `Jun 28`,
+  tabular-nums). Line 2 = one-line ellipsised `preview` (muted, `--fg-2` unread;
+  `You:` prefix when `preview_from==='user'`) + the unread badge. New tokens
+  `--work`, `--attention`, `--fg-2`, `--faint` added to BOTH `chat-react.html`
+  palettes (light + dark).
+
+- **Narrow (<1200px) icon rail.** A JS `narrow` render branch (`useMediaQuery`,
+  test-overridable via a `narrow` prop) collapses the rail to a 68px icon rail:
+  avatar + corner dot + a small corner count badge (`.car-rail-count`), names in
+  the row `title`. Supports PR-4's rail auto-collapse.
+
+- **Seated tabs + workspace-identity seat** (`ProjectShell` `.car-topbar`/`TabBar`
+  + new `WorkspaceSeat`; `chat-react.html` `.car-tab`/`.car-wsseat`). The band is a
+  `--surface` strip whose ACTIVE tab lifts onto the content sheet (bg `--bg`, a
+  border minus its bottom edge, `margin-bottom:-1px` fusing it to the page); the
+  sliding `--accent` underline treatment is DELETED. A workspace seat (active
+  scope's `emoji + name`; General → `💬 General`) sits left of the tabs — no
+  activity dot (that lives on the rail, per Ryan's de-dup). Theme toggle kept.
+
+- **Tests.** `component.test.tsx` (+ new `formatRailTime`/`railDotClass`/`railEmojiFor`
+  pure tests, 2-line-row content, work/attention dots, `You:` prefix, narrow icon
+  rail) and `project-shell.test.tsx` (workspace seat: General + project). tsc clean,
+  leak-gate SILENT. Existing create-project tests updated for the header `+`.
+
 ## 2026-07-02 — M1 UX redesign PR-2: Work-list rows + chat message formats (no flags)
 
 **Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-2 reskins the Work-list

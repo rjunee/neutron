@@ -46,7 +46,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { ChatApp, TopicRail } from './ChatApp.tsx'
+import { ChatApp, TopicRail, GENERAL_EMOJI, railEmojiFor } from './ChatApp.tsx'
 import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
@@ -110,6 +110,21 @@ function TabBar({
         )
       })}
     </nav>
+  )
+}
+
+/** The workspace-identity seat — the "you're inside a workspace" anchor seated
+ *  to the LEFT of the tabs: the active scope's emoji + name (General shows
+ *  💬 General). No activity dot (that lives on the rail — Ryan's de-dup keeps the
+ *  seat clean). */
+function WorkspaceSeat({ emoji, name }: { emoji: string; name: string }): React.JSX.Element {
+  return (
+    <div className="car-wsseat">
+      <span className="car-wsseat-emoji" aria-hidden="true">
+        {emoji}
+      </span>
+      <span className="car-wsseat-name">{name}</span>
+    </div>
   )
 }
 
@@ -396,6 +411,14 @@ export function ProjectShell({
   // scroll state survive — only its visibility toggles.
   const chatHidden = resolvedActiveKey !== CHAT_KEY
 
+  // Workspace-identity seat (left of the tabs): the active scope's emoji + name.
+  // General → 💬 General; a project → its emoji (server, else generic) + label.
+  // A just-switched-to project may not yet be in `vm.projects`; fall back to a
+  // neutral label so the seat never renders blank.
+  const activeProject = isGeneral ? undefined : vm.projects.find((p) => p.id === projectId)
+  const seatEmoji = isGeneral ? GENERAL_EMOJI : railEmojiFor(activeProject?.emoji)
+  const seatName = isGeneral ? 'General' : (activeProject?.label ?? 'Workspace')
+
   // Create-project flow (rail button): the rail owns an INLINE name input
   // (mirrors the mobile `app/app/projects` pattern — no native window.prompt,
   // which is unstyleable and blocks E2E/CDP automation). This callback POSTs to
@@ -444,10 +467,12 @@ export function ProjectShell({
         creating={creatingProject}
       />
       <div className="car-content">
-        {/* Top bar: the section tab bar (fills the row) with the light/dark
-            theme toggle pinned top-right. The toggle owns the whole UI's theme
-            (a user preference, not per-tab), so it lives at the shell root. */}
+        {/* Tab band (seated tabs): the workspace-identity seat, then the section
+            tabs (fills the row), with the light/dark theme toggle bottom-right.
+            The toggle owns the whole UI's theme (a user preference, not per-tab),
+            so it lives at the shell root. */}
         <div className="car-topbar">
+          <WorkspaceSeat emoji={seatEmoji} name={seatName} />
           <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} resolving={resolving} />
           <ThemeToggle />
         </div>

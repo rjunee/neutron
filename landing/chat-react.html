@@ -54,6 +54,13 @@
     --accent: #6cf;
     /* Text/icon drawn ON an accent-filled surface (primary buttons, badges). */
     --on-accent: #04121f;
+    /* M1 UX REDESIGN — rail work-activity dot + secondary text ramp (Telegram
+       2-line rows). --work = the live-build dot/unread fill, --attention = the
+       needs-you amber, --fg-2 = unread preview text, --faint = "You:" / meta. */
+    --work: #6cf;
+    --attention: #ffd27d;
+    --fg-2: #c7ccd6;
+    --faint: #5f646e;
     /* Chat bubbles */
     --user-bubble: #0a84ff;
     --user-fg: #ffffff;
@@ -120,6 +127,10 @@
     --muted: #8a8a8e;
     --accent: #007aff;
     --on-accent: #ffffff;
+    --work: #007aff;
+    --attention: #9a6a00;
+    --fg-2: #3a3f4a;
+    --faint: #aeb2ba;
     --user-bubble: #007aff;
     --user-fg: #ffffff;
     --agent-bubble: #e9e9eb;
@@ -179,26 +190,46 @@
   /* Top bar row: the section tab bar fills the row; the theme toggle is pinned
      to the far right. The band's surface + bottom border live here so the tabs
      and the toggle share one seamless strip. */
+  /* Seated tabs (M1 UX redesign) — the tab band reads as the page's top edge: a
+     surface strip whose ACTIVE tab lifts onto the content sheet (fused via a
+     -1px bottom margin over the band's own bottom border). No sliding underline. */
   .car-topbar {
-    display: flex; align-items: stretch; flex: 0 0 auto;
-    background: var(--surface); border-bottom: 1px solid var(--border);
+    display: flex; align-items: flex-end; flex: 0 0 auto; gap: 2px;
+    padding: 8px 10px 0; background: var(--surface); border-bottom: 1px solid var(--border);
   }
+  /* Workspace-identity seat — the "you're inside a workspace" anchor, left of the
+     tabs. Emoji + name; General shows 💬 General. NO activity dot (that lives on
+     the rail — Ryan's de-dup keeps the seat clean). */
+  .car-wsseat {
+    flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 7px;
+    padding: 6px 12px 10px; font-size: 14px; font-weight: 590; color: var(--fg);
+  }
+  .car-wsseat-emoji { flex: 0 0 auto; font-size: 16px; line-height: 1; }
+  .car-wsseat-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .car-tabs {
-    display: flex; gap: 2px; flex: 1 1 auto; min-width: 0; overflow-x: auto;
-    padding: 0 8px;
+    display: flex; align-items: flex-end; gap: 2px; flex: 1 1 auto; min-width: 0; overflow-x: auto;
   }
   .car-tab {
-    appearance: none; background: transparent; color: var(--muted); border: 0;
-    border-bottom: 2px solid transparent; padding: 11px 14px; margin: 0;
-    font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+    appearance: none; background: transparent; color: var(--muted);
+    border: 1px solid transparent; border-bottom: 0; margin: 0;
+    padding: 7px 15px; font: inherit; font-size: 13.5px; font-weight: 400;
+    cursor: pointer; white-space: nowrap; border-radius: 9px 9px 0 0;
+    transition: color .12s ease, background .12s ease;
   }
-  .car-tab:hover { color: var(--fg); }
-  .car-tab-active { color: var(--fg); border-bottom-color: var(--accent); }
+  .car-tab:hover:not(:disabled) { background: var(--hover-bg); color: var(--fg-2); }
+  .car-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .car-tab:disabled { opacity: .5; cursor: default; }
+  /* Active tab fuses to the content sheet below: bg matches the page, a border
+     minus its bottom edge, pulled 1px down over the band's bottom border. */
+  .car-tab-active {
+    color: var(--fg); font-weight: 590; background: var(--bg);
+    border-color: var(--border); margin-bottom: -1px;
+  }
   /* Light/dark theme toggle — pinned top-right of the content pane. A single
      pill button that cycles system → light → dark; the glyph shows the resolved
      theme (☀/☾) with a small "Auto" marker while following the system. */
   .car-theme-toggle {
-    flex: 0 0 auto; align-self: center; margin: 0 10px 0 6px;
+    flex: 0 0 auto; align-self: flex-end; margin: 0 8px 6px 6px;
     display: inline-flex; align-items: center; gap: 6px;
     appearance: none; cursor: pointer; font: inherit; font-size: 13px; line-height: 1;
     color: var(--muted); background: transparent;
@@ -530,55 +561,112 @@
      eye. Entirely theme-var-driven, so it reskins with the #153 light/dark
      toggle with zero hardcoded colours. */
   .car-rail {
-    width: 244px;
-    flex: 0 0 244px;
+    width: 288px;
+    flex: 0 0 288px;
     border-right: 1px solid var(--border);
     background: var(--surface);
-    padding: 14px 10px 10px;
+    padding: 14px 8px 10px;
     overflow-y: auto;
     /* Flex column so the Create Project button pins to the bottom (margin-top:auto). */
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
-  .car-rail-title {
-    color: var(--muted); font-size: 11px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: .09em; padding: 2px 10px 8px;
+  /* ⚛ Neutron branding lockup (M1 UX redesign) — replaces the "PROJECTS" caps
+     label: an accent-lit atom mark + the wordmark, with the new-project "+" on
+     the right of the header. */
+  .car-rail-head {
+    display: flex; align-items: center; gap: 9px; padding: 1px 4px 10px;
   }
-  .car-rail-list { display: flex; flex-direction: column; gap: 2px; }
+  .car-rail-atom { flex: 0 0 20px; width: 20px; height: 20px; color: var(--accent); }
+  .car-rail-wordmark {
+    font-size: 16px; font-weight: 700; letter-spacing: -.01em; color: var(--fg);
+  }
+  .car-rail-newp {
+    margin-left: auto; flex: 0 0 auto; appearance: none; background: transparent;
+    color: var(--muted); border: 0; cursor: pointer; padding: 0;
+    width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 21px; line-height: 1; border-radius: 7px;
+    transition: color .12s ease, background .12s ease;
+  }
+  .car-rail-newp:hover:not(:disabled) { background: var(--hover-bg); color: var(--fg); }
+  .car-rail-newp:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .car-rail-newp:disabled { opacity: .5; cursor: default; }
+  .car-rail-list { display: flex; flex-direction: column; gap: 1px; }
+  /* Telegram-style 2-line row: [avatar 40px] · [name + time / preview + unread]. */
   .car-rail-item {
-    display: flex; align-items: center; gap: 10px;
-    width: 100%; text-align: left;
-    background: transparent; color: var(--fg); border: 0; border-radius: 11px;
-    padding: 7px 9px; cursor: pointer; font: inherit; font-size: 14px;
-    transition: background .14s ease, color .14s ease, transform .06s ease;
+    display: grid; grid-template-columns: 40px 1fr; gap: 10px; align-items: center;
+    width: 100%; text-align: left; min-height: 56px;
+    background: transparent; color: var(--fg); border: 0; border-radius: 10px;
+    padding: 8px; cursor: pointer; font: inherit;
+    transition: background .14s ease, transform .06s ease;
   }
   .car-rail-item:hover { background: var(--hover-bg); }
   .car-rail-item:active { transform: scale(.985); }
   .car-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  /* Emoji "avatar" chip — a soft rounded square that anchors each row. */
-  .car-rail-emoji {
-    flex: 0 0 30px; width: 30px; height: 30px;
+  .car-rail-item-active { background: var(--active-bg); }
+  /* Avatar slot — plain emoji glyph (Telegram-style, no chip) + a corner
+     work-activity dot pinned bottom-right with a surface-coloured ring. */
+  .car-rail-avatar {
+    position: relative; width: 40px; height: 40px;
     display: inline-flex; align-items: center; justify-content: center;
-    font-size: 17px; line-height: 1;
-    /* No chip/box around the emoji — plain glyph, Telegram-style (Ryan 2026-07-02). */
   }
-  .car-rail-label {
-    flex: 1 1 auto; min-width: 0;
+  .car-rail-emoji { font-size: 22px; line-height: 1; }
+  .car-rail-dot {
+    position: absolute; right: 1px; bottom: 1px;
+    width: 8px; height: 8px; border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--surface);
+  }
+  .car-rail-dot-work { background: var(--work); animation: car-rail-pulse 2.4s ease-in-out infinite; }
+  .car-rail-dot-attention { background: var(--attention); }
+  @keyframes car-rail-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  @media (prefers-reduced-motion: reduce) { .car-rail-dot-work { animation: none; } }
+  .car-rail-meta { min-width: 0; }
+  .car-rail-line1 { display: flex; align-items: baseline; gap: 8px; }
+  .car-rail-name {
+    flex: 1 1 auto; min-width: 0; font-size: 15px; font-weight: 590; color: var(--fg);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  /* Active row: accent-tinted row fill + brighter label carry the selection.
-     No box around the emoji (Ryan 2026-07-02) — the emoji stays a plain glyph. */
-  .car-rail-item-active { background: var(--active-bg); color: var(--active-fg); font-weight: 600; }
-  /* Unread (and not active) — bolder, full-contrast label, Telegram-style. */
-  .car-rail-item-unread .car-rail-label { color: var(--fg); font-weight: 600; }
-  /* Unread count pill, right-aligned. */
+  .car-rail-item-unread .car-rail-name { font-weight: 700; }
+  .car-rail-time {
+    flex: 0 0 auto; margin-left: auto; font-size: 12px; color: var(--muted);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .car-rail-line2 { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  .car-rail-preview {
+    flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .car-rail-item-unread .car-rail-preview { color: var(--fg-2); }
+  .car-rail-you { color: var(--faint); }
+  /* Unread count pill, right-aligned on line 2. */
   .car-rail-badge {
     flex: 0 0 auto; margin-left: auto;
-    min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box;
+    min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box;
     display: inline-flex; align-items: center; justify-content: center;
-    background: var(--accent); color: var(--on-accent);
-    font-size: 11px; font-weight: 700; line-height: 1; border-radius: 999px;
+    background: var(--work); color: var(--on-accent);
+    font-size: 11px; font-weight: 700; line-height: 1; border-radius: 9px;
+  }
+  /* <1200px — the rail collapses to a 68px icon rail: avatar + corner dot + a
+     small count badge overlapping the top-right; names live in the row `title`.
+     Driven by the JS `narrow` render branch (also PR-4's auto-collapse hook). */
+  .car-rail-narrow { width: 68px; flex-basis: 68px; padding: 12px 8px 10px; align-items: center; }
+  .car-rail-narrow .car-rail-head { justify-content: center; padding: 1px 0 12px; }
+  .car-rail-narrow .car-rail-wordmark { display: none; }
+  .car-rail-narrow .car-rail-newp { margin-left: 0; }
+  .car-rail-narrow .car-rail-list { align-items: center; }
+  .car-rail-item-narrow {
+    grid-template-columns: 40px; justify-items: center; min-height: 48px;
+    padding: 6px; position: relative;
+  }
+  /* Corner count badge overlapping the avatar's top-right (narrow rail only). */
+  .car-rail-count {
+    position: absolute; top: 2px; right: 6px;
+    min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--work); color: var(--on-accent);
+    font-size: 10px; font-weight: 700; line-height: 1; border-radius: 8px;
+    box-shadow: 0 0 0 2px var(--surface);
   }
   /* Flows directly under the last project row (Ryan 2026-07-02 — was pinned to the rail bottom). */
   .car-rail-create {
@@ -605,10 +693,9 @@
   }
   .car-rail-create-confirm { border-color: var(--accent); color: var(--accent); }
   .car-rail-create-cancel:disabled, .car-rail-create-confirm:disabled { opacity: .6; cursor: default; }
-  /* The rail is the sole project navigation (persistent left column), so keep it
-     visible on narrow screens — just slimmer — rather than hiding it. The emoji
-     chip stays; the label ellipsises. */
-  @media (max-width: 720px) { .car-rail { width: 208px; flex-basis: 208px; padding: 12px 8px; } }
+  /* The rail is the sole project navigation (persistent left column). On narrow
+     viewports it collapses to the 68px icon rail above (`.car-rail-narrow`, a JS
+     render branch) rather than hiding, so project switching survives everywhere. */
   /* position: relative anchors the full-surface drag-and-drop overlay (BUG 2+4). */
   .car-main { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
   /* Subtle drag feedback for a PLAIN image drag (no import affordance) — the
