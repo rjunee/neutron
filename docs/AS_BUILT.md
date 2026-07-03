@@ -2,6 +2,50 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-02 — M1 UX redesign PR-2: Work-list rows + chat message formats (no flags)
+
+**Why.** Ryan-signed-off M1 UX redesign (2026-07-02). PR-2 reskins the Work-list
+rows to a plain-language, non-technical-user bar (the "Alina" bar) and fixes the
+chat message-format split. Depends on PR-1 (#180) `step_label` + the live tick
+fan. No feature flags — one code path, the old glyph/arrow code deleted.
+
+**What shipped.**
+
+- **"Plan" → "Work"** user-facing tab label (`tabs/registry.ts`); internal
+  `work_board_*` / `cwb-` / DB identifiers unchanged. Onboarding closing +
+  preamble copy follow ("its Work, Documents, and Chat").
+
+- **Work-list rows (web `landing/chat-react/WorkBoardTab.tsx` + mobile
+  `app/components/WorkBoardRow.tsx`).** Each active row is now
+  `[dot] title … [phase tag] [round] [hover actions]`, consuming PR-1's
+  `step_label`:
+  - **Leading dot** — faint-gray outline before a build starts; a colored
+    PULSING dot while a bound run walks building→reviewing→fixing→merging (pulse
+    in the tag's color, gated by `prefers-reduced-motion`); solid red on failure;
+    solid green when done.
+  - **Phase tag** — a small typographic capsule (Building / Reviewing / Fixing /
+    Merging / Merged / "Didn't finish"), tinted bg + colored fg, no border, no
+    emoji. New phase color tokens in both `chat-react.html` palettes (dark +
+    light) and mobile `app/lib/theme.ts`.
+  - Deleted the emoji-glyph status noise (📝🔨🔍✅⚠️🚫) + the `⑂`/`›` activity-glyph
+    column + the elapsed-minutes timer. `round N` (muted) trails the tag.
+  - **Drag-to-reorder** via a `⠿` grip (web: HTML5 DnD + arrow-key parity;
+    mobile: pointer/accessibility reorder) replacing the ▲▼ arrows; persists
+    `sort_order` via the existing reorder route.
+  - **✕ delete asks to confirm first**; ▶ starts a not-started card, ↻ retries a
+    failed one.
+  - Completed items collapse under a **"Done · N"** disclosure (default closed,
+    caret ▸/▾) and show a **"Merged · Jul 2"** datestamp.
+  - The **add-something-to-do** affordance moved to the BOTTOM of the list.
+
+- **Chat message formats (web).** Errors + command results stay ORDINARY agent
+  chat bubbles (a "build failed" is a message, not a banner) — the Work-list ↻
+  covers the "build failed → retry" case. A quiet centered **system-notification
+  pill** (`.car-system-pill`) is now the ONLY thing in the system-message style,
+  reserved for true notifications: the gateway's cold-start "Waking up…" ack
+  renders as the pill (self-clearing when the real reply streams) instead of a
+  bubble. (Mobile chat-format parity is a documented follow-up — see PR notes.)
+
 ## 2026-07-02 — trident/work-board correctness bundle (3 bugs a live parallel build test exposed)
 
 **Why.** A live test dispatched two trident builds (taskdag + waldb) in parallel
