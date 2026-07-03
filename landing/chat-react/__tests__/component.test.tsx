@@ -1359,8 +1359,50 @@ describe('TopicRail 2-line rows + branding (M1 UX redesign)', () => {
     expect(project.querySelector('.car-rail-count')!.textContent).toBe('2')
     expect(project.querySelector('.car-rail-emoji')!.textContent).toBe('🚀')
     expect(project.getAttribute('title')).toBe('Neutron')
+    // The button carries an explicit accessible name (name + unread) so a screen
+    // reader never announces it as just "2 unread" (Codex P2). General has no unread.
+    expect(project.getAttribute('aria-label')).toBe('Neutron, 2 unread')
+    expect((rows[0] as HTMLElement).getAttribute('aria-label')).toBe('General')
     // The work dot still rides the avatar in the collapsed rail.
     expect(project.querySelector('.car-rail-dot-work')).not.toBeNull()
     await cleanup()
+  })
+
+  it('opening the create form expands the narrow rail so the name field fits (Codex P2)', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const React = await import('react')
+    const { TopicRail } = await import('../ChatApp.tsx')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        React.createElement(TopicRail, {
+          projects: [],
+          activeId: null,
+          onSelect: () => {},
+          onCreate: async () => null,
+          creating: false,
+          narrow: true,
+        }),
+      )
+    })
+    // Collapsed to the icon rail initially…
+    expect(container.querySelector('.car-rail')!.className).toContain('car-rail-narrow')
+    // …clicking the header "+" opens the create form AND expands the rail to full
+    // width (so the name field isn't crushed into the 68px column).
+    await act(async () => {
+      ;(container.querySelector('.car-rail-newp') as HTMLButtonElement).click()
+      await tick()
+    })
+    expect(container.querySelector('.car-rail-input')).not.toBeNull()
+    expect(container.querySelector('.car-rail')!.className).not.toContain('car-rail-narrow')
+    // Rows render 2-line again while expanded.
+    expect(container.querySelector('.car-rail-meta')).not.toBeNull()
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
   })
 })

@@ -870,7 +870,15 @@ function RailItem({
       }${unread > 0 && !active ? ' car-rail-item-unread' : ''}`}
       onClick={onClick}
       aria-current={active ? 'true' : undefined}
-      {...(narrow ? { title: label } : {})}
+      {...(narrow
+        ? {
+            // The icon rail hides the name/preview, so the button's DOM text can't
+            // name it. Provide an explicit accessible name (name + unread) and a
+            // hover tooltip so it never announces as just "2 unread" (Codex P2).
+            title: label,
+            'aria-label': unread > 0 ? `${label}, ${unread} unread` : label,
+          }
+        : {})}
     >
       <span className="car-rail-avatar">
         <span className="car-rail-emoji" aria-hidden="true">
@@ -880,7 +888,7 @@ function RailItem({
           <span className={`car-rail-dot ${dotClass}`} aria-hidden="true" />
         ) : null}
         {narrow && unread > 0 ? (
-          <span className="car-rail-count" aria-label={`${unread} unread`}>
+          <span className="car-rail-count" aria-hidden="true">
             {countText}
           </span>
         ) : null}
@@ -935,6 +943,10 @@ export function TopicRail({
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  // The 68px icon rail can't fit the inline create form's name field, so while
+  // that form is open we temporarily expand the rail back to full width (and the
+  // rows render 2-line). Collapses back to icons on cancel/submit. (Codex P2.)
+  const effectiveNarrow = narrow && !createOpen
 
   const cancelCreate = (): void => {
     setCreateOpen(false)
@@ -962,7 +974,7 @@ export function TopicRail({
   }
 
   return (
-    <aside className={`car-rail${narrow ? ' car-rail-narrow' : ''}`} aria-label="Projects">
+    <aside className={`car-rail${effectiveNarrow ? ' car-rail-narrow' : ''}`} aria-label="Projects">
       {/* ⚛ Neutron branding lockup — replaces the old "PROJECTS" caps label. The
           new-project "+" sits on the right of the header (toggles the inline
           create form below). */}
@@ -1038,7 +1050,7 @@ export function TopicRail({
           active={activeId === null}
           unread={0}
           isGeneral
-          narrow={narrow}
+          narrow={effectiveNarrow}
           now={nowDate}
           onClick={() => onSelect(null)}
         />
@@ -1057,7 +1069,7 @@ export function TopicRail({
             previewFrom={p.preview_from ?? null}
             {...(p.last_activity_at !== undefined ? { lastActivityAt: p.last_activity_at } : {})}
             isGeneral={false}
-            narrow={narrow}
+            narrow={effectiveNarrow}
             now={nowDate}
             onClick={() => onSelect(p.id)}
           />
