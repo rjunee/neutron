@@ -274,14 +274,42 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(done?.completed_at).not.toBeNull()
   })
 
-  test('detachRun(failed) clears the binding + returns to upcoming (retryable, no datestamp)', async () => {
+  test('detachRun(failed) marks the item FAILED and KEEPS the run link (#340), no datestamp', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'fail me' })
     await store.attachRun(SLUG, a.id, 'run-fail')
     const failed = await store.detachRun(SLUG, 'run-fail', 'failed')
-    expect(failed?.status).toBe('upcoming')
-    expect(failed?.linked_run_id).toBeNull()
+    // #340 — FAILED lane, link KEPT so the client shows red + reason + retry.
+    expect(failed?.status).toBe('failed')
+    expect(failed?.linked_run_id).toBe('run-fail')
     expect(failed?.completed_at).toBeNull()
+  })
+
+  test('a failed item RETRIES cleanly: attachRun overwrites the link + flips to in_progress', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'retry me' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'failed')
+    // ▶/↻ retry — a fresh run supersedes the failed one.
+    const retried = await store.attachRun(SLUG, a.id, 'run-2')
+    expect(retried?.status).toBe('in_progress')
+    expect(retried?.linked_run_id).toBe('run-2')
+    // ...and a subsequent success completes + unlinks it (no stale failed state).
+    const done = await store.detachRun(SLUG, 'run-2', 'done')
+    expect(done?.status).toBe('done')
+    expect(done?.linked_run_id).toBeNull()
+  })
+
+  test('manually advancing a failed card off the failed lane DETACHES the terminal run', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'requeue me' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'failed')
+    // The status-dot advance: nextStatus('failed') → 'upcoming'. The stale failed
+    // run link must go, or the card renders red-dot/failed with status='upcoming'.
+    const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.status).toBe('upcoming')
+    expect(requeued?.linked_run_id).toBeNull()
   })
 
   test('detachRun is a safe no-op when no item is bound to the run', async () => {

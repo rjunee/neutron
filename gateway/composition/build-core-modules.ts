@@ -341,7 +341,12 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // hook. Failure-safe: the tick loop wraps `onTerminal` in its own
       // try/catch so a posting outage never un-terminates a finished build.
       const router = ctx.graph.get<ChannelRouter>('channels')
-      const delivery = buildTridentDelivery({ sink: router })
+      // #339 — prefer the composer-supplied delivery sink (Open's durable app-ws
+      // adapter) over the bare router: the router has NO app_socket adapter
+      // registered on Open, so a terminal completion message posted through it
+      // silently threw (walstore completed but the chat never announced). Falls
+      // back to the router for Telegram instances that register adapters on it.
+      const delivery = buildTridentDelivery({ sink: tridentWiring?.delivery_sink ?? router })
       // Skill-forge trigger (parity gap #5) — when the composer wired an
       // `on_run_terminal` observer, run it on every terminal run, ISOLATED
       // from delivery (`withTerminalObserver`): a delivery outage must not skip
@@ -408,6 +413,12 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
+        }
+        // #342 — the bounded Forge merge-conflict resolver: a LOCAL-mode merge
+        // that hits a rebase conflict (a 2nd/3rd parallel same-project build) is
+        // auto-resolved instead of hard-failing. Absent → conflicts escalate to chat.
+        if (tridentWiring.resolve_conflict !== undefined) {
+          orchestratorOpts.resolve_conflict = tridentWiring.resolve_conflict
         }
         // OPTIONAL cross-model review: resolve the Codex credential dir
         // (CODEX_HOME) for the inner workflow. PREFER the composer's per-run

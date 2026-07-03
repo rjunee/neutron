@@ -326,18 +326,32 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
     expect(body.code).toBe('already_running')
   })
 
-  test('POST start when the dispatch is underspecified → 409 with the guidance', async () => {
+  test('#337 — POST start on an underspecified item → 200 asked_in_chat (NO raw guard in the pane)', async () => {
     const item = await store.create(SCOPE, { title: 'thin' })
     const s = createWorkBoardSurface({
       store,
       auth,
-      start_build: async () => ({ ok: false, code: 'underspecified', message: 'ask the owner first' }),
+      // The composer's start closure posts a clarifying question to chat and
+      // returns the underspecified rejection; the surface must NOT paint it.
+      start_build: async () => ({ ok: false, code: 'underspecified', message: 'internal guard reasoning' }),
     })
     const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
-    expect(res?.status).toBe(409)
-    const body = (await res!.json()) as { code: string; message: string }
-    expect(body.code).toBe('underspecified')
-    expect(body.message).toContain('ask the owner')
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { asked_in_chat?: boolean; message?: string }
+    expect(body.asked_in_chat).toBe(true)
+    // The raw internal guard text is NEVER surfaced to the client (→ the pane).
+    expect(JSON.stringify(body)).not.toContain('internal guard reasoning')
+  })
+
+  test('a genuine backend_error on start still surfaces as an error (500)', async () => {
+    const item = await store.create(SCOPE, { title: 'thing' })
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      start_build: async () => ({ ok: false, code: 'backend_error', message: 'disk full' }),
+    })
+    const res = await s.handler(req('POST', `/api/app/projects/proj1/work-board/${item.id}/start`))
+    expect(res?.status).toBe(500)
   })
 })
 

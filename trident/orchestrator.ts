@@ -52,7 +52,13 @@ import {
   type InnerResult,
   type TridentWorkflowFirer,
 } from './inner-loop.ts'
-import { buildMergeCleanupDeps, detectBaseBranch, type RunHostCommand } from './merge.ts'
+import {
+  buildMergeCleanupDeps,
+  detectBaseBranch,
+  TridentMergeConflictEscalation,
+  type MergeConflictResolver,
+  type RunHostCommand,
+} from './merge.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
@@ -91,6 +97,15 @@ export interface BuildTridentOrchestratorOptions {
   resolve_codex_home?: (run: TridentRun) => string | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
+  /**
+   * Bounded Forge merge-conflict resolver (#342). Threaded into the default
+   * `buildMergeCleanupDeps` so a LOCAL-mode merge that hits a rebase conflict
+   * (a 2nd/3rd same-project build replaying onto a sibling's merge) is
+   * auto-resolved rather than hard-failing. Ignored when `merge_deps` is
+   * supplied (the override owns its own resolver). Absent → a conflict
+   * escalates to chat immediately (no auto-resolve).
+   */
+  resolve_conflict?: MergeConflictResolver
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
   mint_run_id?: () => string
   /**
@@ -189,7 +204,12 @@ export function buildTridentOrchestrator(
   const now = opts.now ?? (() => new Date().toISOString())
   const fireWorkflow = opts.fire_workflow
   const db_path = opts.db_path
-  const merge_deps = opts.merge_deps ?? buildMergeCleanupDeps(opts.run_host)
+  const merge_deps =
+    opts.merge_deps ??
+    buildMergeCleanupDeps(
+      opts.run_host,
+      opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {},
+    )
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
@@ -353,6 +373,17 @@ export function buildTridentOrchestrator(
         const res = await cleanupAfterMerge(doneRun, merge_deps)
         return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}` }
       } catch (err) {
+        // #342 — a genuinely ambiguous merge conflict escalates a SPECIFIC
+        // question to chat (not a raw "merge failed"): fail the run with the
+        // question AS the reason so the terminal delivery posts exactly it.
+        if (err instanceof TridentMergeConflictEscalation) {
+          return {
+            run: { ...failedRun(doneRun, err.question, true), inner_verdict: 'APPROVE' },
+            changed: true,
+            waiting: false,
+            note: 'done → failed (merge conflict escalated to chat)',
+          }
+        }
         const reason = err instanceof Error ? err.message : 'merge failed'
         return {
           run: { ...failedRun(doneRun, `merge failed: ${reason}`, true), inner_verdict: 'APPROVE' },

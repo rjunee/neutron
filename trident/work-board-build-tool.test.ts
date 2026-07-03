@@ -108,6 +108,32 @@ describe('work_board_dispatch_build tool', () => {
     expect(attached).toEqual([{ id: 'ready', run_id: out.run_id as string }])
   })
 
+  test('#339 — resolve_delivery stamps the originating chat topic (from ctx.project_id) onto the run', async () => {
+    const reg = new ToolRegistry()
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: board(),
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+      resolve_delivery: (projectId) => ({
+        chat_id: projectId !== null ? `app:owner:${projectId}` : 'app:owner',
+        thread_id: null,
+      }),
+    })
+    const tool = reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
+    const out = (await tool.handler(
+      { board_item_id: 'ready', task: 'build the export' },
+      { ...ctx, project_id: 'p9' },
+    )) as Record<string, unknown>
+    expect(out.ok).toBe(true)
+    const run = store.get(out.run_id as string)!
+    // The run now carries a chat topic → terminal delivery can announce back here.
+    expect(run.chat_id).toBe('app:owner:p9')
+    expect(run.thread_id).toBeNull()
+  })
+
   test('an unknown item is rejected with no run created', async () => {
     const out = (await toolFor().handler({ board_item_id: 'nope', task: 'x' }, ctx)) as Record<string, unknown>
     expect(out.ok).toBe(false)

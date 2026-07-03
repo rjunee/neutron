@@ -477,7 +477,7 @@ export interface AppWsOutboundEditUpdate {
 export interface AppWsWorkBoardItem {
   id: string
   title: string
-  status: 'upcoming' | 'in_progress' | 'done'
+  status: 'upcoming' | 'in_progress' | 'done' | 'failed'
   sort_order: number
   design_doc_ref: string | null
   inline_active: boolean

@@ -48,6 +48,13 @@ describe('operating-doctrine — principle set', () => {
       expect(frag).toContain('INLINE')
       expect(frag.toLowerCase()).toContain('complex')
       expect(frag.toLowerCase()).toContain('tell the owner')
+      // #334 — EVERY build (inline or trident, any project) must leave a card.
+      expect(frag).toContain('MUST leave a trackable card')
+      expect(frag).toContain('work_board_add')
+      // #337 — an underspecified build asks a clarifying question IN THE CHAT and
+      // never surfaces the raw rejection text.
+      expect(frag).toContain('clarifying question IN THE CHAT')
+      expect(frag.toLowerCase()).toContain('never surface the raw rejection')
     }
   })
 

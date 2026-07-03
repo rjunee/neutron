@@ -78,15 +78,20 @@ export const DOCTRINE_PRINCIPLES: readonly string[] = [
 export const BUILD_ROUTING_DOCTRINE =
   'Build routing. When the owner asks you to BUILD something and you have the ' +
   '`work_board_dispatch_build` tool available, DECIDE how to run it — do not wait ' +
-  "for a slash command. A SIMPLE change (a single file, a quick script, a small " +
-  'self-contained edit, a throwaway) you build INLINE with your own Read/Write/Edit/Bash ' +
-  'tools, right now. A COMPLEX build (spans multiple files, touches a real project or ' +
-  'shared code, warrants code review, or is large/risky) you route to the autonomous ' +
-  'trident loop: add a Plan item with `work_board_add` if one does not exist, then call ' +
-  '`work_board_dispatch_build` bound to that item — Forge builds, Argus reviews, and it ' +
-  'merges autonomously. When you route to trident, TELL the owner you are doing so and WHY ' +
-  '(complexity/scope/review), and keep chatting; the result arrives later. If the item is ' +
-  'underspecified the dispatch is rejected — ask ONE clarifying question, then retry.'
+  'for a slash command. EVERY build request — however small, in ANY project (General ' +
+  'included) — MUST leave a trackable card on the Work Board: the owner watches the Work ' +
+  'list, so a build with no card is invisible to them. So ALWAYS create or find a Plan item ' +
+  'with `work_board_add` FIRST, then build. A SIMPLE change (a single file, a quick script, a ' +
+  'small self-contained edit) you MAY build INLINE with your own Read/Write/Edit/Bash tools — ' +
+  'but still add the card, mark it inline_active while you work, and mark it done when you ' +
+  'finish. A COMPLEX build (spans multiple files, touches a real project or shared code, ' +
+  'warrants code review, or is large/risky) you route to the autonomous trident loop: call ' +
+  '`work_board_dispatch_build` bound to that item — Forge builds, Argus reviews, and it merges ' +
+  'autonomously. When you route to trident, TELL the owner you are doing so and WHY ' +
+  '(complexity/scope/review), and keep chatting; the result arrives later. If a build item is ' +
+  'UNDERSPECIFIED (no design doc, a terse title) the dispatch is REJECTED — post ONE short ' +
+  'clarifying question IN THE CHAT (platform? key features? a design reference?) and leave the ' +
+  'item pending; NEVER guess, and NEVER surface the raw rejection text to the owner.'
 
 /**
  * Build the `<operating_doctrine>` fragment for the given surface.

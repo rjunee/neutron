@@ -74,10 +74,12 @@ export interface WorkBoardLiveSource {
   ): () => void
 }
 
-/** Cycle an item's status forward: upcoming → in_progress → done. */
+/** Cycle an item's status forward: upcoming → in_progress → done. A failed item
+ *  re-queues to upcoming on manual advance (the primary action is the ▶/↻ retry). */
 function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress'
   if (status === 'in_progress') return 'done'
+  if (status === 'failed') return 'upcoming'
   return 'done'
 }
 
@@ -85,6 +87,7 @@ function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
 function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress'
   if (status === 'done') return 'Done'
+  if (status === 'failed') return 'Failed'
   return 'Upcoming'
 }
 
@@ -140,8 +143,18 @@ function stepTag(rp: RunProgress | undefined): PhaseTag | null {
     case 'done':
       return { label: 'Merged', cls: 'cwb-tag-merge' }
     case 'failed':
-      return { label: 'Didn’t finish', cls: 'cwb-tag-failed' }
+      return { label: 'Failed', cls: 'cwb-tag-failed' }
   }
+}
+
+/** The failure-reason one-liner (#340) — shown on a failed item's meta line so
+ *  the owner sees WHY it failed (a merge conflict question, a hang, exhausted
+ *  rounds) without opening anything. Null unless the bound run is in the failed
+ *  step. */
+function failureReasonText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined || resolveStepLabel(rp) !== 'failed') return null
+  const reason = rp.failure_reason
+  return reason !== null && reason.length > 0 ? reason : null
 }
 
 interface DotState {
@@ -767,6 +780,7 @@ function WorkBoardRow({
   const dot = dotState(item)
   const tag = stepTag(item.run_progress)
   const round = roundText(item.run_progress)
+  const failReason = failureReasonText(item.run_progress)
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
@@ -907,6 +921,11 @@ function WorkBoardRow({
         <div className="cwb-row-meta">
           {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
           {round !== null ? <span className="cwb-round">{round}</span> : null}
+          {failReason !== null ? (
+            <span className="cwb-fail-reason" title={failReason}>
+              {failReason}
+            </span>
+          ) : null}
         </div>
       ) : null}
     </li>

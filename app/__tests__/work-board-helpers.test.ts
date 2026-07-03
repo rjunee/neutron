@@ -107,9 +107,9 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     expect(roundText(rp)).toBeNull();
   });
 
-  it('failed (terminal) → "Didn’t finish" tag, NO round', () => {
+  it('failed (terminal) → "Failed" tag, NO round', () => {
     const rp = progress({ step_label: 'failed' });
-    expect(stepTag(rp)).toEqual({ label: 'Didn’t finish', colorKey: 'failed' });
+    expect(stepTag(rp)).toEqual({ label: 'Failed', colorKey: 'failed' });
     expect(roundText(rp)).toBeNull();
   });
 

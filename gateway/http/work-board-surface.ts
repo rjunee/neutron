@@ -298,6 +298,12 @@ async function handleStart(
   }
   const result = await startBuild(project_slug, item)
   if (!result.ok) {
+    // #337 — an underspecified card is NOT an error to paint in the work pane:
+    // `startBuild` has already posted a clarifying question to the chat and left
+    // the item pending. Return 200 so the client shows no raw-guard banner.
+    if (result.code === 'underspecified') {
+      return jsonOk({ asked_in_chat: true, item_id, project_id })
+    }
     const status = result.code === 'backend_error' ? 500 : 409
     return jsonError(status, result.code, result.message)
   }

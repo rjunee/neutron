@@ -1385,12 +1385,12 @@ CREATE TABLE watchdog_alerts (
 )
 
 [table] work_board_items (tbl=work_board_items)
-CREATE TABLE work_board_items (
+CREATE TABLE "work_board_items" (
     id              TEXT PRIMARY KEY NOT NULL,      -- ULID
     project_slug    TEXT NOT NULL,
     title           TEXT NOT NULL,                  -- ONE line (stripped + capped at the store)
     status          TEXT NOT NULL DEFAULT 'upcoming'
-                        CHECK (status IN ('upcoming', 'in_progress', 'done')),
+                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed')),
     sort_order      INTEGER NOT NULL,
     design_doc_ref  TEXT,
     inline_active   INTEGER NOT NULL DEFAULT 0

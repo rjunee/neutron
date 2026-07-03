@@ -19,13 +19,17 @@ import type { PhaseColor } from './theme';
 export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress';
   if (status === 'done') return 'Done';
+  if (status === 'failed') return 'Failed';
   return 'Upcoming';
 }
 
-/** Cycle a status forward: upcoming → in_progress → done (done stays done). */
+/** Cycle a status forward: upcoming → in_progress → done (done stays done). A
+ *  failed item re-queues to upcoming on manual advance (the primary action is
+ *  the ▶/↻ retry). */
 export function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress';
   if (status === 'in_progress') return 'done';
+  if (status === 'failed') return 'upcoming';
   return 'done';
 }
 
@@ -112,8 +116,17 @@ export function stepTag(rp: RunProgress | undefined): PhaseTag | null {
     case 'done':
       return { label: 'Merged', colorKey: 'merge' };
     case 'failed':
-      return { label: 'Didn’t finish', colorKey: 'failed' };
+      return { label: 'Failed', colorKey: 'failed' };
   }
+}
+
+/** The failure-reason one-liner (#340) — shown on a failed item's meta line so
+ *  the owner sees WHY it failed without opening anything. Null unless the bound
+ *  run is in the failed step. Mirror of the web helper. */
+export function failureReasonText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined || resolveStepLabel(rp) !== 'failed') return null;
+  const reason = rp.failure_reason;
+  return reason !== null && reason.length > 0 ? reason : null;
 }
 
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */

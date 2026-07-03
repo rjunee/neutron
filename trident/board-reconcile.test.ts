@@ -40,7 +40,7 @@ describe('buildBoardReconcileObserver', () => {
     expect(buildBoardReconcileObserver(undefined)).toBeNull()
   })
 
-  test('a done run completes its bound item; a failed run returns it to upcoming', async () => {
+  test('a done run completes its bound item; a failed run marks it FAILED and KEEPS the link (#340)', async () => {
     const obs = buildBoardReconcileObserver(board)!
     const a = await board.create('proj-1', { title: 'thing A' })
     const b = await board.create('proj-1', { title: 'thing B' })
@@ -52,8 +52,10 @@ describe('buildBoardReconcileObserver', () => {
 
     expect(board.get('proj-1', a.id)?.status).toBe('done')
     expect(board.get('proj-1', a.id)?.linked_run_id).toBeNull()
-    expect(board.get('proj-1', b.id)?.status).toBe('upcoming')
-    expect(board.get('proj-1', b.id)?.linked_run_id).toBeNull()
+    // #340 — a failed run shows FAILED + keeps its run link (so the client
+    // derives the red dot + reason + retry), NOT a revert to upcoming/unlinked.
+    expect(board.get('proj-1', b.id)?.status).toBe('failed')
+    expect(board.get('proj-1', b.id)?.linked_run_id).toBe('run-b')
   })
 })
 

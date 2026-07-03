@@ -27,8 +27,12 @@
 
 import type { ProjectDb } from '../persistence/index.ts'
 
-/** The board lane. */
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done'
+/** The board lane. `failed` is a run-driven terminal lane (a bound trident run
+ *  that FAILED): it stays in the active list (`status != done`), KEEPS its
+ *  `linked_run_id` so the client shows a red dot + "Failed" tag + the run's
+ *  `failure_reason`, and is re-actionable via the ▶/↻ retry. It is NOT a
+ *  client-writable status — only the terminal reconcile sets it. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
 
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
@@ -454,6 +458,16 @@ export class WorkBoardStore {
             )
             .get(project_slug)
           push('sort_order', max?.next ?? 1)
+        } else if (current.status === 'failed') {
+          // Re-queue OFF failed (nextStatus('failed') → 'upcoming', or a dismiss):
+          // DETACH the terminal failed run so the card stops deriving the red dot
+          // + 'failed' step_label + failure_reason from it. detachRun keeps the
+          // link (#340) so the FAILED card can render + retry; but once the human
+          // manually advances it out of the failed lane the stale terminal link
+          // must go, or the card renders failed with status='upcoming' and a
+          // second advance strands it in_progress with a terminal link (no retry).
+          // A genuine retry re-dispatches via attachRun (a fresh linked_run_id).
+          push('linked_run_id', null)
         }
         // active→active (e.g. upcoming→in_progress): no completed_at/sort_order change.
       }
@@ -612,10 +626,17 @@ export class WorkBoardStore {
 
   /**
    * Phase 2b — RECONCILE a bound run that reached a terminal phase. Finds the
-   * item by `run_id`, clears `linked_run_id` (→ fork icon goes dark), and sets
-   * the lane from the outcome: `done` → completed (datestamped history),
-   * `failed` → back to `upcoming` (re-actionable, no active marker). One
-   * transaction, one push. No-op (returns null) when no item is bound to the
+   * item by `run_id` and sets the lane from the outcome:
+   *   - `done`   → CLEAR the run binding (fork icon goes dark) + complete the
+   *               item (datestamped history).
+   *   - `failed` → mark the item FAILED and KEEP the run binding (#340). The
+   *               still-linked failed run is what the client derives the red dot
+   *               + "Failed" tag + `failure_reason` one-liner from (its
+   *               `run_progress.step_label` is 'failed'), and the ▶/↻ retry
+   *               re-dispatches against the same card. Do NOT revert to
+   *               'upcoming' (that showed a grey never-started card and lost the
+   *               failure) and do NOT null `linked_run_id`.
+   * One transaction, one push. No-op (returns null) when no item is bound to the
    * run — terminal reconcile is idempotent + safe for unbound dispatches.
    */
   async detachRun(
@@ -626,18 +647,20 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
       if (current === null) return null
-      const sets = ['linked_run_id = NULL', 'inline_active = 0']
+      const sets = ['inline_active = 0']
       const params: (string | number | null)[] = []
       if (outcome === 'done') {
-        sets.push("status = 'done'")
+        // Done — clear the binding (fork ⑂ dark) + complete the item.
+        sets.push('linked_run_id = NULL', "status = 'done'")
         // Stamp the datestamp only on a genuine →done transition.
         if (current.status !== 'done') {
           sets.push('completed_at = ?')
           params.push(this.now())
         }
       } else {
-        // Failed/stopped — return to the backlog so the owner can retry.
-        sets.push("status = 'upcoming'", 'completed_at = NULL')
+        // Failed — FAILED lane, KEEP the run link (see the header). The retry
+        // path (`attachRun`) overwrites the link + flips back to in_progress.
+        sets.push("status = 'failed'", 'completed_at = NULL')
       }
       sets.push('updated_at = ?')
       params.push(this.now(), project_slug, current.id)

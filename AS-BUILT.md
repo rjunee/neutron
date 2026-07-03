@@ -2,6 +2,85 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-03 — TRIDENT parallel builds + build lifecycle (#342/#340/#339/#334/#337)
+
+**Why.** Ryan's live test 2026-07-03 (SPEC.md Decisions Log, Ryan-locked). Vajra runs
+3+ parallel trident builds in one project constantly; Open couldn't. Plus four
+lifecycle gaps: a failed build vanished, a finished build never announced, a build
+could run untracked, and an underspecified ▶ dumped raw guard text into the pane.
+NO feature flags; one code path; leak-gate SILENT. Stayed clear of the pure chat-react
+UI polish (#333/#335/#336/#338/#341 — a separate forge, landed as #189; this branch
+rebased onto it, resolving the `chat-react.html` `.cwb-drag` overlap by keeping both
+#341's grip styling and this PR's `.cwb-fail-reason`).
+
+**FIX 1 (#342, P1) — 3+ concurrent same-project builds.** Each build already runs in
+its own worktree and `mergeLocal` already serializes LOCAL merges per `repo_path`
+(`withLocalMergeLock`). But inside the lock it did a plain `git merge --no-ff` that
+THREW on any conflict — so a 2nd same-project build (branch cut from the pre-1st base)
+died on a merge conflict (this killed `dagcore` after `walstore` merged). Now
+`mergeLocal` (`trident/merge.ts`): resolves the base, **rebases the build's branch onto
+the latest base** (`git checkout <branch>` + `git rebase <base>`), then `git checkout
+<base>` + `git merge --no-ff` (a clean no-conflict merge since the branch now contains
+base). On a rebase CONFLICT it dispatches a **bounded Forge resolver**
+(`trident/conflict-resolver.ts`, `buildForgeConflictResolver` over the composer's
+`makeEphemeralSubstrate('cc-trident-resolve')`): a single tool-less CC turn rooted in
+the conflicted worktree that resolves + `git add`s the conflicts (the loop runs `git
+rebase --continue`), keeping both intents where compatible; it reports `RESOLVED` or
+`ESCALATE: <specific question>`. A genuinely ambiguous conflict (or a missing/timed-out
+resolver) throws `TridentMergeConflictEscalation`, which `orchestrator.applyResult`
+turns into a `failed` run whose `failure_reason` IS the specific question — so it rides
+the terminal chat delivery (FIX 3) verbatim, never a raw "merge failed". Bounded: an
+8-min per-turn timeout, escalate-on-uncertainty, `MAX_CONFLICT_ROUNDS=12`. Wiring:
+`orchestrator.resolve_conflict` → `buildMergeCleanupDeps(run_host, { resolve_conflict })`;
+threaded through `input.trident.resolve_conflict` (`misc-input.ts` →
+`build-core-modules.ts` → `open/composer.ts`).
+
+**FIX 2 (#340) — a failed build shows FAILED, keeps its link, no revert.** Added a
+fourth Work Board lane `'failed'` (migration `0097`, widened CHECK via table rebuild).
+`WorkBoardStore.detachRun('failed')` now sets `status='failed'` and KEEPS
+`linked_run_id` (was: revert to `upcoming` + null the link, which showed a grey
+never-started card and lost the failure). The client already renders a red dot +
+failed tag off `run_progress.step_label==='failed'` (kept alive by the retained link);
+this PR renames the tag copy to **"Failed"** and renders the `failure_reason` one-liner
+(`.cwb-fail-reason` web / `failReason` mobile). Client status unions + parse guards
+widened to `'failed'` (`work-board-client.ts` web+mobile — the mobile parser had been
+DROPPING any unknown-status item), plus `AppWsWorkBoardItem` + `statusLabel`/`nextStatus`.
+
+**FIX 3 (#339) — terminal builds announce in chat.** Root cause was two-fold: (a) a
+board-dispatched run carried `chat_id=null` (the warm-REPL `ToolCallContext.topic_id`
+is null by design), so `topicForRun` no-op'd; (b) even with a chat_id, Open's delivery
+`ChannelRouter` has NO app_socket adapter registered, so `router.send` threw and was
+swallowed. Fix: (a) `resolve_delivery(project_id)` on the dispatch tools + the ▶ route +
+`/code` stamps the originating app-ws topic (`<appWsTopicId>[:<project_id>]`, `project_id`
+is correctly populated on the tool ctx) onto the run's `chat_id`; (b) a composer-supplied
+`delivery_sink` backed by the durable `AppWsAdapter.send` (persists + fans live) replaces
+the bare router for on-terminal delivery. Copy is now slug-forward ("✅ `<slug>` — build
+done, merged" / "❌ `<slug>` — build failed: `<reason>`").
+
+**FIX 4 (#334) — every build creates a trackable card.** Strengthened
+`BUILD_ROUTING_DOCTRINE` (`operating-doctrine.ts`): EVERY build — inline OR trident, any
+project incl. General — MUST `work_board_add` a card FIRST (inline builds mark it
+inline_active + done); an untracked build is invisible to the owner.
+
+**FIX 5 (#337) — underspecified → ask in chat, not raw guard in the pane.** The ▶ HTTP
+route previously mapped an `underspecified` rejection to a 409 whose raw guard message
+the client painted into the `cwb-error` pane banner. Now the composer's start closure
+posts a short clarifying question to the chat (`buildClarifyPoster`, via the app-ws
+adapter) and `handleStart` returns 200 `{asked_in_chat:true}` — no raw text in the pane,
+item left quietly pending. The agent-native path already returns the rejection to the
+model (which the strengthened doctrine tells to ask in chat).
+
+**Tests.** trident + work-board + composer green incl. a concurrent-merge test and a
+3-build serialized rebase+resolve test (`trident/merge.test.ts`), conflict-resolver
+marker parsing (`trident/conflict-resolver.test.ts`), orchestrator resolve-vs-escalate
+(`trident/orchestrator.test.ts`), `detachRun('failed')` keeps-link + retry
+(`work-board/store.test.ts`), delivery copy (`trident/delivery.test.ts`),
+`resolve_delivery` threading (`trident/work-board-build-tool.test.ts`), doctrine
+always-card + ask-in-chat (`operating-doctrine.test.ts`), and the ▶ underspecified→200
+(`work-board-surface.test.ts`). `tsc` clean (root + trident + leaf); migrations snapshot
+regenerated (`0097`); leak-gate SILENT; QUIET local boot verified (healthz ok, `0097`
+applied).
+
 ## 2026-07-03 — UX BATCH-2: 5 chat/work-board polish fixes (#333/#335/#336/#338/#341)
 
 **Why.** Five small UI defects from Ryan's live review 2026-07-03. All presentational /

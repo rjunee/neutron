@@ -45,6 +45,7 @@ import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme
 import {
   canPlay,
   dotState,
+  failureReasonText,
   formatCompletedShort,
   isLinkedRunning,
   isRetry,
@@ -130,6 +131,7 @@ function WorkBoardRowImpl({
   const dot = dotState(item);
   const tag = stepTag(item.run_progress);
   const round = roundText(item.run_progress);
+  const failReason = failureReasonText(item.run_progress);
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
   const retry = isRetry(item);
@@ -325,6 +327,11 @@ function WorkBoardRowImpl({
             </View>
           ) : null}
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
+          {failReason !== null ? (
+            <Text style={styles.failReason} numberOfLines={1}>
+              {failReason}
+            </Text>
+          ) : null}
         </View>
       ) : null}
     </Animated.View>
@@ -468,6 +475,13 @@ const styles = StyleSheet.create({
   },
   round: {
     color: THEME.text_muted,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+  },
+  // failure-reason one-liner (#340) — muted red, single-line, shrinks/truncates.
+  failReason: {
+    flexShrink: 1,
+    color: PHASE.failed.fg,
     fontSize: TYPOGRAPHY.caption.fontSize,
     lineHeight: TYPOGRAPHY.caption.lineHeight,
   },

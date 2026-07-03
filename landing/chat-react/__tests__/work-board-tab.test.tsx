@@ -331,7 +331,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     ]
     const { container, root, act } = await mount(listOf(rows))
     const tags = Array.from(container.querySelectorAll('.cwb-tag')).map((n) => n.textContent ?? '')
-    expect(tags).toContain('Didn’t finish')
+    expect(tags).toContain('Failed')
     expect(tags).toContain('Merged')
     // Terminal steps drop the `round N` trail.
     expect(container.querySelector('.cwb-round')).toBeNull()
