@@ -191,8 +191,17 @@ import { formatAvailableServicesFragment } from '../project-credentials/fragment
 import {
   WorkBoardStore,
   workBoardProjectIdForKey,
+  workBoardScopeKey,
   type WorkBoardItem,
 } from '../work-board/store.ts'
+import { isTerminalPhase } from '../trident/state-machine.ts'
+import { deriveRunProgress } from '../trident/run-progress.ts'
+import {
+  deriveProjectActivity,
+  truncatePreview,
+  type ProjectActivity,
+  type PreviewFrom,
+} from './project-rail.ts'
 import { WorkBoardSpecDocService } from '../work-board/spec-doc-service.ts'
 import { dispatchBoardBoundBuild } from '../trident/board-dispatch.ts'
 import type { WorkBoardStartResult } from '../gateway/http/work-board-surface.ts'
@@ -1524,17 +1533,98 @@ export function buildOpenGraphComposer(
         return 0
       }
     }
+    // M1 UX REDESIGN — the set of projects with a LIVE chat turn in progress.
+    // Maintained at the `agent_typing` start/end seam (the same boundary that
+    // drives the typing dots), so the rail's `working` state reflects an
+    // in-flight chat turn without a second bookkeeping path. General turns (no
+    // project_id) are keyed under the General sentinel so its row can also read
+    // `working`. Best-effort in-memory — a lost `end` self-heals on the next turn.
+    const activeChatProjects = new Set<string>()
+    const GENERAL_RAIL_KEY = '__general__'
+    const railChatKey = (project_id?: string): string =>
+      project_id !== undefined && project_id.length > 0 ? project_id : GENERAL_RAIL_KEY
+    // M1 UX REDESIGN — the rail-redesign per-project derived fields
+    // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
+    // `open/project-rail.ts`; here we only COLLECT the signals from the project's
+    // Work-Board items + their bound runs + its live chat turn + its last chat
+    // message. Best-effort: any read failure degrades that project to idle / no
+    // preview rather than sinking the whole rail refresh.
+    const readProjectRailExtras = (
+      project_id: string,
+    ): {
+      activity: ProjectActivity
+      preview: string | null
+      preview_from: PreviewFrom
+      live_runs: number
+    } => {
+      let liveRunCount = 0
+      let hasInlineActive = false
+      let hasFailedNotDone = false
+      let hasStalledLiveRun = false
+      try {
+        const scopeKey = workBoardScopeKey(project_slug, project_id)
+        const nowMs = Date.now()
+        for (const item of workBoardStore.list(scopeKey)) {
+          if (item.inline_active) hasInlineActive = true
+          const runId = item.linked_run_id
+          if (runId === null || runId.length === 0) continue
+          const run = boardRunStore.get(runId)
+          if (run === null) continue
+          if (isTerminalPhase(run.phase)) {
+            // A still-bound terminal run: `failed` on a not-done item = attention
+            // (the brief pre-reconcile window; a `done` run just completes it).
+            if (run.phase === 'failed' && item.status !== 'done') hasFailedNotDone = true
+            continue
+          }
+          // Live (non-terminal) bound run.
+          liveRunCount++
+          if (deriveRunProgress(run, nowMs).stalled) hasStalledLiveRun = true
+        }
+      } catch {
+        // Board/run read failure → treat as no board signal (idle unless chat).
+      }
+      const activity = deriveProjectActivity({
+        chatTurnInProgress: activeChatProjects.has(railChatKey(project_id)),
+        liveRunCount,
+        hasInlineActive,
+        hasFailedNotDone,
+        hasStalledLiveRun,
+      })
+      // Preview = the project's last chat message, markdown-stripped + truncated.
+      let preview: string | null = null
+      let preview_from: PreviewFrom = null
+      try {
+        const topic = appWsProjectTopicId(OWNER_USER_ID, project_id)
+        const last = db
+          .prepare<{ role: 'user' | 'agent'; body: string }, [string]>(
+            `SELECT role, body FROM app_chat_messages
+              WHERE topic_id = ? ORDER BY seq DESC LIMIT 1`,
+          )
+          .get(topic)
+        if (last !== null) {
+          preview = truncatePreview(last.body)
+          if (preview !== null) preview_from = last.role
+        }
+      } catch {
+        // No chat tables / read error → no preview line.
+      }
+      return { activity, preview, preview_from, live_runs: liveRunCount }
+    }
     // The rail row shape shared by the page bootstrap injection AND the live
     // `projects_changed` app-ws emit — id + label + the rail-redesign fields
-    // (emoji / unread / activity). Ordered most-recent-activity-first so an
-    // active project floats to the top; a legacy row with a NULL activity key
-    // falls back to updated_at (COALESCE) rather than sinking.
+    // (emoji / unread / activity / preview / live_runs). Ordered
+    // most-recent-activity-first so an active project floats to the top; a legacy
+    // row with a NULL activity key falls back to updated_at (COALESCE).
     const readProjectRows = (): {
       id: string
       label: string
       emoji: string
       unread: number
       last_activity_at: string
+      activity: ProjectActivity
+      preview: string | null
+      preview_from: PreviewFrom
+      live_runs: number
     }[] => {
       try {
         return db
@@ -1554,6 +1644,7 @@ export function buildOpenGraphComposer(
             emoji: resolveProjectEmoji(r.emoji, r.name),
             unread: readProjectUnread(r.id),
             last_activity_at: r.last_activity_at ?? r.updated_at,
+            ...readProjectRailExtras(r.id),
           }))
       } catch {
         return []
@@ -2143,48 +2234,51 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
-    const workBoardStore = new WorkBoardStore(db, {
-      // `changedKey` is the storage key of the board that mutated. List + push
-      // THAT project's snapshot (not one shared board) and tag the frame with the
-      // per-project `project_id` so the clients' per-project filter applies it to
-      // the right view; General (key === the owner slug) → no tag (the clients'
-      // "no project_id = this/General board" broadcast).
-      onChange: (changedKey: string): void => {
-        try {
-          const nowMs = Date.now()
-          const framePid = workBoardProjectIdForKey(project_slug, changedKey)
-          const frame: AppWsOutboundWorkBoardChanged = {
-            v: 1,
-            type: 'work_board_changed',
-            items: workBoardStore.list(changedKey).map((it) => {
-              // Item 1 — attach the bound run's live progress (null when unbound).
-              const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
-              return {
-                id: it.id,
-                title: it.title,
-                status: it.status,
-                sort_order: it.sort_order,
-                design_doc_ref: it.design_doc_ref,
-                inline_active: it.inline_active,
-                linked_run_id: it.linked_run_id,
-                created_at: it.created_at,
-                updated_at: it.updated_at,
-                completed_at: it.completed_at,
-                ...(run_progress !== null ? { run_progress } : {}),
-              }
-            }),
-            ...(framePid !== undefined ? { project_id: framePid } : {}),
-            ts: nowMs,
-          }
-          appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
-        } catch (err) {
-          console.warn(
-            `[work-board] event=push_failed project=${changedKey} err=${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
+    // `changedKey` is the storage key of the board that mutated. List + push THAT
+    // project's snapshot (not one shared board) and tag the frame with the
+    // per-project `project_id` so the clients' per-project filter applies it to the
+    // right view; General (key === the owner slug) → no tag (the clients' "no
+    // project_id = this/General board" broadcast). Extracted as a named fn so the
+    // store's `onChange` AND the M1 run-transition fan (`on_run_transition`, which
+    // pushes on each inner-workflow checkpoint) share ONE snapshot-build path.
+    const fanWorkBoardChanged = (changedKey: string): void => {
+      try {
+        const nowMs = Date.now()
+        const framePid = workBoardProjectIdForKey(project_slug, changedKey)
+        const frame: AppWsOutboundWorkBoardChanged = {
+          v: 1,
+          type: 'work_board_changed',
+          items: workBoardStore.list(changedKey).map((it) => {
+            // Item 1 — attach the bound run's live progress (null when unbound).
+            const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
+            return {
+              id: it.id,
+              title: it.title,
+              status: it.status,
+              sort_order: it.sort_order,
+              design_doc_ref: it.design_doc_ref,
+              inline_active: it.inline_active,
+              linked_run_id: it.linked_run_id,
+              created_at: it.created_at,
+              updated_at: it.updated_at,
+              completed_at: it.completed_at,
+              ...(run_progress !== null ? { run_progress } : {}),
+            }
+          }),
+          ...(framePid !== undefined ? { project_id: framePid } : {}),
+          ts: nowMs,
         }
-      },
+        appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+      } catch (err) {
+        console.warn(
+          `[work-board] event=push_failed project=${changedKey} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
+    const workBoardStore = new WorkBoardStore(db, {
+      onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
     })
     // M1 on-disk spec + ▶ play button — the ONE service that persists a card's
     // full ask to a user-visible `Projects/<id>/docs/plans/<slug>.md` doc (setting
@@ -2967,6 +3061,11 @@ export function buildOpenGraphComposer(
       state: 'start' | 'end',
       project_id?: string,
     ): void => {
+      // M1 UX REDESIGN — track the live chat turn for the rail's `working` state.
+      // `start`/`end` bracket every live-agent turn, so this is the composer-known
+      // "chat turn in progress" signal `readProjectRailExtras` reads.
+      if (state === 'start') activeChatProjects.add(railChatKey(project_id))
+      else activeChatProjects.delete(railChatKey(project_id))
       const env: AppWsOutboundAgentTyping = {
         v: 1,
         type: 'agent_typing',
@@ -2978,6 +3077,14 @@ export function buildOpenGraphComposer(
         appWsRegistry.send(channel_topic_id, env)
       } catch {
         /* socket closed mid-turn; the start/end pair is best-effort */
+      }
+      // M1 UX REDESIGN — the chat turn just started/ended, so this project's rail
+      // `activity` flipped working↔idle. Fan a fresh `projects_changed` (diff-gated
+      // — no-ops when the rail snapshot is unchanged) so the rail updates live.
+      try {
+        emitProjectsChangedIfChanged(OWNER_USER_ID)
+      } catch {
+        /* rail refresh is best-effort — never let it break the typing emit */
       }
     }
     // Translate an engine `ButtonPrompt` → the app-ws `agent_message` envelope
@@ -3594,6 +3701,20 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: skillForgeOnRunTerminal,
+              // M1 UX REDESIGN — the LIVE-PROGRESS fan. Fired by the tick loop for
+              // every run whose observable progress advanced (a checkpoint crossing
+              // building→reviewing→fixing→merging, a launch, or a terminal
+              // transition). A board-bound run's `project_slug` IS the board scope
+              // key (`dispatchBoardBoundBuild` creates the run + binds the item
+              // under the same slug), so fan THAT board's `work_board_changed` (its
+              // items carry the fresh `run_progress.step_label`) + the rail's
+              // `projects_changed` (activity/live_runs). Both are best-effort +
+              // diff-gated; this is what retires the client's 15 s poll to a
+              // fallback. Sync fans wrapped in an async fn to satisfy the hook.
+              on_run_transition: async (run): Promise<void> => {
+                fanWorkBoardChanged(run.project_slug)
+                emitProjectsChangedIfChanged(OWNER_USER_ID)
+              },
               // The CODEX_HOME the trident loop threads into the inner workflow's
               // optional codex reviewer. Resolved PER RUN through the credential
               // service (`resolveActiveCodexHome`: project override → global →

@@ -214,6 +214,7 @@ describe('WorkBoardTab (happy-dom)', () => {
         run_progress: {
           run_id: 'run_1',
           phase_label: 'building',
+          step_label: 'fixing',
           round: 2,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
@@ -245,6 +246,7 @@ describe('WorkBoardTab (happy-dom)', () => {
         run_progress: {
           run_id: 'run_1',
           phase_label: 'building',
+          step_label: 'building',
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:00:30Z',
@@ -264,6 +266,7 @@ describe('WorkBoardTab (happy-dom)', () => {
         run_progress: {
           run_id: 'run_2',
           phase_label: 'merged',
+          step_label: 'done',
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:05:00Z',
@@ -295,6 +298,7 @@ describe('WorkBoardTab (happy-dom)', () => {
         run_progress: {
           run_id: 'run_1',
           phase_label: 'building',
+          step_label: 'building',
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',

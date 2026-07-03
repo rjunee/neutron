@@ -36,6 +36,17 @@ export interface ProjectTab {
   /** ISO-8601 activity sort key. The server already orders the list
    *  most-recent-first; kept for optional client-side re-sort. */
   last_activity_at?: string
+  /** M1 UX REDESIGN — the derived rail state. Optional on the wire for
+   *  back-compat (absent ⇒ the rail treats the project as idle). */
+  activity?: 'idle' | 'working' | 'attention'
+  /** M1 UX REDESIGN — the last message, server-truncated + markdown-stripped, for
+   *  the rail's second line. Null/absent ⇒ no preview line. */
+  preview?: string | null
+  /** M1 UX REDESIGN — who sent the previewed message, for a `You: ` prefix. */
+  preview_from?: 'user' | 'agent' | null
+  /** M1 UX REDESIGN — count of live (non-terminal) bound runs, for the Work-tab
+   *  badge + pane toggle count. Absent/0 ⇒ no badge. */
+  live_runs?: number
 }
 
 export interface BootstrapConfig {

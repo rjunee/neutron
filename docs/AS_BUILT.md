@@ -1945,3 +1945,79 @@ questions; rich hobby → research doc; compose failure degrades correctly).
 `non_work_interests` + `inferred_interests`; hobby/work same-name dedup; dropped
 hobby excluded; kickoff body emitted under the single opening dedupe slot with the
 deterministic fallback for declined projects).
+
+---
+
+## M1 UX REDESIGN — backend data contracts (PR-1, 2026-07-02)
+
+First redesign PR: the two design-independent backend contracts the redesigned
+Work pane + project rail consume. NO feature flag, one code path, NO visual
+change (PR-2+ build the UI on top of these).
+
+### A. Per-run inner-step (`step_label`) + a live push that retires the 15 s poll
+
+**Problem.** The outer `code_trident_runs.phase` sits at `forge-init` the WHOLE
+inner build, and NOTHING pushed the inner workflow's checkpoint advances — the
+web Work Board fell back to a 15 s poll (`WorkBoardTab.tsx`) to notice
+building→reviewing→fixing, so a live build "looked frozen".
+
+**`step_label` derivation (`trident/run-progress.ts`).** New exported
+`deriveStepLabel(phase, inner_checkpoint)` + a `step_label: RunStepLabel` field on
+`RunProgress` (`building|reviewing|fixing|merging|done|failed`). It REUSES the
+`inner_checkpoint` the inner workflow already re-stamps at each phase boundary
+(`checkpoint()` in `inner-workflow.mjs`); because checkpoints are END-of-phase
+markers, each maps to the phase the run is CURRENTLY in — `forge-done`→reviewing,
+`argus-request-changes`→fixing, `fix-round-N`→reviewing, `argus-approved`→merging,
+terminal phases win. No new DB column (the spec's sanctioned "reuse the existing
+RunProgress shape" path). Mirrored client-side in `work-board-client.ts` with a
+`stepLabelFromPhase` fallback for a legacy/absent wire value.
+
+**The live fan (`trident/tick.ts`).** New `TridentTransitionHook` +
+`on_transition` option on `TridentTickLoop`. The loop re-loads every non-terminal
+run each tick and, when a run's progress signature
+(`phase|inner_checkpoint|round|pr|last_advanced_at`) differs from what it last saw
+(a checkpoint advance, a launch, or a terminal transition), fires `on_transition`.
+This is the ONLY place that can fan on the inner workflow's behalf — the workflow
+runs detached and can only `sqlite3`-write, never reach the app-ws registry. The
+fan is best-effort (own try/catch), signature-deduped (quiet when idle), and drops
+a run's signature once terminal (no unbounded map growth). Plumbed
+composer→`misc-input.ts` (`on_run_transition`)→`build-core-modules.ts`
+(→`on_transition`).
+
+**Composer wiring (`open/composer.ts`).** The `work_board_changed` fan is
+extracted to a named `fanWorkBoardChanged(scopeKey)` shared by the store's
+`onChange` AND the run-transition hook. `on_run_transition(run)` fans
+`fanWorkBoardChanged(run.project_slug)` (a board-bound run's `project_slug` IS its
+item's board scope key) + `emitProjectsChangedIfChanged`. `WorkBoardTab.tsx`'s
+15 s poll is retained as a FALLBACK only (dropped-frame resilience + the
+elapsed/stall clock).
+
+### B. Per-project rail fields (`activity` / `preview` / `preview_from` / `live_runs`)
+
+`readProjectRows` (`open/composer.ts`) — feeding both the `projects_changed` frame
+and the page bootstrap — now derives four per-project fields:
+
+- **`activity`** (`idle`/`working`/`attention`) — `working` = a live chat turn
+  (tracked at the `agent_typing` start/end seam via `activeChatProjects`) ∪ any
+  board item bound to a live non-terminal run ∪ any `inline_active` item;
+  `attention` (WINS over working) = any not-done item whose bound run is `failed` ∪
+  any live run stalled past the display threshold.
+- **`preview` / `preview_from`** — the project's last chat message
+  (`app_chat_messages`), markdown-stripped + server-truncated to ~90 chars, plus
+  the sender (`user`/`agent`) for a `You: ` prefix.
+- **`live_runs`** — count of the project's live bound runs (Work-tab badge / pane
+  toggle count).
+
+The precedence + truncation are a PURE, unit-tested module (`open/project-rail.ts`:
+`deriveProjectActivity`, `truncatePreview`, `stripMarkdownForPreview`). The chat
+turn also fans `projects_changed` at the typing seam (diff-gated). Frame type
+extended in `channels/adapters/app-ws/envelope.ts`; client parses the fields in
+`controller.ts` into the `ProjectTab` type (`config.ts`), all optional on the wire
+for back-compat.
+
+**Tests.** `trident/run-progress.test.ts` (step_label for every checkpoint + the
+full building→reviewing→fixing→reviewing→merging→done arc); `trident/tick.test.ts`
+(on_transition fires on first-observation + each checkpoint advance + terminal,
+never on a no-op; a throwing fan never aborts the tick); `open/project-rail.test.ts`
+(activity precedence incl. attention-wins; preview markdown-strip + truncation).
+`tsc` clean (root + `trident` + `landing/chat-react` leaf); leak-gate SILENT.

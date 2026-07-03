@@ -70,6 +70,17 @@ export interface MiscCompositionInput {
      */
     on_run_terminal?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
     /**
+     * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
+     * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
+     * run whose observable progress advanced (a checkpoint crossing
+     * building→reviewing→fixing→merging, a launch, or a terminal transition). The
+     * composer wires this to fan the bound Work item's `work_board_changed` frame
+     * + the project rail's `projects_changed` frame, so the redesign UI updates
+     * live instead of on the client's 15 s poll fallback. Failure-safe: the tick
+     * loop wraps the call so a fan outage never blocks the tick.
+     */
+    on_run_transition?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
+    /**
      * Per-owner CODEX_HOME dir for the OPTIONAL cross-model review (Part B).
      * When set, the trident loop threads it into the inner workflow so the codex
      * reviewer runs `trident/codex-review.sh` with this CODEX_HOME. The composer

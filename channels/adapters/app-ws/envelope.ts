@@ -359,6 +359,15 @@ export interface AppWsOutboundProjectsChanged {
    *                 up; honest, never a fabricated badge).
    *   - `last_activity_at` — ISO activity sort key; the list is already ordered
    *                 most-recent-first, but the client keeps it for local re-sort.
+   *   - `activity` — M1 UX REDESIGN: ONE derived rail state (`idle`/`working`/
+   *                 `attention`) — working = a live chat turn or live build or
+   *                 inline action; attention (wins) = a failed-not-done item or a
+   *                 stalled live run.
+   *   - `preview` / `preview_from` — M1 UX REDESIGN: the last chat message,
+   *                 markdown-stripped + server-truncated (~90 chars), and who sent
+   *                 it (`user`/`agent`) so the rail can prefix `You: `. Null = none.
+   *   - `live_runs` — M1 UX REDESIGN: count of the project's live (non-terminal)
+   *                 bound runs, for the Work-tab badge + pane toggle count.
    */
   projects: ReadonlyArray<{
     id: string
@@ -366,6 +375,10 @@ export interface AppWsOutboundProjectsChanged {
     emoji: string
     unread: number
     last_activity_at: string
+    activity: 'idle' | 'working' | 'attention'
+    preview: string | null
+    preview_from: 'user' | 'agent' | null
+    live_runs: number
   }>
   /**
    * The project the client should make active when it currently has none — the

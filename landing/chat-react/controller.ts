@@ -763,6 +763,21 @@ export class NeutronChatController {
             tab.unread = Math.max(0, Math.trunc(rec['unread'] as number))
           }
           if (typeof rec['last_activity_at'] === 'string') tab.last_activity_at = rec['last_activity_at']
+          // M1 UX REDESIGN — rail activity / preview / live_runs (all optional on
+          // the wire; carried through when present so the redesigned rail renders
+          // the state dot, the preview line, and the Work-tab badge).
+          const activity = rec['activity']
+          if (activity === 'idle' || activity === 'working' || activity === 'attention') {
+            tab.activity = activity
+          }
+          if (typeof rec['preview'] === 'string') tab.preview = rec['preview']
+          else if (rec['preview'] === null) tab.preview = null
+          const from = rec['preview_from']
+          if (from === 'user' || from === 'agent') tab.preview_from = from
+          else if (from === null) tab.preview_from = null
+          if (typeof rec['live_runs'] === 'number' && Number.isFinite(rec['live_runs'])) {
+            tab.live_runs = Math.max(0, Math.trunc(rec['live_runs'] as number))
+          }
           projects.push(tab)
         }
       }

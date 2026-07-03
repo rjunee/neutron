@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
 import { ProjectDb } from '../persistence/index.ts'
-import { TridentRunStore } from './store.ts'
+import { TridentRunStore, type TridentRun } from './store.ts'
 import {
   stubAdvanceDeps,
   type AdvanceDeps,
+  type AdvanceOutcome,
   type SubagentOutcome,
 } from './state-machine.ts'
 import { TridentTickLoop } from './tick.ts'
@@ -284,5 +285,81 @@ describe('TridentTickLoop.runOnce', () => {
     loop.stop()
     loop.stop() // safe to stop twice
     expect(loop.stats().advanced).toBe(0)
+  })
+})
+
+describe('TridentTickLoop — on_transition (M1 UX REDESIGN live-progress fan)', () => {
+  test('fires on first observation, on each checkpoint advance, and on the terminal transition — never on a no-op', async () => {
+    const store = new TridentRunStore(db)
+    const r = await store.create({ slug: 'x', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    const seen: Array<{ id: string; cp: string | null; phase: string }> = []
+    const on_transition = {
+      async onTransition(run: TridentRun): Promise<void> {
+        seen.push({ id: run.id, cp: run.inner_checkpoint, phase: run.phase })
+      },
+    }
+
+    // A controllable step: waits in-flight (changed:false) until `terminalNow`,
+    // then transitions the run to `done` (changed:true).
+    let terminalNow = false
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> =>
+      terminalNow
+        ? { run: { ...run, phase: 'done' as const }, changed: true, waiting: false, note: 'done' }
+        : { run, changed: false, waiting: true, note: 'waiting' }
+
+    const loop = new TridentTickLoop({ store, step, on_transition })
+
+    // Tick 1 — first observation of a fresh run → fan.
+    await loop.runOnce()
+    expect(seen.length).toBe(1)
+    expect(seen[0]!.cp).toBeNull()
+
+    // Tick 2 — nothing advanced → NO fan (the poll-killer must be quiet when idle).
+    await loop.runOnce()
+    expect(seen.length).toBe(1)
+
+    // Checkpoint advance (inner workflow re-stamped) → fan.
+    await store.update(r.id, { inner_checkpoint: 'forge-done' })
+    await loop.runOnce()
+    expect(seen.length).toBe(2)
+    expect(seen[1]!.cp).toBe('forge-done')
+
+    // Another advance → fan.
+    await store.update(r.id, { inner_checkpoint: 'argus-approved' })
+    await loop.runOnce()
+    expect(seen.length).toBe(3)
+    expect(seen[2]!.cp).toBe('argus-approved')
+
+    // Terminal transition → fan (the rail must drop this run from live_runs).
+    terminalNow = true
+    await loop.runOnce()
+    expect(seen.length).toBe(4)
+    expect(seen[3]!.phase).toBe('done')
+
+    expect(loop.stats().transitions).toBe(4)
+  })
+
+  test('a throwing on_transition never aborts the tick', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.create({ slug: 'b', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    const on_transition = {
+      async onTransition(): Promise<void> {
+        throw new Error('fan sink down')
+      },
+    }
+    const step = async (run: TridentRun): Promise<AdvanceOutcome> => ({
+      run,
+      changed: false,
+      waiting: true,
+      note: 'waiting',
+    })
+    const loop = new TridentTickLoop({ store, step, on_transition })
+    // Both runs observed; both fans throw and are swallowed — the tick completes.
+    const res = await loop.runOnce()
+    expect(res.skipped_due_to_overlap).toBe(false)
+    expect(loop.stats().transitions).toBe(0) // a throwing fan does not count
   })
 })
