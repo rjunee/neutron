@@ -318,7 +318,7 @@ their tabs. `tabs/registry.ts` exposes a `TabDescriptor` (`key`, `label`,
 `scope: 'project'|'global'`, `source: 'builtin'|'core'`, `order`,
 `mount: { kind: 'builtin'|'webview', target }`) and a
 `resolveTabs(scope, cores)` resolver. **BUILTIN descriptors** — Chat /
-**Plan** (`work_board`, label "Plan") / Documents per-project, Admin global — are
+**Work** (`work_board`, label "Work") / Documents per-project, Admin global — are
 unioned with **CORE-contributed tabs** (PR-2): the `project_tab` surfaces of installed
 Cores, shaped as `source:'core'`, `key:'core:<slug>'`,
 `mount:{kind:'webview', target}` and sorted AFTER the builtins. The registry
@@ -407,9 +407,10 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 > 2. **Persistent rail + tab layout.** `TopicRail` is lifted OUT of `ChatApp`
 >    (which is now just the Chat-tab body) to a persistent left column in
 >    `ProjectShell`; the `TabBar` renders in the content pane for BOTH views.
->    **General** = Chat + Admin (global tabs); **project** = Chat / Plan /
+>    **General** = Chat + Admin (global tabs); **project** = Chat / Work /
 >    Documents (NO Admin fold-in — the old bug).
-> 3. **"Work Board" → "Plan"** user-facing label (`tabs/registry.ts`); internal
+> 3. **"Work Board" → "Work"** user-facing label (`tabs/registry.ts`; M1 UX
+>    redesign renamed the earlier interim "Plan" to "Work"); internal
 >    `work_board_*` / `cwb-` / DB table keep their identifiers.
 > 4. **Tasks tab removed** from the engine (see the Tasks note above).
 > 5. **Markdown** — agent chat bodies (`ChatApp` `TextPart`) + the Documents
@@ -758,7 +759,7 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >   `app:<user>[:<project>]` that `chat_history_surface` hydrates + a
 >   `buildAppWsSendReply` socket push) and, AFTER `emitProjectsChanged`, emits a
 >   deterministic General closing pointing at the populated left rail ("open one to
->   find its Plan, Documents, and Chat" — "Plan", not "Work Board").
+>   find its Work, Documents, and Chat" — "Work", not "Work Board").
 > - **Per-project opening (item 7).** Finalize now seeds each materialized
 >   project's chat with a content-aware opening (summary + ONE next move) composed
 >   by the SAME deterministic composer the legacy handoff used
@@ -1212,6 +1213,20 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
 
 ## Work Board — orchestrator external memory + live work tracker (`work-board/`)
+
+> **M1 UX redesign (2026-07-02).** The Work list (user-facing tab "Work") renders
+> each active row as `[dot] title … [phase tag] [round] [actions]`, consuming
+> PR-1's `step_label`: a leading dot that pulses in the phase color while a build
+> walks building→reviewing→fixing→merging (solid red/green on failed/done), a
+> typographic phase tag (Building / Reviewing / Fixing / Merging / Merged /
+> "Didn't finish"), and a muted `round N`. The old emoji-glyph status noise, the
+> `⑂`/`›` activity glyph, and the elapsed-minutes timer are GONE. Rows reorder by
+> DRAG (a `⠿` grip) instead of ▲▼ arrows; ✕ delete asks to confirm; ▶ starts a
+> not-started card and ↻ retries a failed one; completed items collapse under a
+> "Done · N" disclosure (default closed) with a "Merged · Jul 2" date; the
+> add-item box sits at the BOTTOM. In chat, errors are ordinary agent bubbles and
+> the system-message style (a quiet centered pill) is reserved for true
+> notifications (the cold-start "Waking up…" ack).
 
 Phase 1a (backend). The Work Board moves the orchestrator's per-feature state
 **onto disk** (`work_board_items`, migration `0090`, STRICT) so the chat

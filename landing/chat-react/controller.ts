@@ -131,7 +131,7 @@ export interface ChatViewModel {
   awaitingFirstToken: boolean
   /**
    * Chat-typing persistence — true while the active project's Work Board has at
-   * least one `in_progress` item (the SAME signal that flashes the Plan-tab
+   * least one `in_progress` item (the SAME signal that flashes the Work-tab
    * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
    * so the dots stay visible for the WHOLE processing window — including a long
    * or background build that continues AFTER the ack turn settles (the agent
@@ -156,6 +156,34 @@ export interface ChatViewModel {
   latestUserDelivery: DeliveryState | null
   /** BUG 3 — live history-import progress (null when no import is in flight). */
   importProgress: ImportProgressVM | null
+  /**
+   * M1 UX REDESIGN — an ephemeral SYSTEM notification (e.g. the cold-start
+   * "Waking up…" ack, a quota notice). Rendered as a quiet centered PILL, NOT a
+   * chat bubble — errors and command results are chat bubbles; only genuine
+   * notifications use this channel. Null when there's nothing to announce; cleared
+   * the moment a real reply starts streaming (so the pill doesn't linger).
+   */
+  systemNotice: SystemNoticeVM | null
+}
+
+/**
+ * M1 UX REDESIGN — a quiet system notification (cold-start ack / quota). Small,
+ * muted, a spinner/icon + short text; distinct from a chat bubble.
+ */
+export interface SystemNoticeVM {
+  text: string
+}
+
+/**
+ * M1 — recognise the gateway's cold-start acknowledgement so it renders as a
+ * quiet system pill instead of a chat bubble. Mirrors
+ * `gateway/realmode-composer/build-live-agent-turn.ts` `COLD_START_ACK_BODY`
+ * ("⏳ Waking up, one moment…"); matched by its stable leading marker so a minor
+ * copy tweak (trailing punctuation) still routes to the pill. Kept lenient on
+ * purpose — a false positive only restyles a rare, transient ack.
+ */
+function isColdStartAck(body: string): boolean {
+  return /^\s*⏳\s*Waking up\b/i.test(body)
 }
 
 /** The slice of `WebChatSession` the controller depends on (injectable). */
@@ -350,6 +378,13 @@ export class NeutronChatController {
   /** BUG 3 — staleness timer that clears {@link importProgress} when frames stop. */
   private importProgressTimer: ReturnType<typeof setTimeout> | null = null
   private readonly importProgressStaleMs: number
+  /** M1 — the current ephemeral system notice (cold-start ack, quota), or null. */
+  private systemNotice: SystemNoticeVM | null = null
+  /** M1 — safety timer so a system notice can't linger if its clearing frame is
+   *  dropped (e.g. the cold-start ack fires but the reply never streams). */
+  private systemNoticeTimer: ReturnType<typeof setTimeout> | null = null
+  /** M1 — grace window a system-notice pill survives before it self-clears. */
+  private readonly systemNoticeStaleMs = 15_000
   /** Managed post-onboarding claim redirect target (null = Open self-host / no
    *  redirect). Read on the `onboarding_completed` frame. */
   private readonly postOnboardingClaimUrl: string | null
@@ -412,6 +447,10 @@ export class NeutronChatController {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
     }
+    if (this.systemNoticeTimer !== null) {
+      clearTimeout(this.systemNoticeTimer)
+      this.systemNoticeTimer = null
+    }
     if (this.switchConnectingTimer !== null) {
       clearTimeout(this.switchConnectingTimer)
       this.switchConnectingTimer = null
@@ -470,6 +509,11 @@ export class NeutronChatController {
       this.importProgressTimer = null
     }
     this.importProgress = null
+    if (this.systemNoticeTimer !== null) {
+      clearTimeout(this.systemNoticeTimer)
+      this.systemNoticeTimer = null
+    }
+    this.systemNotice = null
     // Stand up the session bound to the new scope, mirroring the current
     // started/active lifecycle so the new socket opens iff the controller is
     // running. Arm the switch latch FIRST (after the old socket's `stop()` →
@@ -580,8 +624,10 @@ export class NeutronChatController {
         // "awaiting" bracket (so the typing dots stay) until a real token lands,
         // and only then create the bubble.
         if (delta.length === 0) return
-        // A real token has begun — clear the "awaiting" bracket.
+        // A real token has begun — clear the "awaiting" bracket + any lingering
+        // "Waking up…" system pill (the reply is here; the notification is done).
         this.awaitingReply = false
+        this.clearSystemNotice()
         this.streaming.set(messageId, { text: delta, createdAt: this.nextSeq() })
       } else {
         this.awaitingReply = false
@@ -591,11 +637,28 @@ export class NeutronChatController {
       return
     }
     if (type === 'agent_message') {
+      // M1 UX REDESIGN — a SYSTEM notification renders as a quiet centered PILL,
+      // NOT a chat bubble (errors + command results ARE chat bubbles; only true
+      // notifications use this channel). Two triggers: an explicit
+      // `system_notice: true` tag (forward-compatible with a first-class server
+      // flag), OR the cold-start acknowledgement — a non-persisted live
+      // `agent_message` the gateway emits while a cold first turn spins up
+      // (`gateway/realmode-composer/build-live-agent-turn.ts` COLD_START_ACK_BODY
+      // = "⏳ Waking up, one moment…"). It self-clears when the real reply streams
+      // (or after a grace window); the awaiting bracket stays so the typing dots
+      // keep spinning while the workspace wakes.
+      const body = typeof f['body'] === 'string' ? (f['body'] as string) : ''
+      if (f['system_notice'] === true || isColdStartAck(body)) {
+        if (body.length > 0) this.setSystemNotice(body)
+        return
+      }
       // The final message persists via the Store (a following onChange); clear
       // the awaiting bracket now so the indicator doesn't linger if no stream
       // ever arrived. The streaming buffer is pruned once the persisted row
-      // shows up (see handleChange).
+      // shows up (see handleChange). A genuine reply also clears any stale
+      // "Waking up…" pill.
       this.awaitingReply = false
+      this.clearSystemNotice()
       this.publish()
       return
     }
@@ -915,6 +978,34 @@ export class NeutronChatController {
     this.publish()
   }
 
+  /**
+   * M1 — show a quiet, ephemeral SYSTEM notification pill (cold-start ack /
+   * quota). Distinct from `pushNotice` (which appends a chat bubble): this is a
+   * centered pill that auto-clears when the real reply arrives or after a grace
+   * window, so a "Waking up…" pill never sticks around behind the answer.
+   */
+  private setSystemNotice(text: string): void {
+    this.systemNotice = { text }
+    if (this.systemNoticeTimer !== null) clearTimeout(this.systemNoticeTimer)
+    this.systemNoticeTimer = setTimeout(() => {
+      this.systemNoticeTimer = null
+      this.clearSystemNotice()
+    }, this.systemNoticeStaleMs)
+    this.publish()
+  }
+
+  /** M1 — clear the system-notice pill (real reply arrived / scope switch / grace). */
+  private clearSystemNotice(): void {
+    if (this.systemNoticeTimer !== null) {
+      clearTimeout(this.systemNoticeTimer)
+      this.systemNoticeTimer = null
+    }
+    if (this.systemNotice !== null) {
+      this.systemNotice = null
+      this.publish()
+    }
+  }
+
   /** BUG 3 — (re)arm the timer that clears stale import progress once frames
    *  stop arriving (job ended / socket gap). */
   private armImportProgressStaleTimer(): void {
@@ -1031,12 +1122,13 @@ export class NeutronChatController {
       projects: this.projects,
       latestUserDelivery,
       importProgress: this.importProgress,
+      systemNotice: this.systemNotice,
     }
   }
 
   /**
    * True when the active project's Work Board has an `in_progress` item — the
-   * signal behind the Plan-tab flashing active-work dot, reused to keep the chat
+   * signal behind the Work-tab flashing active-work dot, reused to keep the chat
    * typing dots visible while a long/background build runs.
    *
    * Reads `activeWorkBoardItems`, which is populated ONLY by live

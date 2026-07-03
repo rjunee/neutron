@@ -1,16 +1,30 @@
 /**
- * landing/chat-react — web WORK BOARD tab content (Work Board Phase 1b).
+ * landing/chat-react — web WORK tab content (M1 UX redesign).
  *
  * The live work-tracking view for the web project shell: the project's board —
  * what's in progress / next at the top, the completed history collapsed at the
- * bottom — rendered as the builtin `work_board` tab inside `ProjectShell`, the
- * sibling of `TasksTab` / `DocumentsTab`.
+ * bottom — rendered as the builtin `work_board` tab (user-facing label "Work")
+ * inside `ProjectShell`, the sibling of `DocumentsTab`.
  *
  * ── Distinct from Tasks ─────────────────────────────────────────────────────
- * Tasks are editable CARDS with priority/due chips. The Work Board is FLAT
- * one-line rows: a status dot + (when active) an activity glyph + the one-line
- * title. No cards, no chips. It's the orchestrator's external memory made
- * visible, not a to-do manager.
+ * Tasks are editable CARDS with priority/due chips. The Work list is FLAT
+ * one-line rows: `[dot] title … [phase tag] [round] [hover actions]`. No cards,
+ * no chips. It's the orchestrator's external memory made visible.
+ *
+ * ── M1 REDESIGN (Ryan signed-off 2026-07-02) ────────────────────────────────
+ * Each row leads with a 9px status DOT that reflects the build lifecycle: a
+ * faint gray outline before a build starts, a colored PULSING dot while a bound
+ * trident run walks building → reviewing → fixing → merging (the pulse is in the
+ * phase TAG's colour), a solid red dot on failure, a solid green dot when done.
+ * A small typographic phase TAG (Building / Reviewing / Fixing / Merging /
+ * Merged / Didn't finish) + a muted `round N` trail the title; there is NO
+ * elapsed-minutes timer and NO emoji-glyph status noise (both deleted — the dot
+ * + tag carry that signal). Completed items collapse under a "Done · N"
+ * disclosure (default closed) and show a "Merged · Jul 2" datestamp. Rows
+ * reorder by DRAG (a ⠿ grip; arrow-keys on the grip for keyboard parity) instead
+ * of ▲▼ arrows; delete asks to confirm first; ▶ starts a not-yet-started card
+ * and ↻ retries a failed one. The add-something-to-do affordance lives at the
+ * BOTTOM of the list.
  *
  * ── Order is the engine's ───────────────────────────────────────────────────
  * The store returns active+next first (by `sort_order`) then completed
@@ -20,17 +34,17 @@
  * for a re-fetch (idempotent, order-independent).
  *
  * ── Human read + WRITE (Ryan-locked) ────────────────────────────────────────
- * The owner can add / edit (inline title) / advance status / reorder / delete —
- * every action hits the SAME canonical `WorkBoardStore` the agent's
- * `work_board_*` tools use, so a human write fires the same live push the agent's
- * does. After a mutation the live frame refreshes every device; we also apply the
- * returned row optimistically so the acting device feels instant.
+ * The owner can add / edit / advance / reorder / delete / ▶-start — every action
+ * hits the SAME canonical `WorkBoardStore` the agent's `work_board_*` tools use,
+ * so a human write fires the same live push the agent's does.
  *
  * ── Live updates ────────────────────────────────────────────────────────────
  * Subscribes to the controller's `onWorkBoardChanged` (the parsed
- * `work_board_changed` frame). Full snapshot, so we replace the list outright. A
- * subtle row flash on change + a live pulse on the active dot are CSS-only and
- * gated by `prefers-reduced-motion` (see `cwb-` styles in chat-react.html).
+ * `work_board_changed` frame). PR-1's tick fan now pushes a fresh snapshot on
+ * every inner-step checkpoint (forge-done → reviewing, fix-round-N → building,
+ * argus-approved → merging), so the dot + tag walk live; the 15s poll is a
+ * fallback for a dropped frame. The dot pulse is CSS-only + gated by
+ * `prefers-reduced-motion` (see `cwb-` styles in chat-react.html).
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -40,6 +54,7 @@ import {
   WebWorkBoardClient,
   docLinkLabel,
   docPathFromDesignRef,
+  resolveStepLabel,
   type RunPhaseLabel,
   type RunProgress,
   type WorkBoardItem,
@@ -66,85 +81,14 @@ function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   return 'done'
 }
 
-/** The accessible label + glyph for a row's status dot. */
-function statusMeta(status: WorkBoardStatus): { cls: string; label: string } {
-  if (status === 'in_progress') return { cls: 'cwb-dot-active', label: 'In progress' }
-  if (status === 'done') return { cls: 'cwb-dot-done', label: 'Done' }
-  return { cls: 'cwb-dot-upcoming', label: 'Upcoming' }
-}
-
-/**
- * The activity glyph for an ACTIVE item, or null when idle. A bound trident run
- * (`linked_run_id`) is a sub-agent (fork `⑂`); an `inline_active` marker is
- * in-topic work (caret `›`). Distinguished by glyph + aria-label, NOT color.
- */
-function activityGlyph(item: WorkBoardItem): { glyph: string; label: string } | null {
-  if (item.linked_run_id !== null && item.linked_run_id.length > 0) {
-    return { glyph: '⑂', label: 'Sub-agent running' }
-  }
-  if (item.inline_active) {
-    return { glyph: '›', label: 'Working inline' }
-  }
-  return null
-}
-
-/** Short UTC datestamp (YYYY-MM-DD) for a completed row; '' when unparseable. */
-function formatCompleted(completed_at: string | null): string {
-  if (completed_at === null || completed_at.length === 0) return ''
-  const m = /^(\d{4}-\d{2}-\d{2})/.exec(completed_at)
-  return m !== null ? (m[1] as string) : completed_at
-}
-
-/* ── Item 1: live run-progress sub-label ─────────────────────────────────── */
-
-/** Display warn threshold (mirror of `trident/run-progress.ts` STALLED_WARN_MS). */
-const STALLED_WARN_MS = 10 * 60_000
-
-const PHASE_GLYPH: Record<RunPhaseLabel, string> = {
-  planning: '📝',
-  building: '🔨',
-  reviewing: '🔍',
-  merged: '✅',
-  failed: '⚠️',
-  cancelled: '🚫',
+/** Human status label (a11y on the advance dot). */
+function statusLabel(status: WorkBoardStatus): string {
+  if (status === 'in_progress') return 'In progress'
+  if (status === 'done') return 'Done'
+  return 'Upcoming'
 }
 
 const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled']
-
-/** Compact `1m` / `4m` / `1h 5m` duration; `<1m` under a minute. */
-function formatDuration(ms: number): string {
-  const totalMin = Math.floor(Math.max(0, ms) / 60_000)
-  if (totalMin < 1) return '<1m'
-  if (totalMin < 60) return `${totalMin}m`
-  const h = Math.floor(totalMin / 60)
-  const m = totalMin % 60
-  return m === 0 ? `${h}h` : `${h}h ${m}m`
-}
-
-/**
- * The compact sub-label for a bound run — e.g. "🔨 building · round 1 · 4m",
- * "🔍 reviewing · round 2 · 6m", "✅ merged · PR #7", "⚠️ failed". Elapsed +
- * stall ticks live off the run's timestamps (`nowMs`) between server polls.
- */
-function runProgressText(rp: RunProgress, nowMs: number): string {
-  const startedMs = Date.parse(rp.started_at)
-  const elapsed = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : rp.elapsed_ms
-  const advancedMs = Date.parse(rp.last_advanced_at)
-  const sinceAdvance = Number.isFinite(advancedMs) ? Math.max(0, nowMs - advancedMs) : rp.stalled_ms ?? 0
-  const terminal = TERMINAL_PHASE_LABELS.includes(rp.phase_label)
-  const stalled = !terminal && (rp.stalled || sinceAdvance > STALLED_WARN_MS)
-
-  const parts: string[] = [`${PHASE_GLYPH[rp.phase_label]} ${rp.phase_label}`]
-  if (rp.phase_label === 'merged') {
-    if (rp.pr !== null) parts.push(`PR #${rp.pr}`)
-  } else if (!terminal) {
-    parts.push(`round ${rp.round}`)
-    parts.push(formatDuration(elapsed))
-  }
-  let text = parts.join(' · ')
-  if (stalled) text += ` · ⚠️ stalled ${formatDuration(sinceAdvance)}`
-  return text
-}
 
 /** True when the item is bound to a run that is still live (not terminal). */
 function isLinkedRunning(item: WorkBoardItem): boolean {
@@ -155,13 +99,115 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
 }
 
 /**
- * True when the ▶ (play) control should render: the item is NOT in_progress and
- * NOT done and has NO live linked run. That's an `upcoming` card that has never
- * been dispatched (START) OR whose last build failed/stopped (RETRY). A live
- * build shows the run sub-label + the X-cancel instead; a done card is history.
+ * True when the ▶/↻ (start/retry) control should render: the item is NOT
+ * in_progress and NOT done and has NO live linked run. That's an `upcoming` card
+ * that has never been dispatched (START) OR whose last build failed/stopped
+ * (RETRY). A live build shows the dot pulse + the X-cancel instead.
  */
 function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'in_progress' && item.status !== 'done' && !isLinkedRunning(item)
+}
+
+/** ▶ vs ↻ — a card that carries a (now-detached) binding or a failed run RETRIES. */
+function isRetry(item: WorkBoardItem): boolean {
+  if (item.linked_run_id !== null && item.linked_run_id.length > 0) return true
+  return item.run_progress?.step_label === 'failed'
+}
+
+/* ── M1 redesign — dot / tag / round derivations ─────────────────────────── */
+
+interface PhaseTag {
+  label: string
+  cls: string
+}
+
+/**
+ * The phase TAG for a bound run's inner step, or null when the item has no run
+ * progress (a plain upcoming card shows just the gray dot + title). Sentence-case
+ * copy, tinted capsule; failure uses the Alina-friendly "Didn't finish".
+ */
+function stepTag(rp: RunProgress | undefined): PhaseTag | null {
+  if (rp === undefined) return null
+  switch (resolveStepLabel(rp)) {
+    case 'building':
+      return { label: 'Building', cls: 'cwb-tag-build' }
+    case 'reviewing':
+      return { label: 'Reviewing', cls: 'cwb-tag-review' }
+    case 'fixing':
+      return { label: 'Fixing', cls: 'cwb-tag-fix' }
+    case 'merging':
+      return { label: 'Merging', cls: 'cwb-tag-merge' }
+    case 'done':
+      return { label: 'Merged', cls: 'cwb-tag-merge' }
+    case 'failed':
+      return { label: 'Didn’t finish', cls: 'cwb-tag-failed' }
+  }
+}
+
+interface DotState {
+  cls: string
+  pulse: boolean
+}
+
+/**
+ * The leading dot's colour class + whether it pulses. A live run's step drives
+ * the colour (pulsing while building/reviewing/fixing/merging, solid on
+ * done/failed); otherwise it falls back to the item's status (done → green,
+ * in_progress → running blue, upcoming → faint gray outline).
+ */
+function dotState(item: WorkBoardItem): DotState {
+  const rp = item.run_progress
+  if (rp !== undefined) {
+    switch (resolveStepLabel(rp)) {
+      case 'building':
+        return { cls: 'cwb-dot-build', pulse: true }
+      case 'reviewing':
+        return { cls: 'cwb-dot-review', pulse: true }
+      case 'fixing':
+        return { cls: 'cwb-dot-fix', pulse: true }
+      case 'merging':
+        return { cls: 'cwb-dot-merge', pulse: true }
+      case 'done':
+        return { cls: 'cwb-dot-done', pulse: false }
+      case 'failed':
+        return { cls: 'cwb-dot-failed', pulse: false }
+    }
+  }
+  if (item.status === 'done') return { cls: 'cwb-dot-done', pulse: false }
+  if (item.status === 'in_progress') return { cls: 'cwb-dot-build', pulse: true }
+  return { cls: 'cwb-dot-upcoming', pulse: false }
+}
+
+/** `round N` for a live (non-terminal) run; null once merged/failed or when idle. */
+function roundText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null
+  const step = resolveStepLabel(rp)
+  if (step === 'done' || step === 'failed') return null
+  return `round ${rp.round}`
+}
+
+const MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const
+
+/** Short "Jul 2" datestamp for a completed row; '' when unparseable. */
+function formatCompletedShort(completed_at: string | null): string {
+  if (completed_at === null || completed_at.length === 0) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(completed_at)
+  if (m === null) return ''
+  const month = MONTHS[Number(m[2]) - 1] ?? m[2]
+  return `${month} ${Number(m[3])}`
 }
 
 export function WorkBoardTab({
@@ -197,7 +243,7 @@ export function WorkBoardTab({
   const [actionError, setActionError] = useState<string | null>(null)
   const [completedOpen, setCompletedOpen] = useState(false)
 
-  // Add composer.
+  // Add composer (now at the BOTTOM of the list).
   const [newTitle, setNewTitle] = useState('')
   const [adding, setAdding] = useState(false)
 
@@ -208,12 +254,12 @@ export function WorkBoardTab({
   // Per-row in-flight guard so a double-click can't fire two mutations.
   const [busyId, setBusyId] = useState<string | null>(null)
 
-  // Item 4 — the item pending delete-confirmation (null = no dialog open).
+  // The item pending delete-confirmation (null = no dialog open).
   const [confirmDelete, setConfirmDelete] = useState<WorkBoardItem | null>(null)
 
-  // Item 1 — a ticking clock so a bound run's elapsed/stall sub-label advances
-  // live between server polls. Only runs while a run is linked (see the effect).
-  const [nowTick, setNowTick] = useState<number>(() => Date.now())
+  // Drag-to-reorder state: the row being dragged + the row it's hovering over.
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
 
   // Monotonic guard so a slow list fetch can't land after a newer one (rapid
   // project switches / StrictMode double-invoke).
@@ -254,6 +300,8 @@ export function WorkBoardTab({
     setEditingId(null)
     setBusyId(null)
     setConfirmDelete(null)
+    setDragId(null)
+    setDragOverId(null)
     refresh()
   }, [refresh, projectId])
 
@@ -276,21 +324,15 @@ export function WorkBoardTab({
     return unsub
   }, [liveSource, projectId, listSeq])
 
-  // Item 1 — while any item is bound to a LIVE (non-terminal) run, tick a clock
-  // (for the live elapsed/stall sub-label) AND quietly re-poll the board every
-  // 15s. M1 UX REDESIGN: intermediate trident checkpoints (forge-done →
-  // reviewing, fix-round-N → building, argus-approved → merging) NOW fan a
-  // `work_board_changed` push — the tick loop observes each checkpoint advance
-  // and fires the fan (`on_run_transition`), so phase/step changes arrive live.
-  // This 15s poll is retained only as a FALLBACK (a dropped frame / a socket blip)
-  // and to keep the elapsed/stall clock ticking between pushes. Gated on a LIVE
-  // link (via `isLinkedRunning`, not merely a present `linked_run_id`) so a
-  // finished/terminal linked run does NOT poll forever (Codex review [P2]).
+  // While any item is bound to a LIVE (non-terminal) run, quietly re-poll the
+  // board every 15s as a FALLBACK. PR-1's tick fan pushes a `work_board_changed`
+  // snapshot on every inner-step checkpoint, so the dot + tag normally walk live;
+  // this poll only covers a dropped frame / socket blip. Gated on a LIVE link
+  // (via `isLinkedRunning`) so a finished/terminal run does NOT poll forever.
   const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
   useEffect(() => {
     if (!hasLiveRun) return
     const interval = setInterval(() => {
-      setNowTick(Date.now())
       refresh(true)
     }, 15_000)
     return () => clearInterval(interval)
@@ -366,32 +408,6 @@ export function WorkBoardTab({
     [client, projectId, editTitle, refresh],
   )
 
-  // Move an active item up/down by reordering it before/after its neighbor in
-  // the active lane. A no-op at the lane edge.
-  const move = useCallback(
-    (active: WorkBoardItem[], index: number, dir: -1 | 1): void => {
-      if (busyId !== null) return
-      const target = index + dir
-      if (target < 0 || target >= active.length) return
-      const item = active[index]!
-      const neighbor = active[target]!
-      setBusyId(item.id)
-      setActionError(null)
-      const where = dir === -1 ? { before: neighbor.id } : { after: neighbor.id }
-      void client
-        .reorder(projectId, item.id, where)
-        .then(() => {
-          setBusyId(null)
-          refresh()
-        })
-        .catch((err: unknown) => {
-          setBusyId(null)
-          setActionError(err instanceof Error ? err.message : 'failed to reorder item')
-        })
-    },
-    [client, projectId, busyId, refresh],
-  )
-
   const removeItem = useCallback(
     (item: WorkBoardItem): void => {
       if (busyId !== null) return
@@ -411,10 +427,10 @@ export function WorkBoardTab({
     [client, projectId, busyId, refresh],
   )
 
-  // ▶ START / RETRY — dispatch a build bound to this card, using its SAVED spec
-  // (its plans/ doc, else its title). The card flips to a live build (fork ⑂ +
-  // the #174 run sub-label) on the next snapshot; we also poll (hasLiveRun). No
-  // confirm on ▶ — starting is cheap + intended (RETRY re-uses the same spec).
+  // ▶ START / ↻ RETRY — dispatch a build bound to this card, using its SAVED spec
+  // (its plans/ doc, else its title). The card flips to a live build (dot pulse +
+  // the run tag) on the next snapshot; we also poll (hasLiveRun). No confirm on
+  // ▶ — starting is cheap + intended (RETRY re-uses the same spec).
   const startBuild = useCallback(
     (item: WorkBoardItem): void => {
       if (busyId !== null) return
@@ -442,8 +458,8 @@ export function WorkBoardTab({
     [onOpenDoc, projectId],
   )
 
-  // Item 4 — open the confirm dialog instead of deleting immediately. Prevents
-  // an accidental click from cancelling an expensive running build.
+  // Open the confirm dialog instead of deleting immediately. Prevents an
+  // accidental click from cancelling an expensive running build.
   const requestRemove = useCallback(
     (item: WorkBoardItem): void => {
       if (busyId !== null) return
@@ -455,33 +471,49 @@ export function WorkBoardTab({
   const active = items.filter((it) => it.status !== 'done')
   const completed = items.filter((it) => it.status === 'done')
 
+  // Drag-to-reorder — persist via the existing reorder route. Dropping the
+  // dragged row onto a neighbor places it before (dragging up) or after (dragging
+  // down) that neighbor, mirroring the old ▲▼ semantics. Bounds + no-ops are
+  // handled by the before/after computation (a drop on itself is a no-op).
+  const reorderTo = useCallback(
+    (sourceId: string, targetId: string): void => {
+      if (busyId !== null || sourceId === targetId) return
+      const from = active.findIndex((a) => a.id === sourceId)
+      const to = active.findIndex((a) => a.id === targetId)
+      if (from < 0 || to < 0 || from === to) return
+      const where = from < to ? { after: targetId } : { before: targetId }
+      setBusyId(sourceId)
+      setActionError(null)
+      void client
+        .reorder(projectId, sourceId, where)
+        .then(() => {
+          setBusyId(null)
+          refresh()
+        })
+        .catch((err: unknown) => {
+          setBusyId(null)
+          setActionError(err instanceof Error ? err.message : 'failed to reorder item')
+        })
+    },
+    [active, busyId, client, projectId, refresh],
+  )
+
+  // Keyboard reorder (arrow keys on the drag grip) — a11y parity for the removed
+  // ▲▼ buttons. Move the active item at `index` by `dir` (-1 up / +1 down).
+  const moveByKey = useCallback(
+    (index: number, dir: -1 | 1): void => {
+      const target = index + dir
+      if (target < 0 || target >= active.length) return
+      const item = active[index]
+      const neighbor = active[target]
+      if (item === undefined || neighbor === undefined) return
+      reorderTo(item.id, neighbor.id)
+    },
+    [active, reorderTo],
+  )
+
   return (
     <div className="cwb">
-      <header className="cwb-head">
-        <form
-          className="cwb-add"
-          onSubmit={(e) => {
-            e.preventDefault()
-            addItem()
-          }}
-        >
-          <input
-            className="cwb-add-input"
-            placeholder="Add an item…"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            aria-label="New work item title"
-          />
-          <button
-            type="submit"
-            className="cwb-btn cwb-btn-primary"
-            disabled={adding || newTitle.trim().length === 0}
-          >
-            {adding ? 'Adding…' : 'Add'}
-          </button>
-        </form>
-      </header>
-
       {actionError !== null ? <div className="cwb-error">{actionError}</div> : null}
 
       {confirmDelete !== null ? (
@@ -518,7 +550,7 @@ export function WorkBoardTab({
         </div>
       ) : null}
 
-      <div className="cwb-list" aria-label="Work Board">
+      <div className="cwb-list" aria-label="Work">
         {loading ? (
           <div className="cwb-empty">Loading…</div>
         ) : listError !== null ? (
@@ -537,8 +569,10 @@ export function WorkBoardTab({
                   busy={busyId === it.id}
                   editing={editingId === it.id}
                   editTitle={editTitle}
-                  canMoveUp={i > 0}
-                  canMoveDown={i < active.length - 1}
+                  index={i}
+                  laneCount={active.length}
+                  dragging={dragId === it.id}
+                  dragOver={dragOverId === it.id && dragId !== it.id}
                   onAdvance={() => advanceStatus(it)}
                   onStartEdit={() => {
                     setEditingId(it.id)
@@ -547,12 +581,24 @@ export function WorkBoardTab({
                   onChangeEdit={setEditTitle}
                   onSaveEdit={() => saveEdit(it)}
                   onCancelEdit={() => setEditingId(null)}
-                  onMoveUp={() => move(active, i, -1)}
-                  onMoveDown={() => move(active, i, 1)}
                   onRemove={() => requestRemove(it)}
                   onPlay={() => startBuild(it)}
+                  onDragStart={() => setDragId(it.id)}
+                  onDragEnterRow={() => {
+                    if (dragId !== null && dragId !== it.id) setDragOverId(it.id)
+                  }}
+                  onDropRow={() => {
+                    if (dragId !== null) reorderTo(dragId, it.id)
+                    setDragId(null)
+                    setDragOverId(null)
+                  }}
+                  onDragEnd={() => {
+                    setDragId(null)
+                    setDragOverId(null)
+                  }}
+                  onMoveUp={() => moveByKey(i, -1)}
+                  onMoveDown={() => moveByKey(i, 1)}
                   {...(onOpenDoc !== undefined ? { onOpenDoc: () => openDoc(it) } : {})}
-                  nowMs={nowTick}
                 />
               ))}
             </ul>
@@ -566,17 +612,19 @@ export function WorkBoardTab({
                   onClick={() => setCompletedOpen((v) => !v)}
                 >
                   <span className="cwb-completed-caret">{completedOpen ? '▾' : '▸'}</span>
-                  Completed · {completed.length}
+                  Done · {completed.length}
                 </button>
                 {completedOpen ? (
-                  <ul className="cwb-ul cwb-completed-ul" aria-label="Completed">
+                  <ul className="cwb-ul cwb-completed-ul" aria-label="Done">
                     {completed.map((it) => (
                       <li key={it.id} className="cwb-row cwb-row-done">
                         <span className="cwb-dot cwb-dot-done" aria-label="Done" />
                         <span className="cwb-title" title={it.title}>
                           {it.title}
                         </span>
-                        <span className="cwb-date">{formatCompleted(it.completed_at)}</span>
+                        <span className="cwb-date">
+                          Merged · {formatCompletedShort(it.completed_at)}
+                        </span>
                         <button
                           type="button"
                           className="cwb-btn cwb-btn-icon"
@@ -596,6 +644,32 @@ export function WorkBoardTab({
           </>
         )}
       </div>
+
+      {/* Add-something-to-do — at the BOTTOM (M1 redesign). */}
+      <footer className="cwb-foot">
+        <form
+          className="cwb-add"
+          onSubmit={(e) => {
+            e.preventDefault()
+            addItem()
+          }}
+        >
+          <input
+            className="cwb-add-input"
+            placeholder="Add something to do…"
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            aria-label="New work item"
+          />
+          <button
+            type="submit"
+            className="cwb-btn cwb-btn-primary"
+            disabled={adding || newTitle.trim().length === 0}
+          >
+            {adding ? 'Adding…' : 'Add'}
+          </button>
+        </form>
+      </footer>
     </div>
   )
 }
@@ -605,61 +679,76 @@ function WorkBoardRow({
   busy,
   editing,
   editTitle,
-  canMoveUp,
-  canMoveDown,
+  index,
+  laneCount,
+  dragging,
+  dragOver,
   onAdvance,
   onStartEdit,
   onChangeEdit,
   onSaveEdit,
   onCancelEdit,
-  onMoveUp,
-  onMoveDown,
   onRemove,
   onPlay,
   onOpenDoc,
-  nowMs,
+  onDragStart,
+  onDragEnterRow,
+  onDropRow,
+  onDragEnd,
+  onMoveUp,
+  onMoveDown,
 }: {
   item: WorkBoardItem
   busy: boolean
   editing: boolean
   editTitle: string
-  canMoveUp: boolean
-  canMoveDown: boolean
+  index: number
+  laneCount: number
+  dragging: boolean
+  dragOver: boolean
   onAdvance: () => void
   onStartEdit: () => void
   onChangeEdit: (v: string) => void
   onSaveEdit: () => void
   onCancelEdit: () => void
-  onMoveUp: () => void
-  onMoveDown: () => void
   onRemove: () => void
-  /** ▶ — START/RETRY a build from the card's saved spec. */
+  /** ▶/↻ — START/RETRY a build from the card's saved spec. */
   onPlay: () => void
   /** Open the card's linked spec-doc in the Documents tab; undefined = no nav. */
   onOpenDoc?: () => void
-  /** Item 1 — a ticking clock so the run sub-label's elapsed/stall advances live. */
-  nowMs: number
+  onDragStart: () => void
+  onDragEnterRow: () => void
+  onDropRow: () => void
+  onDragEnd: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
 }): React.JSX.Element {
-  const dot = statusMeta(item.status)
-  const activity = activityGlyph(item)
-  const progress = item.run_progress
+  const dot = dotState(item)
+  const tag = stepTag(item.run_progress)
+  const round = roundText(item.run_progress)
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
+  const retry = isRetry(item)
   return (
-    <li className={`cwb-row cwb-row-${item.status}`}>
+    <li
+      className={`cwb-row cwb-row-${item.status}${dragging ? ' cwb-row-dragging' : ''}${dragOver ? ' cwb-row-dragover' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault()
+        onDragEnterRow()
+      }}
+      onDrop={(e) => {
+        e.preventDefault()
+        onDropRow()
+      }}
+    >
       <button
         type="button"
-        className={`cwb-dot ${dot.cls}`}
+        className={`cwb-dot ${dot.cls}${dot.pulse ? ' cwb-dot-pulse' : ''}`}
         onClick={onAdvance}
         disabled={busy}
-        title={`${dot.label} — advance`}
-        aria-label={`${dot.label}. Advance status`}
+        title={`${statusLabel(item.status)} — advance`}
+        aria-label={`${statusLabel(item.status)}. Advance status`}
       />
-      {activity !== null ? (
-        <span className="cwb-activity" aria-label={activity.label} title={activity.label}>
-          {activity.glyph}
-        </span>
-      ) : null}
       {editing ? (
         <input
           className="cwb-edit-input"
@@ -683,14 +772,6 @@ function WorkBoardRow({
           >
             {item.title}
           </button>
-          {progress !== undefined ? (
-            <span
-              className={`cwb-run-progress${progress.stalled ? ' cwb-run-progress-stalled' : ''}`}
-              aria-label={`Build progress: ${runProgressText(progress, nowMs)}`}
-            >
-              {runProgressText(progress, nowMs)}
-            </span>
-          ) : null}
           {docLabel !== null ? (
             onOpenDoc !== undefined ? (
               <button
@@ -710,39 +791,44 @@ function WorkBoardRow({
           ) : null}
         </span>
       )}
-      {showPlay ? (
-        <button
-          type="button"
-          className="cwb-btn cwb-btn-icon cwb-btn-play"
-          onClick={onPlay}
-          disabled={busy}
-          title={item.linked_run_id !== null ? 'Retry build' : 'Start build'}
-          aria-label={item.linked_run_id !== null ? 'Retry build' : 'Start build'}
-        >
-          ▶
-        </button>
+      {tag !== null ? (
+        <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span>
       ) : null}
+      {round !== null ? <span className="cwb-round">{round}</span> : null}
       <div className="cwb-actions">
         <button
           type="button"
-          className="cwb-btn cwb-btn-icon"
-          onClick={onMoveUp}
-          disabled={busy || !canMoveUp}
-          title="Move up"
-          aria-label="Move up"
+          className="cwb-btn cwb-btn-icon cwb-drag"
+          draggable
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowUp') {
+              e.preventDefault()
+              onMoveUp()
+            } else if (e.key === 'ArrowDown') {
+              e.preventDefault()
+              onMoveDown()
+            }
+          }}
+          disabled={busy}
+          title="Drag to reorder"
+          aria-label={`Reorder ${item.title}. Item ${index + 1} of ${laneCount}. Use arrow keys to move.`}
         >
-          ▲
+          ⠿
         </button>
-        <button
-          type="button"
-          className="cwb-btn cwb-btn-icon"
-          onClick={onMoveDown}
-          disabled={busy || !canMoveDown}
-          title="Move down"
-          aria-label="Move down"
-        >
-          ▼
-        </button>
+        {showPlay ? (
+          <button
+            type="button"
+            className="cwb-btn cwb-btn-icon cwb-btn-play"
+            onClick={onPlay}
+            disabled={busy}
+            title={retry ? 'Retry build' : 'Start build'}
+            aria-label={retry ? 'Retry build' : 'Start build'}
+          >
+            {retry ? '↻' : '▶'}
+          </button>
+        ) : null}
         <button
           type="button"
           className="cwb-btn cwb-btn-icon"

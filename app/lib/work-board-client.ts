@@ -39,6 +39,45 @@ export interface WorkBoardItem {
   updated_at: string;
   /** ISO-8601 UTC; null until status='done'. */
   completed_at: string | null;
+  /**
+   * M1 redesign — the bound trident run's LIVE progress, present ONLY when
+   * this item has a live `linked_run_id`. Mirror of the web client's
+   * `WorkBoardItem.run_progress` (`landing/chat-react/work-board-client.ts`).
+   */
+  run_progress?: RunProgress;
+}
+
+/** Human-legible live phase of a bound run (mirror of `trident/run-progress.ts`). */
+export type RunPhaseLabel =
+  | 'planning'
+  | 'building'
+  | 'reviewing'
+  | 'merged'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * M1 UX REDESIGN — the inner-step label the redesigned Work item renders live
+ * (mirror of `trident/run-progress.ts` `RunStepLabel`): building → reviewing →
+ * fixing → merging → terminal done/failed.
+ */
+export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'done' | 'failed';
+
+/** A bound run's live progress, as the row consumes it. */
+export interface RunProgress {
+  run_id: string;
+  phase_label: RunPhaseLabel;
+  /** M1 redesign — the inner-step label (building/reviewing/fixing/merging + terminal). */
+  step_label: RunStepLabel;
+  round: number;
+  started_at: string;
+  last_advanced_at: string;
+  elapsed_ms: number;
+  stalled: boolean;
+  stalled_ms: number | null;
+  pr: number | null;
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null;
+  failure_reason: string | null;
 }
 
 export interface CreateWorkBoardItemInput {
@@ -234,6 +273,7 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     if (typeof id !== 'string' || id.length === 0) continue;
     if (typeof title !== 'string') continue;
     if (status !== 'upcoming' && status !== 'in_progress' && status !== 'done') continue;
+    const run_progress = parseRunProgress(r['run_progress']);
     out.push({
       id,
       title,
@@ -246,7 +286,96 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
       created_at: typeof r['created_at'] === 'string' ? (r['created_at'] as string) : '',
       updated_at: typeof r['updated_at'] === 'string' ? (r['updated_at'] as string) : '',
       completed_at: typeof r['completed_at'] === 'string' ? (r['completed_at'] as string) : null,
+      ...(run_progress !== null ? { run_progress } : {}),
     });
   }
   return out;
+}
+
+const RUN_PHASE_LABELS: readonly RunPhaseLabel[] = [
+  'planning',
+  'building',
+  'reviewing',
+  'merged',
+  'failed',
+  'cancelled',
+];
+
+const RUN_STEP_LABELS: readonly RunStepLabel[] = [
+  'building',
+  'reviewing',
+  'fixing',
+  'merging',
+  'done',
+  'failed',
+];
+
+/**
+ * Derive a fallback `step_label` from a `phase_label` for a legacy/absent wire
+ * value — keeps the redesign renderable against an older server that predates
+ * the explicit `step_label` field. Mirror of the web client's
+ * `stepLabelFromPhase` (`landing/chat-react/work-board-client.ts`).
+ */
+function stepLabelFromPhase(phase: RunPhaseLabel): RunStepLabel {
+  switch (phase) {
+    case 'building':
+    case 'planning':
+      return 'building';
+    case 'reviewing':
+      return 'reviewing';
+    case 'merged':
+      return 'done';
+    case 'failed':
+    case 'cancelled':
+      return 'failed';
+  }
+}
+
+/**
+ * The EFFECTIVE inner-step label — `step_label` when the server sent a recognized
+ * one, else derived from `phase_label`. The HTTP `list()` path returns raw server
+ * rows (NOT run through `parseRunProgress`), so a legacy/rolling-deploy gateway
+ * that omits `step_label` would otherwise leave it `undefined` and crash the
+ * tag/dot derivation (Codex P2). The row helpers switch on THIS, never
+ * `rp.step_label` directly. Mirror of the web client's `resolveStepLabel`.
+ */
+export function resolveStepLabel(rp: {
+  step_label?: unknown;
+  phase_label: RunPhaseLabel;
+}): RunStepLabel {
+  return RUN_STEP_LABELS.includes(rp.step_label as RunStepLabel)
+    ? (rp.step_label as RunStepLabel)
+    : stepLabelFromPhase(rp.phase_label);
+}
+
+/** Parse a raw `run_progress` object off a live frame; null when absent/malformed. */
+function parseRunProgress(raw: unknown): RunProgress | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const run_id = r['run_id'];
+  const phase_label = r['phase_label'];
+  if (typeof run_id !== 'string' || run_id.length === 0) return null;
+  if (typeof phase_label !== 'string' || !RUN_PHASE_LABELS.includes(phase_label as RunPhaseLabel)) {
+    return null;
+  }
+  const verdict = r['verdict'];
+  const rawStep = r['step_label'];
+  const step_label: RunStepLabel = RUN_STEP_LABELS.includes(rawStep as RunStepLabel)
+    ? (rawStep as RunStepLabel)
+    : stepLabelFromPhase(phase_label as RunPhaseLabel);
+  return {
+    run_id,
+    phase_label: phase_label as RunPhaseLabel,
+    step_label,
+    round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
+    started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
+    last_advanced_at:
+      typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',
+    elapsed_ms: typeof r['elapsed_ms'] === 'number' ? (r['elapsed_ms'] as number) : 0,
+    stalled: r['stalled'] === true,
+    stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,
+    pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
+    verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
+    failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
+  };
 }

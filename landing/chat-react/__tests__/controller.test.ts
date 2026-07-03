@@ -119,6 +119,46 @@ describe('NeutronChatController — view model over chat-core', () => {
     expect(vm.messages.length).toBe(2)
   })
 
+  it('renders the cold-start "Waking up" ack as a system pill (not a chat bubble), then clears it on the real reply', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('hi')
+    await tick()
+    // The gateway's non-persisted cold-start ack arrives as an agent_message.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message', body: '⏳ Waking up, one moment...', ts: 1 })
+    await tick()
+    let vm = controller.getViewModel()
+    // → a SYSTEM pill, NOT a chat bubble. The transcript stays just the user msg.
+    expect(vm.systemNotice?.text).toBe('⏳ Waking up, one moment...')
+    expect(vm.messages.filter((m) => m.role === 'agent').length).toBe(0)
+    // The typing dots keep spinning while the workspace wakes.
+    expect(vm.isRunning).toBe(true)
+
+    // The real reply streams → the pill clears.
+    sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm1', body_delta: 'Hey!', ts: 2 })
+    await tick()
+    vm = controller.getViewModel()
+    expect(vm.systemNotice).toBeNull()
+    expect(vm.messages.find((m) => m.streaming)?.text).toBe('Hey!')
+  })
+
+  it('an ordinary error frame stays a chat bubble, NOT a system pill', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver({ v: 1, type: 'error', code: 'dispatch_failed', message: 'The build failed to start.', ts: 1 })
+    await tick()
+    const vm = controller.getViewModel()
+    // Error → a normal agent chat bubble; the system-pill channel stays empty.
+    expect(vm.systemNotice).toBeNull()
+    expect(vm.messages.some((m) => m.role === 'agent' && m.text.includes('build failed to start'))).toBe(true)
+  })
+
   it('queues a send while offline (pending) and surfaces it optimistically', async () => {
     const { controller, sockets } = setup()
     controller.start() // socket created but not opened

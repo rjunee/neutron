@@ -144,7 +144,7 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     'FINISHING — do NOT write your own closing/wrap-up. The system sends ONE closing',
     'message automatically the moment the last step is answered: it confirms everything',
     'is set, names the projects it created, and invites the owner to open one in the LEFT',
-    'RAIL (each has its own Plan, Documents, and Chat). So once they have given the final',
+    'RAIL (each has its own Work, Documents, and Chat). So once they have given the final',
     'answer (their personality choice), reply with at MOST a single short, warm',
     'acknowledgement of that answer (e.g. "Love it.") and STOP.',
     'Do NOT say "you\'re all set", do NOT list or',

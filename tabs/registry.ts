@@ -9,7 +9,7 @@
  *
  * ── Scope (PR-1 + PR-2) ─────────────────────────────────────────────────
  * BUILTIN tabs:
- *   - per-project (scope='project'): Chat, Plan (work_board), Documents
+ *   - per-project (scope='project'): Chat, Work (work_board), Documents
  *   - global      (scope='global'):  Admin
  * (Tasks is no longer a builtin — it returns as a Core webview tab, WAVE 3.)
  * PR-2 adds the CORE union: installed Cores' `project_tab` surfaces are
@@ -83,12 +83,12 @@ export interface TabDescriptor {
 
 /**
  * The static builtin tab set. Per-project tabs first
- * (Chat / Plan / Documents), then the global Admin tab. `target` keys match the
+ * (Chat / Work / Documents), then the global Admin tab. `target` keys match the
  * existing client routes: mobile `app/app/projects/[id]/{chat,workboard,docs}.tsx`
  * + the Admin surface.
  *
  * Order is spaced by 10 so a tab can slot between two existing ones without
- * renumbering; the Plan (work_board) tab sits at **order 5** — right after Chat,
+ * renumbering; the Work (work_board) tab sits at **order 5** — right after Chat,
  * before Documents — per the Work Board master plan §1/§9 (the live work-tracker
  * is the orchestrator's external memory, so it ranks just below the
  * conversation). Tasks is intentionally absent — it returns as a Core-contributed
@@ -104,11 +104,11 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     mount: { kind: 'builtin', target: 'chat' },
   },
   {
-    // User-facing label is "Plan" (Ryan directive). The internal key, target,
-    // tool names (`work_board_*`), CSS (`cwb-`), and DB table keep the
-    // `work_board` identifier — only the visible label reads "Plan".
+    // User-facing label is "Work" (Ryan directive, M1 UX redesign — was "Plan").
+    // The internal key, target, tool names (`work_board_*`), CSS (`cwb-`), and DB
+    // table keep the `work_board` identifier — only the visible label reads "Work".
     key: 'work_board',
-    label: 'Plan',
+    label: 'Work',
     scope: 'project',
     source: 'builtin',
     order: 5,
@@ -127,7 +127,7 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     // service tokens), project rename + emoji, and the collaborators
     // (display-only, M2-gated) scaffold. Order 15 slots it after Documents (10)
     // and before any Core-contributed tab (base 100), so it's the last builtin
-    // in the per-project set: Chat / Plan / Documents / Settings.
+    // in the per-project set: Chat / Work / Documents / Settings.
     key: 'settings',
     label: 'Settings',
     scope: 'project',
@@ -224,7 +224,7 @@ export function resolveTabs(
   return [...builtins, ...coreTabs].sort((a, b) => a.order - b.order)
 }
 
-/** Per-project tab descriptors: Chat/Plan/Documents + per-project Core tabs. */
+/** Per-project tab descriptors: Chat/Work/Documents + per-project Core tabs. */
 export function resolveProjectTabs(
   cores: readonly CoreTabContribution[] = [],
 ): TabDescriptor[] {

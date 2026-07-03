@@ -82,11 +82,11 @@ import type { ProjectKickoff } from './build-project-kickoff.ts'
  * finalizes + the project rail refreshes. Path-1 finalize previously emitted NO
  * closing, so the interview just went quiet after the last answer with no signal
  * that projects had been created or where to find them. Points the owner at the
- * populated left rail; uses "Plan" (the user-facing name for the per-project
- * work board) per the 2026-06-30 rename. Em-dash-free (Sam hard rule).
+ * populated left rail; uses "Work" (the user-facing name for the per-project
+ * work board) per the M1 UX redesign rename (was "Plan"). Em-dash-free (Sam hard rule).
  */
 const ONBOARDING_CLOSING_MESSAGE =
-  "You're all set. I've created your projects - they're in the left rail. Open one to find its Plan, Documents, and Chat, and we can dig in whenever you're ready."
+  "You're all set. I've created your projects - they're in the left rail. Open one to find its Work, Documents, and Chat, and we can dig in whenever you're ready."
 
 /**
  * No-projects variant of the closing (item 6). The finalizer intentionally

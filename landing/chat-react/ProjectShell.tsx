@@ -144,7 +144,7 @@ function TabContent({
   fetchImpl?: FetchImpl
   /** P-A — a pending "open this doc" request forwarded to the Documents tab. */
   docOpenRequest?: DocOpenRequest
-  /** Open a project doc in the Documents tab — threaded to the Plan tab's card
+  /** Open a project doc in the Documents tab — threaded to the Work tab's card
    *  ▸ spec-doc links (same nav a chat doc link uses). */
   onOpenDocLink?: (projectId: string, path: string) => void
 }): React.JSX.Element {

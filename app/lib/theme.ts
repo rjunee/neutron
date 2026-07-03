@@ -56,6 +56,36 @@ export const THEME: NeutronTheme = Object.freeze({
   link: '#5fb6ff',
 });
 
+/** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */
+export interface PhaseColor {
+  fg: string;
+  bg: string;
+}
+
+/**
+ * M1 redesign — Work-list row phase colors (dot / tag). Mirror of the web
+ * `cwb-tag-*` / `cwb-dot-*` CSS colors (`landing/chat-react/chat-react.html`);
+ * mobile is dark-only so these are the literal values, not a light/dark pair.
+ * Keyed by the same coarse phase the row derives from `RunStepLabel`
+ * (`merge` covers both the live "merging" step and the terminal "done"/merged
+ * state — same green, mirroring the web `cwb-tag-merge` class reuse).
+ */
+export interface NeutronPhaseColors {
+  build: PhaseColor;
+  review: PhaseColor;
+  fix: PhaseColor;
+  merge: PhaseColor;
+  failed: PhaseColor;
+}
+
+export const PHASE: NeutronPhaseColors = Object.freeze({
+  build: { fg: '#8cc6ff', bg: 'rgba(140,198,255,0.14)' },
+  review: { fg: '#a8a2ff', bg: 'rgba(168,162,255,0.14)' },
+  fix: { fg: '#ffd27d', bg: 'rgba(255,210,125,0.14)' },
+  merge: { fg: '#7ddf9b', bg: 'rgba(125,223,155,0.14)' },
+  failed: { fg: '#ff8a8a', bg: 'rgba(255,138,138,0.14)' },
+});
+
 export interface TypographyToken {
   fontSize: number;
   lineHeight: number;

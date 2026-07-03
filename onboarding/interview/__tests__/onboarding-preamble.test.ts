@@ -150,10 +150,10 @@ describe('buildOnboardingPreamble — defined archetypes + options + closing (20
     const out = buildOnboardingPreamble({ import_offered: false })
     // The duplicate-closing fix: the agent must not emit its own wrap-up (which
     // Ryan hit as a second, near-identical closing). The deterministic finalize
-    // message is the single closing and it names the LEFT RAIL + Plan.
+    // message is the single closing and it names the LEFT RAIL + Work.
     expect(out).toContain('do NOT write your own closing')
     expect(out).toMatch(/left\s+rail/i)
-    expect(out).toContain('Plan')
+    expect(out).toContain('Work')
     // And it explicitly forbids the phrases that made it read as a duplicate.
     expect(out).toContain("Do NOT say \"you're all set\"")
     expect(out).toContain('what do you want to look at first')

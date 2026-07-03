@@ -16,7 +16,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
-import type { WorkBoardItem } from '../work-board-client.ts'
+import type { RunProgress, WorkBoardItem } from '../work-board-client.ts'
 
 beforeAll(() => {
   GlobalRegistrator.register({ url: 'https://sam.neutron.test/chat?client=react' })
@@ -164,11 +164,11 @@ describe('WorkBoardTab (happy-dom)', () => {
       (n) => n.textContent ?? '',
     )
     expect(titles).toEqual(['Active one', 'Next up'])
-    // Completed lives behind the disclosure (count shown, row hidden until open).
-    expect(container.textContent).toContain('Completed · 1')
+    // Done lives behind the disclosure (count shown, row hidden until open).
+    expect(container.textContent).toContain('Done · 1')
     expect(container.querySelector('.cwb-completed-ul')).toBeNull()
 
-    // Expand the disclosure → the done row + its datestamp appear.
+    // Expand the disclosure → the done row + its "Merged · Jun 22" datestamp appear.
     const toggle = container.querySelector('.cwb-completed-toggle') as HTMLButtonElement
     await act(async () => {
       toggle.click()
@@ -176,35 +176,51 @@ describe('WorkBoardTab (happy-dom)', () => {
     })
     expect(container.querySelector('.cwb-completed-ul')).not.toBeNull()
     expect(container.textContent).toContain('Old done')
-    expect(container.textContent).toContain('2026-06-22')
+    expect(container.textContent).toContain('Merged · Jun 22')
 
     await act(async () => root.unmount())
   })
 
-  it('derives status dot + activity glyph with a11y labels', async () => {
+  it('derives the leading dot colour from the run step + status (no activity glyph)', async () => {
     const rows = [
-      item({ id: 'a', title: 'Subagent row', status: 'in_progress', linked_run_id: 'run_1' }),
-      item({ id: 'b', title: 'Inline row', status: 'in_progress', inline_active: true }),
+      item({
+        id: 'a',
+        title: 'Reviewing row',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'reviewing',
+          step_label: 'reviewing',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
       item({ id: 'c', title: 'Idle upcoming', status: 'upcoming' }),
     ]
     const { container, root, act } = await mount(listOf(rows))
 
     const dots = Array.from(container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) .cwb-dot'))
-    expect(dots[0]!.className).toContain('cwb-dot-active')
-    expect(dots[2]!.className).toContain('cwb-dot-upcoming')
-
-    const glyphs = Array.from(container.querySelectorAll('.cwb-activity')).map(
-      (n) => n.getAttribute('aria-label') ?? '',
-    )
-    expect(glyphs).toContain('Sub-agent running')
-    expect(glyphs).toContain('Working inline')
-    // The idle upcoming row has NO activity glyph.
-    expect(glyphs).toHaveLength(2)
+    // A live review step → review-coloured, pulsing dot.
+    expect(dots[0]!.className).toContain('cwb-dot-review')
+    expect(dots[0]!.className).toContain('cwb-dot-pulse')
+    // A never-started card → faint gray outline, no pulse.
+    expect(dots[1]!.className).toContain('cwb-dot-upcoming')
+    expect(dots[1]!.className).not.toContain('cwb-dot-pulse')
+    // The old ⑂/› activity-glyph column is GONE.
+    expect(container.querySelector('.cwb-activity')).toBeNull()
 
     await act(async () => root.unmount())
   })
 
-  it('renders a live run-progress sub-label for a bound run (item 1)', async () => {
+  it('renders the phase tag + round for a bound run (dot+tag+round, no emoji/timer)', async () => {
     const rows = [
       item({
         id: 'a',
@@ -228,34 +244,68 @@ describe('WorkBoardTab (happy-dom)', () => {
       }),
     ]
     const { container, root, act } = await mount(listOf(rows))
-    const label = container.querySelector('.cwb-run-progress')
-    expect(label).not.toBeNull()
-    const text = label!.textContent ?? ''
-    expect(text).toContain('🔨 building')
-    expect(text).toContain('round 2')
+    const tag = container.querySelector('.cwb-tag')
+    expect(tag).not.toBeNull()
+    expect(tag!.textContent).toBe('Fixing')
+    expect(tag!.className).toContain('cwb-tag-fix')
+    expect(container.querySelector('.cwb-round')!.textContent).toBe('round 2')
+    // No emoji glyphs, no elapsed-minutes timer, no old sub-label.
+    expect(container.querySelector('.cwb-run-progress')).toBeNull()
+    expect(container.textContent).not.toContain('🔨')
+    expect(container.textContent).not.toContain('4m')
     await act(async () => root.unmount())
   })
 
-  it('shows a stalled warning + a merged PR label on the sub-label (item 1)', async () => {
+  it('renders a derived tag for a LEGACY run_progress missing step_label (no crash)', async () => {
+    // A rolling-deploy / legacy gateway HTTP GET can return run_progress with only
+    // phase_label (no step_label). The row must derive the tag from phase_label
+    // instead of crashing (Codex P2). `step_label` intentionally omitted.
+    const legacyProgress = {
+      run_id: 'run_1',
+      phase_label: 'building',
+      round: 1,
+      started_at: '2026-07-02T00:00:00Z',
+      last_advanced_at: '2026-07-02T00:01:00Z',
+      elapsed_ms: 60000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      verdict: null,
+      failure_reason: null,
+    } as unknown as RunProgress
+    const rows = [
+      item({ id: 'a', title: 'Legacy row', status: 'in_progress', linked_run_id: 'run_1', run_progress: legacyProgress }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const tag = container.querySelector('.cwb-tag')
+    expect(tag).not.toBeNull()
+    // phase_label 'building' → derived step 'building' → 'Building' tag.
+    expect(tag!.textContent).toBe('Building')
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-build')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a merged tag (no round) for a completed build and a failed tag on failure', async () => {
     const rows = [
       item({
         id: 'a',
-        title: 'Stalled row',
+        title: 'Failed row',
         status: 'in_progress',
         linked_run_id: 'run_1',
         run_progress: {
           run_id: 'run_1',
-          phase_label: 'building',
-          step_label: 'building',
-          round: 1,
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 3,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:00:30Z',
           elapsed_ms: 900000,
-          stalled: true,
-          stalled_ms: 700000,
+          stalled: false,
+          stalled_ms: null,
           pr: null,
           verdict: null,
-          failure_reason: null,
+          failure_reason: 'tests failed',
         },
       }),
       item({
@@ -280,11 +330,11 @@ describe('WorkBoardTab (happy-dom)', () => {
       }),
     ]
     const { container, root, act } = await mount(listOf(rows))
-    const labels = Array.from(container.querySelectorAll('.cwb-run-progress')).map(
-      (n) => n.textContent ?? '',
-    )
-    expect(labels.some((t) => t.includes('⚠️ stalled'))).toBe(true)
-    expect(labels.some((t) => t.includes('✅ merged') && t.includes('PR #123'))).toBe(true)
+    const tags = Array.from(container.querySelectorAll('.cwb-tag')).map((n) => n.textContent ?? '')
+    expect(tags).toContain('Didn’t finish')
+    expect(tags).toContain('Merged')
+    // Terminal steps drop the `round N` trail.
+    expect(container.querySelector('.cwb-round')).toBeNull()
     await act(async () => root.unmount())
   })
 
@@ -381,6 +431,78 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(posted!.title).toBe('Brand new')
     expect(listCount).toBeGreaterThanOrEqual(2)
 
+    await act(async () => root.unmount())
+  })
+
+  it('reorders via the drag grip keyboard (ArrowDown → persist via /reorder)', async () => {
+    let reordered: { url: string; body: Record<string, unknown> } | null = null
+    const handler: Handler = (url, init) => {
+      if (url.endsWith('/work-board') && (init?.method ?? 'GET') === 'GET') {
+        return jsonRes({
+          ok: true,
+          items: [
+            item({ id: 'a', title: 'First', status: 'upcoming', sort_order: 1 }),
+            item({ id: 'b', title: 'Second', status: 'upcoming', sort_order: 2 }),
+          ],
+          project_id: PROJECT,
+        })
+      }
+      if (url.includes('/work-board/a/reorder') && init?.method === 'POST') {
+        reordered = { url, body: JSON.parse(init.body as string) as Record<string, unknown> }
+        return jsonRes({ ok: true, items: [], project_id: PROJECT })
+      }
+      return null
+    }
+    const { container, root, act } = await mount(handler)
+    const grips = Array.from(container.querySelectorAll('.cwb-drag')) as HTMLButtonElement[]
+    // ArrowDown on the first row's grip moves it below its neighbor → {after: 'b'}.
+    await act(async () => {
+      grips[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      await tick()
+      await tick()
+    })
+    expect(reordered).not.toBeNull()
+    expect(reordered!.body).toEqual({ after: 'b' })
+    await act(async () => root.unmount())
+  })
+
+  it('shows ▶ start on a fresh card and ↻ retry on a card with a prior binding; add-box is at the bottom', async () => {
+    const rows = [
+      item({ id: 'fresh', title: 'Never started', status: 'upcoming', linked_run_id: null }),
+      // A card whose last build FAILED (terminal run_progress, binding detached) →
+      // it's startable again, and the control reads ↻ Retry.
+      item({
+        id: 'failed',
+        title: 'Retry me',
+        status: 'upcoming',
+        linked_run_id: null,
+        run_progress: {
+          run_id: 'run_old',
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:00:30Z',
+          elapsed_ms: 1000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: 'tests failed',
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const playBtns = Array.from(container.querySelectorAll('.cwb-btn-play')) as HTMLButtonElement[]
+    const labels = playBtns.map((b) => b.getAttribute('aria-label') ?? '')
+    expect(labels).toContain('Start build')
+    expect(labels).toContain('Retry build')
+    expect(playBtns.find((b) => b.getAttribute('aria-label') === 'Start build')!.textContent).toBe('▶')
+    expect(playBtns.find((b) => b.getAttribute('aria-label') === 'Retry build')!.textContent).toBe('↻')
+    // The add affordance lives in the bottom footer, after the list.
+    const foot = container.querySelector('.cwb-foot')
+    expect(foot).not.toBeNull()
+    expect(foot!.querySelector('.cwb-add-input')).not.toBeNull()
     await act(async () => root.unmount())
   })
 
