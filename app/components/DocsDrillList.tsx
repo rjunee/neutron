@@ -25,6 +25,24 @@ export interface DocsDrillListProps {
   now?: Date;
   onOpenFolder(path: string): void;
   onOpenFile(path: string): void;
+  /** Long-press a row → the rename/move/delete action sheet (parity with the
+   *  wide-viewport `TreeBranch`). Optional so unit callers can omit it. */
+  onLongPress?(node: DocTreeNode): void;
+}
+
+/** The emoji glyph for a node — folders, markdown files, and binaries (by MIME),
+ *  mirroring the wide `TreeBranch`'s `treeIconFor`. */
+function iconFor(node: DocTreeNode): string {
+  if (node.kind === 'folder') return '📁';
+  if (node.kind === 'binary') {
+    const ct = node.content_type ?? '';
+    if (ct.startsWith('image/')) return '🖼️';
+    if (ct === 'application/pdf') return '📕';
+    if (ct.startsWith('audio/')) return '🎵';
+    if (ct.startsWith('video/')) return '🎬';
+    return '📎';
+  }
+  return '📄';
 }
 
 function DrillRow({
@@ -34,6 +52,7 @@ function DrillRow({
   chevron,
   testID,
   onPress,
+  onLongPress,
 }: {
   icon: string;
   label: string;
@@ -41,6 +60,7 @@ function DrillRow({
   chevron?: boolean;
   testID: string;
   onPress(): void;
+  onLongPress?(): void;
 }): React.JSX.Element {
   return (
     <Pressable
@@ -48,6 +68,7 @@ function DrillRow({
       accessibilityLabel={label}
       testID={testID}
       onPress={onPress}
+      {...(onLongPress !== undefined ? { onLongPress } : {})}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
       <Text style={styles.icon}>{icon}</Text>
@@ -67,10 +88,13 @@ export function DocsDrillList({
   now,
   onOpenFolder,
   onOpenFile,
+  onLongPress,
 }: DocsDrillListProps): React.JSX.Element {
   const clock = now ?? new Date();
   const folders = nodes.filter((n) => n.kind === 'folder');
-  const files = nodes.filter((n) => n.kind === 'file');
+  // Markdown files AND binaries (images/PDFs/…) are tappable leaves — dropping
+  // binaries would strand attachments (and blank a binary-only folder).
+  const leaves = nodes.filter((n) => n.kind === 'file' || n.kind === 'binary');
   const showFilesLabel = pinned.length > 0 || recent.length > 0;
 
   return (
@@ -86,6 +110,7 @@ export function DocsDrillList({
               chevron
               testID={`docs-drill-file-${f.path}`}
               onPress={() => onOpenFile(f.path)}
+              {...(onLongPress !== undefined ? { onLongPress: () => onLongPress(f) } : {})}
             />
           ))}
         </>
@@ -102,6 +127,7 @@ export function DocsDrillList({
               time={formatDocTime(f.modified_at, clock)}
               testID={`docs-drill-file-${f.path}`}
               onPress={() => onOpenFile(f.path)}
+              {...(onLongPress !== undefined ? { onLongPress: () => onLongPress(f) } : {})}
             />
           ))}
         </>
@@ -119,16 +145,18 @@ export function DocsDrillList({
           chevron
           testID={`docs-drill-folder-${n.path}`}
           onPress={() => onOpenFolder(n.path)}
+          {...(onLongPress !== undefined ? { onLongPress: () => onLongPress(n) } : {})}
         />
       ))}
-      {files.map((n) => (
+      {leaves.map((n) => (
         <DrillRow
-          key={`file:${n.path}`}
-          icon="📄"
+          key={`leaf:${n.path}`}
+          icon={iconFor(n)}
           label={n.name}
           time={formatDocTime(n.modified_at, clock)}
           testID={`docs-drill-file-${n.path}`}
           onPress={() => onOpenFile(n.path)}
+          {...(onLongPress !== undefined ? { onLongPress: () => onLongPress(n) } : {})}
         />
       ))}
     </ScrollView>

@@ -364,7 +364,14 @@ export default function DocsTab() {
     if (deepLinkPath === null) return;
     if (loadingTree) return;
     setSelectedPath(deepLinkPath);
-    void fetchFile(deepLinkPath);
+    // A binary deep link (a phone drill-down tap on an image/PDF) renders via the
+    // BinaryPreview branch (`file === null` + `selectedPath`) — never fetch it as
+    // markdown, which would 4xx. Mirrors `handleSelect`'s binary arm.
+    if (isBinaryExtension(deepLinkPath)) {
+      setFile(null);
+    } else {
+      void fetchFile(deepLinkPath);
+    }
   }, [deepLinkPath, loadingTree, fetchFile]);
 
   // P7.3 — line- AND range-anchor scroll. After the viewer's body
@@ -1097,6 +1104,7 @@ export default function DocsTab() {
             recent={folderPath === null ? collectRecentNodes(tree) : []}
             onOpenFolder={openFolder}
             onOpenFile={openFileScreen}
+            onLongPress={(node) => setActionSheet(node)}
           />
         )
       ) : (

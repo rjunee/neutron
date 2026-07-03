@@ -94,6 +94,29 @@ describe('scopeToFolder', () => {
     // A file path is not a folder.
     expect(scopeToFolder(TREE, 'brand-guide.md')).toBeNull();
   });
+
+  it('keeps binary leaves in the scoped level (the drill list renders them)', () => {
+    const withBinary: DocTreeNode[] = [
+      folder('assets', 'assets', [
+        {
+          kind: 'binary',
+          path: 'assets/logo.png',
+          name: 'logo.png',
+          size_bytes: 2048,
+          modified_at: 2_000,
+          content_type: 'image/png',
+          referenced_by_count: 0,
+          origin: null,
+          children: [],
+        },
+      ]),
+    ];
+    const scoped = scopeToFolder(withBinary, 'assets');
+    expect(scoped?.map((n) => `${n.kind}:${n.path}`)).toEqual(['binary:assets/logo.png']);
+    // …but a binary is neither pinned nor a "recent" markdown doc.
+    expect(collectPinnedNodes(withBinary)).toEqual([]);
+    expect(collectRecentNodes(withBinary)).toEqual([]);
+  });
 });
 
 describe('pinned + recent', () => {
