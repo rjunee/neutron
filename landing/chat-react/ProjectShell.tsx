@@ -46,9 +46,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { ChatApp, TopicRail, GENERAL_EMOJI, railEmojiFor } from './ChatApp.tsx'
+import { ChatApp, TopicRail, GENERAL_EMOJI, railEmojiFor, useMediaQuery } from './ChatApp.tsx'
 import { DocumentsTab, type DocOpenRequest } from './DocumentsTab.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
+import { PlansPane } from './PlansPane.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
@@ -378,16 +379,36 @@ export function ProjectShell({
     setPendingDoc(null)
   }, [pendingDoc, projectId, tabs, tabsScope])
 
+  // PR-4 — on desktop (≥1024px) the Work board is NOT a seated tab; it lives in
+  // the right-edge slide-out pane (mounted below). Drop the `workboard`
+  // descriptor from the tab bar and mount the pane instead. Below 1024px Work
+  // STAYS a tab (the mobile Work badge is PR-6) — one implementation per
+  // platform, never a dual tab-and-pane path on the same viewport.
+  const isDesktop = useMediaQuery('(min-width: 1024px)')
+  const workboardTab = tabs.find((t) => t.mount.target === 'workboard')
+  const showPane = isDesktop && workboardTab !== undefined
+  const visibleTabs = showPane ? tabs.filter((t) => t.mount.target !== 'workboard') : tabs
+
+  // Pane open state is owned by `PlansPane` (auto-open/close + manual handle);
+  // it reports up here so the shell grid's 3rd column can grow in lock-step
+  // (chat shrinks, never overlaid). Reset when the pane unmounts (resize below
+  // 1024px, or a scope with no Work board) so the grid can't stay expanded.
+  const [paneOpen, setPaneOpen] = useState(false)
+  useEffect(() => {
+    if (!showPane) setPaneOpen(false)
+  }, [showPane])
+
   // The previous active tab can vanish when the set changes (scope switch / Core
-  // uninstall). Fall back to Chat so we never highlight a missing tab. While a
-  // scope switch's tab fetch is in flight (`resolving`), the still-mounted tabs
-  // belong to the OUTGOING scope, so clamp the active tab to the always-in-scope
-  // Chat until the new set resolves — belt-and-braces with the disabled non-Chat
+  // uninstall) — or, on desktop, because the Work tab was dropped in favor of the
+  // pane. Fall back to Chat so we never highlight a missing tab. While a scope
+  // switch's tab fetch is in flight (`resolving`), the still-mounted tabs belong
+  // to the OUTGOING scope, so clamp the active tab to the always-in-scope Chat
+  // until the new set resolves — belt-and-braces with the disabled non-Chat
   // buttons so no wrong-scope `TabContent` can mount mid-switch (Codex P2).
   const resolving = tabsScope === null
-  const hasActive = tabs.some((t) => t.key === activeKey)
+  const hasActive = visibleTabs.some((t) => t.key === activeKey)
   const resolvedActiveKey = resolving || !hasActive ? CHAT_KEY : activeKey
-  const activeTab = tabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
+  const activeTab = visibleTabs.find((t) => t.key === resolvedActiveKey) ?? CHAT_TAB
 
   // P-A — a doc-open request is ONE-SHOT: clear it once the user leaves the
   // Documents tab so revisiting Documents (or a `DocumentsTab` remount on a
@@ -473,34 +494,54 @@ export function ProjectShell({
             so it lives at the shell root. */}
         <div className="car-topbar">
           <WorkspaceSeat emoji={seatEmoji} name={seatName} />
-          <TabBar tabs={tabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} resolving={resolving} />
+          <TabBar tabs={visibleTabs} activeKey={resolvedActiveKey} onSelect={setActiveKey} resolving={resolving} />
           <ThemeToggle />
         </div>
-        <div className="car-tabpanels" ref={panelsRef}>
-          {/* Chat stays mounted across tab switches so the live session, stream,
-              and scroll state survive — only its visibility toggles. */}
-          <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
-            <ChatApp
-              vm={vm}
-              controller={controller}
-              config={config}
-              draft={draft}
-              onOpenDocLink={onOpenDocLink}
-              {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-            />
-          </div>
-          {resolvedActiveKey !== CHAT_KEY ? (
-            <div className="car-tabpanel" role="tabpanel">
-              <TabContent
-                tab={activeTab}
-                projectId={projectId ?? ''}
-                config={config}
+        {/* The chat STAGE (below the band): the chat/tab panels + the desktop Work
+            slide-out. A CSS grid so the pane's column can grow (chat shrinks,
+            never overlaid) while the pane floats within this region — below the
+            band, not over it. */}
+        <div className={`car-stage${showPane && paneOpen ? ' car-stage-pane-open' : ''}`}>
+          <div className="car-tabpanels" ref={panelsRef}>
+            {/* Chat stays mounted across tab switches so the live session, stream,
+                and scroll state survive — only its visibility toggles. */}
+            <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
+              <ChatApp
+                vm={vm}
                 controller={controller}
+                config={config}
+                draft={draft}
                 onOpenDocLink={onOpenDocLink}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-                {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
               />
             </div>
+            {resolvedActiveKey !== CHAT_KEY ? (
+              <div className="car-tabpanel" role="tabpanel">
+                <TabContent
+                  tab={activeTab}
+                  projectId={projectId ?? ''}
+                  config={config}
+                  controller={controller}
+                  onOpenDocLink={onOpenDocLink}
+                  {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+                  {...(docReqForTab !== undefined ? { docOpenRequest: docReqForTab } : {})}
+                />
+              </div>
+            ) : null}
+          </div>
+          {/* PR-4 — the desktop WORK slide-out. Mounted (not a tab) only ≥1024px
+              on a scope that has a Work board; keyed by project so its
+              auto-open/close controller resets cleanly on a project switch. */}
+          {showPane ? (
+            <PlansPane
+              key={projectId ?? ''}
+              projectId={projectId ?? ''}
+              config={config}
+              controller={controller}
+              onOpenChange={setPaneOpen}
+              onOpenDoc={onOpenDocLink}
+              {...(fetchImpl !== undefined ? { fetchImpl } : {})}
+            />
           ) : null}
         </div>
       </div>

@@ -488,6 +488,33 @@ consumption is PR-4 (reworked 2026-06-30 — see below).
 >    a clean "you're inside a workspace" anchor with NO activity dot (that lives on
 >    the rail — Ryan's de-dup). Both palettes preserved.
 
+> **M1 UX REDESIGN — Work slide-out pane (PR-4, 2026-07-02).** On **desktop
+> (≥1024px)** the Work board is **no longer a tab** — it's a right-edge **slide-out
+> pane INSIDE the chat** (`PlansPane.tsx`), wrapping the shipped PR-2 `WorkBoardTab`
+> body (rows unchanged). `ProjectShell` drops the `workboard` tab descriptor from
+> the seated tab bar at ≥1024px (`useMediaQuery('(min-width:1024px)')`) and mounts
+> the pane instead. **Below 1024px Work stays a tab** (the mobile Work badge is
+> PR-6) — one implementation per viewport, never a dual tab-and-pane path.
+> - **Edge-handle is the ONLY manual control.** A thin vertical grab-handle
+>   (`.car-plans-handle`, a real `<button>` with an aria-label "Show work"/"Hide
+>   work") rides the pane's left seam — no toggle button, no X, no close chevron
+>   anywhere (Ryan's sign-off overrode the design doc's toggle-chip). Click/Enter
+>   toggles it.
+> - **Auto-open / auto-close is the PRIMARY behavior.** The pane slides open by
+>   itself when a plan is kicked off (a board item gains a live non-terminal run →
+>   the `WorkBoardTab` `onSummary` roll-up's `running` rises) and slides closed by
+>   itself ~5s after ALL runs finish (running + failed both zero). A **failed run
+>   keeps it open** (attention). A manual handle toggle overrides + persists
+>   per-project (`localStorage`) until the next auto-kickoff. State machine:
+>   `usePlansPaneController`.
+> - **Floating panel, not a wall.** The chat STAGE below the band is a 2-column CSS
+>   grid (`.car-stage`) whose pane column animates `0 → --pane-width` (340px), so
+>   the chat column shrinks in lock-step (chat is never overlaid). The panel itself
+>   floats flush to the right edge with top/bottom breathing room (~16px), rounded
+>   left corners, and a soft shadow — it reads as a panel that slid in next to the
+>   chat. Motion is `--ease-out` (no bounce), gated by `prefers-reduced-motion`.
+>   Both palettes preserved.
+
 > **Light/dark theme toggle (2026-07-01).** The web chat is CSS-variable-driven:
 > `chat-react.html`'s stylesheet has ONE dark `:root` var set (the historical
 > default) and a `:root[data-theme="light"]` override set with an

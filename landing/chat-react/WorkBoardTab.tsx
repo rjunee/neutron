@@ -210,12 +210,39 @@ function formatCompletedShort(completed_at: string | null): string {
   return `${month} ${Number(m[3])}`
 }
 
+/**
+ * A live-activity roll-up of the board, consumed by the desktop slide-out pane
+ * (PR-4) to drive its header count + auto-open/close: `running` = items bound to
+ * a live (non-terminal) run; `failed` = items whose last run didn't finish. The
+ * pane opens when `running` rises, stays open while `running > 0` or `failed >
+ * 0`, and auto-closes only once BOTH are zero (all merged/cancelled). Pure so it
+ * unit-tests directly.
+ */
+export interface WorkBoardSummary {
+  running: number
+  failed: number
+}
+
+export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
+  let running = 0
+  let failed = 0
+  for (const it of items) {
+    if (isLinkedRunning(it)) {
+      running += 1
+    } else if (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed') {
+      failed += 1
+    }
+  }
+  return { running, failed }
+}
+
 export function WorkBoardTab({
   projectId,
   config,
   liveSource,
   fetchImpl,
   onOpenDoc,
+  onSummary,
 }: {
   projectId: string
   config: BootstrapConfig
@@ -226,6 +253,10 @@ export function WorkBoardTab({
   /** Open a project doc in the Documents tab (card ▸ spec-doc link). Optional —
    *  when absent, the doc link falls back to a non-navigating label. */
   onOpenDoc?: (projectId: string, path: string) => void
+  /** PR-4 — report a live-activity roll-up ({@link WorkBoardSummary}) on every
+   *  board change, so the desktop slide-out pane can drive its header count and
+   *  auto-open/close. Memoize the callback (else it fires every render). */
+  onSummary?: (summary: WorkBoardSummary) => void
 }): React.JSX.Element {
   const client = useMemo(
     () =>
@@ -330,6 +361,14 @@ export function WorkBoardTab({
   // this poll only covers a dropped frame / socket blip. Gated on a LIVE link
   // (via `isLinkedRunning`) so a finished/terminal run does NOT poll forever.
   const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
+
+  // PR-4 — surface the live-activity roll-up to the desktop slide-out pane on
+  // every board change (initial load, live snapshot, or poll). The pane keys its
+  // auto-open/close + header count off this; `summarize` is pure so the effect
+  // stays cheap.
+  useEffect(() => {
+    onSummary?.(summarize(items))
+  }, [items, onSummary])
   useEffect(() => {
     if (!hasLiveRun) return
     const interval = setInterval(() => {
