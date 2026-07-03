@@ -927,8 +927,17 @@ interface ActiveTurn {
 export interface ReplToolBridge {
   /** Discovery half — the per-session tools manifest the bridge advertises. */
   listToolSchemas(): { name: string; description: string; input_schema: unknown }[]
-  /** Invocation half — dispatch a tool call against the in-process registry. */
-  dispatch(input: { tool_name: string; args: unknown; call_id: string }): Promise<unknown>
+  /** Invocation half — dispatch a tool call against the in-process registry.
+   *  `project_id` carries the active project of the session that made the call
+   *  (the warm REPL is keyed per-project, so the sink resolves it from the
+   *  originating `ReplSession`) — the `McpServer` binds it into the tool's
+   *  `ToolCallContext.project_id` so a per-project tool scopes to the right board. */
+  dispatch(input: {
+    tool_name: string
+    args: unknown
+    call_id: string
+    project_id?: string | null
+  }): Promise<unknown>
 }
 
 let replToolBridge: ReplToolBridge | undefined
@@ -1046,11 +1055,21 @@ class ReplSink {
         if (toolName === '') {
           return Response.json({ ok: false, error: 'tool_name required' }, { status: 400 })
         }
+        // ACTIVE-PROJECT SCOPE: the warm REPL is topic-agnostic (no bound
+        // `TopicContext`), so `McpServer.dispatch` would otherwise resolve every
+        // work-board write to the owner/instance slug (the General board). The
+        // pool is keyed per-project, so THIS session serves exactly one project
+        // scope — thread it in so a per-project tool (`work_board_*`, the trident
+        // build-dispatch tools) scopes to the composing turn's project. A miss
+        // (unregistered session / General scope) degrades to the owner slug =
+        // General, the prior behaviour.
+        const toolProjectId = this.sessions.get(sessionId)?.projectId ?? null
         try {
           const result = await replToolBridge.dispatch({
             tool_name: toolName,
             args: body['args'] ?? {},
             call_id: callId,
+            project_id: toolProjectId,
           })
           return Response.json({ ok: true, result })
         } catch (e) {
@@ -1108,6 +1127,14 @@ class ReplSession {
   private readyResolve: (() => void) | undefined
   readonly ready: Promise<void>
   activeTurn: ActiveTurn | undefined
+  /** The ACTIVE project scope this warm REPL serves (`options.project_id`).
+   *  The pool key folds `project_id` in (`poolKeyFor`), so one session serves
+   *  exactly ONE project scope for its whole lifetime — `'general'` (or absent)
+   *  for the General surface, the project id otherwise. The topic-agnostic
+   *  `/tool-call` sink reads it to thread the active project into the tool
+   *  dispatch, so an agent `work_board_*` write scopes to the composing turn's
+   *  project instead of falling back to the owner/General slug. */
+  projectId: string | undefined
   /** ABANDON-POISON flag (2026-06-18 warm-session hang fix). Set true when a turn
    *  on this warm REPL is ABANDONED before its reply lands — the caller's budget
    *  elapsed (`handle.cancel()`, e.g. the synthesis `dispatchTurn` 90s timeout) OR
@@ -1679,6 +1706,10 @@ async function spawnSession(
   // POST from the dev-channel can never race ahead of the sink registration.
   const session = new ReplSession(sessionKey, sessionId, channelName)
   session.toolSurface = toolSurface.join(',')
+  // Stamp the active project scope this REPL serves (folded into the pool key, so
+  // it is stable for the session's whole lifetime). The `/tool-call` sink reads
+  // it to bind the active project into a tool dispatch — see `ReplSession.projectId`.
+  session.projectId = options.project_id
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive

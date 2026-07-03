@@ -129,6 +129,7 @@ test('create_project tool validates name + delegates to the bound service', asyn
 
   const ctx = {
     project_slug: PROJECT_SLUG,
+    project_id: null,
     topic_id: 'topic-1',
     call_id: 'call-1',
     speaker_user_id: 'sam',

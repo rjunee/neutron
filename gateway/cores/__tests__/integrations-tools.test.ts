@@ -33,6 +33,7 @@ afterEach(async () => {
 
 const CTX: ToolCallContext = {
   project_slug: OWNER,
+  project_id: null,
   topic_id: null,
   call_id: 'call-1',
   speaker_user_id: null,

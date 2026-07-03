@@ -97,10 +97,36 @@ resolver reads it back when the accessor fires — the single in-process `await`
 chain propagates the frame straight through. When no frame is bound (the General
 topic, or the CC-spawn MCP-tool path, which crosses a process + loopback-HTTP
 boundary the frame can't follow) the active project resolves to `''` → **global
-scope**, i.e. the exact pre-D2 per-instance behavior (safe, no regression). Wiring
-the MCP-tool path to per-project resolution (forwarding the bound topic through
-the tools-bridge → sink → `McpServer` so `ToolCallContext.topic_id` is populated)
-is the documented next slice.
+scope**, i.e. the exact pre-D2 per-instance behavior (safe, no regression).
+
+**Active-project scope over the CC-spawn MCP-tool path (work-board / trident-build
+tools).** The credential-resolution slice above still resolves global on the MCP-tool
+path, but the **work-board + trident-build tools now DO carry the active project**.
+The warm conversational REPL is keyed per-project (`poolKeyFor` folds
+`metering_context.project_id`), so a given session serves exactly one project
+scope; the substrate stamps that scope onto the `ReplSession` and the topic-agnostic
+`/tool-call` sink threads it into `McpServer.dispatch({… project_id})` →
+`ToolCallContext.project_id`. The `work_board_*` tools and the trident build-dispatch
+tools (`work_board_dispatch_build` / `work_board_start`) then resolve their storage
+scope via `workBoardScopeKey(ctx.project_slug, ctx.project_id)` — so **a work item /
+build created by the agent while chatting in project X lands on X's board and the
+`code_trident_runs.project_slug` scope-keys to X, not the General bucket** (the P0
+this fixes; before, the agent tools fell back to the instance slug = General). The
+per-turn *injected* `<work_board>` block is scoped the same way (composer
+`workBoardSnapshot` → `workBoardScopeKey`), so the board the agent re-grounds on
+matches the board its writes land on. General (no active project) still scope-keys to
+the owner slug, unchanged; the HTTP ▶/create surface already scope-keyed from the URL
+`project_id`. Forwarding the topic itself (so `ToolCallContext.topic_id` populates for
+`message_search`) remains the documented next slice.
+
+> **Known follow-up — General's Work view.** General is a genuine board bucket
+> (`owner_slug`) and the HTTP surface serves it, but the web chat's tab-set builder
+> (`landing/chat-react/ProjectShell.tsx`, the `if (isGeneral)` branch) still excludes
+> the **Work** tab for General (Chat + Admin only). Surfacing General's Work view is
+> deferred to the redesign PR that owns the Work-surface geometry (desktop Work tab →
+> slide-out): when it lands its Work surface, it should drop the `isGeneral` Work
+> exclusion so General gets the SAME surface every project has. Kept out of this PR to
+> avoid a collision in that same file.
 
 ### Email-Managed Core (`cores/free/email/`)
 

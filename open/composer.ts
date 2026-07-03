@@ -2836,9 +2836,14 @@ export function buildOpenGraphComposer(
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
             // Work Board (Phase 1a) — re-ground EVERY turn on the board (the
             // orchestrator's external memory). Returns the already-formatted,
-            // escaped `<work_board>` DATA block for the active+next items.
-            workBoardSnapshot: (slug: string): string =>
-              formatWorkBoardFragment(workBoardStore.listActive(slug)),
+            // escaped `<work_board>` DATA block for the active+next items, scoped
+            // to the ACTIVE project (`workBoardScopeKey`) so the injected board
+            // matches the board the agent's `work_board_*` writes land on. General
+            // (no project_id) → the owner slug, as before.
+            workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
+              formatWorkBoardFragment(
+                workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+              ),
             // Available-services awareness — the project-scoped credential
             // picture (per-project ∪ global default), so the agent knows which
             // external services it can use in THIS project and gracefully

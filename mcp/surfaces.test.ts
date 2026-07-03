@@ -18,7 +18,7 @@ describe('neutron-tools surface', () => {
     registerNeutronToolsSurface(reg)
     const tool = reg.get('conversations_list')
     await expect(
-      tool!.handler({}, { project_slug: 't', topic_id: null, call_id: 'c', speaker_user_id: null }),
+      tool!.handler({}, { project_slug: 't', project_id: null, topic_id: null, call_id: 'c', speaker_user_id: null }),
     ).rejects.toThrow(/conversations_list/)
   })
 })

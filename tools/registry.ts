@@ -38,6 +38,18 @@ export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
 /** Per-call context handed to a tool handler at invocation time. */
 export interface ToolCallContext {
   project_slug: string
+  /**
+   * The ACTIVE project of the composing turn (the project the chat/agent turn
+   * belongs to), or NULL for the General surface / cron-spawned / system calls.
+   * SEPARATE from `project_slug` (the owner/instance boundary, constant on a
+   * single-owner Open box): `project_slug` bounds *which owner*, `project_id`
+   * selects *which project within it*. A per-project tool (the `work_board_*`
+   * board tools + the trident build-dispatch tools) resolves its storage scope
+   * from BOTH via `workBoardScopeKey(project_slug, project_id)`, so a build/item
+   * created while chatting in project X lands on X's board, not General. Owner-
+   * scoped tools (doc_search, reminders, …) keep using `project_slug` alone.
+   */
+  project_id: string | null
   /** Topic the call originated from. NULL for cron-spawned / system calls. */
   topic_id: string | null
   call_id: string

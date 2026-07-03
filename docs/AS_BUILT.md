@@ -2126,3 +2126,85 @@ its item on terminal reconcile, so the bound-item check alone was fleeting;
 the scope's most-recent run is `failed` and the project still has a not-done item,
 `attention` persists until a fresh run supersedes it. Tests added for both (tick
 stall-crossing fan; `store.latestByProjectScope` scoping).
+
+---
+
+## Work-Board project-scope fix — agent tools + trident builds scope to the ACTIVE project (P0)
+
+**Symptom (reproduced on the box 2026-07-02).** Chatting inside a NAMED project
+(e.g. "Tabs"), the agent created Work items + kicked trident builds, but BOTH the
+`work_board_items` rows AND the `code_trident_runs` rows came out under the
+owner/instance slug (the General bucket) instead of the project — so they were
+invisible in the project's Work tab and mis-filed onto General. Every agent-started
+work item / build from a named project landed on General.
+
+**Trace (the ACTUAL path the builds took).** The two candidate items were AGENT-
+created, so the path is the agent-native MCP tool path — NOT the `/code` filter
+(which is defined in `gateway/boot-helpers.ts` but **never constructed** in Open —
+not a live path) and NOT the HTTP ▶ route (`gateway/http/work-board-surface.ts`,
+which already derives `scope = workBoardScopeKey(resolved.project_slug, <URL
+project_id>)` correctly). The drop point, step by step:
+
+1. Agent calls `work_board_add` / `work_board_dispatch_build` over the native-MCP
+   bridge → the spawned `claude`'s tools-bridge POSTs `/tool-call` to the warm-REPL
+   sink (`persistent-repl-substrate.ts`).
+2. The sink dispatched `replToolBridge.dispatch({tool_name, args, call_id})` with **no
+   active project** — the warm REPL is topic-agnostic (documented Codex r1 [P2]: it
+   binds `topic_id:null`), so there was no per-turn project on the call.
+3. `McpServer.dispatch` → `currentTopicContextOrSystem(call_id, this.project_slug)`:
+   no bound `TopicContext` ⇒ system shape with `project_slug = this.project_slug` (the
+   **instance slug**).
+4. The `work_board_*` handlers (`work-board/agent-tool.ts`) + the trident build tools
+   (`trident/work-board-build-tool.ts`) passed that `ctx.project_slug` straight to the
+   store / `dispatchBoardBoundBuild`. Via `workBoardScopeKey(owner_slug, /* empty */)`
+   → `owner_slug` = the **General board**. ⇐ **exact drop point.**
+
+**Fix — thread the active project end-to-end.** The warm conversational REPL is keyed
+per-project (`poolKeyFor` folds `metering_context.project_id`), so a session serves
+exactly one project scope for its lifetime:
+
+- `ReplSession.projectId` is stamped from `options.project_id` at spawn; the
+  `/tool-call` sink looks the session up by `session_id` (the tools-bridge already
+  POSTs it) and threads `project_id` into `replToolBridge.dispatch({… project_id})`.
+- `ReplToolBridge.dispatch` + `McpServer.dispatch` gained an optional `project_id`;
+  `currentTopicContextOrSystem` returns it (preferring a bound `TopicContext`'s own
+  `project_id` on the `resolveBound` path). New field
+  `ToolCallContext.project_id` (the ACTIVE project; NULL = General/system).
+- `work_board_*` (`work-board/agent-tool.ts`) and `work_board_dispatch_build` /
+  `work_board_start` (`trident/work-board-build-tool.ts`) now resolve their scope via
+  `workBoardScopeKey(ctx.project_slug, ctx.project_id)`, threaded to every store call,
+  the board `get`/`attachRun`, `resolve_task`, and the created `code_trident_runs` row.
+- The per-turn **injected** `<work_board>` block is scoped the same way
+  (`build-live-agent-turn.ts` passes `turn.project_id`; composer `workBoardSnapshot`
+  wraps `workBoardScopeKey`), so the board the agent re-grounds on == the board its
+  writes land on. (`availableServicesSnapshot` already did this; the work board didn't.)
+
+General (no active project / `'general'`) still scope-keys to the owner slug — the
+"pre-existing rows map to General" behaviour (`work-board/store.ts:120-153`) is
+preserved. One code path, no feature flags.
+
+**Spec-conformance.** SPEC (#179): every project has its own board keyed by scope-key;
+agent + build writes scope to the active project. CURRENT (before): agent
+`work_board_*` + build-dispatch tools fell back to the instance/General slug. GAP:
+active `project_id` not threaded into the agent tools + run creation. THIS PR: threads
+it via the per-project session scope so named-project work scopes correctly; injected
+board matches. OUT: General's Work *view* (UI tab, see below); redesign geometry.
+
+**General's Work view — deferred (stated per spec).** General IS a first-class board
+bucket (`owner_slug`) and the HTTP surface serves it, but the web tab-set builder
+(`landing/chat-react/ProjectShell.tsx`, `if (isGeneral)` at ~L325) excludes the Work
+tab for General. That file is owned by the parallel redesign PR that turns the desktop
+Work tab into a slide-out; adding a General Work tab here would collide with it and be
+immediately obsoleted. Deferred to that PR with an actionable note (drop the
+`isGeneral` Work exclusion so General gets the same Work surface). No backend blocker —
+General's board is already reachable.
+
+**Tests.** `work-board/agent-tool.test.ts` (add/list/update/complete scope to the
+active project; General regression guard; cross-scope write is a no-op).
+`trident/work-board-build-tool.test.ts` (a build in project "acme" scope-keys the run
+`project_slug` + board `get`/`attachRun` + `resolve_task` to acme; General → owner
+slug). `mcp/server.test.ts` (dispatch binds bound-context `project_id`; threads the
+caller `project_id` with no bound context; null otherwise). `tool-bridge.test.ts` (a
+`/tool-call` from a session spawned under project "acme" threads `project_id:'acme'`
+into dispatch; an unknown session → null). `tsc` clean (root + `trident`); leak-gate
+SILENT.

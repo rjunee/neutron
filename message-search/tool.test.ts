@@ -32,7 +32,7 @@ function msg(p: Partial<ChatMessage> & { client_msg_id: string }): ChatMessage {
 }
 
 function ctx(topic_id: string | null): ToolCallContext {
-  return { project_slug: 'demo', topic_id, call_id: 'call-1', speaker_user_id: null }
+  return { project_slug: 'demo', project_id: null, topic_id, call_id: 'call-1', speaker_user_id: null }
 }
 
 async function registry(): Promise<ToolRegistry> {

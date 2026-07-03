@@ -20,8 +20,8 @@ let db: ProjectDb
 let registry: ToolRegistry
 let store: WorkBoardStore
 
-function ctx(project_slug: string): ToolCallContext {
-  return { project_slug, topic_id: null, call_id: 'c1', speaker_user_id: null }
+function ctx(project_slug: string, project_id: string | null = null): ToolCallContext {
+  return { project_slug, project_id, topic_id: null, call_id: 'c1', speaker_user_id: null }
 }
 
 beforeEach(() => {
@@ -114,6 +114,72 @@ describe('work_board_* agent tools', () => {
     )) as { ok: boolean; error?: string }
     expect(res.ok).toBe(false)
     expect(res.error).toContain('design_doc_ref')
+  })
+})
+
+describe('work_board_* active-project scoping (P0: named-project builds must NOT land on General)', () => {
+  test('add with an ACTIVE project_id scopes the item to that project, NOT the owner/General slug', async () => {
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    // The composing turn is for project "acme" (owner slug = "owner").
+    const res = (await add.handler({ title: 'Ship kvlog' }, ctx('owner', 'acme'))) as {
+      ok: boolean
+      item?: { project_slug: string }
+    }
+    expect(res.ok).toBe(true)
+    // Stored on acme's board (scope key = the project id), NOT General (owner).
+    expect(res.item?.project_slug).toBe('acme')
+    expect(store.list('acme').length).toBe(1)
+    expect(store.list('owner').length).toBe(0)
+  })
+
+  test('add with NO active project (General) still scopes to the owner slug (regression guard)', async () => {
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    await add.handler({ title: 'General work' }, ctx('owner', null))
+    // project_id === 'general' maps to General too.
+    await add.handler({ title: 'Also general' }, ctx('owner', 'general'))
+    expect(store.list('owner').length).toBe(2)
+    expect(store.list('acme').length).toBe(0)
+  })
+
+  test('list under an active project returns ONLY that project’s board', async () => {
+    await store.create('acme', { title: 'A' })
+    await store.create('owner', { title: 'general-only' })
+    const list = registry.get(WORK_BOARD_LIST_TOOL)!
+    const acme = (await list.handler({}, ctx('owner', 'acme'))) as { items: unknown[] }
+    const general = (await list.handler({}, ctx('owner', null))) as { items: unknown[] }
+    expect(acme.items.length).toBe(1)
+    expect(general.items.length).toBe(1)
+  })
+
+  test('update / complete key on the active project scope; a cross-scope write is a no-op', async () => {
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    const created = (await add.handler({ title: 'acme item' }, ctx('owner', 'acme'))) as {
+      item: { id: string }
+    }
+    const id = created.item.id
+    // Same-project update succeeds and returns the item…
+    const update = registry.get(WORK_BOARD_UPDATE_TOOL)!
+    const upd = (await update.handler({ id, status: 'in_progress' }, ctx('owner', 'acme'))) as {
+      ok: boolean
+      item?: { status: string }
+    }
+    expect(upd.item?.status).toBe('in_progress')
+    // …but a General-scoped update for the SAME id cannot SEE it (different board):
+    // the store finds no row in the owner/General scope, so it is a silent no-op
+    // (ok, but no item) and acme's item is untouched.
+    const crossScope = (await update.handler({ id, status: 'done' }, ctx('owner', null))) as {
+      ok: boolean
+      item?: { status: string }
+    }
+    expect(crossScope.item).toBeUndefined()
+    expect(store.get('acme', id)?.status).toBe('in_progress')
+    // Complete in acme scope works.
+    const complete = registry.get(WORK_BOARD_COMPLETE_TOOL)!
+    const done = (await complete.handler({ id }, ctx('owner', 'acme'))) as {
+      ok: boolean
+      item?: { status: string }
+    }
+    expect(done.item?.status).toBe('done')
   })
 })
 

@@ -21,7 +21,7 @@ import {
 } from './codex-credential-tool.ts'
 
 const SLUG = 'owner'
-const CTX = { project_slug: SLUG, topic_id: 't', call_id: 'c', speaker_user_id: null }
+const CTX = { project_slug: SLUG, project_id: null, topic_id: 't', call_id: 'c', speaker_user_id: null }
 
 let tmp: string
 let db: ProjectDb

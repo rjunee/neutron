@@ -12,17 +12,23 @@
  * with a `read:project_data` / `write:project_data` capability (mirrors
  * `gbrain_search`).
  *
- * SECURITY: `project_slug` is NEVER an agent-supplied argument — it is read
- * from the server-injected `ToolCallContext.project_slug` (`mcp/server.ts`
- * overrides it with the instance slug on every dispatch, so the model cannot
- * spoof it). The input schemas expose only `title / status / design_doc_ref /
- * id / before|after`. `design_doc_ref` schemes are allow-listed at the store.
+ * SECURITY + SCOPE: the storage scope is NEVER an agent-supplied argument. It is
+ * derived at dispatch time from the server-injected `ToolCallContext` via
+ * `workBoardScopeKey(ctx.project_slug, ctx.project_id)` — `project_slug` is the
+ * owner/instance boundary (`mcp/server.ts` overrides it on every dispatch, so the
+ * model cannot spoof it) and `project_id` is the ACTIVE project of the composing
+ * turn (threaded from the topic-agnostic warm REPL's per-project session scope).
+ * So a card added while chatting in project X lands on X's board; a General turn
+ * (no active project) still scopes to the owner slug (the General board). The
+ * input schemas expose only `title / status / design_doc_ref / id / before|after`.
+ * `design_doc_ref` schemes are allow-listed at the store.
  */
 
 import type { JsonSchemaDocument } from '../core-sdk/types.ts'
 import type { ToolRegistry } from '../tools/registry.ts'
 import {
   WorkBoardValidationError,
+  workBoardScopeKey,
   type CreateWorkBoardItemInput,
   type ReorderTarget,
   type WorkBoardItem,
@@ -158,7 +164,7 @@ export function registerWorkBoardToolSurface(
     capability_required: 'read:project_data',
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
-      return { items: store.list(ctx.project_slug) }
+      return { items: store.list(workBoardScopeKey(ctx.project_slug, ctx.project_id)) }
     },
   })
 
@@ -197,10 +203,11 @@ export function registerWorkBoardToolSurface(
       const status = asStatus(a.status)
       const ref = asString(a.design_doc_ref)
       const spec = asString(a.spec)
+      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
       try {
         if (specDoc !== undefined) {
           return ok(
-            await specDoc.createCardWithOptionalSpec(ctx.project_slug, {
+            await specDoc.createCardWithOptionalSpec(scope, {
               title,
               ...(status !== undefined ? { status } : {}),
               ...(ref !== undefined ? { design_doc_ref: ref } : {}),
@@ -211,7 +218,7 @@ export function registerWorkBoardToolSurface(
         const createInput: CreateWorkBoardItemInput = { title }
         if (status !== undefined) createInput.status = status
         if (ref !== undefined) createInput.design_doc_ref = ref
-        return ok(await store.create(ctx.project_slug, createInput))
+        return ok(await store.create(scope, createInput))
       } catch (err) {
         return asErrorResult(err)
       }
@@ -259,7 +266,7 @@ export function registerWorkBoardToolSurface(
       if (ref !== undefined) patch.design_doc_ref = ref
       if (typeof a.inline_active === 'boolean') patch.inline_active = a.inline_active
       try {
-        return ok(await store.update(ctx.project_slug, id, patch))
+        return ok(await store.update(workBoardScopeKey(ctx.project_slug, ctx.project_id), id, patch))
       } catch (err) {
         return asErrorResult(err)
       }
@@ -282,7 +289,7 @@ export function registerWorkBoardToolSurface(
       const a = (args ?? {}) as IdArg
       const id = asString(a.id)
       if (id === undefined) return { ok: false, error: 'id is required' }
-      return ok(await store.complete(ctx.project_slug, id))
+      return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
     },
   })
 
@@ -313,7 +320,7 @@ export function registerWorkBoardToolSurface(
       const target: ReorderTarget = {}
       if (before !== undefined) target.before = before
       if (after !== undefined) target.after = after
-      await store.reorder(ctx.project_slug, id, target)
+      await store.reorder(workBoardScopeKey(ctx.project_slug, ctx.project_id), id, target)
       return { ok: true }
     },
   })
