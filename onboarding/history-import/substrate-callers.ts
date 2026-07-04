@@ -399,7 +399,7 @@ function extractErrorMessage(err: unknown): string {
  * local to this module so the substrate caller doesn't take a runtime
  * dependency on the runner just for the detector.
  */
-function is429ErrorMessage(message: string): boolean {
+export function is429ErrorMessage(message: string): boolean {
   if (/HTTP\s+429\b/i.test(message)) return true
   if (/rate[_-]?limit/i.test(message)) return true
   return false
