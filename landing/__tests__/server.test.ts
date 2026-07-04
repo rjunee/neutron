@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test, mock } from 'bun:test'
-import { createLandingServer, computeAssetEtag, type ChatBridge, type PendingChatClaim } from '../server.ts'
+import { createLandingServer, computeAssetEtag, ifNoneMatchSatisfied, type ChatBridge, type PendingChatClaim } from '../server.ts'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -55,6 +55,34 @@ describe('computeAssetEtag', () => {
     const etag = computeAssetEtag('hello world')
     expect(etag.startsWith('"')).toBe(true)
     expect(etag.endsWith('"')).toBe(true)
+  })
+})
+
+// ISSUES #353 (Codex r1 P2) — RFC 9110 §13.1.2 If-None-Match evaluation: `*`,
+// comma-separated validator lists, and weak (`W/`) prefixes — not just exact
+// single-token equality.
+describe('ifNoneMatchSatisfied', () => {
+  const etag = computeAssetEtag('const x = 1;')
+  test('null / empty header is never a match (unconditional GET)', () => {
+    expect(ifNoneMatchSatisfied(null, etag)).toBe(false)
+    expect(ifNoneMatchSatisfied('', etag)).toBe(false)
+    expect(ifNoneMatchSatisfied('   ', etag)).toBe(false)
+  })
+  test('exact single-token match', () => {
+    expect(ifNoneMatchSatisfied(etag, etag)).toBe(true)
+  })
+  test('`*` matches any current representation', () => {
+    expect(ifNoneMatchSatisfied('*', etag)).toBe(true)
+  })
+  test('matches when the current ETag is anywhere in a comma-separated list', () => {
+    expect(ifNoneMatchSatisfied(`"sha256-bogus", ${etag}`, etag)).toBe(true)
+    expect(ifNoneMatchSatisfied(`${etag}, "sha256-other"`, etag)).toBe(true)
+  })
+  test('weak-prefixed validator still matches (If-None-Match uses weak comparison)', () => {
+    expect(ifNoneMatchSatisfied(`W/${etag}`, etag)).toBe(true)
+  })
+  test('a list with no matching validator is not a match (fresh 200)', () => {
+    expect(ifNoneMatchSatisfied('"sha256-stale-a", "sha256-stale-b"', etag)).toBe(false)
   })
 })
 
@@ -117,6 +145,22 @@ describe('createLandingServer', () => {
       expect(second.status).toBe(304)
       expect(await second.text()).toBe('')
       expect(second.headers.get('etag')).toBe(etag)
+    }, 30_000)
+
+    test('a comma-separated If-None-Match list containing the current ETag round-trips a 304', async () => {
+      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
+      const first = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+      const etag = first.headers.get('etag')
+      expect(etag).not.toBeNull()
+      const second = await handler.fetch(
+        new Request('http://x.test/chat-react.js', {
+          headers: { 'if-none-match': `"sha256-bogus", ${etag as string}` },
+        }),
+        fakeServer,
+      )
+      expect(second.status).toBe(304)
+      expect(await second.text()).toBe('')
     }, 30_000)
 
     test('a stale If-None-Match (simulating a post-deploy client) gets a fresh 200', async () => {

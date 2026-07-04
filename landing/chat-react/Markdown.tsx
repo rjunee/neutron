@@ -37,6 +37,24 @@ import { parseWebDocLinkHref } from './doc-link-nav.ts'
 const REMARK_PLUGINS = [remarkGfm]
 const REHYPE_PLUGINS = [rehypeSanitize]
 
+/** Copy `text` to the clipboard, degrading gracefully to `false` (never a throw)
+ *  when the Clipboard API is unavailable or denied. FIX #359 (Codex r1 P1):
+ *  `navigator.clipboard` is `undefined` in an insecure context / older browser,
+ *  and property access on it throws SYNCHRONOUSLY — a `.catch()` on the
+ *  `writeText` promise never runs, so the click handler crashed instead of
+ *  staying inert. Guard the property access, then catch the async rejection
+ *  (permission denied) too. */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  const clip = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (!clip || typeof clip.writeText !== 'function') return false
+  try {
+    await clip.writeText(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** FIX #359 — Telegram-style one-tap copy button on fenced code blocks. Wraps
  *  the sanitized `<pre>` in a positioned container so a small button can sit in
  *  its corner (CSS shows it on hover/focus; always visible on touch via
@@ -49,16 +67,11 @@ function CodeBlock(props: React.ComponentPropsWithoutRef<'pre'>): React.JSX.Elem
   const handleCopy = (): void => {
     const text = preRef.current?.textContent ?? ''
     if (text.length === 0) return
-    navigator.clipboard
-      .writeText(text)
-      .then(() => {
-        setCopied(true)
-        window.setTimeout(() => setCopied(false), 1500)
-      })
-      .catch(() => {
-        // Clipboard API unavailable/denied (e.g. insecure context, permission
-        // denied) — leave the button inert rather than crash the render.
-      })
+    void copyTextToClipboard(text).then((ok) => {
+      if (!ok) return // API unavailable/denied — button stays inert, no crash.
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    })
   }
   return (
     <div className="car-md-pre-wrap">

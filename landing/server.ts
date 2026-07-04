@@ -1171,6 +1171,27 @@ export function computeAssetEtag(bytes: string): string {
 }
 
 /**
+ * ISSUES #353 (Codex r1 P2) — RFC 9110 §13.1.2 `If-None-Match` evaluation.
+ * `*` matches any current representation; otherwise the header is a
+ * comma-separated LIST of validators and matches if ANY member equals our ETag
+ * (a browser can legitimately send `"a", "b"`). `If-None-Match` uses WEAK
+ * comparison, so an optional `W/` prefix is stripped before comparing — though
+ * our ETag is strong and self-issued (clients echo it verbatim). Being
+ * over-strict here only costs a missed 304 (a fresh 200 is still correct bytes),
+ * never a staleness bug — but honoring the list/`*` forms keeps the cache
+ * behavior spec-correct.
+ */
+export function ifNoneMatchSatisfied(header: string | null, etag: string): boolean {
+  if (header === null) return false
+  const h = header.trim()
+  if (h === '') return false
+  if (h === '*') return true
+  const norm = (t: string): string => t.trim().replace(/^W\//, '')
+  const want = norm(etag)
+  return h.split(',').some((token) => norm(token) === want)
+}
+
+/**
  * Bun.serve handler that surfaces the landing `/chat` (HTTP) SPA shell
  * plus the rest of the landing HTTP routes. Chat moved to the unified
  * `/ws/app/chat` Expo-app socket, so this server no longer upgrades a
@@ -1422,7 +1443,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
           'cache-control': 'no-cache',
           etag,
         }
-        if (req.headers.get('if-none-match') === etag) {
+        if (ifNoneMatchSatisfied(req.headers.get('if-none-match'), etag)) {
           return new Response(null, { status: 304, headers })
         }
         return new Response(js, { headers })
