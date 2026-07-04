@@ -14,7 +14,9 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `00bd398` (F9 #194 merged). CI baseline GREEN.
+- **main HEAD:** `89728c2` (W8 #197 merged). **CI baseline GREEN** — restored by #198
+  after discovering #196 had turned it red (see Done). Leak-gate now allowlists the
+  tracked plan doc (§1.4 / D-11).
 - **CI infra:** `.github/workflows/ci.yml` throttled to `NEUTRON_TEST_CONCURRENCY=2`,
   `CHUNK_SIZE=75` (conservative guaranteed-green; ~2× wall-clock). Raise / set
   `NEUTRON_TEST_JOBS>1` once a faster runner is wired. Runner-upgrade decision PENDING
@@ -26,13 +28,26 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **CI baseline repair** (#195, `41b57c0`) — real-git trident tests needed a repo-local
   git identity on Linux CI (was masquerading as OOM). main green.
 - **F9** (#194, `00bd398`) — `[BEHAVIOR]` trident conflict-resolver tools + humanized
-  delivery + REAL passthrough test. **This was the orchestration PILOT** — proved the
-  full machine: worktree build-agent → Argus/Codex review → CI green → squash-merge.
-  §17 ticked.
+  delivery + REAL passthrough test. **Orchestration PILOT** — proved the full machine:
+  worktree build-agent → Argus/Codex review → CI green → squash-merge. §17 ticked.
+- **Leak-gate main-red repair** (#198, `5e96e15`) — #196 committed the tracked plan doc
+  WITHOUT its leak-gate allowlist entry (§1.4 / D-11) → Purity gate flagged 34 `tenant-*`
+  hits and main's `ci` push workflow was RED on every push since (STATUS "baseline GREEN"
+  was stale). Fix = allowlist the plan doc for retired-vocab rules only (mirrors
+  AS_BUILT.md); PII/hosted-domain/secret rules stay armed. Unblocked the whole window.
+- **W8** (chat client cheap wins · `sonnet` · lane clients) — **#197, `89728c2`**, §17
+  ticked. 4 items: (a) `[BEHAVIOR]` cache-busting `/chat-react.js` (#353) — escalated by
+  Codex across r1-r3 from ETag-only to airtight **URL versioning** (`?v=<content-hash>` in
+  shell + `no-store` + resolve-before-serve); (b) desktop theme toggle restore (#360);
+  (c) `.car-md` list spacing (#358); (d) code-block copy button (#359). 6 review rounds →
+  Codex APPROVE. **Two CI-caught issues** (both real, both lessons): (1) the `?v=` rewrite
+  broke `open/composer.ts` bootstrap injection — cross-package consumer I'd missed locally
+  → [[refactor-orchestrator-gate-crosspackage]]; (2) the leak-gate main-red above surfaced
+  once an anchor-walker timing flake cleared. Airtight cache-busting is the real #353 win.
 
 ## In flight
 
-- (none — between units. Next turn: open the Step 0 remainder.)
+- (none — between units. Next: **W7-crash**, the last Step 0 unit, same `clients` lane.)
 
 ## Ready-set / queue (order: Step 0 → G1–G10 → waves 1–9; K10 LAST)
 

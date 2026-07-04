@@ -90,3 +90,13 @@ docs/AS_BUILT.md:workspace-retired
 docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-purged
 docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-word
 docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-code
+
+# refactor-orchestration-STATUS.md is the live resume anchor for the same window
+# (its companion). Documenting leak-gate / vocabulary-sweep units (this very fix,
+# G7, the K/N phases) unavoidably names the retired vocab. Same justification and
+# same scope as the plan doc above: exempt from the retired-vocab rules ONLY;
+# PII / hosted-domain / secret rules stay ARMED. Added in the SAME PR that first
+# introduces the vocab into the file (the D-11 discipline #196 skipped).
+docs/plans/refactor-orchestration-STATUS.md:tenant-purged
+docs/plans/refactor-orchestration-STATUS.md:tenant-word
+docs/plans/refactor-orchestration-STATUS.md:tenant-code
