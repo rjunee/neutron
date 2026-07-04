@@ -61,8 +61,11 @@ describe('createIsolatedHome', () => {
     const before: Record<string, string | undefined> = {}
     for (const k of ISOLATED_HOME_ENV_KEYS) before[k] = process.env[k]
 
-    const a = createIsolatedHome({ slug: 'lifo-a' })
-    const b = createIsolatedHome({ slug: 'lifo-b' })
+    // track() both so a mid-test assertion failure still tears them down via
+    // afterEach (restore() is idempotent, so the manual LIFO restores below
+    // remain the assertions under test).
+    const a = track(createIsolatedHome({ slug: 'lifo-a' }))
+    const b = track(createIsolatedHome({ slug: 'lifo-b' }))
     expect(process.env['NEUTRON_HOME']).toBe(b.dir)
 
     b.restore()
@@ -95,14 +98,24 @@ describe('createIsolatedHome', () => {
   })
 
   test('restore() DELETES a key that was unset before (no phantom leak)', () => {
-    delete process.env['NEUTRON_DB_PATH']
-    expect('NEUTRON_DB_PATH' in process.env).toBe(false)
+    // This test deliberately drives NEUTRON_DB_PATH through unset→set→unset, so
+    // it must snapshot and restore the AMBIENT value itself — otherwise a
+    // process that started with NEUTRON_DB_PATH set would have it destroyed
+    // here (the very leak the testkit exists to prevent).
+    const ambientDbPath = process.env['NEUTRON_DB_PATH']
+    try {
+      delete process.env['NEUTRON_DB_PATH']
+      expect('NEUTRON_DB_PATH' in process.env).toBe(false)
 
-    const home = createIsolatedHome()
-    expect(process.env['NEUTRON_DB_PATH']).toBe(home.dbPath)
+      const home = createIsolatedHome()
+      expect(process.env['NEUTRON_DB_PATH']).toBe(home.dbPath)
 
-    home.restore()
-    expect('NEUTRON_DB_PATH' in process.env).toBe(false)
+      home.restore()
+      expect('NEUTRON_DB_PATH' in process.env).toBe(false)
+    } finally {
+      if (ambientDbPath === undefined) delete process.env['NEUTRON_DB_PATH']
+      else process.env['NEUTRON_DB_PATH'] = ambientDbPath
+    }
   })
 
   test('restore() is idempotent', () => {
