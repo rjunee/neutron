@@ -52,6 +52,13 @@ jobs:
         run: bunx tsc --noEmit
 
       - name: Test (bounded-memory partitioned runner)
+        # OOM mitigation: #193 tipped a general chunk past the 7 GB ubuntu-latest
+        # ceiling (silent SIGKILL, no assertion). Halve peak RSS = concurrency 4→2
+        # + chunk 100→75. TEMPORARY — raise these (and set NEUTRON_TEST_JOBS>1 for
+        # parallel speed) once the larger CI runner is provisioned.
+        env:
+          NEUTRON_TEST_CONCURRENCY: "2"
+          NEUTRON_TEST_CHUNK_SIZE: "75"
         run: bash scripts/run-tests.sh
 
       - name: Purity gate (leak-gate subset)
