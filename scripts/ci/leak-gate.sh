@@ -231,6 +231,36 @@ if [ ! -f "$SCAN_ROOT/LICENSE" ] \
   report_hits license-stub < <(printf 'LICENSE:1:missing or not the full Apache-2.0 text\n')
 fi
 
+# ── Tier 3b: binary-hiding tripwire (unit G7) ──────────────────────────────────
+# EVERY vocab/PII/structural rule above runs through `grep -I`, which SILENTLY
+# skips any file it classifies as binary — i.e. any file that contains a raw NUL
+# (0x00) byte. So a banned token embedded next to a NUL is INVISIBLE to the whole
+# gate, forever. That is not hypothetical: the history-import hash-seed `tenant:`
+# token (tasks/history-import-seeder.ts) and a retired multi-tenant fixture path
+# (…/wedge-detector.test.ts) both evaded a "zero-tolerance" gate this exact way
+# until 2026-07-03. This tripwire closes the whole class: any tracked file that
+# contains a NUL byte is a hard finding UNLESS it is a known binary-asset class
+# (images/fonts/archives/compiled — exempt by extension) or is exempted by exact
+# path in the committed allowlist (rule id: binary-hidden). It is FAIL-CLOSED —
+# an UNKNOWN extension carrying a NUL trips — so a new binary asset type must be
+# added to the extension list (or allowlisted) deliberately, and a source file
+# can never re-acquire a hidden NUL. NUL detection is byte-exact and locale-safe
+# (LC_ALL=C tr | cmp), so it never itself trips grep's binary heuristic.
+KNOWN_BINARY_EXT_RE='\.(png|jpe?g|gif|webp|avif|ico|icns|bmp|tiff?|svgz|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|xz|zst|7z|rar|tar|mp3|mp4|m4a|mov|avi|webm|wav|ogg|oga|flac|aac|wasm|so|dylib|dll|node|jar|class|pyc|pyo|bin|dat|db|sqlite3?|wal|p12|pfx|jks|keystore)$'
+binary_hidden_hits() {
+  local f
+  while IFS= read -r f; do
+    # Known binary-asset extensions legitimately carry NULs — skip them.
+    printf '%s' "$f" | grep -qiE "$KNOWN_BINARY_EXT_RE" && continue
+    # A file is "binary to grep" iff it contains a NUL byte. Strip NULs and
+    # compare to the original: identical ⇒ no NUL ⇒ visible to the gate.
+    if ! LC_ALL=C tr -d '\000' < "$SCAN_ROOT/$f" 2>/dev/null | cmp -s - "$SCAN_ROOT/$f"; then
+      printf '%s:1:tracked file is binary to grep (contains a NUL byte) — hides tokens from every rule above\n' "$f"
+    fi
+  done < "$FILELIST"
+}
+report_hits binary-hidden < <(binary_hidden_hits)
+
 # ── Verdict ───────────────────────────────────────────────────────────────────
 echo
 echo "── Summary ────────────────────────────────────────────────────────────"

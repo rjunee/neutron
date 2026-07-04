@@ -365,7 +365,7 @@ export function buildInMemoryCalendarClient(
   // them and silently lose data. Mirror Google's addressing.
   const rows = new Map<string, CalendarEventRow>()
   const key = (calendar_id: string, event_id: string): string =>
-    `${calendar_id} ${event_id}`
+    `${calendar_id}\x00${event_id}`
 
   return {
     async list(input: CalendarListInput): Promise<CalendarEventRow[]> {
