@@ -1,6 +1,12 @@
 {
+  // Browser + Bun-server landing leaf. Owns the DOM lib (landing/chat.ts is the
+  // browser chat client). Its own CI step is `tsc -p landing/tsconfig.json`.
+  // `chat-react/` is excluded — it is a separate React/JSX leaf with its own
+  // tsconfig (landing/chat-react/tsconfig.json) and its own matrix step.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2022", "DOM"]
-  }
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules", "dist", "chat-react"]
 }

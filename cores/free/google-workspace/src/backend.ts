@@ -602,7 +602,7 @@ function readGrid(sheet: InMemorySheet, parsed: ParsedRange): string[][] {
 // ---------------------------------------------------------------------------
 
 export type FetchLike = (
-  input: URL | RequestInfo,
+  input: URL | Request | string,
   init?: RequestInit,
 ) => Promise<Response>
 

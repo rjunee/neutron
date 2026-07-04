@@ -48,8 +48,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck (tsc --noEmit)
-        run: bunx tsc --noEmit
+      # G5 — typecheck completeness. Runs `tsc -p` for EVERY tsconfig.json in the
+      # repo (root deploy-gate config + every leaf/package config), not just the
+      # root config. The root include list never reached trident/, app/,
+      # work-board/, project-credentials/, jwt-validator/, landing/chat-react/,
+      # or their test files, so real type errors used to ship. Discovery is
+      # dynamic, so a new package with a tsconfig is covered automatically;
+      # scripts/ci/ci-workflow.test.ts guards that completeness.
+      - name: Typecheck (tsc matrix over every tsconfig)
+        run: bash scripts/ci/typecheck-all.sh
 
       - name: Test (bounded-memory partitioned runner)
         # OOM mitigation: #193 tipped a general chunk past the 7 GB ubuntu-latest

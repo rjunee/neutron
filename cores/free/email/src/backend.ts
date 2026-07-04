@@ -1074,7 +1074,7 @@ export function buildSeededInMemoryGmailClient(
  *   Core ships send.
  */
 export type FetchLike = (
-  input: URL | RequestInfo,
+  input: URL | Request | string,
   init?: RequestInit,
 ) => Promise<Response>
 

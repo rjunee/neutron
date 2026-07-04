@@ -784,7 +784,7 @@ async function handlePutBinary(
       `multipart body exceeds ${MULTIPART_WIRE_LIMIT} bytes (got ${len})`,
     )
   }
-  let form: FormData
+  let form: Awaited<ReturnType<typeof req.formData>>
   try {
     form = await req.formData()
   } catch {

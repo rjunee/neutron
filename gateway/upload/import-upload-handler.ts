@@ -336,7 +336,7 @@ export async function handleImportUpload(
   if (ctx === null) return jsonError(404, 'project not found')
 
   // 4. Read multipart body.
-  let form: FormData
+  let form: Awaited<ReturnType<typeof req.formData>>
   try {
     form = await req.formData()
   } catch (err) {

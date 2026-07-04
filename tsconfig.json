@@ -1,13 +1,14 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    // The deploy gate runs `bunx tsc --noEmit` against this root config.
-    // The browser-DOM chat client (`landing/chat.ts`) lives inside the
-    // gate so we add the DOM lib here. The Bun-side `Buffer` ↔ DOM
-    // `BodyInit` ambiguity in landing/boot.ts + landing/server.ts is
-    // resolved by wrapping the buffer in `new Uint8Array(buf)` at the
-    // call sites.
-    "lib": ["ESNext", "DOM"]
+    // The deploy gate runs `bunx tsc --noEmit` against this root config over the
+    // SERVER tree. No "DOM" here on purpose (G5): server code must NOT typecheck
+    // against browser globals like `document`/`window` — that masks wrong-runtime
+    // bugs. Browser leaves own their own DOM lib and their own `tsc -p` step in
+    // the CI matrix: `landing/` (landing/tsconfig.json), `landing/chat-react/`,
+    // `chat-core/`, `app/`. The server-side landing modules that server code
+    // imports (session-cookie, spa-routes, server type surface) are DOM-free.
+    "lib": ["ESNext"]
   },
   "include": [
     "open/**/*.ts",
@@ -31,16 +32,15 @@
     "persistence/**/*.ts",
     "chat-core/**/*.ts",
     "tests/integration/**/*.ts",
+    "tests/support/**/*.ts",
+    "tests/fixtures/**/*.ts",
     "scripts/**/*.ts",
     "core-sdk/**/*.ts",
     "channels/**/*.ts",
     "connect/**/*.ts",
     "watchdog/**/*.ts",
     "auth/**/*.ts",
-    "onboarding/**/*.ts",
-    "landing/server.ts",
-    "landing/chat.ts",
-    "landing/__tests__/**/*.ts"
+    "onboarding/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

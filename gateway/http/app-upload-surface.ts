@@ -203,7 +203,7 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
       `multipart body exceeds ${wireLimit} bytes (got ${len})`,
     )
   }
-  let form: FormData
+  let form: Awaited<ReturnType<typeof req.formData>>
   try {
     form = await req.formData()
   } catch {

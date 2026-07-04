@@ -475,7 +475,7 @@ describe('buildGoogleGmailClient — OAuth + REST wrapper', () => {
       fetchImpl: async (input, init) => {
         const url = typeof input === 'string' ? input : input.toString()
         seenUrls.push(url)
-        const h = new Headers(init?.headers as HeadersInit | undefined)
+        const h = new Headers(init?.headers)
         seenAuth.push(h.get('authorization') ?? '')
         if (url.includes('/messages?')) {
           return new Response(

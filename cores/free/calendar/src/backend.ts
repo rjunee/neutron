@@ -534,7 +534,7 @@ export function buildInMemoryCalendarClient(
  * keeps the tests typed without a cast.
  */
 export type FetchLike = (
-  input: URL | RequestInfo,
+  input: URL | Request | string,
   init?: RequestInit,
 ) => Promise<Response>
 
