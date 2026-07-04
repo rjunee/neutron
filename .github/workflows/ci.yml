@@ -82,3 +82,12 @@ jobs:
       # imports, doesn't typecheck).
       - name: Layering gate (dependency-cruiser)
         run: bash scripts/ci/depcruise.sh
+
+      # G8 — ratchet-GROWTH guard. depcruise.sh above trusts every entry in
+      # .dependency-cruiser-known-violations.json, so a PR could grandfather a
+      # NEW cross-band edge just by adding it to that baseline and stay green.
+      # This guard enforces the "baseline only shrinks" invariant: it compares
+      # the committed baseline against origin/main's and FAILS if any entry was
+      # added. Skips on bootstrap (main has no baseline) and on push-to-main.
+      - name: Layering ratchet-growth guard (baseline only shrinks)
+        run: bash scripts/ci/depcruise-ratchet-guard.sh

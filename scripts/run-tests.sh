@@ -137,7 +137,28 @@ fi
 # 100%-coverage run. LC_ALL=C makes -a portable across BSD/GNU/ugrep.
 BUN_DISC="$(NO_COLOR=1 "$BUN" test -t '__neutron_runtests_no_match__' 2>&1 \
   | LC_ALL=C grep -aoE 'across [0-9]+ file' | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
-if [ -n "$BUN_DISC" ] && [ "$BUN_DISC" != "$TOTAL" ]; then
+# An EMPTY BUN_DISC means bun's discovery probe printed no parseable "across N
+# files" count — either bun failed to run or its summary format changed. The old
+# `[ -n "$BUN_DISC" ] && …` guard treated that as a reason to SILENTLY SKIP the
+# cross-check, so a broken discovery would let the partition list diverge from
+# the real suite unnoticed — the exact silent-truncation this audit exists to
+# forbid. So an empty probe is now LOUD by default: fatal, refusing to run blind.
+# (NEUTRON_TEST_ALLOW_EMPTY_BUN_DISC=1 downgrades it to a loud, non-silent WARNING
+# — a documented, opt-in escape hatch for a future bun whose summary format drifts,
+# never a silent default.)
+if [ -z "$BUN_DISC" ]; then
+  if [ "${NEUTRON_TEST_ALLOW_EMPTY_BUN_DISC:-0}" = "1" ]; then
+    echo "run-tests: WARNING — bun's discovery probe returned no 'across N files' count;" >&2
+    echo "  the coverage cross-check is DISABLED for this run (NEUTRON_TEST_ALLOW_EMPTY_BUN_DISC=1)." >&2
+    echo "  A broken discovery could let the partition list silently diverge from the real suite." >&2
+  else
+    echo "run-tests: FATAL — bun's discovery probe returned no 'across N files' count." >&2
+    echo "  Cannot cross-check the partition list against the real suite, so 100% coverage" >&2
+    echo "  cannot be guaranteed and the run refuses to proceed blind. (bun failed to run, or" >&2
+    echo "  its summary format changed — set NEUTRON_TEST_ALLOW_EMPTY_BUN_DISC=1 to override.)" >&2
+    exit 1
+  fi
+elif [ "$BUN_DISC" != "$TOTAL" ]; then
   echo "run-tests: FATAL coverage drift — find discovered ${TOTAL} files but bun" >&2
   echo "  discovers ${BUN_DISC}. The partition list would not match the real suite." >&2
   echo "  A new test-file pattern probably needs adding to discover() in this script." >&2
