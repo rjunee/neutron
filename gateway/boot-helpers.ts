@@ -850,12 +850,12 @@ export async function buildCoresBackendFactories(
      */
     researchProjectBackend?: import('@neutronai/research-core').ResearchProjectBackend
     /**
-     * Code-Gen Core S2 — pre-built `CodegenOrchestrator` from
-     * `buildCodegenWiring(...)`. When supplied, the `codegen_core`
-     * factory returns THIS instance so the MCP tools + the `/code`
-     * chat-command filter share one runner + one per-project sidecar
-     * resolver. When omitted, the factory falls back to a skeleton
-     * runner-backed orchestrator (Tier 1 safe-install behavior).
+     * Code-Gen Core S2 — an optional pre-built `CodegenOrchestrator`. When
+     * supplied, the `codegen_core` factory returns THIS instance for the
+     * `codegen_*` MCP tools. When omitted (the current production shape — the
+     * retired v1 wiring builder was deleted), the factory falls back to a
+     * skeleton runner-backed orchestrator (Tier 1 safe-install behavior). The
+     * live `/code` chat command is served by foundational Trident, not this.
      */
     codegenOrchestrator?: import('@neutronai/codegen-core').CodegenOrchestrator
     /**

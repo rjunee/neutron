@@ -57,40 +57,15 @@ export type {
   MergeCleanupResult,
 } from './git-mode.ts'
 
-// PR-3 — the real Forge/Argus substrate-session wiring.
-export {
-  FORGE_SYSTEM_PROMPT,
-  ARGUS_SYSTEM_PROMPT,
-  ARGUS_DIFF_LINE_LIMIT,
-  RALPH_BOOTSTRAP_NOTE,
-  renderForgePrompt,
-  renderForgeFixPrompt,
-  renderRalphPlanPrompt,
-  renderRalphTaskPrompt,
-  renderArgusPrompt,
-  chooseArgusScope,
-  parseForgeOutput,
-  parseRalphPlan,
-  parseArgusVerdict,
-  parseArgusFindings,
-} from './prompts.ts'
-export type { ParsedForgeOutput, ParsedRalphPlan } from './prompts.ts'
+// The one surviving Forge/Argus prompt constant. The v1 render/parse half of
+// `prompts.ts` (and its `session.ts` / `substrate-dispatch.ts` consumers) was
+// deleted — the live Forge/Argus contract is inlined in `inner-workflow.mjs`.
+export { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 
-export { TridentSessionManager } from './session.ts'
-export type {
-  TridentDispatch,
-  TridentDispatchInput,
-  TridentDispatchResult,
-  TridentSessionManagerOptions,
-  ForgeMeta,
-} from './session.ts'
-
-// WAVE 2 P1 #7 — persona agent dispatch (Atlas/Sentinel) with the lifted
-// `prompts/<kind>.md` personas loaded as the system prompt (previously those
-// files were dead code). `dispatchAgent` is the phase-less path that makes
-// Atlas + Sentinel dispatchable. Forge/Argus stay on their NATIVE
-// `trident/prompts.ts` contract (the parser-locked one) — disk-prompt
-// loading is deliberately scoped to the persona agents.
+// Persona agent system-prompt loader (Atlas/Sentinel) — LIVE: consumed by the
+// general `agent-dispatch/` dispatch service (the `dispatch_agent` tool) via
+// `defaultPersonaLoader`. Forge/Argus take no persona system prompt; their
+// contract is the inlined `inner-workflow.mjs` build loop.
 export {
   loadAgentSystemPrompt,
   AGENT_PROMPT_FALLBACK,
@@ -102,13 +77,6 @@ export type {
   AgentSystemPrompt,
   LoadAgentPromptDeps,
 } from './agent-prompts.ts'
-
-export { dispatchAgent } from './agent-dispatch.ts'
-export type {
-  DispatchAgentInput,
-  DispatchAgentDeps,
-  DispatchAgentOutcome,
-} from './agent-dispatch.ts'
 
 export {
   buildMergeCleanupDeps,

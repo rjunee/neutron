@@ -8,8 +8,6 @@
     "./manifest": "./src/manifest.ts",
     "./backend": "./src/backend.ts",
     "./tools": "./src/tools.ts",
-    "./chat-commands": "./src/chat-commands.ts",
-    "./runtime-runner": "./src/runtime-runner.ts",
     "./substrate-runtime": "./src/substrate-runtime.ts",
     "./tool-handlers": "./src/tool-handlers.ts",
     "./worktree-resolver": "./src/worktree-resolver.ts",
