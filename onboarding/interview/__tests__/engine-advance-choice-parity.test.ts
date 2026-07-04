@@ -101,6 +101,50 @@ test('advance with a button choice on the signup prompt advances the phase + wri
   expect(userLines[0]?.button_choice).toBe('use-telegram-name')
 })
 
+test('KNOWN-DIVERGENCE: `__cancel__` on the signup prompt currently ADVANCES via the live advance path', async () => {
+  // Characterization test (K4 adjudication of Codex r-review). `__cancel__` is a
+  // NON_ADVANCING_CHOICE_VALUES sentinel (engine-internals.ts) AND is NOT in the
+  // gateway's FORBIDDEN_INBOUND_VALUES ({ __freeform__, __timeout__ } —
+  // channels/adapters/app-socket/render-button-prompt.ts:64), so an app-socket
+  // `button_choice` carrying it passes chat-bridge (chat-bridge.ts:1643) and
+  // reaches engine.advance → consumeChoice. consumeChoice's signup generic route
+  // applies NO NON_ADVANCING guard (the guards live only in
+  // consumeWowFallbackChoice + handleFinalHandoffOnCompleted), so the cancel
+  // sentinel WRONGLY advances signup → instance_provisioned → ai_substrate_offered.
+  //
+  // This is a PRE-EXISTING latent bug, NOT a K4 regression: the deleted
+  // `acceptChoice` (which DID guard NON_ADVANCING) had ZERO production callers —
+  // the live tap path was always advance→consumeChoice, both before and after
+  // this deletion, so the observable behavior is unchanged by K4. We pin CURRENT
+  // behavior here so a dedicated fix unit (port the guard into consumeChoice's
+  // signup route) flips this assertion from 'advanced' to a no-op. Codex r-review
+  // correctly flagged the coverage gap; the fix is out of scope for a pure
+  // deletion. See the wave-1 known-divergence log.
+  const start = await engine.start({
+    project_slug: 't1',
+    topic_id: 'topic-1',
+    user_id: 'u-1',
+    signup_via: 'telegram',
+  })
+  const out = await engine.advance({
+    project_slug: 't1',
+    user_id: 'u-1',
+    topic_id: 'topic-1',
+    channel_kind: 'app-socket',
+    choice: {
+      prompt_id: start.prompt_id,
+      choice_value: '__cancel__',
+      chosen_at: 1234,
+      speaker_user_id: 'u-1',
+      channel_kind: 'app-socket',
+    },
+  })
+  // CURRENT (buggy) behavior — pinned, not endorsed. Flip to 'no_active_prompt'
+  // + phase 'signup' when the guard is ported in the dedicated fix unit.
+  expect(out.outcome).toBe('advanced')
+  expect(out.state?.phase).toBe('ai_substrate_offered')
+})
+
 test('advance routes a choice to the calling user, not the project-default user', async () => {
   const startA = await engine.start({
     project_slug: 't1',
