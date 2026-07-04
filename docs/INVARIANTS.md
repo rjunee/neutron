@@ -70,7 +70,8 @@ with cross-references noted inline.
     Protects: **G2** (Hydration-parity characterization), **W3** (Transcript unification, gated on
     G2).
 11. `__timeout__`/`__cancel__` prompt resolutions render as UNRESOLVED, never as user bubbles;
-    `EmitResult.was_delivered` governs the re-render rule. `button-store.ts:768-777` region.
+    `EmitResult.was_delivered` governs the re-render rule. `button-store.ts:1050-1069`
+    (the `RESERVED_RESOLUTION_VALUES` sentinel-handling block).
     Protects: **G2**, **L1** (Chat-protocol leaf module).
 12. `button_prompts.body` has `[[OPTIONS]]` stripped on persist — every consumer must read
     `latestPromptByTopic`/`options_json`, never re-parse `body` (PR#144 trap).
