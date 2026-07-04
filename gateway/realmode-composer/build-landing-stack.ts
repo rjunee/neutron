@@ -377,17 +377,17 @@ export interface BuildLandingStackInput {
   wowPromptResolutionNow?: () => number
   /**
    * T4 (2026-05-13) — history-import job-runner hook. When provided,
-   * the engine routes the `import_offered` zip choices through it;
-   * when null/undefined, the factory default-builds a real
-   * `ImportJobRunner` via `buildImportJobRunnerHook(...)` so production
-   * walks the spec'd path by construction. Tests inject a recorder
-   * via this field directly.
+   * the engine routes the `import_offered` zip choices through it (an
+   * injected runner always wins). When null/undefined, the factory builds
+   * the SYNTHESIS runner iff `importUseSynthesis === true` (the Open
+   * single-owner path — `open/composer.ts` opts in), otherwise no runner is
+   * wired and the engine collapses the zip choices into its skip path. The
+   * retired per-chunk `buildImportJobRunnerHook` default was deleted (K3).
+   * Tests inject a recorder via this field directly.
    *
-   * Argus-trapping shape: the explicit `null` carve-out lets test
-   * harnesses opt out (legacy boot paths during the wiring rollout);
-   * production never passes null because the engine's import_offered
-   * branch silently collapses to skip when unwired. Per the brief:
-   * "Production composer ALWAYS wires the hook".
+   * Argus-trapping shape: the explicit `null` carve-out lets test harnesses
+   * opt out; production reaches the real path via `importUseSynthesis: true`,
+   * not by passing a runner here.
    */
   importJobRunner?: ImportJobRunnerHook | null
   /**
