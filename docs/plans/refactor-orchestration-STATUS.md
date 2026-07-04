@@ -14,9 +14,12 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `89728c2` (W8 #197 merged). **CI baseline GREEN** — restored by #198
-  after discovering #196 had turned it red (see Done). Leak-gate now allowlists the
-  tracked plan doc (§1.4 / D-11).
+- **main HEAD:** `c37e7d0` (wave-0 guardrails G10/G1/G5/G6/G3 merged). **CI GREEN.**
+  Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
+  **G5 landed a structural CI change:** the Typecheck step is now a MATRIX
+  (`scripts/ci/typecheck-all.sh` runs `tsc -p` over all 44 tsconfigs; DOM stripped from
+  server configs). Every subsequent unit MUST pass `bash scripts/ci/typecheck-all.sh` on
+  rebase, not just root+leaf tsc.
 - **CI infra:** `.github/workflows/ci.yml` throttled to `NEUTRON_TEST_CONCURRENCY=2`,
   `CHUNK_SIZE=75` (conservative guaranteed-green; ~2× wall-clock). Raise / set
   `NEUTRON_TEST_JOBS>1` once a faster runner is wired. Runner-upgrade decision PENDING
@@ -58,16 +61,33 @@ land — it is what a fresh context reads to resume without re-deriving anything
 **✅ STEP 0 (Wave −1) COMPLETE** — F9 #194, W8 #197, W7-crash #200. Plus main-red repair #198,
 docs #199. main GREEN @ `135c2e1`.
 
-## In flight (wave 0 — Phase-0 guardrails, first distinct-lane batch)
+## Wave 0 (Phase-0 guardrails) — 5/10 merged
 
-- **G5** (typecheck completeness · `opus` · lane **ci**) — CI must `tsc -p` every dir with a
-  tsconfig + add leaf tsconfigs + strip `DOM` from root/server; fix the wrong-runtime errors
-  it surfaces. Highest-value guardrail (catches the leaf-tsc-miss class I hit twice on W8).
-- **G1** (route-matrix characterization · `opus` · lane **none**) — snapshot the Open composer
-  route ladder + negative space; protects the C-phase.
-- **G10** (invariants inventory · `sonnet` · lane **docs**) — compile `docs/INVARIANTS.md`
-  from the 12 critic reports; the per-merge Fable-synthesis checklist.
-- Remaining wave-0: G2 G3 G4 G6 G7 G8 G9 · W0 · M0 (dispatch as lanes free, cap 3).
+**Merged:**
+- **G5** (#204, `b38b2f2`) — typecheck-completeness MATRIX + DOM-strip; 47 masked type
+  errors fixed (incl. a real jwt-validator bug). Codex APPROVE. The high-value guardrail.
+- **G1** (#203) — Open route-matrix characterization (ladder + negative space, both
+  directions). **Surfaced a latent prod bug**: `hasAnyChainedSurface` omits
+  `import_resume_handler` → a resume-only composition serves nothing; pinned as a
+  documented known-divergence for a later fix unit.
+- **G10** (#202) — `docs/INVARIANTS.md`, 111 anchored invariants (108 unit-protected,
+  3 review-only). Allowlisted for retired-vocab.
+- **G6** (#206) — substrate error-string classifier conformance (6 classifiers pinned by
+  driving the REAL producer strings per the no-mock rule; tripwire proven on reword).
+- **G3** (#205) — mirror parity (TabDescriptor, AgentEngagementMode) + entity-format golden
+  round-trip. Bidirectional parity via typed-parameter identity fns (catches either-side widening).
+
+**In flight:** G9 (test-isolation testkit · `opus` · none) + G7 (leak-gate NUL tripwire +
+retire 3 grep-binary-hidden tokens · `opus` · ci) building.
+
+**Remaining wave-0:** G2 (hydration-parity · `opus` · none, held) · G4 (depcruise · `sonnet` · ci) ·
+G8 (test-infra self-tests · `sonnet` · ci) · W0 (UX Option-D record · clients) · M0 (Managed CI —
+cross-repo neutron-managed, deferred). ci-lane (G4/G7/G8) serialize (all touch `ci.yml`/`scripts/ci`).
+
+**Review pattern (holding across every unit):** build agent → orchestrator diff review → Codex
+cross-review (EVERY unit found ≥1 real defect: vacuous assertions, one-directional parity holes,
+wrong anchors, boundary gaps, a clipboard sync-throw, the composer-injection regression, a latent
+composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI green → squash-merge.
 
 ## Ready-set / queue (order: Step 0 → G1–G10 → waves 1–9; K10 LAST)
 
