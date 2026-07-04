@@ -1,0 +1,328 @@
+[
+  {
+    "type": "dependency",
+    "from": "gateway/projects/shared-projects-resolver.ts",
+    "to": "connect/api/mint-instance-token.ts",
+    "unresolvedTo": "@neutronai/connect/api/mint-instance-token.ts",
+    "dependencyTypes": [
+      "undetermined",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "connect-is-dynamic-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "migrations/runner.ts",
+    "to": "open/owner-identity.ts",
+    "unresolvedTo": "../open/owner-identity.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "contracts-are-leaves"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/agent-settings/src/backend.ts",
+    "to": "connect/agent-engagement.ts",
+    "unresolvedTo": "../../../../connect/agent-engagement.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/agent-settings/src/backend.ts",
+    "to": "onboarding/interview/final-handoff-config.ts",
+    "unresolvedTo": "../../../../onboarding/interview/final-handoff-config.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/calendar/migrations/runner.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/code-gen/src/sidecar/store.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/email/src/cache.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/backend.ts",
+    "to": "runtime/models.ts",
+    "unresolvedTo": "../../../../runtime/models.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/research-orchestrator.ts",
+    "to": "runtime/models.ts",
+    "unresolvedTo": "../../../../runtime/models.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/store-resolver.ts",
+    "to": "migrations/runner.ts",
+    "unresolvedTo": "../../../../migrations/runner.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/research/src/substrate-runtime.ts",
+    "to": "runtime/models.ts",
+    "unresolvedTo": "../../../../runtime/models.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "cores-use-sdk-only"
+    }
+  },
+  {
+    "type": "cycle",
+    "from": "gbrain-memory/ensure-brain-init.ts",
+    "to": "gbrain-memory/gbrain-doctor.ts",
+    "unresolvedTo": "./gbrain-doctor.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "no-cycles"
+    },
+    "cycle": [
+      {
+        "name": "gbrain-memory/gbrain-doctor.ts",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      },
+      {
+        "name": "gbrain-memory/ensure-brain-init.ts",
+        "dependencyTypes": [
+          "local",
+          "dynamic-import"
+        ]
+      }
+    ]
+  },
+  {
+    "type": "cycle",
+    "from": "trident/board-dispatch.ts",
+    "to": "trident/code-command.ts",
+    "unresolvedTo": "./code-command.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "no-cycles"
+    },
+    "cycle": [
+      {
+        "name": "trident/code-command.ts",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      },
+      {
+        "name": "trident/board-dispatch.ts",
+        "dependencyTypes": [
+          "local",
+          "import"
+        ]
+      }
+    ]
+  },
+  {
+    "type": "dependency",
+    "from": "migrations/runner.ts",
+    "to": "open/owner-identity.ts",
+    "unresolvedTo": "../open/owner-identity.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "nobody-imports-composition"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "onboarding/wow-moment/actions/03-project-shells.ts",
+    "to": "gateway/projects/default-emoji.ts",
+    "unresolvedTo": "../../../gateway/projects/default-emoji.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "nobody-imports-composition"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "reminders/dispatcher.ts",
+    "to": "gateway/realmode-composer/build-llm-call-substrate.ts",
+    "unresolvedTo": "../gateway/realmode-composer/build-llm-call-substrate.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "nobody-imports-composition"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "cores/free/agent-settings/src/backend.ts",
+    "to": "onboarding/interview/final-handoff-config.ts",
+    "unresolvedTo": "../../../../onboarding/interview/final-handoff-config.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "only-composition-imports-product-surfaces"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "runtime/onboarding-conversational-flag.ts",
+    "to": "onboarding/interview/phase.ts",
+    "unresolvedTo": "../onboarding/interview/phase.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "platform-stays-low"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "connect/trusted-accept-handler.ts",
+    "to": "onboarding/api/invite-link-generate.ts",
+    "unresolvedTo": "../onboarding/api/invite-link-generate.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "services-below-product"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "landing/server.ts",
+    "to": "onboarding/interview/final-handoff-config.ts",
+    "unresolvedTo": "../onboarding/interview/final-handoff-config.ts",
+    "dependencyTypes": [
+      "local",
+      "export"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "services-below-product"
+    }
+  },
+  {
+    "type": "dependency",
+    "from": "reminders/dispatcher.ts",
+    "to": "gateway/realmode-composer/build-llm-call-substrate.ts",
+    "unresolvedTo": "../gateway/realmode-composer/build-llm-call-substrate.ts",
+    "dependencyTypes": [
+      "local",
+      "import"
+    ],
+    "rule": {
+      "severity": "error",
+      "name": "services-below-product"
+    }
+  }
+]

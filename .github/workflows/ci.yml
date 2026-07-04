@@ -70,3 +70,15 @@ jobs:
 
       - name: Purity gate (leak-gate subset)
         run: bash scripts/ci/leak-gate.sh --tree .
+
+      # G4 — layering ratchet. dependency-cruiser enforces the five-band model
+      # from docs/research/refactor-audit-2026-07-02/critic-layering.md
+      # (contracts < platform < services < product < composition) against
+      # .dependency-cruiser.cjs. Today's ~21 known cross-band edges are
+      # grandfathered in .dependency-cruiser-known-violations.json so this
+      # gate does not block on day one; it fails on any NEW cross-band import
+      # or import cycle, and the baseline shrinks (never grows) as the
+      # audit's cut-list PRs land. Runs in single-digit seconds (parses
+      # imports, doesn't typecheck).
+      - name: Layering gate (dependency-cruiser)
+        run: bash scripts/ci/depcruise.sh
