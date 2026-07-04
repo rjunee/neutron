@@ -69,9 +69,6 @@ function makeNoopTerminalEngine(events: string[], state: OnboardingState): Inter
       events.push('engine.advance')
       return { outcome: 'noop_terminal', state } as AdvanceResult
     },
-    async acceptChoice() {
-      throw new Error('not used')
-    },
     async tick(): Promise<void> {},
     async emitCurrentPhasePrompt(): Promise<AdvanceResult> {
       return { outcome: 'noop_terminal', state } as AdvanceResult

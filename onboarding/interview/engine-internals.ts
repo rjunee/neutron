@@ -8,7 +8,7 @@
  *
  * Holds (all PURE MOVES from engine.ts — no logic changes):
  *   - `InterviewEngineDeps` + the DI hook interfaces it references, the
- *     `Start*` / `AcceptChoice*` / `Advance*` public types, and
+ *     `Start*` / `Advance*` public types, and
  *     `InterviewErrorCode` / `InterviewError` (relocated so the leaf can
  *     type `EngineInternals.deps` without an engine.ts edge). `engine.ts`
  *     re-exports every one of these for API compatibility.
@@ -1365,31 +1365,8 @@ export interface StartResult {
   state: OnboardingState
 }
 
-export interface AcceptChoiceInput {
-  project_slug: string
-  /**
-   * ISSUES #2 (2026-05-19) — second PK component on `onboarding_state`.
-   * Every caller threads the platform user_id (from the channel
-   * adapter's resolved JWT `sub` claim) so the engine reads + writes
-   * the correct (project_slug, user_id) row.
-   */
-  user_id: string
-  choice: ButtonChoice
-}
-
-export interface AcceptChoiceResult {
-  /** True when the choice advanced the state machine; false on duplicate
-   *  callbacks or unknown prompts (which the channel layer already
-   *  deduplicated). */
-  advanced: boolean
-  state: OnboardingState
-  /** The choice as persisted by the channel layer's ButtonStore. May
-   *  carry a different `chosen_at` than the input on duplicate callbacks. */
-  resolved_choice: ButtonChoice
-}
-
 /**
- * Inbound shape for `advance(...)` — either the user tapped a button (the
+ * Inbound shape for `advance(...)`— either the user tapped a button (the
  * channel layer has already routed it into a `ButtonChoice`) or they
  * typed a freeform message that did not correspond to an active prompt.
  */

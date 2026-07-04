@@ -135,9 +135,14 @@ function makeCallbackHandler() {
       routeChoice: async (input) => {
         const result = await router.routeChoice(input)
         if (result.delivered && result.prompt) {
-          await engine.acceptChoice({
+          // K4a (refactor) — drive the PRODUCTION engine path (`advance` with
+          // a ButtonChoice), matching the app-ws / chat-bridge button_choice
+          // wiring. The retired `acceptChoice` had zero production callers.
+          await engine.advance({
             user_id: 'u-1',
             project_slug: 't1',
+            topic_id: 'topic-1',
+            channel_kind: 'telegram',
             choice: result.choice,
           })
           receivedChoiceValues.push(result.choice.choice_value)
@@ -182,7 +187,7 @@ describe('button-primitive cross-channel — Telegram round-trip', () => {
 
     const state = await stateStore.get('t1', 'u-1')
     // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned →
-    // import_offered via the AUTO_SKIP walker on acceptChoice path.
+    // import_offered via the AUTO_SKIP walker on the advance choice path.
     // The user lands on the import-substrate picker, not stranded on
     // the hidden instance_provisioned transit.
     expect(state?.phase).toBe('ai_substrate_offered')
@@ -279,7 +284,14 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
       })
       if (result.delivered) {
         appSocketChoice = result.choice
-        await engine2.acceptChoice({ project_slug: 't2', user_id: 'u-as-1', choice: result.choice })
+        // K4a (refactor) — production engine path is `advance` with the choice.
+        await engine2.advance({
+          project_slug: 't2',
+          user_id: 'u-as-1',
+          topic_id: 'topic-as-1',
+          channel_kind: 'app-socket',
+          choice: result.choice,
+        })
       }
     })
 
@@ -320,7 +332,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
     expect(appSocketChoice!.channel_kind).toBe('app-socket')
     const state = await stateStore2.get('t2', 'u-as-1')
     // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned →
-    // import_offered via the AUTO_SKIP walker on acceptChoice path.
+    // import_offered via the AUTO_SKIP walker on the advance choice path.
     expect(state?.phase).toBe('ai_substrate_offered')
 
     // Re-delivery: same envelope should resolve idempotently with was_new=false.

@@ -70,9 +70,6 @@ function makeNoopEngine(state: OnboardingState): InterviewEngine {
     async advance(_i: AdvanceInput): Promise<AdvanceResult> {
       return { outcome: 'noop_terminal', state } as AdvanceResult
     },
-    async acceptChoice() {
-      throw new Error('not used')
-    },
     async tick(): Promise<void> {},
     async emitCurrentPhasePrompt(): Promise<AdvanceResult> {
       return { outcome: 'noop_terminal', state } as AdvanceResult

@@ -69,9 +69,6 @@ function makeFakeEngine(): InterviewEngine {
     async advance(_: AdvanceInput): Promise<AdvanceResult> {
       return advanceResult
     },
-    async acceptChoice() {
-      throw new Error('unused')
-    },
     async tick() {},
     async emitCurrentPhasePrompt() {
       return advanceResult
@@ -583,9 +580,6 @@ describe('chat-bridge ownerRegistry lookup (no-restart rename)', () => {
         }
       },
       async advance(_: AdvanceInput): Promise<AdvanceResult> {
-        throw new Error('unused')
-      },
-      async acceptChoice() {
         throw new Error('unused')
       },
       async tick() {},

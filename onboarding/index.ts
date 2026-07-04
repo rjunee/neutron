@@ -18,8 +18,6 @@ export {
   InterviewError,
   DEFAULT_RESUME_GAP_MS,
   computeImportHardTimeoutMs,
-  type AcceptChoiceInput,
-  type AcceptChoiceResult,
   type AdvanceInput,
   type AdvanceResult,
   type AdvanceOutcome,
