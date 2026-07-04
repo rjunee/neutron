@@ -42,35 +42,29 @@ import { fileURLToPath } from 'node:url'
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { composeProductionGraph } from '../../gateway/composition.ts'
-import { startTokenTopicId } from '../../landing/start-token-topic-id.ts'
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
-import { buildLocalStartTokenAuth } from '../local-start-token.ts'
+import { appWsTopicId } from '../../channels/adapters/app-ws/envelope.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
-const COOKIE_SECRET = 'open-test-secret-0123456789'
-
 /**
- * Resolve the `X-Neutron-Topic-Id` upload header the SAME way the browser
- * chat client (`landing/chat.ts:resolveUploadTopicId`) does: mint a REAL
- * Open single-owner start-token, then run the real `startTokenTopicId`
- * decoder over it. This drives the actual real-Open path instead of
- * hardcoding `web:owner` — pre-fix this resolved to null (the JWT-only
- * decoder couldn't read the 2-segment HMAC token), the client sent NO
- * header, and the upload fell back to topic 'chat' so onboarding never
- * advanced. The integration assertions below depend on this resolving to
- * the same `web:owner` the engine's session is keyed on.
+ * Resolve the `X-Neutron-Topic-Id` upload header the SAME way the real
+ * production React/Open chat client does: `config.topicId =
+ * appWsTopicId(userId)` = `app:<user_id>` (`landing/chat-react/config.ts`
+ * mirrors the server's `appWsTopicId`, `channels/adapters/app-ws/envelope.ts`).
+ * We call the REAL server-side `appWsTopicId` here so the test exercises the
+ * live `app:<user>` boundary the upload path actually sees — the upload
+ * handler runs `parseAnyTopicId(header)` → `user_id` and the engine looks up
+ * onboarding_state by `(project_slug, user_id)`, so this must derive to the
+ * same `owner` the seeded row is keyed on.
+ *
+ * (Formerly this minted a local start-token and ran the JWT-only decoder
+ * `landing/start-token-topic-id.ts:startTokenTopicId` over it — that decoder
+ * had zero production importers and was deleted in the wave-1 dead-code kill,
+ * refactor plan §K1. It also pinned the dead `web:<user>` shape; the real
+ * React upload path sends `app:<user>`, which is what we assert now.)
  */
 function resolveRealUploadTopicId(user_id: string): string {
-  const auth = buildLocalStartTokenAuth(COOKIE_SECRET)
-  const token = auth.mint({ project_slug: 'owner', user_id })
-  const topicId = startTokenTopicId(token)
-  if (topicId === null) {
-    throw new Error(
-      'resolveRealUploadTopicId: client resolution returned null — the upload ' +
-        "would fall back to topic 'chat' and onboarding would NOT advance",
-    )
-  }
-  return topicId
+  return appWsTopicId(user_id)
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -218,7 +212,11 @@ describe('Open import-upload surface wiring', () => {
       user_id: 'owner',
       phase: 'import_upload_pending',
       phase_state_patch: {
-        topic_id: 'web:owner',
+        // The real app-ws session persists the `app:<user>` topic (mirrors what
+        // an app-surface upload sends); `user_id` is the store key. `signup_via`
+        // stays 'web' — there is no 'app' value and the upload path's
+        // channel_kind:'app-socket' resolves signup_via to 'web' upstream too.
+        topic_id: 'app:owner',
         user_id: 'owner',
         signup_via: 'web',
         ai_substrate_used: 'claude',
@@ -226,12 +224,12 @@ describe('Open import-upload surface wiring', () => {
     })
     expect((await stateStore.get('owner', 'owner'))?.phase).toBe('import_upload_pending')
 
-    // Resolve the upload topic header THE REAL WAY — mint an Open
-    // start-token and run the production client decoder over it. Must land
-    // on `web:owner` (the session's key), NOT null / the 'chat' fallback.
-    // Pre-fix this threw because resolution returned null.
+    // Resolve the upload topic header THE REAL WAY — the same
+    // `appWsTopicId(userId)` the production React/Open chat client stamps as
+    // `config.topicId`. Must land on `app:owner`; the upload handler parses it
+    // to user_id `owner` and the engine keys the advance on (owner, owner).
     const topicHeader = resolveRealUploadTopicId('owner')
-    expect(topicHeader).toBe('web:owner')
+    expect(topicHeader).toBe('app:owner')
 
     // 1. Start the chunked upload.
     const startRes = await fetch(`${harness.base}/api/upload/claude/start`, {

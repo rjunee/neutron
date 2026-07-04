@@ -20,6 +20,42 @@ const MEMBERSHIPS: Membership[] = [
   { slug: 'acme', role: 'member', kind: 'workspace' },
 ]
 
+test('open mode stamps the CENTRAL kind:user membership slug as origin, NOT the local box slug', async () => {
+  // Security boundary (Argus r2 #2): on a real Open deployment the local
+  // self-host slug (`deps.user_instance_slug`) differs from the central-assigned
+  // user slug carried in the federated JWT's memberships. The outbound origin
+  // MUST be the central slug — the receiving workspace 403s `origin_not_a_member`
+  // if it sees the local slug. The other open-mode tests use matching slugs, so
+  // they can't catch a regression to `deps.user_instance_slug`; this pins the
+  // divergent case (restores coverage lost when the old resolver test was removed
+  // with the dead `open-instance-source-resolver`).
+  const MEMBERSHIPS_DIVERGENT: Membership[] = [
+    { slug: 'central-alice', role: 'owner', kind: 'user' },
+    { slug: 'acme', role: 'member', kind: 'workspace' },
+  ]
+  let capturedUserSlug: string | undefined
+
+  const deps: SharedProjectsResolverDeps = {
+    user_instance_slug: 'local-box', // local self-host slug — deliberately != central
+    membershipStore: { list: async () => MEMBERSHIPS_DIVERGENT },
+    deployment_mode: 'open',
+    federatedToken: async () => 'federated-multi-aud-jwt',
+    openResolveBaseUrl: (slug) => `https://${slug}.neutron.example`,
+    getUnifiedProjects: async (input) => {
+      capturedUserSlug = input.user_instance_slug
+      return { projects: [], source_errors: [] }
+    },
+  }
+
+  const resolver = buildSharedProjectsResolver(deps)
+  await resolver.fetch({ user_id: 'u-alice', project_slug: 'central-alice' })
+
+  // The origin stamped for every outbound workspace request must be the central
+  // membership slug, never the local box slug.
+  expect(capturedUserSlug).toBe('central-alice')
+  expect(capturedUserSlug).not.toBe('local-box')
+})
+
 test('open mode uses the federated JWT + open base-url resolver for every workspace', async () => {
   let capturedSources: ReadonlyArray<UnifiedProjectListSource> = []
   let federatedCalls = 0
