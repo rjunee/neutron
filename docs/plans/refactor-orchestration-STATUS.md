@@ -14,8 +14,12 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `b7c4c1c` (wave-0 guardrails G10/G1/G5/G6/G3/G7/G2/G9 + W0 merged). **CI GREEN.**
+- **main HEAD:** `b3bdc63` — **WAVE 0 COMPLETE** (all guardrails G1–G10 + W0 merged; only
+  M0 = cross-repo Managed CI deferred). **CI GREEN.** Now in **WAVE 1 (K = kill / deletions)**.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
+- **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
+  anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
+  job re-run, 31/31 local). Not a unit defect — a candidate for test hardening / quarantine.
   **G5 landed a structural CI change:** the Typecheck step is now a MATRIX
   (`scripts/ci/typecheck-all.sh` runs `tsc -p` over all 44 tsconfigs; DOM stripped from
   server configs). Every subsequent unit MUST pass `bash scripts/ci/typecheck-all.sh` on
@@ -61,7 +65,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 **✅ STEP 0 (Wave −1) COMPLETE** — F9 #194, W8 #197, W7-crash #200. Plus main-red repair #198,
 docs #199. main GREEN @ `135c2e1`.
 
-## Wave 0 (Phase-0 guardrails) — 8/10 merged + W0
+## Wave 0 (Phase-0 guardrails) — COMPLETE (10/10 + W0; M0 cross-repo deferred)
 
 **Merged:**
 - **G5** (#204, `b38b2f2`) — typecheck-completeness MATRIX + DOM-strip; 47 masked type
@@ -93,20 +97,10 @@ docs #199. main GREEN @ `135c2e1`.
   noUncheckedIndexedAccess, ambient-key destruction) — all fixed; final fix is a file-level
   full-env snapshot/restore so the suite can never leak. Codex APPROVE.
 
-**In flight:** **G4** (depcruise · was `sonnet`, bumped to `opus` on fix) — PR #210 built but
-Codex REQUEST_CHANGES found 3 REAL gate gaps (global `exclude` drops tests from `no-cycles`;
-`connect-is-dynamic-only` exempts composition so a STATIC edge passes; `app-bundle-purity`
-only checks direct not transitive imports). Fix agent dispatched (repoints to the branch,
-regens baseline). ci-lane.
+**G4** (#210, `92cf3c7`) — dependency-cruiser five-band layering gate + 21-edge grandfathered baseline + CI gate. Two Codex rounds (r1: 3 rule-correctness gaps — tests invisible to no-cycles, static composition→connect, direct-only app-purity; r2: ratchet-growth + self-tests, ROUTED to G8). Merged on met acceptance.
+- **G8** (#213, `b3bdc63`) — self-tests for run-tests.sh + leak-gate.sh + a CI-enforced depcruise **ratchet-growth guard** (baseline may only shrink vs main). Loud-fatal empty BUN_DISC (override documented). Codex REQUEST_CHANGES (run-tests fatal breaks CI) was a FALSE POSITIVE — empirically BUN_DISC=915 on local AND CI (Codex mis-reproduced with explicit file args vs the script's no-arg full discovery). Separately fixed a real leak-gate-selftest literal-token issue my clean-export re-run caught. Merged.
 
-- **W0** (docs-only · `opus`/Fable · clients) — UX architecture decision RECORDED: Option D
-  (`landing/chat-react` = single canonical UI; Expo app → thin native shell), spike scoped to
-  chat-feel AND offline durability, W1/W2/W4/W5/W6 enumerated. Artifact:
-  `docs/specs/ux-architecture-option-d-2026-07-03.md` (the decision already lived in plan §W0;
-  this is the discoverable spec). Ships no code.
-
-**Remaining wave-0:** G8 (test-infra self-tests · `sonnet` · ci — **held: ci-lane serializes
-behind G4**) · M0 (Managed CI — cross-repo neutron-managed, deferred).
+**Wave-0 remaining:** only M0 (Managed CI — cross-repo neutron-managed, deferred).
 
 ## Known-divergences (pinned by a guardrail, owned by a later fix unit)
 
