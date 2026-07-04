@@ -1,9 +1,10 @@
 # shellcheck shell=bash
 # scripts/lib/discover-test-files.sh
 #
-# Single source of truth for "what is the real test suite?" — used by both the
-# human/CI runner (scripts/run-tests.sh) and the deploy gate
-# (scripts/install/lib/flake-tolerant-test-gate.sh) so the two never drift.
+# Single source of truth for "what is the real test suite?" — used by the
+# human/CI runner (scripts/run-tests.sh). Isolating discovery here means any
+# future consumer (a deploy gate, another lane) shares the exact same file set,
+# so the dot-dir/node_modules exclusion below can never drift between callers.
 #
 # neutron_discover_test_files prints, one per line, every real-source test file
 # bun would run, EXCLUDING node_modules and ALL dot-directories. The dot-dir
