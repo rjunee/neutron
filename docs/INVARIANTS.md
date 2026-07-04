@@ -2,10 +2,22 @@
 
 Compiled 2026-07-03 for refactor unit **G10** (`docs/plans/2026-07-02-world-class-refactor-plan.md`
 §G10). This is the checklist Fable synthesis runs per merge: every load-bearing subtlety named in
-the 12 critic reports (`docs/research/refactor-audit-2026-07-02/critic-*.md`), one line each, with
-a `file:line` anchor and the refactor unit (or existing test) that protects it. An invariant tagged
-**unprotected — covered by review only** has no automated guard today; a unit touching that area
-must add one or an Argus/Codex reviewer must explicitly re-verify it by hand.
+the **11 critic reports** (`docs/research/refactor-audit-2026-07-02/critic-*.md`), one line each,
+with a concrete `file:line` anchor and the refactor unit (or existing test) that protects it. An
+invariant tagged **unprotected — covered by review only** has no automated guard today; a unit
+touching that area must add one or an Argus/Codex reviewer must explicitly re-verify it by hand.
+
+> **On the count.** The plan (§G10) says "all 12 critic reports"; there are in fact **11**
+> `critic-*.md` files in the audit directory. `critic-security-config.md` has no dedicated
+> "load-bearing subtleties" section (its charter is config/secrets/auth-gate posture), so its
+> preserve-verbatim items are folded into §11 below. Everything in this doc is keyed to the 11
+> files that exist; the "12" in the plan is the pre-audit estimate, reconciled here.
+
+Anchor convention: every invariant carries a `file:line` (or `file:line-range`) pointing at the
+governing code site. Where an invariant is genuinely cross-cutting (many near-identical copies, or
+a proposed consolidation target that does not exist yet), the anchor names the **representative**
+site — the canonical producer, the file the audit cites, or the test that pins it — so each line is
+verifiable from the doc; a `~` prefix marks an approximate line from the audit not re-pinned to HEAD.
 
 Source reports are untracked working docs (`docs/research/refactor-audit-2026-07-02/`, see plan
 §1.4) — this file is the durable, tracked distillation. Grouped by the critic dimension that
@@ -65,16 +77,18 @@ with cross-references noted inline.
     `button-store.ts:289-368`.
     Protects: **L1**, **W3**.
 13. `{ok:false, code, message}` wire bytes and stable code strings are load-bearing — the Expo
-    client branches on them; a surface-kit consolidation must stay byte-identical.
-    (see `gateway/http/*` response builders.)
+    client branches on them; a surface-kit consolidation must stay byte-identical. Representative
+    producer `gateway/http/app-backups-surface.ts:338` (the shape is emitted from ~19 near-identical
+    copies per `critic-duplication.md:116`; O7 folds them into a proposed `gateway/http/surface-kit.ts`).
     Protects: **O7** (Gateway surface-kit).
 14. Compose ladder orderings are semantic and must be preserved 1:1 if lifted into a registry:
     chunked-upload before legacy; `focusCurrent` before `focus`; per-project children before
     appProjects; SPA catch-all last; `LANDING_PATHS` completeness is a recurring 404 factory.
+    `gateway/http/compose.ts:722-752` (LANDING_PATHS), `:833-1320` (route ladder).
     Protects: **C4**.
 15. `chat-core` merge laws — receipts are union-monotonic, edits are rev-LWW, seq ordering is
     strict — must not be "harmonized" with server-side projections during unification.
-    `chat-core/store.ts`.
+    `chat-core/store.ts:82-171`.
     Protects: **L7** (chat-core scope rename), **W1** (client-core shared package), **W3**.
 
 ## 3. Data layer & persistence (`critic-data-layer.md`)
@@ -89,7 +103,8 @@ with cross-references noted inline.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
-    `regen-snapshot.ts`, never hand-edit.
+    `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
+    `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).
     Protects: existing test asset (not a unit) — leaned on by **P1–P4**, **P8**, **P11**.
 19. `sqlite-state-store` upsert is a read-merge-write inside **one** transaction; single-statement
     crash-atomicity claims in its header comment depend on this. `sqlite-state-store.ts:82-210`.
@@ -102,8 +117,8 @@ with cross-references noted inline.
     `GBrainSyncHook.ts:130-256`.
     Protects: **P9** (GBrain sync observability).
 22. Reminders: single-flight tick, claim-then-dispatch with only-if-unchanged reverts,
-    persist-before-send outbound to the `app:` registry. `reminders/tick.ts`, `store.ts:234-293`,
-    `outbound.ts:7-18`.
+    persist-before-send outbound to the `app:` registry. `reminders/tick.ts:130-177`,
+    `reminders/store.ts:234-293`, `reminders/outbound.ts:7-18`.
     Protects: **F1** (adopts `SupervisedLoop` in `reminders/tick.ts`).
 23. Task↔reminder link writes share the task mutation's transaction. `tasks/reminder-link.ts:97`.
     Protects: unprotected — covered by review only.
@@ -133,18 +148,21 @@ with cross-references noted inline.
     Protects: **F5**.
 29. Drain loops: email triage stub throws by design; substrate-callers must not break on the
     completion event; scribe/reflection abort checks precede buffer append.
+    `onboarding/history-import/substrate-callers.ts:486-510`, `scribe/extract.ts:141-153`,
+    `reflection/detector.ts:166-178`.
     Protects: **O8** (drainToText consolidation), **D5** (email backend split).
 30. Sidecar resolvers: mismatch error codes are per-core contracts; init-dedup finally-clears the
     pending map; adding traversal guards to email/code-gen/calendar is a scheduled behavior change,
-    not an incidental one.
+    not an incidental one. `cores/free/research/src/store-resolver.ts:90-200` (the one with the
+    `safeResolveProjectRoot` traversal guard), `cores/free/email/src/cache.ts:279-345`.
     Protects: **X2** (Typed Core module contract), **X4** (cores/runtime shared helpers).
 31. Open start-tokens are single-use JTI; the cookie is minted only on first claim; the two
     existing copies of this block must converge on ONE implementation with the same claim
-    semantics.
+    semantics. `open/composer.ts:1655-1760` (verbatim copies at `:1713-1726` and `:1738-1749`).
     Protects: **S1** (Per-install owner credential).
 32. Credential resolver precedence: env OAuth > API key > ambient (Open-only); the `'ambient'`
     tier threads NO token (the child process uses the OS Keychain).
-    `core-credential-resolver.ts`.
+    `gateway/cores/core-credential-resolver.ts:46-61`.
     Protects: **C6** (Credential-resolver unification).
 33. leak-gate allowlist is keyed to the literal `docs/AS_BUILT.md` path; Ralph prompts will
     recreate a root `AS-BUILT.md` unless repointed first. `scripts/ci/leak-gate-allowlist.txt:69-80`.
@@ -152,9 +170,11 @@ with cross-references noted inline.
     prompts), **G7** (Leak-gate NUL tripwire).
 34. `app/` bundle purity: the shared wire-types package must never import node-only modules or it
     bricks the Expo/Metro build — this constraint, not laziness, created the hand-written mirrors.
+    `app/lib/ws-envelope.ts:4-7` (the `node:sqlite`-bricks-the-RN-bundle comment).
     Protects: **L6** (`@neutronai/wire-types` leaf).
 35. Open composer's env-mutation-as-DI trick + `open/server.ts` process.env writes are duplicated
-    across the two boot paths and must converge to one implementation. (Cross-ref #1.)
+    across the two boot paths and must converge to one implementation. `open/server.ts:58-73`.
+    (Cross-ref #1.)
     Protects: **C1**.
 
 ## 5. Errors & fail-soft/fail-open (`critic-errors-observability.md` §8)
@@ -180,7 +200,7 @@ with cross-references noted inline.
     Protects: **D5**, **X2**.
 41. Reminder dispatcher degrades to `literalFallback` on ANY LLM failure so a reminder always
     delivers; outbound is persist-before-send with swallowed live-push throws.
-    `reminders/dispatcher.ts`, `reminders/outbound.ts:7-18`. (Cross-ref #22.)
+    `reminders/dispatcher.ts:203,232,237`, `reminders/outbound.ts:7-18`. (Cross-ref #22.)
     Protects: **F1**.
 42. Engagement gate fails soft to `all_messages` — a DB read error must never drop a chat turn.
     `gateway/http/chat-bridge.ts:2749-2791`.
@@ -195,7 +215,7 @@ with cross-references noted inline.
     Protects: **P9**.
 45. `InMemoryWebChatSenderRegistry` identity-guarded unregister, recovered-reply drain topic
     gating, and `recordInboundReceived`-before-`advance` are error/ordering invariants a "cleaner"
-    async refactor could reorder.
+    async refactor could reorder. `gateway/http/chat-bridge.ts:185` (registry class).
     Protects: **F5**, **D3**.
 46. Import honest-failure gate: `attempted>0 && succeeded==0 && projects==0` → `failed`, never a
     blank `completed` wow. `build-synthesis-import-runner.ts:203-220`. (Cross-ref #25.)
@@ -232,6 +252,7 @@ with cross-references noted inline.
     Protects: **W1**, **W3**.
 54. Staged/timer-fired sends must target the `app:` registry (PR#105); the durable rail/badge path
     is read from `button_prompts` history regardless of the live registry.
+    `channels/adapters/app-ws/adapter.ts:174-199` (app: registry fan-out).
     Protects: **F5**, **W5** (`[BEHAVIOR]` chat-core connection resilience).
 55. `hasAnyChainedSurface` and its field mapping must move together — already diverged for 3+
     fields per the gateway-services map; a registry-based fix must encode current order/set as an
@@ -253,39 +274,46 @@ with cross-references noted inline.
     without the other silently changes skip behavior. `engine.ts:~7813-7820`.
     Protects: **D9a–D9d**.
 60. 83 test files pin engine.ts behavior; the dead `acceptChoice` path is itself tested, so test
-    migration is part of its deletion, not optional.
+    migration is part of its deletion, not optional. `onboarding/interview/engine.ts:1322`
+    (acceptChoice path), pinned by `onboarding/interview/__tests__/`.
     Protects: **K4** (Engine dead surface: acceptChoice + slug flow).
 61. `sink.register` runs BEFORE `ptyHost.spawn` in the persistent-repl substrate.
     `persistent-repl-substrate.ts:~1678-1694`.
     Protects: **D1** (PoolRuntime reification).
 62. Identity-guarded eviction (unregisterIf / compare-delete) everywhere in the substrate — a
     respawn re-attaches the SAME `sessionId`; a split that "simplifies" to blind deletes
-    reintroduces a P2/P3 resume race.
+    reintroduces a P2/P3 resume race. `persistent-repl-substrate.ts:1005` (`ReplSink.unregisterIf`),
+    `:1958` (call site).
     Protects: **D1**.
 63. `pendingChildKills` consumption in `spawnResume` is one-owner-per-transcript.
+    `persistent-repl-substrate.ts:1431` (decl), `:3288-3305` (consume in spawnResume).
     Protects: **D1**.
 64. Ephemeral gate (`options.ephemeral && spec.session === undefined`) and the NEVER-enqueue-to-
     pending-respawns rule for ephemerals — a replayed internal prompt would otherwise land in the
-    user's chat.
+    user's chat. `persistent-repl-substrate.ts:2861-2877`.
     Protects: **D1**, **F6** (Cancellation chokepoint).
-65. Watchdog ticks scope the pool by owning `replRegistryPath` (`~3553-3556`); the `rt` (runtime)
-    threading must preserve that scoping or one instance respawns another's sessions.
+65. Watchdog ticks scope the pool by owning `replRegistryPath`; the `rt` (runtime) threading must
+    preserve that scoping or one instance respawns another's sessions.
+    `persistent-repl-substrate.ts:~3553-3556`.
     Protects: **D1**, **D2** (Substrate banner split).
 66. 48 test files under `persistent/__tests__` drive the REAL `ReplSink`/dev-channel seam — a
     split must not fork the sink into per-module instances.
+    `persistent-repl-substrate.ts:1005` (the `ReplSink` seam the suites drive).
     Protects: **D1**, **D2**.
 67. `open/server.ts:58-73` env mutation happens BEFORE `boot()` — untouched by the composer split
     but adjacent; config reads must not move out of the entrypoint. (Cross-ref #1.)
     Protects: **C1**.
 68. Trident fire substrate must be WARM per-repo-cwd and only `cc-agent-` gets
-    `enableToolBridge` — pool-key/instance-id prefixes are semantic. (Cross-ref #7.)
+    `enableToolBridge` — pool-key/instance-id prefixes are semantic.
+    `open/composer.ts:590-633,535-541`. (Cross-ref #7.)
     Protects: **D1**, **D2**.
 69. 30 `open/__tests__` wiring tests + gateway `*-production-composer` tests are the composer-split
     lock; a characterization test snapshotting which `CompositionInput` fields Open sets must be
-    added BEFORE the split and asserted unchanged after.
+    added BEFORE the split and asserted unchanged after. `open/composer.ts:396-3615` (the
+    composition closure the wiring tests lock).
     Protects: **C3a–C3d** (Carve `open/composer.ts` into wiring modules).
-70. Registry send must PROPAGATE throws (chat-bridge, `:202-219`); identity compare-and-delete
-    unregister (`:192-200,1523-1542`). (Cross-ref #27/#36.)
+70. Registry send must PROPAGATE throws; identity compare-and-delete unregister.
+    `gateway/http/chat-bridge.ts:202-219,192-200,1523-1542`. (Cross-ref #27/#36.)
     Protects: **D3**, **F5**.
 71. `startSession` runs `engine.start` BEFORE the JTI claim; a duplicate JTI returns `false`, not
     an error. `chat-bridge.ts:~1229-1400`.
@@ -296,15 +324,18 @@ with cross-references noted inline.
     `chat-bridge.ts:~1919-2717`.
     Protects: **D3**.
 73. `tag_gated` no-mention posts persist the transcript and send a no-render `agent_ack`.
+    `gateway/realmode-composer/build-live-agent-turn.ts:1135`,
+    `gateway/realmode-composer/build-landing-stack.ts:1473`.
     Protects: **D3**.
 74. Backup/restore facade: `last_attempted` written BEFORE the snapshot fires (scheduler contract);
     SNAPSHOT caps constants; sha/path validation errors are typed classes the HTTP surface maps to
     status codes — keep the error classes exported from the same specifier.
-    `project-backup-store.ts` facade.
+    `gateway/git/project-backup-store.ts:410` (facade class), `:210-217` (SNAPSHOT caps),
+    `:953-972` (last_attempted read/write).
     Protects: **D4** (project-backup-store split behind facade).
 75. `docs.tsx`'s `mutateGate` covering ALL mutations (create/rename/delete/binary) in one gate is
     the invariant — it has been fixed 4 separate times per review history; splitting into
-    per-cluster hooks must keep one shared gate.
+    per-cluster hooks must keep one shared gate. `app/app/projects/[id]/docs.tsx:207`.
     Protects: **D7** (docs.tsx hook extraction).
 
 ## 8. Layering / module graph (`critic-layering.md` §10)
@@ -316,12 +347,14 @@ with cross-references noted inline.
     Protects: **L3** (Remaining DAG edge cuts) — encodes the `connect-is-dynamic-only` rule.
 77. The Expo (`app/`) bundle must never transitively import server workspaces (`node:sqlite`
     bricks the RN bundle) — this is WHY `app/lib/ws-envelope.ts`, `doc-links.ts`, `tabs-client.ts`
-    exist as hand mirrors. (Cross-ref #34.)
+    exist as hand mirrors. `app/lib/ws-envelope.ts:4-7` (the constraint comment). (Cross-ref #34.)
     Protects: **L6**, **W1**.
 78. Gateway's export surface is a cross-repo ABI — the Managed deploy-gate keys on 8 literal
     surfaces in `neutron-managed/src/ops/open-contract.ts` (path+substring matched, NOT
     symbol-matched). Renaming/moving `gateway/boot-helpers.ts`, `gateway/index.ts`'s healthz
     handler, or splitting `open/composer.ts` breaks the gate even if every name survives.
+    `gateway/index.ts:474-486` (healthz, one of the 8 pinned surfaces);
+    contract at `neutron-managed/src/ops/open-contract.ts` (out-of-repo).
     Protects: **M1** (Contract-gate hardening + route-manifest adoption), **C7**
     (`realmode-composer/` → `gateway/wiring/` rename must ship a paired `open-contract.ts` update).
 79. `boot-helpers.ts` must never import `gateway/index.ts` (TLA entry↔composer cycle);
@@ -329,11 +362,12 @@ with cross-references noted inline.
     Protects: **L3**, **C2** (boot-helpers split).
 80. `process.env` is the de-facto DI bus at boot; moving `resolveOpenDbPath` out of
     `open/owner-identity.ts` must preserve the exact DB-path/slug resolution order for both
-    entrypoints. (Cross-ref #1/#67.)
+    entrypoints. `open/owner-identity.ts:61`. (Cross-ref #1/#67.)
     Protects: **C1**.
 81. Moving value constants changes module-init graphs (e.g. `collectTokensToString`,
     `TELEGRAM_BIND_TOKEN_TTL_MS`) — several modules read env at module-load time; relocation
     reorders those reads. Prefer re-export shims for one release.
+    `gateway/realmode-composer/build-llm-call-substrate.ts:793` (`collectTokensToString`).
     Protects: **L5** (Relative-import autofix sweeps).
 82. `slugifyProjectId` (`onboarding/wow-moment/project-identity.ts:41-44`) must stay byte-identical
     to gateway's `defaultProjectIdSlugifier` — already guarded by a drift test; keep the test until
@@ -342,14 +376,17 @@ with cross-references noted inline.
     `critic-duplication.md` §8.
 83. `docs/AS_BUILT.md` leak-gate literal-path coupling — module renames that touch docs or
     allowlisted paths re-arm retired-vocab CI rules; move allowlist entries in the same PR as any
-    rename. (Cross-ref #33.)
+    rename. `scripts/ci/leak-gate-allowlist.txt:69-80`. (Cross-ref #33.)
     Protects: **K6**, **K7**, **G7**.
-84. Type-only vs. value edges: two of the layering cuts are type-erased (zero runtime risk); the
-    rest move real values and each needs its consumer's existing test suite run.
+84. Type-only vs. value edges: two of the layering cuts (edges #10/#11) are type-erased (zero
+    runtime risk); the rest move real values and each needs its consumer's existing test suite run.
+    `runtime/connect-handlers.ts:1-8` (representative `import type`-only shadow edge; see
+    `critic-layering.md:429`).
     Protects: **L3**.
 85. `cores/free/research` frozen model constants must NOT be converted to `getBestModel()` thunks
     while "just fixing imports" — that flips runtime model selection, a deliberate, separately
-    verified change.
+    verified change. `cores/free/research/src/research-orchestrator.ts:177`
+    (`DEFAULT_MODEL_PREFERENCE`, imported `SONNET_MODEL`/`FAST_MODEL`).
     Protects: **X4** (cores/runtime shared helpers).
 
 ## 9. Lifecycle & concurrency (`critic-lifecycle-concurrency.md` §5)
@@ -394,31 +431,33 @@ with cross-references noted inline.
     ABI-facing files).
 96. Cross-repo ABI property names (`internal_handle` option bags; `realmode-composer`/
     `boot-helpers` export names + paths) are reachable only via `NEUTRON_GRAPH_COMPOSER_MODULE` —
-    invisible to in-repo grep.
+    invisible to in-repo grep. `gateway/index.ts:540` (the composer-module resolution seam).
     Protects: **M1**, **N3**.
 97. `packageNameToSlug` couples core-package renames to already-installed data — a rename must
-    ship a compat/migration path, not a pure rename.
+    ship a compat/migration path, not a pure rename. `cores/runtime/loader.ts:61-81`.
     Protects: **N4** (project_slug → owner_slug), **N5** (Directory/name hygiene).
 98. `ChannelKind` strings are persisted row values — a rename is a data migration, not a
-    find-and-replace.
+    find-and-replace. `channels/types.ts:12`.
     Protects: **N6** (`[BEHAVIOR]` ChannelKind persisted-value unification).
 99. `docs/AS_BUILT.md` leak-gate exemptions are keyed to LITERAL paths — changelog consolidation
-    must move allowlist entries in the same commit. (Cross-ref #33/#83.)
+    must move allowlist entries in the same commit. `scripts/ci/leak-gate-allowlist.txt:69-80`.
+    (Cross-ref #33/#83.)
     Protects: **K6**, **K7**, **G7**.
 100. `prompts/*.md` loads are silent-fail-soft; the `KNOWN_PROMPTS`≡disk parity test pins dead
-     files in place until deleted deliberately.
+     files in place until deleted deliberately. `prompts/template.ts:140-147`.
      Protects: **K10** (Public in-repo SPEC.md + repoint agent prompts), **K6**.
 101. Migration numbers and migration 0074's `tenant_provisioned` string are immutable — never
-     renumber a migration file.
+     renumber a migration file. `migrations/0074_rename_tenant_provisioned_phase.sql:40`.
      Protects: **P2**, **P3**.
 102. `.url_slug` file precedence over `NEUTRON_INSTANCE_SLUG` env resolver.
      `gateway/index.ts:147-157`.
      Protects: **C1**, **N4**.
 103. Healthz `project_slug` field, start-token dual claims, and JWT `slug` claim are wire contracts
-     — renames there are cross-repo breaking changes.
+     — renames there are cross-repo breaking changes. `gateway/index.ts:474-486` (healthz),
+     `jwt-validator/claims.ts:26` (jwt `slug`).
      Protects: **M1**.
 104. `KNOWN_PROMPTS` throws on unknown prompt names — the file and the registry entry must change
-     together.
+     together. `prompts/template.ts:140-147`.
      Protects: **K10**.
 105. `deploymentMode`/`isLegalTransition` `'managed'` defaults are pinned by test matrices — rename
      the vocabulary token, do not change the default VALUES.
@@ -434,7 +473,7 @@ with cross-references noted inline.
      Protects: **S3** (Secrets-at-rest hygiene).
 107. The `SecretsStore` SQL column is literally named `project_slug` but holds the FROZEN
      `internal_handle`; a caller passing `url_slug` silently loses all credentials — enforced by
-     prose convention only. (Cross-ref #95.)
+     prose convention only. `auth/secrets-store.ts:10-27`. (Cross-ref #95.)
      Protects: **N1**, **S3** (branded-type fix belongs to security per the report).
 108. Credential-pool threading into spawns explicitly UNSETS `ANTHROPIC_API_KEY`/
      `ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN` before setting ONLY the selected credential;
