@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test, mock } from 'bun:test'
-import { createLandingServer, type ChatBridge, type PendingChatClaim } from '../server.ts'
+import { createLandingServer, computeAssetEtag, type ChatBridge, type PendingChatClaim } from '../server.ts'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -39,6 +39,24 @@ function makeBridge(overrides: Partial<ChatBridge> = {}): ChatBridge {
     ...overrides,
   }
 }
+
+// ISSUES #353 — pure function backing the /chat-react.js cache-busting ETag
+// (see `createLandingServer`'s route handler + module header above it).
+describe('computeAssetEtag', () => {
+  test('is deterministic for the same bytes', () => {
+    expect(computeAssetEtag('const x = 1;')).toBe(computeAssetEtag('const x = 1;'))
+  })
+
+  test('changes when the bytes change (the whole point of cache-busting)', () => {
+    expect(computeAssetEtag('const x = 1;')).not.toBe(computeAssetEtag('const x = 2;'))
+  })
+
+  test('is a quoted opaque string (RFC 9110 ETag syntax)', () => {
+    const etag = computeAssetEtag('hello world')
+    expect(etag.startsWith('"')).toBe(true)
+    expect(etag.endsWith('"')).toBe(true)
+  })
+})
 
 describe('createLandingServer', () => {
   test('GET /chat returns the React chat shell', async () => {
@@ -69,6 +87,50 @@ describe('createLandingServer', () => {
     // The bundle carries React + assistant-ui + chat-core — large + non-empty.
     expect(body.length).toBeGreaterThan(100_000)
   }, 30_000)
+
+  // ISSUES #353 — cache-busting: no unversioned `max-age` (browsers must
+  // revalidate) + a strong content ETag that changes iff the bundle's bytes do,
+  // so a redeploy is never masked by a stale cached copy. See `computeAssetEtag`.
+  describe('/chat-react.js cache-busting (#353)', () => {
+    test('serves cache-control: no-cache with a strong ETag over the bundle bytes', async () => {
+      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
+      const res = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('cache-control')).toBe('no-cache')
+      const etag = res.headers.get('etag')
+      expect(etag).not.toBeNull()
+      const body = await res.text()
+      expect(etag).toBe(computeAssetEtag(body))
+    }, 30_000)
+
+    test('a matching If-None-Match round-trips a 304 with no body (unchanged bytes)', async () => {
+      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
+      const first = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+      const etag = first.headers.get('etag')
+      expect(etag).not.toBeNull()
+      const second = await handler.fetch(
+        new Request('http://x.test/chat-react.js', { headers: { 'if-none-match': etag as string } }),
+        fakeServer,
+      )
+      expect(second.status).toBe(304)
+      expect(await second.text()).toBe('')
+      expect(second.headers.get('etag')).toBe(etag)
+    }, 30_000)
+
+    test('a stale If-None-Match (simulating a post-deploy client) gets a fresh 200', async () => {
+      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
+      const res = await handler.fetch(
+        new Request('http://x.test/chat-react.js', { headers: { 'if-none-match': '"sha256-stale-from-before-deploy"' } }),
+        fakeServer,
+      )
+      expect(res.status).toBe(200)
+      const body = await res.text()
+      expect(body.length).toBeGreaterThan(100_000)
+    }, 30_000)
+  })
 
   test('GET /ws/chat now 404s — the legacy onboarding socket was removed (chat moved to /ws/app/chat)', async () => {
     const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })

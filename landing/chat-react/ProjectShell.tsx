@@ -53,6 +53,7 @@ import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
 import { useTabOverflow, OverflowMenu } from './tab-overflow.tsx'
 import { useWorkActivity, JobStartDrawer } from './work-activity.tsx'
+import { ThemeToggle } from './ThemeToggle.tsx'
 import type { ChatViewModel } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig } from './config.ts'
@@ -546,10 +547,14 @@ export function ProjectShell({
       <div className="car-content">
         {/* Tab band (seated tabs): the workspace-identity seat (title), then the
             section tabs. FIX #350 — on mobile the title sits on its own line with
-            the tab band below it (CSS stacks `.car-topbar` at <1024px); the
-            light/dark toggle no longer lives here (it moved to General → Admin →
-            Appearance, deduped across viewports). Overflowing tabs collapse into
-            a "⋯" menu rather than scrolling. */}
+            the tab band below it (CSS stacks `.car-topbar` at <1024px). FIX #360 —
+            #350 over-removed the light/dark toggle from EVERY viewport when it
+            moved into General → Admin → Appearance; that labeled control stays the
+            mobile home (no room in the stacked mobile band), but desktop has the
+            room back, so the toggle is restored here gated to `isDesktop` only —
+            no duplicate control on mobile. Both share the same `useTheme` state, so
+            they stay in sync. Overflowing tabs collapse into a "⋯" menu rather
+            than scrolling. */}
         <div className="car-topbar">
           <WorkspaceSeat emoji={seatEmoji} name={seatName} />
           <TabBar
@@ -560,6 +565,7 @@ export function ProjectShell({
             workRunning={work.running > 0}
             mobile={!isDesktop}
           />
+          {isDesktop ? <ThemeToggle /> : null}
         </div>
         {/* The chat STAGE (below the band): the tab panels. The desktop Work
             slide-out no longer lives here — it's mounted INSIDE the Chat view

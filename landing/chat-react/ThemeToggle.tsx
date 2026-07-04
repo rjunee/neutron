@@ -54,11 +54,14 @@ export function ThemeToggle(): React.JSX.Element {
 
 /**
  * FIX #350 — the LABELED light/dark control for the settings surface. The
- * top-bar cycling {@link ThemeToggle} was removed from every viewport; the
- * theme preference now lives here (General → Admin → Appearance) as an explicit
+ * theme preference also lives here (General → Admin → Appearance) as an explicit
  * three-way segmented control so the choice is discoverable, not a mystery cycle.
- * Shares the exact same {@link useTheme} state (localStorage + `data-theme`), so
- * it drives the whole UI's theme the same way the old toggle did.
+ * FIX #360: #350 removed the top-bar cycling {@link ThemeToggle} from EVERY
+ * viewport, but mobile's stacked top bar has no room for it — only DESKTOP got
+ * the toggle back (`ProjectShell.tsx`, gated on `isDesktop`); mobile keeps this
+ * control as its only theme surface (no duplicate). Shares the exact same
+ * {@link useTheme} state (localStorage + `data-theme`), so both controls (and
+ * the top-bar toggle) drive the whole UI's theme in lockstep.
  */
 export function ThemeControl(): React.JSX.Element {
   const { preference, resolved, setPreference } = useTheme()

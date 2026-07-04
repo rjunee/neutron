@@ -1155,6 +1155,22 @@ export function chatAuthGateCsp(): string {
 }
 
 /**
+ * ISSUES #353 — strong content ETag for a served asset's bytes. Pure + total;
+ * used to cache-bust `/chat-react.js` (see `resolveChatReactJs`'s caller in
+ * `createLandingServer`): the response carries `cache-control: no-cache`
+ * (always revalidate) plus this ETag, so the browser must round-trip a
+ * conditional GET on every load — a redeploy that changed the bundle's bytes
+ * gets a fresh 200 with the new code instead of silently replaying a stale
+ * cached copy from a prior `max-age`-cached response (the "work pane empty
+ * until a manual hard-refresh" bug). Unchanged bytes still get a cheap 304 (no
+ * re-download). Quoted per RFC 9110 — ETag values are a DQUOTE-wrapped opaque
+ * string, compared byte-for-byte against `if-none-match`.
+ */
+export function computeAssetEtag(bytes: string): string {
+  return `"sha256-${createHash('sha256').update(bytes, 'utf8').digest('hex')}"`
+}
+
+/**
  * Bun.serve handler that surfaces the landing `/chat` (HTTP) SPA shell
  * plus the rest of the landing HTTP routes. Chat moved to the unified
  * `/ws/app/chat` Expo-app socket, so this server no longer upgrades a
@@ -1271,6 +1287,15 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       return null
     }
   }
+  // ISSUES #353 — the ETag is derived from the resolved bundle bytes, which are
+  // themselves cached for the process lifetime (`chat_react_js_cache` above is
+  // set once, either from the prebuilt file or the first `Bun.build`), so the
+  // hash only needs computing once per process too.
+  let chat_react_js_etag: string | null = null
+  function getChatReactJsEtag(js: string): string {
+    if (chat_react_js_etag === null) chat_react_js_etag = computeAssetEtag(js)
+    return chat_react_js_etag
+  }
   async function resolveInviteJs(): Promise<string | null> {
     if (invite_js_cache !== null) return invite_js_cache
     if (!existsSync(invite_ts_path)) return null
@@ -1386,9 +1411,21 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       if (url.pathname === '/chat-react.js' && req.method === 'GET') {
         const js = await resolveChatReactJs()
         if (js === null) return new Response('chat-react.js unavailable', { status: 404 })
-        return new Response(js, {
-          headers: { 'content-type': 'application/javascript; charset=utf-8' },
-        })
+        // ISSUES #353 — cache-bust the bundle. No `max-age` (so the browser
+        // always revalidates) + a strong content ETag: unchanged bytes round-trip
+        // a cheap 304, but the instant a redeploy changes the bundle the ETag
+        // changes with it and the very next load gets the new bytes — no stale
+        // cache, no manual hard-refresh required.
+        const etag = getChatReactJsEtag(js)
+        const headers = {
+          'content-type': 'application/javascript; charset=utf-8',
+          'cache-control': 'no-cache',
+          etag,
+        }
+        if (req.headers.get('if-none-match') === etag) {
+          return new Response(null, { status: 304, headers })
+        }
+        return new Response(js, { headers })
       }
       // ISSUES #208 — mobile install/landing page (see construction note).
       if (mobile_html !== null && url.pathname === '/mobile' && req.method === 'GET') {

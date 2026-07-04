@@ -27,6 +27,7 @@
  * chat surface leaves this off (default) and is unaffected.
  */
 
+import { useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeSanitize from 'rehype-sanitize'
@@ -35,6 +36,44 @@ import { parseWebDocLinkHref } from './doc-link-nav.ts'
 
 const REMARK_PLUGINS = [remarkGfm]
 const REHYPE_PLUGINS = [rehypeSanitize]
+
+/** FIX #359 — Telegram-style one-tap copy button on fenced code blocks. Wraps
+ *  the sanitized `<pre>` in a positioned container so a small button can sit in
+ *  its corner (CSS shows it on hover/focus; always visible on touch via
+ *  `(hover: none)`, since there's no hover gesture to reveal it there). Reads
+ *  the rendered `<pre>`'s own text — exactly what's on screen, post-sanitize —
+ *  rather than re-deriving it from the markdown AST. */
+function CodeBlock(props: React.ComponentPropsWithoutRef<'pre'>): React.JSX.Element {
+  const preRef = useRef<HTMLPreElement>(null)
+  const [copied, setCopied] = useState(false)
+  const handleCopy = (): void => {
+    const text = preRef.current?.textContent ?? ''
+    if (text.length === 0) return
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => {
+        // Clipboard API unavailable/denied (e.g. insecure context, permission
+        // denied) — leave the button inert rather than crash the render.
+      })
+  }
+  return (
+    <div className="car-md-pre-wrap">
+      <pre {...props} ref={preRef} />
+      <button
+        type="button"
+        className="car-md-copy"
+        aria-label={copied ? 'Copied to clipboard' : 'Copy code'}
+        onClick={handleCopy}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  )
+}
 
 /**
  * Strip a leading YAML frontmatter fence from a document body so it is not
@@ -92,6 +131,7 @@ export function Markdown({
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
         components={{
+          pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
           a: ({ node: _node, href, ...props }) => (
             <a
               {...props}
