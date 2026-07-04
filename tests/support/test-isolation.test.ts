@@ -25,7 +25,7 @@ import {
 // (see the "overlapping homes restore LIFO" test below).
 let openHomes: IsolatedHome[] = []
 afterEach(() => {
-  for (let i = openHomes.length - 1; i >= 0; i--) openHomes[i].restore()
+  for (const h of [...openHomes].reverse()) h.restore()
   openHomes = []
 })
 function track(h: IsolatedHome): IsolatedHome {
