@@ -101,6 +101,32 @@ docs/plans/refactor-orchestration-STATUS.md:tenant-purged
 docs/plans/refactor-orchestration-STATUS.md:tenant-word
 docs/plans/refactor-orchestration-STATUS.md:tenant-code
 
+# tasks/history-import-seeder.ts embeds the literal `tenant:` as a FROZEN
+# hash-seed / domain-separation label fed into the SHA-256 that mints every
+# `hi_<sha256>` history-import task id. It predates the tenant→owner purge and is
+# NOT live multi-tenant surface — but changing it would re-mint every existing
+# task id and break the idempotent re-seed guard, so it is locked. Before unit G7
+# the field separator was a RAW 0x00 NUL byte that made grep classify the whole
+# file as binary and skip it, hiding this token entirely; G7 replaced the NUL
+# with the byte-identical `\x00` escape (hash-stability proven by test) so the
+# gate now SEES the file — hence this exact-path exemption for the retired-vocab
+# rules it now legitimately matches (the seed literal + its explanatory comment).
+# PII / hosted-domain / secret rules stay ARMED on the file.
+tasks/history-import-seeder.ts:tenant-purged
+tasks/history-import-seeder.ts:tenant-word
+
+# cores/free/research/migrations/0001_research_claims.sql ships an index named
+# `research_tasks_tenant_project_status_idx`. Migration history is immutable —
+# a shipped migration is never edited — so the historic `tenant` in this index
+# name is a permanent, reviewed false-positive (the `migrations/*` globs above
+# do NOT cover this cores/-nested migration dir, so it is named by exact path).
+# Word-bounded rules do not currently trip on the `_tenant` substring, but the
+# exemption is carried explicitly so the token is documented and stays covered
+# if a rule ever broadens. PII / hosted-domain / secret rules stay ARMED.
+cores/free/research/migrations/0001_research_claims.sql:tenant-purged
+cores/free/research/migrations/0001_research_claims.sql:tenant-word
+cores/free/research/migrations/0001_research_claims.sql:tenant-code
+
 # docs/INVARIANTS.md (unit G10) is the tracked distillation of the audit critic
 # reports' load-bearing-subtleties sections. Quoting the naming-vocab critic's
 # invariants (the frozen `tenant:` hash-seed prefix, migration 0074's

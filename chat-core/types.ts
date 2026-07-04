@@ -678,7 +678,7 @@ export function parseReactions(raw: unknown): readonly MessageReaction[] {
     const device_id = r['device_id']
     if (typeof emoji !== 'string' || emoji.length === 0) continue
     if (typeof device_id !== 'string' || device_id.length === 0) continue
-    const key = `${emoji} ${device_id}`
+    const key = `${emoji}\x00${device_id}`
     if (seen.has(key)) continue
     seen.add(key)
     out.push({ emoji, device_id })

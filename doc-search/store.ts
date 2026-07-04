@@ -327,7 +327,7 @@ export class DocSearchIndex {
     // Collapse to the best (lowest-bm25) chunk per file BEFORE limiting.
     const bestByFile = new Map<string, ChunkRow>()
     for (const r of rows) {
-      const key = `${r.project} ${r.relpath}`
+      const key = `${r.project}\x00${r.relpath}`
       const existing = bestByFile.get(key)
       if (existing === undefined || r.bm25 < existing.bm25) bestByFile.set(key, r)
     }
