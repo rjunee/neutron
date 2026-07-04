@@ -19,9 +19,8 @@ const CONNECT_SURFACE_FILES = [
   '../invite-preview-handler.ts',
   '../trusted-accept-handler.ts',
   '../../gateway/http/app-connect-invite.ts',
-  // `../../landing/connect-accept.ts` + `../../landing/connect-disclosure.ts`
-  // were deleted (refactor plan §K1, wave-1 kill — zero non-test importers;
-  // the accept/disclosure surfaces they implemented were dead).
+  '../../landing/connect-accept.ts',
+  '../../landing/connect-disclosure.ts',
 ]
 
 // GBrain / memory write CALLS that must not appear in any of these surfaces. We
