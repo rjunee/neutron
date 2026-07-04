@@ -60,12 +60,12 @@ describe('ProjectCredentialStore — migration + basic CRUD', () => {
     expect(rec.service).toBe('meta_ads')
     expect(rec.label).toBe('prod token')
     // The record type carries no ciphertext/plaintext field.
-    expect((rec as Record<string, unknown>).ciphertext).toBeUndefined()
-    expect((rec as Record<string, unknown>).plaintext).toBeUndefined()
+    expect((rec as unknown as Record<string, unknown>).ciphertext).toBeUndefined()
+    expect((rec as unknown as Record<string, unknown>).plaintext).toBeUndefined()
 
     const list = store.listForProject(OWNER, 'proj-a')
     expect(list.map((r) => r.service)).toEqual(['meta_ads'])
-    expect((list[0] as Record<string, unknown>).ciphertext).toBeUndefined()
+    expect((list[0] as unknown as Record<string, unknown>).ciphertext).toBeUndefined()
   })
 
   test('ciphertext at rest — the raw DB row never holds the plaintext', async () => {

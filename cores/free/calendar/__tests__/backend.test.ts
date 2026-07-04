@@ -380,7 +380,7 @@ describe('buildGoogleCalendarClient — OAuth + REST wrapper', () => {
       fetchImpl: async (input, init) => {
         seen.url = typeof input === 'string' ? input : input.toString()
         seen.method = (init?.method as string) ?? 'GET'
-        seen.headers = new Headers(init?.headers as HeadersInit | undefined)
+        seen.headers = new Headers(init?.headers)
         const body = JSON.stringify({
           items: [
             {

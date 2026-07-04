@@ -36,8 +36,8 @@ const OWNER = 'demo'
 const __dispatchers = new Map<string, (req: Request) => Promise<Response>>()
 let __gatewaySeq = 0
 const __realFetch = globalThis.fetch.bind(globalThis)
-const fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-  const req = input instanceof Request ? input : new Request(input, init)
+const fetch = ((input: Request | string | URL, init?: RequestInit): Promise<Response> => {
+  const req = input instanceof Request ? input : new Request(input instanceof URL ? input.href : input, init)
   const dispatch = __dispatchers.get(new URL(req.url).host)
   if (dispatch !== undefined) return dispatch(req)
   return __realFetch(input as Parameters<typeof __realFetch>[0], init)

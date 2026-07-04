@@ -104,7 +104,7 @@ interface FetchCall {
 
 interface FakeGoogle {
   fetch: (
-    input: URL | RequestInfo,
+    input: URL | Request | string,
     init?: RequestInit,
   ) => Promise<Response>
   calls: FetchCall[]
@@ -126,7 +126,7 @@ function buildFakeGoogle(): FakeGoogle {
   const calls: FetchCall[] = []
   let nextId = 1
   const fetch = async (
-    input: URL | RequestInfo,
+    input: URL | Request | string,
     init?: RequestInit,
   ): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url

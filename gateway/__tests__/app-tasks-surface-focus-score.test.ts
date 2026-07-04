@@ -29,8 +29,8 @@ import { createAppTasksSurface } from '../http/app-tasks-surface.ts'
 const __composedHandlers = new Map<string, ComposedHttpHandler>()
 let __gatewaySeq = 0
 const __realFetch = globalThis.fetch.bind(globalThis)
-const fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-  const req = input instanceof Request ? input : new Request(input, init)
+const fetch = ((input: Request | string | URL, init?: RequestInit): Promise<Response> => {
+  const req = input instanceof Request ? input : new Request(input instanceof URL ? input.href : input, init)
   const composed = __composedHandlers.get(new URL(req.url).host)
   if (composed !== undefined) return Promise.resolve(composed.fetch(req, undefined as never))
   return __realFetch(input as Parameters<typeof __realFetch>[0], init)

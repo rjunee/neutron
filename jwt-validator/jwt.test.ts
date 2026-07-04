@@ -3,8 +3,8 @@ import {
   exportJWK,
   generateKeyPair,
   type JSONWebKeySet,
+  type KeyLike,
   SignJWT,
-  type CryptoKey,
   type JWK,
 } from 'jose'
 import {
@@ -18,7 +18,7 @@ import {
 
 interface KeyMaterial {
   kid: string
-  privateKey: CryptoKey
+  privateKey: KeyLike
   publicJwk: JWK
 }
 

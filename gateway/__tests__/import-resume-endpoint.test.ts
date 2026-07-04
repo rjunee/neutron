@@ -134,7 +134,7 @@ describe('POST /api/import/<job_id>/resume', () => {
     )
     expect(res).not.toBeNull()
     expect(res!.status).toBe(200)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.ok).toBe(true)
     expect(body.prior_job_id).toBe('job-old')
     expect(body.job_id).toBe('job-new')
@@ -175,7 +175,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/nonexistent/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(404)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.error).toBe('job_not_found')
     expect(runnerStartCalls).toBe(0)
   })
@@ -187,7 +187,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(409)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.error).toBe('not_resumable')
     expect(body.status).toBe('completed')
     expect(runnerStartCalls).toBe(0)
@@ -201,7 +201,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(409)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.error).toBe('source_zip_missing')
     expect(body.source).toBe('chatgpt-zip')
     expect(runnerStartCalls).toBe(0)
@@ -277,7 +277,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(200)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.ok).toBe(true)
     expect(body.job_id).toBe('job-new')
 
@@ -359,7 +359,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(409)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.error).toBe('no_onboarding_state')
     expect(body.project_slug).toBe(OWNER)
 
@@ -396,7 +396,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(409)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.error).toBe('no_onboarding_state')
   })
 
@@ -416,7 +416,7 @@ describe('POST /api/import/<job_id>/resume', () => {
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
     expect(res!.status).toBe(409)
-    const body = await res!.json()
+    const body = (await res!.json()) as Record<string, any>
     expect(body.error).toBe('payload_unavailable')
     expect(runnerStartCalls).toBe(0)
   })

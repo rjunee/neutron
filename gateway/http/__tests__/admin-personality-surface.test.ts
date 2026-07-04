@@ -108,7 +108,7 @@ async function startGateway(opts: StartOptions = {}): Promise<Harness> {
   }
 }
 
-function bearer(headers: HeadersInit = {}): Headers {
+function bearer(headers: Record<string, string> = {}): Headers {
   const h = new Headers(headers)
   h.set('authorization', 'Bearer dev:test-user')
   return h
