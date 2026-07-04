@@ -27,7 +27,7 @@
 import type { Substrate } from '../../runtime/substrate.ts'
 import type { Event } from '../../runtime/events.ts'
 import { getBestModel } from '../../runtime/models.ts'
-import { extractJsonObject } from '../history-import/substrate-callers.ts'
+import { extractJsonObject } from './json-extract.ts'
 import {
   SYNTHESIS_CEILING_MS_DEFAULT,
   SYNTHESIS_IDLE_TIMEOUT_MS_DEFAULT,

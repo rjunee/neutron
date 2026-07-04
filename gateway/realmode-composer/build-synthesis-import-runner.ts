@@ -45,8 +45,8 @@ import type {
   ImportJobStatus,
   ImportResult,
   ImportSource,
+  SourceParser,
 } from '../../onboarding/history-import/types.ts'
-import type { SourceParser } from '../../onboarding/history-import/job-runner.ts'
 import { buildDefaultSourceParser } from '../../onboarding/history-import/default-source-parser.ts'
 import type { GmailClient } from '../../onboarding/history-import/oauth-gmail.ts'
 import type { CalendarClient } from '../../onboarding/history-import/oauth-calendar.ts'

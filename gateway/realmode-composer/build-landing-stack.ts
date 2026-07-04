@@ -81,12 +81,11 @@ import { buildProjectDocComposer } from './build-project-doc-composer.ts'
 import { buildProjectPageIndexer } from './build-project-page-indexer.ts'
 import { buildGatewayAnthropicMessagesClient } from './build-llm-router.ts'
 import {
-  buildImportJobRunnerHook,
   buildImportResumeReadinessProbe,
   ChainedImportPayloadResolver,
   FilesystemImportPayloadResolver,
   UrlPasteImportPayloadResolver,
-} from './build-import-job-runner.ts'
+} from './import-payload-resolvers.ts'
 import { buildSynthesisSession } from './build-synthesis-session.ts'
 import { buildSynthesisImportJobRunner } from './build-synthesis-import-runner.ts'
 
@@ -378,17 +377,17 @@ export interface BuildLandingStackInput {
   wowPromptResolutionNow?: () => number
   /**
    * T4 (2026-05-13) — history-import job-runner hook. When provided,
-   * the engine routes the `import_offered` zip choices through it;
-   * when null/undefined, the factory default-builds a real
-   * `ImportJobRunner` via `buildImportJobRunnerHook(...)` so production
-   * walks the spec'd path by construction. Tests inject a recorder
-   * via this field directly.
+   * the engine routes the `import_offered` zip choices through it (an
+   * injected runner always wins). When null/undefined, the factory builds
+   * the SYNTHESIS runner iff `importUseSynthesis === true` (the Open
+   * single-owner path — `open/composer.ts` opts in), otherwise no runner is
+   * wired and the engine collapses the zip choices into its skip path. The
+   * retired per-chunk `buildImportJobRunnerHook` default was deleted (K3).
+   * Tests inject a recorder via this field directly.
    *
-   * Argus-trapping shape: the explicit `null` carve-out lets test
-   * harnesses opt out (legacy boot paths during the wiring rollout);
-   * production never passes null because the engine's import_offered
-   * branch silently collapses to skip when unwired. Per the brief:
-   * "Production composer ALWAYS wires the hook".
+   * Argus-trapping shape: the explicit `null` carve-out lets test harnesses
+   * opt out; production reaches the real path via `importUseSynthesis: true`,
+   * not by passing a runner here.
    */
   importJobRunner?: ImportJobRunnerHook | null
   /**
@@ -401,40 +400,16 @@ export interface BuildLandingStackInput {
    */
   importPayloadResolver?: ImportPayloadResolver | null
   /**
-   * T4 (2026-05-13) — Pass-1 LLM caller override (test seam). When
-   * supplied AND `importJobRunner` is left undefined, threaded into
-   * the default-built runner so tests can inject deterministic mocks
-   * without rebuilding the entire runner.
-   */
-  importPass1Llm?:
-    | import('../../onboarding/history-import/pass1-triage.ts').Pass1LlmCall
-  /**
-   * T4 (2026-05-13) — Pass-2 LLM caller override (test seam).
-   */
-  importPass2Llm?:
-    | import('../../onboarding/history-import/pass2-synthesis.ts').Pass2LlmCall
-  /**
-   * T7 (2026-05-14) — Substrate used to default-build the Pass-1 + Pass-2
-   * LLM callers when neither `importPass1Llm` nor `importPass2Llm` is
-   * supplied. Production composer constructs a `createClaudeCodeSubstrateAuto(...)`
-   * from the resolved Anthropic credentials (Max OAuth > BYO key > env)
-   * and passes it here so a real import dispatches Haiku 4.5 + Opus 4.7
-   * end-to-end. Per docs/plans/P2-onboarding.md § 2.3 + § 4.7.
+   * Substrate the LIVE synthesis import path dispatches through. The Open
+   * single-owner composer constructs a `createClaudeCodeSubstrateAuto(...)`
+   * from the resolved Anthropic credentials (Max OAuth > BYO key > env) and
+   * passes it here; `buildSynthesisSession` runs the ONE accumulating
+   * synthesis session over it. Tests drive the path with a deterministic
+   * `Substrate` stub. When omitted, the synthesis runner surfaces an honest
+   * "no LLM substrate" failure the engine routes to gap-fill.
    *
-   * Tests that drive Pass-1 / Pass-2 paths inject a deterministic
-   * `Substrate` stub here so the regression suite exercises the same
-   * default-builder production walks (instead of side-stepping the
-   * wiring via the `importPass1Llm` / `importPass2Llm` overrides).
-   *
-   * Resolution order inside `buildImportJobRunnerHook`:
-   *   1. Caller-supplied `importPass1Llm` / `importPass2Llm` win
-   *      (back-compat with T4 tests).
-   *   2. Else: when `importSubstrate` is supplied, build Pass-1 (Haiku)
-   *      + Pass-2 (Opus) callers via
-   *      `buildPass1SubstrateCaller` / `buildPass2SubstrateCaller`.
-   *   3. Else: fall back to the T4 `llm_unwired` throwing closure so the
-   *      engine's `failed` sub_step UX still surfaces a user-visible
-   *      failure (CLAUDE.md "Spec is the source of truth").
+   * (K3, 2026-07-03) — the per-chunk `importPass1Llm` / `importPass2Llm`
+   * caller-override seams were removed with the dead per-chunk runner.
    */
   importSubstrate?: import('../../runtime/substrate.ts').Substrate
   /**
@@ -450,59 +425,23 @@ export interface BuildLandingStackInput {
    */
   importUseSynthesis?: boolean
   /**
-   * P2-v2 S21 (2026-05-17) — telemetry hook fired when the Pass-2
-   * substrate caller falls back from Opus 4.7 to Sonnet 4.6 on a 429.
-   * Production composer wires this against the per-instance
-   * `OnboardingTelemetry`; tests pass a recorder. Optional — when
-   * unset, the substrate caller still falls back to Sonnet (the
-   * user benefits unconditionally) but no telemetry row lands.
-   * See `BuildImportJobRunnerHookInput.onSonnetFallback` for the
-   * full contract.
-   */
-  importOnSonnetFallback?: import('../../onboarding/history-import/index.ts').Pass2SonnetFallbackHook
-  /**
-   * v0.1.85 (2026-05-23) — credential-kind resolver threaded to the
-   * runner so Pass-1 chunk size adapts per-credential at job-start
-   * time. Production composer wires this to a callback that re-resolves
-   * the Anthropic CredentialPool via the same `resolveLlmCredentials`
-   * path the lazy `importSubstrate.resolvePool` uses, then returns the
-   * primary credential's `.kind`. Max OAuth (`'oauth'`) → 4096-token
-   * chunks (stays under Anthropic's per-call rate-limit gate);
-   * everything else → 50K-token chunks (the throughput default).
-   *
-   * Optional — tests inject a static resolver (constant `'oauth'` /
-   * `'api_key'`) to exercise the chunk-size override deterministically.
-   * When omitted, the runner preserves the legacy single-target
-   * behaviour for back-compat with pre-v0.1.85 test fixtures.
-   */
-  importGetCurrentCredentialKind?: import('../../onboarding/history-import/index.ts').CredentialKindResolver
-  /**
-   * 2026-05-25 (import-pipeline-resilience sprint, Bug D + Argus r1
-   * BLOCKER #1) — entity-populator write seam threaded into the
-   * default-built `ImportJobRunner`. Tests pass a recorder to assert
-   * the populator fired on completed / partial paths without writing
-   * to disk. Production composer omits — the builder defaults to the
-   * real `writeEntity` from `runtime/entity-writer.ts` when
-   * `ownerDataDir` is set (the production composer ALSO omits, since
-   * the default is `owner_home`).
-   */
-  importWriteEntity?: import('../../onboarding/history-import/index.ts').EntityPopulatorWriteEntityFn
-  /**
-   * 2026-05-25 (Bug D + Argus r1 BLOCKER #1) — override the
-   * instance-data-dir threaded to the populator. Defaults to
-   * `input.owner_home`. Tests may pass an isolated temp dir so each
-   * test owns its own `entities/` tree.
+   * 2026-05-25 — override the instance-data-dir threaded to the wow-moment
+   * project indexer. Defaults to `input.owner_home`. Tests may pass an
+   * isolated temp dir so each test owns its own `entities/` tree.
    */
   importOwnerDataDir?: string
   /**
-   * 2026-05-25 (Bug D + Argus r1 BLOCKER #1) — optional GBrain
-   * sync hook fired by `writeEntity` after each committed page.
-   * Production composer wires this when GBrain is provisioned for
-   * the instance; tests pass a recorder or omit. When undefined the
-   * entity writer still emits markdown to disk; only the KG fan-out
-   * is skipped (recoverable via a later re-sync sweep).
+   * 2026-05-25 — optional GBrain sync hook fired by `writeEntity` after each
+   * committed page. Production composer wires this when GBrain is provisioned
+   * for the instance; tests pass a recorder or omit. When undefined the entity
+   * writer still emits markdown to disk; only the KG fan-out is skipped
+   * (recoverable via a later re-sync sweep). Consumed by the wow-moment
+   * project-page indexer (`buildProjectPageIndexer`).
+   *
+   * (K3, 2026-07-03) — type repointed from the deleted per-chunk barrel's
+   * `ImportPopulatorSyncHook` alias to the underlying `SyncHook`.
    */
-  importGbrainSyncHook?: import('../../onboarding/history-import/index.ts').ImportPopulatorSyncHook
+  importGbrainSyncHook?: import('../../runtime/entity-writer.ts').SyncHook
   /**
    * Item 4 (2026-06-11) — LLM doc composer for the wow-moment project
    * materializer (README + transcript-summary synthesis).
@@ -551,7 +490,7 @@ export interface BuildLandingStackInput {
    * inject a deterministic parser that yields canned conversations
    * without spinning up zip parsing.
    */
-  importParse?: import('../../onboarding/history-import/job-runner.ts').SourceParser
+  importParse?: import('../../onboarding/history-import/types.ts').SourceParser
   /**
    * T4 (2026-05-13) — clock override threaded into the default-built
    * runner. Tests pass a fixed-time `now()` so chunk timestamps land
@@ -564,13 +503,6 @@ export interface BuildLandingStackInput {
    * predictable.
    */
   importUuid?: () => string
-  /**
-   * Codex r6 P1 (post-T4) — test seam for the default-runner wiring
-   * tests that need a non-null hook but never execute a real import.
-   * Production composer omits; setting it true silences the strict
-   * "pass1Llm / pass2Llm required" guard.
-   */
-  __allowNoOpLlmForBoot?: boolean
   /**
    * 2026-05-11 — pending-redirect store. Production wires a
    * `SqlitePendingRedirectStore` against the per-instance DB so the
@@ -1108,65 +1040,32 @@ export function buildOnboardingEnginePieces(
   // wired today; if a future feature needs one (e.g. a status
   // emitter), the mutual-reference ceremony belongs here.
   //
-  // 2026-06-17 (Step 2b — synthesis cut-over): when the caller OPTS IN via
-  // `importUseSynthesis` (the Open single-owner composer — its `cc-synthesis-*`
-  // substrate is built ACCUMULATING, NO `reset_context_per_turn`), the live
-  // import runs through the ONE accumulating synthesis session
-  // (`onboarding/synthesis/*` via `buildSynthesisSession` →
-  // `buildSynthesisImportJobRunner`) instead of the retired per-chunk
-  // `buildImportJobRunnerHook` path. The opt-in is explicit (not auto-detected)
-  // because the MANAGED hosted import substrate (`build-import-substrate.ts`)
-  // is still `ephemeral` by the 2026-06 recovered-reply decision — feeding an
-  // ephemeral substrate to the accumulating synthesis session would defeat the
-  // accumulation, so managed stays on per-chunk until its substrate is reworked
-  // (documented follow-up). An injected `importJobRunner` always wins.
-  const useSynthesisImport =
-    input.importJobRunner === undefined && input.importUseSynthesis === true
-  const importJobRunner: ImportJobRunnerHook | null = useSynthesisImport
-    ? buildSynthesisImportJobRunner({
-        db: input.db,
-        synthesis: buildSynthesisSession({
-          substrate: input.importSubstrate ?? null,
-          owner_home: input.importOwnerDataDir ?? input.owner_home,
-          ...(input.importNow !== undefined ? { now: input.importNow } : {}),
-        }),
-        ...(input.importParse !== undefined ? { parse: input.importParse } : {}),
-        ...(input.importNow !== undefined ? { now: input.importNow } : {}),
-        ...(input.importUuid !== undefined ? { uuid: input.importUuid } : {}),
-      })
-    : input.importJobRunner === undefined
-      ? buildImportJobRunnerHook({
-          db: input.db,
-          ...(input.importPass1Llm !== undefined ? { pass1Llm: input.importPass1Llm } : {}),
-          ...(input.importPass2Llm !== undefined ? { pass2Llm: input.importPass2Llm } : {}),
-          ...(input.importSubstrate !== undefined ? { substrate: input.importSubstrate } : {}),
-          ...(input.importOnSonnetFallback !== undefined
-            ? { onSonnetFallback: input.importOnSonnetFallback }
-            : {}),
-          ...(input.importParse !== undefined ? { parse: input.importParse } : {}),
-          ...(input.importNow !== undefined ? { now: input.importNow } : {}),
-          ...(input.importUuid !== undefined ? { uuid: input.importUuid } : {}),
-          ...(input.importGetCurrentCredentialKind !== undefined
-            ? { getCurrentCredentialKind: input.importGetCurrentCredentialKind }
-            : {}),
-          // 2026-05-25 (Bug D + Argus r1 BLOCKER #1) — populator wiring.
-          // ownerDataDir defaults to `owner_home` so the production
-          // boot path always lands `<owner_home>/entities/...`
-          // populated after each completed/partial import. Tests can
-          // override with `importOwnerDataDir` (isolated tmp dir) +
-          // `importWriteEntity` (recorder). `importGbrainSyncHook`
-          // is forwarded as-is — undefined here keeps the KG fan-out
-          // skipped on instances without GBrain wired.
-          ownerDataDir: input.importOwnerDataDir ?? input.owner_home,
-          ...(input.importWriteEntity !== undefined
-            ? { writeEntity: input.importWriteEntity }
-            : {}),
-          ...(input.importGbrainSyncHook !== undefined
-            ? { gbrainSyncHook: input.importGbrainSyncHook }
-            : {}),
-          ...(input.__allowNoOpLlmForBoot === true ? { __allowNoOpLlmForBoot: true } : {}),
-        })
-      : input.importJobRunner
+  // 2026-06-17 (Step 2b — synthesis cut-over) / K3 (2026-07-03 — per-chunk
+  // pipeline evacuated): the live import runs through the ONE accumulating
+  // synthesis session (`onboarding/synthesis/*` via `buildSynthesisSession` →
+  // `buildSynthesisImportJobRunner`). The Open single-owner composer opts in
+  // via `importUseSynthesis: true` (its `cc-synthesis-*` substrate is built
+  // ACCUMULATING, NO `reset_context_per_turn`). An injected `importJobRunner`
+  // always wins. The retired per-chunk `buildImportJobRunnerHook` path was
+  // deleted (K3): when neither an injected runner nor synthesis opt-in is
+  // present, no import runner is wired — the engine collapses the zip choices
+  // into the skip path (its documented unwired-hook behaviour).
+  const importJobRunner: ImportJobRunnerHook | null =
+    input.importJobRunner !== undefined
+      ? input.importJobRunner
+      : input.importUseSynthesis === true
+        ? buildSynthesisImportJobRunner({
+            db: input.db,
+            synthesis: buildSynthesisSession({
+              substrate: input.importSubstrate ?? null,
+              owner_home: input.importOwnerDataDir ?? input.owner_home,
+              ...(input.importNow !== undefined ? { now: input.importNow } : {}),
+            }),
+            ...(input.importParse !== undefined ? { parse: input.importParse } : {}),
+            ...(input.importNow !== undefined ? { now: input.importNow } : {}),
+            ...(input.importUuid !== undefined ? { uuid: input.importUuid } : {}),
+          })
+        : null
   // 2026-05-25 (import-pipeline-resilience sprint, Part G.2 + Argus
   // r1 BLOCKER #3) — `ImportResumeReadinessProbe`.
   //

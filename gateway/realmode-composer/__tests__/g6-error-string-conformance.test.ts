@@ -9,7 +9,7 @@
  *   - detectChannelWedged          (build-llm-call-substrate.ts)
  *   - detectTurnTimeout            (build-llm-call-substrate.ts)
  *   - isFreezeTimeout              (build-live-agent-turn.ts)
- *   - is429ErrorMessage            (onboarding/history-import/substrate-callers.ts)
+ *   - is429ErrorMessage            (onboarding/history-import/rate-limit.ts)
  *
  * The EXISTING behaviour tests (build-llm-call-substrate.test.ts:492/523/562/585,
  * cli-auth-failure-classification.test.ts) feed the classifiers a HAND-COPIED
@@ -52,7 +52,7 @@ import {
   CHANNEL_WEDGED_MESSAGE,
 } from '../build-llm-call-substrate.ts'
 import { isFreezeTimeout } from '../build-live-agent-turn.ts'
-import { is429ErrorMessage } from '../../../onboarding/history-import/substrate-callers.ts'
+import { is429ErrorMessage } from '../../../onboarding/history-import/rate-limit.ts'
 import { startResponsesStream } from '../../../runtime/adapters/gpt-5-5-api/responses-stream.ts'
 import { ChannelWedgedSpawnError } from '../../../runtime/adapters/claude-code/persistent/channel-wedge-respawn.ts'
 import {

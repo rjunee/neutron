@@ -37,6 +37,10 @@ import type {
   ImportResult,
   ImportSource,
 } from '../history-import/types.ts'
+// (K3, 2026-07-03) — the `ImportJobRunnerHook` contract now lives in its own
+// module; imported here for local use (e.g. `importJobRunner?: …`) AND
+// re-exported below so `engine.ts` + every consumer keep resolving.
+import type { ImportJobRunnerHook } from './import-runner-hook.ts'
 import { readEnvTimeoutMs } from './llm-timeouts.ts'
 import type {
   ApplyEditInput as PersonaApplyEditInput,
@@ -675,56 +679,13 @@ export interface WowPushEmitterInput {
 }
 
 /**
- * T4 (2026-05-13) — history-import job-runner hook. Mirrors the surface
- * area of `onboarding/history-import/job-runner.ts:ImportJobRunner` so
- * the production composer wires a real `ImportJobRunner` directly and
- * tests can inject a recorder without spinning up the LLM passes or
- * the zip parser.
- *
- * Per docs/plans/P2-onboarding.md § 2.3 + § 4.7:
- *   - `start(...)` kicks off a background job, returns `{job_id}` immediately.
- *   - `status(job_id)` is the poller; returns `null` when no row exists.
- *   - `cancel(job_id)` marks the row cancelled; inflight chunks finish.
- *
- * When the hook is absent (deps.importJobRunner === undefined), the
- * engine collapses `chatgpt_zip` / `claude_zip` choices into the skip
- * path — production composer ALWAYS wires the hook (see
- * `gateway/realmode-composer/build-landing-stack.ts`) so users always
- * reach the runner. The unwired path exists for legacy callers + test
- * harnesses that don't exercise the import flow.
+ * T4 (2026-05-13) — history-import job-runner hook. The contract now lives in
+ * its own dedicated module (`./import-runner-hook.ts`) so it survives the K3
+ * per-chunk import-pipeline evacuation independent of these engine internals;
+ * re-exported here so `engine.ts` and every existing consumer keep resolving
+ * unchanged.
  */
-export interface ImportJobRunnerHook {
-  start(input: {
-    project_slug: string
-    /**
-     * ISSUES #2 (2026-05-19) — onboarding_state PK is composite.
-     * Threaded so the runner's `BudgetWarningEmitter` callback can
-     * resolve the right (project_slug, user_id) row when emitting the
-     * 80% warning prompt back through the engine.
-     */
-    user_id: string
-    source: ImportSource
-    payload: ChunkerInput
-  }): Promise<{ job_id: string }>
-  status(job_id: string): Promise<ImportJob | null>
-  cancel(job_id: string): Promise<void>
-  /**
-   * T4 / Codex r2 (post-T4) — synthesize-on-demand. Aggregates the
-   * Pass-1 chunks already persisted for this job's (instance, source)
-   * pair and persists a partial `ImportResult` to `import_results`.
-   * The engine calls this on the user's "Stop now (use partial)" tap
-   * BEFORE `cancel` so the partial work the user explicitly asked to
-   * keep is recoverable.
-   *
-   * Returns `null` when no Pass-1 rows exist yet (e.g. cancel before
-   * any chunk landed) so the engine can still route gracefully to
-   * use_partial → archetype_picked with `import_result=null`.
-   */
-  synthesizeOnDemand(
-    job_id: string,
-    opts?: { preferDegraded?: boolean },
-  ): Promise<ImportResult | null>
-}
+export type { ImportJobRunnerHook } from './import-runner-hook.ts'
 
 /**
  * T4 (2026-05-13) — payload resolver for the history-import upload
