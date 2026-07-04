@@ -27,9 +27,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+
+import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 import { fileURLToPath } from 'node:url'
 
 import { applyMigrations } from '../../migrations/runner.ts'
@@ -44,14 +44,7 @@ import type { Event } from '../../runtime/events.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
-const SAVED_ENV_KEYS = [
-  'NEUTRON_HOME', 'OWNER_HOME', 'NEUTRON_DB_PATH', 'NEUTRON_INSTANCE_SLUG',
-  'NEUTRON_LANDING_STATIC_DIR', 'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
-  'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'NOTIFY_SOCKET',
-] as const
-
-let savedEnv: Record<string, string | undefined> = {}
-let tmpDir: string
+let home: IsolatedHome
 
 interface Harness { base: string; db: ProjectDb; close(): Promise<void> }
 let harness: Harness | null = null
@@ -74,27 +67,30 @@ function recordingSubstrate(): Substrate {
 }
 
 beforeEach(() => {
-  savedEnv = {}
-  for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
-  tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-import-rearm-'))
-  process.env['NEUTRON_HOME'] = tmpDir
-  process.env['OWNER_HOME'] = tmpDir
-  process.env['NEUTRON_DB_PATH'] = join(tmpDir, 'project.db')
-  process.env['NEUTRON_INSTANCE_SLUG'] = 'owner'
-  process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
-  process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
-  process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-import-rearm'
-  delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
-  delete process.env['NOTIFY_SOCKET']
+  // Shared G9 test-isolation testkit: a fresh, unique NEUTRON_HOME tmpdir +
+  // the standard per-instance env, with the extra onboarding-boot keys layered
+  // on and all of them restored on teardown. See tests/support/test-isolation.ts.
+  home = createIsolatedHome({
+    extraEnvKeys: [
+      'NEUTRON_LANDING_STATIC_DIR',
+      'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
+      'ANTHROPIC_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'NOTIFY_SOCKET',
+    ],
+    env: {
+      NEUTRON_LANDING_STATIC_DIR: LANDING_DIR,
+      NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET: 'open-test-secret-0123456789',
+      ANTHROPIC_API_KEY: 'sk-ant-synthetic-import-rearm',
+      CLAUDE_CODE_OAUTH_TOKEN: undefined,
+      NOTIFY_SOCKET: undefined,
+    },
+  })
 })
 
 afterEach(async () => {
   if (harness !== null) { await harness.close(); harness = null }
-  for (const k of SAVED_ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k]
-    else process.env[k] = savedEnv[k]
-  }
-  rmSync(tmpDir, { recursive: true, force: true })
+  home.restore()
 })
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))

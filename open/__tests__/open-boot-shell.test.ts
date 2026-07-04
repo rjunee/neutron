@@ -26,10 +26,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { createIsolatedHome, type IsolatedHome } from '../../tests/support/test-isolation.ts'
 
 import { boot } from '../../gateway/index.ts'
 import type { BootHandle } from '../../gateway/index.ts'
@@ -41,49 +41,44 @@ import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
-const SAVED_ENV_KEYS = [
-  'NEUTRON_HOME',
-  'OWNER_HOME',
-  'NEUTRON_DB_PATH',
-  'NEUTRON_INSTANCE_SLUG',
-  'NEUTRON_LANDING_STATIC_DIR',
-  'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
-  'ANTHROPIC_API_KEY',
-  // ISSUES #318 — the auth gate is keyed on `resolveOpenLlmPool(env) === null`,
-  // which is null only when BOTH substrate credentials are absent. A dev/CI box
-  // with an ambient `CLAUDE_CODE_OAUTH_TOKEN` would otherwise disable the gate
-  // and make the no-credential 503 assertions return the 200 shell. Save +
-  // clear it alongside ANTHROPIC_API_KEY so these tests are env-independent.
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  // #101 added a macOS Keychain ambient-auth probe that reads the Keychain
-  // DIRECTLY (not env), so clearing the token above is not enough on a dev Mac
-  // with a real `claude` login — it would resolve a pool and disable the gate.
-  // Force the handoff default so these gate assertions are host-independent.
-  'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
-  'NOTIFY_SOCKET',
-  'NEUTRON_GRAPH_COMPOSER_MODULE',
-] as const
-
-let savedEnv: Record<string, string | undefined> = {}
-let tmpDir: string
+let home: IsolatedHome
 let handle: BootHandle | null = null
 
 beforeEach(() => {
-  savedEnv = {}
-  for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
-  tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-sprint-d-'))
-  process.env['NEUTRON_HOME'] = tmpDir
-  process.env['OWNER_HOME'] = tmpDir
-  process.env['NEUTRON_DB_PATH'] = join(tmpDir, 'project.db')
-  process.env['NEUTRON_INSTANCE_SLUG'] = 'owner'
-  process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
-  process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
-  delete process.env['ANTHROPIC_API_KEY'] // LLM-less → static onboarding prompts
-  delete process.env['CLAUDE_CODE_OAUTH_TOKEN'] // ISSUES #318 — keep the auth gate ACTIVE
-  process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1' // ignore any host `claude` login
+  // Shared G9 test-isolation testkit: a fresh, unique NEUTRON_HOME tmpdir +
+  // the standard per-instance env. The extra keys below are this suite's
+  // boot-gate controls — all snapshotted and restored on teardown. See
+  // tests/support/test-isolation.ts.
+  home = createIsolatedHome({
+    extraEnvKeys: [
+      'NEUTRON_LANDING_STATIC_DIR',
+      'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
+      'ANTHROPIC_API_KEY',
+      // ISSUES #318 — the auth gate is keyed on `resolveOpenLlmPool(env) === null`,
+      // which is null only when BOTH substrate credentials are absent. A dev/CI box
+      // with an ambient `CLAUDE_CODE_OAUTH_TOKEN` would otherwise disable the gate
+      // and make the no-credential 503 assertions return the 200 shell. Save +
+      // clear it alongside ANTHROPIC_API_KEY so these tests are env-independent.
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      // #101 added a macOS Keychain ambient-auth probe that reads the Keychain
+      // DIRECTLY (not env), so clearing the token above is not enough on a dev Mac
+      // with a real `claude` login — it would resolve a pool and disable the gate.
+      // Force the handoff default so these gate assertions are host-independent.
+      'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
+      'NOTIFY_SOCKET',
+      'NEUTRON_GRAPH_COMPOSER_MODULE',
+    ],
+    env: {
+      NEUTRON_LANDING_STATIC_DIR: LANDING_DIR,
+      NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET: 'open-test-secret-0123456789',
+      ANTHROPIC_API_KEY: undefined, // LLM-less → static onboarding prompts
+      CLAUDE_CODE_OAUTH_TOKEN: undefined, // ISSUES #318 — keep the auth gate ACTIVE
+      NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH: '1', // ignore any host `claude` login
+      NOTIFY_SOCKET: undefined,
+      NEUTRON_GRAPH_COMPOSER_MODULE: undefined,
+    },
+  })
   __resetAmbientAuthCacheForTests() // drop a cached probe result from a prior test
-  delete process.env['NOTIFY_SOCKET']
-  delete process.env['NEUTRON_GRAPH_COMPOSER_MODULE']
 })
 
 afterEach(async () => {
@@ -91,11 +86,7 @@ afterEach(async () => {
     await handle.shutdown({ force: true })
     handle = null
   }
-  for (const k of SAVED_ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k]
-    else process.env[k] = savedEnv[k]
-  }
-  rmSync(tmpDir, { recursive: true, force: true })
+  home.restore()
   // Generous hook budget: a booted Open server starts the cron scheduler +
   // watchdog and `shutdown({force:true})` can take several seconds to drain
   // them (slower still when ambient Anthropic creds are rate-limited and an
