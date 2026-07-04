@@ -35,7 +35,6 @@ import { BusyRetryExhaustedError } from './errors.ts'
 export const WRITE_MAX_RETRIES = 15 as const
 export const WRITE_RETRY_MIN_MS = 20 as const
 export const WRITE_RETRY_MAX_MS = 100 as const
-export const CHECKPOINT_EVERY_N_WRITES = 50 as const
 export const BUSY_TIMEOUT_MS = 100 as const
 
 const SQLITE_BUSY_PATTERNS: ReadonlyArray<RegExp> = [

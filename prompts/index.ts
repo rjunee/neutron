@@ -3,7 +3,7 @@
  *
  * Lifted-and-parameterized copies of Nova's canonical agent prompt library
  * (Atlas, Argus, Sentinel, Forge, Scribe, reminder-agent-base,
- * topic-agent-base, reminder-patterns) plus the strict template-substitution
+ * reminder-patterns) plus the strict template-substitution
  * runtime that resolves `{{OWNER_HOME}}` and any future platform-level
  * template variables. See `template.ts` for the resolver contract and the
  * per-file `<!-- LIFTED FROM: ... -->` headers for source provenance.

@@ -144,7 +144,6 @@ export const KNOWN_PROMPTS = [
   'reminder-patterns.md',
   'scribe.md',
   'sentinel.md',
-  'topic-agent-base.md',
 ] as const
 
 export type KnownPromptName = (typeof KNOWN_PROMPTS)[number]
