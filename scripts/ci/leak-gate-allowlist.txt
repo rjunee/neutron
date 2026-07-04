@@ -77,3 +77,16 @@ docs/AS_BUILT.md:tenant-word
 docs/AS_BUILT.md:tenant-code
 docs/AS_BUILT.md:tenant-routing-camel
 docs/AS_BUILT.md:workspace-retired
+
+# The world-class refactor plan is the tracked orchestration source of truth for
+# the refactor window (committed in #196 alongside the §17 checklist + STATUS
+# resume anchor). Like AS_BUILT.md it unavoidably NAMES the retired multi-tenant
+# vocabulary while describing the Managed-vs-Open architecture, the tenant→owner
+# renames, and the D-11 leak-gate hazard itself — but carries NO real PII, NO
+# hosted-domain, NO secret. Exempted ONLY from the retired-vocab rules (per §1.4
+# / decision D-11); the PII / hosted-domain / secret rules stay ARMED on it.
+# (#196 committed the doc WITHOUT this entry → the leak-gate turned main red;
+# this restores the baseline.)
+docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-purged
+docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-word
+docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-code
