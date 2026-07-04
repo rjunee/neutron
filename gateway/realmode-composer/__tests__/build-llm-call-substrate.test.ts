@@ -354,9 +354,11 @@ test('eager pool + oauth credential threads CLAUDE_CODE_OAUTH_TOKEN and scrubs A
 })
 
 // ---------------------------------------------------------------------------
-// 2b. extra_env overlay — root-cause fix (2026-06-05). A router-dedicated
-//     substrate carries MAX_THINKING_TOKENS=0 on every spawn, layered AFTER
-//     the auth scrub (so auth env is preserved, the knob wins on collision).
+// 2b. extra_env overlay — the substrate's generic per-spawn env seam. A
+//     representative knob (MAX_THINKING_TOKENS=0) is carried on every spawn,
+//     layered AFTER the auth scrub (so auth env is preserved, the knob wins on
+//     collision). No production caller sets extra_env today; this pins the
+//     overlay mechanics regardless.
 // ---------------------------------------------------------------------------
 
 test('extra_env overlay is layered onto the spawn env after auth scrub', async () => {
@@ -376,7 +378,7 @@ test('extra_env overlay is layered onto the spawn env after auth scrub', async (
   for await (const _ev of handle.events) {
     // drain
   }
-  // Router knob present...
+  // overlay knob present...
   expect(seen[0]!.opts.env?.['MAX_THINKING_TOKENS']).toBe('0')
   // ...and the auth env is untouched by the overlay.
   expect(seen[0]!.opts.env?.['CLAUDE_CODE_OAUTH_TOKEN']).toBe('oauth-token-abc')

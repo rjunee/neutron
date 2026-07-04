@@ -330,13 +330,16 @@ export interface BuildLlmCallSubstrateInput {
    * Extra env overlay layered onto EVERY spawn AFTER the auth-scrub step
    * (`resolveScrubbedAuthEnv`). Values follow the same `string | undefined`
    * contract as the auth env: `undefined` deletes the inherited var, a string
-   * sets it. Used by the router to inject `MAX_THINKING_TOKENS=0` so its
-   * classifier spawn doesn't burn 20-40s on extended thinking (root-caused
-   * 2026-06-05 — see `runtime/adapters/claude-code/router-thinking-budget.ts`).
+   * sets it. A general per-substrate spawn knob — e.g. a caller could inject
+   * `MAX_THINKING_TOKENS=0` to keep a latency-sensitive classifier spawn from
+   * burning 20-40s on extended thinking. (No production caller sets `extra_env`
+   * today; the onboarding router that once motivated it never wired it and is
+   * being removed — see AS-BUILT 2026-07-04, unit K9. Kept as the substrate's
+   * generic env-overlay seam, exercised by the substrate unit test.)
    *
-   * Scope note: layered per-substrate, so a router-DEDICATED substrate carries
-   * this overlay while the shared `llmCallSubstrate` does not. Keys here win
-   * over the auth-scrub env on collision (applied last).
+   * Scope note: layered per-substrate, so a dedicated substrate can carry this
+   * overlay while the shared `llmCallSubstrate` does not. Keys here win over the
+   * auth-scrub env on collision (applied last).
    */
   extra_env?: Record<string, string | undefined>
   /**
@@ -448,8 +451,8 @@ export function buildLlmCallSubstrate(
         const { env, pool } = resolved
         const cred = { id: resolved.cred_id }
         // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
-        // per-substrate spawn knobs (e.g. the router's `MAX_THINKING_TOKENS=0`)
-        // win over inherited vars without disturbing the auth scrubbing. The
+        // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
+        // knob) win over inherited vars without disturbing the auth scrubbing. The
         // `undefined`-deletes contract is preserved downstream by the REPL spawn
         // env merge.
         const spawnEnv: Record<string, string | undefined> =

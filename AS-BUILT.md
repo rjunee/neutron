@@ -2,6 +2,41 @@
 
 Running log of notable build-time changes, what shipped, and why. Newest first.
 
+## 2026-07-04 — K9: router-thinking-budget deleted (refactor unit K9)
+
+**Decision: DELETE** `runtime/adapters/claude-code/router-thinking-budget.ts` (+ its
+unit test) and correct the misleading comments in
+`gateway/realmode-composer/build-llm-call-substrate.ts` that claimed the router-hang
+protection was live.
+
+**Incident recap.** The 2026-06-05 router-hang root cause
+(`docs/plans/router-call-hangs-rootcause-brief.md`, per the module's own header): the
+onboarding classifier's `claude -p` spawn ran with Claude Code's default extended-thinking
+budget enabled, so on ambiguous prompts Haiku 4.5 generated a multi-thousand-token
+thinking block (cold ~40s / warm 20-36s) before the one-line JSON answer — read as a
+"hang." The intended fix was to spawn the router substrate with `MAX_THINKING_TOKENS=0`.
+
+**Why delete, not re-wire.** The module was orphaned — zero production importers (only
+its own test imported it; the `runtime/adapters/claude-code/index.ts` barrel does not
+re-export it). The wiring its header describes ("the router-dedicated
+`buildLlmCallSubstrate` threads this as `extra_env` via `gateway/index.ts`") does NOT
+exist: no non-test call site sets `extra_env` anywhere in the repo, so the helpers
+(`resolveRouterThinkingBudget` / `routerThinkingEnvOverlay`) were never called on any
+live path. The protection was therefore already absent, and the comments were the worst
+state — asserting an active hang guard that wasn't. Deletion is the no-behavior-change
+option that makes code and comments agree. Re-wiring was rejected because the only
+consumer it would protect — the onboarding `llm-router` — is itself already dead code on
+every live path and is being removed in the same refactor wave (unit K11:
+`llm-router.ts` fires only inside dead `engine.advance`).
+
+**What changed.** Removed the module + test. The `extra_env` field on
+`BuildLlmCallSubstrateInput` is KEPT (it is the substrate's generic per-spawn env-overlay
+seam, covered by its own substrate unit test); its JSDoc + the inline-apply comment were
+rewritten to describe it as a generic knob with `MAX_THINKING_TOKENS=0` as an
+illustrative example, noting no production caller sets it today. (K6 will later
+consolidate this AS-BUILT.md into `docs/AS_BUILT.md`; appending to the root file is
+correct for now.)
+
 ## 2026-07-03 — TRIDENT parallel builds + build lifecycle (#342/#340/#339/#334/#337)
 
 **Why.** Ryan's live test 2026-07-03 (SPEC.md Decisions Log, Ryan-locked). Vajra runs
