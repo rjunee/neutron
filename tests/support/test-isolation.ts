@@ -36,6 +36,16 @@
  *   beforeEach(() => { home = createIsolatedHome() })
  *   afterEach(() => { home.restore() })
  *   // ... process.env.NEUTRON_DB_PATH now points at home.dbPath ...
+ *
+ * NESTING CONTRACT (LIFO): each call snapshots the LIVE env at create time,
+ * so if two homes are live at once the newer one's snapshot captures the
+ * older one's values. Restore them newest-first (LIFO) — like unwinding a
+ * stack of context managers. Restoring an OLDER home before a newer one puts
+ * the env back to a value the newer home then overwrites with an already-
+ * deleted dir, which is exactly the leak this testkit prevents. The dominant
+ * beforeEach-create / afterEach-restore pattern is trivially LIFO (one live
+ * home at a time); only fixtures that hold several homes open simultaneously
+ * must order their teardown.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'

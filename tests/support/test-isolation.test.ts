@@ -18,10 +18,14 @@ import {
 } from './test-isolation.ts'
 
 // Defensive: any home left un-restored by a failing assertion is torn down
-// here so it cannot pollute a sibling test in this same file.
+// here so it cannot pollute a sibling test in this same file. Restore is
+// LIFO (newest-first): each home snapshots the LIVE env at create time, so a
+// later home's snapshot captures the earlier home's values — unwinding in
+// reverse is the only order that lands every key on its true pre-create value
+// (see the "overlapping homes restore LIFO" test below).
 let openHomes: IsolatedHome[] = []
 afterEach(() => {
-  for (const h of openHomes) h.restore()
+  for (let i = openHomes.length - 1; i >= 0; i--) openHomes[i].restore()
   openHomes = []
 })
 function track(h: IsolatedHome): IsolatedHome {
@@ -46,6 +50,32 @@ describe('createIsolatedHome', () => {
     const b = track(createIsolatedHome())
     expect(a.dir).not.toBe(b.dir)
     expect(a.dbPath).not.toBe(b.dbPath)
+  })
+
+  test('overlapping homes restore LIFO back to the original env', () => {
+    // Two live homes at once: `b` is created while `a` is still active, so
+    // `b`'s snapshot captures `a`'s paths. Restoring newest-first (b then a)
+    // must land the env back on its true pre-create values; restoring a-then-b
+    // would leave the env pointing at `a`'s already-deleted dir (the leak this
+    // testkit exists to prevent — the exact footgun a naive FIFO teardown hits).
+    const before: Record<string, string | undefined> = {}
+    for (const k of ISOLATED_HOME_ENV_KEYS) before[k] = process.env[k]
+
+    const a = createIsolatedHome({ slug: 'lifo-a' })
+    const b = createIsolatedHome({ slug: 'lifo-b' })
+    expect(process.env['NEUTRON_HOME']).toBe(b.dir)
+
+    b.restore()
+    // After the newest is unwound, env is back to the still-live `a`.
+    expect(process.env['NEUTRON_HOME']).toBe(a.dir)
+    expect(existsSync(a.dir)).toBe(true)
+
+    a.restore()
+    for (const k of ISOLATED_HOME_ENV_KEYS) {
+      expect(process.env[k]).toBe(before[k])
+    }
+    expect(existsSync(a.dir)).toBe(false)
+    expect(existsSync(b.dir)).toBe(false)
   })
 
   test('restore() puts env back exactly and removes the dir', () => {
