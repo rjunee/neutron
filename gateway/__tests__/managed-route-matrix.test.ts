@@ -175,7 +175,9 @@ describe('G1 — Managed-contract route matrix (negative-space surfaces WIRED)',
     harness = await bootManagedGraph()
   })
   afterAll(async () => {
-    await harness.close()
+    // Guarded: if beforeAll threw, `harness` is undefined — an unguarded
+    // `harness.close()` would throw a TypeError that masks the real setup error.
+    await harness?.close()
   })
 
   const OWNED: ReadonlyArray<[string, string, string, string]> = [
@@ -211,12 +213,14 @@ describe('G1 — Managed-contract route matrix (negative-space surfaces WIRED)',
 })
 
 describe('G1 — Managed-contract: connect_api is the field that mounts the cross-instance API', () => {
-  test('WITHOUT connect_api, /connect/v1/* is unmounted (404) — proving the API is field-gated', async () => {
-    // The cross-instance connect API is Managed-only and dynamic-imported ONLY
-    // when `composition.connect_api` is supplied
-    // (`buildComposedHttpFromComposition`). This pins the drop-direction guard
-    // for the Managed connect field without constructing the heavy live
-    // handler: with the field omitted, the route falls through to 404.
+  // Boot the graph with an explicit connect_api override (present or omitted)
+  // and probe the cross-instance surface. Pinning BOTH directions closes the
+  // ratchet hole: the OMITTED case guards a dropped route binding, the SUPPLIED
+  // case guards a dropped field mapping (`composition.ts:111` / `:143`).
+  async function withConnectGraph(
+    connect_api: NonNullable<CompositionInput['connect_api']> | undefined,
+    probe: (fetch: NonNullable<Awaited<ReturnType<typeof composeProductionGraph>>['fetch']>) => Promise<void>,
+  ): Promise<void> {
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-managed-connect-'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
     applyMigrations(db.raw())
@@ -225,19 +229,52 @@ describe('G1 — Managed-contract: connect_api is the field that mounts the cros
       project_slug: OWNER,
       ...noOpInputBase,
       landing_server: { fetch: (): Response => sentinel('landing'), websocket: NOOP_WS },
-      // connect_api intentionally omitted.
+      ...(connect_api !== undefined ? { connect_api } : {}),
     })
     try {
       expect(graph.fetch).toBeDefined()
-      const res = await graph.fetch!(
-        new Request('http://127.0.0.1/connect/v1/inbound', { method: 'POST' }),
-        FAKE_SERVER,
-      )
-      expect(res.status).toBe(404)
+      await probe(graph.fetch!)
     } finally {
       await graph.shutdown()
       db.close()
       rmSync(tmp, { recursive: true, force: true })
     }
+  }
+
+  test('WITHOUT connect_api, /connect/v1/* is unmounted (404) — the route binding is field-gated', async () => {
+    // The cross-instance connect API is dynamic-imported ONLY when
+    // `composition.connect_api` is supplied — omit it and the route 404s.
+    await withConnectGraph(undefined, async (fetch) => {
+      const res = await fetch(
+        new Request('http://127.0.0.1/connect/v1/inbound', { method: 'POST' }),
+        FAKE_SERVER,
+      )
+      expect(res.status).toBe(404)
+    })
+  })
+
+  test('WITH connect_api supplied, /connect/v1/health is OWNED (200) — the field mapping mounts the API', async () => {
+    // `/connect/v1/health` is the one intentionally-unauthed connect route
+    // (`connect/api/server.ts` — GET, no bearer), so a minimal connect_api with
+    // empty handlers is enough to prove the cross-instance handler mounted.
+    // `auth.jwks` is never touched by the health path, so a structural
+    // placeholder suffices. If the supplied-field mapping is ever dropped, this
+    // flips to 404.
+    const connect_api: NonNullable<CompositionInput['connect_api']> = {
+      auth: {
+        receiving_instance_slug: OWNER,
+      } as unknown as NonNullable<CompositionInput['connect_api']>['auth'],
+      handlers: {},
+    }
+    await withConnectGraph(connect_api, async (fetch) => {
+      const res = await fetch(
+        new Request('http://127.0.0.1/connect/v1/health', { method: 'GET' }),
+        FAKE_SERVER,
+      )
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { status?: string; receiving_instance_slug?: string }
+      expect(body.status).toBe('ok')
+      expect(body.receiving_instance_slug).toBe(OWNER)
+    })
   })
 })

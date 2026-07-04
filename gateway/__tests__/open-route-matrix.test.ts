@@ -285,7 +285,9 @@ describe('G1 — Open composition route matrix (real graph)', () => {
     harness = await bootOpenGraph()
   })
   afterAll(async () => {
-    await harness.close()
+    // Guarded: if beforeAll threw, `harness` is undefined — an unguarded
+    // `harness.close()` would throw a TypeError that masks the real setup error.
+    await harness?.close()
   })
 
   // ── positive matrix: each wired surface OWNS its canonical route ────────
