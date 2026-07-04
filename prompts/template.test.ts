@@ -129,8 +129,8 @@ describe('loadPrompt', () => {
     }
   })
 
-  test('the reminder/topic prompts substitute {{TELEGRAM_CHAT_ID}} (no baked-in chat id survives)', () => {
-    for (const name of ['reminder-agent-base.md', 'reminder-patterns.md', 'topic-agent-base.md']) {
+  test('the reminder prompts substitute {{TELEGRAM_CHAT_ID}} (no baked-in chat id survives)', () => {
+    for (const name of ['reminder-agent-base.md', 'reminder-patterns.md']) {
       const out = loadPrompt(name, SYNTHETIC_VARS)
       // The owner chat id was actually injected — not left as literal text.
       expect(out).toContain(SYNTHETIC_CHAT_ID)
@@ -192,7 +192,7 @@ describe('buildPromptVars', () => {
       OWNER_HOME: SYNTHETIC_OWNER_HOME,
       TELEGRAM_CHAT_ID: SYNTHETIC_CHAT_ID,
     })
-    const out = loadPrompt('topic-agent-base.md', vars)
+    const out = loadPrompt('reminder-agent-base.md', vars)
     expect(out).toContain(SYNTHETIC_CHAT_ID)
     expect(out).not.toMatch(/\{\{[A-Z_][A-Z0-9_]*\}\}/)
   })

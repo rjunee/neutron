@@ -17,6 +17,8 @@ build/
 *.swp
 *.swo
 .claude/
+__pycache__/
+*.pyc
 
 .worktrees/
 STATUS.md
