@@ -100,3 +100,15 @@ docs/plans/2026-07-02-world-class-refactor-plan.md:tenant-code
 docs/plans/refactor-orchestration-STATUS.md:tenant-purged
 docs/plans/refactor-orchestration-STATUS.md:tenant-word
 docs/plans/refactor-orchestration-STATUS.md:tenant-code
+
+# docs/INVARIANTS.md (unit G10) is the tracked distillation of the audit critic
+# reports' load-bearing-subtleties sections. Quoting the naming-vocab critic's
+# invariants (the frozen `tenant:` hash-seed prefix, migration 0074's
+# `tenant_provisioned` string) unavoidably NAMES the retired vocabulary while
+# describing exactly the invariants that keep it frozen. Carries NO real PII, NO
+# hosted-domain, NO secret. Exempted ONLY from the retired-vocab rules (same
+# scope as docs/AS_BUILT.md and the plan doc above); PII/hosted-domain/secret
+# rules stay ARMED.
+docs/INVARIANTS.md:tenant-purged
+docs/INVARIANTS.md:tenant-word
+docs/INVARIANTS.md:tenant-code
