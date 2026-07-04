@@ -46,6 +46,13 @@ async function makeBaseRepo(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'trident-base-'))
   created.push(dir)
   await git(dir, 'init', '-q', '--initial-branch=main')
+  // CI runners have NO ambient git identity (dev machines do), and the merge/
+  // rebase under test creates commits (rebase --continue, merge --no-ff). Set a
+  // LOCAL identity on the repo so every git op here — the test's own AND the
+  // trident merge code operating on this repo — has a committer. Without this the
+  // real-git tests pass on macOS but fail on Linux CI ("Committer identity unknown").
+  await git(dir, 'config', 'user.email', 'trident-test@neutron.local')
+  await git(dir, 'config', 'user.name', 'Trident Test')
   writeFileSync(join(dir, 'README.md'), 'base\n')
   await git(dir, 'add', '.')
   await git(dir, ...GIT_ID, 'commit', '-q', '-m', 'init')
