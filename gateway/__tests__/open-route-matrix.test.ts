@@ -424,14 +424,24 @@ describe('G1 — ladder order: authGate FIRST + Set-Cookie stitch', () => {
     const fetch = compose({
       defaultHandler: () => new Response('Not Found', { status: 404 }),
       authGate: AUTH_GATE,
-      landing: { fetch: (): Response => sentinel('landing'), websocket: NOOP_WS },
+      // The landing stub RECORDS into `calls` before answering — so the
+      // `calls === []` assertion below has teeth: it stays empty ONLY because
+      // the gate short-circuited before landing ran. A regression that let the
+      // request reach landing would push 'landing' and fail the assertion.
+      landing: {
+        fetch: (): Response => {
+          calls.push('landing')
+          return sentinel('landing')
+        },
+        websocket: NOOP_WS,
+      },
     })
     const res = await fetch(
       new Request('http://127.0.0.1/chat', { headers: { accept: 'text/html' } }),
     )
     expect(res.status).toBe(302)
     expect(res.headers.get('location') ?? '').toContain(IDENTITY_BASE)
-    // The gate short-circuited: the landing handler was never reached.
+    // The gate short-circuited: the (recording) landing handler was never reached.
     expect(calls).toEqual([])
   })
 })
@@ -570,5 +580,87 @@ describe('G1 — ladder order: landing path-set, then SPA catch-all, then connec
       connectHandler: async (): Promise<Response | null> => null,
     })(new Request('http://127.0.0.1/api/app/unknown'))
     expect(res.status).toBe(404)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// Part 3 — the `import_resume_handler`-only boundary (KNOWN DIVERGENCE)
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('G1 — import_resume_handler-only composition (pinned known-divergence)', () => {
+  test('supplying ONLY import_resume_handler yields NO composed fetch (graph.fetch undefined)', async () => {
+    // KNOWN DIVERGENCE — pinned AS-IS, not fixed (G1 characterizes reality).
+    //
+    // `import_resume_handler` IS mapped into `composeInput`
+    // (`gateway/composition.ts:173-174`) but is OMITTED from the
+    // `hasAnyChainedSurface` gate (`gateway/composition.ts:264-295`, which
+    // counts `import_upload_handler` + `chunked_upload_handler` but NOT
+    // `import_resume_handler`). So when it is the ONLY supplied HTTP surface,
+    // `hasAnyChainedSurface` is false → `buildComposedHttpFromComposition`
+    // returns null → `graph.fetch`/`graph.websocket` stay UNDEFINED and the
+    // boot shell falls back to its `/healthz`-only default handler. The
+    // resume route (`POST /api/import/<job>/resume`) is therefore NOT served
+    // even though its handler was wired.
+    //
+    // This looks like a LATENT PROD BUG (a box that supplied only the resume
+    // handler would silently serve no composed surface), but it is harmless in
+    // practice today because every real composition also supplies landing +
+    // other surfaces, so the gate is always satisfied. Flagged here for a
+    // later fix unit to add `import_resume_handler` (and `import_upload_handler`
+    // is already listed) to the gate. G1 only pins the current behavior; a fix
+    // must change this assertion WITH an explicit ratchet-change PR note.
+    const tmp = mkdtempSync(join(tmpdir(), 'neutron-import-resume-only-'))
+    const db = ProjectDb.open(join(tmp, 'owner.db'))
+    applyMigrations(db.raw())
+    const graph = await composeProductionGraph({
+      db,
+      project_slug: OWNER,
+      ...noOpInputBase,
+      import_resume_handler: async (req: Request): Promise<Response | null> =>
+        /^\/api\/import\/[^/]+\/resume$/.test(new URL(req.url).pathname)
+          ? sentinel('import-resume')
+          : null,
+      // NOTHING else supplied — import_resume_handler is the sole HTTP surface.
+    })
+    try {
+      expect(graph.fetch).toBeUndefined()
+      expect(graph.websocket).toBeUndefined()
+    } finally {
+      await graph.shutdown()
+      db.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('the SAME resume handler DOES route once any gate-counted surface is also present', async () => {
+    // Contrast case: add ONE gate-counted surface (landing) alongside the same
+    // resume handler → `hasAnyChainedSurface` is now true → the composed fetch
+    // exists AND the resume route is OWNED. This proves the divergence above is
+    // purely the gate omission, not a broken import-resume mapping.
+    const tmp = mkdtempSync(join(tmpdir(), 'neutron-import-resume-plus-'))
+    const db = ProjectDb.open(join(tmp, 'owner.db'))
+    applyMigrations(db.raw())
+    const graph = await composeProductionGraph({
+      db,
+      project_slug: OWNER,
+      ...noOpInputBase,
+      landing_server: { fetch: (): Response => sentinel('landing'), websocket: NOOP_WS },
+      import_resume_handler: async (req: Request): Promise<Response | null> =>
+        /^\/api\/import\/[^/]+\/resume$/.test(new URL(req.url).pathname)
+          ? sentinel('import-resume')
+          : null,
+    })
+    try {
+      expect(graph.fetch).toBeDefined()
+      const res = await graph.fetch!(
+        new Request('http://127.0.0.1/api/import/job-1/resume', { method: 'POST' }),
+        FAKE_SERVER,
+      )
+      expect(await answered(res)).toBe('import-resume')
+    } finally {
+      await graph.shutdown()
+      db.close()
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 })
