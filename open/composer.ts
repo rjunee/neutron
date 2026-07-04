@@ -1732,11 +1732,19 @@ export function buildOpenGraphComposer(
         return new Response(html, { status: r.status, headers })
       }
       const claimScript = claimBootstrapScript()
+      // Match the shell's module script tag whether or not it carries a
+      // `?v=<hash>` cache-bust query — `landing/server.ts` now versions the URL
+      // (ISSUES #353) so an exact-string match on the bare tag would silently
+      // drop EVERY bootstrap injection (projects/onboarding/claim). Inject the
+      // bootstrap scripts immediately before the tag, preserving it (query and
+      // all). Function replacement so `$` in the injected JSON isn't treated as a
+      // `String.replace` special pattern.
       const injected = html.replace(
-        '<script type="module" src="/chat-react.js"></script>',
-        `${projectsBootstrapScript()}\n${onboardingBootstrapScript()}` +
+        /<script type="module" src="\/chat-react\.js(?:\?v=[^"]*)?"><\/script>/,
+        (tag) =>
+          `${projectsBootstrapScript()}\n${onboardingBootstrapScript()}` +
           `${claimScript.length > 0 ? `\n${claimScript}` : ''}` +
-          `\n<script type="module" src="/chat-react.js"></script>`,
+          `\n${tag}`,
       )
       const headers = new Headers(r.headers)
       headers.delete('content-length')
