@@ -37,7 +37,6 @@ function fakeEngine(): {
   recordInboundReceived(): Promise<void>
   advance(input: unknown): Promise<unknown>
   start(): Promise<unknown>
-  acceptChoice(): Promise<unknown>
   tick(): Promise<void>
   emitCurrentPhasePrompt(): Promise<unknown>
 } {
@@ -51,9 +50,6 @@ function fakeEngine(): {
     },
     async start(): Promise<unknown> {
       return { prompt_id: 'pid', was_new: true, state: {} }
-    },
-    async acceptChoice(): Promise<unknown> {
-      return { outcome: 'advanced', state: {} }
     },
     async tick(): Promise<void> {},
     async emitCurrentPhasePrompt(): Promise<unknown> {

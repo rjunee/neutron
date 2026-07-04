@@ -118,190 +118,26 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
     expect(rows?.c).toBe(1)
   })
 
-  test('acceptChoice advances past signup and writes user transcript line', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const choice: ButtonChoice = {
-      prompt_id: start.prompt_id,
-      choice_value: 'use-telegram-name',
-      chosen_at: 1234,
-      speaker_user_id: 'u-1',
-      channel_kind: 'telegram',
-    }
-    const out = await engine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    expect(out.advanced).toBe(true)
-    // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned →
-    // import_offered. The engine runs the AUTO_SKIP walker on the
-    // acceptChoice path so the user lands on the first interactive
-    // phase (import_offered) instead of the hidden instance_provisioned
-    // transit. The pre-T9 path advanced to name_chosen via the
-    // shortcut and skipped both import_offered + archetype_picked
-    // entirely.
-    expect(out.state.phase).toBe('ai_substrate_offered')
-    const entries = transcript.readAll()
-    expect(entries.length).toBe(2)
-    expect(entries[1]?.role).toBe('user')
-    expect(entries[1]?.button_choice).toBe('use-telegram-name')
-  })
+  // K4a (refactor) — `acceptChoice` deleted (zero production callers; the
+  // production path is `advance` → `consumeChoice`). The button-choice-
+  // advances-past-signup + user-transcript-line assertions are preserved on
+  // the advance path by engine-router-integration.test.ts ("signup: typed
+  // name maps to consumeChoice + transcript user line") and the
+  // advance-driven port in engine-advance-choice-parity.test.ts.
 
-  test('Sprint 30 — personaSync.recordAgentName fires on the name_chosen transition with freeform name', async () => {
-    const recorded: Array<{ project_slug: string; agent_name: string | null }> = []
-    const localEngine = new InterviewEngine({
-      buttonStore,
-      stateStore,
-      transcript,
-      sendButtonPrompt: async (input) => {
-        sentPrompts.push(input)
-        return { message_id: `msg-${sentPrompts.length}`, was_new: true }
-      },
-      personaSync: {
-        recordAgentName: async (input) => {
-          recorded.push(input)
-        },
-      },
-    })
-    const start = await localEngine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const choice: ButtonChoice = {
-      prompt_id: start.prompt_id,
-      choice_value: '__freeform__',
-      chosen_at: 1234,
-      speaker_user_id: 'u-1',
-      channel_kind: 'telegram',
-      freeform_text: 'Athena',
-    }
-    await localEngine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    expect(recorded.length).toBe(1)
-    expect(recorded[0]?.project_slug).toBe('t1')
-    expect(recorded[0]?.agent_name).toBe('Athena')
-  })
-
-  test('Sprint 30 (Codex r1 P2) — personaSync is NOT called when agent_name is null on button-only choice', async () => {
-    // Button-only choices ('use-telegram-name', 'keep-display-name') do
-    // not carry literal text, so the engine cannot determine the user's
-    // chosen name. Per Codex r1 P2 finding, the engine MUST NOT
-    // overwrite the stored `agent_name` with NULL — that would clobber
-    // any provisioning-time default OR a name set by an earlier
-    // resume. The hook is silently skipped; the local
-    // `phase_state.agent_name` still records null so a later sprint
-    // can backfill from channel context.
-    const recorded: Array<{ project_slug: string; agent_name: string | null }> = []
-    const localEngine = new InterviewEngine({
-      buttonStore,
-      stateStore,
-      transcript,
-      sendButtonPrompt: async (input) => {
-        sentPrompts.push(input)
-        return { message_id: `msg-${sentPrompts.length}`, was_new: true }
-      },
-      personaSync: {
-        recordAgentName: async (input) => {
-          recorded.push(input)
-        },
-      },
-    })
-    const start = await localEngine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const choice: ButtonChoice = {
-      prompt_id: start.prompt_id,
-      choice_value: 'use-telegram-name',
-      chosen_at: 1234,
-      speaker_user_id: 'u-1',
-      channel_kind: 'telegram',
-    }
-    await localEngine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    expect(recorded.length).toBe(0)
-  })
-
-  test('Sprint 30 — engine survives a personaSync failure (best-effort)', async () => {
-    const localEngine = new InterviewEngine({
-      buttonStore,
-      stateStore,
-      transcript,
-      sendButtonPrompt: async (input) => {
-        sentPrompts.push(input)
-        return { message_id: `msg-${sentPrompts.length}`, was_new: true }
-      },
-      personaSync: {
-        recordAgentName: async () => {
-          throw new Error('synthetic registry-write failure')
-        },
-      },
-    })
-    const start = await localEngine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const choice: ButtonChoice = {
-      prompt_id: start.prompt_id,
-      choice_value: '__freeform__',
-      chosen_at: 1234,
-      speaker_user_id: 'u-1',
-      channel_kind: 'telegram',
-      freeform_text: 'Hermes',
-    }
-    const out = await localEngine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    expect(out.advanced).toBe(true)
-    // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned →
-    // import_offered via AUTO_SKIP walker on acceptChoice path.
-    expect(out.state.phase).toBe('ai_substrate_offered')
-  })
-
-  test('acceptChoice with __freeform__ records freeform_text in transcript body', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const choice: ButtonChoice = {
-      prompt_id: start.prompt_id,
-      choice_value: '__freeform__',
-      chosen_at: 1234,
-      speaker_user_id: 'u-1',
-      channel_kind: 'telegram',
-      freeform_text: 'Alice',
-    }
-    await engine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    const entries = transcript.readAll()
-    expect(entries[1]?.body).toBe('Alice')
-  })
-
-  test('duplicate acceptChoice does NOT re-advance', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const choice: ButtonChoice = {
-      prompt_id: start.prompt_id,
-      choice_value: 'use-telegram-name',
-      chosen_at: 1234,
-      speaker_user_id: 'u-1',
-      channel_kind: 'telegram',
-    }
-    const a = await engine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    const b = await engine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    expect(a.advanced).toBe(true)
-    expect(b.advanced).toBe(false)
-    const entries = transcript.readAll()
-    expect(entries.length).toBe(2) // only one user line
-  })
+  // K4a (refactor) — the persona-sync fire / skip-on-null / survive-throw
+  // discipline these three `acceptChoice` tests covered is preserved on the
+  // PRODUCTION advance path by signup-asks-name.test.ts, which drives
+  // `engine.advance` and asserts `recordUserFirstName` fires on a name reply
+  // (L147), is skipped on a non-name reply (L244), and swallows a throw
+  // (L476). Note: on the signup ADVANCE the engine fires `recordUserFirstName`
+  // (v2), not `recordAgentName` (a legacy acceptChoice-only signup artifact —
+  // advance fires `recordAgentName` at the `agent_name_chosen` transition
+  // instead). The `__freeform__`→transcript-body and duplicate-no-re-advance
+  // assertions are covered on the advance path by
+  // engine-router-integration.test.ts ("signup: typed name maps to
+  // consumeChoice + transcript user line"; "DEDUPED redelivered hybrid
+  // advance") and final-handoff-resolve-roundtrip.test.ts (double-tap noop).
 
   test('state is persisted BEFORE the send call (Codex r8 P1)', async () => {
     // Race scenario: user taps the keyboard before the post-send state
@@ -341,9 +177,13 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
       user_id: 'u-1',
       signup_via: 'telegram',
     })
-    await engine.acceptChoice({
+    // K4a (refactor) — advance the phase via the PRODUCTION path
+    // (`engine.advance` with a button choice), not the deleted `acceptChoice`.
+    await engine.advance({
       user_id: 'u-1',
       project_slug: 't1',
+      topic_id: 'topic-1',
+      channel_kind: 'telegram',
       choice: {
         prompt_id: start.prompt_id,
         choice_value: 'use-telegram-name',
@@ -353,25 +193,18 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
       },
     })
     const advancedState = await stateStore.get('t1', 'u-1')
-    // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned (auto-
-    // skip walker on the acceptChoice path) → import_offered. The
-    // post-acceptChoice phase is the first non-AUTO_SKIP phase reached
-    // by the walker, so callbacks land the user on the import-substrate
-    // picker instead of stranding on a hidden transit phase.
-    // The walker clears active_prompt_id on the entry-side patch, so
-    // there is no in-flight prompt to re-send on reconnect — the
-    // import_offered emit happens via the next start() / advance().
+    // Under the PRODUCTION `advance` path the engine walks
+    // signup → instance_provisioned → (AUTO_SKIP) → ai_substrate_offered AND
+    // emits the ai_substrate_offered prompt, so a live active prompt exists
+    // (unlike the retired `acceptChoice`, which advanced state without
+    // emitting the post-skip prompt).
     expect(advancedState?.phase).toBe('ai_substrate_offered')
-    expect(advancedState?.phase_state.active_prompt_id ?? null).toBeNull()
+    expect(typeof advancedState?.phase_state.active_prompt_id).toBe('string')
 
-    // Spurious second start (e.g. duplicate signup trigger / reconnect).
-    // The r3 guarantee — no state rollback — still holds: state.phase
-    // remains import_offered. The r4 guarantee (unresolved-prompt re-
-    // send on reconnect) is moot here because the walker cleared the
-    // active prompt at acceptChoice time; instead, start() reaches the
-    // !has_active_prompt + has_phase_prompt branch and emits a fresh
-    // import_offered prompt via emitCurrentPhasePrompt.
-    const sentBefore = sentPrompts.length
+    // Spurious second start (e.g. duplicate signup trigger / reconnect). The
+    // r3 guarantee — no state rollback — holds: the phase remains
+    // ai_substrate_offered and start collapses idempotently (was_new=false)
+    // instead of resetting the row back to signup.
     const out = await engine.start({
       project_slug: 't1',
       topic_id: 'topic-1',
@@ -382,11 +215,6 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
     expect(out.state.phase).toBe('ai_substrate_offered')
     expect(typeof out.prompt_id).toBe('string')
     expect((out.prompt_id ?? '').length).toBeGreaterThan(0)
-    expect(sentPrompts.length).toBe(sentBefore + 1)
-    // The freshly emitted prompt is for import_offered.
-    expect(sentPrompts[sentPrompts.length - 1]?.prompt.body).toContain(
-      'ChatGPT',
-    )
   })
 
   test('start retries the send when the prior attempt failed (no delivered_at)', async () => {
@@ -442,94 +270,27 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
     expect(agentLines.length).toBe(1)
   })
 
-  test('acceptChoice with __timeout__ does NOT advance phase (Codex r5 P1)', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const out = await engine.acceptChoice({
-      user_id: 'u-1',
-      project_slug: 't1',
-      choice: {
-        prompt_id: start.prompt_id,
-        choice_value: '__timeout__',
-        chosen_at: 1234,
-        speaker_user_id: '__system__',
-        channel_kind: 'webhook',
-      },
-    })
-    expect(out.advanced).toBe(false)
-    expect(out.state.phase).toBe('signup')
-    const entries = transcript.readAll()
-    const userLines = entries.filter((e) => e.role === 'user')
-    expect(userLines.length).toBe(0)
-    const systemLines = entries.filter((e) => e.role === 'system')
-    expect(systemLines.length).toBe(1)
-    expect(systemLines[0]?.button_choice).toBe('__timeout__')
-  })
+  // K4a (refactor) — the "__timeout__ / __cancel__ synthetic sentinel does
+  // NOT advance the phase" assertions lived ONLY on the deleted `acceptChoice`
+  // entry (its top-of-method NON_ADVANCING_CHOICE_VALUES guard). The
+  // production `advance` → `consumeChoice` path has no such generic guard, and
+  // the sentinels do not reach it: `__timeout__` is rejected at the gateway
+  // boundary (FORBIDDEN_INBOUND_VALUES in the app-socket adapter + chat-bridge
+  // button_choice handler) and is produced only by ButtonStore.sweepExpired,
+  // which has no production consumer that feeds the engine. This behavior was
+  // therefore dead-with-acceptChoice and is intentionally not ported. (The
+  // `__cancel__` app-socket path DOES reach `advance`; hardening consumeChoice
+  // to no-op on it is a separate concern flagged in the K4a PR, out of scope
+  // for a pure deletion.)
 
-  test('acceptChoice with __cancel__ does NOT advance phase (Codex r5 P1)', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    const out = await engine.acceptChoice({
-      user_id: 'u-1',
-      project_slug: 't1',
-      choice: {
-        prompt_id: start.prompt_id,
-        choice_value: '__cancel__',
-        chosen_at: 1234,
-        speaker_user_id: 'u-1',
-        channel_kind: 'app-socket',
-      },
-    })
-    expect(out.advanced).toBe(false)
-    expect(out.state.phase).toBe('signup')
-  })
-
-  test('after __timeout__ (via sweepExpired), next start() emits a FRESH prompt (Codex r7 P1.3)', async () => {
-    // sweepExpired runs in production from cron tick; here we simulate
-    // it advancing time past expires_at and calling sweep, then feed
-    // the synthesized __timeout__ choice into the engine the way
-    // production routeChoice would (sweepExpired returns ButtonChoice[],
-    // each gets routed; engine.acceptChoice handles it).
-    const a = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-      // Short expires so sweep can fire deterministically below.
-    })
-    // Pin the row's expires_at to fire on a known clock.
-    await db.run(`UPDATE button_prompts SET expires_at = ? WHERE prompt_id = ?`, [
-      1_000,
-      a.prompt_id,
-    ])
-    const sweep = await buttonStore.sweepExpired(2_000)
-    expect(sweep.resolved.length).toBe(1)
-    const synth = sweep.resolved[0]!
-    await engine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice: synth })
-
-    const cleared = await stateStore.get('t1', 'u-1')
-    expect(cleared?.phase_state.active_prompt_id).toBeNull()
-
-    // Next start() must emit a fresh prompt + send Telegram again.
-    const sentBefore = sentPrompts.length
-    const b = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    expect(b.was_new).toBe(true)
-    expect(b.prompt_id).not.toBe(a.prompt_id)
-    expect(sentPrompts.length).toBe(sentBefore + 1)
-  })
+  // K4a (refactor) — removed. This test fed a swept `__timeout__` sentinel
+  // through `acceptChoice`, relying on that method's NON_ADVANCING guard to
+  // CLEAR `active_prompt_id` so the next `start()` re-emits fresh. That guard
+  // was acceptChoice-only and is deleted; `__timeout__` never reaches the
+  // production engine (see the NON_ADVANCING note above). The surviving
+  // start-recovery guarantee — next `start()` re-emits after a prompt was
+  // resolved before the phase advanced — is covered by the sibling test below
+  // ("start recovers when prompt was resolved before phase advance").
 
   test('start recovers when prompt was resolved before phase advance (Codex r9 P1 + r11 P2)', async () => {
     // Simulate the crash: store.resolve commits, then process dies
@@ -541,7 +302,7 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
       user_id: 'u-1',
       signup_via: 'telegram',
     })
-    // Resolve via the channel-side router but skip engine.acceptChoice.
+    // Resolve via the channel-side router but skip driving engine.advance.
     await buttonStore.resolve({
       choice: {
         prompt_id: a.prompt_id,
@@ -666,7 +427,7 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
         freeform_text: 'Alice the freeform name',
       },
     })
-    // Process dies before engine.acceptChoice. Recovery start():
+    // Process dies before the engine advances the phase. Recovery start():
     const recovered = await engine.start({
       project_slug: 't1',
       topic_id: 'topic-1',
@@ -717,49 +478,12 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
     expect(sentTopics).toEqual(['topic-1', 'topic-1'])
   })
 
-  test('after __cancel__ (via app-socket routeChoice), next start() emits a FRESH prompt (Codex r7 P1.3)', async () => {
-    const a = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    // App-socket cancel: routeChoice → store.resolve writes the row's
-    // resolution_value=__cancel__. Mirror that here.
-    await buttonStore.resolve({
-      choice: {
-        prompt_id: a.prompt_id,
-        choice_value: '__cancel__',
-        chosen_at: 1234,
-        speaker_user_id: 'u-1',
-        channel_kind: 'app-socket',
-      },
-    })
-    await engine.acceptChoice({
-      user_id: 'u-1',
-      project_slug: 't1',
-      choice: {
-        prompt_id: a.prompt_id,
-        choice_value: '__cancel__',
-        chosen_at: 1234,
-        speaker_user_id: 'u-1',
-        channel_kind: 'app-socket',
-      },
-    })
-    // Time passes past the original prompt's expires_at so the sweep-
-    // resolved row is treated as stale on re-emit.
-    await db.run(`UPDATE button_prompts SET expires_at = 0 WHERE prompt_id = ?`, [a.prompt_id])
-    const sentBefore = sentPrompts.length
-    const b = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
-    expect(b.was_new).toBe(true)
-    expect(b.prompt_id).not.toBe(a.prompt_id)
-    expect(sentPrompts.length).toBe(sentBefore + 1)
-  })
+  // K4a (refactor) — removed. Same shape as the deleted `__timeout__` start-
+  // fresh test: it drove the swept `__cancel__` sentinel through `acceptChoice`
+  // to clear `active_prompt_id` before asserting the next `start()` re-emits.
+  // That clear was acceptChoice-only. Start re-emit / prompt-reuse on signup is
+  // covered by "start during signup with active prompt reuses prompt_id" below
+  // and "start recovers when prompt was resolved before phase advance" above.
 
   test('start during signup with active prompt reuses prompt_id (Codex r5 P2)', async () => {
     const a = await engine.start({
@@ -784,7 +508,13 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
     expect(sentPrompts.length).toBe(1)
   })
 
-  test('acceptChoice without prior start throws owner_state_missing', async () => {
+  test('advance with a choice but no prior state is a no-op (noop_no_state)', async () => {
+    // K4a (refactor) — the deleted `acceptChoice` THREW `owner_state_missing`
+    // when driven with no prior `start()`. The production `advance` path
+    // instead returns `outcome: 'noop_no_state'` (engine.advance's terminal
+    // no-op when the (project_slug, user_id) row is absent). This pins that
+    // contract so a missing-state inbound is swallowed, never crashing the
+    // chat-bridge turn.
     const choice: ButtonChoice = {
       prompt_id: '00000000-0000-0000-0000-000000000000',
       choice_value: 'x',
@@ -792,13 +522,15 @@ describe('InterviewEngine — S1 single hardcoded phase', () => {
       speaker_user_id: 'u-1',
       channel_kind: 'telegram',
     }
-    try {
-      await engine.acceptChoice({ project_slug: 't1', user_id: 'u-1', choice })
-    } catch (err) {
-      expect((err as Error).name).toBe('InterviewError')
-      return
-    }
-    throw new Error('expected throw')
+    const out = await engine.advance({
+      project_slug: 't1',
+      user_id: 'u-1',
+      topic_id: 'topic-1',
+      channel_kind: 'telegram',
+      choice,
+    })
+    expect(out.outcome).toBe('noop_no_state')
+    expect(out.state).toBeNull()
   })
 })
 

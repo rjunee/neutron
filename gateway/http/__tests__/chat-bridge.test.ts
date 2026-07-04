@@ -119,9 +119,6 @@ function makeFakeEngine(): FakeEngine {
       return advanceResult
     },
     // Methods unused by the bridge — stub for type compatibility.
-    async acceptChoice() {
-      throw new Error('not used in tests')
-    },
     async tick(): Promise<void> {},
     async emitCurrentPhasePrompt(): Promise<AdvanceResult> {
       return advanceResult
@@ -958,9 +955,6 @@ describe('buildWebChatBridge — handleInbound', () => {
       },
       async advance(): Promise<AdvanceResult> {
         return advanceResult
-      },
-      async acceptChoice(): Promise<AdvanceResult> {
-        throw new Error('not used in this test')
       },
       async tick(): Promise<void> {},
       async emitCurrentPhasePrompt(): Promise<AdvanceResult> {

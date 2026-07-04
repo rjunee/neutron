@@ -6,10 +6,12 @@
  * S1 SKELETON (preserved verbatim on this class):
  *   - `start(...)` emits the hardcoded "What's your name?" prompt for the
  *     `signup → name_chosen` transition.
- *   - `acceptChoice(...)` resolves that single prompt + advances state.
  *
  * S2 EXTENSION (this commit adds):
  *   - `advance(...)` walks every phase in `phase.ts:LEGAL_TRANSITIONS`.
+ *     Button choices are threaded in via `AdvanceInput.choice`; this is the
+ *     production entry point (chat-bridge drives `advance`, never the removed
+ *     legacy single-prompt `acceptChoice`).
  *     For each phase with an entry in `phase-prompts.ts:PHASE_PROMPTS`, the
  *     engine emits the prompt, persists it via ButtonStore, accepts the
  *     inbound ButtonChoice or freeform reply, walks the legal transition,
@@ -197,7 +199,7 @@ import {
   type ImportRunningSubStep,
 } from './phase-prompts.ts'
 // R5 / audit P2-4 — InterviewEngineDeps + hook interfaces + public
-// Start/AcceptChoice/Advance types + InterviewError + the import-routing
+// Start/Advance types + InterviewError + the import-routing
 // constants/helpers were relocated to the dependency-free leaf
 // `engine-internals.ts` so the import-routing free functions in
 // `engine-import-routing.ts` can consume them without an engine.ts import
@@ -227,8 +229,6 @@ import {
   sanitizeBrowserTimezone,
   serializeDraft,
   readStringArray,
-  type AcceptChoiceInput,
-  type AcceptChoiceResult,
   type AdvanceInput,
   type AdvanceResult,
   type EngineInternals,
@@ -261,8 +261,6 @@ export {
   type ImportTimeoutReason,
 } from './engine-internals.ts'
 export type {
-  AcceptChoiceInput,
-  AcceptChoiceResult,
   AdvanceInput,
   AdvanceOutcome,
   AdvanceResult,
@@ -1650,7 +1648,7 @@ export class InterviewEngine implements EngineInternals {
     })
     this.deps.transcript.append({
       role: 'system',
-      body: `recovery: re-applied resolved prompt during start() (acceptChoice did not run before restart)`,
+      body: `recovery: re-applied resolved prompt during start() (the reply was not consumed before restart)`,
       phase: 'signup',
       button_prompt_id: prompt_id,
       button_choice: choice_value,
@@ -1704,272 +1702,6 @@ export class InterviewEngine implements EngineInternals {
       }
     }
     return { prompt_id, was_new: false, state }
-  }
-
-  /**
-   * Accept a ButtonChoice for the active prompt + advance state.
-   *
-   * The channel layer (DefaultButtonRouter.routeChoice) is responsible for
-   * persisting the resolution into `button_prompts.resolution_*` columns;
-   * the engine's job is to walk the phase machine. Dedup is phase-based
-   * here — once `state.phase === 'agent_name_chosen'` for a given prompt_id, a
-   * second acceptChoice with that prompt_id is a no-op.
-   *
-   * Returns `advanced: false` when the choice corresponds to a stale or
-   * already-handled prompt; the engine swallows that to keep S1 trivial.
-   */
-  async acceptChoice(input: AcceptChoiceInput): Promise<AcceptChoiceResult> {
-    this.clearResolvedSpecCache()
-    const existing = await this.deps.stateStore.get(input.project_slug, input.user_id)
-    if (existing === null) {
-      throw new InterviewError(
-        'signup',
-        'owner_state_missing',
-        false,
-        `no onboarding_state for project=${input.project_slug}; start() must run first`,
-      )
-    }
-    const expected_prompt_id = existing.phase_state.active_prompt_id
-    if (
-      typeof expected_prompt_id !== 'string' ||
-      expected_prompt_id !== input.choice.prompt_id
-    ) {
-      // Either there's no active prompt or the choice is for a different
-      // (stale) prompt. The skeleton treats this as a no-op so the agent
-      // doesn't double-advance on a stale callback.
-      return {
-        advanced: false,
-        state: existing,
-        resolved_choice: input.choice,
-      }
-    }
-
-    if (existing.phase !== 'signup') {
-      // Phase already advanced past `signup` — this is a duplicate
-      // delivery for a prompt we already processed. Idempotent no-op.
-      return {
-        advanced: false,
-        state: existing,
-        resolved_choice: input.choice,
-      }
-    }
-
-    // Codex r5 P1 — synthetic sentinels (__timeout__ from sweepExpired,
-    // __cancel__ from app-socket) are NOT successful answers. The
-    // skeleton records them in the transcript as `system` lines for
-    // audit but does NOT advance the phase. Real abandonment / cancel
-    // semantics land in S2 alongside the full phase machine; for S1 we
-    // just refuse to advance so a sentinel can never silently complete
-    // a phase the user never answered.
-    //
-    // Codex r7 P1.3 — clearing active_prompt_id is critical: a stale
-    // active_prompt_id pointing at the timed-out / cancelled prompt
-    // would block the next start() from emitting a fresh keyboard (the
-    // duplicate-start guard treats a non-empty active_prompt_id as
-    // "user is looking at this"). Clear it so the instance can recover.
-    if (NON_ADVANCING_CHOICE_VALUES.has(input.choice.choice_value)) {
-      this.deps.transcript.append({
-        role: 'system',
-        body: `prompt resolved as ${input.choice.choice_value}; phase stays at ${existing.phase}`,
-        phase: 'signup',
-        button_prompt_id: input.choice.prompt_id,
-        button_choice: input.choice.choice_value,
-      })
-      const cleared = await this.deps.stateStore.upsert({
-        project_slug: input.project_slug,
-        user_id: input.user_id,
-        phase: existing.phase,
-        phase_state_patch: { active_prompt_id: null },
-        advanced_at: this.now(),
-      })
-      return {
-        advanced: false,
-        state: cleared,
-        resolved_choice: input.choice,
-      }
-    }
-
-    // Argus r1 (2026-05-10) — the S1_HARDCODED_NEXT_PHASE shortcut is
-    // gone. Resolve the phase spec (LLM driver / phaseSpecResolver /
-    // static fallback) and route via that spec's `next_phase_on_default`
-    // and `next_phase_overrides`. When the LLM driver decides the
-    // conversation is not over (returns `next_phase_on_default ===
-    // existing.phase`), this path stays at signup and reports
-    // `advanced: false` — the caller is the legacy single-prompt
-    // acceptChoice entry, which never re-emits, so the caller's view
-    // of "no advance" is correct. The production conversational path
-    // lives in `advance()` → `consumeChoice` which DOES re-emit.
-    const spec = await this.resolvePhasePromptSpec(input.project_slug, input.user_id, existing.phase)
-    if (spec === null) {
-      throw new InterviewError(
-        existing.phase,
-        'prompt_emit_failed',
-        false,
-        `no prompt spec for project=${input.project_slug} phase=${existing.phase}`,
-      )
-    }
-    const choice_value = input.choice.choice_value
-    const next_phase: OnboardingPhase = this.nextPhaseForMode(
-      existing.phase,
-      spec.next_phase_overrides?.[choice_value] ?? spec.next_phase_on_default,
-    )
-
-    // Translate reserved values back into a readable transcript body.
-    const body =
-      input.choice.choice_value === '__freeform__' && input.choice.freeform_text !== undefined
-        ? input.choice.freeform_text
-        : input.choice.choice_value
-    this.deps.transcript.append({
-      role: 'user',
-      body,
-      phase: 'signup',
-      button_prompt_id: input.choice.prompt_id,
-      button_choice: input.choice.choice_value,
-    })
-
-    // LLM driver says "stay" — record the reply, clear the active
-    // prompt so the next start()/advance() emits fresh, return no-advance.
-    if (next_phase === existing.phase) {
-      const stayed = await this.deps.stateStore.upsert({
-        project_slug: input.project_slug,
-        user_id: input.user_id,
-        phase: existing.phase,
-        phase_state_patch: {
-          active_prompt_id: null,
-          last_choice_value: input.choice.choice_value,
-          ...(input.choice.freeform_text !== undefined
-            ? { last_choice_freeform: input.choice.freeform_text }
-            : {}),
-        },
-        advanced_at: this.now(),
-      })
-      return {
-        advanced: false,
-        state: stayed,
-        resolved_choice: input.choice,
-      }
-    }
-
-    if (!isLegalTransition(existing.phase, next_phase, this.deploymentMode)) {
-      throw new InterviewError(
-        existing.phase,
-        'illegal_transition',
-        false,
-        `illegal transition ${existing.phase} → ${next_phase}`,
-      )
-    }
-
-    // 2026-05-14 — T9 (Codex r1 P2): persist the captured signup name
-    // on the acceptChoice path too. Pre-T9 the only place this happened
-    // was the signup → name_chosen shortcut path (handled by the
-    // generic `next_phase === 'agent_name_chosen'` branch in consumeChoice);
-    // post-T9 signup advances to `instance_provisioned` (auto-skipped to
-    // `import_offered`), so the extraction needs to land on phase_state
-    // here too. The downstream archetype_picked → name_chosen handler
-    // picks it up via its `persisted_name = readString(state.phase_state,
-    // 'agent_name')` lookup. Without this fix the callback-driven
-    // signup path (Telegram, app-socket button round-trip tests, future
-    // freeform bridge) would advance with `agent_name=null` and the
-    // user's chosen name would be silently lost.
-    const acceptchoice_signup_patch: Record<string, unknown> = {}
-    let recorded_agent_name: string | null = null
-    if (
-      existing.phase === 'signup' &&
-      next_phase !== 'failed' &&
-      input.choice.choice_value === '__freeform__' &&
-      input.choice.freeform_text !== undefined &&
-      input.choice.freeform_text.length > 0
-    ) {
-      const persisted_name = readString(existing.phase_state, 'agent_name')
-      const heuristic_name = extractAgentNameFromFreeform(input.choice.freeform_text)
-      const agent_name = persisted_name ?? heuristic_name
-      if (agent_name !== null) {
-        acceptchoice_signup_patch['agent_name'] = agent_name
-        const persisted_slug = readString(existing.phase_state, 'suggested_slug')
-        if (persisted_slug === null) {
-          acceptchoice_signup_patch['suggested_slug'] =
-            suggestedSlugFromAgentName(agent_name)
-        }
-        recorded_agent_name = agent_name
-      }
-    }
-
-    let state = await this.deps.stateStore.upsert({
-      project_slug: input.project_slug,
-      user_id: input.user_id,
-      phase: next_phase,
-      phase_state_patch: {
-        chosen_value: input.choice.choice_value,
-        ...(input.choice.freeform_text !== undefined
-          ? { chosen_freeform: input.choice.freeform_text }
-          : {}),
-        ...acceptchoice_signup_patch,
-      },
-      advanced_at: this.now(),
-    })
-
-    // 2026-05-14 — T9 (Codex r1 P2): drive the AUTO_SKIP walker on the
-    // acceptChoice path too. Pre-T9 the post-acceptChoice phase was
-    // `name_chosen` (in AUTO_SKIP_PHASES), but acceptChoice never
-    // emitted the post-skip prompt — it just returned and the next
-    // engine.start() / engine.advance() call handled the auto-skip
-    // walk. With T9 the post-acceptChoice phase is `instance_provisioned`
-    // (also in AUTO_SKIP_PHASES), so the user could be stranded on a
-    // hidden transit phase if no fresh start() / advance() fires
-    // between the callback and the user's next interaction. Walk
-    // through AUTO_SKIP_PHASES so the persisted phase lands on the
-    // first interactive phase (e.g. `import_offered` after signup).
-    // Note: acceptChoice does NOT emit the post-skip phase's prompt —
-    // that remains the caller's responsibility (the legacy single-
-    // prompt acceptChoice contract is "advance state + write
-    // transcript"; emit happens out-of-band via emitCurrentPhasePrompt
-    // or the next start()). The callback-router-driven tests rely on
-    // a follow-up start() on reconnect to re-emit.
-    if (AUTO_SKIP_PHASES.has(state.phase) && !TERMINAL_PHASES.has(state.phase)) {
-      state = await this.walkAutoSkip(input.project_slug, state, this.now())
-    }
-
-    // Sprint 30 — fire the persona-sync hook on the signup acceptChoice
-    // path when it advances. Mirrors the same hook in the consumeChoice
-    // path so the registry is updated regardless of which entry-point
-    // drives the transition. Best-effort: a hook failure is logged but
-    // never blocks the user.
-    //
-    // Codex r1 P2 — skip the registry write when agent_name is null
-    // (button-only choice that does not carry literal text). See the
-    // matching guard in `consumeChoice` for the rationale.
-    //
-    // 2026-05-14 — T9: trigger on "advancing OUT of signup" rather than
-    // the literal `next_phase === 'agent_name_chosen'`. The post-T9 default
-    // route is `instance_provisioned` (auto-skipped → import_offered);
-    // the registry write still fires when a name is extractable from
-    // the persona-discovery answer. Use the same agent_name we just
-    // persisted onto phase_state above so the registry write + the
-    // local store stay in sync.
-    if (
-      existing.phase === 'signup' &&
-      next_phase !== 'failed' &&
-      this.deps.personaSync !== undefined &&
-      recorded_agent_name !== null
-    ) {
-      try {
-        await this.deps.personaSync.recordAgentName({
-          project_slug: input.project_slug,
-          agent_name: recorded_agent_name,
-        })
-      } catch (err) {
-        console.warn(
-          `[engine] personaSync.recordAgentName failed for project=${input.project_slug}:`,
-          err instanceof Error ? err.message : err,
-        )
-      }
-    }
-
-    return {
-      advanced: true,
-      state,
-      resolved_choice: input.choice,
-    }
   }
 
   // ----- S2: full state machine driver -----

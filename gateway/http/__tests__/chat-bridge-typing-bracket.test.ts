@@ -97,9 +97,6 @@ function makeFakeEngine(events: string[], opts: { advanceThrows?: boolean } = {}
       if (opts.advanceThrows === true) throw new Error('boom in advance')
       return advanceResult
     },
-    async acceptChoice() {
-      throw new Error('not used')
-    },
     async tick(): Promise<void> {},
     async emitCurrentPhasePrompt(): Promise<AdvanceResult> {
       return advanceResult
