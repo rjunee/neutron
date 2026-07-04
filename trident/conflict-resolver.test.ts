@@ -11,7 +11,8 @@ import { describe, expect, test } from 'bun:test'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { SessionHandle } from '../runtime/session-handle.ts'
 import type { Event } from '../runtime/events.ts'
-import { buildForgeConflictResolver } from './conflict-resolver.ts'
+import { buildForgeConflictResolver, RESOLVER_TOOL_NAMES } from './conflict-resolver.ts'
+import { buildReplArgv } from '../runtime/adapters/claude-code/persistent/build-repl-argv.ts'
 import type { TridentRun } from './store.ts'
 
 const completion = (): Event => ({
@@ -103,19 +104,82 @@ const input = () => ({
 })
 
 describe('buildForgeConflictResolver', () => {
-  test('RESOLVED marker → resolved:true; roots the substrate at the repo + tool-less prompt names the files', async () => {
+  test('RESOLVED marker → resolved:true; roots the substrate at the repo + grants the file/shell tools + prompt names the files', async () => {
     const f = scriptedFactory('...work...\nRESOLVED')
     const resolve = buildForgeConflictResolver({ build_substrate: f.build })
     const out = await resolve(input())
     expect(out).toEqual({ resolved: true })
     // Built once, rooted at the conflicted working tree.
     expect(f.cwds).toEqual(['/proj/code'])
-    // The Forge turn is tool-less (the CC subprocess drives its own tools) and
-    // the prompt lists the conflicted files + forbids `rebase --continue`.
-    expect(f.specs[0]!.tools).toEqual([])
+    // #361 — the Forge turn MUST carry the file+shell tool surface (an empty grant
+    // ships a toolless `--tools ""` subprocess that can't open/edit/stage files).
+    expect(f.specs[0]!.tools.map((t) => t.name)).toEqual([
+      'Read',
+      'Glob',
+      'Grep',
+      'Edit',
+      'Write',
+      'Bash',
+    ])
+    // Never the toolless surface that shipped the #361 bug.
+    expect(f.specs[0]!.tools.length).toBeGreaterThan(0)
     expect(f.specs[0]!.prompt).toContain('flush.ts, ring.ts')
     expect(f.specs[0]!.prompt).toContain('rebase --continue')
     expect(f.specs[0]!.model_preference.length).toBeGreaterThan(0)
+  })
+
+  // THE regression guard for #361 — DO NOT MOCK PAST THE SEAM. A spy substrate
+  // records the AgentSpec it is launched with and runs the spec's declared tools
+  // through the REAL `buildReplArgv` (the exact prod function that turns
+  // `spec.tools.map(t => t.name)` into the spawned `claude`'s `--tools` flag). If
+  // the resolver ever regresses to `tools: []`, the argv becomes `--tools ""` (a
+  // toolless subprocess) and this test fails — the failure mode the #193 stub
+  // (which faked `resolve_conflict → {resolved:true}`) could never catch.
+  test('#361 the declared tool grant reaches the launch boundary → real `--tools Read,Glob,Grep,Edit,Write,Bash`', async () => {
+    let launchedArgv: string[] | null = null
+    const spyBuild = (cwd: string): Substrate => ({
+      start(spec: AgentSpec): SessionHandle {
+        // Mirror the prod persistent-REPL substrate: it forwards
+        // `spec.tools.map(t => t.name)` straight into `buildReplArgv`'s `tools`.
+        launchedArgv = buildReplArgv({
+          sessionId: 'sess',
+          resume: false,
+          channelName: 'ch',
+          mcpConfigPath: '/tmp/mcp.json',
+          settingsPath: '/tmp/settings.json',
+          appendSystemPromptFile: '/tmp/agent.md',
+          model: spec.model_preference[0] ?? 'opus',
+          addDir: cwd,
+          tools: spec.tools.map((t) => t.name),
+          skipPermissions: true,
+        })
+        async function* gen(): AsyncGenerator<Event> {
+          yield { kind: 'token', text: 'RESOLVED' }
+          yield completion()
+        }
+        return {
+          events: gen(),
+          async respondToTool(): Promise<void> {},
+          async cancel(): Promise<void> {},
+          tool_resolution: 'internal',
+        }
+      },
+    })
+
+    const resolve = buildForgeConflictResolver({ build_substrate: spyBuild })
+    const out = await resolve(input())
+    expect(out).toEqual({ resolved: true })
+
+    expect(launchedArgv).not.toBeNull()
+    const argv = launchedArgv as unknown as string[]
+    const toolsIdx = argv.indexOf('--tools')
+    expect(toolsIdx).toBeGreaterThanOrEqual(0)
+    const toolsValue = argv[toolsIdx + 1]
+    // The REAL `--tools` value the CC subprocess would launch with — the exact
+    // file/shell surface, NOT the default-deny empty string.
+    expect(toolsValue).toBe('Read,Glob,Grep,Edit,Write,Bash')
+    expect(toolsValue).not.toBe('')
+    expect(toolsValue).toBe(RESOLVER_TOOL_NAMES.join(','))
   })
 
   test('ESCALATE: <question> → resolved:false with the specific question', async () => {

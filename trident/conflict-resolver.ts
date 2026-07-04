@@ -25,9 +25,19 @@
  *                          delivery posts to chat (never a raw "merge failed").
  *
  * BOUNDED: a single turn with a wall-clock timeout (default 8 min, safely under
- * the merge path's own budget), NO tools declared (the CC subprocess drives its
- * own Read/Edit/Bash), and NO conversation state — a crashed / timed-out / marker-
- * less turn escalates conservatively rather than guessing a resolution.
+ * the merge path's own budget), a FILE+SHELL tool grant (Read/Glob/Grep/Edit/
+ * Write/Bash), and NO conversation state — a crashed / timed-out / marker-less
+ * turn escalates conservatively rather than guessing a resolution.
+ *
+ * TOOL GRANT (#361, same class as #175). The resolver runs on an EPHEMERAL
+ * `cc-trident-resolve` REPL that the composer launches WITHOUT any built-in
+ * tools unless this AgentSpec declares them: the persistent-REPL substrate maps
+ * `spec.tools.map(t => t.name)` straight onto the spawned `claude`'s `--tools`
+ * flag (default-DENY — an empty surface becomes `--tools ""`, disabling EVERY
+ * built-in). An earlier `tools: []` therefore shipped a toolless subprocess that
+ * could not open, edit, or `git add` a single conflicted file, so every real
+ * rebase conflict hard-failed the build. The resolver MUST carry the file+shell
+ * surface below so the CC subprocess can actually resolve + stage the conflicts.
  */
 
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
@@ -53,6 +63,27 @@ export interface BuildForgeConflictResolverOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 8 * 60_000
+
+/**
+ * The built-in tool surface the resolver's CC subprocess needs to actually
+ * resolve a conflict: Read/Glob/Grep to inspect the conflicted files, Edit/Write
+ * to rewrite the resolutions, and Bash to run tests + `git add` the results.
+ * Mapped 1:1 onto the spawned REPL's `--tools` flag (see the file header) — an
+ * empty grant would spawn a toolless subprocess (#361/#175). Exported so the
+ * boundary test can assert the EXACT surface reaches the substrate.
+ */
+export const RESOLVER_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] as const
+
+/** The declared `AgentSpec.tools` surface for the resolver turn — the ToolDef
+ *  shape the substrate consumes, built from `RESOLVER_TOOL_NAMES`. Mirrors the
+ *  inner-loop fire surface (`WORKFLOW_FIRE_TOOL_NAMES`). */
+const RESOLVER_TOOLS: AgentSpec['tools'] = RESOLVER_TOOL_NAMES.map((name) => ({
+  name,
+  description: `Built-in Claude Code tool '${name}' (trident conflict-resolver surface)`,
+  input_schema: { type: 'object' },
+  output_schema: { type: 'object' },
+  capability_required: 'fs:project_data',
+}))
 
 const NO_INTERACTIVE_RULE =
   'You run UNATTENDED. NEVER call AskUserQuestion or any interactive prompt — if you would need to ask, ESCALATE (below) instead of hanging.'
@@ -120,7 +151,7 @@ export function buildForgeConflictResolver(
         conflicted_files: input.conflicted_files,
         task: input.run.task,
       }),
-      tools: [],
+      tools: RESOLVER_TOOLS,
       model_preference: modelPreference,
     }
 

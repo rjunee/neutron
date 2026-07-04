@@ -163,7 +163,7 @@ describe('TridentTickLoop.runOnce', () => {
       expect(sent.length).toBe(1)
       expect(sent[0]!.topic.channel_kind).toBe('telegram')
       expect(sent[0]!.topic.channel_topic_id).toBe('12345:678')
-      expect(sent[0]!.text).toContain('build done')
+      expect(sent[0]!.text).toContain('merged and deployed')
       expect(sent[0]!.text).toContain('add a feature flag')
       expect(loop.stats().delivered).toBe(1)
     })

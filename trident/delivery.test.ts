@@ -66,29 +66,37 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
 }
 
 describe('composeTerminalDelivery', () => {
-  test('done / pr mode → reports the merged PR number + branch (slug-forward)', () => {
+  test('done / pr mode → humanized "merged and deployed", title-forward, keeps the openable PR ref (#361)', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'pr', pr: 42 }))
     expect(out).not.toBeNull()
     expect(out!.text).toContain('✅')
-    // #339 — leads with the build slug + "build done, merged".
-    expect(out!.text).toContain('`add-flag`')
-    expect(out!.text).toContain('build done, merged')
+    // #361 — leads with the WORK TITLE (run.task), not the machine slug.
     expect(out!.text).toContain('add a feature flag')
+    expect(out!.text).not.toContain('`add-flag`')
+    // Plain "merged and deployed" — no "build done" jargon.
+    expect(out!.text).toContain('merged and deployed')
+    expect(out!.text).not.toContain('build done')
+    // The PR number rides inline (openable artifact, not jargon).
     expect(out!.text).toContain('PR #42')
   })
 
-  test('done / local mode → reports the merged branch', () => {
+  test('done / local mode → plain "merged and deployed", no branch jargon (#361)', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', merge_mode: 'local' }))
-    expect(out!.text).toContain('merged `trident/add-flag` locally')
+    expect(out!.text).toContain('add a feature flag')
+    expect(out!.text).toContain('merged and deployed')
+    // Branch names are jargon — dropped.
+    expect(out!.text).not.toContain('trident/add-flag')
     expect(out!.text).not.toContain('PR #')
   })
 
-  test('done after multiple rounds → mentions the review-round count', () => {
+  test('done → drops the review-round jargon regardless of round count (#361)', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', round: 3 }))
-    expect(out!.text).toContain('after 3 review rounds')
+    expect(out!.text).toContain('merged and deployed')
+    expect(out!.text).not.toContain('review round')
+    expect(out!.text).not.toContain('after 3')
   })
 
-  test('done on the first round → omits the round suffix', () => {
+  test('done on the first round → still no round jargon', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'done', round: 1 }))
     expect(out!.text).not.toContain('review round')
   })
@@ -102,10 +110,13 @@ describe('composeTerminalDelivery', () => {
       }),
     )
     expect(out!.text).toContain('❌')
-    // Plain language — NOT the raw internal reason string.
+    // Leads with the work title, plain language — NOT the raw internal reason.
+    expect(out!.text).toContain('add a feature flag')
     expect(out!.text).toContain('blocking findings')
     expect(out!.text).not.toContain('inner loop exhausted')
-    expect(out!.text).toContain('`trident/add-flag`') // names the branch to review
+    // #361 — branch jargon dropped; the saved-progress cue is plain.
+    expect(out!.text).not.toContain('trident/add-flag')
+    expect(out!.text.toLowerCase()).toContain('progress is saved')
   })
 
   test('failed / pr mode → points at the open PR', () => {
@@ -154,12 +165,12 @@ describe('composeTerminalDelivery', () => {
     }
   })
 
-  test('a long task is truncated in the header', () => {
+  test('a long title is truncated in the header', () => {
     const longTask = 'x'.repeat(200)
     const out = composeTerminalDelivery(runWith({ phase: 'done', task: longTask }))
     expect(out!.text).toContain('…')
-    // the truncated task is ≤ 60 chars
-    expect(out!.text.includes('x'.repeat(61))).toBe(false)
+    // the title is clamped to ≤ 80 chars (the header lead)
+    expect(out!.text.includes('x'.repeat(81))).toBe(false)
   })
 })
 
@@ -207,6 +218,26 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     expect(interp.klass).toBe('merge-conflict')
     expect(interp.input_needed).toBe(q)
     expect(interp.summary.toLowerCase()).toContain('same code')
+  })
+
+  test('#361 tools-not-enabled → classified INTERNAL (infra), never leaks the raw "file/shell tools" stderr', () => {
+    for (const raw of [
+      'forge:build reported: I don\'t have access to a bash execution tool — I only have reply and send_typing',
+      'resolver failed: tools not enabled in this context; re-run with file/shell tools enabled',
+      'Edit tool is not enabled in this context',
+    ]) {
+      const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: raw }))
+      // A toolless subprocess is a purely INTERNAL misconfiguration.
+      expect(interp.klass).toBe('infra')
+      // The raw "tools not enabled" / "file/shell tools" stderr is NEVER surfaced.
+      const shown = (interp.summary + ' ' + interp.input_needed).toLowerCase()
+      expect(shown).not.toContain('tools not enabled')
+      expect(shown).not.toContain('file/shell tools')
+      expect(shown).not.toContain('re-run with')
+      expect(shown).not.toContain('send_typing')
+      expect(shown).toContain('internal')
+      expect(interp.input_needed.toLowerCase()).toContain('retry')
+    }
   })
 
   test('merge-mechanics (raw git stderr) → the raw stderr is DISCARDED', () => {
