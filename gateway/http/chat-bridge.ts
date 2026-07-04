@@ -40,7 +40,6 @@
  */
 
 import { createHash } from 'node:crypto'
-import { tmpdir } from 'node:os'
 import type { KeyLike } from 'jose'
 import type { ChatBridge, ChatOutbound, PendingChatClaim } from '../../landing/server.ts'
 import { drainRecoveredReplies } from './recovered-reply-store.ts'
