@@ -1932,7 +1932,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 
 ## 17. Unit checklist (tick on merge)
 
-- [ ] G1 · [ ] G2 · [ ] G3 · [ ] G4 · [ ] G5 · [ ] G6 · [ ] G7 · [ ] G8 · [ ] G9 · [ ] G10
+- [x] G1 ✅ #203 · [ ] G2 · [x] G3 ✅ #205 · [ ] G4 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [ ] G7 · [ ] G8 · [ ] G9 · [x] G10 ✅ #202
 - [ ] K1 · [ ] K2 · [ ] K3 · [ ] K4 · [ ] K5 · [ ] K6 · [ ] K7 · [ ] K8 · [ ] K9 · [ ] K10 · [ ] K11
 - [ ] L1 · [ ] L2 · [ ] L3 · [ ] L4 · [ ] L5 · [ ] L6 · [ ] L7
 - [ ] C1 · [ ] C2 · [ ] C3a · [ ] C3b · [ ] C3c · [ ] C3d · [ ] C4 · [ ] C5 · [ ] C6 · [ ] C7 · [ ] C8
