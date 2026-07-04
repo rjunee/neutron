@@ -44,10 +44,30 @@ land — it is what a fresh context reads to resume without re-deriving anything
   broke `open/composer.ts` bootstrap injection — cross-package consumer I'd missed locally
   → [[refactor-orchestrator-gate-crosspackage]]; (2) the leak-gate main-red above surfaced
   once an anchor-walker timing flake cleared. Airtight cache-busting is the real #353 win.
+- **W7-crash** (#354 blank-screen crash · `opus` · lane clients) — **RESOLVED-by-batch-PRs;
+  guard = #200, `135c2e1`.** The opus agent REFUTED the crash as already-fixed at HEAD:
+  the load-bearing memo (assistant-ui adapter identity → `setAdapter` early-return) landed
+  in **PR #162**, predating the jank report; the LIVE crash was a **stale cached bundle**
+  replaying pre-#162 code, now closed by W8's #197 cache-busting. #200 adds a zero-behavior
+  extraction (`useChatAdapter`) + a **discriminating** regression test (fails if the memo
+  is removed) + pane-switch coverage. Codex APPROVE; root+leaf tsc + 334 chat-react + 5
+  open tests pass. **Browser-verify is Ryan's manual gate** (PR #200 body: hard-refresh,
+  switch ~10× with Work pane open during a live build → DOM survives, zero console errors).
+  §17 W7 stays UNCHECKED — the full mount rebuild (#355 re-slide, #356 typing) is wave-7 W7.
 
-## In flight
+**✅ STEP 0 (Wave −1) COMPLETE** — F9 #194, W8 #197, W7-crash #200. Plus main-red repair #198,
+docs #199. main GREEN @ `135c2e1`.
 
-- (none — between units. Next: **W7-crash**, the last Step 0 unit, same `clients` lane.)
+## In flight (wave 0 — Phase-0 guardrails, first distinct-lane batch)
+
+- **G5** (typecheck completeness · `opus` · lane **ci**) — CI must `tsc -p` every dir with a
+  tsconfig + add leaf tsconfigs + strip `DOM` from root/server; fix the wrong-runtime errors
+  it surfaces. Highest-value guardrail (catches the leaf-tsc-miss class I hit twice on W8).
+- **G1** (route-matrix characterization · `opus` · lane **none**) — snapshot the Open composer
+  route ladder + negative space; protects the C-phase.
+- **G10** (invariants inventory · `sonnet` · lane **docs**) — compile `docs/INVARIANTS.md`
+  from the 12 critic reports; the per-merge Fable-synthesis checklist.
+- Remaining wave-0: G2 G3 G4 G6 G7 G8 G9 · W0 · M0 (dispatch as lanes free, cap 3).
 
 ## Ready-set / queue (order: Step 0 → G1–G10 → waves 1–9; K10 LAST)
 
