@@ -257,7 +257,7 @@ with cross-references noted inline.
     Protects: **F5**, **W5** (`[BEHAVIOR]` chat-core connection resilience).
 55. `hasAnyChainedSurface` and its field mapping must move together — already diverged for 3+
     fields per the gateway-services map; a registry-based fix must encode current order/set as an
-    explicit list with a transition test. `composition.ts:254`.
+    explicit list with a transition test. `gateway/composition.ts:264`.
     Protects: **C4**.
 
 ## 7. God-module split safety (`critic-god-modules.md`)
