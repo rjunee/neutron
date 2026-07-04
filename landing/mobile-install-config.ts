@@ -15,7 +15,7 @@
  * requiring Sam's Apple/Google developer accounts.)
  */
 
-import { escapeHtml } from './markdown.ts'
+import { escapeHtml } from './escape-html.ts'
 
 /** App Store product URL (e.g. https://apps.apple.com/app/idNNNNNNN). Empty = coming soon. */
 export const APP_STORE_URL = ''
@@ -48,7 +48,7 @@ function storeRow(label: string, url: string): string {
       `<strong>${label}</strong><em>coming soon</em></span>`
     )
   }
-  // escapeHtml (landing/markdown.ts) covers attribute context too — the
+  // escapeHtml (landing/escape-html.ts) covers attribute context too — the
   // constants are operator-authored, but escaping keeps a pasted URL
   // with `&` query params valid and the renderer safe by construction.
   return (

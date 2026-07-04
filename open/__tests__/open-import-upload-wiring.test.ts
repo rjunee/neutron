@@ -42,35 +42,20 @@ import { fileURLToPath } from 'node:url'
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
 import { composeProductionGraph } from '../../gateway/composition.ts'
-import { startTokenTopicId } from '../../landing/start-token-topic-id.ts'
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
-import { buildLocalStartTokenAuth } from '../local-start-token.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
-const COOKIE_SECRET = 'open-test-secret-0123456789'
-
 /**
- * Resolve the `X-Neutron-Topic-Id` upload header the SAME way the browser
- * chat client (`landing/chat.ts:resolveUploadTopicId`) does: mint a REAL
- * Open single-owner start-token, then run the real `startTokenTopicId`
- * decoder over it. This drives the actual real-Open path instead of
- * hardcoding `web:owner` — pre-fix this resolved to null (the JWT-only
- * decoder couldn't read the 2-segment HMAC token), the client sent NO
- * header, and the upload fell back to topic 'chat' so onboarding never
- * advanced. The integration assertions below depend on this resolving to
- * the same `web:owner` the engine's session is keyed on.
+ * Resolve the `X-Neutron-Topic-Id` upload header the SAME way the Open
+ * single-owner session is keyed: `web:<user_id>`. (Formerly derived by
+ * minting a real start-token and running it through
+ * `landing/start-token-topic-id.ts:startTokenTopicId` — that decoder had
+ * zero production importers and was deleted in the wave-1 dead-code kill,
+ * refactor plan §K1. The format it decoded to is fixed and asserted below,
+ * so deriving it directly here is equivalent for this integration test.)
  */
 function resolveRealUploadTopicId(user_id: string): string {
-  const auth = buildLocalStartTokenAuth(COOKIE_SECRET)
-  const token = auth.mint({ project_slug: 'owner', user_id })
-  const topicId = startTokenTopicId(token)
-  if (topicId === null) {
-    throw new Error(
-      'resolveRealUploadTopicId: client resolution returned null — the upload ' +
-        "would fall back to topic 'chat' and onboarding would NOT advance",
-    )
-  }
-  return topicId
+  return `web:${user_id}`
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url))

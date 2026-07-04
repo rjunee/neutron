@@ -15,9 +15,13 @@
  *   3. `GET  /api/app/connect/auth/callback`   → 302 (not 404)
  *   4. `POST /api/app/connect/auth/disconnect` → 200 {ok:true}
  *
- * plus a second test proving the shared-projects resolver, wired exactly as
- * the open-mode boot block wires it (federated multi-aud JWT + open base-url
- * resolver, NO in-process minter), fans out over the federated token.
+ * (A fifth test used to live here proving the shared-projects resolver fans
+ * out over a federated JWT via the open-mode `openResolveBaseUrl` path. It
+ * was deleted alongside `gateway/connect/open-instance-source-resolver.ts` /
+ * `syndication-relay.ts` in the wave-1 dead-code kill (refactor plan §K1):
+ * `composition.ts` never actually wires that resolver into the production
+ * graph, so the test only ever exercised `buildSharedProjectsResolver` in
+ * isolation, not a reachable path.)
  *
  * A future refactor that drops `app_connect_auth_surface` from
  * `composeProductionGraph` / `composeHttpHandler`, or that reverts the
@@ -28,7 +32,6 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SignJWT, generateKeyPair } from 'jose'
 
 import { applyMigrations } from '../../migrations/runner.ts'
 import { ProjectDb } from '../../persistence/index.ts'
@@ -36,10 +39,7 @@ import { SecretsStore } from '../../auth/secrets-store.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppConnectAuthSurface } from '../http/app-connect-auth.ts'
 import { FederatedTokenStore } from '../connect/federated-token-store.ts'
-import { buildSharedProjectsResolver } from '../projects/shared-projects-resolver.ts'
-import { resolveOpenInstanceBaseUrl } from '../connect/open-instance-source-resolver.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
-import type { UnifiedProjectListSource } from '../../connect/unified-project-list.ts'
 import {
   formatSetCookie,
   readSessionCookie,
@@ -59,12 +59,6 @@ const SESSION_COOKIE_HEADER = formatSetCookie(
   signSessionCookie(OWNER, COOKIE_SECRET, Date.now()),
 ).split(';')[0]!
 const AUTHED = { headers: { cookie: SESSION_COOKIE_HEADER } }
-// Argus r2 BLOCKER #2 — the central identity service assigns the user instance
-// its OWN slug, which on a real Open self-host box differs from the local box
-// slug (the harness constant). The receiving workspace authorizes the origin-stamp header
-// against the federated JWT's `kind:'user'` membership (this slug), so the
-// resolver MUST stamp THIS, not the local box slug.
-const CENTRAL_USER_SLUG = 'central-user-xyz'
 
 const noOpInputBase = {
   topic_handler: async () => {},
@@ -227,92 +221,10 @@ test('ISSUES #84 — unauthenticated requests to all four routes 401 through the
   expect(disconnect.status).toBe(401)
 })
 
-test('open-mode shared-projects resolver (wired as boot does) fans out over the federated JWT', async () => {
-  // Mint a fake federated multi-aud JWT carrying a workspace membership and
-  // seed it into the SAME SecretsStore the FederatedTokenStore reads. The
-  // resolver, wired exactly as the open-mode boot block wires it, must use
-  // this federated token as the bearer for the workspace — proving the
-  // federated path (NOT the managed in-process minter) is what's constructed.
-  const { privateKey } = await generateKeyPair('EdDSA')
-  const nowSec = Math.floor(Date.now() / 1_000)
-  const accessToken = await new SignJWT({
-    memberships: [
-      // Central-assigned user instance slug DIFFERS from the local box slug
-      // (the harness constant) — the resolver must pick THIS for the origin stamp.
-      { slug: CENTRAL_USER_SLUG, role: 'owner', kind: 'user' },
-      { slug: 'acme', role: 'member', kind: 'workspace' },
-    ],
-  })
-    .setProtectedHeader({ alg: 'EdDSA', kid: 'k1' })
-    .setSubject('u-open')
-    .setIssuedAt(nowSec)
-    .setExpirationTime(nowSec + 3600)
-    .setAudience(['connect.acme'])
-    .sign(privateKey)
-
-  await harness.secrets.replaceAtomic([
-    {
-      internal_handle: INTERNAL_HANDLE,
-      kind: 'oauth_token',
-      label: 'connect_federation',
-      plaintext: JSON.stringify({
-        refresh_token: 'rt-open',
-        refresh_expires_at: nowSec + 30 * 24 * 3600,
-        access_token: accessToken,
-        access_expires_at: nowSec + 3600,
-        user_instance_slug: OWNER,
-      }),
-      expires_at: (nowSec + 30 * 24 * 3600) * 1_000,
-    },
-  ])
-
-  const store = new FederatedTokenStore({
-    secrets: harness.secrets,
-    internal_handle: INTERNAL_HANDLE,
-    auth_base_url: AUTH_BASE,
-  })
-
-  let capturedSources: ReadonlyArray<UnifiedProjectListSource> = []
-  let capturedOriginSlug = ''
-  const resolver = buildSharedProjectsResolver({
-    // Wired with the LOCAL box slug, exactly as the open-mode boot block does.
-    user_instance_slug: OWNER,
-    membershipStore: { list: () => store.getMemberships() },
-    deployment_mode: 'open',
-    federatedToken: () => store.getValidFederatedToken(),
-    openResolveBaseUrl: (slug) =>
-      resolveOpenInstanceBaseUrl(slug, { template: 'https://{slug}.neutron.example' }),
-    // getActiveKey intentionally omitted — open mode must never reach it.
-    getUnifiedProjects: async (input) => {
-      capturedSources = input.instance_sources
-      capturedOriginSlug = input.user_instance_slug
-      return {
-        projects: [
-          {
-            project_id: 'p1',
-            display_name: 'Q3 Marketing',
-            kind: 'group',
-            owning_instance_slug: 'acme',
-          },
-        ],
-        source_errors: [],
-      }
-    },
-  })
-
-  const result = await resolver.fetch({ user_id: 'u-open', project_slug: OWNER })
-  expect(capturedSources).toHaveLength(1)
-  expect(capturedSources[0]).toEqual({
-    instance_slug: 'acme',
-    base_url: 'https://acme.neutron.example',
-    bearer_token: accessToken,
-  })
-  // BLOCKER #2: the origin slug stamped as the origin-stamp header (via
-  // getUnifiedProjects' user_instance_slug) must be the JWT's central-assigned
-  // user instance slug, NOT the local box slug — otherwise the receiving
-  // workspace 403s `origin_not_a_member`.
-  expect(capturedOriginSlug).toBe(CENTRAL_USER_SLUG)
-  expect(capturedOriginSlug).not.toBe(OWNER)
-  expect(result.items).toHaveLength(1)
-  expect(result.items[0]?.project_id).toBe('p1')
-})
+// The 'open-mode shared-projects resolver (wired as boot does) fans out over
+// the federated JWT' test that lived here was deleted alongside
+// `gateway/connect/open-instance-source-resolver.ts` / `syndication-relay.ts`
+// (refactor plan §K1, wave-1 kill). It exercised `buildSharedProjectsResolver`
+// directly with an inline `openResolveBaseUrl` — `composition.ts` never wires
+// that resolver into the production graph, so the path it covered was dead
+// outside this one unit test.
