@@ -10,7 +10,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useExternalStoreRuntime, type AppendMessage } from '@assistant-ui/react'
+import {
+  useExternalStoreRuntime,
+  type AppendMessage,
+  type ExternalStoreAdapter,
+} from '@assistant-ui/react'
 
 import type { ChatViewModel, NeutronChatController, RenderMessage } from './controller.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
@@ -72,29 +76,35 @@ export function useNeutronChatVm(controller: NeutronChatController): ChatViewMod
 }
 
 /**
- * Build the assistant-ui `ExternalStoreRuntime` from the current view-model.
+ * Build the MEMOIZED assistant-ui external-store adapter — the object whose
+ * IDENTITY {@link useChatRuntime} hands to `useExternalStoreRuntime`.
  *
- * SEV1 chat project-switch race (2026-07-02) — a project switch must mount a
- * FRESH runtime, NOT reuse a single stable one. The assistant-ui message
- * primitives resolve a part by INDEX into the runtime's live message list; if
- * the same runtime is retained across a switch, `controller.setProject` empties
- * `msgs` IN-PLACE and the shared runtime shrinks to length 0 while stale
- * `MessagePart` subscribers from the outgoing project still index into it →
- * `useClientLookup: Index N out of bounds (length: 0)` → the render throws and
- * the #162 error boundary trips. The caller therefore mounts the host that
- * calls THIS hook with `key={convId}` (see `ConversationRuntimeHost` in
- * ChatApp.tsx): each conversation gets its own runtime, the outgoing runtime is
- * discarded WHOLE (never shrunk in place), and the incoming one starts from the
- * already-scoped (empty → hydrating) `msgs` — so no part ever indexes a stale
- * position. This is the root-cause fix; the boundary stays only as a last
- * resort that now (essentially) never fires on a normal switch/load.
+ * ⚠️ #354 BLANK-SCREEN CRASH GUARD — the stable identity of this object is the
+ * load-bearing fix for the #354 crash. assistant-ui's `useExternalStoreRuntime`
+ * runs `runtime.setAdapter(adapter)` in an effect on EVERY render, and that
+ * method's FIRST line is `if (this._store === adapter) return`. If this hook
+ * returned a fresh object literal per render (the pre-#162 bug), that guard
+ * never hits → `setAdapter` calls `_notifySubscribers()` on every commit → the
+ * assistant-ui `useSyncExternalStore` snapshots churn → in a real browser's
+ * concurrent renderer this becomes a re-render storm ("Maximum update depth
+ * exceeded" / "Tried to unmount a fiber that is already unmounted") → the
+ * `ChatErrorBoundary` trips → BLANK SCREEN. Memoizing the adapter so its
+ * identity only changes when `messages`/`isRunning` (or the stable callbacks)
+ * actually change lets `setAdapter` early-return on unrelated re-renders, which
+ * is what stops the storm. Do NOT inline this back into an object literal.
+ *
+ * (The residual React dev-only "getSnapshot should be cached" WARNING originates
+ * INSIDE assistant-ui's `useRuntimeState` — its `getState()` returns a fresh
+ * object — and cannot be silenced from here; on its own, without the notify
+ * storm above, it does not loop. The regression coverage is
+ * `__tests__/snapshot-stability.test.tsx`.)
  */
-export function useChatRuntime(
+export function useChatAdapter(
   controller: NeutronChatController,
   vm: ChatViewModel,
   origin: string,
   draft?: AttachmentDraft,
-): ReturnType<typeof useExternalStoreRuntime> {
+): ExternalStoreAdapter<RenderMessage> {
   const convertMessage = useMemo(
     () => (m: RenderMessage) => toThreadMessage(m, origin),
     [origin],
@@ -145,6 +155,34 @@ export function useChatRuntime(
     [vm.messages, vm.isRunning, convertMessage, onNew],
   )
 
+  return adapter
+}
+
+/**
+ * Build the assistant-ui `ExternalStoreRuntime` from the current view-model.
+ *
+ * SEV1 chat project-switch race (2026-07-02) — a project switch must mount a
+ * FRESH runtime, NOT reuse a single stable one. The assistant-ui message
+ * primitives resolve a part by INDEX into the runtime's live message list; if
+ * the same runtime is retained across a switch, `controller.setProject` empties
+ * `msgs` IN-PLACE and the shared runtime shrinks to length 0 while stale
+ * `MessagePart` subscribers from the outgoing project still index into it →
+ * `useClientLookup: Index N out of bounds (length: 0)` → the render throws and
+ * the #162 error boundary trips. The caller therefore mounts the host that
+ * calls THIS hook with `key={convId}` (see `ConversationRuntimeHost` in
+ * ChatApp.tsx): each conversation gets its own runtime, the outgoing runtime is
+ * discarded WHOLE (never shrunk in place), and the incoming one starts from the
+ * already-scoped (empty → hydrating) `msgs` — so no part ever indexes a stale
+ * position. This is the root-cause fix; the boundary stays only as a last
+ * resort that now (essentially) never fires on a normal switch/load.
+ */
+export function useChatRuntime(
+  controller: NeutronChatController,
+  vm: ChatViewModel,
+  origin: string,
+  draft?: AttachmentDraft,
+): ReturnType<typeof useExternalStoreRuntime> {
+  const adapter = useChatAdapter(controller, vm, origin, draft)
   const runtime = useExternalStoreRuntime<RenderMessage>(adapter)
 
   return runtime
