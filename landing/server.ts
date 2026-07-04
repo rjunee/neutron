@@ -1155,6 +1155,43 @@ export function chatAuthGateCsp(): string {
 }
 
 /**
+ * ISSUES #353 — strong content ETag for a served asset's bytes. Pure + total;
+ * used to cache-bust `/chat-react.js` (see `resolveChatReactJs`'s caller in
+ * `createLandingServer`): the response carries `cache-control: no-cache`
+ * (always revalidate) plus this ETag, so the browser must round-trip a
+ * conditional GET on every load — a redeploy that changed the bundle's bytes
+ * gets a fresh 200 with the new code instead of silently replaying a stale
+ * cached copy from a prior `max-age`-cached response (the "work pane empty
+ * until a manual hard-refresh" bug). Unchanged bytes still get a cheap 304 (no
+ * re-download). Quoted per RFC 9110 — ETag values are a DQUOTE-wrapped opaque
+ * string, compared byte-for-byte against `if-none-match`.
+ */
+export function computeAssetEtag(bytes: string): string {
+  return `"sha256-${createHash('sha256').update(bytes, 'utf8').digest('hex')}"`
+}
+
+/**
+ * ISSUES #353 (Codex r1 P2) — RFC 9110 §13.1.2 `If-None-Match` evaluation.
+ * `*` matches any current representation; otherwise the header is a
+ * comma-separated LIST of validators and matches if ANY member equals our ETag
+ * (a browser can legitimately send `"a", "b"`). `If-None-Match` uses WEAK
+ * comparison, so an optional `W/` prefix is stripped before comparing — though
+ * our ETag is strong and self-issued (clients echo it verbatim). Being
+ * over-strict here only costs a missed 304 (a fresh 200 is still correct bytes),
+ * never a staleness bug — but honoring the list/`*` forms keeps the cache
+ * behavior spec-correct.
+ */
+export function ifNoneMatchSatisfied(header: string | null, etag: string): boolean {
+  if (header === null) return false
+  const h = header.trim()
+  if (h === '') return false
+  if (h === '*') return true
+  const norm = (t: string): string => t.trim().replace(/^W\//, '')
+  const want = norm(etag)
+  return h.split(',').some((token) => norm(token) === want)
+}
+
+/**
  * Bun.serve handler that surfaces the landing `/chat` (HTTP) SPA shell
  * plus the rest of the landing HTTP routes. Chat moved to the unified
  * `/ws/app/chat` Expo-app socket, so this server no longer upgrades a
@@ -1271,6 +1308,46 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       return null
     }
   }
+  // ISSUES #353 — the ETag is derived from the resolved bundle bytes, which are
+  // themselves cached for the process lifetime (`chat_react_js_cache` above is
+  // set once, either from the prebuilt file or the first `Bun.build`), so the
+  // hash only needs computing once per process too.
+  let chat_react_js_etag: string | null = null
+  function getChatReactJsEtag(js: string): string {
+    if (chat_react_js_etag === null) chat_react_js_etag = computeAssetEtag(js)
+    return chat_react_js_etag
+  }
+  // ISSUES #353 (Codex r1 blocker) — the ETag + `no-cache` only bust the cache
+  // AFTER the browser revalidates. But the current prod serves `/chat-react.js`
+  // with `max-age=86400` under an UNVERSIONED URL, so a client (or proxy) that
+  // still holds a fresh copy replays the STALE bundle from cache without ever
+  // hitting the server — the `no-cache` headers never run, and the stale code
+  // persists up to a day post-deploy. Fix = version the URL: inject a short
+  // content id into the shell's `<script src>` so the cache KEY changes the
+  // instant the bytes change, bypassing any stale entry cached under the bare
+  // URL. `chat_react_js_cache` is populated at construction from the prebuilt
+  // bundle in a real install, so the shell is always versioned in prod; the dev
+  // lazy-build path is null until the first `/chat-react.js` request, so its
+  // first shell load is unversioned (harmless — the JS `no-cache`+ETag still
+  // guarantees correctness) and every subsequent load is versioned.
+  const chat_react_html_str = chat_react_html.toString('utf8')
+  let chat_react_html_versioned: string | null = null
+  async function getVersionedChatReactShell(): Promise<string> {
+    if (chat_react_html_versioned !== null) return chat_react_html_versioned
+    // RESOLVE the bundle before serving so the URL is versioned even on the
+    // lazy-build path's very FIRST /chat (Codex r3): otherwise that first shell
+    // ships the bare URL and a stale cross-deploy cache is replayed. In a real
+    // install `chat_react_js_cache` is already populated (prebuilt at
+    // construction) so this is a cheap cache hit; lazy-dev builds once here.
+    const js = await resolveChatReactJs()
+    if (js === null) return chat_react_html_str // packaging error — /chat-react.js 404s anyway
+    const version = createHash('sha256').update(js, 'utf8').digest('hex').slice(0, 12)
+    chat_react_html_versioned = chat_react_html_str.replace(
+      'src="/chat-react.js"',
+      `src="/chat-react.js?v=${version}"`,
+    )
+    return chat_react_html_versioned
+  }
   async function resolveInviteJs(): Promise<string | null> {
     if (invite_js_cache !== null) return invite_js_cache
     if (!existsSync(invite_ts_path)) return null
@@ -1348,7 +1425,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       // substrate credential is present). Shared by `GET /chat` and the SPA
       // client-route catch-all below so a hard-loaded deep link boots the same
       // shell + honours the same auth gate as `/chat`.
-      function serveChatReactShell(): Response {
+      async function serveChatReactShell(): Promise<Response> {
         // ISSUES #318 — app-level Claude-auth gate. A box with no working
         // substrate credential would render an interactive-looking chat that
         // silently produces nothing; show a clear "authenticate Claude" page
@@ -1372,12 +1449,16 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         // P0b — React is the only client. Always serve the tabbed React shell
         // (no flag, no `?client=` branch, no vanilla fallback). The shell is
         // loaded + asserted at construction, so this is unconditional.
-        return new Response(new Uint8Array(chat_react_html), {
-          headers: { 'content-type': 'text/html; charset=utf-8' },
+        // ISSUES #353 — serve the version-injected shell, and `no-store` it so a
+        // stale-cached shell can't defeat the `?v=` bust by pointing at an old
+        // bundle URL. The shell is a tiny dynamic, auth-gated app frame; not
+        // caching it costs nothing and is what makes the URL versioning airtight.
+        return new Response(await getVersionedChatReactShell(), {
+          headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
         })
       }
       if (url.pathname === '/chat' && req.method === 'GET') {
-        return serveChatReactShell()
+        return await serveChatReactShell()
       }
       // Serve the lazily-bundled React client. Returns 404 only on a packaging
       // error (the `chat-react/main.tsx` entry missing) — the shell that
@@ -1386,9 +1467,21 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       if (url.pathname === '/chat-react.js' && req.method === 'GET') {
         const js = await resolveChatReactJs()
         if (js === null) return new Response('chat-react.js unavailable', { status: 404 })
-        return new Response(js, {
-          headers: { 'content-type': 'application/javascript; charset=utf-8' },
-        })
+        // ISSUES #353 — cache-bust the bundle. No `max-age` (so the browser
+        // always revalidates) + a strong content ETag: unchanged bytes round-trip
+        // a cheap 304, but the instant a redeploy changes the bundle the ETag
+        // changes with it and the very next load gets the new bytes — no stale
+        // cache, no manual hard-refresh required.
+        const etag = getChatReactJsEtag(js)
+        const headers = {
+          'content-type': 'application/javascript; charset=utf-8',
+          'cache-control': 'no-cache',
+          etag,
+        }
+        if (ifNoneMatchSatisfied(req.headers.get('if-none-match'), etag)) {
+          return new Response(null, { status: 304, headers })
+        }
+        return new Response(js, { headers })
       }
       // ISSUES #208 — mobile install/landing page (see construction note).
       if (mobile_html !== null && url.pathname === '/mobile' && req.method === 'GET') {
@@ -1495,7 +1588,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
       // path — those are matched earlier here + in the compose chain, so this
       // never masks a real 404. All other unknown paths keep returning 404.
       if (isSpaClientRoute(url.pathname, req.method)) {
-        return serveChatReactShell()
+        return await serveChatReactShell()
       }
       // The legacy `/ws/chat` onboarding WebSocket upgrade was removed —
       // onboarding + chat are unified on the `/ws/app/chat` Expo-app
