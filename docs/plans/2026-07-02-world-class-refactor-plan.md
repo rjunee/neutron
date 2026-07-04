@@ -1932,7 +1932,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 
 ## 17. Unit checklist (tick on merge)
 
-- [x] G1 ✅ #203 · [ ] G2 · [x] G3 ✅ #205 · [ ] G4 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [ ] G7 · [ ] G8 · [ ] G9 · [x] G10 ✅ #202
+- [x] G1 ✅ #203 · [x] G2 ✅ #211 · [x] G3 ✅ #205 · [ ] G4 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [x] G7 ✅ #208 · [ ] G8 · [x] G9 ✅ #209 · [x] G10 ✅ #202
 - [ ] K1 · [ ] K2 · [ ] K3 · [ ] K4 · [ ] K5 · [ ] K6 · [ ] K7 · [ ] K8 · [ ] K9 · [ ] K10 · [ ] K11
 - [ ] L1 · [ ] L2 · [ ] L3 · [ ] L4 · [ ] L5 · [ ] L6 · [ ] L7
 - [ ] C1 · [ ] C2 · [ ] C3a · [ ] C3b · [ ] C3c · [ ] C3d · [ ] C4 · [ ] C5 · [ ] C6 · [ ] C7 · [ ] C8
@@ -1941,7 +1941,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [ ] F7 · [ ] F8 · [x] F9 ✅ #194 (pilot)
 - [ ] O1 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
 - [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
-- [ ] W0 · [ ] W1 · [ ] W2 · [ ] W3a · [ ] W3 · [ ] W4 · [ ] W5 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
+- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [ ] W2 · [ ] W3a · [ ] W3 · [ ] W4 · [ ] W5 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
 - [ ] M0 · [ ] M1 · [ ] M2 · [ ] M3 (riders) · [ ] M4 · [ ] M5 · [ ] M6
 - [ ] N1 · [ ] N2 · [ ] N3 · [ ] N4 · [ ] N5 · [ ] N6 · [ ] N7 · [ ] N8
 - [ ] S0 · [ ] S1 · [ ] S2 · [ ] S3
