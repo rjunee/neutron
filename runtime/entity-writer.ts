@@ -765,4 +765,8 @@ export {
   extractCompiledTruth as _extractCompiledTruth,
   mergeTimeline as _mergeTimeline,
   diffTriples as _diffTriples,
+  // G3 (mirror-parity guardrail): expose the kind→dir map so a golden-
+  // roundtrip test can pin it against the hand mirrors in
+  // scribe/write-to-gbrain.ts and the inverse in gbrain-memory/GBrainSyncHook.ts.
+  KIND_TO_DIR as _KIND_TO_DIR,
 }
