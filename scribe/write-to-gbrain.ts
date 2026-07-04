@@ -544,3 +544,15 @@ function extractCompiledTruthSlice(body: string): string {
  * one implementation. See {@link entitySlugify}.
  */
 export const slugify = entitySlugify
+
+export {
+  // G3 (mirror-parity guardrail): exported for unit tests only, so a golden-
+  // roundtrip test can pin these hand mirrors of
+  // `runtime/entity-writer.ts` (KIND_TO_DIR, extractCompiledTruth,
+  // renderYamlFrontmatter) against the canonical implementations. Not part
+  // of the public surface.
+  KIND_TO_DIR as _KIND_TO_DIR,
+  extractCompiledTruthSlice as _extractCompiledTruthSlice,
+  parseFrontmatter as _parseFrontmatter,
+  parseYamlScalar as _parseYamlScalar,
+}

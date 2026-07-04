@@ -492,4 +492,8 @@ export {
   extractRows as _extractRows,
   isEdgeMatch as _isEdgeMatch,
   isMissingPageError as _isMissingPageError,
+  // G3 (mirror-parity guardrail): expose the dir→kind map so a golden-
+  // roundtrip test can pin it as the exact inverse of `KIND_TO_DIR` in
+  // `runtime/entity-writer.ts` / `scribe/write-to-gbrain.ts`.
+  DIR_TO_KIND as _DIR_TO_KIND,
 }
