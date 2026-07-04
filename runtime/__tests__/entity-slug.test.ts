@@ -1,7 +1,6 @@
 import { describe, test, expect } from 'bun:test'
 import { entitySlugify, SLUG_REGEX } from '../entity-slug.ts'
 import { slugify as scribeSlugify } from '../../scribe/write-to-gbrain.ts'
-import { slugify as populatorSlugify } from '../../onboarding/history-import/entity-populator.ts'
 
 describe('entitySlugify — pinned grammar (P2-8 consolidation)', () => {
   test('lower-cases, hyphenates non-alphanumeric runs, strips edge hyphens', () => {
@@ -40,12 +39,13 @@ describe('entitySlugify — pinned grammar (P2-8 consolidation)', () => {
     }
   })
 
-  test('scribe and populator re-exports resolve to the one shared impl', () => {
+  test('scribe re-export resolves to the one shared impl', () => {
+    // (K3, 2026-07-03) — the `onboarding/history-import/entity-populator.ts`
+    // re-export of `slugify` was dropped when that module was deleted with the
+    // per-chunk import pipeline; the scribe parity check remains.
     expect(scribeSlugify).toBe(entitySlugify)
-    expect(populatorSlugify).toBe(entitySlugify)
     for (const s of ['Casey Rivera', 'Compound Engineering!', '---', 'a'.repeat(200)]) {
       expect(scribeSlugify(s)).toBe(entitySlugify(s))
-      expect(populatorSlugify(s)).toBe(entitySlugify(s))
     }
   })
 })

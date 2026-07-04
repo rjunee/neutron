@@ -539,3 +539,18 @@ export const APPROX_CHARS_PER_TOKEN = 4
  * reports the giant-message worst-case in practice.
  */
 export const MAX_OAUTH_CHUNK_TARGET_TOKENS = 4_096
+
+/**
+ * Source → `ConversationRecord` stream. The runner / synthesis bridge inject
+ * this (default: `buildDefaultSourceParser`); tests substitute their own.
+ *
+ * (K3, 2026-07-03) — relocated here from the deleted per-chunk
+ * `job-runner.ts` so the LIVE synthesis import path
+ * (`gateway/realmode-composer/build-synthesis-import-runner.ts`) and the
+ * composer keep a stable, node-free home for the type after the per-chunk
+ * pipeline was evacuated.
+ */
+export type SourceParser = (
+  source: ImportSource,
+  payload: ChunkerInput,
+) => AsyncIterable<ConversationRecord>
