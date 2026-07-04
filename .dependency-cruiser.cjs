@@ -60,6 +60,16 @@ const L = {
   composition: ['^gateway', '^open'],
 };
 
+// Test-file path fragment (verifier amendment, plan §G4). Applied PER-RULE via
+// `from.pathNot` on the directional band-ordering rules only — NOT as a global
+// `options.exclude`. dependency-cruiser's top-level exclude drops matching files
+// from the graph BEFORE any rule (including `no-cycles`) runs, which would blind
+// `no-cycles` to test-introduced cycles. By exempting test edges per-rule
+// instead, the whole-graph rules (`no-cycles`) still analyze the FULL graph
+// (tests included) while the one-directional layering rules keep ignoring the
+// cross-band edges that test helpers legitimately create to set up fixtures.
+const TEST = '(__tests__|\\.test\\.|(^|/)tests/)';
+
 module.exports = {
   options: {
     doNotFollow: { path: 'node_modules' },
@@ -70,14 +80,14 @@ module.exports = {
     includeOnly:
       '^(gateway|runtime|scribe|reflection|gbrain-memory|reminders|trident|agent-dispatch|tasks|skill-forge|cron|doc-search|message-search|cores|prompts|mcp|tools|migrations|persistence|core-sdk|jwt-validator|channels|chat-core|connect|watchdog|auth|onboarding|landing|app|open|tabs|work-board|project-credentials)/',
     // Test-file policy (verifier amendment, plan §G4): the measured 28-module
-    // SCC is WITH test files; production-only it's 19. Exempting __tests__/
-    // *.test.* edges from the band rules is what lets the baseline burn down
-    // as production cuts land, instead of being permanently pinned by test
-    // helpers that legitimately reach across bands to set up fixtures.
-    // `no-cycles` below still runs over the *whole* graph (tests included),
-    // so a NEW test-introduced production cycle still fails the build — this
-    // only exempts test edges from the one-directional band-ordering rules.
-    exclude: { path: '(__tests__|\\.test\\.|(^|/)tests/)' },
+    // SCC is WITH test files; production-only it's 19. Test edges are exempted
+    // from the band-ordering rules PER-RULE (via `from.pathNot: TEST`), NOT
+    // globally here. A global `exclude` would remove test files from the graph
+    // before ANY rule runs, so `no-cycles` would never see a test-introduced
+    // cycle (Codex finding 1). With no global exclude, `no-cycles` analyzes the
+    // WHOLE graph (tests included) so a NEW test-file cycle fails the build,
+    // while test helpers that legitimately reach across bands stay exempt from
+    // the one-directional band-ordering rules only. See `TEST` above.
     tsConfig: { fileName: 'tsconfig.base.json' },
   },
   forbidden: [
@@ -97,7 +107,7 @@ module.exports = {
       comment: 'Contracts & leaves (persistence, migrations, chat-core, core-sdk, ' +
         'cores/sdk, jwt-validator, prompts, tabs) must not import anything above them.',
       severity: 'error',
-      from: { path: L.contracts },
+      from: { path: L.contracts, pathNot: TEST },
       to: { path: [...L.platform, ...L.services, ...L.product, ...L.composition] },
     },
     {
@@ -105,14 +115,14 @@ module.exports = {
       comment: 'Platform (runtime, cron, tools, channels, auth, project-credentials) ' +
         'must not import services/product/composition.',
       severity: 'error',
-      from: { path: L.platform },
+      from: { path: L.platform, pathNot: TEST },
       to: { path: [...L.services, ...L.product, ...L.composition] },
     },
     {
       name: 'services-below-product',
       comment: 'Services & memory must not import product surfaces or composition.',
       severity: 'error',
-      from: { path: L.services },
+      from: { path: L.services, pathNot: TEST },
       to: { path: [...L.product, ...L.composition] },
     },
     {
@@ -120,7 +130,7 @@ module.exports = {
       comment: 'Only gateway/open may import onboarding (the flagship product ' +
         'surface); other product surfaces (cores/free/*, app) must not reach into it.',
       severity: 'error',
-      from: { path: L.product, pathNot: '^onboarding' },
+      from: { path: L.product, pathNot: ['^onboarding', TEST] },
       to: { path: '^onboarding' },
     },
     {
@@ -129,7 +139,7 @@ module.exports = {
         'may import it (open<->gateway is the one mutual exception, both being ' +
         'composition, which this rule already allows).',
       severity: 'error',
-      from: { pathNot: ['^open', '^gateway'] },
+      from: { pathNot: ['^open', '^gateway', TEST] },
       to: { path: ['^gateway', '^open'] },
     },
     {
@@ -139,30 +149,40 @@ module.exports = {
         'Reaching into gateway/open/onboarding/connect/runtime/migrations/auth/' +
         'landing is the "third-party fiction" violation the audit documents.',
       severity: 'error',
-      from: { path: '^cores/free' },
+      from: { path: '^cores/free', pathNot: TEST },
       to: { path: '^(gateway|open|onboarding|connect|runtime|migrations|auth|landing)/' },
     },
     {
       name: 'connect-is-dynamic-only',
       comment: 'connect/api/* is the federation surface that must stay behind a ' +
-        'dynamic import (runtime/platform-adapter-local.ts sets composition.connect_api ' +
-        ':false for Open) — a static edge here would make every Open boot load ' +
-        'federation code (audit §10.1). gateway/composition is the one place allowed ' +
-        'to reference it statically (the composition wiring that decides whether to ' +
-        'dynamic-import it at all).',
+        'DYNAMIC import (runtime/platform-adapter-local.ts leaves composition.connect_api ' +
+        'unset for Open) — a STATIC edge here would make every Open boot load ' +
+        'federation code (audit §10.1, INVARIANTS §76). This is enforced by ' +
+        'dependency TYPE, not by file path: a static `import`/`require` into ' +
+        'connect/api/* is forbidden from anywhere (including gateway/composition — ' +
+        'the composition wiring must keep using `await import(...)`), while the ' +
+        'legitimate `dynamic-import` edge is allowed. Exempting the composition ' +
+        'file wholesale (the old approach) would have let a static composition→' +
+        'connect/api edge pass and defeat the invariant (Codex finding 2).',
       severity: 'error',
-      from: { pathNot: '^(connect|gateway/composition)' },
-      to: { path: '^connect/api/' },
+      from: { pathNot: ['^connect', TEST] },
+      to: { path: '^connect/api/', dependencyTypes: ['import', 'require'] },
     },
     {
       name: 'app-bundle-purity',
-      comment: 'The Expo/RN bundle (app/) must never transitively import server-only ' +
-        'workspaces — node:sqlite etc. bricks the bundle (audit §10.2). This is why ' +
-        'app/lib/ws-envelope.ts, doc-links.ts, tabs-client.ts exist as hand mirrors ' +
-        'today instead of imports.',
+      comment: 'The Expo/RN bundle (app/) must never TRANSITIVELY import server-only ' +
+        'workspaces — node:sqlite etc. bricks the bundle (audit §10.2, INVARIANTS §77). ' +
+        'This is why app/lib/ws-envelope.ts, doc-links.ts, tabs-client.ts exist as hand ' +
+        'mirrors today instead of imports. Enforced by REACHABILITY (to.reachable), not ' +
+        'just direct edges: a two-hop path app → allowed-intermediate → server-workspace ' +
+        'trips the rule, which a direct-only from.path/to.path check would miss (Codex ' +
+        'finding 3).',
       severity: 'error',
-      from: { path: '^app/' },
-      to: { path: '^(gateway|runtime|persistence|migrations|onboarding|channels|auth|connect)/' },
+      from: { path: '^app/', pathNot: TEST },
+      to: {
+        path: '^(gateway|runtime|persistence|migrations|onboarding|channels|auth|connect)/',
+        reachable: true,
+      },
     },
   ],
 };
