@@ -163,6 +163,23 @@ describe('createLandingServer', () => {
       expect(await second.text()).toBe('')
     }, 30_000)
 
+    test('the /chat shell versions the bundle URL (?v=<id>) + is no-store, so a stale cross-deploy cache is bypassed', async () => {
+      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
+      // Prime the process JS cache (in a real install the prebuilt bundle
+      // populates it at construction; the test's static_dir has no prebuilt
+      // chat-react.js, so it resolves lazily on this first request).
+      await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+      const res = await handler.fetch(new Request('http://x.test/chat'), fakeServer)
+      expect(res.status).toBe(200)
+      // The app frame must not be cached, or a stale shell would defeat the ?v= bust.
+      expect(res.headers.get('cache-control')).toBe('no-store')
+      const html = await res.text()
+      // The script src carries a short content-hash version, not the bare URL.
+      expect(html).toMatch(/src="\/chat-react\.js\?v=[0-9a-f]{12}"/)
+      expect(html).not.toContain('src="/chat-react.js"')
+    }, 30_000)
+
     test('a stale If-None-Match (simulating a post-deploy client) gets a fresh 200', async () => {
       const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>

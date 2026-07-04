@@ -1317,6 +1317,31 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     if (chat_react_js_etag === null) chat_react_js_etag = computeAssetEtag(js)
     return chat_react_js_etag
   }
+  // ISSUES #353 (Codex r1 blocker) — the ETag + `no-cache` only bust the cache
+  // AFTER the browser revalidates. But the current prod serves `/chat-react.js`
+  // with `max-age=86400` under an UNVERSIONED URL, so a client (or proxy) that
+  // still holds a fresh copy replays the STALE bundle from cache without ever
+  // hitting the server — the `no-cache` headers never run, and the stale code
+  // persists up to a day post-deploy. Fix = version the URL: inject a short
+  // content id into the shell's `<script src>` so the cache KEY changes the
+  // instant the bytes change, bypassing any stale entry cached under the bare
+  // URL. `chat_react_js_cache` is populated at construction from the prebuilt
+  // bundle in a real install, so the shell is always versioned in prod; the dev
+  // lazy-build path is null until the first `/chat-react.js` request, so its
+  // first shell load is unversioned (harmless — the JS `no-cache`+ETag still
+  // guarantees correctness) and every subsequent load is versioned.
+  const chat_react_html_str = chat_react_html.toString('utf8')
+  let chat_react_html_versioned: string | null = null
+  function getVersionedChatReactShell(): string {
+    if (chat_react_html_versioned !== null) return chat_react_html_versioned
+    if (chat_react_js_cache === null) return chat_react_html_str
+    const version = createHash('sha256').update(chat_react_js_cache, 'utf8').digest('hex').slice(0, 12)
+    chat_react_html_versioned = chat_react_html_str.replace(
+      'src="/chat-react.js"',
+      `src="/chat-react.js?v=${version}"`,
+    )
+    return chat_react_html_versioned
+  }
   async function resolveInviteJs(): Promise<string | null> {
     if (invite_js_cache !== null) return invite_js_cache
     if (!existsSync(invite_ts_path)) return null
@@ -1418,8 +1443,12 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         // P0b — React is the only client. Always serve the tabbed React shell
         // (no flag, no `?client=` branch, no vanilla fallback). The shell is
         // loaded + asserted at construction, so this is unconditional.
-        return new Response(new Uint8Array(chat_react_html), {
-          headers: { 'content-type': 'text/html; charset=utf-8' },
+        // ISSUES #353 — serve the version-injected shell, and `no-store` it so a
+        // stale-cached shell can't defeat the `?v=` bust by pointing at an old
+        // bundle URL. The shell is a tiny dynamic, auth-gated app frame; not
+        // caching it costs nothing and is what makes the URL versioning airtight.
+        return new Response(getVersionedChatReactShell(), {
+          headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
         })
       }
       if (url.pathname === '/chat' && req.method === 'GET') {
