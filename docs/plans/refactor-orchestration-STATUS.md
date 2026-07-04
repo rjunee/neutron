@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `c37e7d0` (wave-0 guardrails G10/G1/G5/G6/G3 merged). **CI GREEN.**
+- **main HEAD:** `b7c4c1c` (wave-0 guardrails G10/G1/G5/G6/G3/G7/G2/G9 + W0 merged). **CI GREEN.**
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
   **G5 landed a structural CI change:** the Typecheck step is now a MATRIX
   (`scripts/ci/typecheck-all.sh` runs `tsc -p` over all 44 tsconfigs; DOM stripped from
@@ -61,7 +61,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 **✅ STEP 0 (Wave −1) COMPLETE** — F9 #194, W8 #197, W7-crash #200. Plus main-red repair #198,
 docs #199. main GREEN @ `135c2e1`.
 
-## Wave 0 (Phase-0 guardrails) — 5/10 merged
+## Wave 0 (Phase-0 guardrails) — 8/10 merged + W0
 
 **Merged:**
 - **G5** (#204, `b38b2f2`) — typecheck-completeness MATRIX + DOM-strip; 47 masked type
@@ -76,13 +76,46 @@ docs #199. main GREEN @ `135c2e1`.
   driving the REAL producer strings per the no-mock rule; tripwire proven on reword).
 - **G3** (#205) — mirror parity (TabDescriptor, AgentEngagementMode) + entity-format golden
   round-trip. Bidirectional parity via typed-parameter identity fns (catches either-side widening).
+- **G7** (#208, `8eae26f`) — leak-gate NUL tripwire (`binary-hidden` rule, fail-closed) +
+  retire 3 raw-NUL tokens as `\x00` escapes (**byte-identical**, hash-stability golden).
+  Codex REQUEST_CHANGES **DECLINED** (documented): the composite-key collision it flagged
+  (`${emoji}\x00${device_id}` etc.) is PRE-EXISTING (raw-NUL delimiter before, identical
+  `\x00` after) and out of scope for a byte-identical unit — **pinned as a known-divergence**
+  (see below) like G1's `hasAnyChainedSurface`.
+- **G2** (#211, `66a0df3`) — hydration-parity 3-transcript fidelity matrix (HTTP history /
+  WS resume / live push), divergence PINNED as green-today (W3 flips DROPPED→PRESENT). Real
+  seam driven (one SQLite ProjectDb, real ButtonStore + AppWsAdapter). Codex APPROVE (clean).
+  Root cause noted: `AppChatRow`/`button_prompts` have no columns for citations/doc_refs →
+  W3 needs schema work, not a mapping fix.
+- **G9** (#209, `b7c4c1c`) — shared test-isolation testkit (`createIsolatedHome` +
+  `reserveFreePort`), adopted in 3 polluting suites (pass twice consecutively). Codex found
+  FOUR real env-leaks in the testkit's OWN suite across rounds (LIFO restore order,
+  noUncheckedIndexedAccess, ambient-key destruction) — all fixed; final fix is a file-level
+  full-env snapshot/restore so the suite can never leak. Codex APPROVE.
 
-**In flight:** G9 (test-isolation testkit · `opus` · none) + G7 (leak-gate NUL tripwire +
-retire 3 grep-binary-hidden tokens · `opus` · ci) building.
+**In flight:** **G4** (depcruise · was `sonnet`, bumped to `opus` on fix) — PR #210 built but
+Codex REQUEST_CHANGES found 3 REAL gate gaps (global `exclude` drops tests from `no-cycles`;
+`connect-is-dynamic-only` exempts composition so a STATIC edge passes; `app-bundle-purity`
+only checks direct not transitive imports). Fix agent dispatched (repoints to the branch,
+regens baseline). ci-lane.
 
-**Remaining wave-0:** G2 (hydration-parity · `opus` · none, held) · G4 (depcruise · `sonnet` · ci) ·
-G8 (test-infra self-tests · `sonnet` · ci) · W0 (UX Option-D record · clients) · M0 (Managed CI —
-cross-repo neutron-managed, deferred). ci-lane (G4/G7/G8) serialize (all touch `ci.yml`/`scripts/ci`).
+- **W0** (docs-only · `opus`/Fable · clients) — UX architecture decision RECORDED: Option D
+  (`landing/chat-react` = single canonical UI; Expo app → thin native shell), spike scoped to
+  chat-feel AND offline durability, W1/W2/W4/W5/W6 enumerated. Artifact:
+  `docs/specs/ux-architecture-option-d-2026-07-03.md` (the decision already lived in plan §W0;
+  this is the discoverable spec). Ships no code.
+
+**Remaining wave-0:** G8 (test-infra self-tests · `sonnet` · ci — **held: ci-lane serializes
+behind G4**) · M0 (Managed CI — cross-repo neutron-managed, deferred).
+
+## Known-divergences (pinned by a guardrail, owned by a later fix unit)
+
+- **G1:** `hasAnyChainedSurface` (`gateway/composition.ts`) omits `import_resume_handler` →
+  a resume-only composition serves nothing. Pinned by G1's route-matrix test.
+- **G7:** composite-key encoders use a NUL delimiter (`parseReactions`, in-mem calendar,
+  `InMemoryOnboardingStateStore`, doc-search per-file collapse) → a component containing NUL
+  collides. Pre-existing (byte-identical through G7). Low severity (needs literal NUL in
+  emoji/slug/id). Owner: a later fix unit adds collision-proof keying + boundary tests.
 
 **Review pattern (holding across every unit):** build agent → orchestrator diff review → Codex
 cross-review (EVERY unit found ≥1 real defect: vacuous assertions, one-directional parity holes,
