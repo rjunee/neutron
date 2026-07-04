@@ -163,13 +163,13 @@ describe('createLandingServer', () => {
       expect(await second.text()).toBe('')
     }, 30_000)
 
-    test('the /chat shell versions the bundle URL (?v=<id>) + is no-store, so a stale cross-deploy cache is bypassed', async () => {
+    test('the FIRST /chat shell versions the bundle URL (?v=<id>) + is no-store — no priming, so the lazy-build first-load boundary is covered', async () => {
       const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
-      // Prime the process JS cache (in a real install the prebuilt bundle
-      // populates it at construction; the test's static_dir has no prebuilt
-      // chat-react.js, so it resolves lazily on this first request).
-      await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
+      // NO priming: the static_dir has no prebuilt chat-react.js, so this
+      // exercises the lazy-build path's very first shell serve — the exact
+      // boundary where an unversioned URL would leave a stale cross-deploy cache
+      // in play. The shell must resolve the bundle and version the URL anyway.
       const res = await handler.fetch(new Request('http://x.test/chat'), fakeServer)
       expect(res.status).toBe(200)
       // The app frame must not be cached, or a stale shell would defeat the ?v= bust.
