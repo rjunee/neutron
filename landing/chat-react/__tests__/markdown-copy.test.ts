@@ -38,15 +38,15 @@ describe('copyTextToClipboard', () => {
   })
 
   test('writes the text and returns true when the Clipboard API works', async () => {
-    let written: string | null = null
+    const writes: string[] = []
     setClipboard({
       writeText: (t: string): Promise<void> => {
-        written = t
+        writes.push(t)
         return Promise.resolve()
       },
     })
     expect(await copyTextToClipboard('hello code')).toBe(true)
-    expect(written).toBe('hello code')
+    expect(writes).toEqual(['hello code'])
   })
 
   test('returns false (not a rejection) when writeText is denied', async () => {
