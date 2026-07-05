@@ -13,8 +13,11 @@ bun test gateway/__tests__/app-tasks-surface.test.ts   # one file (fine, cheap)
 
 `bun test` loads **all** discovered files into **one** long-lived process —
 file parallelism is intra-process (`--max-concurrency`), not separate OS
-processes. With ~775 files that single process's peak RSS climbs past ~1.2 GB
-and OOMs the contended 30 GB deploy box (ISSUES #78). The runner **partitions**
+processes. The suite has grown into the hundreds of files (run
+`bash scripts/run-tests.sh` and read its own startup line for today's live
+count — don't trust a number written here, it will rot), and that single
+process's peak RSS climbs past ~1.2 GB and OOMs the contended 30 GB deploy box
+(ISSUES #78). The runner **partitions**
 the suite into chunks and runs each chunk in its **own fresh, short-lived** `bun
 test` process, so peak RSS is bounded to one chunk's working set and freed
 between chunks. 100% coverage is preserved and **audited**: every discovered

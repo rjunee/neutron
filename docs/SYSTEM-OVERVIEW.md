@@ -6,15 +6,31 @@ per-module headers.
 
 ## Boot path
 
-`gateway/index.ts:boot()` opens the per-instance SQLite DB, applies
-migrations, then composes the module graph from a **graph composer**
-resolved via the `NEUTRON_GRAPH_COMPOSER_MODULE` env seam
-(`loadGraphComposerFromEnv`). Managed deploys point that env at the
-private `provisioning/realmode-composer.ts`; Open self-hosts leave it
-unset and boot a `/healthz`-only shell. The composer produces a
+The shared shell is `gateway/index.ts:boot()`: it opens the per-instance
+SQLite DB, applies migrations, then composes the module graph from a
+**graph composer** the caller supplies. The composer produces a
 `CompositionInput` → `composeProductionGraph` (`gateway/composition.ts`)
 wires the channel router, MCP/tool registry, HTTP surfaces, and the
-bundled Cores.
+bundled Cores. Two different entrypoints hand `boot()` that composer:
+
+- **`bun run start` → `open/server.ts`** is the real Open self-host
+  entrypoint (root `package.json` `start` script). It resolves single-owner
+  config (`NEUTRON_HOME`, owner slug), builds the Open composer
+  (`open/composer.ts` `buildOpenGraphComposer`), and calls
+  `boot({ composer })` directly — this is the full onboarding + chat +
+  WebSocket product on one port, **not** a healthz-only shell. This is what
+  a fresh self-host actually runs.
+- **Bare `gateway/index.ts` run directly** (its own `import.meta.main`
+  entry — Managed's systemd unit, or a raw dev/smoke invocation) resolves
+  its composer via the `NEUTRON_GRAPH_COMPOSER_MODULE` env seam
+  (`loadGraphComposerFromEnv`). Managed deploys point that env at the
+  private `provisioning/realmode-composer.ts`. Run this entry with the env
+  unset — which is NOT how Open self-hosters start the server, but is how
+  a bare `gateway/index.ts` invocation behaves — and it boots only a
+  `/healthz` dev shell (`open/server.ts` guards against this: it first
+  checks `NEUTRON_GRAPH_COMPOSER_MODULE` itself so a Managed checkout can
+  still safely run `bun start`, then falls back to the Open composer
+  instead of an empty one).
 
 ## Cores
 
@@ -3810,35 +3826,34 @@ breadcrumb. LLM-less self-host: omit the substrate → detection OFF, diary +
 read-back still work. Every hook is best-effort and never throws into the chat
 path.
 
-## React web chat client (`landing/chat-react/`, Track B Phase 3) — behind a flag
+## React web chat client (`landing/chat-react/`, Track B Phase 3) — the only web chat client
 
-The vanilla-TS client above (`landing/chat.ts`, ~4.5k lines, served on the
-legacy `/ws/chat` surface) is the DEFAULT and is untouched. Track B Phase 3
-adds a second, React-based web chat surface — the parity-research doc's
-recommended stack (**React + `@assistant-ui/react`, MIT, bring-your-own-
-transport**) — that reuses the Phase-1 `@neutron/chat-core` sync engine. It
-ships **behind a flag with no cutover**; parity is proven before any default
-flip.
+> **P0b (2026-06-26) — no flag, no vanilla path.** The old vanilla-TS client
+> (`landing/chat.ts`, served on the legacy `/ws/chat` surface) and the
+> `NEUTRON_WEB_CHAT_CLIENT` / `?client=` flag (`landing/web-chat-flag.ts`) were
+> **deleted** (Ryan-locked: no feature flags, no dual path). `GET /chat` now
+> **unconditionally** serves the React shell; a fresh single-owner Open install
+> always gets the tabbed React UI with no env var. See "Web client consumption"
+> above for the current serving contract (`landing/server.ts:1205`).
+
+React + `@assistant-ui/react` (MIT, bring-your-own-transport) is the web chat
+surface, reusing the Phase-1 `@neutron/chat-core` sync engine.
 
 **Transport.** The React client connects through chat-core's `WebChatSession`
-to the **app-ws** surface (`/ws/app/chat`, `app:<user_id>` topic) — the Phase-1
-transport with a monotonic per-topic `seq` + `resume after_seq` replay + the
-OPFS/wasm local Store. That is a DIFFERENT surface from the vanilla client's
-`/ws/chat`; the two run side by side. Identity is derived client-side from the
-same start-token `sub` claim the vanilla shell stashes; the app-ws token
-defaults to the dev-bypass form (`dev:<user_id>`) and is overridden by
-`window.__neutron_app_ws_token` once the production EdDSA mint lands.
+to the **app-ws** surface (`/ws/app/chat`, `app:<user_id>` topic) — a
+monotonic per-topic `seq` + `resume after_seq` replay + the OPFS/wasm local
+Store. Identity is derived client-side from the start-token `sub` claim; the
+app-ws token defaults to the dev-bypass form (`dev:<user_id>`) and is
+overridden by `window.__neutron_app_ws_token` once the production EdDSA mint
+lands.
 
-**The flag (`landing/web-chat-flag.ts`).** `GET /chat` picks the client via
-`resolveWebChatClient({ envDefault, queryClient })` — env
-`NEUTRON_WEB_CHAT_CLIENT` (deploy-wide default; `react` opts in) with a
-per-request `?client=react|vanilla` override. Default + unrecognized → vanilla.
-The React assets are also `existsSync`-guarded, so even with the flag on an
-instance that didn't ship them falls back to vanilla rather than 404ing the
-chat surface. The React shell (`chat-react.html`) loads `/chat-react.js`, which
-the landing server lazily bundles from `chat-react/main.tsx` via `Bun.build`
-(minified, ~0.6 MB — React + assistant-ui + chat-core), exactly mirroring the
-existing `chat.ts` → `/chat.js` lazy-bundle path.
+**Serving.** `GET /chat` always serves `chat-react.html` (loads
+`/chat-react.js`); the landing server lazily bundles it from
+`chat-react/main.tsx` via `Bun.build` (minified, ~0.6 MB — React + assistant-ui
++ chat-core) or serves a pre-built `chat-react.js` if present next to the HTML
+(`landing/server.ts` — see "Web client consumption" above). `chat-react.html`
+is REQUIRED at boot: its absence throws rather than falling back to a
+now-nonexistent vanilla client.
 
 **Layering (testable seams).**
 - `chat-core/web-session.ts` gained one additive, optional `onFrame(frame)`
@@ -3895,8 +3910,9 @@ the app-ws surface + persistence + a `WebChatSession.loadEarlier()` correlation
 + a controller cursor + a "Load earlier" button) that must not destabilize the
 Phase-1 forward-only resume contract — deferred to its own reviewed sprint. Also
 deferred: the production app-ws token mint for web (the same identity sub-sprint
-the app-ws auth resolver itself notes). The vanilla client remains the default
-until these close.
+the app-ws auth resolver itself notes). These are deferred enhancements to the
+(now unconditional) React client — the vanilla client is deleted; the forward-only
+resume contract holds until they land.
 
 **Tests.** `chat-react/__tests__/` — controller integration over a real
 `WebChatSession`+fake socket, pure adapter + bootstrap-config tests, and a
@@ -3905,12 +3921,13 @@ and asserts an optimistic send + a streamed-then-finalized agent reply reach the
 DOM. `chat-react/__tests__/uploads.test.ts` covers the upload client (bearer
 multipart POST, pre-flight size/type rejection, server error codes, abort,
 authed GET→object URL) and `attachments.test.tsx` the full stage→upload→send→
-authed-render flow. `landing/__tests__/web-chat-flag.test.ts` + `chat-react-serving.test.ts`
-cover the flag + flag-gated `/chat` + `/chat-react.js` serving. The React leaf
-typechecks via `landing/chat-react/tsconfig.json` (`bunx tsc -p
+authed-render flow. `landing/__tests__/chat-react-serving.test.ts` covers the
+unconditional `/chat` + `/chat-react.js` serving. The React leaf typechecks via
+`landing/chat-react/tsconfig.json` (`bunx tsc -p
 landing/chat-react/tsconfig.json`) — isolated from the root deploy gate, which
-has no JSX/React; the only chat-react file the root gate sees is the pure
-`landing/web-chat-flag.ts` (imported by `server.ts`).
+has no JSX/React and (since the flag's removal) does not include `landing/**`
+at all; `landing/` has its own leaf config (`landing/tsconfig.json`), both
+checked by `scripts/ci/typecheck-all.sh`'s dynamic tsconfig matrix.
 
 ## Onboarding project removal ("ignore X")
 
@@ -3977,9 +3994,10 @@ flag; built unconditionally so the manage surface works even on an LLM-less box.
 CI runs `bash scripts/run-tests.sh` (`.github/workflows/ci.yml`), the one
 documented command for the **whole** suite. `bun test` loads every file into one
 long-lived process whose peak RSS OOMs the contended 30 GB deploy box (ISSUES
-#78); the runner **partitions** the ~775 files into chunks and runs each chunk in
-its own fresh `bun test` process, so peak RSS is bounded to a single chunk and
-freed between chunks. Coverage is **audited** — every discovered file runs once,
+#78); the runner **partitions** the suite (hundreds of files and growing — run
+the script and read its own startup line for today's live count) into chunks
+and runs each chunk in its own fresh `bun test` process, so peak RSS is bounded
+to a single chunk and freed between chunks. Coverage is **audited** — every discovered file runs once,
 cross-checked against bun's own discovery count; drift is a fatal error, never
 silent truncation. For a single file, bare `bun test <file>` is fine.
 

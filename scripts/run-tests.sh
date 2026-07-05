@@ -9,11 +9,12 @@
 # file-level parallelism is intra-process via the JS event loop (--max-concurrency),
 # NOT separate OS processes (verified; see
 # docs/research/bun-test-parallel-load-flakiness-2026-05-19.md root cause #3).
-# The suite has grown from 432 files / 4943 tests (May 2026) to ~859 files /
-# ~8180 tests, so that single process's peak RSS (measured ~1.2 GB and climbing
-# on a dev box) OOMs the contended 30 GB production deploy box (ISSUES #78 /
-# the 25GB-of-30GB observation). Raising RAM is not the fix; the single-process
-# model is the architectural flaw.
+# The suite keeps growing (this script's own startup line — "N test files
+# (bun-discovered: M) -> ... chunks" — reports today's live count; don't
+# hardcode a snapshot here, it will just rot), so that single process's peak
+# RSS (measured >1 GB and climbing on a dev box) OOMs the contended 30 GB
+# production deploy box (ISSUES #78 / the 25GB-of-30GB observation). Raising
+# RAM is not the fix; the single-process model is the architectural flaw.
 #
 # This runner PARTITIONS the suite into chunks and runs each chunk in its own
 # FRESH, short-lived `bun test` process. Peak RSS is therefore bounded to a
@@ -24,10 +25,11 @@
 # truncation. This is partitioning-for-bounded-memory, NOT sharding-to-skip.
 #
 # Bun 1.3.9 already excludes node_modules and dot-directories (.claude/worktrees
-# trident/forge clones, .git) from discovery, so those ~6810 clone test files
-# are NOT swept in — confirmed by `bun test` reporting "across 859 files" at the
-# repo root. We mirror those exclusions when building the partition list and the
-# cross-check makes any drift fatal.
+# trident/forge clones, .git) from discovery, so those clone test files are NOT
+# swept in — confirmed by `bun test` reporting "across N files" at the repo
+# root, a count that intentionally excludes them (compare against a plain `find`
+# with no dot-dir exclusion to see the gap). We mirror those exclusions when
+# building the partition list and the cross-check makes any drift fatal.
 #
 # PGLITE-WASM QUARANTINE LANE (ISSUES #79 / #327)
 # ----------------------------------------------
