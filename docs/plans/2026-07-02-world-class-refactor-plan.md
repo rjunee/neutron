@@ -376,13 +376,22 @@ explicit "unprotected — covered by review only" tag.
 > importers" claims fresh at build time — the audit's evidence is cited per unit.
 
 ### K1 — Dead landing/connect files · `sonnet` · S · lane transport
-Delete: `landing/connect-relay.ts` (351), `landing/connect-accept.ts` (239) +
-`connect-accept.html` + `landing/connect-disclosure.ts` (163),
-`landing/start-token-topic-id.ts` (124), `gateway/connect/syndication-relay.ts`,
-`gateway/connect/open-instance-source-resolver.ts`. Split the one live function out of
-`landing/markdown.ts` (`escapeHtml`, imported at `landing/mobile-install-config.ts:18`)
-then delete the renderer. **Tests:** delete each module's own tests; nothing to port
-(all dead paths). **Accept:** grep-zero references; suite green.
+**⚠️ AS-BUILT CORRECTION (Codex near-live-break catch, #217):** the original deletion list
+below was WRONG — `landing/connect-accept.ts` (239) + `connect-accept.html` +
+`landing/connect-disclosure.ts` (163) are **LIVE** (the by-link Connect collaborator-accept
+page served at `connect.<domain>/connect/accept`; the app still mints + shows that URL via
+`gateway/http/app-connect-invite.ts` `buildGuestAcceptUrl` + `ProjectSettingsDrawer` testID
+`connect-accept-url`). `AS-BUILT.md:3920-3922` marks `connect-accept.ts` LIVE — the audit
+confused it with the removed orphan `connect-accept-server.ts`. **As shipped, K1 deleted only
+the truly-dead files and RESTORED the live connect-accept trio.** Lesson: served-by-path files
+have zero code importers but are URL-reachable → see memory `refactor-deletion-served-by-path-trap`.
+
+Delete (corrected): `landing/connect-relay.ts` (351), `landing/start-token-topic-id.ts` (124),
+`gateway/connect/syndication-relay.ts`, `gateway/connect/open-instance-source-resolver.ts`.
+Split the one live function out of `landing/markdown.ts` (`escapeHtml`, imported at
+`landing/mobile-install-config.ts:18`) then delete the renderer. **Tests:** delete each dead
+module's own tests; add a discriminating boundary test on the retained shared-projects resolver.
+**Accept:** grep-zero references for the truly-dead files; connect-accept surface intact; suite green.
 
 ### K2 — chat-bridge dead slug-picker: DELETE · `opus` · S · lane bridge
 (D-1 resolved by grep: Managed has its OWN slug picker at `/v1/slug/check` and zero
@@ -1933,7 +1942,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 ## 17. Unit checklist (tick on merge)
 
 - [x] G1 ✅ #203 · [x] G2 ✅ #211 · [x] G3 ✅ #205 · [x] G4 ✅ #210 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [x] G7 ✅ #208 · [x] G8 ✅ #213 · [x] G9 ✅ #209 · [x] G10 ✅ #202
-- [ ] K1 · [ ] K2 · [ ] K3 · [ ] K4 · [ ] K5 · [ ] K6 · [ ] K7 · [ ] K8 · [ ] K9 · [ ] K10 · [ ] K11
+- [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [ ] K6 · [ ] K7 · [x] K8 · [x] K9 · [ ] K10 · [ ] K11
 - [ ] L1 · [ ] L2 · [ ] L3 · [ ] L4 · [ ] L5 · [ ] L6 · [ ] L7
 - [ ] C1 · [ ] C2 · [ ] C3a · [ ] C3b · [ ] C3c · [ ] C3d · [ ] C4 · [ ] C5 · [ ] C6 · [ ] C7 · [ ] C8
 - [ ] D1 · [ ] D2 · [ ] D3 · [ ] D4 · [ ] D5 · [ ] D6 · [ ] D7 · [ ] D8 · [ ] D9a · [ ] D9b · [ ] D9c · [ ] D9d
