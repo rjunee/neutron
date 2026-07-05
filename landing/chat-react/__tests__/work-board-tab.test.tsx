@@ -727,4 +727,79 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(container.textContent).toContain('No work tracked yet')
     await act(async () => root.unmount())
   })
+
+  it('guards setState after unmount — repro for the CI setState-after-unmount crash', async () => {
+    // Diagnosis: `refresh()`'s `client.list()` `.then`/`.catch` can resolve AFTER
+    // the tab has unmounted (project switch / tab close). In CI's partitioned
+    // test runner, `GlobalRegistrator.unregister()` tears `window` down BETWEEN
+    // test files, and a late setState's `dispatchSetState → resolveUpdatePriority`
+    // reads `window.event`, throwing `ReferenceError: window is not defined` as
+    // an unhandled rejection that fails the whole chunk (WorkBoardTab.tsx:330).
+    // Reproduced here: unmount BEFORE the initial list() fetch resolves, delete
+    // the global `window` binding to match the cross-file teardown window, then
+    // resolve + flush. Without the `aliveRef` guard this triggers the crash;
+    // with it, the stale `.then`/`.catch` continuation is a no-op.
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { WorkBoardTab } = await import('../WorkBoardTab.tsx')
+    const React = await import('react')
+
+    let resolveList: ((res: Response) => void) | null = null
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith('/work-board') && (init?.method ?? 'GET') === 'GET') {
+        return await new Promise<Response>((resolve) => {
+          resolveList = resolve
+        })
+      }
+      return new Response(JSON.stringify({ ok: false, code: 'request_failed' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<WorkBoardTab projectId={PROJECT} config={config} fetchImpl={fetchImpl} />)
+    })
+
+    // The initial `client.list()` GET is in-flight; its `.then` has not fired yet.
+    expect(resolveList).not.toBeNull()
+
+    // Unmount BEFORE the fetch settles — the exact crash precondition.
+    await act(async () => root.unmount())
+
+    // Capture anything that escapes as an unhandled rejection/exception (what a
+    // fixless build produces once `window` is gone).
+    let escaped: unknown = null
+    const onRejection = (reason: unknown): void => {
+      escaped = reason
+    }
+    const onException = (err: unknown): void => {
+      escaped = err
+    }
+    process.on('unhandledRejection', onRejection)
+    process.on('uncaughtException', onException)
+
+    const savedWindow = (globalThis as { window?: unknown }).window
+    delete (globalThis as { window?: unknown }).window
+    try {
+      resolveList!(
+        new Response(JSON.stringify({ ok: true, items: [], project_id: PROJECT }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      await tick()
+      await tick()
+      await new Promise((r) => setImmediate(r))
+    } finally {
+      ;(globalThis as { window?: unknown }).window = savedWindow
+      process.removeListener('unhandledRejection', onRejection)
+      process.removeListener('uncaughtException', onException)
+    }
+
+    expect(escaped).toBeNull()
+  })
 })
