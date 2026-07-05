@@ -14,12 +14,21 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `b3bdc63` — **WAVE 0 COMPLETE** (all guardrails G1–G10 + W0 merged; only
-  M0 = cross-repo Managed CI deferred). **CI GREEN.** Now in **WAVE 1 (K = kill / deletions)**.
+- **main HEAD:** `53b2844` — **WAVE 0 COMPLETE** (G1–G10 + W0; only M0 = cross-repo Managed
+  CI deferred) + **WAVE 1 (K = kill / deletions) ~65% done:** K1,K2,K3,K4a,K5,K8,K9 merged
+  (7/11). Remaining: K6/K7/K10 (docs cluster, orchestrator-managed — K7 needs untracked
+  docs), K11 (engine, needs the chat-bridge sender-registry split first), K4b deferred.
+  **CI GREEN.**
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
   job re-run, 31/31 local). Not a unit defect — a candidate for test hardening / quarantine.
+- **Chat-react async-leak flake (ROOT FIX IN FLIGHT):** `WorkBoardTab.tsx:330` fired setState
+  in async continuations after unmount → CI chunk-7 crash `ReferenceError: window is not defined`
+  (`# Unhandled error between tests`, surfaced via `plans-pane.test.tsx`). Cost a re-run on both
+  K5 and K8 (identical signature; clears on re-run). Root fix in flight: **#222**
+  (`fix/workboardtab-unmount-guard`, Codex APPROVE) — an `aliveRef` guard on all 9 async→setState
+  sites + a repro test. Once merged, wave-1+ CI should stop hitting it.
   **G5 landed a structural CI change:** the Typecheck step is now a MATRIX
   (`scripts/ci/typecheck-all.sh` runs `tsc -p` over all 44 tsconfigs; DOM stripped from
   server configs). Every subsequent unit MUST pass `bash scripts/ci/typecheck-all.sh` on
@@ -102,6 +111,28 @@ docs #199. main GREEN @ `135c2e1`.
 
 **Wave-0 remaining:** only M0 (Managed CI — cross-repo neutron-managed, deferred).
 
+## Wave 1 (K = kill / deletions) — merged
+
+- **K1** (#217, `557bdd0`) — delete dead `landing/connect` files + split `escapeHtml` live.
+  **Codex near-live-break catch:** the plan's audit wrongly marked live `connect-accept.ts`
+  dead (confused with the removed orphan `connect-accept-server.ts`); restored the live trio.
+  Lesson → [[refactor-deletion-served-by-path-trap]]. (Plan §K1 corrected in-doc.)
+- **K2** (#215, `44cbf1f`) — delete dead slug-picker from `chat-bridge.ts` (~510 LOC).
+- **K3** (#216, `94c1155`) — evacuate + delete the dead per-chunk import pipeline (−5k+ LOC).
+- **K4a** (#219, `6dd6761`) — delete dead `acceptChoice` (0 prod callers) + pin phase_state
+  contract. K4b (slug-flow) deferred. **Known-divergence pinned:** `__cancel__` advances signup
+  (see below).
+- **K5** (#218, `274ff21`) — misc kill-list sweep (dtc + X5-gated items preserved).
+- **K8** (#221, `53b2844`) — delete Trident v1 remnants + retired code-gen forks (~−4.3k LOC);
+  FIX 9 parity retargeted onto live `inner-workflow.mjs`. Codex found 2 real issues (both
+  fixed): the `/codefoo` gateway-grammar boundary + a stale `codegen_dispatch` MCP manifest.
+- **K9** (#220, `79396a1`) — delete orphaned `router-thinking-budget` (0 callers) + make the
+  substrate/AGENTS comments honest (the `MAX_THINKING_TOKENS=0`/`extra_env` guard was never
+  wired). Codex caught a missed AGENTS.md doc-drift (fixed).
+
+Net wave-1 so far: **~−17.7k LOC** removed behind green gates. Every unit's Codex review found
+≥1 real issue; zero regressions shipped; zero owner-stops triggered.
+
 ## Known-divergences (pinned by a guardrail, owned by a later fix unit)
 
 - **G1:** `hasAnyChainedSurface` (`gateway/composition.ts`) omits `import_resume_handler` →
@@ -110,23 +141,37 @@ docs #199. main GREEN @ `135c2e1`.
   `InMemoryOnboardingStateStore`, doc-search per-file collapse) → a component containing NUL
   collides. Pre-existing (byte-identical through G7). Low severity (needs literal NUL in
   emoji/slug/id). Owner: a later fix unit adds collision-proof keying + boundary tests.
+- **K4:** `__cancel__` (a NON_ADVANCING sentinel, but NOT in the gateway's
+  `FORBIDDEN_INBOUND_VALUES` = {`__freeform__`,`__timeout__`}) reaches `advance → consumeChoice`
+  on the signup prompt and WRONGLY advances signup — the signup generic route has no
+  NON_ADVANCING guard (the surviving guards are only in `consumeWowFallbackChoice` +
+  `handleFinalHandoffOnCompleted`). Pre-existing: the deleted `acceptChoice`'s guard sat on a
+  dead path, so live behavior is identical pre/post-K4. Pinned by a characterization test in
+  `engine-advance-choice-parity.test.ts` (asserts current buggy `advanced`; flip to
+  `no_active_prompt` + phase `signup` in the fix unit). Owner: a later onboarding fix unit / K11.
 
 **Review pattern (holding across every unit):** build agent → orchestrator diff review → Codex
 cross-review (EVERY unit found ≥1 real defect: vacuous assertions, one-directional parity holes,
 wrong anchors, boundary gaps, a clipboard sync-throw, the composer-injection regression, a latent
 composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI green → squash-merge.
 
-## Ready-set / queue (order: Step 0 → G1–G10 → waves 1–9; K10 LAST)
+## Ready-set / queue (order: waves 1–9; K10 LAST)
 
-**Step 0 (Wave −1, do next, independently shippable live-bug fixes):**
-1. **W8** — chat client cheap wins, *pull cache-busting first* (#353 bites every deploy).
-   `sonnet` · lane clients. Plan §W8 (~line 1479).
-2. **W7-crash** — the #354 blank-screen crash slice only (stable-mount snapshot-cache +
-   fiber-unmount fix). `opus` · lane clients. Rest of W7 stays in wave 7. Plan §W7.
+**Wave 1 remaining:**
+1. **#222** (live-fix, Codex APPROVE, CI pending) — WorkBoardTab unmount-guard flake fix
+   (lane clients). Merge on green.
+2. **K6 / K7 / K10** — docs cluster, all **lane docs → SERIALIZE**. Orchestrator-managed:
+   K7 `git add`s untracked plans/research docs that live only in the MAIN tree (a fresh
+   worktree can't see them). K10 (public root `SPEC.md`) sequenced **LAST** — D-4 governed-mode
+   landmine (`detectRalphMode` triggers on SPEC.md existence; git-mode.ts:100-142). Order:
+   K7 (truth pass + git-add) → K6 (changelog consolidation) → K10 (SPEC.md).
+3. **K11** — one onboarding flow + flag purge (`opus`, lane engine, ~−5-6k LOC). BLOCKED on
+   the chat-bridge sender-registry split (D3) — do K11 after/with it, or extract the
+   `WebChatSenderRegistry` first. Overlaps K4b. **Highest-risk remaining unit.**
 
-**Then Phase-0 guardrails G1–G10** (merge before structural waves — G1 route-matrix,
-G2 hydration-parity-pin, G4 depcruise baseline, G6 error-string conformance, etc.), then
-**waves 1–9** per the §16 wave table. K10 sequenced last (D-4 governed-mode landmine).
+**Then waves 2–9** (L layering → C → D → P → O → X → W → M → N → S) per the §16 wave table.
+Do NOT start wave 2 (L1 chat-protocol extraction) until K11 lands — L1 must not extract code
+K11 removes.
 
 ## Protocol (full detail in plan §1.5)
 
