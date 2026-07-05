@@ -8,8 +8,6 @@
     "./manifest": "./src/manifest.ts",
     "./backend": "./src/backend.ts",
     "./tools": "./src/tools.ts",
-    "./chat-commands": "./src/chat-commands.ts",
-    "./runtime-runner": "./src/runtime-runner.ts",
     "./substrate-runtime": "./src/substrate-runtime.ts",
     "./tool-handlers": "./src/tool-handlers.ts",
     "./worktree-resolver": "./src/worktree-resolver.ts",
@@ -33,7 +31,7 @@
     "tools": [
       {
         "name": "codegen_dispatch",
-        "description": "Kick off a code-generation task. Returns a task_id immediately; the LLM-driven runner (Forge → Argus → gated merge) executes asynchronously and writes the resulting branch / PR back into the task record. Poll codegen_status until the task is in a terminal state, then call codegen_fetch.",
+        "description": "Kick off a code-generation task against an explicitly-configured Code-Gen Core orchestrator. Returns a task_id immediately; the runner executes asynchronously and writes the resulting branch / PR back into the task record. Poll codegen_status until terminal, then call codegen_fetch. NOTE: current production wires only the skeleton runner for this tool — it raises CodegenNotConfiguredError unless a CodegenOrchestrator is supplied at boot. The live autonomous `/code` build path is served by foundational Trident, not this MCP tool.",
         "input_schema": {
           "type": "object",
           "properties": {

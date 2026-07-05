@@ -1,11 +1,22 @@
 # @neutron/codegen-core
 
-Tier 1 free **Code-Gen Core**. The unified neutron-side replacement
-for the host app's `/trident` / `/forge` / `/argus` stack. Type `/code <task>`
-in chat (or tap the 🛠 launcher tile) and an in-process Sonnet 4.6
-Forge-shape sub-agent authors a branch + opens a draft PR, an
-Argus-shape sub-agent reviews HEAD, and on `APPROVE` the orchestrator
-auto-merges via the host `gh` CLI — no user confirmation step.
+Tier 1 free **Code-Gen Core** — the `codegen_*` MCP tool surface
+(`codegen_dispatch` / `codegen_status` / `codegen_fetch`) over a
+`CodegenOrchestrator`.
+
+> **As-built (2026-07, unit K8):** the live autonomous `/code` chat command is
+> served by **foundational Trident** (`buildTridentCodeChatCommandFilter` →
+> `code_trident_runs` on the CC-subprocess substrate), **not** this Core. The
+> retired v1 in-process runner (`runtime-runner` + `forge`/`argus`-system
+> prompts + the Code-Gen Core `/code` chat parser) has been deleted. In current
+> production the `codegen_*` MCP tools fall back to the skeleton runner, which
+> raises `CodegenNotConfiguredError` unless a `CodegenOrchestrator` is supplied
+> at boot. The prose below describes the original S2 design intent.
+
+Original S2 design intent: type `/code <task>` in chat (or tap the 🛠 launcher
+tile) and an in-process Forge-shape sub-agent authors a branch + opens a draft
+PR, an Argus-shape sub-agent reviews HEAD, and on `APPROVE` the orchestrator
+auto-merges via the host `gh` CLI.
 
 Per docs/plans/code-gen-core-tier1-brief.md +
 docs/plans/2026-05-22-002-feat-code-gen-core-s2-autonomous-plan.md.

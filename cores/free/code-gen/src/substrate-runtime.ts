@@ -43,12 +43,52 @@
  * § "Architecture (the layer cake)" and § Phase 1 for the contract.
  */
 
-import type {
-  CodegenSubagentKind,
-  SubagentDispatch,
-  SubagentDispatchInput,
-  SubagentDispatchResult,
-} from './runtime-runner.ts'
+/**
+ * Sub-agent dispatch contract. Relocated here (from the deleted
+ * `runtime-runner.ts` — the retired v1 code-gen pipeline) because
+ * `buildRuntimeSubagentDispatch` below is what actually PRODUCES a
+ * `SubagentDispatch`, so this is their cohesive owner.
+ */
+export interface SubagentDispatch {
+  (input: SubagentDispatchInput): Promise<SubagentDispatchResult>
+}
+
+/**
+ * Every sub-agent kind the substrate dispatch closure can serve. Each kind
+ * resolves its OWN toolset in `buildRuntimeSubagentDispatch` — there is no
+ * silent fallback, so a persona kind never inherits Argus's read-only
+ * surface. Declared here so the Core carries no dependency on the trident
+ * package.
+ */
+export type CodegenSubagentKind = 'forge' | 'argus' | 'atlas' | 'sentinel'
+
+export interface SubagentDispatchInput {
+  /** Instance key (passed through to the registry). */
+  instance_key: string
+  /** Sub-agent kind — forge / argus (build loop) or atlas / sentinel (persona). */
+  kind: CodegenSubagentKind
+  /** Sub-agent model id. */
+  model: string
+  /** Fully-rendered system prompt. */
+  system: string
+  /** Fully-rendered user message. */
+  user_message: string
+  /** The per-project worktree path the sub-agent operates in. */
+  worktree_path: string
+  /** Parent task id (used for sub-agent registry book-keeping). */
+  parent_task_id: string
+  /** Wall-clock budget for this sub-agent. */
+  timeout_ms: number
+}
+
+export interface SubagentDispatchResult {
+  /** The sub-agent's terminal output text. */
+  result: string
+  /** The opaque sub-agent run_id (used for cancellation + audit). */
+  subagent_run_id: string
+  /** Terminal status — 'completed' | 'failed' | 'cancelled' | 'timed_out'. */
+  status: 'completed' | 'failed' | 'cancelled' | 'timed_out'
+}
 
 /** Tool-use block — mirrors the Anthropic Messages API tool_use shape. */
 export interface CodegenToolBlock {

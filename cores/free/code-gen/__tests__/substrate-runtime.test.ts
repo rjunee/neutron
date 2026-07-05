@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type {
   SubagentDispatchInput,
   SubagentDispatchResult,
-} from '../src/runtime-runner.ts'
+} from '../src/substrate-runtime.ts'
 import {
   buildCannedCodegenLlmCall,
   buildRuntimeSubagentDispatch,

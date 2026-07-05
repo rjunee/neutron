@@ -93,29 +93,12 @@ export {
   type ToolDeps,
 } from './src/tools.ts'
 
-export {
-  executeCodeCommand,
-  parseAndExecuteCodeCommand,
-  parseCodeCommand,
-  type CodeCommand,
-  type CodeCommandContext,
-  type CodeCommandErrorCode,
-  type CodeCommandResponse,
-  type CodegenChatNotifier,
-} from './src/chat-commands.ts'
-
-export {
-  buildRuntimeCodegenRunner,
-  DEFAULT_ARGUS_MODEL,
-  DEFAULT_FORGE_MODEL,
-  parseForgeOutput,
-  type ParsedForgeOutput,
-  type RuntimeCodegenRunnerOptions,
-  type CodegenSubagentKind,
-  type SubagentDispatch,
-  type SubagentDispatchInput,
-  type SubagentDispatchResult,
-} from './src/runtime-runner.ts'
+// NOTE: the retired v1 code-gen `/code` pipeline was deleted (K8 refactor):
+// `chat-commands.ts` (duplicate `/code` grammar — the LIVE `/code` parser is
+// `trident/code-command.ts`), `runtime-runner.ts` + `wiring-production.ts` (the
+// dead Forge→Argus runner), and `prompts/{forge,argus}-system.ts` (dead prompt
+// forks). The live build loop is `trident/inner-workflow.mjs`. The sub-agent
+// dispatch types below moved into `substrate-runtime.ts` (their cohesive owner).
 
 export {
   buildCannedCodegenLlmCall,
@@ -134,6 +117,10 @@ export {
   type CodegenToolDefinition,
   type CodegenToolHandler,
   type CodegenToolResultBlock,
+  type CodegenSubagentKind,
+  type SubagentDispatch,
+  type SubagentDispatchInput,
+  type SubagentDispatchResult,
 } from './src/substrate-runtime.ts'
 
 export {
@@ -188,24 +175,5 @@ export {
   type StubHostRunnersOverrides,
 } from './src/host-runners.ts'
 
-export {
-  FORGE_SYSTEM_PROMPT,
-  renderForgeFixPrompt,
-  renderForgePrompt,
-} from './src/prompts/forge-system.ts'
-
-export {
-  ARGUS_SYSTEM_PROMPT,
-  parseArgusFindings,
-  parseArgusVerdict,
-  renderArgusPrompt,
-} from './src/prompts/argus-system.ts'
-
 export { LAUNCHER_ICON, type LauncherIconMeta } from './src/ui/launcher-icon.ts'
 export { APP_TAB_SURFACE, type CodeGenAppTabMeta } from './src/ui/app-tab-surface.ts'
-
-export {
-  buildCodegenWiring,
-  type BuildCodegenWiringOptions,
-  type BuildCodegenWiringResult,
-} from './src/wiring-production.ts'

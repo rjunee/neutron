@@ -1,40 +1,47 @@
 /**
- * Vajra battle-tested-fix parity — one explicit assertion per fix.
+ * Vajra battle-tested-fix parity — one explicit assertion per fix, pinned on
+ * the LIVE exec-model path.
  *
- * Trident-port PR-5 mandate: every battle-tested fix from Vajra's
- * `/trident` SKILL.md + the forge/argus prompts must map onto an
- * Open-substrate equivalent with a regression test so none can silently
- * regress. This file is that map — each `test` names the Vajra fix (and,
- * where relevant, the incident of record) and pins its Open analog.
+ * Trident-port mandate: every battle-tested fix from Vajra's `/trident`
+ * SKILL.md + the forge/argus prompts must map onto an Open-substrate
+ * equivalent with a regression test so none can silently regress. This file
+ * is that map — each `test` names the Vajra fix (and, where relevant, the
+ * incident of record) and pins its Open analog.
  *
- * Where a fix is already exercised by a broader suite (orchestrator /
- * state-machine / prompts / restart-resume), this file still asserts the
- * narrow invariant directly so the mapping is legible in one place.
+ * The v1 outer state machine (`session.ts` / `substrate-dispatch.ts` +
+ * `prompts.ts` render/parse) was DELETED (K8 refactor). The live loop is the
+ * native CC Dynamic Workflow `inner-workflow.mjs`, FIRED by `inner-loop.ts`
+ * (`buildSubstrateWorkflowFire`) and driven/harvested by `orchestrator.ts`
+ * (`buildTridentOrchestrator`). Every fix below now asserts against one of
+ * those live artifacts — several read `inner-workflow.mjs` source directly
+ * (the Forge/Argus contract is inlined there, the single live source), the
+ * way FIX 8 always has.
  */
 
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { HostCommandResult } from './git-mode.ts'
-import {
-  ARGUS_DIFF_LINE_LIMIT,
-  chooseArgusScope,
-  parseArgusVerdict,
-  parseForgeOutput,
-  parseRalphPlan,
-  renderForgePrompt,
-} from './prompts.ts'
+import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { buildTridentOrchestrator, computeDiffLineCount } from './orchestrator.ts'
-import { buildSubstrateWorkflowFire, type TridentWorkflowFirer } from './inner-loop.ts'
+import {
+  buildSubstrateWorkflowFire,
+  type TridentWorkflowFirer,
+} from './inner-loop.ts'
 import type { Event } from '../runtime/events.ts'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { SessionHandle } from '../runtime/session-handle.ts'
-import { TridentSessionManager, type TridentDispatch } from './session.ts'
 import { computeTransition } from './state-machine.ts'
 import type { MergeMode, TridentRun } from './store.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'boom', exit_code: 1 })
+
+/** The single live source of the Forge/Argus contract. */
+const INNER_WORKFLOW_SRC = readFileSync(
+  fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)),
+  'utf8',
+)
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {
   return {
@@ -69,68 +76,65 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
   }
 }
 
-// ---------------------------------------------------------------------------
-// FIX 1 — Spawn validation: confirm a session actually started before
-// treating it as in-flight (Vajra: "don't poll a phantom session"; the
-// poll-up-to-60s + bare-substring grep guard, 2026-04-15 + 2026-06-09).
-// Open analog: spawn() records the `running` entry SYNCHRONOUSLY before it
-// returns, so the very next classify/isTracked can never miss it; an empty
-// id mint is a hard throw, not a phantom in-flight.
-// ---------------------------------------------------------------------------
-describe('FIX 1 — spawn validation (no phantom in-flight)', () => {
-  const inflight: TridentDispatch = async () => {
-    await new Promise<void>(() => {}) // never resolves
-    return { result: '', status: 'completed' }
+/**
+ * A one-shot substrate whose single turn emits the events supplied by
+ * `script`, then closes its stream. Used to drive `buildSubstrateWorkflowFire`
+ * — the live "fire" seam whose settle discipline replaces the deleted v1
+ * `TridentSessionManager` spawn/classify machinery.
+ */
+function scriptedSubstrate(script: () => AsyncGenerator<Event>): { substrate: Substrate; specs: AgentSpec[] } {
+  const specs: AgentSpec[] = []
+  const substrate: Substrate = {
+    start(spec: AgentSpec): SessionHandle {
+      specs.push(spec)
+      return {
+        events: script(),
+        async respondToTool() {},
+        async cancel() {},
+        tool_resolution: 'internal',
+      } as SessionHandle
+    },
   }
+  return { substrate, specs }
+}
 
-  test('spawn registers the session synchronously — isTracked true before any await', () => {
-    const mgr = new TridentSessionManager({ dispatch: inflight, mint_run_id: () => 'fixed-id' })
-    const id = mgr.spawn({
-      kind: 'forge',
-      phase: 'forge-init',
-      system: 's',
-      user_message: 'u',
-      repo_path: '/repo',
-      trident_run_id: 'r1',
-      model: 'claude-sonnet-4-6',
-      timeout_ms: 1000,
-    })
-    expect(id).toBe('fixed-id')
-    // No await between spawn() and this check — yet the session is tracked.
-    expect(mgr.isTracked('fixed-id')).toBe(true)
-    expect(mgr.runningCount()).toBe(1)
-  })
+const completionEvent: Event = {
+  kind: 'completion',
+  usage: { input_tokens: 1, output_tokens: 1 } as never,
+  substrate_instance_id: 'cc-trident-fire-test',
+}
 
-  test('an empty/blank minted id throws at spawn time (never a phantom row)', () => {
-    const mgr = new TridentSessionManager({ dispatch: inflight, mint_run_id: () => '' })
-    expect(() =>
-      mgr.spawn({
-        kind: 'forge',
-        phase: 'forge-init',
-        system: 's',
-        user_message: 'u',
-        repo_path: '/repo',
-        trident_run_id: 'r1',
-        model: 'm',
-        timeout_ms: 1000,
-      }),
-    ).toThrow(/empty id/)
+// ---------------------------------------------------------------------------
+// FIX 1 — Spawn validation: never treat a session that did not actually start
+// as in-flight (Vajra: "don't poll a phantom session", 2026-04-15 + 2026-06-09).
+// Open v2 analog: `buildSubstrateWorkflowFire` reports `fired` ONLY when a real
+// launcher turn settles. A substrate that cannot even START the fire turn is a
+// hard `failed`, never a phantom `fired` the harvester would then poll.
+// ---------------------------------------------------------------------------
+describe('FIX 1 — spawn validation (no phantom fire)', () => {
+  test('a substrate whose start() throws → failed, never a phantom "fired"', async () => {
+    const substrate: Substrate = {
+      start() {
+        throw new Error('substrate down')
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ substrate })
+    const out = await fire({ prompt: 'p', cwd: '/repo', settle_timeout_ms: 1000 })
+    expect(out.status).toBe('failed')
+    expect(out.error).toContain('fire start failed')
   })
 })
 
 // ---------------------------------------------------------------------------
-// FIX 2 — Reap / "dispatch lost on restart" → re-dispatch, bounded. Vajra reaped
-// a dead tmux window/PID and re-dispatched. Open v2 analog: an orphaned
-// persisted subagent_run_id (the inner-loop dispatch this process no longer
+// FIX 2 — Reap / "dispatch lost on restart" → re-dispatch, bounded. Vajra
+// reaped a dead tmux window/PID and re-dispatched. Open v2 analog: an orphaned
+// persisted subagent_run_id (an inner-loop dispatch this process no longer
 // tracks) relaunches a FRESH workflow once per process under the default policy.
 // (Full lifecycle in restart-resume.test.ts; here we pin the bound + 'wait'.)
 // ---------------------------------------------------------------------------
 describe('FIX 2 — reap → bounded re-dispatch', () => {
   test('an untracked in-flight id re-dispatches exactly once, then waits (bounded)', async () => {
     let calls = 0
-    // The fire settles (the launching turn replies) but the simulated workflow
-    // writes NO result, so the run stays in flight — yet, now tracked in the
-    // process's `fired` set, it must NOT re-dispatch a second time.
     const fire_workflow: TridentWorkflowFirer = async () => {
       calls++
       return { status: 'fired', error: null }
@@ -146,12 +150,10 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
 
     const t1 = await step(run)
     run = t1.run
-    // Re-dispatched: slot now holds a fresh, tracked id (not STALE).
     expect(run.subagent_run_id).not.toBe('STALE')
     expect(run.subagent_run_id).not.toBeNull()
     expect(calls).toBe(1)
 
-    // Tracked now (in `fired`) → the next step waits, never a 2nd re-dispatch.
     const t2 = await step(run)
     expect(t2.waiting).toBe(true)
     expect(t2.run.subagent_run_id).toBe(run.subagent_run_id)
@@ -178,29 +180,17 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
 
 // ---------------------------------------------------------------------------
 // FIX 3 — Oversized-diff review guard: Argus never reads a >~3000-line diff
-// in one shot (Vajra silent-exit trigger). Open analog: a pre-spawn
-// numstat probe + chooseArgusScope downgrades to the meaty-commits scope
-// and conservatively treats an unmeasurable diff as OVER the ceiling.
+// in one shot (Vajra silent-exit trigger). Open v2 analogs: the live
+// `orchestrator.ts` pre-spawn numstat probe (`computeDiffLineCount`)
+// conservatively treats an unmeasurable diff as OVER the ceiling, and the
+// inlined Argus rubric in `inner-workflow.mjs` carries the guard.
 // ---------------------------------------------------------------------------
 describe('FIX 3 — oversized-diff guard', () => {
-  test('a diff over the ceiling steers Argus to meaty commits + "could not verify"', () => {
-    const scope = chooseArgusScope({ base_branch: 'main', round: 1, diff_line_count: ARGUS_DIFF_LINE_LIMIT + 1 })
-    expect(scope).toContain('OVER')
-    expect(scope).toContain('git log --oneline main..HEAD')
-    expect(scope).toContain('could not verify')
-    expect(scope).not.toContain('git diff main..HEAD') // must NOT read it whole
-  })
-
-  test('a diff under the ceiling lets Argus read the full branch diff', () => {
-    const scope = chooseArgusScope({ base_branch: 'main', round: 1, diff_line_count: 10 })
-    expect(scope).toContain('git diff main..HEAD')
-    expect(scope).not.toContain('OVER')
-  })
-
-  test('round 2+ always reviews only the latest fix commit (never the whole branch)', () => {
-    const scope = chooseArgusScope({ base_branch: 'main', round: 2, diff_line_count: 999999 })
-    expect(scope).toContain('git show HEAD')
-    expect(scope).not.toContain('OVER')
+  test('the live Argus rubric bans reading a >~3000-line diff in one shot', () => {
+    expect(ARGUS_DIFF_LINE_LIMIT).toBe(3000)
+    expect(INNER_WORKFLOW_SRC).toContain('OVERSIZED-DIFF GUARD')
+    expect(INNER_WORKFLOW_SRC).toContain('3000-line diff')
+    expect(INNER_WORKFLOW_SRC).toContain('STATE what you could not verify')
   })
 
   test('an unmeasurable diff is treated as OVER the ceiling (conservative)', async () => {
@@ -216,7 +206,7 @@ describe('FIX 3 — oversized-diff guard', () => {
 // ---------------------------------------------------------------------------
 // FIX 4 — max_rounds / max_ralph_rounds caps with loud failure reporting.
 // Vajra: a non-converging review loop or planner fails for manual review
-// rather than spinning forever. Open analog: computeTransition.
+// rather than spinning forever. Open analog: computeTransition (state-machine).
 // ---------------------------------------------------------------------------
 describe('FIX 4 — round caps fail loudly', () => {
   test('argus REQUEST CHANGES past max_rounds → failed with a named reason', () => {
@@ -243,87 +233,62 @@ describe('FIX 4 — round caps fail loudly', () => {
 
 // ---------------------------------------------------------------------------
 // FIX 5 — Phantom-ID / async-registry-write race. Vajra's registry row was
-// written a beat after spawn-agent.sh returned, so a naive poll raced it.
-// Open analog: spawn() is synchronous; a classify before the dispatch
-// resolves reports `running` (never a phantom crash), and an unknown id
-// (lost map) defaults to the SAFE `running` (the non-null id blocks a
-// re-spawn at the session layer; the orchestrator owns orphan recovery).
+// written a beat after spawn-agent.sh returned, so a naive poll raced it and
+// could spuriously crash/merge. Open v2 analog: the orchestrator never advances
+// an ambiguous (untracked, still-persisted) session toward a terminal/merge
+// state under the conservative `wait` policy — it leaves the run untouched for
+// operator-driven recovery, never a spurious crash or auto-merge.
 // ---------------------------------------------------------------------------
-describe('FIX 5 — no phantom-ID race', () => {
-  test('classify right after spawn (before completion) reports running, not crashed', async () => {
-    const session = new TridentSessionManager({
-      dispatch: async () => {
-        await new Promise<void>(() => {})
-        return { result: '', status: 'completed' }
-      },
-      mint_run_id: () => 'live-id',
+describe('FIX 5 — no phantom-ID race (ambiguous session never auto-terminates)', () => {
+  test('an orphaned session under wait is left in place — never crashed or merged', async () => {
+    const fire_workflow: TridentWorkflowFirer = async () => ({ status: 'fired', error: null })
+    const { step } = buildTridentOrchestrator({
+      fire_workflow,
+      db_path: '/tmp/db',
+      run_host: async () => ok(),
+      base_branch: 'main',
+      on_orphaned_session: 'wait',
+      now: () => new Date(0).toISOString(),
     })
-    const id = session.spawn({
-      kind: 'argus',
-      phase: 'argus',
-      system: 's',
-      user_message: 'u',
-      repo_path: '/repo',
-      trident_run_id: 'r1',
-      model: 'm',
-      timeout_ms: 1000,
-    })
-    const outcome = await session.classify(makeRun({ subagent_run_id: id, phase: 'argus' }))
-    expect(outcome.status).toBe('running')
-  })
-
-  test('an unknown id defaults to the safe running (no spurious crash/merge)', async () => {
-    const session = new TridentSessionManager({ dispatch: async () => ({ result: 'APPROVE', status: 'completed' }) })
-    const outcome = await session.classify(makeRun({ subagent_run_id: 'never-spawned', phase: 'argus' }))
-    expect(outcome.status).toBe('running')
-  })
-
-  test('unknown_session:crashed opts into loud orphan failure at the session layer', async () => {
-    const session = new TridentSessionManager({
-      dispatch: async () => ({ result: 'APPROVE', status: 'completed' }),
-      unknown_session: 'crashed',
-    })
-    const outcome = await session.classify(makeRun({ subagent_run_id: 'never-spawned', phase: 'argus' }))
-    expect(outcome.status).toBe('crashed')
+    const out = await step(makeRun({ subagent_run_id: 'never-tracked', subagent_status: 'running' }))
+    expect(out.waiting).toBe(true)
+    expect(out.run.phase).not.toBe('failed')
+    expect(out.run.phase).not.toBe('merged')
+    expect(out.run.phase).not.toBe('done')
   })
 })
 
 // ---------------------------------------------------------------------------
 // FIX 6 — No silent exit / no silent merge.
-// Vajra: a Forge that never emitted the PR contract is a failure (not
-// silent success); an unreadable Argus verdict must NEVER auto-merge.
+// Vajra: a Forge that never emitted the PR contract is a failure (not silent
+// success); an unreadable/deferred review must NEVER auto-approve/merge. Open
+// v2 analog: the inlined Forge contract keeps the PR_NUMBER/BRANCH/WORKTREE
+// last-lines discipline, the Argus rubric NEVER exits silently, and the codex
+// panelist never-silent-downgrades a failed review into an APPROVE.
 // ---------------------------------------------------------------------------
 describe('FIX 6 — no silent exit / no silent merge', () => {
-  test('a forge-init with no PR/BRANCH/WORKTREE contract → crashed (not success)', async () => {
-    const session = new TridentSessionManager({ dispatch: async () => ({ result: 'I did some stuff', status: 'completed' }) })
-    const id = session.spawn({
-      kind: 'forge',
-      phase: 'forge-init',
-      system: 's',
-      user_message: 'u',
-      repo_path: '/repo',
-      trident_run_id: 'r1',
-      model: 'm',
-      timeout_ms: 1000,
-    })
-    await session.drain()
-    const outcome = await session.classify(makeRun({ subagent_run_id: id, phase: 'forge-init' }))
-    expect(outcome.status).toBe('crashed')
+  test('the live Forge contract keeps the locked PR_NUMBER/BRANCH/WORKTREE last lines', () => {
+    expect(INNER_WORKFLOW_SRC).toContain('BRANCH=')
+    expect(INNER_WORKFLOW_SRC).toContain('WORKTREE=')
+    expect(INNER_WORKFLOW_SRC).toContain('PR_NUMBER=')
   })
 
-  test('an unparseable Argus verdict fails safe to REQUEST_CHANGES (never auto-merge)', () => {
-    expect(parseArgusVerdict('the diff looks fine to me probably')).toBe('REQUEST_CHANGES')
-    expect(parseArgusVerdict('')).toBe('REQUEST_CHANGES')
+  test('the live Argus rubric refuses to exit silently', () => {
+    expect(INNER_WORKFLOW_SRC).toContain('NEVER EXIT SILENTLY')
+    expect(INNER_WORKFLOW_SRC).toContain('TRUNCATED verdict')
   })
 
-  test('a clean APPROVE on its own line parses as APPROVE', () => {
-    expect(parseArgusVerdict('Looks good.\nAPPROVE')).toBe('APPROVE')
+  test('a configured-but-failed cross-model review never silent-downgrades to APPROVE', () => {
+    expect(INNER_WORKFLOW_SRC).toContain('never-silent-downgrade')
+    expect(INNER_WORKFLOW_SRC).toContain('refusing to silently APPROVE')
+    expect(INNER_WORKFLOW_SRC).toContain('do NOT return APPROVE')
   })
 })
 
 // ---------------------------------------------------------------------------
 // FIX 7 — Missing/garbled REMAINING_TASKS fails loudly (never silently
-// reviews a partial governed build).
+// reviews a partial governed build). Open analog: computeTransition (the live
+// state-machine) fails a ralph bootstrap/planner whose count is null.
 // ---------------------------------------------------------------------------
 describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
   test('a Ralph bootstrap with no valid count → failed (not a one-shot Argus)', () => {
@@ -338,11 +303,6 @@ describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
     const t = computeTransition(run, { remaining: null })
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('REMAINING_TASKS')
-  })
-
-  test('a garbled REMAINING_TASKS string parses to null (strict ^[0-9]+$)', () => {
-    expect(parseRalphPlan('REMAINING_TASKS=lots\nNEXT_TASK=x').remaining).toBeNull()
-    expect(parseForgeOutput('PR_NUMBER=1\nBRANCH=b\nWORKTREE=/w\nREMAINING_TASKS=3')?.remaining).toBe(3)
   })
 
   test('a legacy (non-ralph) forge-init with absent remaining → argus, not failed', () => {
@@ -368,25 +328,9 @@ describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
 // ---------------------------------------------------------------------------
 describe('FIX 8 — Fable-orchestrator model routing (per-role models in the workflow)', () => {
   test('the inner-loop FIRE seam still pins a non-Fable model (default opus) for the launching turn', async () => {
-    const specs: AgentSpec[] = []
-    const substrate: Substrate = {
-      start(spec: AgentSpec): SessionHandle {
-        specs.push(spec)
-        const ev: Event = {
-          kind: 'completion',
-          usage: { input_tokens: 1, output_tokens: 1 } as never,
-          substrate_instance_id: 'cc-trident-fire-test',
-        }
-        return {
-          events: (async function* () {
-            yield ev
-          })(),
-          async respondToTool() {},
-          async cancel() {},
-          tool_resolution: 'internal',
-        } as SessionHandle
-      },
-    }
+    const { substrate, specs } = scriptedSubstrate(async function* () {
+      yield completionEvent
+    })
     const fire = buildSubstrateWorkflowFire({ substrate })
     await fire({ prompt: 'launcher prompt', cwd: '/repo', settle_timeout_ms: 1000 })
     const pref = specs[0]!.model_preference
@@ -397,7 +341,7 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
   })
 
   test('the inner workflow routes the intended per-role models (Fable orchestrates; Opus/Sonnet execute; Opus reviews)', () => {
-    const src = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+    const src = INNER_WORKFLOW_SRC
     // Fable ORCHESTRATES: the planner + the verdict synthesis.
     expect(src).toContain("'plan:fable': { model: MODELS.fable")
     expect(src).toContain("'argus:synthesis': { model: MODELS.fable")
@@ -437,34 +381,47 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
 // Vajra incident (fleet-wide, 2026-06-23): a Forge pushed its branch then
 // HUNG at the cross-model (Codex) review before opening the PR — it self-ran
 // an ASYNC review and yielded its turn to await a result nothing feeds back to
-// a headless agent, so it idled until reaped, PR unshipped. Two Open analogs:
-//   (a) PROMPT: the rendered Forge prompt must encode OPEN-PR-FIRST +
-//       review-is-best-effort + NEVER-yield-the-turn-to-await-a-review (the
-//       Open analog of Vajra's prompts/forge.md cross-model rewrite). Open has
-//       no openai-codex stop-review-gate plugin in its repo surface, so the
-//       durable defense here is the prompt, not a per-worktree gate pin.
-//   (b) FALSE-COMPLETION race: a substrate turn whose stream ends WITHOUT a
-//       terminal completion/error event (paused, not finished) must NOT be
-//       classified as completed — asserted in substrate-dispatch.test.ts.
+// a headless agent, so it idled until reaped, PR unshipped. Two Open analogs,
+// BOTH now on the live path:
+//   (a) PROMPT: the inlined live Forge contract in `inner-workflow.mjs` must
+//       encode OPEN-PR-FIRST + review-is-best-effort + NEVER-yield-the-turn.
+//   (b) FALSE-COMPLETION race: `buildSubstrateWorkflowFire` classifies a fire
+//       turn whose stream ends WITHOUT a terminal `completion` event as
+//       `failed` (paused ≠ finished), never a silent `fired`.
 // See docs/research/vajra-neutron-fix-reconciliation-2026-06-24.md.
 // ---------------------------------------------------------------------------
 describe('FIX 9 — fleet premature-completion / cross-model-review wedge', () => {
-  const prompt = renderForgePrompt(makeRun({ merge_mode: 'pr' as MergeMode }), 'main')
-
-  test('the Forge prompt orders PR-FIRST then review (a stalled review never costs the PR)', () => {
-    expect(prompt).toContain('OPEN THE PR FIRST')
-    // The review ACTION is explicitly sequenced AFTER opening the PR.
-    expect(prompt).toMatch(/OPEN THE PR FIRST[\s\S]*THEN run any cross-model/i)
+  test('(a) the live Forge contract orders PR-FIRST, best-effort review, never gate/yield', () => {
+    // The inlined forgePushStep in inner-workflow.mjs (the single live source).
+    expect(INNER_WORKFLOW_SRC).toContain('OPEN THE PR FIRST')
+    expect(INNER_WORKFLOW_SRC).toMatch(/best-effort/i)
+    expect(INNER_WORKFLOW_SRC).toContain('NEVER gate the PR')
+    expect(INNER_WORKFLOW_SRC).toMatch(/yield your turn/i)
   })
 
-  test('the Forge prompt marks cross-model review BEST-EFFORT (never gates the PR)', () => {
-    expect(prompt).toMatch(/BEST-EFFORT/)
-    expect(prompt.toLowerCase()).toContain('never gate the pr')
+  test('(b) a fire turn that ends without a completion event → failed (paused ≠ finished)', async () => {
+    // Stream yields a non-terminal event then closes with NO completion — a
+    // paused / abnormally-closed launcher turn. It must NEVER be reported fired.
+    const { substrate } = scriptedSubstrate(async function* () {
+      yield {
+        kind: 'token',
+        text: 'working...',
+        substrate_instance_id: 'cc-trident-fire-test',
+      } as Event
+      // stream ends here — no completion event
+    })
+    const fire = buildSubstrateWorkflowFire({ substrate })
+    const out = await fire({ prompt: 'p', cwd: '/repo', settle_timeout_ms: 1000 })
+    expect(out.status).toBe('failed')
+    expect(out.error).toContain('without a completion event')
   })
 
-  test('the Forge prompt BANS yielding the turn to await an async/background review', () => {
-    // The live wedge: ending the turn "to wait for"/"resume when" a review.
-    expect(prompt).toMatch(/NEVER end your turn/i)
-    expect(prompt.toLowerCase()).toContain('synchronously')
+  test('(b) a fire turn that settles with a completion event → fired', async () => {
+    const { substrate } = scriptedSubstrate(async function* () {
+      yield completionEvent
+    })
+    const fire = buildSubstrateWorkflowFire({ substrate })
+    const out = await fire({ prompt: 'p', cwd: '/repo', settle_timeout_ms: 1000 })
+    expect(out.status).toBe('fired')
   })
 })

@@ -629,8 +629,17 @@ export function buildTridentCodeChatCommandFilter(deps: {
   return {
     async match(input) {
       const trimmed = input.body.trimStart()
+      // Cheap early-out: skip the dynamic import for anything not even
+      // prefixed `/code`. The real boundary check is `parseCodeCommand`
+      // below — bare `startsWith` would wrongly claim `/codefoo`.
       if (!trimmed.startsWith('/code')) return null
       const { parseAndExecuteCodeCommand, parseCodeCommand } = await import('../trident/code-command.ts')
+      // Share ONE grammar with the canonical parser (K8): `/code` must be
+      // followed by EOL/whitespace. `/codefoo bar` is NOT a code command —
+      // fall through to the LLM instead of pre-claiming it here (which, in the
+      // no-context branch below, would answer "unavailable" for a non-command).
+      const parsed = parseCodeCommand(input.body)
+      if (parsed.kind === 'unrecognized') return null
       const ctx = await deps.resolve_context({
         project_id: input.project_id ?? default_pid,
         project_slug: input.project_slug,
@@ -640,7 +649,6 @@ export function buildTridentCodeChatCommandFilter(deps: {
       if (ctx === null) {
         // Still claim the `/code` command (don't fall through to the LLM)
         // but answer honestly. `/code help` works with no context too.
-        const parsed = parseCodeCommand(input.body)
         if (parsed.kind === 'help') return { text: unavailable }
         return { text: unavailable, error: { code: 'unavailable', message: 'no build target' } }
       }
@@ -850,12 +858,12 @@ export async function buildCoresBackendFactories(
      */
     researchProjectBackend?: import('@neutronai/research-core').ResearchProjectBackend
     /**
-     * Code-Gen Core S2 — pre-built `CodegenOrchestrator` from
-     * `buildCodegenWiring(...)`. When supplied, the `codegen_core`
-     * factory returns THIS instance so the MCP tools + the `/code`
-     * chat-command filter share one runner + one per-project sidecar
-     * resolver. When omitted, the factory falls back to a skeleton
-     * runner-backed orchestrator (Tier 1 safe-install behavior).
+     * Code-Gen Core S2 — an optional pre-built `CodegenOrchestrator`. When
+     * supplied, the `codegen_core` factory returns THIS instance for the
+     * `codegen_*` MCP tools. When omitted (the current production shape — the
+     * retired v1 wiring builder was deleted), the factory falls back to a
+     * skeleton runner-backed orchestrator (Tier 1 safe-install behavior). The
+     * live `/code` chat command is served by foundational Trident, not this.
      */
     codegenOrchestrator?: import('@neutronai/codegen-core').CodegenOrchestrator
     /**
