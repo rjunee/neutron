@@ -107,6 +107,23 @@ describe('buildTridentCodeChatCommandFilter', () => {
     expect(await filter.match(matchInput('what is the weather'))).toBeNull()
   })
 
+  test('a `/code`-PREFIXED word (`/codefoo`) is NOT a code command — falls through to the LLM', async () => {
+    // K8 grammar-unification boundary: the gateway pre-check shares the
+    // canonical parser (`/code` must be followed by EOL/whitespace), so a bare
+    // `startsWith('/code')` no longer wrongly claims `/codefoo`. Asserted on the
+    // null-context path — the exact case that previously answered "unavailable"
+    // for a non-command instead of returning null.
+    const filter = buildTridentCodeChatCommandFilter({
+      resolve_context: () => null,
+      unavailable_message: 'no repo wired here',
+    })
+    expect(await filter.match(matchInput('/codefoo bar'))).toBeNull()
+    // And with a live context it still falls through (no run row created).
+    const live = buildTridentCodeChatCommandFilter({ resolve_context: () => ctxFor() })
+    expect(await live.match(matchInput('/codebase please'))).toBeNull()
+    expect(store.listNonTerminal().length).toBe(0)
+  })
+
   test('null context still claims /code but answers unavailable (no LLM fallthrough)', async () => {
     const filter = buildTridentCodeChatCommandFilter({
       resolve_context: () => null,

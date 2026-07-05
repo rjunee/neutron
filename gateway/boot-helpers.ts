@@ -629,8 +629,17 @@ export function buildTridentCodeChatCommandFilter(deps: {
   return {
     async match(input) {
       const trimmed = input.body.trimStart()
+      // Cheap early-out: skip the dynamic import for anything not even
+      // prefixed `/code`. The real boundary check is `parseCodeCommand`
+      // below — bare `startsWith` would wrongly claim `/codefoo`.
       if (!trimmed.startsWith('/code')) return null
       const { parseAndExecuteCodeCommand, parseCodeCommand } = await import('../trident/code-command.ts')
+      // Share ONE grammar with the canonical parser (K8): `/code` must be
+      // followed by EOL/whitespace. `/codefoo bar` is NOT a code command —
+      // fall through to the LLM instead of pre-claiming it here (which, in the
+      // no-context branch below, would answer "unavailable" for a non-command).
+      const parsed = parseCodeCommand(input.body)
+      if (parsed.kind === 'unrecognized') return null
       const ctx = await deps.resolve_context({
         project_id: input.project_id ?? default_pid,
         project_slug: input.project_slug,
@@ -640,7 +649,6 @@ export function buildTridentCodeChatCommandFilter(deps: {
       if (ctx === null) {
         // Still claim the `/code` command (don't fall through to the LLM)
         // but answer honestly. `/code help` works with no context too.
-        const parsed = parseCodeCommand(input.body)
         if (parsed.kind === 'help') return { text: unavailable }
         return { text: unavailable, error: { code: 'unavailable', message: 'no build target' } }
       }
