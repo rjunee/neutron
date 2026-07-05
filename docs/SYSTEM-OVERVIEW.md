@@ -3910,8 +3910,9 @@ the app-ws surface + persistence + a `WebChatSession.loadEarlier()` correlation
 + a controller cursor + a "Load earlier" button) that must not destabilize the
 Phase-1 forward-only resume contract — deferred to its own reviewed sprint. Also
 deferred: the production app-ws token mint for web (the same identity sub-sprint
-the app-ws auth resolver itself notes). The vanilla client remains the default
-until these close.
+the app-ws auth resolver itself notes). These are deferred enhancements to the
+(now unconditional) React client — the vanilla client is deleted; the forward-only
+resume contract holds until they land.
 
 **Tests.** `chat-react/__tests__/` — controller integration over a real
 `WebChatSession`+fake socket, pure adapter + bootstrap-config tests, and a

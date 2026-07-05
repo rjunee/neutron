@@ -248,9 +248,9 @@ The repo is a Bun workspace, grouped into five layers (bottom-up):
 │  PRODUCT SURFACES   onboarding/  app/  landing/  prompts/      │
 ├──────────────────────────────────────────────────────────────┤
 │  CORES              core-sdk/  cores/sdk  cores/runtime        │
-│                     cores/free/{notes,tasks,reminders,         │
-│                       calendar,email,research,code-gen,        │
-│                       agent-settings}                          │
+│                     cores/free/{tasks,reminders,calendar,      │
+│                       email,research,code-gen,agent-settings,  │
+│                       google-workspace,scraping}               │
 ├──────────────────────────────────────────────────────────────┤
 │  MEMORY             gbrain-memory/  scribe/                    │
 │                     runtime/entity-writer (privacy gate)       │
