@@ -1,7 +1,8 @@
 # System Overview
 
 High-level map of how Neutron Open boots and where the major runtime
-pieces live. Keep this short; deep detail belongs in `AS-BUILT.md` and the
+pieces live. Keep this short; deep detail belongs in `docs/AS_BUILT.md` (and the
+archived history in `docs/research/AS-BUILT-archive-2026-07.md`) and the
 per-module headers.
 
 ## Boot path
@@ -2673,7 +2674,8 @@ already folded into the foundational Trident runtime across PR-1..PR-5. The
 install-lifecycle / sidecar remain a self-contained Tier-2 MCP surface (121
 passing tests); their physical deletion is the one documented remaining cleanup,
 left out because it is referenced by those MCP tools, the install
-lifecycle/manifest, and the Managed graph composer. See `AS-BUILT.md`.
+lifecycle/manifest, and the Managed graph composer. See
+`docs/research/AS-BUILT-archive-2026-07.md`.
 
 ## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
 
@@ -2778,7 +2780,8 @@ window, so a fresh agent each iteration cannot forget what was agreed.
      drift-catch: a regressed task re-opens as `- [ ]`.
   3. `ralph-task` — a FRESH Forge implements ONLY the surfaced `NEXT_TASK`
      (threaded via `session.nextTaskFor`), checks it off, updates
-     `AS-BUILT.md`, commits. Prompt: `renderRalphTaskPrompt`.
+     the changelog (`docs/AS_BUILT.md`), commits. (Historical prompt:
+     `renderRalphTaskPrompt`, since folded into `trident/inner-workflow.mjs`.)
   4. Repeat 2 ⇄ 3 until a planning pass reports `REMAINING_TASKS=0`, then →
      `argus` → the normal fix/merge loop reviews + merges the accumulated
      branch.

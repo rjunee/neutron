@@ -97,7 +97,8 @@ test('packs system + single-turn message into spec.prompt as "<system>\\n\\n<bod
 // forces the factory default, every pass dispatches the same model — the
 // escalation path is dead, both passes run inside the wrong timeout, and the
 // `[llm-router]` log lines report the wrong model so incidents like the
-// Sonnet 429 line referenced in AS_BUILT become unattributable.
+// Sonnet 429 line recorded in docs/research/AS-BUILT-archive-2026-07.md
+// become unattributable.
 // ---------------------------------------------------------------------------
 
 test('args.model ALWAYS wins (Haiku→Sonnet escalation depends on this)', async () => {

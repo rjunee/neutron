@@ -2,6 +2,49 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+> Pre-consolidation history (unit K6, 2026-07-05): the former root `AS-BUILT.md`
+> (7,647 lines — the anchored record of behavioral invariants through 2026-07-04)
+> is archived VERBATIM at `docs/research/AS-BUILT-archive-2026-07.md`, and the
+> former `docs/AS-BUILT.md` (1,469 lines — PTY terminal-detection ports, the
+> Trident v2 Workflow cutover, Work Board Phase 1a/1b, parity-gap closures) at
+> `docs/research/AS-BUILT-docs-archive-2026-07.md`. This file is the ONE live
+> changelog going forward.
+
+## 2026-07-04 — K9: router-thinking-budget deleted (refactor unit K9)
+
+**Decision: DELETE** `runtime/adapters/claude-code/router-thinking-budget.ts` (+ its
+unit test) and correct the misleading comments in
+`gateway/realmode-composer/build-llm-call-substrate.ts` that claimed the router-hang
+protection was live.
+
+**Incident recap.** The 2026-06-05 router-hang root cause
+(`docs/plans/router-call-hangs-rootcause-brief.md`, per the module's own header): the
+onboarding classifier's `claude -p` spawn ran with Claude Code's default extended-thinking
+budget enabled, so on ambiguous prompts Haiku 4.5 generated a multi-thousand-token
+thinking block (cold ~40s / warm 20-36s) before the one-line JSON answer — read as a
+"hang." The intended fix was to spawn the router substrate with `MAX_THINKING_TOKENS=0`.
+
+**Why delete, not re-wire.** The module was orphaned — zero production importers (only
+its own test imported it; the `runtime/adapters/claude-code/index.ts` barrel does not
+re-export it). The wiring its header describes ("the router-dedicated
+`buildLlmCallSubstrate` threads this as `extra_env` via `gateway/index.ts`") does NOT
+exist: no non-test call site sets `extra_env` anywhere in the repo, so the helpers
+(`resolveRouterThinkingBudget` / `routerThinkingEnvOverlay`) were never called on any
+live path. The protection was therefore already absent, and the comments were the worst
+state — asserting an active hang guard that wasn't. Deletion is the no-behavior-change
+option that makes code and comments agree. Re-wiring was rejected because the only
+consumer it would protect — the onboarding `llm-router` — is itself already dead code on
+every live path and is being removed in the same refactor wave (unit K11:
+`llm-router.ts` fires only inside dead `engine.advance`).
+
+**What changed.** Removed the module + test. The `extra_env` field on
+`BuildLlmCallSubstrateInput` is KEPT (it is the substrate's generic per-spawn env-overlay
+seam, covered by its own substrate unit test); its JSDoc + the inline-apply comment were
+rewritten to describe it as a generic knob with `MAX_THINKING_TOKENS=0` as an
+illustrative example, noting no production caller sets it today. (This entry was
+originally appended to the root `AS-BUILT.md` and carried forward here by K6, the
+changelog consolidation.)
+
 ## 2026-07-03 — Trident build reliability: worktree isolation + self-healing merge + interpreted failures (#351/#352, no flags)
 
 **Why.** Ryan re-ran two same-project builds on `tabs` (dagflow + kvwal) on
@@ -329,6 +372,134 @@ App `tsc` clean, root `tsc` clean, leak-gate SILENT.
 
 **Out of scope.** Desktop web (PR-1..5), docs drill-down (PR-5), a rail preview
 line, any activity/live_runs derivation outside the composer.
+## 2026-07-03 — TRIDENT parallel builds + build lifecycle (#342/#340/#339/#334/#337)
+
+**Why.** Ryan's live test 2026-07-03 (SPEC.md Decisions Log, Ryan-locked). Vajra runs
+3+ parallel trident builds in one project constantly; Open couldn't. Plus four
+lifecycle gaps: a failed build vanished, a finished build never announced, a build
+could run untracked, and an underspecified ▶ dumped raw guard text into the pane.
+NO feature flags; one code path; leak-gate SILENT. Stayed clear of the pure chat-react
+UI polish (#333/#335/#336/#338/#341 — a separate forge, landed as #189; this branch
+rebased onto it, resolving the `chat-react.html` `.cwb-drag` overlap by keeping both
+#341's grip styling and this PR's `.cwb-fail-reason`).
+
+**FIX 1 (#342, P1) — 3+ concurrent same-project builds.** Each build already runs in
+its own worktree and `mergeLocal` already serializes LOCAL merges per `repo_path`
+(`withLocalMergeLock`). But inside the lock it did a plain `git merge --no-ff` that
+THREW on any conflict — so a 2nd same-project build (branch cut from the pre-1st base)
+died on a merge conflict (this killed `dagcore` after `walstore` merged). Now
+`mergeLocal` (`trident/merge.ts`): resolves the base, **rebases the build's branch onto
+the latest base** (`git checkout <branch>` + `git rebase <base>`), then `git checkout
+<base>` + `git merge --no-ff` (a clean no-conflict merge since the branch now contains
+base). On a rebase CONFLICT it dispatches a **bounded Forge resolver**
+(`trident/conflict-resolver.ts`, `buildForgeConflictResolver` over the composer's
+`makeEphemeralSubstrate('cc-trident-resolve')`): a single tool-less CC turn rooted in
+the conflicted worktree that resolves + `git add`s the conflicts (the loop runs `git
+rebase --continue`), keeping both intents where compatible; it reports `RESOLVED` or
+`ESCALATE: <specific question>`. A genuinely ambiguous conflict (or a missing/timed-out
+resolver) throws `TridentMergeConflictEscalation`, which `orchestrator.applyResult`
+turns into a `failed` run whose `failure_reason` IS the specific question — so it rides
+the terminal chat delivery (FIX 3) verbatim, never a raw "merge failed". Bounded: an
+8-min per-turn timeout, escalate-on-uncertainty, `MAX_CONFLICT_ROUNDS=12`. Wiring:
+`orchestrator.resolve_conflict` → `buildMergeCleanupDeps(run_host, { resolve_conflict })`;
+threaded through `input.trident.resolve_conflict` (`misc-input.ts` →
+`build-core-modules.ts` → `open/composer.ts`).
+
+**FIX 2 (#340) — a failed build shows FAILED, keeps its link, no revert.** Added a
+fourth Work Board lane `'failed'` (migration `0097`, widened CHECK via table rebuild).
+`WorkBoardStore.detachRun('failed')` now sets `status='failed'` and KEEPS
+`linked_run_id` (was: revert to `upcoming` + null the link, which showed a grey
+never-started card and lost the failure). The client already renders a red dot +
+failed tag off `run_progress.step_label==='failed'` (kept alive by the retained link);
+this PR renames the tag copy to **"Failed"** and renders the `failure_reason` one-liner
+(`.cwb-fail-reason` web / `failReason` mobile). Client status unions + parse guards
+widened to `'failed'` (`work-board-client.ts` web+mobile — the mobile parser had been
+DROPPING any unknown-status item), plus `AppWsWorkBoardItem` + `statusLabel`/`nextStatus`.
+
+**FIX 3 (#339) — terminal builds announce in chat.** Root cause was two-fold: (a) a
+board-dispatched run carried `chat_id=null` (the warm-REPL `ToolCallContext.topic_id`
+is null by design), so `topicForRun` no-op'd; (b) even with a chat_id, Open's delivery
+`ChannelRouter` has NO app_socket adapter registered, so `router.send` threw and was
+swallowed. Fix: (a) `resolve_delivery(project_id)` on the dispatch tools + the ▶ route +
+`/code` stamps the originating app-ws topic (`<appWsTopicId>[:<project_id>]`, `project_id`
+is correctly populated on the tool ctx) onto the run's `chat_id`; (b) a composer-supplied
+`delivery_sink` backed by the durable `AppWsAdapter.send` (persists + fans live) replaces
+the bare router for on-terminal delivery. Copy is now slug-forward ("✅ `<slug>` — build
+done, merged" / "❌ `<slug>` — build failed: `<reason>`").
+
+**FIX 4 (#334) — every build creates a trackable card.** Strengthened
+`BUILD_ROUTING_DOCTRINE` (`operating-doctrine.ts`): EVERY build — inline OR trident, any
+project incl. General — MUST `work_board_add` a card FIRST (inline builds mark it
+inline_active + done); an untracked build is invisible to the owner.
+
+**FIX 5 (#337) — underspecified → ask in chat, not raw guard in the pane.** The ▶ HTTP
+route previously mapped an `underspecified` rejection to a 409 whose raw guard message
+the client painted into the `cwb-error` pane banner. Now the composer's start closure
+posts a short clarifying question to the chat (`buildClarifyPoster`, via the app-ws
+adapter) and `handleStart` returns 200 `{asked_in_chat:true}` — no raw text in the pane,
+item left quietly pending. The agent-native path already returns the rejection to the
+model (which the strengthened doctrine tells to ask in chat).
+
+**Tests.** trident + work-board + composer green incl. a concurrent-merge test and a
+3-build serialized rebase+resolve test (`trident/merge.test.ts`), conflict-resolver
+marker parsing (`trident/conflict-resolver.test.ts`), orchestrator resolve-vs-escalate
+(`trident/orchestrator.test.ts`), `detachRun('failed')` keeps-link + retry
+(`work-board/store.test.ts`), delivery copy (`trident/delivery.test.ts`),
+`resolve_delivery` threading (`trident/work-board-build-tool.test.ts`), doctrine
+always-card + ask-in-chat (`operating-doctrine.test.ts`), and the ▶ underspecified→200
+(`work-board-surface.test.ts`). `tsc` clean (root + trident + leaf); migrations snapshot
+regenerated (`0097`); leak-gate SILENT; QUIET local boot verified (healthz ok, `0097`
+applied).
+
+## 2026-07-03 — UX BATCH-2: 5 chat/work-board polish fixes (#333/#335/#336/#338/#341)
+
+**Why.** Five small UI defects from Ryan's live review 2026-07-03. All presentational /
+run-progress; no feature flags; kept clear of trident/merge + build-dispatch (a
+separate forge owns #334/#337/#339/#340/#342).
+
+**Spec-conformance diff.** SPEC = rail dot pulses in work-blue; transient system pills
+never persisted; Fixing shows round 2+; chat has timestamps+date-hover+day-dividers;
+drag handle is grip-dots no-border. CURRENT (pre-PR) = rail dot used the separate
+`--work` token; waking-up pill persisted→re-hydrated as a bubble on reload; Fixing
+showed round 1; chat had no timestamps; drag handle was a bordered `.cwb-btn` box.
+GAP = all five. THIS PR = all five. OUT = build-dispatch behavior + trident-parallel.
+
+**What shipped.**
+- **#335 rail activity dot (web + mobile).** The `working` rail dot now MATCHES the
+  Work-list building dot exactly: the building blue (`--phase-build-fg` /
+  `PHASE.build.fg`, not the separate `--work` token) with the shared `cwb-pulse`
+  (opacity 1→.4→1, 2s, prefers-reduced-motion gated). `attention` stays a STATIC
+  amber (`--attention`) reserved for a genuine stall/failed-not-done.
+  (`landing/chat-react.html` `.car-rail-dot-work`; `app/components/ProjectRail.tsx`
+  `ActivityDot`.)
+- **#333 transient system pills are live-only.** The cold-start "⏳ Waking up…" ack
+  now rides a first-class `system_notice: true` flag end-to-end
+  (`AgentMessageOutbound` → `buildAppWsSendReply` adapter_options →
+  `AppWsAdapter.send`): the adapter fans it out to the live socket but SKIPS the
+  durable `chat_log` row (and the project `last_activity_at` stamp), so a
+  reload/project-switch can't re-hydrate it as a stray chat bubble. The client
+  already routed `system_notice` to the quiet pill.
+- **#336 Fixing shows the fix-round.** `deriveRunProgress` derives the displayed
+  `round` from the inner checkpoint (the outer `code_trident_runs.round` stays 1 for
+  the whole in-process workflow — `checkpoint()` never bumps it): a
+  `argus-request-changes` (fixing) step now floors the round at 2; `fix-round-N`
+  carries N; a first build stays round 1. (`trident/run-progress.ts` only — no
+  inner-workflow edit, to stay clear of the trident forge.)
+- **#338 chat timestamps + date-on-hover + day dividers.** `RenderMessage` gains a
+  real-wallclock `timestampMs` (durable rows only); a context-keyed meta index
+  (`buildMetaIndex`) tags each bubble with a subtle trailing `HH:MM` time (full date
+  on hover via `title`) and a centered "Today / Yesterday / Mon Jul 1" day divider
+  above the first message of a new calendar day. (`landing/chat-react/controller.ts`,
+  `ChatApp.tsx`, `.car-time`/`.car-day-divider` CSS.)
+- **#341 drag handle is grip-dots.** The reorder handle drops the `.cwb-btn`
+  bordered-box chrome — just the ⠿ grip glyph, muted (`--faint`→`--muted` on hover),
+  grab/grabbing cursor — so it reads as a draggable grip, not a third action button
+  next to ▶/✕. (`landing/chat-react/WorkBoardTab.tsx` + `.cwb-drag` CSS.)
+
+**Verify.** tsc clean (root + chat-react + trident + app); 415+ chat-react/app-ws
+suites green + new tests for the round derivation, the ephemeral-send no-persist path,
+and the time/divider helpers; leak-gate SILENT. Both light+dark preserved;
+prefers-reduced-motion gated.
 
 ## 2026-07-02 — M1 UX redesign PR-4: Work slide-out pane (edge-handle + auto-open/close, no flags)
 

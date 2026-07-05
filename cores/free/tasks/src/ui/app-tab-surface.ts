@@ -28,7 +28,8 @@ export const APP_TAB_META = {
   /**
    * Order hint among project tabs (lower = earlier). Tasks Core sits
    * between Notes (~20) and Reminders (~40) per the locked Cores order
-   * in `SPEC.md § Phases→Steps`.
+   * in `SPEC.md § Phases→Steps` (TODO(K10): root SPEC.md not yet in
+   * this repo; K10 recreates it).
    */
   order: 30,
 } as const

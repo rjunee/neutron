@@ -2065,7 +2065,8 @@ export function buildOpenGraphComposer(
         // 2026-06-27). Enabling it on the agent-polluted, web-only watermark
         // would mis-target + spam — worse than deferring. The `rateNudge` gate
         // is still supplied so the sweep enforces ≥7 the moment a correct
-        // `listIdleTopics` lands. See AS-BUILT for the follow-up.
+        // `listIdleTopics` lands. See docs/research/AS-BUILT-archive-2026-07.md
+        // for the follow-up.
         ...(proactiveLlm !== null
           ? {
               // LLM brief over real sources (Vajra parity) + the dual-rating

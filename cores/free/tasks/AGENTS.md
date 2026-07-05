@@ -60,7 +60,7 @@ modification.
 - `docs/plans/tasks-core-tier1-brief.md` — S1 sprint brief (current work)
 - `docs/SYSTEM-OVERVIEW.md § 7.3` — Tier 1 status row
 - `docs/SYSTEM-OVERVIEW.md § 8.7.1` — Tasks Core wrap narrative
-- `SPEC.md § Phases→Steps` — Tier 1 Cores buildout
+- `SPEC.md § Phases→Steps` — Tier 1 Cores buildout (TODO(K10): root SPEC.md not yet in this repo; K10 recreates it)
 - `cores/sdk/SDK-CONTRACT.md` — author-facing API
 - `cores/runtime/` — install / capability gating / audit log
 - `tasks/AGENTS.md` — the canonical P6 substrate this Core adapts
