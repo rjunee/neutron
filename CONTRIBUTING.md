@@ -43,10 +43,31 @@ bun run start          # onboarding + chat at http://127.0.0.1:7800/chat
 
 ## Tests
 
+Do NOT run bare `bun test` for the whole suite — it loads every discovered file
+into one long-lived process and its peak memory footprint will OOM most
+machines (the suite has grown past 800+ files). Use the partitioned runner
+instead, which runs the same suite to completion in bounded memory:
+
 ```sh
-bun test               # the whole suite
-bun test path/to/dir   # a subset while iterating
-bunx tsc --noEmit      # type-check
+bash scripts/run-tests.sh          # the whole suite, bounded memory (what CI runs)
+bun test path/to/dir               # a subset while iterating (fine, cheap)
+bun test path/to/file.test.ts      # a single file (fine, cheap)
+```
+
+See `docs/testing-runner.md` for tuning knobs (chunk size, concurrency, the
+PGLite quarantine lane) if a run is slow or your box has limited RAM.
+
+To reproduce the full CI gate locally, run the same steps CI runs
+(`.github/workflows/ci.yml`):
+
+```sh
+bash scripts/ci/typecheck-all.sh    # type-check EVERY tsconfig.json in the repo
+                                    # (not just the root — leaf packages like
+                                    # trident/, app/, landing/chat-react/ have
+                                    # their own configs and real errors there)
+bash scripts/run-tests.sh           # the partitioned test suite
+bash scripts/ci/leak-gate.sh --tree .   # public-repo purity gate
+bash scripts/ci/depcruise.sh        # layering / cross-band import ratchet
 ```
 
 Please keep the suite green. New behavior needs a real test that asserts the
@@ -59,7 +80,8 @@ worse than no test.
 - Keep PRs focused: one concern per PR.
 - Include tests for new behavior and bug fixes (a regression test that fails
   before your fix and passes after).
-- Run `bunx tsc --noEmit` and `bun test` before pushing.
+- Run `bash scripts/ci/typecheck-all.sh` and `bash scripts/run-tests.sh` before
+  pushing (see [Tests](#tests) above) — these are the same commands CI runs.
 - Match the style of the surrounding code (formatting, naming, comment density).
 - Write clear commit messages explaining the why, not just the what.
 

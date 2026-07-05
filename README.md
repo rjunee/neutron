@@ -123,8 +123,11 @@ Prerequisites:
   sign-in) it can't complete that step, so it prints the exact command to run
   afterward and tells you auth is still required. You can also paste a token
   during onboarding in chat.
-- The `gbrain` memory binary on `PATH` (optional; memory degrades fail-soft if
-  absent — see [Memory](#memory-how-it-learns-you))
+- The `gbrain` memory binary on `PATH` — the installer installs it by default
+  and its own step **aborts the install** if it can't be confirmed on PATH
+  afterward. Pass `--no-gbrain` (or set `NEUTRON_SKIP_GBRAIN=1`) to explicitly
+  opt out and install without it — see [Memory](#memory-how-it-learns-you) for
+  what degrades in that case.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) — optional; the
   bundled web chat works with no Telegram setup
 
@@ -366,9 +369,13 @@ every real turn (entities, facts, typed relations) and writes the results
 through the same privacy gate. Onboarding's history-import does the same in bulk
 from your exported chat history, so the agent knows you from session one.
 
-> The `gbrain` binary is a host prerequisite. If it's absent, memory degrades
-> fail-soft (no crash, but writes are silently dropped) — install it for the
-> full experience.
+> The `gbrain` binary is a REQUIRED host prerequisite, not an optional
+> best-effort one: `install.sh` installs it by default and **aborts the
+> install** if it can't confirm the binary lands on PATH — pass `--no-gbrain`
+> (or `NEUTRON_SKIP_GBRAIN=1`) to explicitly install without it. Only in that
+> opted-out case (or a hand-run dev boot with no `gbrain` on PATH at all) does
+> the running server degrade fail-soft at the runtime layer: no crash, but
+> memory writes silently no-op and recall falls back to on-disk entity pages.
 
 ---
 
@@ -382,18 +389,23 @@ contract lives in `core-sdk/` (pure types + schema, published as
 per-Core data namespace → walk OAuth secrets if needed → register → start) and
 enforces the **capability gate on every tool call**.
 
-Eight free Cores ship bundled in `cores/free/`:
+Nine free Cores ship bundled in `cores/free/`:
 
 | Core | What it does |
 |---|---|
-| **notes** | Second-brain capture and recall over per-project SQLite + the knowledge graph |
 | **tasks** | A task store with a deterministic focus-score and task↔reminder linking |
 | **reminders** | Context-aware, LLM-composed nudges fired by the scheduler |
 | **calendar** | Google Calendar |
 | **email** | Gmail triage and drafting |
+| **google-workspace** | Drive, Sheets, and Docs (read/create/update) over per-Core Google OAuth |
 | **research** | A brief-producing research workflow with citation invariants |
 | **code-gen** | An autonomous build → review → merge orchestrator, driven by `/code <task>` |
+| **scraping** | Instagram + X/Twitter scraping via Apify (`/scrape <url>`) |
 | **agent-settings** | In-chat configuration of your agent |
+
+(The former **notes** Core — second-brain capture over a per-project SQLite
+sidecar — was removed 2026-07-01: GBrain is now the sole per-owner memory
+store, making the sidecar redundant.)
 
 Design invariant, locked: **the runtime cannot tell a free Core from a paid
 one.** No license checks, no entitlement tables, no heartbeats — ever. Whether
@@ -432,7 +444,8 @@ self-host a Connect node, free, forever.
 
 ## Contributing
 
-Issues and pull requests are welcome. Run the suite with `bun test` and
-type-check with `bunx tsc --noEmit` before opening a PR. Full contribution
-guidelines (DCO, code style, the Core-author guide) are being finalized ahead of
-the public launch.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for how to run the suite and reproduce CI locally before opening a PR (bare
+`bun test` OOMs on the full suite — use `bash scripts/run-tests.sh`). Full
+contribution guidelines (DCO, code style, the Core-author guide) are being
+finalized ahead of the public launch.
