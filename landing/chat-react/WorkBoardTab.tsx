@@ -310,6 +310,21 @@ export function WorkBoardTab({
   // project switches / StrictMode double-invoke).
   const listSeq = useMemo(() => ({ current: 0 }), [])
 
+  // Liveness guard — every async continuation below (refresh + all mutation
+  // handlers) checks this before touching state. Without it, a promise that
+  // resolves AFTER the tab unmounts (project switch, tab close) calls setState
+  // on an unmounted component: benign in prod, but a fatal
+  // `ReferenceError: window is not defined` in CI's partitioned test runner,
+  // where happy-dom tears down `window` between tests and React's
+  // `dispatchSetState` still reads `window.event`.
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
   // `quiet` (background poll) skips the loading flip so a periodic refetch never
   // flashes the "Loading…" placeholder over a populated board.
   const refresh = useCallback(
@@ -320,12 +335,12 @@ export function WorkBoardTab({
       void client
         .list(projectId)
         .then((rows) => {
-          if (seq !== listSeq.current) return
+          if (!aliveRef.current || seq !== listSeq.current) return
           setItems(rows)
           setLoading(false)
         })
         .catch((err: unknown) => {
-          if (seq !== listSeq.current) return
+          if (!aliveRef.current || seq !== listSeq.current) return
           if (!quiet) {
             setItems([])
             setListError(err instanceof Error ? err.message : 'failed to load the board')
@@ -362,6 +377,7 @@ export function WorkBoardTab({
       // board, whose projectId is ''); apply it ONLY when it matches THIS tab's
       // project, so a General/sibling board can't overwrite a per-project view.
       if ((framePid ?? '') !== projectId) return
+      if (!aliveRef.current) return
       listSeq.current += 1
       setItems(next)
       setLoading(false)
@@ -399,11 +415,13 @@ export function WorkBoardTab({
     void client
       .create(projectId, { title })
       .then(() => {
+        if (!aliveRef.current) return
         setAdding(false)
         setNewTitle('')
         refresh()
       })
       .catch((err: unknown) => {
+        if (!aliveRef.current) return
         setAdding(false)
         setActionError(err instanceof Error ? err.message : 'failed to add item')
       })
@@ -422,10 +440,12 @@ export function WorkBoardTab({
           : client.update(projectId, item.id, { status: target })
       void op
         .then(() => {
+          if (!aliveRef.current) return
           setBusyId(null)
           refresh()
         })
         .catch((err: unknown) => {
+          if (!aliveRef.current) return
           setBusyId(null)
           setActionError(err instanceof Error ? err.message : 'failed to update item')
         })
@@ -449,11 +469,13 @@ export function WorkBoardTab({
       void client
         .update(projectId, item.id, { title })
         .then(() => {
+          if (!aliveRef.current) return
           setBusyId(null)
           setEditingId(null)
           refresh()
         })
         .catch((err: unknown) => {
+          if (!aliveRef.current) return
           setBusyId(null)
           setActionError(err instanceof Error ? err.message : 'failed to rename item')
         })
@@ -469,10 +491,12 @@ export function WorkBoardTab({
       void client
         .delete(projectId, item.id)
         .then(() => {
+          if (!aliveRef.current) return
           setBusyId(null)
           refresh()
         })
         .catch((err: unknown) => {
+          if (!aliveRef.current) return
           setBusyId(null)
           setActionError(err instanceof Error ? err.message : 'failed to delete item')
         })
@@ -492,10 +516,12 @@ export function WorkBoardTab({
       void client
         .start(projectId, item.id)
         .then(() => {
+          if (!aliveRef.current) return
           setBusyId(null)
           refresh()
         })
         .catch((err: unknown) => {
+          if (!aliveRef.current) return
           setBusyId(null)
           setActionError(err instanceof Error ? err.message : 'failed to start build')
         })
@@ -551,10 +577,12 @@ export function WorkBoardTab({
       void client
         .reorder(projectId, sourceId, where)
         .then(() => {
+          if (!aliveRef.current) return
           setBusyId(null)
           refresh()
         })
         .catch((err: unknown) => {
+          if (!aliveRef.current) return
           setBusyId(null)
           setActionError(err instanceof Error ? err.message : 'failed to reorder item')
         })
