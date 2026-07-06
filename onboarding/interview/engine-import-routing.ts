@@ -32,7 +32,7 @@ import {
 } from './phase-prompts.ts'
 import {
   IMPORT_SOURCE_SWITCH_ACK,
-} from './interaction-mode.ts'
+} from './import-source-copy.ts'
 import { auditRequiredFields } from './required-fields-audit.ts'
 import {
   MAX_OAUTH_CHUNK_TARGET_TOKENS,

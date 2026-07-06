@@ -143,14 +143,16 @@ import { MOBILE_APP_URL, resolveTelegramBotUsername } from './final-handoff-conf
 import {
   BUTTONS_ONLY_NUDGE_TEXT,
   NO_BUTTONS_FALLBACK_NUDGE_TEXT,
-  IMPORT_SOURCE_SWITCH_ACK,
-  LATE_UPLOAD_SOURCE_MISMATCH_NOTICE,
-  detectImportSourceMention,
   deriveActiveSubStep,
   isFreeformSubStep,
   resolveInteractionMode,
   validateMixedTextInput,
 } from './interaction-mode.ts'
+import {
+  IMPORT_SOURCE_SWITCH_ACK,
+  LATE_UPLOAD_SOURCE_MISMATCH_NOTICE,
+  detectImportSourceMention,
+} from './import-source-copy.ts'
 import { auditRequiredFields } from './required-fields-audit.ts'
 import type {
   ApplyEditInput as PersonaApplyEditInput,
