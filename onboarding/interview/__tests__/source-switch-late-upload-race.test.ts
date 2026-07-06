@@ -33,6 +33,13 @@
  * `stateStore.upsert` and assert `notifyImportUpload`'s arbitration
  * directly. The source-token DETECTOR half already split out to
  * `./import-source-copy.test.ts` beside `../import-source-copy.ts`.
+ *
+ * The still-live-at-HEAD intent WRITE/CLEAR path those tests also carried
+ * (`reEmitImportSourceSelection` computes+persists `source_switch_intent`;
+ * `reconcileSwitchIntentFromFreeform` clears/updates it — both via the dying
+ * `engine.advance`/`normalAdvance`) is preserved, driven through the real
+ * path, in `./source-switch-intent-write.die.test.ts` (co-deletes in K11b1),
+ * so this seeded re-anchor does not un-pin that code before K11b1 deletes it.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
