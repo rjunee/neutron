@@ -333,18 +333,23 @@ import {
 } from './engine-persona.ts'
 // R5 / audit P2-4 — import the extracted slug free functions; the class
 // methods below are now one-line delegators that pass `this`.
+// K11a5 — the LIVE open-mode agent-name half was split out to
+// `./engine-agent-name.ts`; the managed `slug_chosen` remainder stays in
+// `./engine-slug.ts`. Aliases are unchanged.
 import {
   consumeAgentNameChosenChoice as slugConsumeAgentNameChosenChoice,
   getOrStartCharacterSuggestions as slugGetOrStartCharacterSuggestions,
   getOrStartAgentNameSuggestions as slugGetOrStartAgentNameSuggestions,
+  maybeAutoAdvancePastMaxOauthOffered as slugMaybeAutoAdvancePastMaxOauthOffered,
+  suggestionFingerprint as slugSuggestionFingerprint,
+  suggestionKeyPrefix as slugSuggestionKeyPrefix,
+} from './engine-agent-name.ts'
+import {
   computeSlugSuggestionsForPhase as slugComputeSlugSuggestionsForPhase,
   consumeSlugChosenChoice as slugConsumeSlugChosenChoice,
   advanceFromSlugChosen as slugAdvanceFromSlugChosen,
   persistRejectionAndReEmit as slugPersistRejectionAndReEmit,
   reEmitSlugChosen as slugReEmitSlugChosen,
-  maybeAutoAdvancePastMaxOauthOffered as slugMaybeAutoAdvancePastMaxOauthOffered,
-  suggestionFingerprint as slugSuggestionFingerprint,
-  suggestionKeyPrefix as slugSuggestionKeyPrefix,
 } from './engine-slug.ts'
 
 
@@ -9809,4 +9814,5 @@ function readBlendedArchetype(
 // in import_offered).
 
 // R5 / audit P2-4 — `describeRejection` relocated to engine-internals.ts
-// (consumed by the extracted slug free functions in engine-slug.ts).
+// (consumed by the extracted slug free functions in engine-slug.ts +
+// engine-agent-name.ts).
