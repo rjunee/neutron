@@ -86,7 +86,7 @@
 import type { ProjectDb } from '../../persistence/index.ts'
 import type { ButtonStore } from '../../channels/button-store.ts'
 import type { ButtonPrompt } from '../../channels/button-primitive.ts'
-import type { WebChatSenderRegistry } from '../http/chat-bridge.ts'
+import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
 import { renderButtonPromptForWeb } from '../http/chat-bridge.ts'
 import { ReminderStore } from '../../reminders/store.ts'
 import { CronJobRegistry } from '../../cron/jobs.ts'

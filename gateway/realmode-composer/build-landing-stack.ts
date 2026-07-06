@@ -35,13 +35,15 @@ import {
   buildRoutedSendButtonPrompt,
   buildRoutedSendImportProgress,
   buildWebChatBridge,
-  InMemoryWebChatSenderRegistry,
   type AppSocketButtonPromptRouter,
   type AppSocketImportProgressRouter,
   type SlugHistoryShimStore,
   type OwnerRegistryLookup,
-  type WebChatSenderRegistry,
 } from '../http/chat-bridge.ts'
+import {
+  InMemoryWebChatSenderRegistry,
+  type WebChatSenderRegistry,
+} from '../http/chat-sender-registry.ts'
 import {
   InterviewEngine,
   type ImportJobRunnerHook,
@@ -173,7 +175,7 @@ export interface BuildLandingStackInput {
    * production composer so the resolved slug-picker hook can hold a
    * reference to the SAME registry the chat-bridge does.
    */
-  webRegistry?: import('../http/chat-bridge.ts').WebChatSenderRegistry
+  webRegistry?: import('../http/chat-sender-registry.ts').WebChatSenderRegistry
   /**
    * Sprint 28 — profile-pic engine hook. When provided, the onboarding
    * engine drives `profile_pic_generating` through the Gemini Imagen
@@ -645,7 +647,7 @@ export interface BuildLandingStackInput {
   liveAgentTurnFactory?: (pieces: {
     buttonStore: ButtonStore
     transcript: TranscriptWriter
-  }) => import('../http/chat-bridge.ts').LiveAgentTurnRunner
+  }) => import('../http/chat-sender-registry.ts').LiveAgentTurnRunner
   /**
    * Parity gap #2 (Cores→Open) — pre-dispatch chat-command filter, threaded
    * verbatim into `buildWebChatBridge`. The Open composer builds it by chaining
@@ -837,7 +839,7 @@ export interface OnboardingEnginePieces {
   buttonStore: ButtonStore
   stateStore: SqliteOnboardingStateStore
   transcript: TranscriptWriter
-  registry: import('../http/chat-bridge.ts').WebChatSenderRegistry
+  registry: import('../http/chat-sender-registry.ts').WebChatSenderRegistry
   wowDispatcher: WowDispatcherHook | null
   /**
    * T4 (2026-05-13) — history-import job-runner hook surfaced on the

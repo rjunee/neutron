@@ -34,7 +34,7 @@
 
 import type { ButtonStore } from '../../channels/button-store.ts'
 import type { ChatOutbound } from '../../landing/server.ts'
-import type { WebChatSenderRegistry } from '../http/chat-bridge.ts'
+import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
 import type { OutboundSink, OutgoingMessage } from './sink.ts'
 
 const LOG_TAG = '[proactive-sink]'

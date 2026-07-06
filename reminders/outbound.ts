@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { buildButtonPrompt } from '../channels/button-primitive.ts'
 import type { ButtonStore } from '../channels/button-store.ts'
 import type { ChatOutbound } from '../landing/server.ts'
-import type { WebChatSenderRegistry } from '../gateway/http/chat-bridge.ts'
+import type { WebChatSenderRegistry } from '../gateway/http/chat-sender-registry.ts'
 import type { ReminderOutbound, ReminderOutboundInput } from './dispatcher.ts'
 
 /** Reply rows are HISTORY, not pending questions — never expire them out of

@@ -50,7 +50,7 @@ import {
   type PhaseContextBundle,
   type PhaseSpecResolver,
 } from '../../onboarding/interview/phase-spec-resolver.ts'
-import type { WebChatSenderRegistry } from '../http/chat-bridge.ts'
+import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
 import { getBestModel } from '../../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
 import { collectTokensToString } from './build-llm-call-substrate.ts'
