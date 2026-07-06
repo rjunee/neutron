@@ -698,6 +698,7 @@ boot-helpers.ts:6-20); do NOT touch the `startOpenServer` / healthz / `/chat` /
 agent-name-suggester surfaces the Managed gate pins (§0 rule 3) without a paired
 `open-contract.ts` update. **Accept:** dead exports gone; boot-helpers ≤ ~400 lines per
 split file; Managed's `open-contract.ts` gate still green against the new vendor pin.
+> ⚠️ **CO-DELETE (Fable sweep 2026-07-06 §3 N4):** each of the 8 dead exports has exactly ONE non-test reference — the pure barrel re-export block **`gateway/index.ts:33-53`** (`export {...} from './boot-helpers.ts'`, unused inside `boot()`). Those re-export lines must be deleted in the SAME PR or tsc breaks. And because `gateway/index.ts` is a Managed-contract-pinned file, this edit warrants the M3-rider / `open-contract.ts` check even though the symbols themselves are dead.
 
 ### C3a–C3d — Carve `open/composer.ts` into wiring modules · `opus` · L each
 Decompose the 3,220-line closure along its existing comment narrative into
@@ -874,6 +875,7 @@ fetchTree); effect dependency arrays unchanged; hook orchestration has NO direct
 Delete dead: `validateActiveTopicId:77`, `resolveRequestHost:111`, `emitSessionReady:124`,
 SocketState (846-934), the unread `bridge` option (websocket path removed — the handler
 is a defensive stub at 1497-1514). File lands ~700 lines of pure HTTP routing + CSP.
+> ⚠️ **NOT zero-referenced (Fable sweep 2026-07-06 §3 N7):** `SocketState` is a live TYPE at `landing/server.ts:945-946` (`Bun.Server<SocketState>`, `WebSocketHandler<SocketState>`) — deleting it requires re-typing the live `fetch`/`websocket` handler signatures (compile-caught, but it's not a pure deletion). The three named functions + the `bridge` option ARE confirmed zero-callsite dead.
 **Accept:** landing tests green; CSP hash helpers (136-168, live) untouched.
 
 ### D9a–D9d — Interview-engine decomposition · `opus` · L/L/XL/L · lane engine
@@ -1942,7 +1944,8 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 ## 17. Unit checklist (tick on merge)
 
 - [x] G1 ✅ #203 · [x] G2 ✅ #211 · [x] G3 ✅ #205 · [x] G4 ✅ #210 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [x] G7 ✅ #208 · [x] G8 ✅ #213 · [x] G9 ✅ #209 · [x] G10 ✅ #202
-- [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [ ] K6 · [ ] K7 · [x] K8 · [x] K9 · [ ] K10 · [ ] K11
+- [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [x] K6 ✅ #225 · [x] K7 ✅ #224 · [x] K8 · [x] K9 · [ ] K10 · [ ] K11
+- Window auxiliary units: [x] FX1 ✅ #226 (`/code` pre-check narrow) · [x] FX2 ✅ #227 (K3 coverage restore) · [x] RT1 ✅ #228 (Ralph/SPEC tripwire) · [x] K11-pre ✅ #229 (K11a6 test re-anchor) · [~] M0 (Managed CI — PR neutron-managed#123 open, merges in Managed repo)
 - [ ] L1 · [ ] L2 · [ ] L3 · [ ] L4 · [ ] L5 · [ ] L6 · [ ] L7
 - [ ] C1 · [ ] C2 · [ ] C3a · [ ] C3b · [ ] C3c · [ ] C3d · [ ] C4 · [ ] C5 · [ ] C6 · [ ] C7 · [ ] C8
 - [ ] D1 · [ ] D2 · [ ] D3 · [ ] D4 · [ ] D5 · [ ] D6 · [ ] D7 · [ ] D8 · [ ] D9a · [ ] D9b · [ ] D9c · [ ] D9d

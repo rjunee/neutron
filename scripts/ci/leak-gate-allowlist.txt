@@ -138,3 +138,25 @@ cores/free/research/migrations/0001_research_claims.sql:tenant-code
 docs/INVARIANTS.md:tenant-purged
 docs/INVARIANTS.md:tenant-word
 docs/INVARIANTS.md:tenant-code
+
+# Fable-authored refactor sub-plans + audit/sweep research (committed in the
+# 2026-07-06 bookkeeping PR). Same scope + rationale as the world-class plan doc
+# above: they describe the Managed-vs-Open architecture and the tenant→owner
+# purge, so they unavoidably NAME the retired multi-tenant vocabulary. Carry NO
+# real PII, NO hosted-domain, NO secret — verified against the git-archive tree.
+# Exempt ONLY from the retired-vocab rules; PII/hosted-domain/secret stay ARMED.
+docs/plans/2026-07-05-k11-execution-plan.md:tenant-purged
+docs/plans/2026-07-05-k11-execution-plan.md:tenant-word
+docs/plans/2026-07-05-k11-execution-plan.md:tenant-code
+docs/plans/2026-07-05-waves-2-9-resequence.md:tenant-purged
+docs/plans/2026-07-05-waves-2-9-resequence.md:tenant-word
+docs/plans/2026-07-05-waves-2-9-resequence.md:tenant-code
+docs/plans/2026-07-05-l-phase-extraction-plan.md:tenant-purged
+docs/plans/2026-07-05-l-phase-extraction-plan.md:tenant-word
+docs/plans/2026-07-05-l-phase-extraction-plan.md:tenant-code
+docs/research/fable-refactor-audit-2026-07-05.md:tenant-purged
+docs/research/fable-refactor-audit-2026-07-05.md:tenant-word
+docs/research/fable-refactor-audit-2026-07-05.md:tenant-code
+docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-purged
+docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-word
+docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-code

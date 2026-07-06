@@ -14,21 +14,34 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `53b2844` — **WAVE 0 COMPLETE** (G1–G10 + W0; only M0 = cross-repo Managed
-  CI deferred) + **WAVE 1 (K = kill / deletions) ~65% done:** K1,K2,K3,K4a,K5,K8,K9 merged
-  (7/11). Remaining: K6/K7/K10 (docs cluster, orchestrator-managed — K7 needs untracked
-  docs), K11 (engine, needs the chat-bridge sender-registry split first), K4b deferred.
+- **main HEAD:** `108e161` — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions)
+  ~82% done:** K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged (9/11). Remaining: **K10** (docs cluster,
+  orchestrator-managed) and **K11** (engine excision). K4b deferred.
   **CI GREEN.**
+  - **Window auxiliary units merged this batch:** FX1 #226 (`/code` pre-check narrow — audit
+    caught the K8 over-broad reject), FX2 #227 (restore K3-deleted import-resume coverage,
+    mutation-proven), RT1 #228 (Ralph/SPEC.md governed-mode tripwire — forces `ralph=false` +
+    leak-gate bans root SPEC.md for the window; **K10 reverts both**), K11-pre #229 (re-anchor
+    the 11 live import-integration tests off the doomed `engine.start`/`advance` — K11a6, no prod
+    code touched). **M0** (Managed CI) = neutron-managed PR **#123** open (public submodule, no
+    PAT); merges in the Managed repo.
+  - **⚠️ K11 GATING — Fable deletion-claim sweep done (`docs/research/fable-k11-deletion-sweep-2026-07-06.md`).**
+    Central premise (`engine.start`/`advance` dead on every live path) VERIFIED-DEAD; the 4 prior
+    load-bearing targets re-confirmed. **7 NEW corrections folded into the plan/exec-plan as ⚠️
+    callouts** — the critical one: K11b3's "delete `open/composer.ts:1926-2060`" pointed at LIVE
+    reminders/brief delivery wiring (served-by-path trap); rescoped to a comment-truth pass. Plus
+    4 missed paired-edits (D-K11-4 `rate_limit_paused` live route, §7.5 flag also in retained
+    resolver, C2 barrel re-exports, D-K11-7 unowned OAuth purge). **Read those callouts before
+    running any K11 sub-unit.**
+  - **PAUSED before K11a** per owner instruction (2026-07-06). Foundation batch complete.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
   job re-run, 31/31 local). Not a unit defect — a candidate for test hardening / quarantine.
-- **Chat-react async-leak flake (ROOT FIX IN FLIGHT):** `WorkBoardTab.tsx:330` fired setState
-  in async continuations after unmount → CI chunk-7 crash `ReferenceError: window is not defined`
-  (`# Unhandled error between tests`, surfaced via `plans-pane.test.tsx`). Cost a re-run on both
-  K5 and K8 (identical signature; clears on re-run). Root fix in flight: **#222**
-  (`fix/workboardtab-unmount-guard`, Codex APPROVE) — an `aliveRef` guard on all 9 async→setState
-  sites + a repro test. Once merged, wave-1+ CI should stop hitting it.
+- **Chat-react async-leak flake (FIXED #222):** `WorkBoardTab.tsx:330` fired setState in async
+  continuations after unmount → CI chunk-7 crash `ReferenceError: window is not defined`. Root fix
+  merged **#222** (`aliveRef` guard on all 9 async→setState sites + a repro test). Wave-1+ CI
+  stopped hitting it.
   **G5 landed a structural CI change:** the Typecheck step is now a MATRIX
   (`scripts/ci/typecheck-all.sh` runs `tsc -p` over all 44 tsconfigs; DOM stripped from
   server configs). Every subsequent unit MUST pass `bash scripts/ci/typecheck-all.sh` on
