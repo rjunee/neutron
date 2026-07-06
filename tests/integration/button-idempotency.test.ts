@@ -27,11 +27,14 @@ import {
 } from '@neutronai/channels/button-primitive.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { renderButtonPromptTelegram } from '@neutronai/channels/adapters/telegram/render-button-prompt.ts'
+import { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
+import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
 
 let tmp: string
 let db: ProjectDb
 let store: ButtonStore
+let stateStore: InMemoryOnboardingStateStore
 let transcript: TranscriptWriter
 let sendCount: number
 
@@ -40,6 +43,7 @@ beforeEach(() => {
   db = ProjectDb.open(join(tmp, 'owner.db'))
   applyMigrations(db.raw())
   store = new ButtonStore({ db })
+  stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({ path: join(tmp, 'persona', 'onboarding-transcript.jsonl') })
   sendCount = 0
 })
@@ -50,52 +54,41 @@ afterEach(() => {
 })
 
 describe('button idempotency — repeat emit collapses to one render', () => {
-  test('repeat emit under same idempotency_key sends Telegram once + writes one transcript line', async () => {
-    // Re-anchored (K11a6-rem): the pinned behavior is RETAINED
-    // ButtonStore idempotency. The engine's `start()` used to do
-    // "emit → if was_new: render+send+transcript.append"; K11b1 deletes
-    // that conversational-drive wrapper, so we drive ButtonStore.emit
-    // directly with the SAME emit-guarded side-effects. A repeat emit
-    // under the same idempotency_key returns was_new=false + the ORIGINAL
-    // prompt_id, so the caller renders/sends + appends the agent
-    // transcript line at most once.
-    const seed = canonicalPromptSeed({
-      body: "What's your name?",
-      options: [{ value: 'use-telegram-name' }],
-    })
-    const idempotency_key = deriveIdempotencyKey({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      seed,
-    })
-    const build = (): ButtonPrompt =>
-      buildButtonPrompt({
-        body: "What's your name?",
-        options: [{ label: 'A', body: 'Use my Telegram display name', value: 'use-telegram-name' }],
-        idempotency_key,
-      })
-    // Mirror the retained emit-guarded delivery: render/send + transcript
-    // append ONLY on the first (was_new) emit.
-    const emitOnce = async (): Promise<{ prompt_id: string; was_new: boolean }> => {
-      const prompt = build()
-      const out = await store.emit(prompt, { topic_id: 'topic-1' })
-      if (out.was_new) {
+  test('engine re-start emits same prompt_id + sends Telegram once', async () => {
+    const engine = new InterviewEngine({
+      buttonStore: store,
+      stateStore,
+      transcript,
+      sendButtonPrompt: async ({ prompt }) => {
+        // Render to ensure a real Telegram render path is exercised, but
+        // the test asserts we only invoke the rendered path once.
         renderButtonPromptTelegram(prompt)
         sendCount++
-        transcript.append({ role: 'agent', body: prompt.body })
-      }
-      return out
-    }
+        return { message_id: `msg-${sendCount}`, was_new: true }
+      },
+    })
 
-    const a = await emitOnce()
-    const b = await emitOnce()
+    const a = await engine.start({
+      project_slug: 't1',
+      topic_id: 'topic-1',
+      user_id: 'u-1',
+      signup_via: 'telegram',
+    })
+    const b = await engine.start({
+      project_slug: 't1',
+      topic_id: 'topic-1',
+      user_id: 'u-1',
+      signup_via: 'telegram',
+    })
 
     expect(a.was_new).toBe(true)
     expect(b.was_new).toBe(false)
     expect(b.prompt_id).toBe(a.prompt_id)
 
-    // At-most-one render per idempotency key: the second emit
-    // short-circuits on was_new=false before the send.
+    // The renderer DID run on both emits (the engine writes the row first,
+    // then sends), but the second emit's persistence step short-circuits
+    // BEFORE invoking sendButtonPrompt because we want at-most-one render
+    // per idempotency key. Verify this by asserting sendCount === 1.
     expect(sendCount).toBe(1)
 
     const rows = db
