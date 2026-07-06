@@ -44,7 +44,6 @@ import { getOptionalKeyOffer } from '../optional-keys.ts'
 import { STATIC_PHASE_SPECS } from './phase-prompts.ts'
 import { RESERVED_OPTION_VALUES } from '../../channels/button-primitive.ts'
 import type { RequiredField } from './required-fields-audit.ts'
-import type { PhaseKnowledgePack } from './llm-router.ts'
 import { OPTIN_TOKENS, OPTOUT_TOKENS } from '../../runtime/env-flag-tokens.ts'
 import { CONVERSATIONAL_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
 
@@ -282,6 +281,31 @@ export const PHASE_INTENTS: Readonly<Record<string, PhaseIntent | null>> = {
 // ---------------------------------------------------------------------------
 // PHASE_KNOWLEDGE — P2-v3 S2 (2026-05-18)
 // ---------------------------------------------------------------------------
+
+/**
+ * Hand-curated knowledge bundle per phase. `llm-router.ts` (`RouterInput.knowledge`)
+ * uses `why_we_ask` + `faqs` to answer tangents and `expected_tangents` /
+ * `advance_examples` as few-shot anchors.
+ *
+ * Moved here from `llm-router.ts` (K11a2 — refactor unit; this resolver is
+ * the type's only live consumer and its natural home). `llm-router.ts`
+ * re-exports this type for its own internal usage + external importers
+ * until K11b1 deletes that file's dead halves.
+ */
+export interface PhaseKnowledgePack {
+  why_we_ask: string
+  faqs: Readonly<Record<string, string>>
+  expected_tangents: ReadonlyArray<{
+    user_text_example: string
+    expected_action: 'answer' | 'amend'
+    summary: string
+  }>
+  advance_examples: ReadonlyArray<{
+    user_text_example: string
+    canonical_value: string | null
+    summary: string
+  }>
+}
 
 /**
  * Hand-authored content + length caps per the sprint brief § 2.4. The

@@ -47,7 +47,7 @@
  */
 
 import { getBestModel } from '../../runtime/models.ts'
-import type { AnthropicMessagesClient } from '../../onboarding/interview/llm-router.ts'
+import type { AnthropicMessagesClient } from '../../onboarding/interview/anthropic-client.ts'
 import {
   OPENING_MESSAGE_MAX_CHARS,
   buildDeterministicProjectOpening,

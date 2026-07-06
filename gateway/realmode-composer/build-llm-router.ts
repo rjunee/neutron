@@ -34,22 +34,23 @@
 
 import {
   buildLlmRouter,
-  type AnthropicMessageResponse,
-  type AnthropicMessagesClient,
   type LlmRouter,
   type RouterOptions,
   type RouterTelemetryEvent,
 } from '../../onboarding/interview/llm-router.ts'
+import type { AnthropicMessagesClient } from '../../onboarding/interview/anthropic-client.ts'
 import { maybeBuildFixtureClientFromEnv } from '../../onboarding/interview/fixture-anthropic-client.ts'
 import type { OnboardingTelemetry } from '../../onboarding/telemetry/event-emitter.ts'
-import { getBestModel } from '../../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
-import {
-  collectTokensToString,
-  renderMessagesArray,
-} from './build-llm-call-substrate.ts'
 import { composeSystemPrompt } from './index.ts'
 import type { PersonaPromptLoader } from './persona-loader.ts'
+// Transition re-export (K11a2) — `buildGatewayAnthropicMessagesClient` +
+// its input type moved to `build-anthropic-messages-client.ts`. Re-exported
+// here so nothing breaks mid-repoint until K11b1 deletes this file's dead
+// halves.
+export {
+  buildGatewayAnthropicMessagesClient,
+  type BuildGatewayAnthropicMessagesClientInput,
+} from './build-anthropic-messages-client.ts'
 
 export interface BuildLlmRouterDeps {
   anthropicClient: AnthropicMessagesClient
@@ -234,88 +235,4 @@ function wrapClientWithPersonaSplice(
 function redactReasoning(s: string): string {
   if (typeof s !== 'string') return ''
   return s.length > 100 ? `${s.slice(0, 97)}...` : s
-}
-
-/**
- * Production composer-side factory for the `AnthropicMessagesClient`
- * interface the router consumes. Wraps a shared CC-subprocess
- * `Substrate` (built via `buildLlmCallSubstrate`) into the
- * `messages.create({ system, messages, max_tokens, signal })` shape the
- * router expects.
- *
- * Migrated 2026-05-31 (sprint cc-substrate-migration-3-sites) from the
- * prior direct HTTPS implementation that POSTed straight to the
- * Anthropic Messages endpoint. The substrate input bundles per-instance
- * credential resolution + Max OAuth refresh + env-scrubbing + cooldown
- * reporting under one helper — see `build-llm-call-substrate.ts` for
- * the full contract.
- *
- * Architecture constraint: `AgentSpec` (locked in `runtime/substrate.ts:70`
- * per § B.P1) has a single `prompt: string` field — no separate `system`
- * channel. We pack `<system>\n\n<rendered messages>` into `spec.prompt`;
- * the spawned `claude -p` subprocess sees CC's default system prompt
- * plus this packed body in the user turn. The router's existing
- * classifier prompt enforces a strict JSON envelope so output stays
- * well-formed under this packing. Same pattern
- * `build-import-substrate.ts` already uses for Pass-1/Pass-2 chunks.
- */
-export interface BuildGatewayAnthropicMessagesClientInput {
-  substrate: Substrate
-  /**
-   * Per-factory DEFAULT model — used only when the caller's `messages.create({model, ...})`
-   * does NOT specify a model. Defaults to BEST_MODEL (Opus 4.7) per memory
-   * feedback_default_to_opus.md.
-   *
-   * IMPORTANT: the caller-supplied `args.model` ALWAYS wins. The router's
-   * Haiku→Sonnet escalation in `onboarding/interview/llm-router.ts:303-333`
-   * relies on this — Pass 1 dispatches the fast model, Pass 2 dispatches
-   * the smart model on the same client. Argus r1 BLOCKING #1 (2026-05-31):
-   * the previous wiring hard-discarded `args.model` and forced every call
-   * to dispatch the factory default, killing the escalation path and
-   * making the `[llm-router]` log lines unattributable.
-   */
-  default_model?: string
-}
-
-export function buildGatewayAnthropicMessagesClient(
-  input: BuildGatewayAnthropicMessagesClientInput,
-): AnthropicMessagesClient {
-  return {
-    messages: {
-      async create(args) {
-        const rendered = renderMessagesArray(args.messages)
-        const prompt =
-          args.system !== undefined && args.system.length > 0
-            ? `${args.system}\n\n${rendered}`
-            : rendered
-        if (prompt.length === 0) {
-          throw new Error(
-            'llm-router: empty prompt — refusing to dispatch',
-          )
-        }
-        const spec: AgentSpec = {
-          prompt,
-          tools: [],
-          // Caller-supplied `args.model` wins; factory default is the
-          // fallback for callers that omit the field. Pinned by
-          // `build-llm-router-cc-substrate.test.ts` (Argus r1 BLOCKING #1).
-          // The ULTIMATE fallback resolves PER-CALL via `getBestModel()` so a
-          // model-update watchdog flip reaches new dispatches — never a frozen
-          // module-load constant.
-          model_preference: [args.model ?? input.default_model ?? getBestModel()],
-          max_tokens: args.max_tokens,
-        }
-        const handle = input.substrate.start(spec)
-        let text: string
-        try {
-          text = await collectTokensToString(handle, args.signal)
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          throw new Error(`llm-router: ${msg}`)
-        }
-        const out: AnthropicMessageResponse = { content: [{ text }] }
-        return out
-      },
-    },
-  }
 }

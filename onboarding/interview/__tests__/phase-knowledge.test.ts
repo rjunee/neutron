@@ -14,9 +14,13 @@
  *     uses an allowed canonical_value
  *   - every populated pack carries ≥3 expected_tangents (the design § 6 S3
  *     coverage floor)
- *   - the router system prompt embeds each pack's why_we_ask + at least
- *     one expected_tangent.user_text_example (proves the pack is wired
- *     into the router prompt, not just present in the map)
+ *
+ * The router-prompt-wiring assertions (which exercise `llm-router.ts`'s
+ * `buildSystemPrompt` directly) were split out to
+ * `phase-knowledge-router-wiring.test.ts` (K11a2) — that file dies with
+ * K11b1 alongside `llm-router.ts`; this file's pack-content/validation
+ * assertions are the RETAINED half and now import `PhaseKnowledgePack`
+ * from its new home, `phase-spec-resolver.ts`.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -24,11 +28,10 @@ import {
   getKnowledgeForPhase,
   PHASE_KNOWLEDGE,
   validatePhaseKnowledgePack,
+  type PhaseKnowledgePack,
 } from '../phase-spec-resolver.ts'
 import type { OnboardingPhase } from '../phase.ts'
 import { ALL_PHASES } from '../phase.ts'
-import type { PhaseKnowledgePack } from '../llm-router.ts'
-import { buildSystemPrompt } from '../llm-router.ts'
 
 const S2_PHASES: ReadonlyArray<OnboardingPhase> = [
   'signup',
@@ -255,56 +258,6 @@ describe('PhaseKnowledgePack content invariants', () => {
           e.canonical_value === 'attach_max',
       ),
     ).toBe(true)
-  })
-})
-
-describe('PHASE_KNOWLEDGE × router prompt wiring (design § 6 S3 coverage report)', () => {
-  // Build a minimal RouterInput shape just rich enough to exercise the
-  // system-prompt builder. The router's `buildSystemPrompt` is exported
-  // from llm-router.ts; it consumes the knowledge pack and emits a
-  // string that the LLM sees verbatim. If the wiring drops a pack on
-  // the floor (e.g. the engine forgot to thread it through), the
-  // assertion below catches it.
-  function fakeRouterInput(
-    phase: OnboardingPhase,
-    pack: PhaseKnowledgePack,
-  ): Parameters<typeof buildSystemPrompt>[0] {
-    return {
-      phase,
-      active_prompt: {
-        body: 'placeholder prompt body',
-        options: [],
-        allow_freeform: true,
-        pick_only: false,
-      },
-      user_text: 'placeholder',
-      knowledge: pack,
-      captured: {},
-      recent_turns: [],
-    }
-  }
-
-  test('every populated pack is referenced by the router system prompt', () => {
-    for (const phase of POPULATED_PHASES) {
-      const pack = PHASE_KNOWLEDGE[phase]!
-      const sys = buildSystemPrompt(fakeRouterInput(phase, pack))
-      // why_we_ask should appear verbatim (or at least its first
-      // meaningful chunk) so the LLM has the rationale grounding.
-      // We assert a 40-char head to tolerate any minor reformatting
-      // the prompt builder might do.
-      const whyHead = pack.why_we_ask.slice(0, 40)
-      expect(sys).toContain(whyHead)
-      // At least one expected_tangent.user_text_example should appear
-      // (few-shot anchor). We pick the first.
-      const tangentHead = pack.expected_tangents[0]!.user_text_example.slice(0, 30)
-      expect(sys).toContain(tangentHead)
-    }
-  })
-
-  test('every still-null phase has no wired prompt (resolver returns null)', () => {
-    for (const phase of FOREVER_NULL_PHASES) {
-      expect(getKnowledgeForPhase(phase)).toBeNull()
-    }
   })
 })
 

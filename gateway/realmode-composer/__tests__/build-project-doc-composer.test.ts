@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { buildProjectDocComposer, DOC_MAX_TOKENS } from '../build-project-doc-composer.ts'
-import type { AnthropicMessagesClient } from '../../../onboarding/interview/llm-router.ts'
+import type { AnthropicMessagesClient } from '../../../onboarding/interview/anthropic-client.ts'
 import { BEST_MODEL } from '../../../runtime/models.ts'
 
 interface RecordedCall {
