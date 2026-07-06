@@ -83,7 +83,7 @@ Out-of-scope this sprint:
 
 Cross-refs:
 
-- `SPEC.md § Phases→Steps` — Tier 1 Cores
+- `SPEC.md § Phases→Steps` (TODO(K10): root SPEC.md not yet in this repo; K10 recreates it) — Tier 1 Cores
   buildout (Email-Managed is #5)
 - `cores/sdk/SDK-CONTRACT.md` — author-facing API
 - `cores/runtime/` — install / capability gating / audit log

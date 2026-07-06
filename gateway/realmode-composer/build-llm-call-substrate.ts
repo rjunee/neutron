@@ -334,7 +334,7 @@ export interface BuildLlmCallSubstrateInput {
    * `MAX_THINKING_TOKENS=0` to keep a latency-sensitive classifier spawn from
    * burning 20-40s on extended thinking. (No production caller sets `extra_env`
    * today; the onboarding router that once motivated it never wired it and is
-   * being removed — see AS-BUILT 2026-07-04, unit K9. Kept as the substrate's
+   * being removed — see the K9 entry (2026-07-04) in docs/AS_BUILT.md. Kept as the substrate's
    * generic env-overlay seam, exercised by the substrate unit test.)
    *
    * Scope note: layered per-substrate, so a dedicated substrate can carry this

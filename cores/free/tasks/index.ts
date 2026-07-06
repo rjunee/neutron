@@ -22,7 +22,7 @@
  *
  * Cross-refs:
  * - docs/plans/tasks-core-tier1-brief.md (S1 sprint brief)
- * - SPEC.md § Phases→Steps (Tier 1 Cores buildout)
+ * - SPEC.md § Phases→Steps (Tier 1 Cores buildout; TODO(K10): root SPEC.md not yet in this repo)
  * - cores/sdk/SDK-CONTRACT.md (the API surface this Core consumes)
  * - cores/runtime (install / capability gate / audit log)
  * - tasks/store.ts (the canonical substrate this Core wraps)

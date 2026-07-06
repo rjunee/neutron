@@ -95,7 +95,8 @@ describe('Open proactive activation wiring', () => {
 
     // The idle-nudge SWEEP is deliberately NOT auto-enabled (no listIdleTopics):
     // a correct production enumeration needs a user-turn-only activity watermark
-    // + dual web:/app: namespace (see composer comment + AS-BUILT). The gate is
+    // + dual web:/app: namespace (see composer comment +
+    // docs/research/AS-BUILT-archive-2026-07.md). The gate is
     // wired and ready; the sweep cron only registers once listIdleTopics lands.
     expect(proactive!.listIdleTopics).toBeUndefined()
 

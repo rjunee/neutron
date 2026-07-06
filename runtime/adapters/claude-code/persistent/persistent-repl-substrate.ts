@@ -1041,7 +1041,7 @@ class ReplSink {
       // dispatch (so `message_search` scopes to the active conversation) needs
       // per-turn topic threading through the turn lifecycle — a follow-up beyond
       // P0-1's transport. The agent can still recall via `doc_search`. See
-      // AS-BUILT "P0-1 known follow-up".
+      // docs/research/AS-BUILT-archive-2026-07.md "P0-1 known follow-up".
       if (url.pathname === '/tools') {
         return Response.json({ tools: replToolBridge?.listToolSchemas() ?? [] })
       }
