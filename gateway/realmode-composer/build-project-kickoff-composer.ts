@@ -22,7 +22,7 @@
  * never a half-baked doc.
  */
 
-import type { AnthropicMessagesClient } from '../../onboarding/interview/llm-router.ts'
+import type { AnthropicMessagesClient } from '../../onboarding/interview/anthropic-client.ts'
 import { getBestModel } from '../../runtime/models.ts'
 
 /** Output budget per kickoff doc — a starting plan / research brief is 1-2

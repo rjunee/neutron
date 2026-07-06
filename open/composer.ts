@@ -90,10 +90,8 @@ import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
 } from '../gateway/realmode-composer/build-phase-spec-resolver.ts'
-import {
-  buildGatewayAnthropicMessagesClient,
-  buildGatewayLlmRouter,
-} from '../gateway/realmode-composer/build-llm-router.ts'
+import { buildGatewayLlmRouter } from '../gateway/realmode-composer/build-llm-router.ts'
+import { buildGatewayAnthropicMessagesClient } from '../gateway/realmode-composer/build-anthropic-messages-client.ts'
 import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'

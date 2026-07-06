@@ -1,6 +1,10 @@
 /**
  * Sprint cc-substrate-migration-3-sites (2026-05-31).
  *
+ * Renamed from `build-llm-router-cc-substrate.test.ts` (K11a2 — refactor
+ * unit; `buildGatewayAnthropicMessagesClient` moved out of
+ * `build-llm-router.ts` into its own module, `build-anthropic-messages-client.ts`).
+ *
  * Tests for `buildGatewayAnthropicMessagesClient` — the substrate adapter
  * that wraps a CC-subprocess `Substrate` into the `AnthropicMessagesClient`
  * shape the LLM router expects. The adapter packs `system + messages` into
@@ -15,7 +19,7 @@
 
 import { expect, test } from 'bun:test'
 
-import { buildGatewayAnthropicMessagesClient } from '../build-llm-router.ts'
+import { buildGatewayAnthropicMessagesClient } from '../build-anthropic-messages-client.ts'
 import { BEST_MODEL } from '../../../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../../../runtime/substrate.ts'
 import type { Event } from '../../../runtime/events.ts'

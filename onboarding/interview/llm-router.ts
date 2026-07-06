@@ -75,6 +75,11 @@
 import type { OnboardingPhase } from './phase.ts'
 import type { RequiredFieldsState } from './required-fields-audit.ts'
 import { FAST_MODEL, SONNET_MODEL } from '../../runtime/models.ts'
+import type {
+  AnthropicMessageResponse,
+  AnthropicMessagesClient,
+} from './anthropic-client.ts'
+import type { PhaseKnowledgePack } from './phase-spec-resolver.ts'
 
 // ---------------------------------------------------------------------------
 // Public types — RouterInput / RouterDecision (verbatim per spec § 2.2)
@@ -102,30 +107,12 @@ export interface RouterRecentTurn {
   body: string
 }
 
-/**
- * Hand-curated knowledge bundle per phase. The router uses `why_we_ask`
- * + `faqs` to answer tangents and `expected_tangents` / `advance_examples`
- * as few-shot anchors. S2 hand-authors packs for 4 high-leverage phases;
- * S3 covers the remaining 9.
- *
- * The pack itself is NOT defined or loaded here — S2 extends
- * `phase-spec-resolver.ts` with `PHASE_KNOWLEDGE: Record<OnboardingPhase, PhaseKnowledgePack | null>`.
- * S1 only declares the type so the router signature is stable.
- */
-export interface PhaseKnowledgePack {
-  why_we_ask: string
-  faqs: Readonly<Record<string, string>>
-  expected_tangents: ReadonlyArray<{
-    user_text_example: string
-    expected_action: 'answer' | 'amend'
-    summary: string
-  }>
-  advance_examples: ReadonlyArray<{
-    user_text_example: string
-    canonical_value: string | null
-    summary: string
-  }>
-}
+// `PhaseKnowledgePack` moved to `phase-spec-resolver.ts` (K11a2 — its only
+// live consumer; its natural home). Transition re-export below keeps this
+// module's own internal usage (`RouterInput.knowledge`, `sanitisedKnowledgeBlock`)
+// and every existing external importer working until K11b1 deletes this
+// file's dead halves.
+export type { PhaseKnowledgePack } from './phase-spec-resolver.ts'
 
 export interface RouterInput {
   /** Active phase BEFORE this turn. The router does not advance phase
@@ -212,28 +199,15 @@ export interface RouterDecision {
 }
 
 // ---------------------------------------------------------------------------
-// Anthropic Messages API surface (minimal DI shape — tests inject a stub)
+// Anthropic Messages API surface — moved to `anthropic-client.ts` (K11a2).
+// Transition re-export below keeps every existing importer of this module
+// working until K11b1 deletes this file's dead halves.
 // ---------------------------------------------------------------------------
 
-export interface AnthropicMessageBlock {
-  text: string
-}
-
-export interface AnthropicMessageResponse {
-  content: ReadonlyArray<AnthropicMessageBlock>
-}
-
-export interface AnthropicMessagesClient {
-  messages: {
-    create(input: {
-      model: string
-      system?: string
-      messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }>
-      max_tokens: number
-      signal?: AbortSignal
-    }): Promise<AnthropicMessageResponse>
-  }
-}
+export type {
+  AnthropicMessageResponse,
+  AnthropicMessagesClient,
+} from './anthropic-client.ts'
 
 // ---------------------------------------------------------------------------
 // Telemetry hook (S1 minimal; S2 wires the real event-emitter surface)

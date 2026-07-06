@@ -55,7 +55,7 @@ import { join } from 'node:path'
 import type {
   AnthropicMessageResponse,
   AnthropicMessagesClient,
-} from './llm-router.ts'
+} from './anthropic-client.ts'
 
 export interface FixtureMatch {
   /** When set, the inbound `args.model` must appear in this list. */

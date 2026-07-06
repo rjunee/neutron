@@ -81,7 +81,7 @@ import { createLandingServer, type LandingServer } from '../../landing/server.ts
 import { buildWowDispatcherHook } from './build-wow-dispatcher.ts'
 import { buildProjectDocComposer } from './build-project-doc-composer.ts'
 import { buildProjectPageIndexer } from './build-project-page-indexer.ts'
-import { buildGatewayAnthropicMessagesClient } from './build-llm-router.ts'
+import { buildGatewayAnthropicMessagesClient } from './build-anthropic-messages-client.ts'
 import {
   buildImportResumeReadinessProbe,
   ChainedImportPayloadResolver,
