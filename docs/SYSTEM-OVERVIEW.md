@@ -2779,9 +2779,14 @@ window, so a fresh agent each iteration cannot forget what was agreed.
      by `parseRalphPlan` (no PR contract lines required). The active
      drift-catch: a regressed task re-opens as `- [ ]`.
   3. `ralph-task` — a FRESH Forge implements ONLY the surfaced `NEXT_TASK`
-     (threaded via `session.nextTaskFor`), checks it off, updates
-     the changelog (`docs/AS_BUILT.md`), commits. (Historical prompt:
-     `renderRalphTaskPrompt`, since folded into `trident/inner-workflow.mjs`.)
+     (threaded via `session.nextTaskFor`), checks it off in
+     `IMPLEMENTATION_PLAN.md`, commits code + tests. (Historical prompt:
+     `renderRalphTaskPrompt`, since folded into `trident/inner-workflow.mjs`;
+     the folded executor writes `IMPLEMENTATION_PLAN.md`, NOT the changelog —
+     `docs/AS_BUILT.md` is the single consolidated as-built record that the
+     planner READS (`inner-workflow.mjs:361`) and that unit PRs append to, not
+     an executor-written artifact. Restoring an executor changelog-write would
+     be a separate trident-loop change under self-surgery discipline.)
   4. Repeat 2 ⇄ 3 until a planning pass reports `REMAINING_TASKS=0`, then →
      `argus` → the normal fix/merge loop reviews + merges the accumulated
      branch.
