@@ -197,7 +197,11 @@ echo
 # ── Tier 3: structural ────────────────────────────────────────────────────────
 echo "── Tier 3: structural ─────────────────────────────────────────────────"
 FORBIDDEN_PREFIXES='tenancy/ tenant-provisioning/ signup/ identity/ proxy/'
-FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md AGENTS.md'
+# RT1 tripwire — K10 removes SPEC.md from this list when it intentionally
+# introduces a root SPEC.md (`detectRalphMode` in trident/git-mode.ts flips a
+# repo into Ralph-governed mode the instant a root SPEC.md exists, so an
+# ACCIDENTAL one mid-window would silently change `/code` behavior).
+FORBIDDEN_EXACT='STATUS.md ISSUES.md CLAUDE.md AGENTS.md SPEC.md'
 forbidden_path_hits() {
   local f p
   while IFS= read -r f; do

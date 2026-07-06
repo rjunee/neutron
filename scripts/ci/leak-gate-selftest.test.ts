@@ -129,6 +129,24 @@ describe('G8 leak-gate — planted findings FAIL', () => {
     }
   })
 
+  test('RT1: a root SPEC.md trips forbidden-path (Ralph-mode tripwire)', () => {
+    // `detectRalphMode` (trident/git-mode.ts) flips a repo into Ralph-governed
+    // mode the instant a root SPEC.md exists. An accidental root SPEC.md mid
+    // refactor-window would silently change `/code` behavior, so it's banned
+    // as a forbidden root file exactly like STATUS.md/ISSUES.md/etc.
+    const dir = freshTree()
+    try {
+      writeFileSync(join(dir, 'SPEC.md'), '# spec\n')
+      const { code, out } = runGate(dir)
+      expect(out).toContain('[forbidden-path]')
+      expect(out).toContain('SPEC.md')
+      expect(out).toContain('LEAK GATE: FAIL')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a missing/stub LICENSE trips license-stub', () => {
     // No LICENSE copied → the Apache-2.0 check fails.
     const dir = mkdtempSync(join(tmpdir(), 'leak-gate-nolicense-'))

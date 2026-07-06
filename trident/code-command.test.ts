@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '../migrations/runner.ts'
@@ -144,6 +144,36 @@ describe('/code <task> creates a code_trident_runs row', () => {
     const data = res!.data as { run_id: string }
     expect(store.get(data.run_id)!.ralph).toBe(true)
     expect(res!.text).toContain('Ralph')
+  })
+
+  test('RT1: with NO resolveRalph override (production shape) a real root SPEC.md still resolves ralph=false', async () => {
+    // Production composition (open/composer.ts `trident_build_dispatch`) never
+    // sets `resolveRalph` — it relies on the chokepoint's default. Absent the
+    // RT1 window override, that default is `detectRalphMode`, which would flip
+    // this run governed because `repo_path` has a real root SPEC.md. Build the
+    // context WITHOUT the `ctx()` helper (which always stubs resolveRalph) so
+    // this test exercises the real fallback in `board-dispatch.ts`.
+    const specDir = mkdtempSync(join(tmpdir(), 'neutron-trident-code-specdir-'))
+    writeFileSync(join(specDir, 'SPEC.md'), '# spec\n')
+    try {
+      const noOverrideCtx: TridentCodeContext = {
+        store,
+        work_board: boardStub(),
+        project_slug: 'proj-1',
+        repo_path: specDir,
+        resolveBuildRepo: async (home) => home, // identity — repo_path stays specDir
+        resolveMergeMode: async () => 'pr',
+        // resolveRalph deliberately OMITTED.
+      }
+      const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', noOverrideCtx)
+      expect(res).not.toBeNull()
+      const data = res!.data as { run_id: string; ralph: boolean }
+      expect(data.ralph).toBe(false)
+      expect(store.get(data.run_id)!.ralph).toBe(false)
+      expect(res!.text).not.toContain('Ralph')
+    } finally {
+      rmSync(specDir, { recursive: true, force: true })
+    }
   })
 
   test('#317 threads the originating channel_kind onto the run row', async () => {

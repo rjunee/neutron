@@ -162,7 +162,21 @@ export async function dispatchBoardBoundBuild(
       deps.project_slug,
     )
     merge_mode = await (deps.resolveMergeMode ?? (() => detectMergeMode(repo_path, defaultGitModeProbe())))()
-    ralph = await (deps.resolveRalph ?? (() => detectRalphMode(repo_path, defaultRalphModeProbe())))()
+    // RT1 window override (refactor-window tripwire, part b) — force
+    // non-governed builds for the DURATION OF THE REFACTOR WINDOW. Neither
+    // production caller (the `/code` chat command nor the agent-native
+    // `work_board_dispatch_build` tool) currently supplies `resolveRalph`, so
+    // this chokepoint's fallback is the live behavior for every real build.
+    // Normally it would fall through to `detectRalphMode` — real `SPEC.md`
+    // detection — but that would flip a build governed the instant a root
+    // `SPEC.md` slips into the tree mid-window (belt-and-suspenders with the
+    // leak-gate `forbidden-path` rule, which bans a root SPEC.md outright).
+    // K10 removes this line (restoring `detectRalphMode(repo_path,
+    // defaultRalphModeProbe())` below) when it intentionally introduces a
+    // real root SPEC.md and Ralph mode is meant to engage again. An explicit
+    // caller-supplied `deps.resolveRalph` (tests, or a future composition
+    // root override) still wins — only the DEFAULT is forced false.
+    ralph = await (deps.resolveRalph ?? (() => Promise.resolve(false)))()
   } catch (err) {
     return {
       ok: false,
