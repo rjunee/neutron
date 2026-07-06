@@ -1547,7 +1547,7 @@ export function readNumber(obj: Record<string, unknown>, key: string): number | 
  * part warmth" or a name like "Iris" is never mis-read as a pick). Bounded
  * to 1..99 — option lists are tiny, and the bound keeps a pasted phone
  * number / year from resolving to a pick. Shared by the personality_offered
- * (engine-persona) + agent_name_chosen (engine-slug) handlers so a typed
+ * (engine-persona) + agent_name_chosen (engine-agent-name) handlers so a typed
  * number selects the SAME memoized option a button tap would.
  */
 export function parseBareOptionNumber(text: string): number | null {
@@ -2184,7 +2184,8 @@ export interface EngineInternals {
   ): Promise<AdvanceResult>
 
   // --- R5 / audit P2-4 — fields + non-extracted methods cross-called by
-  //     the extracted slug free functions in `engine-slug.ts` ---
+  //     the extracted slug free functions in `engine-slug.ts` +
+  //     `engine-agent-name.ts` (K11a5 split) ---
   readonly deploymentMode: OnboardingDeploymentMode
   readonly pendingCharacterSuggestions: Map<string, Promise<CharacterSuggesterResult>>
   readonly pendingAgentNameSuggestions: Map<string, Promise<AgentNameSuggesterResult>>
