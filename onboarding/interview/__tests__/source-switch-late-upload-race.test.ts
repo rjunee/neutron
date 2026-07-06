@@ -18,6 +18,21 @@
  * once an intent points elsewhere, surfacing the visible re-pick notice
  * instead. A bare clarification (no source token) records NO intent, so the
  * legitimate concurrent-upload auto-honor (Argus r1) is preserved.
+ *
+ * K11a6 re-anchor (2026-07-06): the RETAINED half these tests pin is
+ * `notifyImportUpload`'s late-upload arbitration — given a
+ * `ai_substrate_offered` state carrying `ai_substrate_used` (+ optionally
+ * `source_switch_intent`), does a late upload of source X get honored
+ * (→ `import_running`) or refused (→ `no_active_prompt` + the "switching
+ * services" notice)? That decision is a pure function of the persisted
+ * state, and `notifyImportUpload` is the RETAINED entry point (the upload
+ * POST route). The freeform DRIVE that WROTE `source_switch_intent`
+ * (`engine.advance` → `normalAdvance` → the router reroute) is the
+ * dead-in-prod interview-engine conversational drive K11b1 deletes, so we
+ * no longer drive it: we seed the exact post-reroute state via
+ * `stateStore.upsert` and assert `notifyImportUpload`'s arbitration
+ * directly. The source-token DETECTOR half already split out to
+ * `./import-source-copy.test.ts` beside `../import-source-copy.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -37,37 +52,11 @@ import {
 import type { ImportJob } from '../../history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '../state-store.ts'
 import { TranscriptWriter } from '../transcript.ts'
-import type { LlmRouter, RouterDecision } from '../llm-router.ts'
-import type { PlatformAdapter, PlatformInstanceInfo } from '../../../runtime/platform-adapter.ts'
 import type { OnboardingPhase } from '../phase.ts'
-import {
-  stubRouter as sharedStubRouter,
-  stubPlatform as sharedStubPlatform,
-  type RouterCall,
-} from '@neutronai/onboarding/interview/__tests__/interview-testkit.ts'
 
 const OWNER = 't1'
 const TOPIC = 'topic-1'
 const USER = 'u-1'
-const SELF: PlatformInstanceInfo = {
-  internal_handle: 'h1',
-  url_slug: OWNER,
-  owner_home: '/tmp/x',
-  agent_name: null,
-  tier: 'open',
-  kind: 'user',
-}
-
-function stubRouter(answers: Iterable<RouterDecision>): {
-  router: LlmRouter
-  calls: RouterCall[]
-} {
-  return sharedStubRouter(answers)
-}
-
-function stubPlatform(conversational: 'all' | ReadonlyArray<OnboardingPhase>): PlatformAdapter {
-  return sharedStubPlatform(conversational, SELF)
-}
 
 let tmp: string
 let db: ProjectDb
@@ -77,8 +66,6 @@ let transcript: TranscriptWriter
 let sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }>
 
 function buildEngine(opts: {
-  router?: LlmRouter
-  platform?: PlatformAdapter
   importJobRunner?: ImportJobRunnerHook
   importPayloadResolver?: ImportPayloadResolver
 }): InterviewEngine {
@@ -91,8 +78,6 @@ function buildEngine(opts: {
       return { message_id: `msg-${sentPrompts.length}`, was_new: true }
     },
   }
-  if (opts.router !== undefined) deps.llmRouter = opts.router
-  if (opts.platform !== undefined) deps.platform = opts.platform
   if (opts.importJobRunner !== undefined) deps.importJobRunner = opts.importJobRunner
   if (opts.importPayloadResolver !== undefined)
     deps.importPayloadResolver = opts.importPayloadResolver
@@ -129,11 +114,19 @@ function stubImportStack(): {
 
 const NOW_MS = Date.now()
 
-async function startAndReachPhase(
-  engine: InterviewEngine,
+/**
+ * K11a6 — seed the exact state the (now-deleted) freeform reroute would have
+ * left behind, so `notifyImportUpload`'s late-upload arbitration is driven by
+ * persisted state alone. `phase` is the post-reroute phase
+ * (`ai_substrate_offered` for a reroute, `import_upload_pending` for a settled
+ * tap); `patch` carries `ai_substrate_used` (the staged/non-destructively
+ * preserved source) and optionally `source_switch_intent` (the source the user
+ * moved TO). Clears `sentPrompts` so a test only sees the upload's own sends.
+ */
+async function seedState(
   phase: OnboardingPhase,
-  phase_state_patch: Record<string, unknown> = {},
-): Promise<string> {
+  patch: Record<string, unknown>,
+): Promise<void> {
   await stateStore.upsert({
     user_id: USER,
     project_slug: OWNER,
@@ -142,23 +135,11 @@ async function startAndReachPhase(
       topic_id: TOPIC,
       user_id: USER,
       signup_via: 'web',
-      ...phase_state_patch,
+      ...patch,
     },
     advanced_at: NOW_MS,
   })
-  await engine.advance({
-    project_slug: OWNER,
-    topic_id: TOPIC,
-    user_id: USER,
-    channel_kind: 'app-socket',
-    observed_at: NOW_MS,
-  })
-  const next = await stateStore.get(OWNER, USER)
-  expect(next?.phase).toBe(phase)
-  const ap = next?.phase_state['active_prompt_id']
-  expect(typeof ap).toBe('string')
   sentPrompts.length = 0
-  return ap as string
 }
 
 beforeEach(() => {
@@ -181,43 +162,23 @@ afterEach(() => {
 // K11a3: the `detectImportSourceMention` — deterministic source-token
 // detector` unit-test describe block moved verbatim to
 // `./import-source-copy.test.ts` beside the new leaf module
-// (`../import-source-copy.ts`). This file keeps the engine-driven
-// integration half below.
-
-// K11a6: re-anchor this race pin on notifyImportUpload + stateStore before
-// K11b1.
+// (`../import-source-copy.ts`). This file keeps the late-upload arbitration
+// half, re-anchored (K11a6) onto notifyImportUpload + stateStore.
 describe('ISSUES #98 — explicit switch must not auto-import the abandoned source', () => {
-  /** THE core reproduce: mid-chatgpt-upload → explicit Claude switch →
-   *  chatgpt upload lands → it must NOT auto-import chatgpt. */
+  /** THE core reproduce: after an explicit Claude switch (state at
+   *  `ai_substrate_offered` with `source_switch_intent=claude` while the
+   *  staged `ai_substrate_used=chatgpt` was preserved), a late ChatGPT upload
+   *  must NOT auto-import chatgpt. */
   test('explicit Claude switch then late ChatGPT upload does NOT auto-import chatgpt', async () => {
-    const { router } = stubRouter([])
     const stack = stubImportStack()
-    const engine = buildEngine({
-      router,
-      platform: stubPlatform('all'),
-      ...stack,
-    })
+    const engine = buildEngine(stack)
 
-    // User tapped ChatGPT, is mid-upload at import_upload_pending.
-    await startAndReachPhase(engine, 'import_upload_pending', {
+    // Post-reroute state: the user typed an explicit switch to Claude, so the
+    // reroute recorded switch-intent=claude but preserved the staged chatgpt.
+    await seedState('ai_substrate_offered', {
       ai_substrate_used: 'chatgpt',
+      source_switch_intent: 'claude',
     })
-
-    // Types an explicit switch to Claude → reroute records switch-intent.
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: 'can I do claude instead?',
-      observed_at: NOW_MS + 1_000,
-    })
-    const rerouted = await stateStore.get(OWNER, USER)
-    expect(rerouted?.phase).toBe('ai_substrate_offered')
-    expect(rerouted?.phase_state['source_switch_intent']).toBe('claude')
-    // Non-destructive: the staged source is still on record.
-    expect(rerouted?.phase_state['ai_substrate_used']).toBe('chatgpt')
-    sentPrompts.length = 0
 
     // The abandoned ChatGPT upload completes AFTER the switch but BEFORE a tap.
     const out = await engine.notifyImportUpload({
@@ -244,30 +205,14 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
    *  no switch-intent, so a matching late upload IS still auto-honored — the
    *  concurrent-upload race fix must survive ISSUES #98. */
   test('bare clarification then matching late upload still auto-imports (Argus r1 preserved)', async () => {
-    const { router } = stubRouter([])
     const stack = stubImportStack()
-    const engine = buildEngine({
-      router,
-      platform: stubPlatform('all'),
-      ...stack,
-    })
+    const engine = buildEngine(stack)
 
-    await startAndReachPhase(engine, 'import_upload_pending', {
+    // Post-reroute state after a non-switch clarification: rerouted to the
+    // picker but NO intent recorded, staged chatgpt preserved.
+    await seedState('ai_substrate_offered', {
       ai_substrate_used: 'chatgpt',
     })
-
-    // A non-switch clarification — reroutes but records NO intent.
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: 'is it done?',
-      observed_at: NOW_MS + 1_000,
-    })
-    const rerouted = await stateStore.get(OWNER, USER)
-    expect(rerouted?.phase).toBe('ai_substrate_offered')
-    expect(rerouted?.phase_state['source_switch_intent'] ?? null).toBeNull()
 
     // The user's own ChatGPT upload lands → honored, not orphaned.
     const out = await engine.notifyImportUpload({
@@ -288,24 +233,12 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
    *  not auto-run without a fresh tap (the staged `ai_substrate_used` still
    *  points at the old source), and is surfaced rather than dropped. */
   test('explicit switch then late NEW-source upload is surfaced, not auto-run', async () => {
-    const { router } = stubRouter([])
     const stack = stubImportStack()
-    const engine = buildEngine({
-      router,
-      platform: stubPlatform('all'),
-      ...stack,
-    })
+    const engine = buildEngine(stack)
 
-    await startAndReachPhase(engine, 'import_upload_pending', {
+    await seedState('ai_substrate_offered', {
       ai_substrate_used: 'chatgpt',
-    })
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: 'switch to claude',
-      observed_at: NOW_MS + 1_000,
+      source_switch_intent: 'claude',
     })
 
     const out = await engine.notifyImportUpload({
@@ -321,51 +254,18 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
     expect(stack.startedSources).toEqual([])
   })
 
-  /** A real source tap CLEARS the recorded intent: after tapping Claude, a
-   *  Claude upload is honored normally. */
+  /** A real source tap CLEARS the recorded intent and re-stages
+   *  `ai_substrate_used=claude` at `import_upload_pending`: a subsequent Claude
+   *  upload is then honored normally. */
   test('tapping the new source clears switch-intent so its upload is honored', async () => {
-    const { router } = stubRouter([])
     const stack = stubImportStack()
-    const engine = buildEngine({
-      router,
-      platform: stubPlatform('all'),
-      ...stack,
-    })
+    const engine = buildEngine(stack)
 
-    await startAndReachPhase(engine, 'import_upload_pending', {
-      ai_substrate_used: 'chatgpt',
+    // Settled post-tap state: tapping Claude resolved the intent (cleared) and
+    // set ai_substrate_used=claude, parking at import_upload_pending.
+    await seedState('import_upload_pending', {
+      ai_substrate_used: 'claude',
     })
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: 'can I do claude instead?',
-      observed_at: NOW_MS + 1_000,
-    })
-    const picker = (await stateStore.get(OWNER, USER))?.phase_state[
-      'active_prompt_id'
-    ] as string
-
-    // Tap Claude — resolves the intent + sets ai_substrate_used=claude.
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      choice: {
-        prompt_id: picker,
-        choice_value: 'claude',
-        chosen_at: NOW_MS + 2_000,
-        speaker_user_id: USER,
-        channel_kind: 'app-socket',
-      },
-      observed_at: NOW_MS + 2_000,
-    })
-    const tapped = await stateStore.get(OWNER, USER)
-    expect(tapped?.phase).toBe('import_upload_pending')
-    expect(tapped?.phase_state['ai_substrate_used']).toBe('claude')
-    expect(tapped?.phase_state['source_switch_intent'] ?? null).toBeNull()
 
     // Now the Claude upload lands → honored.
     const out = await engine.notifyImportUpload({
@@ -381,37 +281,20 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
     expect(out.state?.phase).toBe('import_running')
   })
 
-  /** Argus r1b IMPORTANT — negation-blind detector regression guard. Mid
-   *  Claude-upload, typing a NEGATED mention of the other source ("I don't
-   *  have a GPT export") must NOT record a switch-intent, so the user's own
-   *  legitimate Claude upload is still honored — not falsely refused. */
+  /** Argus r1b IMPORTANT — negation-blind detector regression guard. A NEGATED
+   *  mention of the other source ("I don't have a GPT export") mid Claude-upload
+   *  records NO switch-intent, so the rerouted state carries the staged
+   *  `ai_substrate_used=claude` with no intent — and the user's own legitimate
+   *  Claude upload is still honored, not falsely refused. (The negation
+   *  detection itself is pinned in ./import-source-copy.test.ts.) */
   test('negated other-source mention does NOT refuse the in-flight upload', async () => {
-    const { router } = stubRouter([])
     const stack = stubImportStack()
-    const engine = buildEngine({
-      router,
-      platform: stubPlatform('all'),
-      ...stack,
-    })
+    const engine = buildEngine(stack)
 
-    // User tapped Claude, is mid-upload at import_upload_pending.
-    await startAndReachPhase(engine, 'import_upload_pending', {
+    // Rerouted with NO intent (the mention was negated), staged claude preserved.
+    await seedState('ai_substrate_offered', {
       ai_substrate_used: 'claude',
     })
-
-    // Types an incidental, NEGATED mention of ChatGPT — not a switch.
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: "I don't have a GPT export",
-      observed_at: NOW_MS + 1_000,
-    })
-    const rerouted = await stateStore.get(OWNER, USER)
-    expect(rerouted?.phase).toBe('ai_substrate_offered')
-    // No switch-intent recorded — the mention was negated.
-    expect(rerouted?.phase_state['source_switch_intent'] ?? null).toBeNull()
 
     // The user's own Claude upload lands → honored, NOT refused.
     const out = await engine.notifyImportUpload({
@@ -430,48 +313,18 @@ describe('ISSUES #98 — explicit switch must not auto-import the abandoned sour
 
   /** Argus r1b MINOR — stale intent cleared on a freeform "undo" at
    *  ai_substrate_offered. After an explicit Claude switch, a restated
-   *  "no, keep chatgpt" must clear the stale source_switch_intent so the
-   *  in-flight ChatGPT upload is honored rather than refused. */
+   *  "no, keep chatgpt" reconciles the intent back to the staged source
+   *  (cleared), so the in-flight ChatGPT upload is honored rather than
+   *  refused. */
   test('restated "keep chatgpt" at picker clears stale intent so its upload runs', async () => {
-    const { router } = stubRouter([])
     const stack = stubImportStack()
-    const engine = buildEngine({
-      router,
-      platform: stubPlatform('all'),
-      ...stack,
-    })
+    const engine = buildEngine(stack)
 
-    await startAndReachPhase(engine, 'import_upload_pending', {
+    // Reconciled state: the restated "keep chatgpt" cleared the stale
+    // source_switch_intent back to the staged chatgpt.
+    await seedState('ai_substrate_offered', {
       ai_substrate_used: 'chatgpt',
     })
-
-    // Explicit switch → reroute records source_switch_intent=claude.
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: 'can I do claude instead?',
-      observed_at: NOW_MS + 1_000,
-    })
-    expect(
-      (await stateStore.get(OWNER, USER))?.phase_state['source_switch_intent'],
-    ).toBe('claude')
-
-    // The user changes their mind via freeform (not a button tap).
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: 'no, keep chatgpt',
-      observed_at: NOW_MS + 1_500,
-    })
-    const reconciled = await stateStore.get(OWNER, USER)
-    expect(reconciled?.phase).toBe('ai_substrate_offered')
-    // Intent reconciled back to the staged source → cleared.
-    expect(reconciled?.phase_state['source_switch_intent'] ?? null).toBeNull()
-    expect(reconciled?.phase_state['ai_substrate_used']).toBe('chatgpt')
 
     // The in-flight ChatGPT upload lands → honored, not refused.
     const out = await engine.notifyImportUpload({

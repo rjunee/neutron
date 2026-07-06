@@ -2,20 +2,37 @@
  * Sprint: LLM-driven onboarding prompts (2026-05-09).
  * Architecture: docs/research/onboarding-llm-prompts-architecture-2026-05-09.md
  *
- * End-to-end tests for the engine wiring: when `phaseSpecResolver` is
- * provided, `engine.start(...)` routes the signup phase through the
- * resolver instead of the static `S1_PROMPT_*` constants. When the
- * resolver returns null (phase not enabled / LLM error), the engine
- * falls back to the static spec — preserving every existing assertion.
+ * Tests for the RETAINED `resolveLlmSpec` wiring: when `phaseSpecResolver`
+ * is provided, `emitPhasePrompt(...)` routes the phase through the resolver
+ * instead of the static `STATIC_PHASE_SPECS` body. When the resolver returns
+ * null (phase not enabled / LLM error / unwired), the engine falls back to
+ * the static spec — preserving every existing assertion.
  *
  * Also covers:
  *   - signup_via=web vs signup_via=telegram bundle population
- *   - tg_first_name reaches the resolver bundle when set on StartInput
- *   - ButtonStore idempotency unchanged across resolver runs
+ *   - tg_first_name reaches the resolver bundle from phase_state
+ *   - ButtonStore idempotency across resolver runs (repeat emits dedupe)
  *   - recent_turns populates from the transcript on subsequent emits
+ *
+ * K11a6 re-anchor (2026-07-06). The pinned surface here is `resolveLlmSpec`
+ * — RETAINED, and reached in PROD via the import prompt-render path
+ * (`emitPhasePrompt` / `resolvePhasePromptSpec`, the same entry the import
+ * cron's re-emit and `ai_substrate_offered` render use). The original cases
+ * drove the resolver through the `engine.start` entry — the dead-in-prod
+ * interview-engine conversational drive K11b1 deletes. `emitPhasePrompt`
+ * exercises the identical resolver seam (build bundle from phase_state →
+ * `phaseSpecResolver.resolve` → static fallback), and survives K11b1 (it does
+ * NOT touch `start`/`advance`/`normalAdvance`/`consumeChoice`). So we seed the
+ * signup state via `stateStore.upsert` and drive `emitPhasePrompt` directly.
+ * Every model-precedence / spec / bundle-population assertion is preserved.
+ *
+ * The one `start()`-EXCLUSIVE case — the static-seed concurrent-first-emit
+ * race defense (Codex P1), whose assertion INVERTS under `emitPhasePrompt`'s
+ * body-dependent seed — has no retained equivalent and is split to
+ * `./engine-llm-resolver-start-static-seed.die.test.ts` (co-deletes in K11b1).
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -95,8 +112,44 @@ function tearDown(h: Harness): void {
   rmSync(h.tmp, { recursive: true, force: true })
 }
 
-describe('InterviewEngine — phaseSpecResolver wiring', () => {
-  test('start emits LLM body when resolver returns a spec (signup phase)', async () => {
+/**
+ * K11a6 — seed the signup state and drive the RETAINED `emitPhasePrompt`
+ * resolver seam (the same path `resolvePhasePromptSpec` takes in prod). The
+ * resolver bundle reads `signup_via` / `topic_id` / `tg_first_name` from the
+ * persisted `phase_state`, so we stamp them on the seed. Returns the emit
+ * result so idempotency assertions can compare `prompt_id`.
+ */
+async function emitSignup(
+  h: Harness,
+  opts: {
+    user_id?: string
+    topic_id?: string
+    signup_via?: 'web' | 'telegram'
+    tg_first_name?: string
+  } = {},
+): Promise<{ prompt_id: string }> {
+  const user_id = opts.user_id ?? 'u-1'
+  const topic_id = opts.topic_id ?? 'web:user-1'
+  const signup_via = opts.signup_via ?? 'web'
+  const phase_state_patch: Record<string, unknown> = { topic_id, user_id, signup_via }
+  if (opts.tg_first_name !== undefined) phase_state_patch['tg_first_name'] = opts.tg_first_name
+  await h.stateStore.upsert({
+    project_slug: 't1',
+    user_id,
+    phase: 'signup',
+    phase_state_patch,
+  })
+  return h.engine.emitPhasePrompt({
+    project_slug: 't1',
+    user_id,
+    topic_id,
+    phase: 'signup',
+    observed_at: Date.now(),
+  })
+}
+
+describe('InterviewEngine — phaseSpecResolver wiring (via emitPhasePrompt)', () => {
+  test('emits LLM body when resolver returns a spec (signup phase)', async () => {
     let observedBundle: PhaseContextBundle | null = null
     const resolver: PhaseSpecResolver = {
       async resolve(bundle) {
@@ -112,12 +165,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'web:user-1',
-        user_id: 'u-1',
-        signup_via: 'web',
-      })
+      await emitSignup(h, { signup_via: 'web' })
       expect(h.sentPrompts.length).toBe(1)
       expect(h.sentPrompts[0]!.prompt.body).toBe('Hey - whats your name?')
       // Free-text resolver returned no options.
@@ -130,7 +178,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
   })
 
-  test('start falls back to static S1_PROMPT_* when resolver returns null', async () => {
+  test('falls back to static S1_PROMPT_* when resolver returns null', async () => {
     const resolver: PhaseSpecResolver = {
       async resolve() {
         return null
@@ -138,12 +186,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'topic-1',
-        user_id: 'u-1',
-        signup_via: 'telegram',
-      })
+      await emitSignup(h, { topic_id: 'topic-1', signup_via: 'telegram' })
       expect(h.sentPrompts[0]!.prompt.body).toBe(S1_PROMPT_BODY)
       expect(h.sentPrompts[0]!.prompt.options.length).toBe(
         S1_PROMPT_OPTIONS.length,
@@ -153,15 +196,10 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
   })
 
-  test('start with no resolver wired uses the static spec (default behavior)', async () => {
+  test('no resolver wired uses the static spec (default behavior)', async () => {
     const h = buildHarness({})
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'topic-1',
-        user_id: 'u-1',
-        signup_via: 'telegram',
-      })
+      await emitSignup(h, { topic_id: 'topic-1', signup_via: 'telegram' })
       expect(h.sentPrompts[0]!.prompt.body).toBe(S1_PROMPT_BODY)
       expect(h.sentPrompts[0]!.prompt.options.length).toBe(
         S1_PROMPT_OPTIONS.length,
@@ -171,7 +209,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
   })
 
-  test('start passes signup_via=telegram + tg_first_name into the bundle', async () => {
+  test('passes signup_via=telegram + tg_first_name into the bundle', async () => {
     let observedBundle: PhaseContextBundle | null = null
     const resolver: PhaseSpecResolver = {
       async resolve(bundle) {
@@ -187,17 +225,16 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'tg:123:0',
+      await emitSignup(h, {
         user_id: 'tg-user-123',
+        topic_id: 'tg:123:0',
         signup_via: 'telegram',
         tg_first_name: 'Anna',
       })
       expect(observedBundle).not.toBeNull()
       expect(observedBundle!.signup_via).toBe('telegram')
       expect(observedBundle!.telegram_display_name).toBe('Anna')
-      // Verify it persisted into phase_state for downstream phases.
+      // tg_first_name lives in phase_state for downstream phases.
       const state = await h.stateStore.get('t1', 'tg-user-123')
       expect(state!.phase_state['tg_first_name']).toBe('Anna')
     } finally {
@@ -221,12 +258,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'web:user-1',
-        user_id: 'u-1',
-        signup_via: 'web',
-      })
+      await emitSignup(h, { signup_via: 'web' })
       expect(observedBundle).not.toBeNull()
       expect(observedBundle!.signup_via).toBe('web')
       expect(observedBundle!.telegram_display_name).toBeNull()
@@ -235,11 +267,14 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
   })
 
-  test('start idempotency unchanged across resolver runs', async () => {
-    let calls = 0
+  test('ButtonStore idempotency across resolver runs — repeat emits dedupe to one row', async () => {
+    // K11a6: the RETAINED ButtonStore idempotency pin. Two emits of the same
+    // resolved (body + options) hash to the same idempotency_key, so the second
+    // emit reuses the first row (same prompt_id) and no duplicate is written.
+    // (The `start()`-only static-seed race defense — a DIFFERENT body deduping
+    // to the same row — is start-exclusive dead behavior; see the `.die` split.)
     const resolver: PhaseSpecResolver = {
       async resolve() {
-        calls++
         return {
           phase: 'signup',
           body: 'whats your name?',
@@ -251,18 +286,8 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      const startInput = {
-        project_slug: 't1',
-        topic_id: 'web:user-1',
-        user_id: 'u-1',
-        signup_via: 'web' as const,
-      }
-      const a = await h.engine.start(startInput)
-      const b = await h.engine.start(startInput)
-      // Second call short-circuits via the existing-active-prompt guard
-      // path, so the resolver is NOT consulted a second time when the
-      // existing row is reused. This proves we did not break idempotency.
-      expect(b.was_new).toBe(false)
+      const a = await emitSignup(h, { signup_via: 'web' })
+      const b = await emitSignup(h, { signup_via: 'web' })
       expect(b.prompt_id).toBe(a.prompt_id)
       const rows = h.db
         .prepare<{ c: number }, []>('SELECT COUNT(*) AS c FROM button_prompts')
@@ -270,75 +295,6 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
       expect(rows?.c).toBe(1)
     } finally {
       tearDown(h)
-    }
-  })
-
-  test('start idempotency holds even when LLM returns DIFFERENT body on each call (Codex P1)', async () => {
-    // Simulates the race: two concurrent start() calls land before the
-    // first persists active_prompt_id. Each gets a slightly different
-    // LLM rephrase. The seed must NOT depend on LLM body — the same
-    // (instance, topic, phase) must hash to the same idempotency_key so
-    // ButtonStore.emit dedupes and only one row + one send happens.
-    let counter = 0
-    const resolver: PhaseSpecResolver = {
-      async resolve() {
-        counter++
-        return {
-          phase: 'signup',
-          body: `LLM rephrase #${counter}`,
-          options: [],
-          allow_freeform: true,
-          next_phase_on_default: 'agent_name_chosen',
-        }
-      },
-    }
-    // Build TWO independent harnesses sharing the same db so both
-    // start() calls compete for the same idempotency_key bucket.
-    const tmp = mkdtempSync(join(tmpdir(), 'neutron-eng-llm-race-'))
-    try {
-      const db = ProjectDb.open(join(tmp, 'project.db'))
-      try {
-        applyMigrations(db.raw())
-        const buttonStore = new ButtonStore({ db })
-        const stateStore = new InMemoryOnboardingStateStore()
-        const transcript = new TranscriptWriter({
-          path: join(tmp, 'persona', 'onboarding-transcript.jsonl'),
-        })
-        const sentPrompts: Array<{ project_slug: string; topic_id: string; prompt: ButtonPrompt }> = []
-        const sender = async (input: { project_slug: string; topic_id: string; prompt: ButtonPrompt }) => {
-          sentPrompts.push(input)
-          return { message_id: `msg-${sentPrompts.length}`, was_new: true }
-        }
-        // Two engines on the same DB — but with the SAME resolver so
-        // each call gets a different body. The state-store guard
-        // dedupes one path, but the idempotency_key must dedupe the
-        // ButtonStore row even if the body differs.
-        const engine1 = new InterviewEngine({
-          buttonStore,
-          stateStore,
-          transcript,
-          sendButtonPrompt: sender,
-          phaseSpecResolver: resolver,
-        })
-        const startInput = {
-          project_slug: 't1',
-          topic_id: 'web:user-1',
-          user_id: 'u-1',
-          signup_via: 'web' as const,
-        }
-        await engine1.start(startInput)
-        await engine1.start(startInput)
-        // Even though the resolver was consulted twice and returned
-        // DIFFERENT bodies, only ONE button_prompts row exists.
-        const rows = db
-          .prepare<{ c: number }, []>('SELECT COUNT(*) AS c FROM button_prompts')
-          .get()
-        expect(rows?.c).toBe(1)
-      } finally {
-        db.close()
-      }
-    } finally {
-      rmSync(tmp, { recursive: true, force: true })
     }
   })
 
@@ -350,12 +306,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'topic-1',
-        user_id: 'u-1',
-        signup_via: 'telegram',
-      })
+      await emitSignup(h, { topic_id: 'topic-1', signup_via: 'telegram' })
       expect(h.sentPrompts.length).toBe(1)
       expect(h.sentPrompts[0]!.prompt.body).toBe(S1_PROMPT_BODY)
     } finally {
@@ -377,12 +328,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'web:user-1',
-        user_id: 'u-1',
-        signup_via: 'web',
-      })
+      await emitSignup(h, { signup_via: 'web' })
       const entries = h.transcript.readAll()
       expect(entries.length).toBe(1)
       expect(entries[0]!.body).toBe('casual LLM greeting')
@@ -406,12 +352,7 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'web:user-1',
-        user_id: 'u-1',
-        signup_via: 'web',
-      })
+      await emitSignup(h, { signup_via: 'web' })
       // Add a synthetic user line to the transcript to simulate the
       // user replying. The next emit's bundle should see it in
       // recent_turns.
@@ -420,9 +361,8 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
         body: 'Sam',
         phase: 'signup',
       })
-      // Re-emit the same phase via emitCurrentPhasePrompt — the engine
-      // re-resolves with the LLM resolver and the bundle picks up the
-      // user turn we just appended.
+      // Re-emit the same phase — the engine re-resolves with the LLM
+      // resolver and the bundle picks up the user turn we just appended.
       const obs: PhaseContextBundle[] = []
       // Replace the resolver so we can observe the bundle on this turn.
       const resolver2: PhaseSpecResolver = {
@@ -449,10 +389,12 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
         },
         phaseSpecResolver: resolver2,
       })
-      await engine2.emitCurrentPhasePrompt({
+      await engine2.emitPhasePrompt({
         user_id: 'u-1',
         project_slug: 't1',
         topic_id: 'web:user-1',
+        phase: 'signup',
+        observed_at: Date.now(),
       })
       expect(obs.length).toBeGreaterThan(0)
       const lastBundle = obs[obs.length - 1]!
@@ -482,10 +424,9 @@ describe('InterviewEngine — phaseSpecResolver wiring', () => {
     }
     const h = buildHarness({ resolver })
     try {
-      await h.engine.start({
-        project_slug: 't1',
-        topic_id: 'web:user-99',
+      await emitSignup(h, {
         user_id: 'user-99',
+        topic_id: 'web:user-99',
         signup_via: 'web',
       })
       expect(observedBundle).not.toBeNull()
