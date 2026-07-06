@@ -19,7 +19,7 @@
  * are gone; personality alone drives SOUL.md.
  */
 
-import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-character-suggester.ts'
+import { STATIC_PERSONALITY_CHARACTER_FALLBACK } from './personality-characters.ts'
 import { auditRequiredFields } from './required-fields-audit.ts'
 
 export interface OnboardingPreambleInput {
@@ -32,7 +32,7 @@ export interface OnboardingPreambleInput {
  * step (item 1, 2026-06-30). Before this, the preamble told the model to "offer
  * a couple of concrete flavors" and it improvised a fresh, inconsistent trio
  * every run. We instead inject a stable, curated set of NAMED characters (the
- * voice anchors `personality-character-suggester.ts` was built around) so every
+ * voice anchors the personality-character suggester was built around) so every
  * owner sees the same recognisable choices — rendered as tappable buttons via
  * the `[[OPTIONS]]` protocol below. The owner can still describe their own.
  */
