@@ -30,7 +30,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
-import type { ButtonPrompt, ButtonChoice } from '@neutronai/channels/button-primitive.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import {
   InterviewEngine,
   SqliteOnboardingStateStore,
@@ -98,7 +98,7 @@ afterEach(() => {
 })
 
 describe('failed-import → import_analysis_presented (S14)', () => {
-  test('cron fire on runner.status=failed advances phase, emits graceful free-text body, user reply routes to work_interview_gap_fill', async () => {
+  test('cron fire on runner.status=failed advances phase, emits graceful free-text body', async () => {
     const T0 = 1_700_000_000_000
     const job_id = 'job-failed-rate-limited'
 
@@ -193,35 +193,15 @@ describe('failed-import → import_analysis_presented (S14)', () => {
     expect(prompt!.options).toEqual([])
     expect(prompt!.allow_freeform).toBe(true)
 
-    // User replies freeform. The audit will find primary_projects +
-    // non_work_interests missing (no import seeded them) so the engine
-    // routes to work_interview_gap_fill per § 2.4.
-    const choice: ButtonChoice = {
-      prompt_id: prompt!.prompt_id,
-      choice_value: '__freeform__',
-      freeform_text: "I'm working on a startup",
-      chosen_at: T0 + 60_000,
-      speaker_user_id: USER,
-      channel_kind: 'app-socket',
-    }
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      choice,
-      observed_at: T0 + 60_000,
-    })
-
-    const after = await stateStore.get(OWNER, USER)
-    expect(after).not.toBeNull()
-    expect(after!.phase).toBe('work_interview_gap_fill')
-
-    // The reply lands in user_supplied_corrections so the gap-fill LLM
-    // driver has the user's verbatim words on its first turn.
-    const corrections = after!.phase_state['user_supplied_corrections'] as string[]
-    expect(Array.isArray(corrections)).toBe(true)
-    expect(corrections).toContain("I'm working on a startup")
+    // NOTE (K11-pre / K11a6, 2026-07-06): the user's freeform reply on this
+    // graceful-failure body used to advance to `work_interview_gap_fill` via
+    // `engine.advance(...) with a freeform reply` — the conversational drive K11b
+    // deletes (dead on every live path; the live reply routes to the CC
+    // session, not the engine). That freeform-reply→gap_fill assertion for the
+    // import_failed case now lives in the dies-with-K11b file
+    // `import-analysis-presented-freeform-routing.test.ts` (failure-path
+    // describe), so this surviving test pins only the cron-driven advance +
+    // graceful body — the behavior that outlives K11b via `pollImportRunningTick`.
   })
 
   test('cron fire on runner.status=cancelled advances phase to import_analysis_presented (no illegal_transition throw)', async () => {

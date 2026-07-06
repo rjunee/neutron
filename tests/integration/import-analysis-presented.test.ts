@@ -17,16 +17,30 @@
  *   - the engine populates `phase_state.primary_projects`
  *     (verbatim names) and `phase_state.non_work_interests`
  *     from the import_result
- *   - a freeform reply is captured into
- *     `phase_state.user_supplied_corrections[]`
- *   - audit-aware routing:
- *       - when user_first_name + 3+ projects + 1+ interest are present,
- *         the engine advances to `personality_offered`
- *       - when non_work_interests is missing, the engine routes to
- *         `work_interview_gap_fill`
- *   - the failure path (`import_failed=true`) emits the graceful
- *     "couldn't analyze" body and routes the user's reply to
- *     `work_interview_gap_fill`
+ *
+ * 2026-07-06 K11-pre re-anchor (K11a6): the body-shape + themes-regression
+ * blocks previously reached `import_analysis_presented` by calling
+ * `engine.start(...)` (its start-path invokes the poll-and-advance). K11b
+ * deletes `engine.start`/`engine.advance`, so those blocks are re-anchored
+ * onto the SURVIVING import surface: seed `import_running` directly on the
+ * state store (exactly what a prior turn / the upload handler leaves) and
+ * drive the transition via `engine.pollImportRunningTick(...)` — the same
+ * public method the import-running cron calls in production. The resulting
+ * `import_running → import_analysis_presented` advance + emitted body is
+ * byte-identical to the old start-path (both funnel through
+ * `pollImportRunningAndAdvance`), so every body assertion is preserved.
+ *
+ * The corrections-capture + audit-routing + failure-reply blocks, which
+ * drove the CONVERSATIONAL freeform path
+ * (`engine.advance(...) → llmRouter.route →
+ * dispatchRouterDecision → consumeImportAnalysisPresentedChoice`), pinned
+ * the conversational drive that K11b deletes and that is already dead on
+ * every live path (the live import-completion watcher consumes
+ * `import_analysis_presented` with a plain `stateStore.upsert`; the freeform
+ * reply routes to the live CC session, not the engine). They were relocated
+ * verbatim to `import-analysis-presented-freeform-routing.test.ts`
+ * (K11 execution plan §6 category C — dies with K11b1) so they keep pinning
+ * that behavior against CURRENT code until the drive is removed.
  *
  * No dynamic-prompt substrate is wired — the dead `promptDriver`
  * extraction seam was removed in the 2026-06-21 onboarding-engine
@@ -34,15 +48,6 @@
  * phase-prompts.ts) is now the SOLE body source. This is intentional:
  * the test pins the deterministic builder per the brief's "test against
  * the actual phase-prompts builder, not a mocked output" rule.
- *
- * Freeform extraction at this REVIEW phase now flows ONLY through the
- * `llmRouter` dep (the single extraction seam). The corrections-capture
- * + audit-routing tests below drive the REAL freeform router path
- * (`engine.advance({ freeform_text }) → llmRouter.route →
- * dispatchRouterDecision → consumeImportAnalysisPresentedChoice`) with a
- * `stubRouter` decision, mirroring production + the existing passing
- * `gap1-live-import-analysis-merge.test.ts`. The body-shape tests need
- * no router (they only `start()` and inspect the emitted prompt).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -62,8 +67,6 @@ import {
 import type { ImportJob, ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
-import type { RouterDecision } from '@neutronai/onboarding/interview/llm-router.ts'
-import { stubRouter, stubPlatform } from './m2-walkthrough-test-helpers.ts'
 
 const OWNER = 'alex-test'
 const TOPIC = 'chat'
@@ -77,28 +80,7 @@ let transcript: TranscriptWriter
 let sentPrompts: Array<{ prompt: ButtonPrompt }>
 let runnerResults: Map<string, ImportJob>
 
-/** A REVIEW-completing freeform reply decision. `import_analysis_presented`
- *  is a REVIEW/CORRECTION phase, so the router classifies a corrections
- *  reply as `advance` carrying a non-null `state_delta` (the one case where
- *  an advance carries a delta — see llm-router.ts § REVIEW/CORRECTION). The
- *  engine records `freeform_text` into `user_supplied_corrections[]` and
- *  applies the whitelisted delta before auditing + routing. */
-function reviewAdvance(
-  freeform_text: string,
-  state_delta: RouterDecision['state_delta'] = null,
-): RouterDecision {
-  return {
-    action: 'advance',
-    confidence: 0.95,
-    choice_value: null,
-    freeform_text,
-    response: null,
-    state_delta,
-    reasoning: 'test: review-completing corrections reply',
-  }
-}
-
-function makeEngine(decisions: ReadonlyArray<RouterDecision> = []): InterviewEngine {
+function makeEngine(): InterviewEngine {
   const runner: ImportJobRunnerHook = {
     start: async () => ({ job_id: 'unused' }),
     status: async (job_id) => runnerResults.get(job_id) ?? null,
@@ -118,12 +100,6 @@ function makeEngine(decisions: ReadonlyArray<RouterDecision> = []): InterviewEng
     },
     importJobRunner: runner,
     importPayloadResolver: resolver,
-    // Freeform extraction at this REVIEW phase flows ONLY through the
-    // llmRouter (the single extraction seam; the dead promptDriver was
-    // removed). stubPlatform('all') flips the conversational flag on so
-    // the router is consulted for the freeform reply.
-    llmRouter: stubRouter(decisions).router,
-    platform: stubPlatform('all'),
   })
 }
 
@@ -183,25 +159,13 @@ function ryanShapeResult(): ImportResult {
   }
 }
 
-function thinResult(): ImportResult {
-  // Pass-2 inferred zero non-work interests — drives the audit-fail
-  // route to work_interview_gap_fill.
-  return {
-    conversation_count: 8,
-    entities: [],
-    topics: [],
-    proposed_projects: [
-      { name: 'Caldera', rationale: 'fragrance brand', suggested_topics: [] },
-      { name: 'Ledgerline', rationale: 'JV ops', suggested_topics: [] },
-      { name: 'Childcare', rationale: 'family ops', suggested_topics: [] },
-    ],
-    proposed_tasks: [],
-    proposed_reminders: [],
-    voice_signals: {},
-    facts: {},
-  }
-}
-
+/**
+ * Seed an `import_running` row exactly as a prior turn / the upload handler
+ * leaves it, then complete the fake runner's job. The topic_id + signup_via
+ * that `engine.start` used to stamp onto phase_state are seeded here so
+ * `pollImportRunningTick` has the channel context it needs to advance
+ * (mirrors the seeds in import-failed-routes-to-analysis-presented.test.ts).
+ */
 async function landAtImportRunning(opts: { import_result: ImportResult | null; import_failed?: boolean }): Promise<void> {
   const job_id = 'job-1'
   await stateStore.upsert({
@@ -209,6 +173,8 @@ async function landAtImportRunning(opts: { import_result: ImportResult | null; i
     project_slug: OWNER,
     phase: 'import_running',
     phase_state_patch: {
+      topic_id: TOPIC,
+      signup_via: 'web',
       user_first_name: 'Alex',
       import_job_id: job_id,
       import_source: 'chatgpt-zip',
@@ -250,6 +216,17 @@ async function landAtImportRunning(opts: { import_result: ImportResult | null; i
   runnerResults.set(job_id, stamped)
 }
 
+/**
+ * Drive the SURVIVING poll-and-advance: `pollImportRunningTick` is the public
+ * method the import-running cron calls each tick. It reads the seeded
+ * `import_running` row, polls the runner, and (on a `completed` job) advances
+ * to `import_analysis_presented`, emitting the analysis body — the same path
+ * `engine.start` used to funnel through.
+ */
+async function pollToAnalysisPresented(engine: InterviewEngine): Promise<void> {
+  await engine.pollImportRunningTick({ project_slug: OWNER, user_id: USER, observed_at: 2 })
+}
+
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'import-analysis-presented-'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
@@ -273,16 +250,10 @@ describe('import_analysis_presented — body shape (Alex-shape happy path)', () 
     const engine = makeEngine()
     await landAtImportRunning({ import_result: ryanShapeResult() })
 
-    // Trigger pollImportRunningAndAdvance via the engine's start path
-    // — it sees phase=import_running, no terminal sub_step, and polls
-    // the runner; the completed-status branch advances to
-    // import_analysis_presented and emits the bullet body.
-    await engine.start({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      signup_via: 'web',
-    })
+    // Cron poll tick sees phase=import_running, polls the runner, and the
+    // completed-status branch advances to import_analysis_presented and emits
+    // the bullet body.
+    await pollToAnalysisPresented(engine)
 
     const state = await stateStore.get(OWNER, USER)
     expect(state).not.toBeNull()
@@ -355,164 +326,6 @@ describe('import_analysis_presented — body shape (Alex-shape happy path)', () 
   })
 })
 
-describe('import_analysis_presented — corrections capture + audit-aware routing', () => {
-  test('Alex-shape: user reply lands in user_supplied_corrections[] and engine advances to personality_offered (audit clean)', async () => {
-    // The user replies freeform: "Sound Ceremony is right — and add
-    // Halo, that's the supplement brand." The router classifies this
-    // review-completing reply as an `advance` carrying the verbatim text
-    // + a (non-null) state_delta restating + adding the projects.
-    const reply =
-      "Sound Ceremony is right, and add Halo - that's the supplement brand we're launching mid-2026"
-    const engine = makeEngine([
-      reviewAdvance(reply, {
-        primary_projects: [
-          'Ledgerline Hospitality',
-          'Caldera',
-          'A book about contemplative awakening',
-          'Sound Ceremony course',
-          'Halo',
-        ],
-        removed_projects: [],
-      }),
-    ])
-    await landAtImportRunning({ import_result: ryanShapeResult() })
-    await engine.start({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      signup_via: 'web',
-    })
-
-    // Drive the REAL freeform path: a typed reply with NO matching
-    // ButtonChoice routes through the llmRouter (the live web client
-    // never synthesises a `__freeform__` choice here — that would
-    // short-circuit the router).
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: reply,
-      observed_at: 2,
-    })
-
-    const state = await stateStore.get(OWNER, USER)
-    expect(state).not.toBeNull()
-    // user_first_name + primary_projects (4) + non_work_interests (2)
-    // are all filled — audit's next_to_collect is agent_personality
-    // → required-clean → advance to personality_offered.
-    expect(state!.phase).toBe('personality_offered')
-    const ps = state!.phase_state as Record<string, unknown>
-    expect(Array.isArray(ps['user_supplied_corrections'])).toBe(true)
-    expect((ps['user_supplied_corrections'] as string[])).toContain(
-      "Sound Ceremony is right, and add Halo - that's the supplement brand we're launching mid-2026",
-    )
-  })
-
-  test('Mira-shape thin import: missing non_work_interests routes user to work_interview_gap_fill', async () => {
-    const reply = 'Nope, you got the gist'
-    // A "no corrections" review-completing reply still routes as an
-    // advance; the delta restates the seeded projects (no interests, so
-    // the audit still flags non_work_interests as missing → gap_fill).
-    const engine = makeEngine([
-      reviewAdvance(reply, {
-        primary_projects: ['Caldera', 'Ledgerline', 'Childcare'],
-        removed_projects: [],
-      }),
-    ])
-    await landAtImportRunning({ import_result: thinResult() })
-    await engine.start({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      signup_via: 'web',
-    })
-
-    expect((await stateStore.get(OWNER, USER))!.phase).toBe('import_analysis_presented')
-
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: reply,
-      observed_at: 2,
-    })
-
-    const state = await stateStore.get(OWNER, USER)
-    expect(state).not.toBeNull()
-    // user_first_name + 3 projects are filled, but non_work_interests
-    // is empty → audit reports it missing → engine routes to gap_fill.
-    expect(state!.phase).toBe('work_interview_gap_fill')
-    const ps = state!.phase_state as Record<string, unknown>
-    expect((ps['user_supplied_corrections'] as string[])).toContain('Nope, you got the gist')
-  })
-})
-
-describe('import_analysis_presented — failure path (graceful "couldn\'t analyze")', () => {
-  test('advanceFromImportRunningOnComplete(failure_reason) routes directly to import_analysis_presented with the graceful body', async () => {
-    // S14 (2026-05-17) — both runner.status=failed AND the hard-timeout
-    // backstop call advanceFromImportRunningOnComplete(failure_reason);
-    // the body builder MUST emit the graceful framing whenever
-    // phase_state.import_failed=true. Here we exercise the body shape
-    // by landing the engine directly at import_analysis_presented with
-    // a synthetic failed state; the cron-tick path that exercises the
-    // runner.status=failed branch end-to-end lives in
-    // import-failed-routes-to-analysis-presented.test.ts.
-    await stateStore.upsert({
-      user_id: USER,
-      project_slug: OWNER,
-      phase: 'import_analysis_presented',
-      phase_state_patch: {
-        user_first_name: 'Alex',
-        import_source: 'chatgpt-zip',
-        import_result: null,
-        import_failed: true,
-        import_failure_reason: 'timeout',
-        import_partial: false,
-      },
-      advanced_at: 1,
-    })
-    // User reply routes to work_interview_gap_fill regardless of audit
-    // (audit fails anyway since primary_projects / non_work_interests
-    // were never populated — the failure path never seeds them, and the
-    // router's partial delta here still leaves non_work_interests
-    // missing). Wire the router decision BEFORE start() so the freeform
-    // reply below resolves through it.
-    const reply =
-      "I'm working on a hotel acquisition and a supplement brand. Outside work I climb."
-    const engine = makeEngine([reviewAdvance(reply, null)])
-    // start() will re-emit the active prompt for the persisted phase.
-    await engine.start({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      signup_via: 'web',
-    })
-
-    const prompt = sentPrompts[sentPrompts.length - 1]?.prompt
-    expect(prompt).not.toBeUndefined()
-    const body = prompt!.body
-    // Graceful framing per § 3.6.
-    expect(body).toContain("couldn't analyze")
-    expect(body).toContain('Alex')
-    // No bullets in the failure body.
-    expect(body).not.toContain("Projects you're working on:")
-    expect(body).not.toContain('Outside work')
-
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      freeform_text: reply,
-      observed_at: 2,
-    })
-    const state = await stateStore.get(OWNER, USER)
-    expect(state!.phase).toBe('work_interview_gap_fill')
-  })
-})
-
 describe('import_analysis_presented — themes regression catch', () => {
   test('a body containing the Pass-2 result NEVER renders themes (Alex-lock 2026-05-15)', async () => {
     const engine = makeEngine()
@@ -522,12 +335,7 @@ describe('import_analysis_presented — themes regression catch', () => {
     // "Themes" section header.
     const r = ryanShapeResult()
     await landAtImportRunning({ import_result: r })
-    await engine.start({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      signup_via: 'web',
-    })
+    await pollToAnalysisPresented(engine)
     const last = sentPrompts[sentPrompts.length - 1]?.prompt
     expect(last).not.toBeUndefined()
     const body = last!.body

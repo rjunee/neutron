@@ -36,7 +36,6 @@ import type {
 } from '@neutronai/onboarding/interview/engine.ts'
 import type { ImportJob } from '@neutronai/onboarding/history-import/types.ts'
 import type {
-  ButtonChoice,
   ButtonPrompt,
 } from '@neutronai/channels/button-primitive.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
@@ -246,51 +245,19 @@ describe('resume_import button surface', () => {
     expect(resumeOption).toBeUndefined()
   })
 
-  test('tapping resume_import dispatches runner and flips phase back to import_running', async () => {
-    const T0 = 1_700_000_000_000
-    const PRIOR = 'job-old'
-    await stateStore.upsert({
-      user_id: USER,
-      project_slug: OWNER,
-      phase: 'import_running',
-      phase_state_patch: {
-        topic_id: TOPIC,
-        user_id: USER,
-        signup_via: 'web',
-        user_first_name: 'owner',
-        import_job_id: PRIOR,
-        import_source: 'chatgpt-zip',
-      },
-      advanced_at: T0,
-    })
-
-    const engine = makeEngine(() => T0 + 30_000)
-    await seedFailedAndFireCron(engine, T0 + 30_000, PRIOR)
-
-    const prompt = sentPrompts[sentPrompts.length - 1]?.prompt
-    expect(prompt).not.toBeUndefined()
-
-    const choice: ButtonChoice = {
-      prompt_id: prompt!.prompt_id,
-      choice_value: IMPORT_RESUME_CHOICE_VALUE,
-      chosen_at: T0 + 60_000,
-      speaker_user_id: USER,
-      channel_kind: 'app-socket',
-    }
-
-    await engine.advance({
-      project_slug: OWNER,
-      topic_id: TOPIC,
-      user_id: USER,
-      channel_kind: 'app-socket',
-      choice,
-      observed_at: T0 + 60_000,
-    })
-
-    expect(runnerStartCalls).toBe(1)
-    const after = await stateStore.get(OWNER, USER)
-    expect(after).not.toBeNull()
-    expect(after!.phase).toBe('import_running')
-    expect(after!.phase_state['import_job_id']).toBe(nextRunnerJobId)
-  })
+  // NOTE (K11-pre / K11a6, 2026-07-06): the third assertion in this suite —
+  // "tapping resume_import dispatches the runner and flips the phase back to
+  // import_running" — previously drove the tap through `engine.advance(...) with a resume choice`
+  // → `consumeImportAnalysisPresentedChoice`'s resume intercept →
+  // `attemptAutoResumeFromPaused`. That engine-side resume path is DEAD on every
+  // live path: in production the resume button POSTs to `/api/import/<job_id>/resume`
+  // (`buildImportResumeHandler`), which dispatches the runner and upserts the row
+  // back to `import_running` WITHOUT the engine. K11b deletes `engine.advance` and
+  // that resume intercept. The surviving live behavior (runner dispatched + state
+  // flips to import_running from an import_analysis_presented row) is fully pinned
+  // by `gateway/__tests__/import-resume-endpoint.test.ts` (the HTTP handler test),
+  // so the tap assertion was dropped here rather than re-anchored onto a dying seam.
+  // The two surviving assertions above — that the FAILED analysis-presented body
+  // emits (probe=true) / suppresses (probe=false) the resume_import OPTION, driven
+  // by the cron via `buildImportRunningHandler` — outlive K11b and stay pinned.
 })
