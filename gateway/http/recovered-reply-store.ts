@@ -50,7 +50,7 @@
 
 import type { ChatOutbound } from '../../landing/server.ts'
 import type { RecoveredReply } from '../../runtime/adapters/claude-code/index.ts'
-import type { WebChatSenderRegistry } from './chat-bridge.ts'
+import type { WebChatSenderRegistry } from './chat-sender-registry.ts'
 
 /** An undelivered (or delivered) recovered-reply row, keyed `(topic_id, turn_id)`. */
 export interface RecoveredReplyRow {
