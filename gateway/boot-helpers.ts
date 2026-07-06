@@ -638,8 +638,15 @@ export function buildTridentCodeChatCommandFilter(deps: {
       // followed by EOL/whitespace. `/codefoo bar` is NOT a code command —
       // fall through to the LLM instead of pre-claiming it here (which, in the
       // no-context branch below, would answer "unavailable" for a non-command).
+      // IMPORTANT: only fall through on the genuine non-command reason
+      // (`not_a_code_command`). Other `unrecognized` reasons — e.g. a
+      // retired/unknown sub-verb like `/code status` — must still be CLAIMED
+      // here so `parseAndExecuteCodeCommand` (below) answers with its
+      // friendly reject text, matching the canonical contract in
+      // `trident/code-command.ts` (`parseAndExecuteCodeCommand` only returns
+      // `null` for `not_a_code_command`).
       const parsed = parseCodeCommand(input.body)
-      if (parsed.kind === 'unrecognized') return null
+      if (parsed.kind === 'unrecognized' && parsed.reason === 'not_a_code_command') return null
       const ctx = await deps.resolve_context({
         project_id: input.project_id ?? default_pid,
         project_slug: input.project_slug,

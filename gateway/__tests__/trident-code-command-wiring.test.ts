@@ -124,6 +124,37 @@ describe('buildTridentCodeChatCommandFilter', () => {
     expect(store.listNonTerminal().length).toBe(0)
   })
 
+  // FX1 (K8 regression) — a RETIRED sub-verb (`/code status`) is an
+  // `unrecognized` parse, but NOT the `not_a_code_command` reason. The
+  // canonical contract (`trident/code-command.ts`'s
+  // `parseAndExecuteCodeCommand`) only falls through to `null` for
+  // `not_a_code_command`; every other `unrecognized` reason — including a
+  // retired sub-verb — must be CLAIMED here and answered with the friendly
+  // reject text, never sent to the LLM.
+  test('a retired sub-verb (`/code status`) is CLAIMED and answered with the reject text', async () => {
+    const filter = buildTridentCodeChatCommandFilter({ resolve_context: () => ctxFor() })
+    const res = await filter.match(matchInput('/code status'))
+    expect(res).not.toBeNull()
+    expect(res!.text).toContain('no longer a /code sub-command')
+    expect(res!.error?.code).toBe('malformed')
+    // No run row was created — it was rejected, not dispatched as a task.
+    expect(store.listNonTerminal().length).toBe(0)
+  })
+
+  test('a retired sub-verb with no context is still CLAIMED (not sent to the LLM)', async () => {
+    // With no build target resolved, the filter's null-context branch answers
+    // the generic `unavailable` text for any non-`help` parse (pre-existing
+    // behavior, unchanged by this fix) — the important assertion here is that
+    // it's still non-null (claimed), never falls through to null/LLM.
+    const filter = buildTridentCodeChatCommandFilter({
+      resolve_context: () => null,
+      unavailable_message: 'no repo wired here',
+    })
+    const res = await filter.match(matchInput('/code review'))
+    expect(res).not.toBeNull()
+    expect(res!.text).toBe('no repo wired here')
+  })
+
   test('null context still claims /code but answers unavailable (no LLM fallthrough)', async () => {
     const filter = buildTridentCodeChatCommandFilter({
       resolve_context: () => null,
