@@ -2,24 +2,33 @@
  * Integration test for the P2 S1 button primitive cross-channel round-trip,
  * EXTENDED in S5 to cover the app-socket adapter.
  *
- * Per docs/plans/P2-onboarding.md § 6a:
+ * Re-anchored 2026-07-06 (K11a6-rem/grammar): this test's pinned behavior is
+ * the RETAINED button-primitive grammar — emit a `ButtonPrompt` into
+ * `ButtonStore`, render it through a channel adapter (Telegram / app-socket),
+ * deliver the user's tap back through the callback router →
+ * `DefaultButtonRouter.routeChoice` → `ButtonStore.resolve`, and surface a
+ * `ButtonChoice`. None of that involves the interview engine. The original
+ * spec drove the emit via `engine.start` and consumed the tap via
+ * `engine.advance` (asserting the engine's phase-walk landed on
+ * `ai_substrate_offered`); K11b1 deletes that conversational drive, so the
+ * emit is re-anchored onto `ButtonStore.emit` + the channel renderer, and the
+ * two `state.phase` phase-walk assertions (engine-drive only, no non-engine
+ * analog) are dropped. Every button-primitive assertion — render body, tap
+ * delivery, idempotent re-delivery, unknown-prompt rejection, cross-channel
+ * `ButtonChoice` parity — is preserved.
  *
- *   Given (S1): an interview-engine spawn with one hardcoded phase that emits
- *     a 4-option `ButtonPrompt` body="What's your name?" via the Telegram
- *     adapter. A mock Telegram callback shipper.
- *   When:  mock Telegram delivers a `callback_query` with
- *     `callback_data='btn:<base64url-prompt-id>:opt-A'` for the first
- *     option's value.
- *   Then:  `ButtonStore.resolve` records the choice; the engine receives
- *     a `ButtonChoice{choice_value:'opt-A'}`; engine advances; subsequent
- *     re-delivery of the same callback returns `was_new:false`; second
- *     callback for an unknown prompt_id returns 200 with `delivered:false`.
- *   Mocks: Telegram client (records `sendMessage` calls); substrate
- *     (returns deterministic single-token-stream).
+ *   Given: a `ButtonPrompt` body="What's your name?" with one option, emitted
+ *     into `ButtonStore` and rendered via the Telegram adapter.
+ *   When:  a mock Telegram `callback_query` with
+ *     `callback_data='btn:<base64url-prompt-id>:opt-A'` arrives.
+ *   Then:  `DefaultButtonRouter.routeChoice` records the choice + surfaces a
+ *     `ButtonChoice{choice_value:'use-telegram-name'}`; re-delivery of the
+ *     same callback returns `was_new:false`; a callback for an unknown
+ *     prompt_id returns `delivered:false`.
  *
  *   S5 EXTENSION: repeat the flow over a mock app-socket adapter
  *   (`channels/adapters/app-socket/socket-server.ts`). Asserts the same
- *   `ButtonChoice` shape arrives at the engine — cross-channel parity.
+ *   `ButtonChoice` shape arrives — cross-channel parity.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -41,38 +50,15 @@ import {
   type AppSocketButtonPromptMessage,
 } from '@neutronai/channels/adapters/app-socket/render-button-prompt.ts'
 import { createMockAppSocketServer } from '@neutronai/channels/adapters/app-socket/socket-server.ts'
-import { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
-import type { PhaseSpecResolver } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
-// 2026-05-10 — the static signup fallback no longer ships A/B/C menu
-// options. These cross-channel button-primitive tests need a prompt
-// WITH options to exercise the tap roundtrip; we inject a deterministic
-// `phaseSpecResolver` stub that returns a single-option spec. The stub
-// is logically equivalent to what the LLM driver would emit when it
-// judges a tap is friendlier than freeform — exercises the wire shape
-// without depending on the old hardcoded menu copy.
+import { buildButtonPrompt, type ButtonChoice } from '@neutronai/channels/button-primitive.ts'
+
+// A prompt WITH options to exercise the tap roundtrip. Logically equivalent to
+// what the LLM driver emits when it judges a tap is friendlier than freeform —
+// exercises the wire shape without depending on any onboarding menu copy.
 const S1_PROMPT_OPTIONS: ReadonlyArray<{ value: string; label: string; body: string }> = [
   { value: 'use-telegram-name', label: 'A', body: 'Use my Telegram display name' },
 ]
 const TEST_SIGNUP_BODY = "What's your name?"
-const fixedSignupResolver: PhaseSpecResolver = {
-  async resolve(bundle) {
-    if (bundle.phase !== 'signup') return null
-    return {
-      phase: 'signup',
-      body: TEST_SIGNUP_BODY,
-      options: S1_PROMPT_OPTIONS.map((o) => ({ ...o })),
-      allow_freeform: true,
-      // 2026-05-14 — T9: signup advances to `instance_provisioned` per
-      // the spec'd flow (was `name_chosen` as a shortcut pre-T9).
-      // instance_provisioned is in AUTO_SKIP_PHASES and falls through
-      // to import_offered.
-      next_phase_on_default: 'instance_provisioned',
-    }
-  },
-}
-import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
-import { InMemoryOnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
-import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 
 interface SendCall {
   text: string
@@ -89,9 +75,6 @@ let tmp: string
 let db: ProjectDb
 let store: ButtonStore
 let router: DefaultButtonRouter
-let stateStore: InMemoryOnboardingStateStore
-let transcript: TranscriptWriter
-let engine: InterviewEngine
 let sendCalls: SendCall[]
 let answerCalls: AnswerCall[]
 let receivedChoiceValues: string[]
@@ -102,23 +85,9 @@ beforeEach(() => {
   applyMigrations(db.raw())
   store = new ButtonStore({ db })
   router = new DefaultButtonRouter({ store })
-  stateStore = new InMemoryOnboardingStateStore()
-  transcript = new TranscriptWriter({ path: join(tmp, 'persona', 'onboarding-transcript.jsonl') })
   sendCalls = []
   answerCalls = []
   receivedChoiceValues = []
-
-  engine = new InterviewEngine({
-    buttonStore: store,
-    stateStore,
-    transcript,
-    sendButtonPrompt: async ({ prompt, topic_id }) => {
-      const rendered = renderButtonPromptTelegram(prompt)
-      sendCalls.push({ text: rendered.text, reply_markup: rendered.reply_markup, topic_id })
-      return { message_id: `msg-${sendCalls.length}`, was_new: true }
-    },
-    phaseSpecResolver: fixedSignupResolver,
-  })
 })
 
 afterEach(() => {
@@ -126,25 +95,35 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+/**
+ * Emit an S1-shaped button prompt into `ButtonStore` and render it through the
+ * Telegram adapter (recording the send). Returns the persisted `prompt_id` —
+ * the same thing the engine's `start()` used to return. This IS the retained
+ * agent-emits-a-button grammar, minus the deleted engine wrapper.
+ */
+async function emitTelegramPrompt(s: ButtonStore, topic_id: string): Promise<string> {
+  const prompt = buildButtonPrompt({
+    body: TEST_SIGNUP_BODY,
+    options: S1_PROMPT_OPTIONS.map((o) => ({ label: o.label, body: o.body, value: o.value })),
+    idempotency_key: `k-${topic_id}`,
+  })
+  const emit = await s.emit(prompt, { topic_id })
+  const rendered = renderButtonPromptTelegram(prompt)
+  sendCalls.push({ text: rendered.text, reply_markup: rendered.reply_markup, topic_id })
+  return emit.prompt_id
+}
+
 function makeCallbackHandler() {
   return buildTelegramCallbackHandler({
     buttonRouter: {
-      // Wrap the production router so we can also feed the engine inline.
-      // The production wiring (S2) lives in `gateway/composition.ts` —
-      // the engine attaches a router-listener; here we mimic that wiring.
       routeChoice: async (input) => {
         const result = await router.routeChoice(input)
         if (result.delivered && result.prompt) {
-          // K4a (refactor) — drive the PRODUCTION engine path (`advance` with
-          // a ButtonChoice), matching the app-ws / chat-bridge button_choice
-          // wiring. The retired `acceptChoice` had zero production callers.
-          await engine.advance({
-            user_id: 'u-1',
-            project_slug: 't1',
-            topic_id: 'topic-1',
-            channel_kind: 'telegram',
-            choice: result.choice,
-          })
+          // Re-anchored (K11a6-rem): the retained button-primitive grammar
+          // resolves the tap via DefaultButtonRouter → ButtonStore.resolve and
+          // surfaces the ButtonChoice HERE. The engine.advance phase-walk that
+          // used to consume it is deleted by K11b1; the choice-delivery
+          // contract lives entirely in the router/store.
           receivedChoiceValues.push(result.choice.choice_value)
         }
         return result
@@ -162,20 +141,15 @@ function makeCallbackHandler() {
 }
 
 describe('button-primitive cross-channel — Telegram round-trip', () => {
-  test('agent emits → render → user-tap → engine receives ButtonChoice', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
+  test('agent emits → render → user-tap → router surfaces ButtonChoice', async () => {
+    const prompt_id = await emitTelegramPrompt(store, 'topic-1')
     expect(sendCalls.length).toBe(1)
     expect(sendCalls[0]?.text).toContain("What's your name?")
 
     const handler = makeCallbackHandler()
-    // Pick the first hardcoded option's value
+    // Pick the first option's value
     const optAValue = S1_PROMPT_OPTIONS[0]?.value ?? 'use-telegram-name'
-    const callback_data = encodeCallbackData(start.prompt_id, optAValue)
+    const callback_data = encodeCallbackData(prompt_id, optAValue)
     const result = await handler({
       id: 'cb-1',
       data: callback_data,
@@ -184,26 +158,14 @@ describe('button-primitive cross-channel — Telegram round-trip', () => {
     expect(result.delivered).toBe(true)
     expect(result.was_new).toBe(true)
     expect(receivedChoiceValues).toEqual([optAValue])
-
-    const state = await stateStore.get('t1', 'u-1')
-    // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned →
-    // import_offered via the AUTO_SKIP walker on the advance choice path.
-    // The user lands on the import-substrate picker, not stranded on
-    // the hidden instance_provisioned transit.
-    expect(state?.phase).toBe('ai_substrate_offered')
     expect(answerCalls.length).toBe(1)
   })
 
   test('re-delivery of the same callback returns was_new=false (idempotent)', async () => {
-    const start = await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
+    const prompt_id = await emitTelegramPrompt(store, 'topic-1')
     const handler = makeCallbackHandler()
     const optAValue = S1_PROMPT_OPTIONS[0]?.value ?? 'use-telegram-name'
-    const callback_data = encodeCallbackData(start.prompt_id, optAValue)
+    const callback_data = encodeCallbackData(prompt_id, optAValue)
     const a = await handler({ id: 'cb-1', data: callback_data, from_user_id: 'u-1' })
     const b = await handler({ id: 'cb-1', data: callback_data, from_user_id: 'u-1' })
     expect(a.was_new).toBe(true)
@@ -211,12 +173,7 @@ describe('button-primitive cross-channel — Telegram round-trip', () => {
   })
 
   test('callback for an unknown prompt_id returns delivered=false', async () => {
-    await engine.start({
-      project_slug: 't1',
-      topic_id: 'topic-1',
-      user_id: 'u-1',
-      signup_via: 'telegram',
-    })
+    await emitTelegramPrompt(store, 'topic-1')
     const handler = makeCallbackHandler()
     const callback_data = encodeCallbackData(
       '00000000-0000-0000-0000-000000000000',
@@ -237,15 +194,13 @@ describe('button-primitive cross-channel — Telegram round-trip', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('button-primitive cross-channel — app-socket round-trip (S5)', () => {
-  test('agent emits via app-socket → user delivers choice → engine receives identical ButtonChoice', async () => {
-    // Boot a SECOND engine wired over the mock app-socket transport.
+  test('agent emits via app-socket → user delivers choice → router surfaces identical ButtonChoice', async () => {
+    // Boot a SECOND store/router wired over the mock app-socket transport.
     const tmpDir2 = mkdtempSync(join(tmpdir(), 'neutron-int-bp-as-'))
     const db2 = ProjectDb.open(join(tmpDir2, 'owner.db'))
     applyMigrations(db2.raw())
     const store2 = new ButtonStore({ db: db2 })
     const router2 = new DefaultButtonRouter({ store: store2 })
-    const stateStore2 = new InMemoryOnboardingStateStore()
-    const transcript2 = new TranscriptWriter({ path: join(tmpDir2, 'persona', 'onboarding-transcript.jsonl') })
     const server = createMockAppSocketServer()
 
     const sentEnvelopes: AppSocketButtonPromptMessage[] = []
@@ -253,23 +208,18 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
       sentEnvelopes.push(env)
     })
 
-    const engine2 = new InterviewEngine({
-      buttonStore: store2,
-      stateStore: stateStore2,
-      transcript: transcript2,
-      sendButtonPrompt: async ({ prompt }) => {
-        const peek = await store2.peek(prompt.prompt_id)
-        if (peek === null) throw new Error('expected ButtonStore row to exist after engine.start')
-        const env = renderButtonPromptAppSocket({
-          prompt,
-          expires_at_ms: peek.expires_at,
-        })
-        server.send(env)
-        await store2.markDelivered(prompt.prompt_id)
-        return { message_id: `socket-${sentEnvelopes.length}`, was_new: true }
-      },
-      phaseSpecResolver: fixedSignupResolver,
+    // Emit + render over the app-socket transport (the retained emit grammar).
+    const prompt = buildButtonPrompt({
+      body: TEST_SIGNUP_BODY,
+      options: S1_PROMPT_OPTIONS.map((o) => ({ label: o.label, body: o.body, value: o.value })),
+      idempotency_key: 'k-as-1',
     })
+    const emitOut = await store2.emit(prompt, { topic_id: 'topic-as-1' })
+    const start_prompt_id = emitOut.prompt_id
+    const peek = await store2.peek(start_prompt_id)
+    if (peek === null) throw new Error('expected ButtonStore row to exist after emit')
+    server.send(renderButtonPromptAppSocket({ prompt, expires_at_ms: peek.expires_at }))
+    await store2.markDelivered(start_prompt_id)
 
     let appSocketChoice: ButtonChoice | null = null
     server.onInbound(async (envelope) => {
@@ -284,35 +234,14 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
       })
       if (result.delivered) {
         appSocketChoice = result.choice
-        // K4a (refactor) — production engine path is `advance` with the choice.
-        await engine2.advance({
-          project_slug: 't2',
-          user_id: 'u-as-1',
-          topic_id: 'topic-as-1',
-          channel_kind: 'app-socket',
-          choice: result.choice,
-        })
       }
     })
 
-    // Drive a fresh interview spawn on the app-socket transport. Use
-    // `signup_via='telegram'` so the rendered prompt keeps all 4 S1
-    // options — this test exercises the app-socket TRANSPORT, not the
-    // web-signup prompt variant. (`signup_via='web'` would drop Option
-    // A — see `s1PromptForSignupVia` in onboarding/interview/engine.ts —
-    // and the optAValue assertion below would fail to match a rendered
-    // option, falling through to the freeform coercion path.)
-    const start = await engine2.start({
-      project_slug: 't2',
-      topic_id: 'topic-as-1',
-      user_id: 'u-as-1',
-      signup_via: 'telegram',
-    })
     expect(sentEnvelopes.length).toBe(1)
     const env = sentEnvelopes[0]!
     expect(env.v).toBe(1)
     expect(env.type).toBe('button_prompt')
-    expect(env.prompt_id).toBe(start.prompt_id)
+    expect(env.prompt_id).toBe(start_prompt_id)
     expect(env.body).toContain("What's your name?")
     expect(env.options.length).toBeGreaterThan(0)
     expect(typeof env.expires_at_ms).toBe('number')
@@ -322,7 +251,7 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
     await server.deliverChoice({
       v: 1,
       type: 'button_choice',
-      prompt_id: start.prompt_id,
+      prompt_id: start_prompt_id,
       choice_value: optAValue,
       speaker_user_id: 'u-as-1',
     })
@@ -330,15 +259,11 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
     expect(appSocketChoice).not.toBeNull()
     expect(appSocketChoice!.choice_value).toBe(optAValue)
     expect(appSocketChoice!.channel_kind).toBe('app-socket')
-    const state = await stateStore2.get('t2', 'u-as-1')
-    // 2026-05-14 — T9 (Codex r1 P2): signup → instance_provisioned →
-    // import_offered via the AUTO_SKIP walker on the advance choice path.
-    expect(state?.phase).toBe('ai_substrate_offered')
 
     // Re-delivery: same envelope should resolve idempotently with was_new=false.
     let secondResult: Awaited<ReturnType<DefaultButtonRouter['routeChoice']>> | null = null
     secondResult = await router2.routeChoice({
-      prompt_id: start.prompt_id,
+      prompt_id: start_prompt_id,
       raw_value: optAValue,
       speaker_user_id: 'u-as-1',
       channel_kind: 'app-socket',
@@ -352,10 +277,9 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
   })
 
   test('cross-channel parity — Telegram + app-socket produce identical ButtonChoice shape (excluding channel_kind)', async () => {
-    // Round-trip the same prompt over BOTH channels in lockstep and
-    // assert the resulting `ButtonChoice` differs only in
-    // `channel_kind` (the rest of the shape is the cross-channel
-    // contract).
+    // Round-trip the same prompt over BOTH channels in lockstep and assert the
+    // resulting `ButtonChoice` differs only in `channel_kind` (the rest of the
+    // shape is the cross-channel contract).
     const tmpA = mkdtempSync(join(tmpdir(), 'neutron-int-parity-tg-'))
     const tmpB = mkdtempSync(join(tmpdir(), 'neutron-int-parity-as-'))
     const dbA = ProjectDb.open(join(tmpA, 't.db'))
@@ -366,48 +290,37 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
     const storeB = new ButtonStore({ db: dbB })
     const routerA = new DefaultButtonRouter({ store: storeA })
     const routerB = new DefaultButtonRouter({ store: storeB })
-    const stA = new InMemoryOnboardingStateStore()
-    const stB = new InMemoryOnboardingStateStore()
-    const trA = new TranscriptWriter({ path: join(tmpA, 'persona', 't.jsonl') })
-    const trB = new TranscriptWriter({ path: join(tmpB, 'persona', 't.jsonl') })
     const server = createMockAppSocketServer()
 
-    const engineA = new InterviewEngine({
-      buttonStore: storeA, stateStore: stA, transcript: trA,
-      sendButtonPrompt: async ({ prompt }) => {
-        renderButtonPromptTelegram(prompt)
-        return { message_id: 'a', was_new: true }
-      },
-      phaseSpecResolver: fixedSignupResolver,
+    // Emit the same S1-shaped prompt into both stores + render over each
+    // channel's adapter.
+    const promptA = buildButtonPrompt({
+      body: TEST_SIGNUP_BODY,
+      options: S1_PROMPT_OPTIONS.map((o) => ({ label: o.label, body: o.body, value: o.value })),
+      idempotency_key: 'k-parity-tg',
     })
-    const engineB = new InterviewEngine({
-      buttonStore: storeB, stateStore: stB, transcript: trB,
-      sendButtonPrompt: async ({ prompt }) => {
-        const peek = await storeB.peek(prompt.prompt_id)
-        if (peek === null) throw new Error('row missing')
-        server.send(renderButtonPromptAppSocket({ prompt, expires_at_ms: peek.expires_at }))
-        return { message_id: 'b', was_new: true }
-      },
-      phaseSpecResolver: fixedSignupResolver,
+    const promptB = buildButtonPrompt({
+      body: TEST_SIGNUP_BODY,
+      options: S1_PROMPT_OPTIONS.map((o) => ({ label: o.label, body: o.body, value: o.value })),
+      idempotency_key: 'k-parity-as',
     })
+    const emitA = await storeA.emit(promptA, { topic_id: 'top' })
+    renderButtonPromptTelegram(promptA)
+    const emitB = await storeB.emit(promptB, { topic_id: 'top' })
+    const peekB = await storeB.peek(emitB.prompt_id)
+    if (peekB === null) throw new Error('row missing')
+    server.send(renderButtonPromptAppSocket({ prompt: promptB, expires_at_ms: peekB.expires_at }))
 
-    // Both engines use `signup_via='telegram'` so the rendered options
-    // include Option A; the test asserts CROSS-CHANNEL parity (telegram
-    // vs app-socket TRANSPORT), not cross-signup-channel. Web signups
-    // drop Option A — see `s1PromptForSignupVia` in
-    // onboarding/interview/engine.ts.
-    const startA = await engineA.start({ project_slug: 'tA', topic_id: 'top', user_id: 'u', signup_via: 'telegram' })
-    const startB = await engineB.start({ project_slug: 'tB', topic_id: 'top', user_id: 'u', signup_via: 'telegram' })
     const optAValue = S1_PROMPT_OPTIONS[0]?.value ?? 'use-telegram-name'
 
     const tgResult = await routerA.routeChoice({
-      prompt_id: startA.prompt_id,
+      prompt_id: emitA.prompt_id,
       raw_value: optAValue,
       speaker_user_id: 'u',
       channel_kind: 'telegram',
     })
     const asResult = await routerB.routeChoice({
-      prompt_id: startB.prompt_id,
+      prompt_id: emitB.prompt_id,
       raw_value: optAValue,
       speaker_user_id: 'u',
       channel_kind: 'app-socket',
