@@ -40,7 +40,6 @@ import { TranscriptWriter } from '../transcript.ts'
 import type { LlmRouter, RouterDecision } from '../llm-router.ts'
 import type { PlatformAdapter, PlatformInstanceInfo } from '../../../runtime/platform-adapter.ts'
 import type { OnboardingPhase } from '../phase.ts'
-import { detectImportSourceMention } from '../interaction-mode.ts'
 import {
   stubRouter as sharedStubRouter,
   stubPlatform as sharedStubPlatform,
@@ -179,67 +178,14 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-describe('detectImportSourceMention — deterministic source-token detector', () => {
-  test.each<[string, 'chatgpt' | 'claude']>([
-    ['can I do claude instead?', 'claude'],
-    ['switch to claude', 'claude'],
-    ['actually let me use anthropic', 'claude'],
-    ['can I do chatgpt instead?', 'chatgpt'],
-    ['use chat gpt', 'chatgpt'],
-    ['openai please', 'chatgpt'],
-    ['my gpt export', 'chatgpt'],
-    // Argus r2: a leading negation is overridden ONLY by a CLAUSE BOUNDARY
-    // (comma / but / actually) followed by a keep/switch verb — a clear
-    // "keep the current one" clause. The user IS affirming the source.
-    ['no, keep chatgpt', 'chatgpt'],
-    ['no, keep claude', 'claude'],
-    ['no, switch to claude', 'claude'],
-    ['not chatgpt, actually keep claude', 'claude'],
-    // Argus r3 + Codex: scan ALL occurrences of a source, not just the first.
-    // The first `claude` is negated ("dont have the claude export yet") but the
-    // second is affirmed ("switch to claude") → the source is mentioned. A
-    // first-match-only detector returned null here and auto-honored a late
-    // chatgpt upload, re-opening the #98 dead-end.
-    [
-      'I dont have the claude export yet, but switch to claude',
-      'claude',
-    ],
-  ])('%p → %p', (text, expected) => {
-    expect(detectImportSourceMention(text)).toBe(expected)
-  })
+// K11a3: the `detectImportSourceMention` — deterministic source-token
+// detector` unit-test describe block moved verbatim to
+// `./import-source-copy.test.ts` beside the new leaf module
+// (`../import-source-copy.ts`). This file keeps the engine-driven
+// integration half below.
 
-  test.each([
-    'is it done?',
-    'how long does this take',
-    'go back',
-    'wrong one',
-    'hmm',
-    'ok',
-    // ambiguous — names BOTH sources
-    'claude or chatgpt, which is better?',
-    // Argus r1b IMPORTANT: a NEGATED source mention is not a switch target —
-    // "I don't have a GPT export" must NOT record a chatgpt switch-intent.
-    "I don't have a GPT export",
-    'no claude export here',
-    "haven't got a chatgpt export",
-    // Argus r2 BLOCKER: a negation + a DIRECT-OBJECT verb is a DECLINE of the
-    // named source, not an affirmation — these must stay negated → null so the
-    // decline never records a bogus switch-intent that refuses the user's own
-    // legitimate upload of the staged source (the #98 dead-end).
-    'I dont want claude',
-    "I don't want claude",
-    'dont use claude',
-    'dont use gpt',
-    'never use chatgpt',
-    'I dont want chatgpt',
-    // A bare affirm verb with NO clause boundary stays a continuation of the
-    // negation — "don't keep claude" declines claude.
-    'dont keep claude',
-  ])('%p → null (no unambiguous switch target)', (text) => {
-    expect(detectImportSourceMention(text)).toBeNull()
-  })
-})
-
+// K11a6: re-anchor this race pin on notifyImportUpload + stateStore before
+// K11b1.
 describe('ISSUES #98 — explicit switch must not auto-import the abandoned source', () => {
   /** THE core reproduce: mid-chatgpt-upload → explicit Claude switch →
    *  chatgpt upload lands → it must NOT auto-import chatgpt. */

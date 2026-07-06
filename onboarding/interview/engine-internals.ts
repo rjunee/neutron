@@ -60,7 +60,7 @@ import type {
   AgentNameSuggesterResult,
   AgentNameSuggestions,
 } from './agent-name-suggester.ts'
-import { detectImportSourceMention } from './interaction-mode.ts'
+import { detectImportSourceMention } from './import-source-copy.ts'
 import type { LlmRouter } from './llm-router.ts'
 import type {
   CharacterSuggesterResult,
