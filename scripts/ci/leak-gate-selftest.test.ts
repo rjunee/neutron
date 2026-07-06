@@ -147,6 +147,23 @@ describe('G8 leak-gate — planted findings FAIL', () => {
     }
   })
 
+  test('RT1: a NON-root SPEC.md is allowed (forbidden-path is root-exact)', () => {
+    // The tripwire bans a *root* SPEC.md only — `detectRalphMode` keys off the
+    // git-root file. A nested `docs/SPEC.md` (or any subdir spec) must NOT trip
+    // the gate, or legitimate spec docs would be un-committable. Pins the
+    // exact-root boundary of the FORBIDDEN_EXACT rule.
+    const dir = freshTree()
+    try {
+      mkdirSync(join(dir, 'docs'))
+      writeFileSync(join(dir, 'docs', 'SPEC.md'), '# a perfectly fine nested spec\n')
+      const { code, out } = runGate(dir)
+      expect(out).toContain('LEAK GATE: SILENT')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a missing/stub LICENSE trips license-stub', () => {
     // No LICENSE copied → the Apache-2.0 check fails.
     const dir = mkdtempSync(join(tmpdir(), 'leak-gate-nolicense-'))

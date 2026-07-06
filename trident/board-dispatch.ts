@@ -90,7 +90,11 @@ export interface BoardBoundBuildDeps {
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   /** Defaults to `detectMergeMode` over the production probe. Test seam. */
   resolveMergeMode?: () => Promise<MergeMode>
-  /** Defaults to `detectRalphMode`. Test seam. */
+  /**
+   * RT1 refactor-window override: default is forced `false` (see the
+   * dispatch body); an explicit resolver still wins. K10 restores the
+   * `detectRalphMode` default. Test seam.
+   */
   resolveRalph?: () => Promise<boolean>
   chat_id?: string | null
   thread_id?: string | null

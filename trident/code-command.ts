@@ -154,7 +154,9 @@ export interface TridentCodeContext {
   resolveMergeMode?: () => Promise<MergeMode>
   /**
    * Resolve whether this build is governed (Ralph one-task-per-context
-   * loop). Defaults to `detectRalphMode` (a `SPEC.md` at the git root).
+   * loop). RT1 refactor-window override: the default is forced `false`
+   * (see board-dispatch.ts) — an explicit resolver still wins. K10 restores
+   * the `detectRalphMode` default (a `SPEC.md` at the git root) governs.
    */
   resolveRalph?: () => Promise<boolean>
   /** Chat thread context persisted on the run for status posts. */
@@ -303,9 +305,14 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`
 }
 
+// RT1 refactor-window note: the Ralph auto-governed line is intentionally
+// omitted from HELP_TEXT while board-dispatch forces `ralph=false` (a root
+// SPEC.md is leak-gate-forbidden during the window). K10 restores the
+// "Governed repos (a `SPEC.md` at the root) run the Ralph plan↔task loop
+// automatically." bullet when real governed mode comes back.
 const HELP_TEXT = `Code build — \`/code\` cheatsheet (powered by foundational Trident):
 
-- \`/code <task description>\` — autonomous Forge → Argus → merge loop. Governed repos (a \`SPEC.md\` at the root) run the Ralph plan↔task loop automatically.
+- \`/code <task description>\` — autonomous Forge → Argus → merge loop.
 - \`/code stop\` (alias \`/code cancel\`) — stop the most-recent in-flight build in this project.
 - \`/code stop <run_id>\` — stop a specific run by id (prefix ok).
 
