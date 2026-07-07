@@ -12,6 +12,18 @@ Acceptance contract: after this PR, every remaining `engine.start(`/`engine.adva
 
 Judgments are appended one commit per file as they are made (session-resumable protocol).
 
+**New survivor tests added by this unit (additive, engine-free, pass at HEAD and post-K11b1):**
+- `onboarding/interview/__tests__/validate-agent-name.test.ts` — retained canonical validator direct pin
+- `onboarding/interview/__tests__/max-oauth-offered-prompt-spec.test.ts` — retained STATIC copy + builder branches
+- `onboarding/interview/__tests__/onboarding-envelope-timezone-rule.test.ts` — live envelope never-ask-timezone rule
+- `gateway/realmode-composer/__tests__/wow-channel-adapter-undelivered.test.ts` — retained emitPrompt/sendText undelivered contract
+
+**PR-B (K11b1) operational summary:** delete every file marked DIE in §1/§2/§3/§4 below, plus the
+fixture `tests/fixtures/m2/mira-conversational-tangents.json`; do NOT touch
+`path1-solicited-upload-starts-job.test.ts` (§4b survivor) or any file in §5. If a §4b coverage
+citation names a test that PR-B's final tree also deletes, re-run this manifest's check for that
+row (none known at write time — every citation was verified engine-free at HEAD).
+
 ---
 
 ## 1. Per-file judgments (lists A + D — adjudicated in this unit)
