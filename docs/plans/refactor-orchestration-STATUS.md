@@ -76,8 +76,26 @@ land — it is what a fresh context reads to resume without re-deriving anything
       unit/.env — a live-fleet fact only Ryan can confirm. Removing a 2-line back-compat shim isn't
       worth an unverifiable misconfigured-Managed outage. **Unblock:** Ryan confirms no live box sets
       `NEUTRON_DEPLOYMENT_MODE=`. Exec-plan §8 carries the full DEFERRED banner + unblock condition.
-    - **Remaining autonomous tail:** K11c (OAuth sources purge / D-K11-7), K11d (retained-but-dead
-      prune — MUST co-delete the 2 wow/final-handoff survivors), K11b3 (web:-registry comment-truth), K10 (docs cluster).
+    - **✅ K11c DONE (#247, main green 2026-07-07):** dead OAuth import sources purged (`ImportSource`
+      → `chatgpt-zip | claude-zip`), +32/−765. Resolves **D-K11-7 → (a) delete**. Codex r1 boundary
+      fix (parser `default` arm / resume 409 `unsupported_source` / probe — migration 0040 CHECK still
+      permits legacy `-oauth` strings). NOTE: auto-merge fired on required checks before the (non-required)
+      full `test` check finished — harmless (main CI went green after) but **for tail units block on the
+      `test` check explicitly, do NOT use `gh pr merge --auto`.**
+    - **✅ K11d DONE (#248, main green 2026-07-07):** dead wow-push/final-handoff/max_oauth cluster
+      deleted, **~12.7k LOC**. Verified DEAD 3 ways (audit + Fable + grep) — **corrects the #243
+      "live-reachable" mislabel**: `emitCurrentPhasePrompt` was orphaned by #243's own dispatcher
+      deletion (0 prod callers). The 2 #243 survivor tests deleted WITH the cluster. Codex r1: 2 contract-honesty
+      fixes (dead deps on landing-stack/engine contracts) applied; the `max_oauth_offered`/`wow_fired`
+      **phase-prompts "dead CTA" finding DECLINED as pre-existing** (K11d doesn't touch phase-prompts.ts;
+      phases unreachable on main+branch; Fable confirmed behavior-preserving). Full trace in PR #248 comment.
+    - **🆕 K11e FILED (follow-up, exec-plan §8b):** prune the orphaned `max_oauth_offered`/`wow_fired`/etc.
+      phase DEFINITIONS (phase-prompts + enum + transitions). ⚠️ NOT data-only — `POST_MAX_OAUTH_PHASES`
+      (`resolve-onboarding-phase.ts:47-48`) is LIVE creds-gate logic; legacy sqlite rows at these phase
+      strings need a compat decision (served-by-path trap). Needs its own liveness pass; Managed-adjacent.
+    - **Remaining autonomous tail:** K11e (phase-def prune, needs liveness pass), K11b3 (web:-registry
+      comment-truth — WowChannelAdapter bullet now MOOT, deleted with build-wow-dispatcher.ts in K11d),
+      K10 (docs cluster). K11b2 owner-gated (above).
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
