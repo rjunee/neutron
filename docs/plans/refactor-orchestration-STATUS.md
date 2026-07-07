@@ -14,14 +14,25 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `7855767` — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
-  K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **K11 IN PROGRESS:** all **K11a** leaf-extraction +
-  re-anchor units merged; **K11a6-remainder** re-anchors merged (coverage-loss caught 5× by Codex,
-  each split into `*.die.test.ts`); **K11b0** (dead web-chat `ChatBridge` excision — the K11b1
-  prerequisite) merged as **#240** (`7855767`). Remaining: **K10** (docs cluster,
-  orchestrator-managed) and **K11b1** (the conversational-drive deletion — now UNBLOCKED),
-  then K11c/K11d/K11b2/K11b3 + D-K11-4 rider. K4b deferred.
-  **CI GREEN.**
+- **main HEAD:** `954779c` — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+  K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
+  onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
+  prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
+  **#243 K11b1** (the deletion: engine drive methods + llm-router/interaction-mode/resume-cron/
+  start-onboarding whole modules + §7.5 dual-site flag purge + ~70 DIE tests). Remaining: **K10**
+  (docs cluster) + the **K11 TAIL** — D-K11-4 (`rate_limit_paused` rider), K11c (OAuth sources /
+  D-K11-7), K11d (retained-but-dead prune: wow/final-handoff cluster + `engine-agent-name.ts` +
+  suggestion branches + `consumeImportAnalysisPresentedChoice`), K11b2 (`NEUTRON_DEPLOYMENT_MODE`),
+  K11b3 (web:-registry comment-truth). K4b deferred. **CI GREEN.**
+  - **✅ K11b1 (#243, merged 2026-07-07):** coverage preserved by K8 rule, verified via **tsc
+    ground-truth** (the K11a6 DIE manifest over-deleted the final-handoff family — tsc showed the 9
+    builder tests compile; caught 4 survivors needing FIXES the manifest missed). **Codex caught 2
+    real coverage-loss blockers** (round 1): the wow-push idempotency + final-handoff prompt
+    contracts are reachable from the **retained** `emitCurrentPhasePrompt` auto-advance path
+    (`max_oauth_offered` + Max attached) — NOT dead as the manifest assumed. Re-anchored onto that
+    seam (`wow-push-autoadvance-survivor` + `final-handoff-render-survivor`, 19 tests incl. a
+    credential-gate anti-self-fulfilling check) → Codex round-2 APPROVE. **⚠️ K11d must delete those
+    2 survivors WITH the wow/final-handoff cluster prune.**
   - **✅ K11b0 (#240, merged 2026-07-06):** excised `buildWebChatBridge` + bridge-only helpers
     (chat-bridge.ts 2522→552 lines); re-pointed 4 live slug-compare sites onto `constantTimeEqual`
     (the anti-enumeration invariant, ISSUE #34, was previously enforced ONLY on the dead bridge —
@@ -47,10 +58,11 @@ land — it is what a fresh context reads to resume without re-deriving anything
     4 missed paired-edits (D-K11-4 `rate_limit_paused` live route, §7.5 flag also in retained
     resolver, C2 barrel re-exports, D-K11-7 unowned OAuth purge). **Read those callouts before
     running any K11 sub-unit.**
-  - **RESUMED (2026-07-06, autonomy grant):** K11a + K11a6-remainder + K11b0 driven to merge.
-    **Next: K11b1** — before dispatch, grep the Managed repo for `onboarding_resume_cron` /
-    `handleStartOnboarding` (D-K11-1) cross-repo, since K11b1 deletes `resume-cron.ts` +
-    `start-onboarding.ts` wholesale.
+  - **RESUMED (2026-07-06/07, autonomy grant):** K11a + K11a6-remainder + K11b0 + K11a6-completion
+    + K11b1 all driven to merge (D-K11-1 cleared — Managed grepped clean, vendors Open via submodule).
+    **Next: the K11 tail** — start with D-K11-4 (`rate_limit_paused` rider) then K11c/K11d/K11b2/K11b3.
+    See [[neutron-open-k11b1-drive-deletion]] memory for the DIE-manifest≠tsc-ground-truth + Codex
+    live-path lessons.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
