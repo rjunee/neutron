@@ -97,7 +97,48 @@ PR-B deletes the cohort it has zero importers. No retained behavior of its own.
 
 ## 3. K11a5-pinned survivors (list D) resolved
 
-(appended as decided)
+### `onboarding/interview/__tests__/open-mode-phase-walk.test.ts` — DIE
+Every assertion is reached through `engine.start`/`engine.advance` walks (open + managed), i.e.
+the conversational drive K11b1 deletes. The pinned behaviors and their survivability:
+- **Open route topology (cut phases never entered / kept phases entered):** the WALK is the dead
+  drive. The retained transition-table + AUTO_SKIP_PHASES invariants are pinned engine-free by
+  `onboarding/interview/__tests__/phase-transition-table.test.ts` (#239 split survivor).
+- **Open-mode onboarding progression in PROD** runs through the composer (`appWsChatTurn` +
+  `on_session_open` + post-turn extractor), NOT this walk — covered by
+  `open/__tests__/onboarding-warm-conversational.test.ts`, `post-turn-extractor.test.ts` +
+  `post-turn-extractor-removed-projects.test.ts`, and the reconnect/on_session_open suites
+  (`tests/integration/import-watch-rearm-on-reconnect.open.test.ts`).
+- **max_oauth_offered local setup-token affordance + OpenAI-key rejection + SecretsStore
+  persist:** the engine handler (`engine.ts` `persistSetupTokenAndAdvance` :8939, OpenAI guard
+  :8954-8968) is a private helper reachable ONLY from the deleted drive → orphaned, dies with
+  §7.2. The PROD open setup-token capture is `open/install-token-handoff.ts`
+  (`SETUP_TOKEN_RE` :46 rejects non-`sk-ant-oat` pastes) + the landing paste page — pinned by
+  `open/__tests__/install-token-handoff.test.ts`,
+  `tests/integration/sprint23-paste-token-handoff.open.test.ts`,
+  `tests/integration/install-auth-gate.test.ts`.
+- **Managed slug derivation (`agent_name_chosen` → `slug_chosen` + `suggested_slug`):** Managed
+  provisions Open boxes and never drives the engine in prod (plan §6 addendum) — drive-exclusive.
+Owner adjudication of record (plan §6 addendum, 2026-07-06): "K11a5's two 'byte-unmodified'
+pinned tests BOTH DIE — that pin was an as-built move-integrity check for the pre-K11b1 tree,
+never a forward-compat guarantee across K11b1." Byte-unchanged this unit; co-deletes in K11b1.
+
+### `onboarding/interview/__tests__/engine-agent-name-suggestion-wiring.test.ts` — DIE
+All 10 tests harness `engine.advance` (8 call sites) to reach the agent-name suggestion render/
+consume machinery. Survivability of the pinned behavior:
+- The memoize/source-guard/re-roll wiring lives in RETAINED-BUT-DEAD `engine-agent-name.ts`
+  (`getOrStartAgentNameSuggestions` :405, `consumeAgentNameChosenChoice` :54): owner decision
+  (plan §6 addendum) — "its 'live open half' liveness held only within the dead phase machine;
+  leave it retained-but-dead in K11b1; prune in K11d." It is scheduled dead code, NOT retained
+  live behavior; keeping a drive-shaped pin (or re-anchoring one onto it) would obstruct the
+  K11d prune while protecting nothing prod-reachable. Deliberately un-pinned per that decision.
+- **Genuinely retained-LIVE sub-behaviors are covered engine-free:**
+  - `agent-name-suggester.ts` (Managed ABI, retained): `buildDiverseAgentNameFallback`,
+    `STATIC_AGENT_NAME_FALLBACK`, generation contract →
+    `onboarding/interview/__tests__/agent-name-suggester.test.ts` (zero engine calls).
+  - `buildAgentNameChosenPromptSpec` button rendering (name buttons, rationale-tail strip,
+    reserved/short-name filtering, freeform-on) →
+    `onboarding/interview/__tests__/agent-name-chosen-prompt-spec.test.ts` (zero engine calls).
+Byte-unchanged this unit; co-deletes in K11b1.
 
 ## 4. In-package dying suites (plan §7.4 cohort) — verified drive-harness DIEs
 
