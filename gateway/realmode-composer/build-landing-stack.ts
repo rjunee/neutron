@@ -38,15 +38,12 @@ import {
   type ImportJobRunnerHook,
   type ImportPayloadResolver,
   type ImportResumeReadinessProbe,
-  type MaxOAuthEngineHook,
   type MaxOauthSecretsStore,
   type PersonaComposerHook,
   type PersonaSyncHook,
   type ProfilePicEngineHook,
   type SlugHistoryLookup,
   type SlugPickerEngineHook,
-  type WowDispatcherHook,
-  type WowPushEmitter,
 } from '../../onboarding/interview/engine.ts'
 import type { SqliteOnboardingStateStore as OnboardingStateStoreType } from '../../onboarding/interview/sqlite-state-store.ts'
 import { PersonaComposer } from '../../onboarding/persona-gen/compose.ts'
@@ -189,42 +186,6 @@ export interface BuildLandingStackInput {
    * static spec path identically to today.
    */
   phaseSpecResolver?: PhaseSpecResolver | null
-  /**
-   * T2 r2 (2026-05-13) — wow-moment dispatcher hook. Production wraps
-   * the real `WowDispatcher` (built from the gateway's ReminderStore /
-   * CronJobRegistry / CronStateStore / WowChannelAdapter / WowTelemetry)
-   * in a closure that pins the FROZEN `internal_handle` as the dispatch
-   * identity (NOT the mutable url_slug) so rename across the wow_fired
-   * transition does not orphan the dispatched rows. Tests inject a
-   * recorder via this field directly.
-   *
-   * When `null`/undefined, the engine treats `wow_fired` as a silent
-   * transit (advance phase, no entry body emit) — the previous
-   * behaviour before the T2 wiring. The body emission is gated on a
-   * wired hook to avoid the "active-lie" copy Argus called out in r1
-   * (PR shipped the body but no production dispatcher).
-   */
-  wowDispatcher?: WowDispatcherHook | null
-  /**
-   * 2026-05-22 (push-deeplink-wow sprint) — wow-moment push emitter.
-   * When supplied (production composer closes over the per-instance
-   * `PushDispatcher` + `DevicePushTokenStore` via
-   * `gateway/wow-push-emitter.ts:emitWowPush`), the engine fires it
-   * once per instance on entry into `dispatchWowAndAdvance`. When
-   * undefined/null, the engine no-ops the push step but still drives
-   * the wow dispatcher; the system stays correct under the legacy
-   * pre-sprint behaviour.
-   */
-  wowPushEmitter?: WowPushEmitter | null
-  /**
-   * 2026-05-28 sidebar + per-project chat topology sprint — handoff
-   * hook fired on the `wow_fired` → `completed` transition. The
-   * production composer wires `buildOnboardingHandoffHook(...)` from
-   * `gateway/realmode-composer/build-onboarding-handoff.ts` against
-   * the same `ButtonStore` the engine emits through; tests pass a
-   * recorder or omit (the engine no-ops the handoff gracefully).
-   */
-  onboardingHandoff?: import('../../onboarding/interview/engine.ts').OnboardingHandoffHook | null
   /**
    * Item 5 (2026-06-11, ISSUES #208) — optional LLM opening-message
    * composer threaded into `buildOnboardingHandoffHook` to compose the
@@ -567,35 +528,6 @@ export interface BuildLandingStackInput {
    * surfaces the "Connect failed" rejection on Done.
    */
   secrets?: MaxOauthSecretsStore
-  /**
-   * 2026-05-28 — Max OAuth handoff hook. Threads into the engine so
-   * the "Connect Claude Max" CTA actually fires the upstream handoff.
-   * Production wires this against `MaxOAuthClient` (see
-   * `gateway/index.ts`). Optional — when omitted, the engine renders
-   * "Connect failed; tap to try again." on tap and the user is stuck
-   * until the dep is wired.
-   */
-  maxOauth?: MaxOAuthEngineHook
-  /**
-   * 2026-05-28 PR #331 fast-follower — Telegram-bind token minter.
-   * Threads into the engine so the final-handoff
-   * `[B] Connect a Telegram bot` button can surface a verifiable
-   * `t.me/<bot>?start=bind_<token>` deep link. Production composer
-   * (`gateway/index.ts`) wires this via `buildMintTelegramBindToken`
-   * against `NEUTRON_TELEGRAM_BIND_SECRET`; when the secret is unset
-   * (dev / smoke deploys) the field stays `undefined` and the engine
-   * falls back to its per-request opaque nonce — still grammar-safe
-   * for Telegram's start payload, but non-verifiable.
-   *
-   * Pre-PR #331 fast-follower the dep existed only on the engine
-   * (added in PR #331) without a production wiring path, so every
-   * production deep-link URL fell through to the nonce branch. Argus
-   * r1 (2026-05-28) IMPORTANT #2 — this thread closes that loop.
-   */
-  mintTelegramBindToken?: (input: {
-    project_slug: string
-    user_id: string
-  }) => Promise<string | null>
 }
 
 /**
@@ -708,12 +640,11 @@ export interface OnboardingEnginePieces {
   stateStore: SqliteOnboardingStateStore
   transcript: TranscriptWriter
   registry: import('../http/chat-sender-registry.ts').WebChatSenderRegistry
-  wowDispatcher: WowDispatcherHook | null
   /**
    * T4 (2026-05-13) — history-import job-runner hook surfaced on the
    * shared fixture bag so the wiring regression test
    * (`import-running-composer.test.ts`) can assert the engine receives
-   * a non-null hook by default. Mirrors `wowDispatcher` from T2 r2.
+   * a non-null hook by default.
    */
   importJobRunner: ImportJobRunnerHook | null
   /**
@@ -740,10 +671,9 @@ export interface OnboardingEnginePieces {
 
 /**
  * Build the InterviewEngine + its supporting per-instance fixtures the
- * same way production does. Exported so the T2 r2 wiring regression
- * test asserts the engine receives the `wowDispatcher` hook by
- * default (Argus BLOCKING #1: the original PR shipped a hook
- * interface with NO production call site).
+ * same way production does. Exported so the wiring regression tests can
+ * drive the SAME engine path production walks without spinning the
+ * entire HTTP / WS stack.
  */
 export function buildOnboardingEnginePieces(
   input: BuildLandingStackInput,
@@ -791,31 +721,6 @@ export function buildOnboardingEnginePieces(
       : input.personaComposer
   const phaseSpecResolver: PhaseSpecResolver | null = input.phaseSpecResolver ?? null
   const engineSlugHistory: SlugHistoryLookup | null = input.engineSlugHistory ?? null
-  // T2 r2 (2026-05-13) — wow-moment dispatcher hook.
-  //
-  // Resolution order:
-  //   1. Caller-supplied `input.wowDispatcher` (tests inject a recorder).
-  //   2. `null` explicitly → silent-transit fallback (the engine treats
-  //      `wow_fired` as a no-op transit phase; phase advances with no
-  //      entry body emit, the prior pre-T2 behaviour).
-  //   3. Undefined → BUILD the real dispatcher via
-  //      `buildWowDispatcherHook(...)` using the deps already in scope
-  //      (db, owner_home, webRegistry, buttonStore). Production walks
-  //      this path so a wow_fired transition actually fires the
-  //      catalogue actions instead of stranding the user at "Setting
-  //      up your first week..." with nothing behind it.
-  //
-  // The explicit `null` carve-out exists for callers that want to opt
-  // out (legacy boot paths during the wiring rollout; never invoked in
-  // production now, but it avoids breaking the contract for in-process
-  // test composers that pre-date this builder).
-  // Item 4 (2026-06-11) — materializer enrichments for action 03.
-  // Composer: LLM doc synthesis over the SAME CC substrate the import
-  // pipeline uses (no substrate wired → deterministic template docs).
-  // Indexer: project page through writeEntity(kind='project') into the
-  // SAME entities/ tree + GBrain hook the import entity-populator
-  // targets, so the Item-1 agent's memory recall surfaces projects.
-  const wowDispatcher: WowDispatcherHook | null = input.wowDispatcher ?? null
   // Codex r2 P1 + r3 P1 (post-T4) — default-build a ChainedImportPayloadResolver
   // combining:
   //   1. UrlPasteImportPayloadResolver — picks up the user's pasted URL
@@ -926,7 +831,6 @@ export function buildOnboardingEnginePieces(
     ...(personaSync !== null ? { personaSync } : {}),
     ...(personaComposer !== null ? { personaComposer } : {}),
     ...(phaseSpecResolver !== null ? { phaseSpecResolver } : {}),
-    ...(wowDispatcher !== null ? { wowDispatcher } : {}),
     ...(importJobRunner !== null ? { importJobRunner } : {}),
     ...(importPayloadResolver !== null ? { importPayloadResolver } : {}),
     // ND2 (2026-06-28) — the Path-1 conversational upload affordance is offered
@@ -992,7 +896,6 @@ export function buildOnboardingEnginePieces(
     stateStore,
     transcript,
     registry,
-    wowDispatcher,
     importJobRunner,
     importPayloadResolver,
     importResumeReadiness,
