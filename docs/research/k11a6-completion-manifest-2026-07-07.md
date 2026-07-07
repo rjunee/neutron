@@ -20,7 +20,19 @@ Judgments are appended one commit per file as they are made (session-resumable p
 
 ## 2. List C — pure-drive DIE, verified + coverage-cited (co-delete in K11b1)
 
-(appended as verified)
+### `tests/integration/conversational-onboarding-end-to-end.test.ts` — DIE
+Verified pure-drive: every assertion exercises the `phaseSpecResolver`+`llmRouter` pair through
+the REAL engine drive (`engine.start`/`advance` × 7) — free-text prompt emission, router
+acknowledgment bubbles, router `state_delta` → `phase_state`, recent-turns consult. All of that
+is the conversational drive + router + `dispatchRouterDecision` + the `state_delta` allow-key
+guard, ALL deleted by K11b1 (§7.2/§7.3). Retained sub-behaviors covered elsewhere:
+- prompt body copy / resolver: `onboarding/interview/__tests__/phase-spec-resolver.test.ts`,
+  `phase-prompts-no-leak.test.ts`, `phase-prompts-no-30-seconds.test.ts` (no drive calls).
+- the PROD replacement for "LLM-driven conversational onboarding" (composer live-agent turn):
+  `open/__tests__/onboarding-warm-conversational.test.ts` (warm cc-llm session + pre-warm) and
+  field extraction via `onboarding/interview/__tests__/post-turn-extractor.test.ts` +
+  `post-turn-extractor-removed-projects.test.ts` (the retained extraction seam that replaced
+  router `state_delta` in prod).
 
 ## 3. K11a5-pinned survivors (list D) resolved
 
