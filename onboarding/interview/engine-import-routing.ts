@@ -1188,11 +1188,7 @@ export async function pollImportRunningAndAdvance(
             ? 'ChatGPT'
             : source === 'claude-zip'
               ? 'Claude'
-              : source === 'gmail-oauth'
-                ? 'Gmail'
-                : source === 'calendar-oauth'
-                  ? 'Calendar'
-                  : source ?? 'your history'
+              : source ?? 'your history'
         // v0.1.78 — three body shapes overlay the normal pass1/pass2 bubble:
         //   1. rate_limit_cooling_off — "rate limit cooling off, resuming"
         //   2. rate_limit_paused — "still waiting on rate limit"

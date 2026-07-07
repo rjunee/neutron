@@ -207,14 +207,24 @@ describe('POST /api/import/<job_id>/resume', () => {
     expect(runnerStartCalls).toBe(0)
   })
 
-  test('OAuth sources skip the ZIP-on-disk check', async () => {
+  test('409 unsupported_source for a legacy non-zip row — refused, never dispatched (K11c Codex r1)', async () => {
+    // A legacy `gmail-oauth` row can still exist because migration 0040's
+    // `import_jobs.source` CHECK constraint (immutable history) permits it,
+    // even though `ImportSource` is now narrowed to the two zip sources.
+    // The K11c OAuth-source purge removed the code that once bypassed the
+    // ZIP check for such rows; the handler must now refuse it cleanly.
     seedImportJob({ job_id: 'job-old', status: 'cancelled', source: 'gmail-oauth' })
-    zipExists = false // would block for *-zip; OAuth bypasses
     const handler = makeHandler()
     const res = await handler(
       new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
     )
-    expect(res!.status).toBe(200)
+    expect(res!.status).toBe(409)
+    const body = (await res!.json()) as Record<string, any>
+    expect(body.error).toBe('unsupported_source')
+    expect(body.source).toBe('gmail-oauth')
+    // Never resolved or dispatched.
+    expect(payloadResolveCalls).toBe(0)
+    expect(runnerStartCalls).toBe(0)
   })
 
   test('401 when auth gate denies the request', async () => {

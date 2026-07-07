@@ -307,10 +307,14 @@ export function buildImportResumeReadinessProbe(
       if (row === null) return false
       if (!RESUMABLE_STATUSES.includes(row.status)) return false
       const source = row.source as ImportSource
-      if (source === 'chatgpt-zip' || source === 'claude-zip') {
-        const zipPath = zipPathForSource(input.owner_home, source)
-        if (!fs.existsSync(zipPath)) return false
-      }
+      // Defensive boundary (K11c Codex r1): `row.source` is an unvalidated
+      // DB string. Only the two zip sources are resumable; any legacy non-zip
+      // `-oauth` string a historical row could carry (migration 0040's CHECK
+      // still permits them) is NOT resumable, so the UI never advertises an
+      // impossible resume button for it.
+      if (source !== 'chatgpt-zip' && source !== 'claude-zip') return false
+      const zipPath = zipPathForSource(input.owner_home, source)
+      if (!fs.existsSync(zipPath)) return false
       return true
     },
   }

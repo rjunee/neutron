@@ -13,11 +13,6 @@
 export type ImportSource =
   | 'chatgpt-zip'
   | 'claude-zip'
-  | 'gmail-oauth'
-  | 'calendar-oauth'
-  | 'drive-oauth'
-  | 'notion-oauth'
-  | 'slack-oauth'
 
 export type ImportJobStatus =
   | 'queued'
@@ -153,12 +148,9 @@ export interface Chunk {
    * **Codex r1 fix (post-initial-commit):** the threshold counts every
    * role EXCEPT `assistant` (which is the prior LLM reply, not the
    * signal we're triaging). This includes `user` (ChatGPT/Claude user
-   * turns), `event` (calendar imports + Gmail received-message rows),
-   * `tool` (tool-call outputs), and `system`. v1 of this filter
-   * counted ONLY `role === 'user'` text, which would have silently
-   * 100%-skipped every `calendar-oauth` chunk (all events emit as
-   * `role: 'event'`) AND received-only Gmail threads where the
-   * owner's address was NEVER the sender.
+   * turns), `event`, `tool` (tool-call outputs), and `system`. v1 of
+   * this filter counted ONLY `role === 'user'` text, which would have
+   * silently skipped chunks whose signal lives in non-`user` roles.
    *
    * Omitted (undefined) means "no pre-filter signal" — the runner treats
    * undefined identically to `false` and dispatches normally.
@@ -454,28 +446,14 @@ export interface ImportJob {
   phase?: ImportJobPhase
 }
 
-/** Re-export of the OAuth refs shape. */
-export interface OAuthRefs {
-  /** Encrypted access token (looked up via SecretsStore by the runner). */
-  access_token: string
-  /** Optional refresh token; oauth-gmail/calendar will refresh as needed. */
-  refresh_token?: string
-  /** Source-specific extras (Gmail: {after_date_ms?}; Calendar: {since_ts_ms?}). */
-  options?: Record<string, unknown>
-}
-
-/** Convenience: what `chunkExport` accepts. */
-export type ChunkerInput = Buffer | OAuthRefs
+/** Convenience: what `chunkExport` accepts. Zip-only — the import path
+ * feeds a decoded export `Buffer` (`chatgpt-zip` / `claude-zip`). */
+export type ChunkerInput = Buffer
 
 /** Per-source budget defaults per § 2.3 Pass-2 deepening. */
 export const PER_SOURCE_CAPS: Readonly<Record<ImportSource, number>> = {
   'chatgpt-zip': 3.5,
   'claude-zip': 2.0,
-  'gmail-oauth': 0.75,
-  'calendar-oauth': 0.2,
-  'drive-oauth': 0,
-  'notion-oauth': 0,
-  'slack-oauth': 0,
 }
 
 /** Per-owner ceiling per § 2.3. */

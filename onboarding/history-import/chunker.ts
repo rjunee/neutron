@@ -58,13 +58,10 @@ export interface ChunkerOptions {
    * many messages → one or more chunks) and a 500-char floor
    * correctly drops "user said 'hi'" chunks.
    *
-   * Production wires `false` for `calendar-oauth` / `gmail-oauth` /
-   * `drive-oauth` / `notion-oauth` / `slack-oauth` because those
-   * sources emit one Conversation per event/email/file/page/message
-   * — typical bodies like "1:1 with Bob" / "Quarterly planning
-   * meeting" land well under 500 chars and ARE the signal the LLM
-   * should triage. Skipping them = silently dropping the entire
-   * import's payload.
+   * A caller can wire `false` for a source whose Conversations emit
+   * one short body each (well under the 500-char floor) that IS the
+   * signal the LLM should triage — skipping them would silently drop
+   * the import's payload.
    */
   enable_skip_llm?: boolean
 }
@@ -117,12 +114,10 @@ function* chunkOneConversation(
     //
     // Codex r1 fix (2026-05-31, post-initial-commit): the v1 of this
     // filter counted ONLY `role === 'user'` text, which collapsed to 0
-    // for `calendar-oauth` (all events emit as `role: 'event'`) AND
-    // partially for `gmail-oauth` (received-only threads where the
-    // owner's address is NEVER the sender land entirely as `role:
-    // 'event'`). Both classes of import would have been silently 100%
-    // skipped, producing empty Pass-1 results and zero extracted
-    // entities. Counting all non-assistant text fixes both shapes
+    // for any source whose signal lives entirely in non-`user` roles
+    // (e.g. all-`event` chunks). Those imports would have been silently
+    // 100% skipped, producing empty Pass-1 results and zero extracted
+    // entities. Counting all non-assistant text fixes those shapes
     // without breaking the original ChatGPT/Claude "user said 'hi'"
     // intent (since `'user'` text is still counted).
     //
