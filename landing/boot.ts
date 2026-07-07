@@ -42,10 +42,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import {
-  createLandingServer,
-  type ChatBridge,
-} from './server.ts'
+import { createLandingServer } from './server.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -99,29 +96,6 @@ function assertPort(p: number, label: string): number {
 export function resolveIdentityOauthUrl(env: NodeJS.ProcessEnv): string | null {
   const v = env['NEUTRON_IDENTITY_OAUTH_URL']
   return typeof v === 'string' && v.length > 0 ? v : null
-}
-
-/**
- * The platform-level bridge: rejects every auth attempt by design.
- * Vestigial since the landing `/ws/chat` socket was removed (chat is
- * now per-instance on `/ws/app/chat`); the landing server no longer
- * consumes a bridge, but the field is still accepted (optional) so this
- * stays a harmless no-op for back-compat.
- */
-export function buildPlatformLandingBridge(): ChatBridge {
-  return {
-    async validateStartToken(): Promise<null> {
-      return null
-    },
-    async startSession(): Promise<boolean> {
-      return false
-    },
-    async handleInbound(): Promise<void> {
-      // Should never be reached — startSession always returns false so
-      // open never fires; but defensive in case the server hits a code
-      // path that calls handleInbound without an opened session.
-    },
-  }
 }
 
 export interface BootSignupHandle {
@@ -182,7 +156,6 @@ export async function bootSignup(options: BootSignupOptions = {}): Promise<BootS
   // unmounted, by design.
   const landing = createLandingServer({
     static_dir: staticDir,
-    bridge: buildPlatformLandingBridge(),
     ...(options.inviteAssetsDir !== undefined
       ? { invite_assets_dir: options.inviteAssetsDir }
       : {}),

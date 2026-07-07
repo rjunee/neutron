@@ -34,9 +34,9 @@ export interface HttpSurfacesCompositionInput {
    * Sprint 18 — landing server (chat HTTP + WebSocket upgrade) wired by
    * `gateway/index.ts:boot` into the per-instance `Bun.serve` listener.
    * The factory `createLandingServer` from `@neutronai/landing` returns
-   * the `{ fetch, websocket }` pair this field expects; production
-   * builds it with a `ChatBridge` constructed via
-   * `gateway/http/chat-bridge.ts:buildWebChatBridge`.
+   * the `{ fetch, websocket }` pair this field expects. The legacy
+   * `/ws/chat` `ChatBridge` this once carried was excised (K11b0);
+   * onboarding + chat are unified on `/ws/app/chat`.
    */
   landing_server?: {
     fetch: (req: Request, server: Server<unknown>) => Response | Promise<Response>

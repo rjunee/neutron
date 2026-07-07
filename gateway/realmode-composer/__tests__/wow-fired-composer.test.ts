@@ -42,11 +42,7 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
-import { JwksCache } from '../../../jwt-validator/validator.ts'
-import {
-  InMemoryWebChatSenderRegistry,
-  type SlugHistoryShimStore,
-} from '../../http/chat-bridge.ts'
+import { InMemoryWebChatSenderRegistry } from '../../http/chat-bridge.ts'
 import type {
   WowDispatcherHook,
   WowDispatcherHookInput,
@@ -59,7 +55,6 @@ import { CronHandlerRegistry } from '../../../cron/handlers.ts'
 import { CronScheduler } from '../../../cron/scheduler.ts'
 import type { LlmCallFn } from '../../../onboarding/interview/phase-spec-resolver.ts'
 
-const NOOP_SHIM_STORE: SlugHistoryShimStore = { lookup: async () => null }
 
 let workdir: string
 let db: ProjectDb
@@ -77,17 +72,6 @@ afterEach(() => {
   db.close()
   rmSync(workdir, { recursive: true, force: true })
 })
-
-function makeJwks(): JwksCache {
-  const fetchImpl = async (): Promise<Response> =>
-    new Response(JSON.stringify({ keys: [] }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  return new JwksCache('https://auth.example.test/.well-known/jwks.json', {
-    fetch: fetchImpl,
-  })
-}
 
 interface RecorderHook {
   hook: WowDispatcherHook
@@ -180,10 +164,8 @@ test('default composer builds a real WowDispatcher hook (not null); engine-walk 
     db,
     project_slug: 'shape-check',
     owner_home: join(workdir, 'project-home-shape'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-shape-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
   })
   expect(defaultPieces.wowDispatcher).not.toBeNull()
   expect(typeof defaultPieces.wowDispatcher!.dispatch).toBe('function')
@@ -199,10 +181,8 @@ test('default composer builds a real WowDispatcher hook (not null); engine-walk 
     db,
     project_slug: 'casey',
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     wowDispatcher: rec.hook,
   })
   await tapFireFromMaxOauth({ pieces, project_slug: 'casey' })
@@ -240,10 +220,8 @@ test('dispatch identity is the FROZEN internal_handle, not the (post-rename) url
     db,
     project_slug: ORIGINAL_SLUG,
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: FROZEN_INTERNAL_HANDLE,
-    slugHistoryStore: NOOP_SHIM_STORE,
     wowDispatcher: rec.hook,
   })
   // Seed the row under ORIGINAL_SLUG, then rekey to RENAMED_SLUG to
@@ -306,10 +284,8 @@ test('crash-resume: phase=wow_fired with no wow_report and no error → engine.s
     db,
     project_slug: 'casey',
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     wowDispatcher: rec.hook,
   })
   // Reproduce the crash state: phase=wow_fired with the entry-body
@@ -358,10 +334,8 @@ test('crash-resume: phase=wow_fired with wow_dispatch_error set → engine.start
     db,
     project_slug: 'casey',
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     wowDispatcher: rec.hook,
   })
   await pieces.stateStore.upsert({
@@ -421,10 +395,8 @@ test('T2 r3 BLOCKING #1: shared CronJobRegistry — action 07 registers in the s
     db,
     project_slug,
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     webRegistry: registry,
     // T2 r3 — thread the SHARED registry into the production wow-
     // dispatcher path (NO wowDispatcher caller-override → default
@@ -536,10 +508,8 @@ test('WS-absent → action 01 in failed[], engine STILL advances to completed (2
     db,
     project_slug,
     owner_home: join(workdir, 'project-home-maya'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-maya-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     webRegistry: registry,
     cronJobs: sharedCronJobs,
     wowInterActionPauseMs: 0,
@@ -662,10 +632,8 @@ test('T2 r4 BLOCKING (Codex cross-model): production wiring serializes prompt-em
     db,
     project_slug,
     owner_home: join(workdir, 'project-home-ser'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-ser-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     webRegistry: registry,
     cronJobs: sharedCronJobs,
     // Dispatcher seams: kill the 5s inter-action pause + the action-
@@ -897,10 +865,8 @@ test('T2 r4: production composer default-builds a non-undefined prompt_resolutio
     db,
     project_slug,
     owner_home: join(workdir, 'project-home-gate'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-gate-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     webRegistry: registry,
     cronJobs: sharedCronJobs,
     wowInterActionPauseMs: 0,
@@ -1069,10 +1035,8 @@ test('T2 r4 follow-up BLOCKER (Codex cross-model): WS-dropped emitPrompt throws 
     db,
     project_slug,
     owner_home: join(workdir, 'project-home-wsdrop'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-wsdrop-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     webRegistry: registry,
     cronJobs: sharedCronJobs,
     wowInterActionPauseMs: 0,

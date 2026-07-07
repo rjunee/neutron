@@ -31,7 +31,6 @@
  * composer leaves `default_handler` unset and `boot()` fills it.
  */
 
-import { JwksCache } from '../jwt-validator/validator.ts'
 import { newCredentialPool, type CredentialPool } from '../runtime/credential-pool.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildOpenInstallTokenHandler } from './install-token-handoff.ts'
@@ -1153,24 +1152,6 @@ export function buildOpenGraphComposer(
     // transient SQLite error degrades to the owner-wide persona alone.
     const projectPersonaResolver = buildProjectPersonaResolver(db)
 
-    const liveAgentTurnFactory =
-      liveAgentSubstrate !== null
-        ? (pieces: {
-            buttonStore: import('../channels/button-store.ts').ButtonStore
-            transcript: import('../onboarding/interview/transcript.ts').TranscriptWriter
-          }) =>
-            buildLiveAgentTurn({
-              substrate: liveAgentSubstrate,
-              personaLoader,
-              projectPersonaResolver,
-              reflection,
-              buttonStore: pieces.buttonStore,
-              transcript: pieces.transcript,
-              project_slug,
-              owner_home,
-            })
-        : undefined
-
     // ── Single-owner session + first-prompt-on-connect ─────────────────────
     // The cookie secret is the single shared HMAC secret for both the session
     // cookie AND the local start-token. open/server.ts guarantees it is set
@@ -1256,20 +1237,11 @@ export function buildOpenGraphComposer(
       owner_home,
       appWsButtonPromptRouter,
       appWsImportProgressRouter,
-      // JWKS is a required field but inert on Open — our start-token verifier
-      // is HMAC and never resolves a JWKS key. Pass a never-fetched URL.
-      jwks: new JwksCache('https://invalid.local/.well-known/jwks.json'),
       static_dir,
       internal_handle,
-      // No slug-rename machinery on Open — the shim store always misses.
-      slugHistoryStore: { lookup: async () => null },
       platform,
       cookieToUserClaim,
       cronJobs,
-      // FIX 2 — share the single-use JTI store so the HTTP cookie-mint gate and
-      // any bridge-side claim consume the SAME token namespace (a token claimed
-      // at one gate can never be replayed at the other).
-      consumedTokens,
       // ISSUES #318 — app-level Claude-auth gate (defense in depth for the
       // installer gate). When the box boots with NO substrate credential,
       // `GET /chat` renders an "Authenticate Claude" page instead of a chat
@@ -1278,7 +1250,6 @@ export function buildOpenGraphComposer(
       // composer's substrate wiring uses (`resolveOpenLlmPool`).
       chatAuthGate: { isUnauthenticated: () => resolveOpenLlmPool(env) === null },
       ...(phaseSpecResolver !== null ? { phaseSpecResolver } : {}),
-      ...(liveAgentTurnFactory !== undefined ? { liveAgentTurnFactory } : {}),
       // ONE warm LLM path (see construction above) — wiring these is the
       // fix for the `pickerLlm not configured` deterministic-fallback bug
       // class the owner hit live. All route through the same `cc-llm`
@@ -1307,19 +1278,6 @@ export function buildOpenGraphComposer(
       // disk-only. Previously unwired in Open, so imported insights never
       // reached the agent's memory recall (build-landing-stack.ts:1016).
       importGbrainSyncHook: gbrainSyncHook,
-      // Scribe chat-time extraction (P0 daily-driver, gap-audit cat 7). When the
-      // box has LLM creds, a real user turn fans into scribe's extract→GBrain
-      // path; LLM-less, this is omitted and the chat-bridge no-ops the hook.
-      ...(scribeOnUserTurn !== undefined ? { scribeOnUserTurn } : {}),
-      // Chat-command filters routed BEFORE the LLM turn, chained in order:
-      //   - Free Cores (parity gap #2) — `/cal` / `/email` / `/note` /
-      //     `/remind` / `/research` (sharing each Core's MCP-tool backend).
-      //   - Skill-forge (parity gap #5) — `/skills` (list / approve / decline),
-      //     sharing the SAME `SkillForgeBackend` as the `skill_forge_*` MCP
-      //     tools (agent-native parity).
-      // Each filter returns null for a non-match, so the chain falls through to
-      // the LLM exactly as a single filter would.
-      chatCommandFilter,
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────

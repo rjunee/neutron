@@ -24,8 +24,6 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
-import { JwksCache } from '../../../jwt-validator/validator.ts'
-import type { SlugHistoryShimStore } from '../../http/chat-bridge.ts'
 import { buildOnboardingEnginePieces } from '../build-landing-stack.ts'
 import type {
   LlmRouter,
@@ -38,7 +36,6 @@ import type {
 } from '../../../runtime/platform-adapter.ts'
 import type { OnboardingPhase } from '../../../onboarding/interview/phase.ts'
 
-const NOOP_SHIM_STORE: SlugHistoryShimStore = { lookup: async () => null }
 
 let workdir: string
 let db: ProjectDb
@@ -56,17 +53,6 @@ afterEach(() => {
   db.close()
   rmSync(workdir, { recursive: true, force: true })
 })
-
-function makeJwks(): JwksCache {
-  const fetchImpl = async (): Promise<Response> =>
-    new Response(JSON.stringify({ keys: [] }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  return new JwksCache('https://auth.example.test/.well-known/jwks.json', {
-    fetch: fetchImpl,
-  })
-}
 
 interface RouterRecorder {
   router: LlmRouter
@@ -167,10 +153,8 @@ test('buildOnboardingEnginePieces threads llmRouter + platform onto the engine d
     db,
     project_slug: 'casey',
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     llmRouter: router,
     platform,
   })
@@ -224,10 +208,8 @@ test.skip('end-to-end: composer-built engine routes the brief-incident inbound t
     db,
     project_slug: 'casey',
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     llmRouter: router,
     platform,
   })
@@ -299,10 +281,8 @@ test('without llmRouter wired, the engine still walks the v2 freeform fall-throu
     db,
     project_slug: 'casey',
     owner_home: join(workdir, 'project-home'),
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-casey-0001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     // NO llmRouter wired — even with platform.getOnboardingConversational()
     // returning true, the engine must NOT throw and must fall through to
     // the v2 path.

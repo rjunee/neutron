@@ -41,29 +41,15 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
-import { JwksCache } from '../../../jwt-validator/validator.ts'
-import type { SlugHistoryShimStore } from '../../http/chat-bridge.ts'
 import { buildOnboardingEnginePieces } from '../build-landing-stack.ts'
 import type { ImportSource } from '../../../onboarding/history-import/types.ts'
 
-const NOOP_SHIM_STORE: SlugHistoryShimStore = { lookup: async () => null }
 const OWNER = 'alice'
 const USER = 'u-alice'
 
 let workdir: string
 let ownerHome: string
 let db: ProjectDb
-
-function makeJwks(): JwksCache {
-  const fetchImpl = async (): Promise<Response> =>
-    new Response(JSON.stringify({ keys: [] }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  return new JwksCache('https://auth.example.test/.well-known/jwks.json', {
-    fetch: fetchImpl,
-  })
-}
 
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-import-resilience-wiring-'))
@@ -90,10 +76,8 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
     db,
     project_slug: OWNER,
     owner_home: ownerHome,
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-aaaaaaaa',
-    slugHistoryStore: NOOP_SHIM_STORE,
     // Deliberately omitted: importUseSynthesis / importResumeReadiness.
     // The probe default-build (build-landing-stack.ts, the
     // `importResumeReadiness` const) is unconditional — it does not
@@ -172,10 +156,8 @@ test('BLOCKER #3 — explicit null override still opts out of the probe (legacy 
     db,
     project_slug: OWNER,
     owner_home: ownerHome,
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-aaaaaaaa',
-    slugHistoryStore: NOOP_SHIM_STORE,
     importResumeReadiness: null,
   })
   expect(pieces.importResumeReadiness).toBeNull()
