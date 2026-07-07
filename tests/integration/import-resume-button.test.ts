@@ -247,7 +247,7 @@ describe('resume_import button surface', () => {
 
   // NOTE (K11-pre / K11a6, 2026-07-06): the third assertion in this suite —
   // "tapping resume_import dispatches the runner and flips the phase back to
-  // import_running" — previously drove the tap through `engine.advance(...) with a resume choice`
+  // import_running" — previously drove the tap through the engine `advance` drive with a resume choice
   // → `consumeImportAnalysisPresentedChoice`'s resume intercept →
   // `attemptAutoResumeFromPaused`. That engine-side resume path is DEAD on every
   // live path: in production the resume button POSTs to `/api/import/<job_id>/resume`

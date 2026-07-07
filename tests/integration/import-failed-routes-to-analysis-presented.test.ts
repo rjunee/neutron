@@ -195,7 +195,7 @@ describe('failed-import → import_analysis_presented (S14)', () => {
 
     // NOTE (K11-pre / K11a6, 2026-07-06): the user's freeform reply on this
     // graceful-failure body used to advance to `work_interview_gap_fill` via
-    // `engine.advance(...) with a freeform reply` — the conversational drive K11b
+    // the engine `advance` drive with a freeform reply — the conversational drive K11b
     // deletes (dead on every live path; the live reply routes to the CC
     // session, not the engine). That freeform-reply→gap_fill assertion for the
     // import_failed case now lives in the dies-with-K11b file
