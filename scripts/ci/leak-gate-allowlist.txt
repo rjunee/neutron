@@ -160,3 +160,26 @@ docs/research/fable-refactor-audit-2026-07-05.md:tenant-code
 docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-purged
 docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-word
 docs/research/fable-k11-deletion-sweep-2026-07-06.md:tenant-code
+
+# The refactor audit (docs/research/refactor-audit-2026-07-02/, 35 critic-*/map-*
+# reports) is the load-bearing source the tracked world-class plan + k11 exec plan
+# cite as "audit §N" (18 refs). Same scope + rationale as the fable audit docs
+# above: they analyze the Managed-vs-Open architecture and the tenant→owner purge,
+# so they unavoidably NAME the retired multi-tenant vocabulary. Exempt ONLY from the
+# retired-vocab rules; PII-denylist / secret / hosted-domain rules stay ARMED.
+# (The two hosted-domain mentions in map-managed.md + spec-shape.md were REDACTED
+# to a neutral placeholder, NOT allowlisted — the hosted-domain rule is never
+# exempted.)
+docs/research/refactor-audit-2026-07-02/*:tenant-purged
+docs/research/refactor-audit-2026-07-02/*:tenant-word
+docs/research/refactor-audit-2026-07-02/*:tenant-code
+docs/research/refactor-audit-2026-07-02/*:cross-tenant-code
+
+# vajra-neutron-feature-parity-scan compares the Vajra prototype against Neutron
+# and names the retired multi-tenant vocabulary in that comparison. Retired-vocab
+# rules only; PII / secret / hosted-domain stay ARMED. (The sibling vajra docs +
+# the m1-e2e findings + the 2026-06-30 plans are clean — no entry needed.)
+docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md:tenant-purged
+docs/research/vajra-neutron-feature-parity-scan-2026-06-25.md:tenant-word
+docs/research/vajra-neutron-parity-audit-2026-06-25.md:tenant-purged
+docs/research/vajra-neutron-parity-audit-2026-06-25.md:tenant-word
