@@ -23,7 +23,6 @@ import type { ProjectDb } from '../../persistence/index.ts'
 import type { CronJobRegistry } from '../../cron/jobs.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
 import { ButtonStore } from '../../channels/button-store.ts'
-import { buildOnboardingHandoffHook } from './build-onboarding-handoff.ts'
 import {
   buildRoutedSendButtonPrompt,
   buildRoutedSendImportProgress,
@@ -60,10 +59,6 @@ import type {
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
 import { TranscriptWriter } from '../../onboarding/interview/transcript.ts'
 import { createLandingServer, type LandingServer } from '../../landing/server.ts'
-import { buildWowDispatcherHook } from './build-wow-dispatcher.ts'
-import { buildProjectDocComposer } from './build-project-doc-composer.ts'
-import { buildProjectPageIndexer } from './build-project-page-indexer.ts'
-import { buildGatewayAnthropicMessagesClient } from './build-anthropic-messages-client.ts'
 import {
   buildImportResumeReadinessProbe,
   ChainedImportPayloadResolver,
@@ -820,72 +815,7 @@ export function buildOnboardingEnginePieces(
   // Indexer: project page through writeEntity(kind='project') into the
   // SAME entities/ tree + GBrain hook the import entity-populator
   // targets, so the Item-1 agent's memory recall surfaces projects.
-  const wowMaterializerComposer =
-    input.wowMaterializerComposer === undefined
-      ? input.importSubstrate !== undefined
-        ? buildProjectDocComposer({
-            client: buildGatewayAnthropicMessagesClient({ substrate: input.importSubstrate }),
-          })
-        : null
-      : input.wowMaterializerComposer
-  const wowMaterializerIndexer =
-    input.wowMaterializerIndexer === undefined
-      ? buildProjectPageIndexer({
-          ownerDataDir: input.importOwnerDataDir ?? input.owner_home,
-          project_slug: input.project_slug,
-          ...(input.importGbrainSyncHook !== undefined
-            ? { syncHook: input.importGbrainSyncHook }
-            : {}),
-        })
-      : input.wowMaterializerIndexer
-  const wowDispatcher: WowDispatcherHook | null =
-    input.wowDispatcher === undefined
-      ? buildWowDispatcherHook({
-          db: input.db,
-          owner_home: input.owner_home,
-          webRegistry: registry,
-          buttonStore,
-          ...(wowMaterializerComposer !== null
-            ? { materializerComposer: wowMaterializerComposer }
-            : {}),
-          ...(wowMaterializerIndexer !== null
-            ? { materializerIndexer: wowMaterializerIndexer }
-            : {}),
-          // T2 r3 (2026-05-13) — Argus BLOCKING #1: thread the SHARED
-          // CronJobRegistry so action 07 registers its overnight-pass
-          // job in the registry the production CronScheduler reads
-          // from. Falls back to a fresh local registry when the
-          // composer hasn't been updated to pass one (back-compat for
-          // older boot paths + tests).
-          ...(input.cronJobs !== undefined ? { cronJobs: input.cronJobs } : {}),
-          ...(input.wowInterActionPauseMs !== undefined
-            ? { interActionPauseMs: input.wowInterActionPauseMs }
-            : {}),
-          ...(input.wowSleep !== undefined ? { sleep: input.wowSleep } : {}),
-          ...(input.wowActionTimeoutMs !== undefined
-            ? { actionTimeoutMs: input.wowActionTimeoutMs }
-            : {}),
-          // P2 v2 S9 (Codex S9-r1 P1) — picker LLM for the wow-moment
-          // LLM selection per § 5.3. Without this, production walks
-          // the deterministic-fallback path on every dispatch.
-          ...(input.wowPickerLlm !== undefined
-            ? { pickerLlm: input.wowPickerLlm }
-            : {}),
-          // 2026-05-28 wow-cleanup r3 — probe test seams (poll cadence
-          // + sleep + now). Production omits all three so the
-          // default-built ButtonStoreResolutionProbe walks `Bun.sleep`
-          // and `Date.now` at 500ms cadence; tests pass test seams.
-          ...(input.wowPromptResolutionPollMs !== undefined
-            ? { promptResolutionPollMs: input.wowPromptResolutionPollMs }
-            : {}),
-          ...(input.wowPromptResolutionSleep !== undefined
-            ? { promptResolutionSleep: input.wowPromptResolutionSleep }
-            : {}),
-          ...(input.wowPromptResolutionNow !== undefined
-            ? { promptResolutionNow: input.wowPromptResolutionNow }
-            : {}),
-        })
-      : input.wowDispatcher
+  const wowDispatcher: WowDispatcherHook | null = input.wowDispatcher ?? null
   // Codex r2 P1 + r3 P1 (post-T4) — default-build a ChainedImportPayloadResolver
   // combining:
   //   1. UrlPasteImportPayloadResolver — picks up the user's pasted URL
@@ -997,50 +927,6 @@ export function buildOnboardingEnginePieces(
     ...(personaComposer !== null ? { personaComposer } : {}),
     ...(phaseSpecResolver !== null ? { phaseSpecResolver } : {}),
     ...(wowDispatcher !== null ? { wowDispatcher } : {}),
-    // 2026-05-22 (push-deeplink-wow sprint) — wow-moment push emitter.
-    // The engine fires this once per (instance, user) on entry into
-    // `dispatchWowAndAdvance`, gated on `state.wow_pushed_at === null`.
-    // Production composer in `gateway/index.ts` closes the per-instance
-    // PushDispatcher + DevicePushTokenStore over `emitWowPush` and
-    // forwards the closure here; tests that don't exercise push
-    // simply omit the field (null is fine too).
-    ...(input.wowPushEmitter !== undefined && input.wowPushEmitter !== null
-      ? { wowPushEmitter: input.wowPushEmitter }
-      : {}),
-    // 2026-05-28 sidebar sprint — onboarding-to-General + per-project
-    // topics handoff. Fires on the wow_fired → completed success path
-    // so per-project sidebar topics are seeded BEFORE the engine
-    // declares the user done. The hook is built here against the
-    // local `buttonStore` so the seed rows land in the SAME
-    // per-project DB the chat-history + chat-topics surfaces read
-    // from. Tests injecting `input.onboardingHandoff: null`
-    // explicitly opt out so the seed step is silent for fixtures
-    // that don't exercise it.
-    ...(input.onboardingHandoff === null
-      ? {}
-      : {
-          onboardingHandoff:
-            input.onboardingHandoff ??
-            buildOnboardingHandoffHook({
-              buttonStore,
-              // Item 5 (2026-06-11) — the SAME owner_home the wow
-              // dispatcher hands the Item 4 materializer, so the
-              // opening-message doc reader resolves the exact
-              // `Projects/<slug>/` tree `materialize()` wrote during
-              // the wow dispatch earlier in this transition.
-              owner_home: input.owner_home,
-              // Item 5 — thread the optional LLM opening composer when
-              // supplied so per-project openings carry a real
-              // synthesized paragraph + next move. Production composer
-              // (`gateway/index.ts`) builds this from the same
-              // CC-substrate anthropicClient as llmRouter; tests that
-              // don't exercise the LLM path leave it unset and the
-              // deterministic prose path takes over.
-              ...(input.projectOpeningComposer !== undefined
-                ? { composeProjectOpening: input.projectOpeningComposer }
-                : {}),
-            }),
-        }),
     ...(importJobRunner !== null ? { importJobRunner } : {}),
     ...(importPayloadResolver !== null ? { importPayloadResolver } : {}),
     // ND2 (2026-06-28) — the Path-1 conversational upload affordance is offered
@@ -1091,17 +977,6 @@ export function buildOnboardingEnginePieces(
     // instance whose Max was wired during the import phase never sees
     // the prompt at all.
     ...(input.secrets !== undefined ? { secrets: input.secrets } : {}),
-    ...(input.maxOauth !== undefined ? { maxOauth: input.maxOauth } : {}),
-    // 2026-05-28 PR #331 fast-follower — Telegram-bind token minter.
-    // Closes the IMPORTANT #2 residual from Argus r1: the dep existed
-    // on the engine but had no production call site, so every
-    // [B] Connect a Telegram bot tap minted the per-request opaque
-    // nonce fallback instead of a HMAC-signed token a future bot-side
-    // bind handler (ISSUES #65) can verify. Tests omit this field +
-    // the engine falls back to the nonce path.
-    ...(input.mintTelegramBindToken !== undefined
-      ? { mintTelegramBindToken: input.mintTelegramBindToken }
-      : {}),
     // 2026-06-13 (onboarding Open-mode) — gate the phase sequence on the
     // deployment mode. Open self-host cuts identity_oauth /
     // instance_provisioned / slug_chosen and swaps the hosted Max OAuth

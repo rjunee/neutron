@@ -2052,13 +2052,6 @@ export interface EngineInternals {
     partial: boolean,
     failure_reason?: string | null,
   ): Promise<AdvanceResult>
-  consumeImportAnalysisPresentedChoice(
-    input: AdvanceInput,
-    state: OnboardingState,
-    choice: ButtonChoice,
-    was_new: boolean,
-    observed_at: number,
-  ): Promise<AdvanceResult>
   emitImportRunningPromptSpec(
     input: AdvanceInput,
     state: OnboardingState,
@@ -2107,11 +2100,6 @@ export interface EngineInternals {
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<AgentNameSuggesterResult> | null
-  maybeAutoAdvancePastMaxOauthOffered(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
-  ): Promise<OnboardingState>
 
   // --- the 8 extracted persona methods (so the persona free functions
   //     can cross-call each other via self.* identically to the originals,
@@ -2121,13 +2109,6 @@ export interface EngineInternals {
     state: OnboardingState,
     observed_at: number,
   ): Promise<OnboardingState>
-  consumePersonaReviewedChoice(
-    input: AdvanceInput,
-    state: OnboardingState,
-    choice: ButtonChoice,
-    was_new: boolean,
-    observed_at: number,
-  ): Promise<AdvanceResult>
   consumePersonaSynthesizingChoice(
     input: AdvanceInput,
     state: OnboardingState,
@@ -2139,11 +2120,6 @@ export interface EngineInternals {
     input: AdvanceInput,
     observed_at: number,
     serialized_draft: ReturnType<typeof serializeDraft> | null,
-  ): Promise<AdvanceResult>
-  advanceFromPersonaReviewed(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
   ): Promise<AdvanceResult>
   reEmitPersonaReviewed(
     input: AdvanceInput,
@@ -2184,12 +2160,6 @@ export interface EngineInternals {
     input: AdvanceInput,
     state: OnboardingState,
     observed_at: number,
-  ): Promise<AdvanceResult>
-  advanceFromMaxOauthOffered(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
-    substrate: 'free' | 'byo_api_key' | 'max_oauth',
   ): Promise<AdvanceResult>
 
   // --- the 11 extracted slug methods (so the slug free functions can

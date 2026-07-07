@@ -6,19 +6,6 @@
  */
 
 export {
-  WowDispatcher,
-  DEFAULT_FREEFORM_PAUSE_MS,
-  DEFAULT_INTER_ACTION_PAUSE_MS,
-  DEFAULT_KEEP_TYPING_BUDGET_MS,
-  type DispatchInput,
-  type DispatchOutcome,
-  type FreeformProbe,
-  type RescheduleHook,
-  type WowDispatcherDeps,
-  type WowSelectionLogger,
-} from './dispatcher.ts'
-
-export {
   ActionRunner,
   DEFAULT_ACTION_TIMEOUT_MS,
   type ActionRunnerDeps,
@@ -37,14 +24,6 @@ export {
   type WowFiredEvent,
   type WowTelemetryDeps,
 } from './telemetry.ts'
-
-export {
-  ALWAYS_FIRE_FIRST,
-  ALWAYS_FIRE_LAST,
-  CANDIDATE_IDS,
-  getActionModule,
-  listDispatchOrder,
-} from './catalogue.ts'
 
 export {
   pickWowActions,
