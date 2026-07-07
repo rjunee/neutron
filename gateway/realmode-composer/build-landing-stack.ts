@@ -21,24 +21,14 @@ import { fileURLToPath } from 'node:url'
 
 import type { ProjectDb } from '../../persistence/index.ts'
 import type { CronJobRegistry } from '../../cron/jobs.ts'
-import {
-  DEFAULT_AGENT_ENGAGEMENT_MODE,
-  isAgentEngagementMode,
-  type AgentEngagementMode,
-} from '../../connect/agent-engagement.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
-import { JwksCache } from '../../jwt-validator/validator.ts'
-import { buildJwksResolveKey } from '../../jwt-validator/resolve-key.ts'
 import { ButtonStore } from '../../channels/button-store.ts'
 import { buildOnboardingHandoffHook } from './build-onboarding-handoff.ts'
 import {
   buildRoutedSendButtonPrompt,
   buildRoutedSendImportProgress,
-  buildWebChatBridge,
   type AppSocketButtonPromptRouter,
   type AppSocketImportProgressRouter,
-  type SlugHistoryShimStore,
-  type OwnerRegistryLookup,
 } from '../http/chat-bridge.ts'
 import {
   InMemoryWebChatSenderRegistry,
@@ -69,14 +59,6 @@ import type {
 } from '../../onboarding/interview/phase-spec-resolver.ts'
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
 import { TranscriptWriter } from '../../onboarding/interview/transcript.ts'
-// Sprint B (2026-05-20) — `ConsumedTokensStore` interface +
-// `InMemoryConsumedTokens` lifted to `runtime/`. The production
-// SQLite-backed variant stays Managed; this Open-classified factory
-// only ever defaults to the in-memory store, so the runtime/ import is
-// sufficient and the search-grep is clean.
-import type { ConsumedTokensStore } from '../../runtime/start-token-types.ts'
-import { InMemoryConsumedTokens } from '../../runtime/consumed-tokens-in-memory.ts'
-import type { PendingRedirectStore } from '../../runtime/pending-redirect-types.ts'
 import { createLandingServer, type LandingServer } from '../../landing/server.ts'
 import { buildWowDispatcherHook } from './build-wow-dispatcher.ts'
 import { buildProjectDocComposer } from './build-project-doc-composer.ts'
@@ -95,7 +77,6 @@ export interface BuildLandingStackInput {
   db: ProjectDb
   project_slug: string
   owner_home: string
-  jwks: JwksCache
   static_dir: string
   /**
    * Onboarding consolidation (2026-06-26) — late-bound app-socket routers. The
@@ -109,28 +90,13 @@ export interface BuildLandingStackInput {
   appWsButtonPromptRouter?: AppSocketButtonPromptRouter
   appWsImportProgressRouter?: AppSocketImportProgressRouter
   /**
-   * P1.5 § 1.5.5 — frozen `internal_handle` for THIS instance. Threaded
-   * into `buildWebChatBridge` so the JWT slug-history shim can verify
-   * old-slug claims against THIS instance's history (cross-instance
-   * safety).
-   *
-   * Argus r2 [BLOCKING #1] — required, not optional. Prior shape left
-   * this off, which silently disabled the shim in production and 401'd
-   * every old-slug JWT post-rename. The composer asserts a non-empty
-   * value at boot so misconfiguration surfaces loudly rather than as
-   * a slow-burn user-visible disconnect on first rename.
+   * P1.5 § 1.5.5 — frozen `internal_handle` for THIS instance (per-instance
+   * identity). The `/ws/chat` JWT slug-history shim that once consumed this
+   * was excised with the dead ChatBridge (K11b0); the field stays required
+   * and boot-validated (a non-empty value) so a misconfigured composer fails
+   * loudly rather than booting with an empty identity.
    */
   internal_handle: string
-  /**
-   * P1.5 § 1.5.5 — slug-history grace-window store. Production wires
-   * an `InMemorySlugHistoryCache` wrapping a
-   * `buildSlugHistoryShimFromRegistry(registry SlugHistoryStore)`
-   * adapter; the cache is push-invalidated by the
-   * `/internal/cache-invalidate` route after the rename orchestrator
-   * commits. Required (Argus r2 BLOCKING #1) — see `internal_handle`
-   * above for the same rationale.
-   */
-  slugHistoryStore: SlugHistoryShimStore
   /**
    * 2026-05-13 — engine-side slug-history lookup for the no-restart-rename
    * lazy-rekey path in `InterviewEngine.start`. Production wires this
@@ -141,16 +107,6 @@ export interface BuildLandingStackInput {
    * the user's progress (the failure mode this dep fixes).
    */
   engineSlugHistory?: SlugHistoryLookup | null
-  /**
-   * 2026-05-13 — no-restart slug rename. When supplied, the
-   * `validateStartToken` path accepts a JWT whose `project_slug` claim
-   * mismatches `project_slug` (the gateway's boot-time slug) AS LONG AS
-   * the registry's CURRENT `url_slug` for `internal_handle` matches
-   * the claim. Production wires this against the live `OwnersRegistry`;
-   * tests can pass a stub or omit to fall back to slug-history-only
-   * acceptance.
-   */
-  ownerRegistry?: OwnerRegistryLookup
   /**
    * P1.5 / Sprint 21 — slug-picker engine hook. When provided, the
    * onboarding engine drives the `slug_chosen` phase through the
@@ -227,15 +183,6 @@ export interface BuildLandingStackInput {
    * by the personality phrase itself.
    */
   archetypes?: ArchetypeLibrary | null
-  /**
-   * Sprint 30 — durable replay window for start-token JTIs. When
-   * provided, the bridge uses the SQLite-backed store; when omitted,
-   * falls back to `InMemoryConsumedTokens` (the legacy Sprint 19
-   * behaviour). Production composer always passes the SQLite store
-   * so a process bounce inside the 15-min start-token TTL no longer
-   * lets the same JTI be re-claimed.
-   */
-  consumedTokens?: ConsumedTokensStore | null
   /**
    * LLM-driven prompts sprint (2026-05-09) — phase-spec resolver. When
    * provided AND a given phase is in the resolver's enabled set, the
@@ -506,19 +453,6 @@ export interface BuildLandingStackInput {
    */
   importUuid?: () => string
   /**
-   * 2026-05-11 — pending-redirect store. Production wires a
-   * `SqlitePendingRedirectStore` against the per-instance DB so the
-   * slug-picker hook can persist a redirect when its WS-closed-during-
-   * rename branch fires, and the chat-bridge's `startSession` can
-   * deliver it on the next WS connect.
-   *
-   * Optional for back-compat: when omitted, the factory constructs the
-   * SQLite-backed store automatically from `input.db` so production
-   * boots without explicit wiring. Tests can pass `null` to disable
-   * the feature, or pass an in-memory stub.
-   */
-  pendingRedirects?: PendingRedirectStore | null
-  /**
    * S17 (2026-05-17) — `GET /recover` handler. Mounted on the per-instance
    * landing surface so a same-origin /recover fetch from chat.ts after a
    * post-slug-rename WS disconnect lands on a handler that can mint a
@@ -610,53 +544,6 @@ export interface BuildLandingStackInput {
    * `gateway_events.payload_json` for the M2 metrics view.
    */
   llmRouter?: import('../../onboarding/interview/llm-router.ts').LlmRouter
-  /**
-   * Scribe phase 1 (2026-06-06) — chat-time knowledge-extraction hook,
-   * threaded into the chat-bridge so a real user turn fans into scribe's
-   * extract→GBrain path. Production wires `(i) => scribe.handleUserTurn(i)`
-   * from the boot shell; tests + Open self-host without scribe omit it and the
-   * chat path is unaffected. Closes ISSUES #101 Gap 2.
-   */
-  scribeOnUserTurn?: (input: {
-    project_slug: string
-    user_id: string
-    topic_id: string
-    text: string
-    observed_at: number
-  }) => void
-  /**
-   * Substrate-lift S3 (#106) — replay-redelivery store, threaded into the
-   * chat-bridge so a (re)connect flushes any recovered replies a crash dropped
-   * for this user's conversational channel (`web:<user_id>`). Production wires
-   * the same `InMemoryRecoveredReplyStore` instance the per-instance LLM
-   * substrate's `onRecoveredReply` sink persists into. Optional — omitted on the
-   * `=0` rollback / Open self-host / tests, where the connect path is unaffected.
-   */
-  recoveredReplyStore?: import('../http/recovered-reply-store.ts').RecoveredReplyStore
-  /**
-   * ISSUES #204 (post-onboarding spec § ITEM 1) — live-agent turn-runner
-   * factory. The runner needs the SAME `ButtonStore` + `TranscriptWriter`
-   * instances this factory constructs (persistence + audit must share the
-   * engine's stores), so the boot shell passes a FACTORY that receives
-   * them and returns the runner; `buildLandingStack` threads the result
-   * (plus the onboarding state store, for the phase gate) into
-   * `buildWebChatBridge`. Optional — when omitted (Open box without LLM
-   * creds, legacy tests), completed-phase messages keep the pre-#204
-   * engine no-op path.
-   */
-  liveAgentTurnFactory?: (pieces: {
-    buttonStore: ButtonStore
-    transcript: TranscriptWriter
-  }) => import('../http/chat-sender-registry.ts').LiveAgentTurnRunner
-  /**
-   * Parity gap #2 (Cores→Open) — pre-dispatch chat-command filter, threaded
-   * verbatim into `buildWebChatBridge`. The Open composer builds it by chaining
-   * the bundled free-Core filters (`/cal`, `/email`, `/research`, `/remind`) via
-   * `buildChainedChatCommandFilter([...])`, so a slash command typed into the
-   * single-owner web chat is claimed by its Core instead of falling through to the
-   * LLM. Optional — omitted on Core-less boxes, where the chat path is unaffected.
-   */
-  chatCommandFilter?: import('../http/app-ws-surface.ts').ChatCommandFilter
   /**
    * v0.1.80 (2026-05-22) — personality character suggester. When wired,
    * the engine fires `generate(...)` on `personality_offered` phase entry
@@ -1294,103 +1181,15 @@ export function buildLandingStack(input: BuildLandingStackInput): LandingStackWi
   const pieces = buildOnboardingEnginePieces(input)
   const { engine, registry, stateStore, importJobRunner, importPayloadResolver, buttonStore } =
     pieces
-  const consumedTokens: ConsumedTokensStore = input.consumedTokens ?? new InMemoryConsumedTokens()
-  // 2026-05-11 — pending-redirect store. The Managed boot shell
-  // (`buildDefaultRealModeComposer`) constructs the SQLite-backed store
-  // and threads it in via `input.pendingRedirects`.
-  //
-  // Sprint B (2026-05-20) — the previous default-construction-here
-  // shape took a direct import edge on the Managed pending-redirect-store
-  // module, which is Managed-classified. The store is now wholly owned by the
-  // boot shell; callers that need it (production) wire it through, and
-  // callers that don't (tests / Open self-hosted boxes that never run
-  // the slug-rename flow) pass `undefined` and the chat-bridge's
-  // delivery path stays inert.
-  const pendingRedirects: PendingRedirectStore | null =
-    input.pendingRedirects === undefined ? null : input.pendingRedirects
-  // Sprint B (2026-05-20), updated C2 (2026-06-10) — start-token verify
-  // + JTI claim are dependency-injected from `input.platform` when
-  // supplied by the boot shell, otherwise omitted entirely. Since C2
-  // there is NO fallback: chat-bridge's lazy dynamic import of the
-  // Managed start-token module was DELETED (a dynamic import is still
-  // an open→managed edge), so unwired callers (tests / Open self-host)
-  // get injection-only behavior — validateStartToken rejects every
-  // token with `reason=start-token-auth-unwired`.
-  const bridge = buildWebChatBridge({
-    expected_project_slug: input.project_slug,
-    internal_handle: input.internal_handle,
-    slugHistoryStore: input.slugHistoryStore,
-    ...(input.ownerRegistry !== undefined ? { ownerRegistry: input.ownerRegistry } : {}),
-    resolveKey: buildJwksResolveKey(input.jwks),
-    consumedTokens,
-    ...(input.platform?.verifyStartToken !== undefined
-      ? { verifyStartToken: input.platform.verifyStartToken }
-      : {}),
-    ...(input.platform?.claimStartTokenJti !== undefined
-      ? { claimStartTokenJti: input.platform.claimStartTokenJti }
-      : {}),
-    engine,
-    registry,
-    ...(pendingRedirects !== null ? { pendingRedirects } : {}),
-    // 2026-05-28 sidebar sprint — share the same ButtonStore the
-    // engine emits into so the project-topic inbound stub can resolve
-    // tapped seed prompts via `buttonStore.resolve(...)`.
-    buttonStore,
-    // Scribe phase 1 — forward the chat-time extraction hook so a user turn
-    // fans into the extract→GBrain path (closes #101 Gap 2).
-    ...(input.scribeOnUserTurn !== undefined
-      ? { scribeOnUserTurn: input.scribeOnUserTurn }
-      : {}),
-    // S3 #106 — forward the replay-redelivery store so a (re)connect flushes
-    // any recovered replies a crash dropped for this user's channel.
-    ...(input.recoveredReplyStore !== undefined
-      ? { recoveredReplyStore: input.recoveredReplyStore }
-      : {}),
-    // Parity gap #2 (Cores→Open) — forward the chained free-Core chat-command
-    // filter so `/cal`/`/email`/`/research`/`/remind` are routed to their Core
-    // before the LLM turn. Omitted on Core-less boxes (chat path unaffected).
-    ...(input.chatCommandFilter !== undefined
-      ? { chatCommandFilter: input.chatCommandFilter }
-      : {}),
-    // ISSUES #204 — live-agent turn runner bound to THIS stack's
-    // ButtonStore + TranscriptWriter, plus the state store for the
-    // bridge's completed-phase gate. The state store is threaded
-    // unconditionally (read-only `get`); the gate only fires when the
-    // runner is also present.
-    ...(input.liveAgentTurnFactory !== undefined
-      ? {
-          liveAgentTurn: input.liveAgentTurnFactory({
-            buttonStore,
-            transcript: pieces.transcript,
-          }),
-        }
-      : {}),
-    onboardingStateStore: stateStore,
-    // Connect group-chat engagement mode (spec §2) — the per-project
-    // `agent_engagement_mode` reader, backed by THIS instance's `projects`
-    // table (migration 0088). Wired unconditionally: it is a read-only,
-    // failure-safe lookup that defaults to `all_messages` for any unknown /
-    // unset project, so a project-topic message engages the agent on every
-    // post unless the owner opted that project into `tag_gated`. NO feature
-    // flag — the stored setting IS the behaviour.
-    resolveEngagementMode: async (project_id: string): Promise<AgentEngagementMode> => {
-      try {
-        const row = input.db
-          .prepare<{ agent_engagement_mode: string }, [string]>(
-            `SELECT agent_engagement_mode FROM projects WHERE id = ? AND deleted_at IS NULL`,
-          )
-          .get(project_id)
-        return row !== null && isAgentEngagementMode(row.agent_engagement_mode)
-          ? row.agent_engagement_mode
-          : DEFAULT_AGENT_ENGAGEMENT_MODE
-      } catch {
-        return DEFAULT_AGENT_ENGAGEMENT_MODE
-      }
-    },
-  })
+  // K11b0 (2026-07) — the dead `/ws/chat` `buildWebChatBridge` construction
+  // was excised. The engine's onboarding emit fans out through the routed
+  // senders (`buildRoutedSendButtonPrompt` / `buildRoutedSendImportProgress`,
+  // wired via `buildOnboardingEnginePieces`) on `/ws/app/chat`; the legacy
+  // bridge socket had zero production reachability. `createLandingServer` no
+  // longer accepts a `bridge`, so the start-token / slug-history / engagement
+  // wiring that only fed the bridge is gone with it.
   const landingOpts: Parameters<typeof createLandingServer>[0] = {
     static_dir: input.static_dir,
-    bridge,
   }
   if (input.recoverHandler !== undefined) {
     landingOpts.recoverHandler = input.recoverHandler

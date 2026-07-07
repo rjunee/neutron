@@ -23,13 +23,13 @@
  * `landing/mobile-install-config.ts` are filled in.
  */
 
-import { describe, expect, test, mock } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { bootSignup } from '../boot.ts'
-import { createLandingServer, type ChatBridge, type PendingChatClaim } from '../server.ts'
+import { createLandingServer } from '../server.ts'
 import {
   MOBILE_INSTALL_LINKS,
   STORE_LINKS_TOKEN,
@@ -39,24 +39,6 @@ import { MOBILE_APP_URL } from '../../onboarding/interview/final-handoff-config.
 import { buildFinalHandoffMobileAppFollowupPromptSpec } from '../../onboarding/interview/final-handoff-prompts.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-
-function makeBridge(overrides: Partial<ChatBridge> = {}): ChatBridge {
-  return {
-    validateStartToken: mock(async ({ start_token }: { start_token: string }) =>
-      start_token === 'good'
-        ? ({
-            project_slug: 'alice',
-            user_id: 'u-1',
-            jti: 'jti-1',
-            expires_at_ms: Date.now() + 60_000,
-          } satisfies PendingChatClaim)
-        : null,
-    ),
-    startSession: mock(async () => true),
-    handleInbound: mock(async () => {}),
-    ...overrides,
-  }
-}
 
 const FAKE_SERVER = { upgrade: () => true } as unknown as import('bun').Server<unknown>
 
@@ -115,7 +97,7 @@ describe('GET /mobile — signup-landing boot surface (web-app host apex)', () =
 
 describe('GET /mobile — per-instance landing server (<slug>.<instance-host>)', () => {
   test('createLandingServer serves the same install page', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     const res = await handler.fetch(new Request('http://x.test/mobile'), FAKE_SERVER)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/html')
@@ -127,7 +109,7 @@ describe('GET /mobile — per-instance landing server (<slug>.<instance-host>)',
     // chat.html links manifest + icons (see below); without these routes
     // the per-instance gateway 404s them and Add-to-Home-Screen falls back
     // to an icon-less screenshot shortcut.
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     for (const [path, type] of [
       ['/site.webmanifest', 'application/manifest+json'],
       ['/favicon.svg', 'image/svg+xml'],

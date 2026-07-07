@@ -167,20 +167,6 @@ function collectInlineHashes(html: string, tag: 'script' | 'style'): string[] {
   return out
 }
 
-export type ChatInbound =
-  | { type: 'user_message'; body: string }
-  | { type: 'button_choice'; prompt_id: string; choice_value: string; freeform_text?: string }
-  /**
-   * 2026-05-29 in-place topic switch sprint. Sent by the client when
-   * the user taps a non-active row in the sidebar topic rail. The
-   * gateway re-binds the per-session sender to `new_topic_id` so
-   * subsequent engine emits route to the new topic on the SAME WS
-   * (no socket reconnect, no page reload). The bridge replies with a
-   * `topic_switched` ack on success OR an `error` envelope on
-   * validation failure (cross-user topic_id, malformed shape, etc.).
-   */
-  | { type: 'topic_switch'; new_topic_id: string }
-
 /**
  * P1.5 / Sprint 21 — `ChatOutbound` is a discriminated union covering both
  * the original `agent_message` envelope (P2 S2) and the new `redirect`
@@ -524,189 +510,6 @@ export interface ImportProgressOutbound {
   body?: string
 }
 
-/**
- * The bridge boundary the landing server delegates to. Production wires
- * this through `signup/start-token.ts:consumeStartToken` (to validate
- * the inbound `?start=<token>` query param) + the onboarding engine
- * (`InterviewEngine.advance(...)`).
- *
- * Codex r5 P2: split `authenticate` into `validateStartToken` (no jti
- * claim) + `startSession` (atomic claim + first emit) so a failed
- * upgrade doesn't burn the start-token. Codex r5 P1: `startSession` is
- * the hook that emits the agent's opening prompt to the freshly opened
- * socket so the user does not stare at a blank screen.
- */
-export interface PendingChatClaim {
-  project_slug: string
-  user_id: string
-  jti: string
-  expires_at_ms: number
-  /**
-   * 2026-05-28 sidebar sprint — optional `?topic_id=` query parameter the
-   * WS client supplied (e.g. `web:<user_id>` for General OR
-   * `web:<user_id>:<project_id>` for a per-project topic). Validated by
-   * the upgrade handler against the claim's user_id so a crafted value
-   * can't route to another user. When omitted, the bridge defaults to
-   * the General topic (`webTopicId(user_id)`).
-   */
-  active_topic_id?: string
-}
-
-export interface ChatBridge {
-  /**
-   * Validate the `?start=<token>` query param WITHOUT consuming the jti.
-   * Production wires through a JWT verify + audience + expiry check;
-   * the actual atomic claim happens later in `startSession`.
-   */
-  validateStartToken(input: { start_token: string }): Promise<PendingChatClaim | null>
-  /**
-   * Atomically claim the validated start-token's jti AND fire the
-   * agent's opening prompt to the freshly opened socket. Called by the
-   * server once on `open`, after the WebSocket upgrade has succeeded.
-   * Returns false on a claim race (the jti was consumed elsewhere
-   * between validate and start) so the server closes the WS.
-   */
-  startSession(input: {
-    claim: PendingChatClaim
-    send: (event: ChatOutbound) => void
-    /**
-     * 2026-05-28 sidebar sprint — the active topic_id this socket is
-     * bound to. Defaults to `webTopicId(claim.user_id)` when omitted
-     * (legacy callers + cookie-only upgrades on the General topic).
-     * The bridge uses this to register the outbound sender at the right
-     * topic key so engine emits land on the correct sender.
-     */
-    active_topic_id?: string
-    /**
-     * 2026-06-05 (click-button, Argus #1 BLOCKER) — the host this WS is
-     * connected to (resolved from `X-Forwarded-Host`, else the request
-     * URL host). Threaded into the pending-redirect `takeAndClaim` so the
-     * WS-replay path can apply the SAME destination-host self-redirect
-     * guard the HTTP 302 path already has: a reconnect that lands ON the
-     * slug-rename destination host must NOT re-emit the redirect to
-     * itself (nor burn the start-token), and must instead fall through to
-     * a normal engine.start. Omitted by callers that can't resolve the
-     * request host; the guard then never fires.
-     */
-    current_host?: string
-    /**
-     * #306 (2026-06-19) — the auto-detected browser timezone from the
-     * `?tz=` WS-upgrade query param (IANA, e.g. "America/Los_Angeles").
-     * The bridge forwards it to `engine.start` so onboarding stamps it
-     * onto `phase_state.timezone` and never has to ask. Optional: absent
-     * on cookie-only resumes, Telegram clients, and older browsers; the
-     * engine re-validates the shape before persisting.
-     */
-    browser_timezone?: string
-  }): Promise<boolean>
-  /**
-   * Called once per inbound chat event from the WebSocket. The bridge is
-   * expected to drive the engine and call `send(...)` with any agent
-   * outbound that follows.
-   */
-  handleInbound(input: {
-    project_slug: string
-    user_id: string
-    event: ChatInbound
-    send: (event: ChatOutbound) => void
-    /**
-     * 2026-05-28 sidebar sprint — the active topic_id this socket is
-     * bound to (same semantics as on `startSession`). Defaults to the
-     * General topic when omitted.
-     */
-    active_topic_id?: string
-    /**
-     * 2026-05-29 in-place topic switch sprint — optional callback the
-     * server passes so the bridge's `topic_switch` handler can mutate
-     * the per-socket `SocketState.active_topic_id` in place. Without
-     * this, the bridge re-binds the sender registry but the NEXT
-     * inbound message would still arrive with the OLD `active_topic_id`
-     * (because the server reads it from `data.active_topic_id` on
-     * every message). The server's lambda assigns `data.active_topic_id
-     * = new_topic_id` so the contract stays "ws.data is the source of
-     * truth; the bridge never holds its own copy across calls."
-     *
-     * Optional for back-compat — when omitted the bridge falls back to
-     * re-binding only the registry; the new topic still receives
-     * engine emits via the sender re-register, but subsequent inbound
-     * messages on the same socket still report the OLD active_topic_id
-     * (which is what the pre-sprint behaviour was).
-     */
-    updateActiveTopicId?: (new_id: string) => void
-    /**
-     * 2026-05-29 ISSUES #70 — race-safety read-callback paired with
-     * `updateActiveTopicId`. The bridge's `topic_switch` handler awaits
-     * `reEmitActiveSeedPromptIfAny` (two DB round-trips: list +
-     * get-prompt) BEFORE acking the switch. If a SECOND `topic_switch`
-     * lands on the same socket during that await, the first re-emit's
-     * `send(...)` would otherwise paint a stale seed into the just-
-     * cleared `#log` of the second destination topic. With this hook
-     * wired, the helper re-reads `ws.data.active_topic_id` right before
-     * emitting and drops the emit (logs `event=seed_reemit_superseded`)
-     * when the active topic has moved on. Mirrors the client-side
-     * `pendingTopicSwitchDestination` ack guard introduced in
-     * PR #338 r4.
-     *
-     * Optional for back-compat — when omitted the helper emits
-     * unconditionally (the pre-sprint behaviour). Production wires
-     * `() => ws.data.active_topic_id` so the live value is read at the
-     * moment of emit, never a stale snapshot captured at handler entry.
-     */
-    getActiveTopicId?: () => string | undefined
-  }): Promise<void>
-  /**
-   * Optional — called once on WebSocket `close`. Production bridges use
-   * this hook to unregister per-session sender entries from
-   * registries (Codex Sprint 18 r1 P2 fix — without close-side
-   * cleanup, a long-lived per-instance gateway accrues stale
-   * topic_id → send entries and engine emits would still find a
-   * sender even after the client is gone). Safe to omit; the server
-   * tolerates the absence.
-   *
-   * Argus Sprint 18 r1 BLOCKING — `send` is the same per-socket lambda
-   * the server passed into `startSession` (captured once in
-   * SocketState so reference equality holds). Identity-aware
-   * registries compare-and-delete by this ref so an old socket's
-   * close-fire after a reconnect cannot delete the new socket's
-   * sender.
-   */
-  closeSession?(input: {
-    project_slug: string
-    user_id: string
-    send: (event: ChatOutbound) => void
-    /**
-     * 2026-05-28 sidebar sprint — the active topic_id this socket was
-     * bound to. The bridge uses this to identity-aware unregister the
-     * sender from the right topic key.
-     */
-    active_topic_id?: string
-  }): Promise<void> | void
-  /**
-   * 2026-05-29 r2 BLOCKER fix (Codex catch) — called once on cookie-only
-   * WS open (no `?start=` token, `pending_claim === null`). Mirrors the
-   * `startSession` post-claim hook for the cookie-resume path:
-   * registers the per-socket sender at the active topic AND re-emits
-   * the active unresolved seed prompt for project topics so a page
-   * refresh on `web:<user_id>:<proj>` doesn't render blank.
-   *
-   * No jti to claim, no engine bootstrap to run (the cookie-only path
-   * is by definition "warm" — the engine already started on a prior
-   * start-token redemption). Best-effort: a failure here MUST NOT
-   * close the socket. The server still marks `session_started = true`
-   * so subsequent inbound messages walk `handleInbound` normally.
-   *
-   * Optional for back-compat. When omitted, the cookie-only path runs
-   * pre-r2 behaviour: no sender register, no seed re-emit (project
-   * topics render blank on refresh — the bug this hook fixes).
-   */
-  resumeCookieSession?(input: {
-    project_slug: string
-    user_id: string
-    send: (event: ChatOutbound) => void
-    active_topic_id?: string
-  }): Promise<void> | void
-}
-
 export interface LandingServerOptions {
   /** Directory containing `chat.html` + compiled `chat.js`. */
   static_dir?: string
@@ -720,14 +523,6 @@ export interface LandingServerOptions {
    * (existsSync-guarded), which is the Open self-host default.
    */
   invite_assets_dir?: string
-  /**
-   * Legacy onboarding bridge. The `/ws/chat` onboarding socket that
-   * consumed this was removed (onboarding + chat are unified on
-   * `/ws/app/chat`), so the landing server no longer drives a bridge.
-   * The field stays OPTIONAL purely so existing callers that still pass
-   * a bridge keep compiling; nothing in this module reads it anymore.
-   */
-  bridge?: ChatBridge
   /** Port to listen on; production wires to the per-instance gateway port. */
   port?: number
   /** Optional hostname; defaults to '0.0.0.0' for ipv4 binding. */
@@ -852,88 +647,6 @@ export interface LandingServerOptions {
   }
 }
 
-interface SocketState {
-  project_slug: string
-  user_id: string
-  /**
-   * 2026-05-28 sidebar sprint — the `?topic_id=` query param value (or
-   * undefined when the client didn't supply one). Threaded into the
-   * bridge's start/inbound/close lifecycle so engine emits land on the
-   * sender registered for the right topic. Validated against the
-   * authenticated `user_id` at upgrade time so a crafted value cannot
-   * route to another user.
-   */
-  active_topic_id?: string
-  /**
-   * Pending claim threaded from validate → upgrade → open so we can
-   * atomically consume the jti once the socket is actually live.
-   *
-   * 2026-05-27 persistent-session-cookie sprint (Part B) — nullable to
-   * support cookie-only WS upgrades. When `null` the WS was authed via
-   * a valid session cookie (no `?start=` token present), so there is no
-   * jti to claim and no welcome envelope to fire on `open`. The open
-   * handler still captures the per-socket `send` lambda + flips
-   * `session_started` true so subsequent inbound messages walk
-   * `bridge.handleInbound` normally; `bridge.startSession` is skipped
-   * entirely.
-   */
-  pending_claim: PendingChatClaim | null
-  /** Set after `startSession` confirms the claim. Inbound messages
-   *  before this is true are dropped (the open handler closes on
-   *  failure, but the WS could deliver a message before `open` fires). */
-  session_started: boolean
-  /**
-   * 2026-06-05 (click-button, Argus #1 BLOCKER) — the host the upgrade
-   * request arrived on (resolved from `X-Forwarded-Host`, else the
-   * request URL host). Captured at upgrade time because Bun's WS handler
-   * has no access to the original request. Threaded into
-   * `bridge.startSession` so the pending-redirect WS-replay path can skip
-   * a destination-host self-redirect. Optional — absent on legacy
-   * upgrades that predate this field.
-   */
-  current_host?: string
-  /**
-   * #306 (2026-06-19) — the auto-detected browser timezone from the `?tz=`
-   * query param on the first (token) upgrade. Captured here because Bun's
-   * WS `open` handler has no access to the original request URL. Threaded
-   * into `bridge.startSession` so onboarding stamps it onto
-   * `phase_state.timezone`. Only set on the `?start=` token path (the
-   * client sends `?tz=` once, on the first connect); cookie-only resumes
-   * leave it undefined and the engine keeps the value stamped on connect 1.
-   */
-  browser_timezone?: string
-  /**
-   * ISSUES #94 (2026-06-05) — cookie-resolved identity captured at upgrade
-   * time as a FALLBACK for the token path. When a `?start=` token rides the
-   * upgrade but its jti is already consumed (a reconnect / reload
-   * re-presenting a spent one-shot token — the post-completion General
-   * socket), `bridge.startSession` returns false. Pre-fix the open handler
-   * closed the socket (4001) and `session_started` stayed false, so the
-   * user — though authenticated by a valid 30d session cookie — was
-   * stranded with "session not started" on every inbound. When this is set
-   * (a session cookie valid for the SAME `user_id`/`project_slug` as the
-   * token), the open handler resumes via the cookie-only path instead of
-   * closing. Only populated when `cookieToUserClaim` is wired AND the
-   * cookie is present + same-`user_id` (the single-instance cookie resolver
-   * already guarantees same-instance); a cross-identity or absent cookie
-   * leaves this undefined so a genuine jti race with no session closes
-   * cleanly (no silent cross-auth). The resume itself uses `data.project_slug`
-   * /`data.user_id` (the token claim) — identical to the happy `startSession`
-   * path — so the stored fields are the cookie identity for observability.
-   */
-  cookie_fallback_claim?: { project_slug: string; user_id: string }
-  /**
-   * Per-socket send lambda — captured ONCE in `open` and reused for
-   * the lifetime of the socket so the bridge can use reference
-   * equality to identify which socket owns a registry entry. Argus
-   * Sprint 18 r1 BLOCKING — without this stable ref, a fresh lambda
-   * created on each call would defeat the registry's
-   * identity-aware unregister. Optional because `close` may fire
-   * before `open` (e.g. peer hangs up mid-upgrade).
-   */
-  send?: (event: ChatOutbound) => void
-}
-
 /**
  * Returned by `createLandingServer`: the `{ fetch, websocket }` pair the
  * caller plugs into Bun.serve (or composes into a per-instance gateway). A
@@ -942,8 +655,8 @@ interface SocketState {
  * reviewer Sprint 19 P3 recommendation).
  */
 export interface LandingServer {
-  fetch: (req: Request, server: import('bun').Server<SocketState>) => Response | Promise<Response>
-  websocket: import('bun').WebSocketHandler<SocketState>
+  fetch: (req: Request, server: import('bun').Server<unknown>) => Response | Promise<Response>
+  websocket: import('bun').WebSocketHandler<unknown>
 }
 
 /**

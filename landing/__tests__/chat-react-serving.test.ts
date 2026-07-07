@@ -7,27 +7,19 @@
  * bundle.
  */
 
-import { describe, expect, test, mock } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createLandingServer, type ChatBridge } from '../server.ts'
+import { createLandingServer } from '../server.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const STATIC_DIR = dirname(HERE) // the landing/ package dir (has chat-react.html + chat-react/)
 
-function makeBridge(): ChatBridge {
-  return {
-    validateStartToken: mock(async () => null),
-    startSession: mock(async () => true),
-    handleInbound: mock(async () => {}),
-  }
-}
-
 const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
 
 function get(url: string) {
-  const handler = createLandingServer({ static_dir: STATIC_DIR, bridge: makeBridge() })
+  const handler = createLandingServer({ static_dir: STATIC_DIR })
   return handler.fetch(new Request(url), fakeServer)
 }
 
@@ -74,7 +66,7 @@ describe('SPA client-route catch-all — doc-link deep-link 404 fix', () => {
   })
 
   test('POST /projects/<id> is not the SPA nav catch-all — still 404s', async () => {
-    const handler = createLandingServer({ static_dir: STATIC_DIR, bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: STATIC_DIR })
     const res = await handler.fetch(
       new Request('http://x.test/projects/acme/docs', { method: 'POST' }),
       fakeServer,

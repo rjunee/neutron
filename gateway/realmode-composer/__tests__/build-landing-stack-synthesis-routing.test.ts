@@ -19,28 +19,16 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '../../../migrations/runner.ts'
 import { ProjectDb } from '../../../persistence/index.ts'
-import { JwksCache } from '../../../jwt-validator/validator.ts'
-import type { SlugHistoryShimStore } from '../../http/chat-bridge.ts'
 import { buildOnboardingEnginePieces } from '../build-landing-stack.ts'
 import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
 import type { Event } from '../../../runtime/events.ts'
 import type { SessionHandle } from '../../../runtime/session-handle.ts'
 import type { ConversationRecord } from '../../../onboarding/history-import/types.ts'
 
-const NOOP_SHIM_STORE: SlugHistoryShimStore = { lookup: async () => null }
 
 let workdir: string
 let ownerHome: string
 let db: ProjectDb
-
-function makeJwks(): JwksCache {
-  const fetchImpl = async (): Promise<Response> =>
-    new Response(JSON.stringify({ keys: [] }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  return new JwksCache('https://auth.example.test/.well-known/jwks.json', { fetch: fetchImpl })
-}
 
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-synthesis-routing-'))
@@ -102,10 +90,8 @@ test('importUseSynthesis routes the engine import hook to the accumulating synth
     db,
     project_slug: 'owner',
     owner_home: ownerHome,
-    jwks: makeJwks(),
     static_dir: workdir,
     internal_handle: 't-owner001',
-    slugHistoryStore: NOOP_SHIM_STORE,
     // The Step 2b opt-in + the accumulating synthesis substrate + a
     // deterministic zip parser.
     importUseSynthesis: true,

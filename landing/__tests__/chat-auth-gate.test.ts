@@ -11,7 +11,7 @@
  * elsewhere, not from this process's env).
  */
 
-import { describe, expect, test, mock } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,30 +19,10 @@ import {
   createLandingServer,
   renderChatAuthGateHtml,
   chatAuthGateCsp,
-  type ChatBridge,
-  type PendingChatClaim,
 } from '../server.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const STATIC_DIR = dirname(HERE) // landing/ — contains chat-react.html + assets
-
-function makeBridge(overrides: Partial<ChatBridge> = {}): ChatBridge {
-  return {
-    validateStartToken: mock(async ({ start_token }: { start_token: string }) =>
-      start_token === 'good'
-        ? ({
-            project_slug: 'alice',
-            user_id: 'u-1',
-            jti: 'jti-1',
-            expires_at_ms: Date.now() + 60_000,
-          } satisfies PendingChatClaim)
-        : null,
-    ),
-    startSession: mock(async () => true),
-    handleInbound: mock(async () => {}),
-    ...overrides,
-  }
-}
 
 const FAKE_SERVER = { upgrade: () => true } as unknown as import('bun').Server<unknown>
 
@@ -54,7 +34,6 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
   test('no substrate credential → 503 auth-gate page, NOT the chat shell', async () => {
     const handler = createLandingServer({
       static_dir: STATIC_DIR,
-      bridge: makeBridge(),
       chatAuthGate: { isUnauthenticated: () => true },
     })
     const res = await getChat(handler)
@@ -82,7 +61,6 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
   test('substrate credential present → 200 chat shell (gate inert)', async () => {
     const handler = createLandingServer({
       static_dir: STATIC_DIR,
-      bridge: makeBridge(),
       chatAuthGate: { isUnauthenticated: () => false },
     })
     const res = await getChat(handler)
@@ -97,7 +75,6 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
   test('chatAuthGate unset (Managed) → 200 chat shell, gate never consulted', async () => {
     const handler = createLandingServer({
       static_dir: STATIC_DIR,
-      bridge: makeBridge(),
     })
     const res = await getChat(handler)
     expect(res.status).toBe(200)
@@ -113,7 +90,6 @@ describe('GET /chat — Claude-auth gate (ISSUES #318)', () => {
     let authed = false
     const handler = createLandingServer({
       static_dir: STATIC_DIR,
-      bridge: makeBridge(),
       chatAuthGate: { isUnauthenticated: () => !authed },
     })
     expect((await getChat(handler)).status).toBe(503)

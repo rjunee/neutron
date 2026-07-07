@@ -13,32 +13,11 @@
  */
 
 import { describe, expect, test, mock } from 'bun:test'
-import { createLandingServer, computeAssetEtag, ifNoneMatchSatisfied, type ChatBridge, type PendingChatClaim } from '../server.ts'
+import { createLandingServer, computeAssetEtag, ifNoneMatchSatisfied } from '../server.ts'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-
-// The landing server no longer consumes a bridge (the `/ws/chat` socket
-// that drove it was removed), but the optional field still accepts one.
-// These tests pass a stub bridge to pin that back-compat.
-function makeBridge(overrides: Partial<ChatBridge> = {}): ChatBridge {
-  return {
-    validateStartToken: mock(async ({ start_token }: { start_token: string }) =>
-      start_token === 'good'
-        ? ({
-            project_slug: 'alice',
-            user_id: 'u-1',
-            jti: 'jti-1',
-            expires_at_ms: Date.now() + 60_000,
-          } satisfies PendingChatClaim)
-        : null,
-    ),
-    startSession: mock(async () => true),
-    handleInbound: mock(async () => {}),
-    ...overrides,
-  }
-}
 
 // ISSUES #353 — pure function backing the /chat-react.js cache-busting ETag
 // (see `createLandingServer`'s route handler + module header above it).
@@ -88,8 +67,7 @@ describe('ifNoneMatchSatisfied', () => {
 
 describe('createLandingServer', () => {
   test('GET /chat returns the React chat shell', async () => {
-    const bridge = makeBridge()
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     // We don't actually boot Bun.serve; we just exercise fetch().
     const fakeServer = {
       upgrade(): boolean {
@@ -106,7 +84,7 @@ describe('createLandingServer', () => {
   })
 
   test('GET /chat-react.js serves the React/assistant-ui bundle', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
     const res = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
     expect(res.status).toBe(200)
@@ -121,7 +99,7 @@ describe('createLandingServer', () => {
   // so a redeploy is never masked by a stale cached copy. See `computeAssetEtag`.
   describe('/chat-react.js cache-busting (#353)', () => {
     test('serves cache-control: no-cache with a strong ETag over the bundle bytes', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
       expect(res.status).toBe(200)
@@ -133,7 +111,7 @@ describe('createLandingServer', () => {
     }, 30_000)
 
     test('a matching If-None-Match round-trips a 304 with no body (unchanged bytes)', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const first = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
       const etag = first.headers.get('etag')
@@ -148,7 +126,7 @@ describe('createLandingServer', () => {
     }, 30_000)
 
     test('a comma-separated If-None-Match list containing the current ETag round-trips a 304', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const first = await handler.fetch(new Request('http://x.test/chat-react.js'), fakeServer)
       const etag = first.headers.get('etag')
@@ -164,7 +142,7 @@ describe('createLandingServer', () => {
     }, 30_000)
 
     test('the FIRST /chat shell versions the bundle URL (?v=<id>) + is no-store — no priming, so the lazy-build first-load boundary is covered', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       // NO priming: the static_dir has no prebuilt chat-react.js, so this
       // exercises the lazy-build path's very first shell serve — the exact
@@ -181,7 +159,7 @@ describe('createLandingServer', () => {
     }, 30_000)
 
     test('a stale If-None-Match (simulating a post-deploy client) gets a fresh 200', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(
         new Request('http://x.test/chat-react.js', { headers: { 'if-none-match': '"sha256-stale-from-before-deploy"' } }),
@@ -194,7 +172,7 @@ describe('createLandingServer', () => {
   })
 
   test('GET /ws/chat now 404s — the legacy onboarding socket was removed (chat moved to /ws/app/chat)', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     const upgrade = mock(() => true)
     const fakeServer = { upgrade } as unknown as import('bun').Server<unknown>
     const res = await handler.fetch(new Request('http://x.test/ws/chat?start=good'), fakeServer)
@@ -204,7 +182,7 @@ describe('createLandingServer', () => {
   })
 
   test('unknown route returns 404', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
     const res = await handler.fetch(new Request('http://x.test/anything-else'), fakeServer)
     expect(res.status).toBe(404)
@@ -220,7 +198,7 @@ describe('createLandingServer', () => {
   // ─────────────────────────────────────────────────────────────────
   describe('/start?token= rewrite (per-instance entry point, 2026-05-22)', () => {
     test('GET /start?token=<jwt> 302s to /chat?start=<jwt>', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(
         new Request('http://prism.test/start?token=abc.def.ghi'),
@@ -231,7 +209,7 @@ describe('createLandingServer', () => {
     })
 
     test('GET /start?start=<jwt> (legacy compat) also 302s to /chat?start=<jwt>', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(
         new Request('http://prism.test/start?start=legacy.jwt'),
@@ -242,14 +220,14 @@ describe('createLandingServer', () => {
     })
 
     test('GET /start without ?token or ?start returns 400', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(new Request('http://prism.test/start'), fakeServer)
       expect(res.status).toBe(400)
     })
 
     test('propagates ?debug= so the destination chat.html re-enables debug', async () => {
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(
         new Request('http://prism.test/start?token=jwt&debug=1'),
@@ -267,7 +245,7 @@ describe('createLandingServer', () => {
       // validateStartToken) is the auth gate. The rewrite must NOT 401
       // for a malformed-looking token — that would block /chat from
       // surfacing its own 401 + user-facing error envelope.
-      const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: dirname(HERE) })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(
         new Request('http://prism.test/start?token=not-a-real-jwt'),
@@ -279,14 +257,13 @@ describe('createLandingServer', () => {
 
   test('throws when static_dir missing chat-react.html', () => {
     expect(() =>
-      createLandingServer({ static_dir: '/no/such/path', bridge: makeBridge() }),
+      createLandingServer({ static_dir: '/no/such/path' }),
     ).toThrow()
   })
 
   test('Codex r9 P1: GET /api/v1/sign-up?via=tg redirects to identity OAuth', async () => {
     const handler = createLandingServer({
       static_dir: dirname(HERE),
-      bridge: makeBridge(),
       resolveSignupRedirect: ({ via }) => `https://auth.neutron.example/oauth/start?via=${via}`,
     })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
@@ -296,7 +273,7 @@ describe('createLandingServer', () => {
   })
 
   test('Codex r9 P1: GET /api/v1/sign-up returns 503 when redirect not configured', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
     const res = await handler.fetch(new Request('http://x.test/api/v1/sign-up?via=tg'), fakeServer)
     expect(res.status).toBe(503)
@@ -305,7 +282,6 @@ describe('createLandingServer', () => {
   test('Codex r9 P1: defaults via=web when query missing', async () => {
     const handler = createLandingServer({
       static_dir: dirname(HERE),
-      bridge: makeBridge(),
       resolveSignupRedirect: ({ via }) => `https://auth.example/oauth/start?via=${via}`,
     })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
@@ -317,7 +293,6 @@ describe('createLandingServer', () => {
   test('Argus follow-up: via=telegram resolves to the same target as via=tg', async () => {
     const handler = createLandingServer({
       static_dir: dirname(HERE),
-      bridge: makeBridge(),
       resolveSignupRedirect: ({ via }) => `https://auth.example/oauth/start?via=${via}`,
     })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
@@ -335,7 +310,6 @@ describe('createLandingServer', () => {
   test('Argus follow-up: unrecognized via still defaults to web', async () => {
     const handler = createLandingServer({
       static_dir: dirname(HERE),
-      bridge: makeBridge(),
       resolveSignupRedirect: ({ via }) => `https://auth.example/oauth/start?via=${via}`,
     })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
@@ -345,7 +319,7 @@ describe('createLandingServer', () => {
   })
 
   test('Sprint 26: GET /onboarding/telegram serves the landing HTML when present', async () => {
-    const handler = createLandingServer({ static_dir: dirname(HERE), bridge: makeBridge() })
+    const handler = createLandingServer({ static_dir: dirname(HERE) })
     const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
     const res = await handler.fetch(
       new Request('http://x.test/onboarding/telegram?bot=alice_bot&signin_event_id=abc-123-def&instance=t-dddddddd'),
@@ -372,7 +346,7 @@ describe('createLandingServer', () => {
     // onboarding-telegram.html.
     writeFileSync(join(tmp, 'chat-react.html'), '<html><div id="root"></div></html>')
     try {
-      const handler = createLandingServer({ static_dir: tmp, bridge: makeBridge() })
+      const handler = createLandingServer({ static_dir: tmp })
       const fakeServer = { upgrade: () => true } as unknown as import('bun').Server<unknown>
       const res = await handler.fetch(
         new Request('http://x.test/onboarding/telegram'),

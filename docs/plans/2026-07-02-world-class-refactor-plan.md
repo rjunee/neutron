@@ -878,6 +878,12 @@ is a defensive stub at 1497-1514). File lands ~700 lines of pure HTTP routing + 
 > ⚠️ **NOT zero-referenced (Fable sweep 2026-07-06 §3 N7):** `SocketState` is a live TYPE at `landing/server.ts:945-946` (`Bun.Server<SocketState>`, `WebSocketHandler<SocketState>`) — deleting it requires re-typing the live `fetch`/`websocket` handler signatures (compile-caught, but it's not a pure deletion). The three named functions + the `bridge` option ARE confirmed zero-callsite dead.
 **Accept:** landing tests green; CSP hash helpers (136-168, live) untouched.
 
+> **K11b0 landed (2026-07-06) — dead ChatBridge excised, behavior knowingly made permanently-dead.** The `/ws/chat` `buildWebChatBridge` factory + its `validateStartToken`/`startSession`/`handleInbound`/project-topic surface were deleted (fully unreachable — onboarding+chat are unified on `/ws/app/chat`). Also deleted from `landing/server.ts`: the `ChatBridge`/`PendingChatClaim`/`ChatInbound` types, `SocketState` (the `Bun.Server`/`WebSocketHandler` generics re-typed to `<unknown>`), and the unread `bridge` option. Three behaviors are now **permanently dropped** with the bridge (each was already unreachable in prod):
+> - **Connect engagement-mode / tag-gating enforcement** — the `resolveEngagementMode` + `@neutron` tag-gate lived only on the bridge's project-topic ingress. Gone until re-implemented on the app-ws seam if the feature is revived.
+> - **Recovered-reply reconnect drain** — `RecoveredReplyStore` was drained only by the bridge's connect path; Open never passed a store, so it never fired. The store MODULE is kept (not deleted here); a Managed cross-check is deferred. No other reader exists.
+> - **`runWithActiveProject`'s only caller** — the bridge's chat-command path was the sole wrap site. Module kept; app-ws should adopt the wrap per the per-project credential-scoping plan (`docs/plans/2026-06-30-per-project-settings-tab-credential-scoping-plan.md`).
+> Retained live in `chat-bridge.ts`: routed senders (`buildRoutedSendButtonPrompt`/`buildRoutedSendImportProgress`), `renderButtonPromptForWeb`, the sender/session/owner/slug-shim registries, and the K11a1 re-export shim. This unblocks **K11b1** (engine-drive deletion) — the bridge no longer calls `engine.start/advance`.
+
 ### D9a–D9d — Interview-engine decomposition · `opus` · L/L/XL/L · lane engine
 **Blocked on decision D-5 (the Path-1 fork).** The prior extraction pass created a
 300-line `EngineInternals` friend interface with 165 `self.` references — line count
