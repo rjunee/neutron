@@ -47,7 +47,9 @@ describe('P2 v2 — LEGAL_TRANSITIONS table', () => {
     expect(isLegalTransition('signup', 'instance_provisioned')).toBe(true)
     expect(isLegalTransition('signup', 'identity_oauth')).toBe(true)
     expect(isLegalTransition('signup', 'agent_name_chosen')).toBe(false)
-    expect(isLegalTransition('signup', 'wow_fired')).toBe(false)
+    // K11e: `wow_fired` was deleted; `completed` is the surviving far
+    // terminal that `signup` still must NOT be able to jump directly to.
+    expect(isLegalTransition('signup', 'completed')).toBe(false)
   })
 
   test('v2 chain matches § 2.8 — every spec phase is reachable forward', () => {
@@ -63,9 +65,9 @@ describe('P2 v2 — LEGAL_TRANSITIONS table', () => {
       ['slug_chosen', 'projects_proposed'],
       ['projects_proposed', 'persona_synthesizing'],
       ['persona_synthesizing', 'persona_reviewed'],
-      ['persona_reviewed', 'max_oauth_offered'],
-      ['max_oauth_offered', 'wow_fired'],
-      ['wow_fired', 'completed'],
+      // K11e: `max_oauth_offered` / `wow_fired` deleted — persona_reviewed
+      // now advances straight to the live finalize target, `completed`.
+      ['persona_reviewed', 'completed'],
     ]
     for (const [from, to] of noImportChain) {
       expect({ from, to, legal: isLegalTransition(from as OnboardingPhase, to as OnboardingPhase) }).toEqual({
@@ -95,9 +97,10 @@ describe('P2 v2 — LEGAL_TRANSITIONS table', () => {
   test('persona_reviewed has v2 redo edges back to earlier phases', () => {
     // § 2.12 — redo from persona_reviewed jumps back to personality_offered,
     // agent_name_chosen, or slug_chosen so the user can re-do an earlier
-    // step. The forward edges (max_oauth_offered / wow_fired) also stand.
+    // step. The forward edge (K11e: now `completed`, after the deletion of
+    // max_oauth_offered / wow_fired) also stands.
     const legal = LEGAL_TRANSITIONS['persona_reviewed']
-    expect(legal).toContain('max_oauth_offered')
+    expect(legal).toContain('completed')
     expect(legal).toContain('personality_offered')
     expect(legal).toContain('agent_name_chosen')
     expect(legal).toContain('slug_chosen')

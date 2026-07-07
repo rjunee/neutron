@@ -333,62 +333,14 @@ export const STATIC_PHASE_SPECS: Readonly<Record<string, PhasePromptSpec>> = {
     allow_freeform: false,
     next_phase_on_default: 'persona_reviewed',
   },
-  // § 3.14 — persona_reviewed transit. v2 advances to
-  // `max_oauth_offered` (slug moved EARLIER in the chain, before
-  // projects_proposed, so the post-persona path is just Max-attach).
+  // § 3.14 — persona_reviewed transit. The post-persona Max-attach
+  // (`max_oauth_offered`) and wow-dispatch (`wow_fired`) phases were
+  // removed (walk dispatcher deleted in #243, handlers in #248/K11e), so
+  // the forward default now advances straight to the live finalize
+  // target, `completed`.
   persona_reviewed: {
     phase: 'persona_reviewed',
     body: 'Looks great. One more thing before we wrap up.',
-    options: [],
-    allow_freeform: true,
-    next_phase_on_default: 'max_oauth_offered',
-  },
-  // 2026-05-28 — single-CTA collapse (Sam walkthrough). Pre-2026-05-28
-  // this phase offered a 3-way choice (attach Max / BYO API key / skip
-  // onto free tier). Sam: "We are always using claude max sub for now.
-  // In future we might build an admin interface for changing
-  // models/auth" — the BYO + skip branches were also a frequent stuck
-  // loop because attach failed with "Max attach is temporarily
-  // unavailable. Use your own API key or skip for now." pointing at the
-  // very options we're removing.
-  //
-  // Current shape: ONE button — "Connect Claude Max" — and the engine
-  // auto-skips this phase entirely for owners whose substrate already
-  // has a `max_oauth_refresh` secret (e.g. owners who completed Max
-  // OAuth during the import phase). See
-  // `InterviewEngine.maybeAutoAdvancePastMaxOauthOffered`.
-  //
-  // The `byo_key` + `skip` choice handlers remain in
-  // `consumeMaxOauthChoice` as defensive paths for any stale in-flight
-  // prompt that still surfaces those values, so an old keyboard tap
-  // doesn't strand the user. Fresh emits never present those buttons.
-  // Restoring a BYO-key path is a future-sprint admin-interface
-  // decision per Sam's verbatim note above — not a P0 onboarding gap.
-  max_oauth_offered: {
-    phase: 'max_oauth_offered',
-    body:
-      "I need your Claude Max sub to run premium models. One click to connect.",
-    options: [
-      { label: 'A', body: 'Connect Claude Max', value: 'attach_max' },
-    ],
-    allow_freeform: false,
-    next_phase_on_default: 'wow_fired',
-  },
-  // 2026-05-13 (T2) — wow_fired is the dispatch transit phase. Body is
-  // the "setting up your first week..." status message the user sees
-  // before the WowDispatcher fires the 7 Day-1 actions (per § 2.5
-  // catalogue + § 4.10 contract). allow_freeform:true keeps the button-
-  // primitive validator happy with a zero-option spec; the user is not
-  // expected to interact — the engine drives the transition to
-  // `completed` after the dispatcher resolves (see engine.advanceWowFired).
-  //
-  // SOUL.md / USER.md / persona file names DO NOT appear in this body —
-  // the user sees a plain operator-facing status, not internal artifact
-  // names.
-  wow_fired: {
-    phase: 'wow_fired',
-    body:
-      "Setting up your first week — drafting your brief, queueing your overnight pass, and seeding what we talked about. One moment...",
     options: [],
     allow_freeform: true,
     next_phase_on_default: 'completed',
@@ -1843,163 +1795,13 @@ export const PERSONA_FALLBACK_BLEND: BlendedArchetype = {
   decision_md: '_Decision style to be refined as we learn more about you._',
 }
 
-/**
- * 2026-05-13 — T3 dynamic builder for `max_oauth_offered`.
- *
- * The phase has three shapes:
- *
- *   1. INITIAL — the user is offered the single "Connect Claude Max"
- *      CTA. The static fallback in `STATIC_PHASE_SPECS.max_oauth_offered`
- *      covers this; this builder collapses to that spec when no sub-
- *      state flag is set. 2026-05-28: the historical 3-way choice
- *      (attach / BYO / skip) is gone — single CTA only.
- *
- *   2. AWAITING MAX-HANDOFF COMPLETION — the user tapped Connect Claude
- *      Max, the engine called `maxOauth.startHandoff(...)`, and the
- *      handoff returned a URL for the user to open externally. The
- *      re-emitted prompt surfaces the URL inline and offers a `Done`
- *      button that the engine consumes by verifying the SecretsStore
- *      landed the row, then advancing to `wow_fired`. Triggered by
- *      `phase_state.max_handoff_url`.
- *
- *   3. AWAITING BYO API-KEY PASTE — *legacy / defensive only*. Fresh
- *      emits no longer offer the `byo_key` button (2026-05-28 single-CTA
- *      collapse), so new instances cannot enter this state. The builder
- *      keeps the shape so any in-flight instance whose phase_state still
- *      carries `awaiting_byo_paste === true` from before the cutover
- *      sees a working paste prompt and isn't stranded.
- *
- * The engine resolves this builder in `resolvePhasePromptSpecUncached`,
- * special-casing `max_oauth_offered` the same way `slug_chosen` is
- * special-cased. The engine ALSO auto-advances past this phase entirely
- * when `secrets.list({ kind: 'max_oauth_refresh', ... })` returns a row
- * for this instance — see `maybeAutoAdvancePastMaxOauthOffered`.
+/* K11e (2026-07-07): the `max_oauth_offered` dynamic builder
+ * (`buildMaxOauthOfferedPromptSpec`) + its `BuildMaxOauthOfferedPromptSpecInput`
+ * input type were deleted here. The phase is no longer walked (engine phase-walk
+ * removed in #243, handler methods in #248/K11e), so nothing resolves this
+ * builder. Legacy stranded rows are handled purely by the creds gate in
+ * gateway/realmode-composer/resolve-onboarding-phase.ts.
  */
-export interface BuildMaxOauthOfferedPromptSpecInput {
-  /** When set, the user tapped Attach my Max and the engine has a one-time
-   *  OAuth URL to surface to the user. */
-  max_handoff_url: string | null
-  /** When true, the user tapped Use my own API key and the engine is
-   *  waiting for a freeform paste of the API key. */
-  awaiting_byo_paste: boolean
-  /** Optional rejection reason from a prior failed paste attempt. */
-  rejection_reason: string | null
-  /**
-   * 2026-06-03 (max-oauth-autoskip-wiring) — the substrate the user told
-   * us they use at `ai_substrate_offered` (read off
-   * `phase_state.ai_substrate_used`). Shape 1 (initial connect CTA)
-   * acknowledges a `'claude'` answer with warmer copy; a
-   * `'chatgpt'` / `'neither'` / null answer keeps the original blunt
-   * body. Only the Shape-1 body is affected. Defensive in practice — the
-   * auto-skip fires when Max IS attached, so this acknowledging body is
-   * the one a Claude user sees only when they reach the phase with
-   * NO Max secret yet. Optional so existing callers/tests stay valid.
-   */
-  ai_substrate_used?: AiSubstrateSource | null
-  /**
-   * 2026-06-13 (onboarding Open-mode) — when `'open'`, the initial shape
-   * presents a LOCAL "paste your claude setup-token" affordance instead of
-   * the hosted "Connect Claude Max" OAuth handoff. The pasted token is
-   * stored to the local SecretsStore (kind `max_oauth_refresh`) by the
-   * engine. Optional so managed callers/tests are unchanged (unset ⇒
-   * managed). Per docs/NEUTRON.md § 1 deployment tiers.
-   */
-  deployment_mode?: OnboardingDeploymentMode
-}
-
-export function buildMaxOauthOfferedPromptSpec(
-  input: BuildMaxOauthOfferedPromptSpecInput,
-): PhasePromptSpec {
-  // Shape 3: awaiting BYO paste.
-  if (input.awaiting_byo_paste) {
-    const baseBody =
-      "Paste your Anthropic API key (starts with sk-ant-). I'll only use it for the premium-model calls."
-    const body =
-      input.rejection_reason !== null && input.rejection_reason.length > 0
-        ? `${input.rejection_reason}\n\n${baseBody}`
-        : baseBody
-    // Skip option lets the user back out of the paste flow without
-    // restarting onboarding. Routes to `substrate='free'` via the same
-    // `advanceFromMaxOauthOffered('free')` path the top-level Skip uses.
-    return {
-      phase: 'max_oauth_offered',
-      body,
-      options: [{ label: 'A', body: 'Skip for now', value: 'skip' }],
-      allow_freeform: true,
-      next_phase_on_default: 'wow_fired',
-    }
-  }
-  // Shape 2: awaiting Max-handoff completion.
-  if (typeof input.max_handoff_url === 'string' && input.max_handoff_url.length > 0) {
-    const body = `Open this link to attach your Claude Max sub:\n\n${input.max_handoff_url}\n\nTap Done once you've completed the flow.`
-    return {
-      phase: 'max_oauth_offered',
-      body,
-      options: [{ label: 'A', body: 'Done', value: 'max_done' }],
-      allow_freeform: false,
-      next_phase_on_default: 'wow_fired',
-    }
-  }
-  // Shape 1-open: Open self-host setup-token paste (2026-06-13). The
-  // hosted Claude-Max OAuth handoff makes no sense on a local box, so the
-  // initial emit asks the user to run `claude setup-token` and paste the
-  // result; the engine persists it to the local SecretsStore. `skip` backs
-  // out onto the free tier via the same `advanceFromMaxOauthOffered('free')`
-  // path. The byo-paste / max-handoff sub-states above are never set in
-  // open mode, so this governs the initial emit + every re-emit.
-  if (input.deployment_mode === 'open') {
-    const openBody =
-      'To run premium models locally, paste your Claude setup-token. Run `claude setup-token` in your terminal and paste the full result here.'
-    const body =
-      input.rejection_reason !== null && input.rejection_reason.length > 0
-        ? `${input.rejection_reason}\n\n${openBody}`
-        : openBody
-    return {
-      phase: 'max_oauth_offered',
-      body,
-      options: [{ label: 'A', body: 'Skip for now', value: 'skip' }],
-      allow_freeform: true,
-      next_phase_on_default: 'wow_fired',
-    }
-  }
-  // Shape 1: initial — fall back to the static spec, but stitch the
-  // rejection reason in front of the body so a failed prior tap (e.g.
-  // "Connect failed; tap to try again.") actually surfaces to the user
-  // instead of silently re-emitting the same static body. Pre-
-  // 2026-05-28 the rejection reason was only stitched into the BYO
-  // paste prompt (Shape 3), so Shape 1 failures looked like a silent
-  // re-emit which Sam hit as the "3x stuck loop" in his walkthrough.
-  const fallback = STATIC_PHASE_SPECS['max_oauth_offered']
-  if (fallback === undefined) {
-    // Defensive: should never happen because the static table is the
-    // canonical entry. If it does, return a minimal Connect-only spec
-    // so the user can still try again.
-    return {
-      phase: 'max_oauth_offered',
-      body: 'Connect Claude Max?',
-      options: [{ label: 'A', body: 'Connect Claude Max', value: 'attach_max' }],
-      allow_freeform: false,
-      next_phase_on_default: 'wow_fired',
-    }
-  }
-  // 2026-06-03 (max-oauth-autoskip-wiring) — substrate-aware Shape-1 body.
-  // When the user said at `ai_substrate_offered` that they use Claude
-  // ('claude'), acknowledge that rather than leading with the blunt
-  // "I need your Claude Max sub" framing. chatgpt / neither / null keep
-  // the original static body verbatim (the static spec body is pinned by
-  // a test, so it stays the default).
-  const acknowledges_claude = input.ai_substrate_used === 'claude'
-  const base_body = acknowledges_claude
-    ? 'Earlier you mentioned you use Claude. To run premium models for you, I need your Max sub connected. One click.'
-    : fallback.body
-  if (input.rejection_reason !== null && input.rejection_reason.length > 0) {
-    return {
-      ...fallback,
-      body: `${input.rejection_reason}\n\n${base_body}`,
-    }
-  }
-  return { ...fallback, body: base_body }
-}
 
 /**
  * T4 (2026-05-13), rewritten v0.1.78 (2026-05-22) — dynamic prompt spec
@@ -2260,8 +2062,6 @@ export function humanizePhase(phase: OnboardingPhase): string {
     projects_proposed: 'reviewing proposed projects',
     persona_synthesizing: 'synthesizing your persona files',
     persona_reviewed: 'reviewing your persona files',
-    max_oauth_offered: 'offering Claude Max attach',
-    wow_fired: 'firing your day-1 brief',
   }
   return map[phase] ?? phase
 }

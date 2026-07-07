@@ -2,16 +2,15 @@
  * Unit tests — `PHASE_KNOWLEDGE` table + `validatePhaseKnowledgePack`.
  *
  * P2-v3 S2 (2026-05-18) introduced 4 packs + the validator. P2-v3 S3
- * (2026-05-18) extends to 11 packs covering every user-input-bearing
- * phase. Asserts:
+ * (2026-05-18) extended to cover every user-input-bearing phase (K11e
+ * 2026-07-07: down to 10 packs after the dead `max_oauth_offered` phase
+ * was pruned). Asserts:
  *   - every hand-authored pack passes validation at module load
  *   - every still-null phase (transit / terminal / external-driven) returns
  *     `null` from `getKnowledgeForPhase`
  *   - the validator rejects malformed packs (missing fields, oversize
  *     strings, wrong types)
  *   - every `expected_tangents.expected_action` is one of 'answer' / 'amend'
- *   - the `max_oauth_offered` pick-only invariant: every advance example
- *     uses an allowed canonical_value
  *   - every populated pack carries ≥3 expected_tangents (the design § 6 S3
  *     coverage floor)
  *
@@ -47,7 +46,6 @@ const S3_PHASES: ReadonlyArray<OnboardingPhase> = [
   'slug_chosen',
   'projects_proposed',
   'persona_reviewed',
-  'max_oauth_offered',
 ]
 
 const POPULATED_PHASES: ReadonlyArray<OnboardingPhase> = [
@@ -60,7 +58,6 @@ const FOREVER_NULL_PHASES: ReadonlyArray<OnboardingPhase> = [
   'instance_provisioned',
   'import_running',
   'persona_synthesizing',
-  'wow_fired',
   'completed',
   'failed',
 ]
@@ -89,11 +86,14 @@ describe('PHASE_KNOWLEDGE module-load validation', () => {
     }
   })
 
-  test('S2 + S3 together cover 11 of 18 phases', () => {
+  test('S2 + S3 together cover 10 of 16 phases', () => {
+    // K11e (2026-07-07): max_oauth_offered (had a pack) + wow_fired (null)
+    // were deleted, so ALL_PHASES is 16 (was 18), populated 10 (was 11),
+    // still-null 6 (was 7).
     const populated = ALL_PHASES.filter((p) => PHASE_KNOWLEDGE[p] !== null)
-    expect(populated.length).toBe(11)
+    expect(populated.length).toBe(10)
     const stillNull = ALL_PHASES.filter((p) => PHASE_KNOWLEDGE[p] === null)
-    expect(stillNull.length).toBe(7)
+    expect(stillNull.length).toBe(6)
   })
 })
 
@@ -162,31 +162,9 @@ describe('PhaseKnowledgePack content invariants', () => {
     expect(canonical.has('both')).toBe(false)
   })
 
-  test('max_oauth_offered pick-only invariant: every advance_example uses an allowed canonical_value', () => {
-    // 2026-05-28 single-CTA collapse: BYO + skip dropped. Only
-    // `attach_max` remains in the allow-list; every advance example
-    // must canonicalise to that value.
-    const allowed: ReadonlySet<string> = new Set(['attach_max'])
-    const pack = PHASE_KNOWLEDGE['max_oauth_offered']!
-    expect(pack.advance_examples.length).toBeGreaterThan(0)
-    for (const ex of pack.advance_examples) {
-      expect(ex.canonical_value).not.toBeNull()
-      expect(allowed.has(ex.canonical_value as string)).toBe(true)
-    }
-    // Every allowed value should be exemplified at least once so the
-    // router has a few-shot anchor for every branch.
-    const seen = new Set(pack.advance_examples.map((e) => e.canonical_value))
-    for (const v of allowed) {
-      expect(seen.has(v)).toBe(true)
-    }
-  })
-
-  test('max_oauth_offered every expected_tangent.expected_action is answer (no amend examples on a pick-only phase)', () => {
-    const pack = PHASE_KNOWLEDGE['max_oauth_offered']!
-    for (const t of pack.expected_tangents) {
-      expect(t.expected_action).toBe('answer')
-    }
-  })
+  // K11e (2026-07-07): the `max_oauth_offered` pick-only invariant tests were
+  // deleted along with PACK_MAX_OAUTH_OFFERED — the phase is no longer walked
+  // (#243/#248/K11e) so it carries no knowledge pack.
 
   test('S3 packs cover the brief-named tangent shapes', () => {
     // Spot-check the high-leverage tangents the brief identified as the
@@ -249,15 +227,6 @@ describe('PhaseKnowledgePack content invariants', () => {
     // pack (so the LLM has the answer text to surface).
     expect(typeof persona.faqs['revisit_personality']).toBe('string')
     expect(typeof persona.faqs['revisit_agent_name']).toBe('string')
-
-    const max = PHASE_KNOWLEDGE['max_oauth_offered']!
-    expect(
-      max.advance_examples.some(
-        (e) =>
-          e.user_text_example.toLowerCase().includes('subscription') &&
-          e.canonical_value === 'attach_max',
-      ),
-    ).toBe(true)
   })
 })
 

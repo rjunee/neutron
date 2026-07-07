@@ -47,7 +47,6 @@ import {
   buildAgentNameChosenPromptSpec,
   buildImportAnalysisPresentedPromptSpec,
   buildImportUploadPendingPromptSpec,
-  buildMaxOauthOfferedPromptSpec,
   buildPersonalityOfferedPromptSpec,
   buildProjectsProposedPromptSpec,
   buildResumePromptBody,
@@ -2498,35 +2497,11 @@ export class InterviewEngine implements EngineInternals {
         can_resume_import,
       })
     }
-    // 2026-05-13 — T3 max_oauth_offered dynamic builder. The phase has
-    // three shapes (initial / awaiting Max handoff Done / awaiting BYO
-    // paste); the builder collapses to the static spec when no sub-state
-    // flag is set so the initial three-option prompt ships byte-for-byte
-    // identical to STATIC_PHASE_SPECS.max_oauth_offered.
-    if (phase === 'max_oauth_offered') {
-      const state = await this.deps.stateStore.get(project_slug, user_id)
-      const phase_state = (state?.phase_state ?? {}) as Record<string, unknown>
-      const max_handoff_url = readString(phase_state, 'max_handoff_url')
-      const awaiting_byo_paste = phase_state['awaiting_byo_paste'] === true
-      const rejection = readString(phase_state, 'max_oauth_rejection')
-      // 2026-06-03 (max-oauth-autoskip-wiring) — thread the chosen
-      // substrate so the initial connect CTA acknowledges a Claude user
-      // (see buildMaxOauthOfferedPromptSpec Shape 1).
-      const raw_substrate = phase_state['ai_substrate_used']
-      const ai_substrate_used: AiSubstrateSource | null =
-        raw_substrate === 'chatgpt' || raw_substrate === 'claude'
-          ? raw_substrate
-          : null
-      return buildMaxOauthOfferedPromptSpec({
-        max_handoff_url,
-        awaiting_byo_paste,
-        rejection_reason: rejection,
-        ai_substrate_used,
-        // Open self-host (2026-06-13) — initial shape becomes a local
-        // setup-token paste instead of the hosted Claude-Max OAuth handoff.
-        deployment_mode: this.deploymentMode,
-      })
-    }
+    // K11e (2026-07-07) — the `max_oauth_offered` dynamic-builder resolve
+    // branch was removed here. The phase is no longer walked (engine phase-
+    // walk deleted in #243, handler methods in #248/K11e), so it can never be
+    // the resolver's `phase`. Legacy stranded rows are handled purely by the
+    // creds gate in gateway/realmode-composer/resolve-onboarding-phase.ts.
     // P2 v2 § 0 #9 + § 3.9 — personality_offered dynamic rejection
     // path. Short-circuits the resolver ONLY when the dedicated handler
     // wrote a `personality_offered_rejection` (too short / unparseable

@@ -64,9 +64,32 @@ describe('loadCurrentOnboardingPhase', () => {
     // Note: this row's last_advanced_at is LATER than the old-slug
     // row, so an unscoped ORDER BY would surface it. With the slug
     // filter we still get null when probing for the original slug.
-    await store2.upsert({ project_slug: 'rogue-slug', user_id: 'test-user', phase: 'max_oauth_offered' })
+    //
+    // K11e (2026-07-07): the rogue row carries the LEGACY phase string
+    // `max_oauth_offered` — a stranded pre-#243 value that is no longer an
+    // `OnboardingPhase` member. The typed `upsert` can't write it, so we
+    // seed a placeholder then patch the raw `phase` column, exactly as a
+    // stale on-disk row would still carry it.
+    await store2.upsert({ project_slug: 'rogue-slug', user_id: 'test-user', phase: 'persona_reviewed' })
+    db.raw().exec(`UPDATE onboarding_state SET phase = 'max_oauth_offered' WHERE project_slug = 'rogue-slug'`)
     expect(loadCurrentOnboardingPhase(db, 'old-slug', 'test-user')).toBe('signup')
     expect(loadCurrentOnboardingPhase(db, 'new-slug-no-row', 'test-user')).toBeNull()
+  })
+
+  test('K11e legacy-string compat — a stranded `wow_fired` DB row still gates (post-max)', async () => {
+    // Pre-#243 managed deployments walked owners through `max_oauth_offered`
+    // → `wow_fired`. Those strings are no longer `OnboardingPhase` members,
+    // but a stranded `onboarding_state.phase` row can still hold them. The
+    // gate MUST classify such a row as post-max so a credential-less owner
+    // sees the Max-OAuth gate, not a regressed real-landing mount. Seed a
+    // placeholder row, patch the raw column to the legacy string, then prove
+    // it flows load → gate correctly.
+    const store = new SqliteOnboardingStateStore({ db })
+    await store.upsert({ project_slug: 't', user_id: 'legacy-user', phase: 'persona_reviewed' })
+    db.raw().exec(`UPDATE onboarding_state SET phase = 'wow_fired' WHERE project_slug = 't' AND user_id = 'legacy-user'`)
+    const loaded = loadCurrentOnboardingPhase(db, 't', 'legacy-user')
+    expect(loaded).toBe('wow_fired')
+    expect(shouldMountRealLandingWithoutCreds(loaded)).toBe(false)
   })
 
   test('returns null on a missing onboarding_state table (defensive)', () => {

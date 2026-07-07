@@ -34,7 +34,6 @@
  */
 
 import type { ProjectDb } from '../../persistence/index.ts'
-import type { OnboardingPhase } from '../../onboarding/interview/phase.ts'
 
 /**
  * Phases at or beyond `max_oauth_offered`. When the owner is in one of
@@ -43,7 +42,15 @@ import type { OnboardingPhase } from '../../onboarding/interview/phase.ts'
  *
  * Note: `failed` is NOT in this set — see file header.
  */
-export const POST_MAX_OAUTH_PHASES: ReadonlySet<OnboardingPhase> = new Set([
+export const POST_MAX_OAUTH_PHASES: ReadonlySet<string> = new Set([
+  // `max_oauth_offered` / `wow_fired` are NO LONGER walked phases (the engine
+  // phase-walk was removed in #243 and their handler methods in #248/K11e), so
+  // they are intentionally NOT `OnboardingPhase` members. But pre-#243 managed
+  // deployments walked owners THROUGH these phases, so a stranded legacy
+  // `onboarding_state.phase` row can still hold either string verbatim. The set
+  // is typed `ReadonlySet<string>` so those legacy strings keep classifying as
+  // "post-max" — a credential-less owner stuck on a legacy row must still see
+  // the Max-OAuth gate, not a regressed real-landing mount.
   'max_oauth_offered',
   'wow_fired',
   'completed',
@@ -78,7 +85,7 @@ export function loadCurrentOnboardingPhase(
   db: ProjectDb,
   project_slug: string,
   user_id: string,
-): OnboardingPhase | null {
+): string | null {
   try {
     const row = db
       .raw()
@@ -89,7 +96,10 @@ export function loadCurrentOnboardingPhase(
     if (row === null || row === undefined) return null
     const phase = row.phase
     if (typeof phase !== 'string' || phase.length === 0) return null
-    return phase as OnboardingPhase
+    // Return the RAW DB string (not narrowed to `OnboardingPhase`): a stranded
+    // legacy row can hold `max_oauth_offered` / `wow_fired`, which are no longer
+    // enum members but must still flow through the post-max gate below.
+    return phase
   } catch {
     return null
   }
@@ -104,7 +114,7 @@ export function loadCurrentOnboardingPhase(
  * `max_oauth_offered` and beyond → false (gate).
  */
 export function shouldMountRealLandingWithoutCreds(
-  phase: OnboardingPhase | null,
+  phase: string | null,
 ): boolean {
   if (phase === null) return true
   return !POST_MAX_OAUTH_PHASES.has(phase)

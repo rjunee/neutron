@@ -39,8 +39,6 @@ export type OnboardingPhase =
   | 'projects_proposed'
   | 'persona_synthesizing'
   | 'persona_reviewed'
-  | 'max_oauth_offered'
-  | 'wow_fired'
   | 'completed'
   | 'failed'
 
@@ -85,15 +83,12 @@ export const LEGAL_TRANSITIONS: Readonly<Record<OnboardingPhase, ReadonlyArray<O
   projects_proposed: ['persona_synthesizing', 'failed'],
   persona_synthesizing: ['persona_reviewed', 'failed'],
   persona_reviewed: [
-    'max_oauth_offered',
-    'wow_fired',
+    'completed',
     'failed',
     'personality_offered',
     'agent_name_chosen',
     'slug_chosen',
   ],
-  max_oauth_offered: ['wow_fired', 'failed'],
-  wow_fired: ['completed', 'failed'],
   completed: [],
   failed: [],
 } as const
@@ -173,8 +168,6 @@ export const ALL_PHASES: ReadonlyArray<OnboardingPhase> = [
   'projects_proposed',
   'persona_synthesizing',
   'persona_reviewed',
-  'max_oauth_offered',
-  'wow_fired',
   'completed',
   'failed',
 ]

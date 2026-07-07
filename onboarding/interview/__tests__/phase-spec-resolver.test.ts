@@ -25,9 +25,22 @@ import {
   withTimeout,
   type LlmCallFn,
   type PhaseContextBundle,
+  type PhaseIntent,
 } from '../phase-spec-resolver.ts'
 import { STATIC_PHASE_SPECS } from '../phase-prompts.ts'
 import { CONVERSATIONAL_TIMEOUT_MS_DEFAULT } from '../llm-timeouts.ts'
+
+// K11e (2026-07-07): `max_oauth_offered` was the ONLY pick-only intent in
+// PHASE_INTENTS and it was deleted along with the dead phase. The pure
+// pick-only parsing logic in `parseLlmSpec` / `buildSystemPrompt` still exists,
+// so we exercise it with this synthetic single-CTA fixture (byte-identical to
+// the deleted `PHASE_INTENTS.max_oauth_offered` shape) instead of a live phase.
+const PICK_ONLY_INTENT: PhaseIntent = {
+  goal: 'Offer the Claude Max attach handoff. Single CTA.',
+  shape: 'pick-only',
+  allowed_option_values: ['attach_max'],
+  max_body_chars: 240,
+}
 
 function makeBundle(overrides: Partial<PhaseContextBundle> = {}): PhaseContextBundle {
   const intent = PHASE_INTENTS['signup']!
@@ -65,7 +78,6 @@ describe('allLlmEligiblePhases', () => {
     expect(eligible.has('personality_offered')).toBe(true)
     expect(eligible.has('agent_name_chosen')).toBe(true)
     expect(eligible.has('persona_reviewed')).toBe(true)
-    expect(eligible.has('max_oauth_offered')).toBe(true)
   })
 
   test('excludes externally-driven phases', () => {
@@ -74,7 +86,6 @@ describe('allLlmEligiblePhases', () => {
     expect(eligible.has('instance_provisioned')).toBe(false)
     expect(eligible.has('import_running')).toBe(false)
     expect(eligible.has('persona_synthesizing')).toBe(false)
-    expect(eligible.has('wow_fired')).toBe(false)
     expect(eligible.has('completed')).toBe(false)
     expect(eligible.has('failed')).toBe(false)
   })
@@ -93,11 +104,10 @@ describe('allLlmEligiblePhases', () => {
 
 describe('parseLlmSpec', () => {
   const signupIntent = PHASE_INTENTS['signup']!
-  // 2026-05-28 — max_oauth_offered is the only pick-only intent in the
-  // table (allowed_option_values: ['attach_max'] after the single-CTA
-  // collapse). The tests below assert stripping + required-branch
-  // logic against this single-value allow-list.
-  const pickOnlyIntent = PHASE_INTENTS['max_oauth_offered']!
+  // K11e (2026-07-07) — `max_oauth_offered` was the only pick-only intent and
+  // it was deleted. The synthetic `PICK_ONLY_INTENT` (single-value allow-list
+  // `attach_max`) drives the stripping + required-branch logic below.
+  const pickOnlyIntent = PICK_ONLY_INTENT
   // ai_substrate_offered is the pick-or-text fixture (allow_freeform on
   // the intent table) used below for the zero-options / pick-or-text
   // assertions.
@@ -274,12 +284,11 @@ describe('parseLlmSpec', () => {
 
 describe('buildSystemPrompt + buildUserPrompt', () => {
   test('system prompt includes intent goal + shape + allowed values', () => {
-    // 2026-05-28 — `max_oauth_offered` is the canonical pick-only
-    // intent with a non-empty `allowed_option_values` list (single CTA
-    // post-collapse: `attach_max`). Use it as the fixture so we can
-    // assert allow-list injection into the system prompt. The
-    // pick-or-text shape (ai_substrate_offered) is tested elsewhere.
-    const intent = PHASE_INTENTS['max_oauth_offered']!
+    // K11e — the synthetic `PICK_ONLY_INTENT` (single CTA `attach_max`) is the
+    // pick-only fixture with a non-empty `allowed_option_values` list, used to
+    // assert allow-list injection into the system prompt. The pick-or-text
+    // shape (ai_substrate_offered) is tested elsewhere.
+    const intent = PICK_ONLY_INTENT
     const prompt = buildSystemPrompt(intent)
     expect(prompt).toContain(intent.goal)
     expect(prompt).toContain(intent.shape)
@@ -889,25 +898,14 @@ describe('LLM failure paths fall back to static spec for every eligible phase', 
     expect(out).toBeNull()
   })
 
-  test('allow-list rejection (LLM invents option values) → option dropped, fallback when pick-only loses required branches', async () => {
-    // P2 v2 — `max_oauth_offered` is pick-only with attach_max / byo_key
-    // / skip. An LLM that emits a single `invented-value` option drops it
-    // and the parser returns null (pick-only requires every allowed
-    // value present).
-    const intent = PHASE_INTENTS['max_oauth_offered']!
-    const resolver = buildLlmPhaseSpecResolver({
-      llm: async () =>
-        JSON.stringify({
-          body: 'Pick a substrate.',
-          options: [{ label: 'A', body: 'Bogus', value: 'invented-value' }],
-        }),
-      enabled_phases: new Set(['max_oauth_offered']),
-      log: () => {},
-    })
-    const bundle = makeBundle({ phase: 'max_oauth_offered', intent })
-    const out = await resolver.resolve(bundle)
-    expect(out).toBeNull()
-  })
+  // K11e (2026-07-07): the resolve()-level "pick-only loses required branch →
+  // null fallback" integration test was removed. `resolve()` derives the intent
+  // from `PHASE_INTENTS[bundle.phase]`, and `max_oauth_offered` (the ONLY
+  // pick-only phase) was deleted — no live phase is pick-only, so this path is
+  // unreachable through a real phase. The underlying logic (pick-only returns
+  // null when a required allowed value is missing) is still covered directly by
+  // the `parseLlmSpec` unit test "returns null for pick-only intent missing a
+  // required allowed value (Codex P2)" above.
 })
 
 describe('validateReply', () => {
