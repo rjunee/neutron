@@ -68,14 +68,25 @@ land — it is what a fresh context reads to resume without re-deriving anything
       `pollImportRunningTick` cron seam). `import-paused-auto-resume.test.ts` already survived K11b1
       anchored on the retained `buildImportRunningHandler` (3/3 green) — no code change; delete-together
       was the wrong branch (would kill live behavior + leave the 6 dangling status enumerators). Exec-plan §10 row marked resolved.
-    - **⏸️ K11b2 DEFERRED — owner-gated.** Owner pre-merge grep ran: `NEUTRON_DEPLOYMENT_MODE` /
-      `NEUTRON_ROLE` appear NOWHERE in current Managed source; the current provisioner
-      (`src/provision/systemd.ts`) writes only `NEUTRON_HOME` (managed-mode derived from the identity
-      signing key, not this env alias). Repo-evidence says removal is safe, but an already-provisioned
-      live box from the OLD `tenant-provisioning/` path could have the alias baked into its on-disk
-      unit/.env — a live-fleet fact only Ryan can confirm. Removing a 2-line back-compat shim isn't
-      worth an unverifiable misconfigured-Managed outage. **Unblock:** Ryan confirms no live box sets
-      `NEUTRON_DEPLOYMENT_MODE=`. Exec-plan §8 carries the full DEFERRED banner + unblock condition.
+    - **⏸️ K11b2 DEFERRED — owner/OPS-gated (reasoning CORRECTED 2026-07-07).** In-source: NOTHING in
+      current source sets `NEUTRON_DEPLOYMENT_MODE`/`NEUTRON_ROLE` (not the per-tenant provisioner
+      `systemd.ts`, not `neutron-managed/src/` anywhere, not the live dogfood `.env`/plist). **⚠️ Earlier
+      claim "managed-mode derived from the identity key" was WRONG:** `deployment-mode.ts` resolves mode
+      purely from env (`NEUTRON_ROLE` > `NEUTRON_DEPLOYMENT_MODE` > `open`); the identity key only warns
+      on misconfig + forces the narrow shared-projects-resolver. So the alias IS load-bearing for any box
+      that sets it. The genuine residual = the live **Managed control-plane** unit (remote-VPS infra, in
+      no repo). Removing the alias safely is a **2-step ops migration** (add `NEUTRON_ROLE=managed` to the
+      live unit + deploy → then delete the alias read) — step 1 is against production infra, not safely
+      doable headlessly. **Unblock:** Ryan confirms/migrates the live managed unit to `NEUTRON_ROLE`.
+      Exec-plan §8 carries the full corrected banner.
+    - **✅ K11b3 DONE-BY-VERIFICATION (no code change needed).** After K11b0 (bridge) + K11d
+      (build-wow-dispatcher.ts) deletions, the unit is moot: `landing.registry` appears in `open/composer.ts`
+      ONLY in 2 comments (:1875/:1966) that describe the legacy `web:` path in PAST tense ("were delivered…
+      now fixed") — accurate historical rationale, NOT a stale falsehood; the registry instance itself lives
+      on in `build-landing-stack.ts:607` (kept for import-progress/Managed); `registry.register(` has zero
+      live sites in composer; the WowChannelAdapter rewire is moot (its file deleted in K11d). No dead code,
+      no false comments → nothing to change. (Fable had already caught that the original "delete composer
+      :1926-2060" scope pointed at LIVE reminders wiring.)
     - **✅ K11c DONE (#247, main green 2026-07-07):** dead OAuth import sources purged (`ImportSource`
       → `chatgpt-zip | claude-zip`), +32/−765. Resolves **D-K11-7 → (a) delete**. Codex r1 boundary
       fix (parser `default` arm / resume 409 `unsupported_source` / probe — migration 0040 CHECK still
