@@ -16,7 +16,87 @@ Judgments are appended one commit per file as they are made (session-resumable p
 
 ## 1. Per-file judgments (lists A + D — adjudicated in this unit)
 
-(appended as decided)
+### `tests/integration/button-idempotency.test.ts` — DIE
+Pins `engine.start`'s delivery-idempotency contract (`was_new || !was_delivered` send gate +
+`markDelivered` + transcript dedup) — engine-start-internal, deleted with the drive. Already
+adjudicated DIE by #238 (Codex r2 explicitly REVERTED a ButtonStore re-anchor as a homemade-gate
+reimplementation). Retained ButtonStore primitive coverage verified present at HEAD:
+`channels/__tests__/button-store.test.ts` — ":51 same key collapses to a single row", ":102
+was_delivered false on fresh emit", ":108 was_delivered true after markDelivered + survives
+idempotent re-emit", ":186 markDelivered is idempotent". Byte-unchanged; co-deletes in K11b1.
+
+### `tests/integration/engine-blank-chat-on-reconnect-bug1.test.ts` — DIE
+Pins `engine.start()`-internal re-emit-gate semantics (ephemeral-channel re-emit on every
+session-open, delivered_at set-once, telegram `undelivered || topic_id_changed` gating) —
+adjudicated DIE in #238. NOTE (citation refresh): #238 cited the retained
+`resumeCookieSession → reEmitActiveSeedPromptIfAny` analog in `gateway/http/__tests__/
+chat-bridge.test.ts`; K11b0 (#240) has since deleted that whole bridge surface AS DEAD, so the
+analog itself is gone by design. The PROD reconnect re-emit seam is the composer's
+`on_session_open` path, pinned by `tests/integration/import-watch-rearm-on-reconnect.open.test.ts`
+(re-arm + seed) and `gateway/http/__tests__/replay-redelivery.test.ts` (app-ws redelivery).
+Byte-unchanged; co-deletes in K11b1.
+
+### `tests/integration/engine-reemit-pending-inbound-race-bug2.test.ts` — DIE
+Pins the `PENDING_INBOUND_WINDOW` / `recordInboundReceived` race gate inside `engine.start()` —
+engine-drive-internal with no retained non-engine analog (#238 adjudication; the inbound feeding
+path was the ChatBridge `handleInbound`, itself deleted dead in K11b0 #240). Prod app-ws
+reconnect delivery covered as per bug1 above. Byte-unchanged; co-deletes in K11b1.
+
+### `tests/integration/persona-v2-flow.test.ts` — DIE
+Drives `projects_proposed → persona_synthesizing → persona_reviewed` via `engine.advance` with a
+real `PersonaComposer`. The retained pins (phase_state → `buildComposeInput` → compose mapping;
+SOUL.md/USER.md/priority-map content + H1 preservation) were ported in #239 to
+`onboarding/interview/__tests__/persona-finalize-compose-input.test.ts`, which drives the LIVE
+Path-1 finalize wiring (`build-onboarding-finalize.ts:453`) engine-free. The remaining
+assertions (phase-machine transit + `stripPersonaFileH1` at the drive's render boundary) are
+drive-exclusive. Byte-unchanged; co-deletes in K11b1.
+
+### `tests/integration/persona-reviewed-advance.test.ts` — DIE
+Pins the `looks_good` consumeChoice dispatch → `advanceFromPersonaReviewed` →
+`max_oauth_offered` routing (+ `persona_files_committed`). `advanceFromPersonaReviewed` lives in
+retained-but-dead `engine-persona.ts:1030`, reached ONLY from the deleted consumeChoice dispatch
+(engine.ts:9265 wrapper) — owner addendum classifies that half retained-but-dead → K11d.
+Retained coverage: the `persona_reviewed → max_oauth_offered` transition legality is pinned
+engine-free by `onboarding/interview/__tests__/phase-transition-table.test.ts:66`; the LIVE
+persona compose/commit path by `persona-finalize-compose-input.test.ts` +
+`gateway/realmode-composer/__tests__/build-onboarding-finalize.test.ts`. Byte-unchanged;
+co-deletes in K11b1.
+
+### `tests/integration/personality-offered-single-handler.test.ts` — DIE
+Pins verbatim `agent_personality` capture + `personaSync.recordAgentPersonality` mirror via the
+drive, plus §7.1 archetype-blend derivation at synthesis. #239 ported the retained §7.1 pins
+(free-text `deriveArchetypeBlend` branch + SOUL.md voice shaping) into
+`persona-finalize-compose-input.test.ts` (live finalize seam). The capture/mirror turns are
+consumeChoice-dispatch behavior (dead). Byte-unchanged; co-deletes in K11b1.
+
+### `tests/integration/personality-name-slug-projects-flow.open.test.ts` — DIE (+ additive survivor)
+857-line walk of `personality_offered → agent_name_chosen → slug_chosen → projects_proposed` via
+`engine.start`/`advance` — the conversational drive + consumeChoice cascade + engine slug
+resolver + `mergeAdvanceProjectsAdditively`, all deleted or retained-but-dead (owner addendum).
+Retained-LIVE sub-behaviors and their surviving coverage:
+- `validateAgentName` (RETAINED `phase-prompts.ts:1313`) full contract: previously pinned only
+  through dying drive tests → **new additive survivor
+  `onboarding/interview/__tests__/validate-agent-name.test.ts`** (this unit) pins it directly
+  (length floor/cap, Unicode charset + letter-first, punctuation rejection reason, reserved set
+  case-insensitivity); the retained consumer filter also pinned by
+  `agent-name-chosen-prompt-spec.test.ts`.
+- live slug seam (`slugAvailability.check`/`sanitize` on LocalPlatformAdapter over retained
+  `runtime/slug-grammar.ts`): pinned by surviving
+  `tests/integration/local-platform-adapter-boot.open.test.ts:124-148`. The collision-NNN
+  multi-suggestion ALGORITHM asserted here is the engine slug resolver (dead-with-drive).
+- projects list rendering builder (`buildProjectsProposedPromptSpec`, retained): builder-level
+  coverage in the dying suites only for drive shapes; prod project confirmation runs through the
+  composer/import path (post-turn extractor + finalize), pinned by
+  `post-turn-extractor*.test.ts` + `build-onboarding-finalize.test.ts`.
+Byte-unchanged; co-deletes in K11b1 (drop its `m2-walkthrough-test-helpers.ts` import with it).
+
+### `tests/integration/import-analysis-presented-freeform-routing.test.ts` — DIE (pre-headered)
+Already split out by K11-pre (#229) with a `⚠️ DIES WITH K11b1` header: pins
+`engine.advance({freeform_text}) → llmRouter.route → dispatchRouterDecision →
+consumeImportAnalysisPresentedChoice` corrections routing. The surviving body-shape + themes
+assertions were re-anchored into `tests/integration/import-analysis-presented.test.ts`
+(pollImportRunningTick seam, #229/#237). `consumeImportAnalysisPresentedChoice` is
+retained-but-dead per the owner addendum (K11d prune). Byte-unchanged; co-deletes in K11b1.
 
 ## 2. List C — pure-drive DIE, verified + coverage-cited (co-delete in K11b1)
 
