@@ -222,7 +222,35 @@ Byte-unchanged this unit; co-deletes in K11b1.
 
 ## 4. In-package dying suites (plan §7.4 cohort) — verified drive-harness DIEs
 
-(appended as verified)
+### 4a. Adjudicated by the plan / prior merged PRs (citation of record per file)
+
+| file | DIE basis + retained-coverage citation |
+|---|---|
+| `onboarding/interview/__tests__/buttons-only-safety-net.test.ts` | plan §7.4 die list (interaction-mode safety net = drive routing) |
+| `onboarding/interview/__tests__/engine-router-integration.test.ts` | plan §7.4 (router↔engine integration = deleted pair) |
+| `onboarding/interview/__tests__/interaction-mode-routing.test.ts` | plan §7.4 (interaction-mode.ts remainder deleted §7.4; its 3 live exports were extracted in K11a3) |
+| `onboarding/interview/__tests__/interaction-mode-substep-router-bypass.test.ts` | plan §7.4 |
+| `onboarding/interview/__tests__/gap1-additive-confirm-merge.test.ts` | plan §7.4 (gap-fill router merge = drive) |
+| `onboarding/interview/__tests__/gap1-live-import-analysis-merge.test.ts` | plan §7.4 (same family; drives via post-turn-extractor + engine seams — PR-B dispatch re-check) |
+| `onboarding/interview/__tests__/projects-proposed-ignore-removal.test.ts` | plan §7.4 |
+| `onboarding/interview/__tests__/projects-proposed-prod-union-merge.test.ts` | plan §7.4 |
+| `onboarding/interview/__tests__/signup-router-prod-path.test.ts` | plan §7.4 |
+| `onboarding/interview/__tests__/v2-phase-walk.test.ts` | plan §7.4; retained transition-table/AUTO_SKIP invariants ALREADY split out engine-free to `phase-transition-table.test.ts` (#239 Task 2) — remaining content is the pure phase WALK |
+| `onboarding/interview/__tests__/work-interview-projects-extraction-real-path.test.ts` | plan §7.4 (router extraction real-path) |
+| `gateway/realmode-composer/__tests__/llm-router-composer.test.ts` | plan §7.3/§7.4 (composer llm-router wiring dies with `buildGatewayLlmRouter` husk; THE live client `buildGatewayAnthropicMessagesClient` extracted in K11a2 with its own coverage) |
+| `onboarding/interview/__tests__/engine-reconnect-reemit-unresolved.test.ts` | #238 adjudication: pins `engine.start`'s live unresolved-active-prompt reconnect re-send; retained analog (bridge resumeCookieSession) was itself deleted-as-dead in K11b0 #240; prod reconnect = composer `on_session_open` (`import-watch-rearm-on-reconnect.open.test.ts`) |
+| `onboarding/interview/__tests__/persona-synthesizing.test.ts` | #239 Task 1: retained pin (test 2, buildComposeInput mapping) ported to `persona-finalize-compose-input.test.ts`; rest is drive transit |
+| `onboarding/interview/__tests__/final-handoff-skip-button.test.ts` | #239 Task 3: whole final-handoff family GENUINELY-DEAD (emitFinalHandoffPrompt + buildFinalHandoff* invoked only inside engine.ts); prod finalize handoff covered by `build-onboarding-finalize.test.ts:510-570`. The other 8 final-handoff files + `final-handoff-test-helpers.ts` co-delete too (no drive-grep hits — helper-mediated) |
+| `onboarding/interview/__tests__/engine-llm-resolver-start-static-seed.die.test.ts` | pre-split .die file (K11a6): engine.start's static idempotency-seed race — EXCLUSIVE to the deleted start(); header carries the no-retained-equivalent proof |
+| `onboarding/interview/__tests__/source-switch-intent-write.die.test.ts` | pre-split .die file (K11a3): intent WRITE/CLEAR via dying advance/normalAdvance; retained arbitration READ half re-anchored in `source-switch-late-upload-race.test.ts` |
+| `tests/integration/m2-soren-v2-fixture.open.test.ts` | plan §6 list C (fixture walk; drives the engine via `m2-walkthrough-test-helpers.ts:164` engine.advance — helper-mediated, hence absent from the direct grep) |
+| `onboarding/interview/__tests__/interview-testkit.ts` + `tests/integration/m2-walkthrough-test-helpers.ts` | drive-walk helpers; die when their dying importers die (§7.4 "triage, don't bulk-delete" honored: every importer is dispositioned on this manifest) |
+
+Additional §7.3/§7.4 co-deletes that do NOT hit the drive-grep (router/fixture-direct suites, listed for PR-B completeness): `onboarding/interview/llm-router.test.ts`, `onboarding/interview/__tests__/llm-router-decision.test.ts`, `onboarding/interview/__tests__/fixture-anthropic-client.test.ts`, `onboarding/interview/__tests__/interaction-mode.test.ts`, `onboarding/interview/__tests__/phase-knowledge-router-wiring.test.ts` + `phase-knowledge.test.ts` router-half (K11a2b), `gateway/__tests__/llm-router-persona-wiring.test.ts`, `onboarding/telemetry/__tests__/router-decision-events.test.ts`, `onboarding/interview/__tests__/signup-asks-name.test.ts` (per-§7.4 dispatch triage: signup prompt copy retained via STATIC_PHASE_SPECS/phase-prompts tests), tests named in §7.6 (resume-cron pair, §2 above).
+
+### 4b. Adjudicated this unit (families not covered by plan/PR citations)
+
+(appended when the family analyses land)
 
 ## 5. Comment-only grep hits neutralized (survivor files, no behavior change)
 
