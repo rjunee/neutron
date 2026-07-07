@@ -22,6 +22,7 @@
 import { describe, expect, test } from 'bun:test'
 import { isLegalTransition, LEGAL_TRANSITIONS } from '../phase.ts'
 import type { OnboardingPhase } from '../phase.ts'
+import { AUTO_SKIP_PHASES } from '../engine-internals.ts'
 
 describe('P2 v2 — LEGAL_TRANSITIONS table', () => {
   test('every legal target is itself a known phase', () => {
@@ -104,17 +105,33 @@ describe('P2 v2 — LEGAL_TRANSITIONS table', () => {
 })
 
 describe('P2 v2 — AUTO_SKIP_PHASES set', () => {
-  test('contains identity_oauth + instance_provisioned + persona_synthesizing only', () => {
-    // The exported set is unobservable from outside the engine module
-    // (it's a `const` not exported), so we audit by walking each phase
-    // through the legal-transition table — auto-skip phases must have
-    // at least one non-failure outgoing edge so the walker has a target.
-    const expectedAutoSkip = [
-      'identity_oauth',
-      'instance_provisioned',
-      'persona_synthesizing',
-    ] as const
-    for (const phase of expectedAutoSkip) {
+  // K11a6-rem2 (Codex REQUEST_CHANGES, 2026-07-06): the original ported
+  // block re-derived a LEGAL_TRANSITIONS proxy (vacuous — it passes even
+  // if AUTO_SKIP_PHASES changes entirely) AND wrongly claimed
+  // persona_synthesizing was auto-skipped. Production explicitly documents
+  // the opposite (engine-internals.ts:1460-1466: auto-skipping
+  // persona_synthesizing would fire the walker BEFORE synthesizePersona
+  // and never invoke compose()). The retained exported set
+  // (engine-internals.ts:1468-1471) is `identity_oauth` +
+  // `instance_provisioned` only. Pin the REAL exported set by EXACT
+  // membership so any add/remove regresses noisily.
+
+  test('AUTO_SKIP_PHASES has exactly identity_oauth + instance_provisioned', () => {
+    expect(new Set(AUTO_SKIP_PHASES)).toEqual(
+      new Set<OnboardingPhase>(['identity_oauth', 'instance_provisioned']),
+    )
+    // Explicit non-membership anchors for the two phases most likely to be
+    // mistaken for auto-skip: persona_synthesizing (back-stage transit but
+    // MUST run synthesizePersona inline) + agent_name_chosen (v2
+    // user-visible "what should I be called?" per § 3.10).
+    expect(AUTO_SKIP_PHASES.has('persona_synthesizing')).toBe(false)
+    expect(AUTO_SKIP_PHASES.has('agent_name_chosen')).toBe(false)
+  })
+
+  test('every auto-skip phase has a non-failure outgoing edge so the walker has a target', () => {
+    // Cross-invariant against the retained LEGAL_TRANSITIONS table: a
+    // phase the engine auto-skips must have somewhere legal to skip TO.
+    for (const phase of AUTO_SKIP_PHASES) {
       const legal = LEGAL_TRANSITIONS[phase]
       const nonFailureTargets = legal.filter((t) => t !== 'failed')
       expect({ phase, hasNonFailureTarget: nonFailureTargets.length > 0 }).toEqual({
@@ -122,10 +139,5 @@ describe('P2 v2 — AUTO_SKIP_PHASES set', () => {
         hasNonFailureTarget: true,
       })
     }
-    // agent_name_chosen is NOT auto-skip in v2 — it's user-visible per
-    // § 3.10. Verify by asserting STATIC_PHASE_SPECS has a body that
-    // captures the agent name (i.e. it's reachable / emitted).
-    // Done via the spec-coverage test in m2-ux-surface-fixes.test.ts;
-    // this row is the negative anchor.
   })
 })
