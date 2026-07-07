@@ -128,7 +128,7 @@ describe('ND2 real-export — Path-1 conversational upload STARTS the import', (
     "Ryan's real Claude export at work_interview_gap_fill kicks a real import job ingesting the real conversations.json",
     async () => {
       // Live Path-1, fresh install: there is NO onboarding_state row yet. The
-      // open-mode live-agent flow never calls `engine.start()`, and #130 offers
+      // open-mode live-agent flow never calls the engine `start` drive, and #130 offers
       // the import right after the name — BEFORE the fire-and-forget post-turn
       // extractor has lazily/async created the row. This test deliberately does
       // NOT seed a row (it previously SQL-seeded one, which manufactured the

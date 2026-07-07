@@ -20,7 +20,7 @@
  *
  * 2026-07-06 K11-pre re-anchor (K11a6): the body-shape + themes-regression
  * blocks previously reached `import_analysis_presented` by calling
- * `engine.start(...)` (its start-path invokes the poll-and-advance). K11b
+ * the engine `start` drive (its start-path invokes the poll-and-advance). K11b
  * deletes `engine.start`/`engine.advance`, so those blocks are re-anchored
  * onto the SURVIVING import surface: seed `import_running` directly on the
  * state store (exactly what a prior turn / the upload handler leaves) and
@@ -32,7 +32,7 @@
  *
  * The corrections-capture + audit-routing + failure-reply blocks, which
  * drove the CONVERSATIONAL freeform path
- * (`engine.advance(...) → llmRouter.route →
+ * (the engine `advance` drive → llmRouter.route →
  * dispatchRouterDecision → consumeImportAnalysisPresentedChoice`), pinned
  * the conversational drive that K11b deletes and that is already dead on
  * every live path (the live import-completion watcher consumes

@@ -226,4 +226,18 @@ Byte-unchanged this unit; co-deletes in K11b1.
 
 ## 5. Comment-only grep hits neutralized (survivor files, no behavior change)
 
-(appended as done)
+Four SURVIVOR files carried doc-comment references matching the acceptance pattern
+(`engine.start(`/`engine.advance(` inside historical NOTEs). Comments reworded (no code change,
+tests re-run green) so the acceptance grep returns only DIE-manifest files:
+- `tests/integration/import-analysis-presented.test.ts` (:23, :35)
+- `tests/integration/import-failed-routes-to-analysis-presented.test.ts` (:198)
+- `tests/integration/import-resume-button.test.ts` (:250)
+- `tests/integration/nd2-real-export-path1-import-runs.test.ts` (:131)
+
+Also verified done (no action needed):
+- `onboarding/interview/__tests__/source-switch-late-upload-race.test.ts` — K11a3 race-half
+  re-anchor complete (seeded state + `notifyImportUpload` arbitration; intent WRITE path
+  preserved in `source-switch-intent-write.die.test.ts`). Zero drive calls.
+- `onboarding/interview/__tests__/phase-state-contract.test.ts` — K4a RouterDecision narrowing
+  complete (#236): router `state_delta`-guard assertions removed (header :26-27 documents it),
+  key-contract assertions retained, zero drive calls / no llm-router import.
