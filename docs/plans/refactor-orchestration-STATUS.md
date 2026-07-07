@@ -60,9 +60,24 @@ land — it is what a fresh context reads to resume without re-deriving anything
     running any K11 sub-unit.**
   - **RESUMED (2026-07-06/07, autonomy grant):** K11a + K11a6-remainder + K11b0 + K11a6-completion
     + K11b1 all driven to merge (D-K11-1 cleared — Managed grepped clean, vendors Open via submodule).
-    **Next: the K11 tail** — start with D-K11-4 (`rate_limit_paused` rider) then K11c/K11d/K11b2/K11b3.
     See [[neutron-open-k11b1-drive-deletion]] memory for the DIE-manifest≠tsc-ground-truth + Codex
     live-path lessons.
+  - **K11 TAIL progress (2026-07-07):**
+    - **✅ D-K11-4 RESOLVED → KEEP.** The `rate_limit_paused` / `attemptAutoResumeFromPaused`
+      machinery is LIVE (auto-resume of a rate-limit-paused import via the retained
+      `pollImportRunningTick` cron seam). `import-paused-auto-resume.test.ts` already survived K11b1
+      anchored on the retained `buildImportRunningHandler` (3/3 green) — no code change; delete-together
+      was the wrong branch (would kill live behavior + leave the 6 dangling status enumerators). Exec-plan §10 row marked resolved.
+    - **⏸️ K11b2 DEFERRED — owner-gated.** Owner pre-merge grep ran: `NEUTRON_DEPLOYMENT_MODE` /
+      `NEUTRON_ROLE` appear NOWHERE in current Managed source; the current provisioner
+      (`src/provision/systemd.ts`) writes only `NEUTRON_HOME` (managed-mode derived from the identity
+      signing key, not this env alias). Repo-evidence says removal is safe, but an already-provisioned
+      live box from the OLD `tenant-provisioning/` path could have the alias baked into its on-disk
+      unit/.env — a live-fleet fact only Ryan can confirm. Removing a 2-line back-compat shim isn't
+      worth an unverifiable misconfigured-Managed outage. **Unblock:** Ryan confirms no live box sets
+      `NEUTRON_DEPLOYMENT_MODE=`. Exec-plan §8 carries the full DEFERRED banner + unblock condition.
+    - **Remaining autonomous tail:** K11c (OAuth sources purge / D-K11-7), K11d (retained-but-dead
+      prune — MUST co-delete the 2 wow/final-handoff survivors), K11b3 (web:-registry comment-truth), K10 (docs cluster).
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
