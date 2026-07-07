@@ -155,21 +155,6 @@ function eventForName(name: typeof ALL_ONBOARDING_EVENT_NAMES[number]): Onboardi
           primary_error_message: 'pass2 substrate error: HTTP 429: rate_limit_error',
         },
       }
-    case 'onboarding.router_decision':
-      return {
-        ...base,
-        event: name,
-        payload: {
-          phase: 'import_upload_pending',
-          action: 'answer',
-          confidence: 0.92,
-          escalated_to_sonnet: false,
-          timed_out: false,
-          clarify_synthesised: false,
-          reasoning_redacted: 'tangent_route_to_claude_export_steps',
-          latency_ms: 412,
-        },
-      }
   }
   // exhaustiveness check
   const _exhaustive: never = name

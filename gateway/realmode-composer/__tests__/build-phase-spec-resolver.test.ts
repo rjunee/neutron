@@ -127,10 +127,11 @@ function fakeSubstrate(opts: FakeSubstrateOptions = {}): Substrate {
 
 describe('buildPhaseSpecResolver', () => {
   // 2026-05-12 sprint — default policy: LLM-on for every eligible phase
-  // when both env vars are unset. The factory only returns null when
-  // either (a) the env explicitly opts out, or (b) no substrate is
-  // supplied (the caller passed `substrate: null` because no Anthropic
-  // credentials were resolvable for the instance at composer-boot time).
+  // when both env vars are unset. Post-K11b1 the env opt-out gate
+  // (NEUTRON_LLM_ONBOARDING_DEFAULT/_PHASES) is gone — the factory now
+  // returns null ONLY when no substrate is supplied (the caller passed
+  // `substrate: null` because no Anthropic credentials were resolvable
+  // for the instance at composer-boot time).
 
   test('returns a working resolver when env vars are unset (new default-on policy)', async () => {
     const resolver = await buildPhaseSpecResolver({
@@ -142,29 +143,6 @@ describe('buildPhaseSpecResolver', () => {
       },
     })
     expect(resolver).not.toBeNull()
-  })
-
-  test('returns null when NEUTRON_LLM_ONBOARDING_DEFAULT=0 (operator opt-out)', async () => {
-    const resolver = await buildPhaseSpecResolver({
-      log_slug: 't1',
-      substrate: fakeSubstrate(),
-      env: {
-        NEUTRON_LLM_ONBOARDING_DEFAULT: '0',
-      },
-    })
-    expect(resolver).toBeNull()
-  })
-
-  test('returns null when NEUTRON_LLM_ONBOARDING_PHASES=off (explicit opt-out wins)', async () => {
-    const resolver = await buildPhaseSpecResolver({
-      log_slug: 't1',
-      substrate: fakeSubstrate(),
-      env: {
-        NEUTRON_LLM_ONBOARDING_PHASES: 'off',
-        NEUTRON_LLM_ONBOARDING_DEFAULT: '1',
-      },
-    })
-    expect(resolver).toBeNull()
   })
 
   test('returns null when substrate is null (no Anthropic credentials resolvable)', async () => {

@@ -8,7 +8,6 @@
  *     not in allow-list, free-text intents force options=[])
  *   - typing-indicator emission (onLlmStart before, onLlmEnd after on
  *     success AND error paths via finally semantics)
- *   - env-flag rollout (parseEnabledPhasesEnv + per-phase gate)
  *   - withTimeout wrapper races
  */
 
@@ -19,10 +18,8 @@ import {
   buildSystemPrompt,
   buildUserPrompt,
   materializeSpec,
-  parseEnabledPhasesEnv,
   parseLlmSpec,
   PHASE_INTENTS,
-  resolveEnabledPhases,
   TimeoutError,
   validateReply,
   withTimeout,
@@ -50,40 +47,6 @@ function makeBundle(overrides: Partial<PhaseContextBundle> = {}): PhaseContextBu
   }
 }
 
-describe('parseEnabledPhasesEnv', () => {
-  test('empty / unset returns empty set', () => {
-    expect(parseEnabledPhasesEnv(undefined).size).toBe(0)
-    expect(parseEnabledPhasesEnv('').size).toBe(0)
-    expect(parseEnabledPhasesEnv('   ').size).toBe(0)
-  })
-
-  test('parses comma-separated phase names', () => {
-    const set = parseEnabledPhasesEnv('signup,agent_name_chosen,personality_offered')
-    expect(set.has('signup')).toBe(true)
-    expect(set.has('agent_name_chosen')).toBe(true)
-    expect(set.has('personality_offered')).toBe(true)
-  })
-
-  test('drops unknown phase names silently', () => {
-    const set = parseEnabledPhasesEnv('signup,bogus_phase,agent_name_chosen')
-    expect(set.has('signup')).toBe(true)
-    expect(set.has('agent_name_chosen')).toBe(true)
-    expect(set.size).toBe(2)
-  })
-
-  test('drops null-intent (externally-driven) phases', () => {
-    const set = parseEnabledPhasesEnv('signup,identity_oauth,wow_fired')
-    expect(set.has('signup')).toBe(true)
-    expect(set.has('identity_oauth')).toBe(false)
-    expect(set.has('wow_fired')).toBe(false)
-  })
-
-  test('trims whitespace around entries', () => {
-    const set = parseEnabledPhasesEnv(' signup , agent_name_chosen ')
-    expect(set.has('signup')).toBe(true)
-    expect(set.has('agent_name_chosen')).toBe(true)
-  })
-})
 
 describe('allLlmEligiblePhases', () => {
   // Audit: every static fallback phase that is NOT externally-driven OR
@@ -127,114 +90,6 @@ describe('allLlmEligiblePhases', () => {
   })
 })
 
-describe('resolveEnabledPhases', () => {
-  // 2026-05-12 sprint — default rollout policy. Both env vars unset
-  // → LLM-on for every eligible phase. `_PHASES` overrides `_DEFAULT`
-  // whenever set.
-
-  const ALL = allLlmEligiblePhases()
-
-  test('unset env vars → default-on (every eligible phase)', () => {
-    const set = resolveEnabledPhases({})
-    expect(set.size).toBe(ALL.size)
-    for (const p of ALL) expect(set.has(p)).toBe(true)
-  })
-
-  // Codex r1 P1 (2026-05-12) — `Environment=NEUTRON_LLM_ONBOARDING_DEFAULT=`
-  // in a systemd drop-in clears the parent's value; the resulting env
-  // var is PRESENT-BUT-EMPTY (not undefined). The contract says `""`
-  // opts out; this branch was incorrectly returning default-on before
-  // the fix because empty-string was conflated with "absent."
-  test('explicit-empty NEUTRON_LLM_ONBOARDING_DEFAULT="" → opt-out (not default-on)', () => {
-    const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_DEFAULT: '' })
-    expect(set.size).toBe(0)
-  })
-
-  test('whitespace-only NEUTRON_LLM_ONBOARDING_DEFAULT="   " → opt-out (operator intent is "clear")', () => {
-    const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_DEFAULT: '   ' })
-    expect(set.size).toBe(0)
-  })
-
-  test('NEUTRON_LLM_ONBOARDING_DEFAULT=1 (explicit) → default-on', () => {
-    const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_DEFAULT: '1' })
-    expect(set.size).toBe(ALL.size)
-  })
-
-  test.each(['0', 'false', 'off', 'none', 'disabled', 'no'])(
-    'NEUTRON_LLM_ONBOARDING_DEFAULT=%s → empty set (opt-out)',
-    (token) => {
-      const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_DEFAULT: token })
-      expect(set.size).toBe(0)
-    },
-  )
-
-  test.each(['true', 'TRUE', 'yes', 'on', 'enabled', 'all', '1'])(
-    'NEUTRON_LLM_ONBOARDING_DEFAULT=%s → default-on',
-    (token) => {
-      const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_DEFAULT: token })
-      expect(set.size).toBe(ALL.size)
-    },
-  )
-
-  test('unrecognized NEUTRON_LLM_ONBOARDING_DEFAULT token → safe opt-out', () => {
-    // Typo defense: an unknown token doesn't silently enable LLM.
-    const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_DEFAULT: 'sometimes' })
-    expect(set.size).toBe(0)
-  })
-
-  test('NEUTRON_LLM_ONBOARDING_PHASES=signup → exactly that phase', () => {
-    const set = resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_PHASES: 'signup' })
-    expect(set.size).toBe(1)
-    expect(set.has('signup')).toBe(true)
-  })
-
-  test('NEUTRON_LLM_ONBOARDING_PHASES overrides _DEFAULT (explicit list wins)', () => {
-    const set = resolveEnabledPhases({
-      NEUTRON_LLM_ONBOARDING_PHASES: 'signup,agent_name_chosen',
-      NEUTRON_LLM_ONBOARDING_DEFAULT: '0',
-    })
-    expect(set.size).toBe(2)
-    expect(set.has('signup')).toBe(true)
-    expect(set.has('agent_name_chosen')).toBe(true)
-  })
-
-  test.each(['off', 'none', 'disabled', 'no', 'false', '0'])(
-    'NEUTRON_LLM_ONBOARDING_PHASES=%s → empty set (overrides default-on)',
-    (token) => {
-      const set = resolveEnabledPhases({
-        NEUTRON_LLM_ONBOARDING_PHASES: token,
-        NEUTRON_LLM_ONBOARDING_DEFAULT: '1',
-      })
-      expect(set.size).toBe(0)
-    },
-  )
-
-  test.each(['all', '1', 'true', 'yes', 'on', 'enabled'])(
-    'NEUTRON_LLM_ONBOARDING_PHASES=%s → every eligible phase',
-    (token) => {
-      const set = resolveEnabledPhases({
-        NEUTRON_LLM_ONBOARDING_PHASES: token,
-        NEUTRON_LLM_ONBOARDING_DEFAULT: '0',
-      })
-      expect(set.size).toBe(ALL.size)
-    },
-  )
-
-  test('empty NEUTRON_LLM_ONBOARDING_PHASES falls through to _DEFAULT', () => {
-    expect(resolveEnabledPhases({
-      NEUTRON_LLM_ONBOARDING_PHASES: '',
-      NEUTRON_LLM_ONBOARDING_DEFAULT: '1',
-    }).size).toBe(ALL.size)
-    expect(resolveEnabledPhases({
-      NEUTRON_LLM_ONBOARDING_PHASES: '   ',
-      NEUTRON_LLM_ONBOARDING_DEFAULT: '0',
-    }).size).toBe(0)
-  })
-
-  test('whitespace-only NEUTRON_LLM_ONBOARDING_PHASES falls through to default-on by default', () => {
-    expect(resolveEnabledPhases({ NEUTRON_LLM_ONBOARDING_PHASES: '   ' }).size).toBe(ALL.size)
-  })
-})
 
 describe('parseLlmSpec', () => {
   const signupIntent = PHASE_INTENTS['signup']!
