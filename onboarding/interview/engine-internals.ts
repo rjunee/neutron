@@ -902,16 +902,6 @@ export interface InterviewEngineDeps {
    */
   phaseSpecResolver?: PhaseSpecResolver
   /**
-   * 2026-05-13 — T3 max-oauth handoff hook. When wired AND the user taps
-   * Attach my Max at `max_oauth_offered`, the engine calls
-   * `startHandoff(project_slug, user_id)` to begin the upstream exchange.
-   * Production wires this in `gateway/realmode-composer/build-landing-stack.ts`;
-   * tests inject a deterministic stub. When unwired, the user-facing
-   * options collapse to BYO / Skip — the engine surfaces a soft
-   * "max attach unavailable" inline reason and re-emits.
-   */
-  maxOauth?: MaxOAuthEngineHook
-  /**
    * 2026-05-13 — T3 SecretsStore for the BYO API key path. When wired
    * AND the user taps Use my own API key at `max_oauth_offered` and
    * pastes a valid `sk-ant-...` string on the next turn, the engine
@@ -921,30 +911,6 @@ export interface InterviewEngineDeps {
    * Production wires the per-instance SecretsStore; tests inject a mock.
    */
   secrets?: MaxOauthSecretsStore
-  /**
-   * T2 (2026-05-13) — wow-moment dispatcher hook. When provided, the
-   * engine invokes `dispatch(...)` on entry into `wow_fired` and
-   * advances to `completed` once the dispatcher resolves (per § 2.5 +
-   * § 4.10). When absent (legacy / unwired composer), the engine
-   * emits the wow_fired entry body and leaves state at `wow_fired` —
-   * onboarding visibly stalls there, which the composer's wiring
-   * audit catches in QA. Production wires this in
-   * `gateway/realmode-composer/build-landing-stack.ts`; tests inject
-   * a recorder or omit entirely.
-   */
-  wowDispatcher?: WowDispatcherHook
-  /**
-   * 2026-05-22 (push-deeplink-wow sprint) — wow-moment push trigger.
-   * When provided AND `state.wow_pushed_at === null`,
-   * `dispatchWowAndAdvance` fires the emitter exactly once before
-   * delegating to `wowDispatcher.dispatch(...)`. The engine wraps the
-   * call in try/catch and stamps `wow_pushed_at` regardless of
-   * success/failure so a downstream Expo outage cannot re-fire on
-   * crash-resume. Production composer wires this in
-   * `gateway/realmode-composer/build-landing-stack.ts`; tests inject
-   * a recorder via this field directly.
-   */
-  wowPushEmitter?: WowPushEmitter
   /**
    * T4 (2026-05-13) — history-import job-runner hook. When provided,
    * the engine invokes `start(...)` on the `import_offered` →
@@ -1051,21 +1017,6 @@ export interface InterviewEngineDeps {
    */
   personaSummarizer?: PersonaSummarizer
   /**
-   * 2026-05-28 final-handoff sprint — Telegram-bind token minter. Called
-   * when the user taps `[B] Connect a Telegram bot` on the post-completion
-   * handoff prompt. Production composer wires this to an `issueStartToken`-
-   * style helper with `aud: 'neutron-telegram-bind'` + 1-hour TTL; tests
-   * inject a deterministic stub. When unwired the engine falls back to a
-   * per-(instance, user) opaque nonce so the deep link still renders — the
-   * bot-side `/start bind:<token>` handler is a follow-up sprint (see
-   * ISSUES.md), so a non-verifiable nonce is functionally identical for
-   * now.
-   */
-  mintTelegramBindToken?: (input: {
-    project_slug: string
-    user_id: string
-  }) => Promise<string | null>
-  /**
    * 2026-05-28 final-handoff sprint — Telegram bot username override.
    * When unset, the engine reads `NEUTRON_TELEGRAM_BOT_USERNAME` from env
    * via `resolveTelegramBotUsername(env)` and falls back to the canonical
@@ -1084,29 +1035,6 @@ export interface InterviewEngineDeps {
    * harness).
    */
   mobileAppUrl?: string
-  /**
-   * 2026-05-28 sidebar + per-project chat topology sprint —
-   * onboarding-to-General-and-per-project-topics handoff. Called from
-   * `dispatchWowAndAdvance`'s SUCCESS branch (just before the upsert
-   * to `phase=completed`) with the captured-project list pulled from
-   * `phase_state`. Production wires this against `ButtonStore.emit(...)`
-   * to seed one chat row per project under `web:<user_id>:<project_id>`
-   * so the sidebar's per-project topics already have content when the
-   * user first taps them.
-   *
-   * Failures inside the hook are caught + logged inside the engine —
-   * a seed-emit hiccup must not block the user from completing
-   * onboarding (the sidebar still renders General + the project topics
-   * that DID land; the unlisted ones get re-emitted on the next
-   * onboarding attempt's resume path). Per the brief's spec:
-   *
-   *   "When onboarding completes (phase transitions to a terminal state
-   *    like wow_fired), the current onboarding topic_id web:<user_id>
-   *    becomes the General topic. For each row in
-   *    primary_projects_confirmed, create a new project record (if not
-   *    already) AND emit an initial seed prompt to that project's topic."
-   */
-  onboardingHandoff?: OnboardingHandoffHook
   /**
    * Open-mode-gated phase sequence (2026-06-13 — onboarding Open-mode
    * sprint). Per docs/plans/onboarding-open-vs-managed-framing-2026-06-11.md
@@ -2052,13 +1980,6 @@ export interface EngineInternals {
     partial: boolean,
     failure_reason?: string | null,
   ): Promise<AdvanceResult>
-  consumeImportAnalysisPresentedChoice(
-    input: AdvanceInput,
-    state: OnboardingState,
-    choice: ButtonChoice,
-    was_new: boolean,
-    observed_at: number,
-  ): Promise<AdvanceResult>
   emitImportRunningPromptSpec(
     input: AdvanceInput,
     state: OnboardingState,
@@ -2107,11 +2028,6 @@ export interface EngineInternals {
     user_id: string,
     phase_state: Record<string, unknown>,
   ): Promise<AgentNameSuggesterResult> | null
-  maybeAutoAdvancePastMaxOauthOffered(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
-  ): Promise<OnboardingState>
 
   // --- the 8 extracted persona methods (so the persona free functions
   //     can cross-call each other via self.* identically to the originals,
@@ -2121,13 +2037,6 @@ export interface EngineInternals {
     state: OnboardingState,
     observed_at: number,
   ): Promise<OnboardingState>
-  consumePersonaReviewedChoice(
-    input: AdvanceInput,
-    state: OnboardingState,
-    choice: ButtonChoice,
-    was_new: boolean,
-    observed_at: number,
-  ): Promise<AdvanceResult>
   consumePersonaSynthesizingChoice(
     input: AdvanceInput,
     state: OnboardingState,
@@ -2139,11 +2048,6 @@ export interface EngineInternals {
     input: AdvanceInput,
     observed_at: number,
     serialized_draft: ReturnType<typeof serializeDraft> | null,
-  ): Promise<AdvanceResult>
-  advanceFromPersonaReviewed(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
   ): Promise<AdvanceResult>
   reEmitPersonaReviewed(
     input: AdvanceInput,
@@ -2184,12 +2088,6 @@ export interface EngineInternals {
     input: AdvanceInput,
     state: OnboardingState,
     observed_at: number,
-  ): Promise<AdvanceResult>
-  advanceFromMaxOauthOffered(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
-    substrate: 'free' | 'byo_api_key' | 'max_oauth',
   ): Promise<AdvanceResult>
 
   // --- the 11 extracted slug methods (so the slug free functions can

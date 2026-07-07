@@ -46,7 +46,6 @@ export {
   consumeAgentNameChosenChoice,
   getOrStartCharacterSuggestions,
   getOrStartAgentNameSuggestions,
-  maybeAutoAdvancePastMaxOauthOffered,
   suggestionFingerprint,
   suggestionKeyPrefix,
 } from './engine-agent-name.ts'
