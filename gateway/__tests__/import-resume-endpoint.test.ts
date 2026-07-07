@@ -207,16 +207,6 @@ describe('POST /api/import/<job_id>/resume', () => {
     expect(runnerStartCalls).toBe(0)
   })
 
-  test('OAuth sources skip the ZIP-on-disk check', async () => {
-    seedImportJob({ job_id: 'job-old', status: 'cancelled', source: 'gmail-oauth' })
-    zipExists = false // would block for *-zip; OAuth bypasses
-    const handler = makeHandler()
-    const res = await handler(
-      new Request('http://t.example/api/import/job-old/resume', { method: 'POST' }),
-    )
-    expect(res!.status).toBe(200)
-  })
-
   test('401 when auth gate denies the request', async () => {
     seedImportJob({ job_id: 'job-old', status: 'cancelled', source: 'chatgpt-zip' })
     const handler = makeHandler({ auth: () => false })

@@ -90,10 +90,10 @@ test('assistant text does NOT count toward the floor (signal is the user/event s
   expect(chunks[0]!.skip_llm_user_chars).toBe(2)
 })
 
-test('event-role messages (calendar-oauth) DO count toward the floor (Codex r1 fix)', async () => {
-  // Calendar imports emit one Conversation per event with a single
+test('event-role messages DO count toward the floor (Codex r1 fix)', async () => {
+  // A source can emit one Conversation per event with a single
   // `role: 'event'` message body. v1 of skip_llm only counted
-  // `role === 'user'` text → every calendar chunk would have been
+  // `role === 'user'` text → every such chunk would have been
   // silently skipped. Codex r1 broadened to "any non-assistant text".
   const eventBody = 'Quarterly planning meeting with Alice and Bob. '.repeat(15) // ~700 chars
   const chunks = await collect([

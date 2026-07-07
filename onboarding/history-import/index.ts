@@ -32,7 +32,6 @@ export {
   type ImportJobStatus,
   type ImportResult,
   type ImportSource,
-  type OAuthRefs,
   type Pass1ChunkResult,
   type SourceParser,
   type VoiceSignals,
@@ -60,22 +59,6 @@ export {
 } from './chunker.ts'
 
 export {
-  fetchGmailThreads,
-  type FetchGmailThreadsInput,
-  type GmailClient,
-} from './oauth-gmail.ts'
-
-export {
-  fetchCalendarEvents,
-  type CalendarClient,
-  type FetchCalendarEventsInput,
-} from './oauth-calendar.ts'
-
-export { DRIVE_STUB_MESSAGE } from './oauth-drive.ts'
-export { NOTION_STUB_MESSAGE } from './oauth-notion.ts'
-export { SLACK_STUB_MESSAGE } from './oauth-slack.ts'
-
-export {
   ZipReadError,
   listEntries,
   readEntry,
@@ -83,4 +66,4 @@ export {
   type ZipEntry,
 } from './zip-reader.ts'
 
-export { buildDefaultSourceParser, type DefaultParserDeps } from './default-source-parser.ts'
+export { buildDefaultSourceParser } from './default-source-parser.ts'

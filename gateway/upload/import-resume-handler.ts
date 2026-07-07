@@ -67,7 +67,7 @@ export interface ImportResumeHandlerInput {
   runner: ImportJobRunnerHook
   /**
    * The same `ImportPayloadResolver` the engine deps carries. Resolves
-   * the buffer (for *-zip sources) or OAuthRefs (for *-oauth sources).
+   * the export buffer for the zip sources (`chatgpt-zip` / `claude-zip`).
    * The resume endpoint cannot proceed if the resolver returns null.
    */
   payloadResolver: ImportPayloadResolver
@@ -151,9 +151,9 @@ export function buildImportResumeHandler(
     }
     const source = row.source as ImportSource
     // Only ZIP-backed sources have an on-disk artefact to verify here.
-    // OAuth sources re-fetch fresh on each runner.start so the "ZIP
-    // missing" check is N/A — fall through to the resolver, which is
-    // the OAuth-credential-validation gate for those surfaces.
+    // Every live source is zip-backed; the guard stays defensive against
+    // any legacy non-zip `source` string that a historical row could
+    // carry (those fall through to the resolver rather than 409'ing).
     if (ZIP_SOURCES.includes(source)) {
       const zipPath = zipPathForSource(input.owner_home, source)
       if (!fs.existsSync(zipPath)) {

@@ -693,9 +693,8 @@ export type { ImportJobRunnerHook } from './import-runner-hook.ts'
  * narrow seam the engine calls when the user picks ChatGPT zip /
  * Claude.ai zip at `import_offered`.
  *
- * `resolve` returns a Buffer (or OAuthRefs for the OAuth sources P2
- * surfaces deferred) when the payload is available, or `null` when
- * nothing has been uploaded yet. A null return routes the engine into
+ * `resolve` returns the export Buffer when the payload is available, or
+ * `null` when nothing has been uploaded yet. A null return routes the engine into
  * the "I don't see your export yet" re-emit branch with a retry button;
  * the user uploads via the side-channel and taps retry.
  *
@@ -965,7 +964,7 @@ export interface InterviewEngineDeps {
   /**
    * T4 (2026-05-13) — history-import payload resolver. Called when
    * the user picks a zip source at `import_offered`; the resolver
-   * returns the Buffer (or OAuthRefs) to hand the runner. A `null`
+   * returns the Buffer to hand the runner. A `null`
    * return tells the engine the upload hasn't landed yet → re-emit
    * with a retry button. Optional: when unwired the engine assumes
    * the payload arrives via a side-channel and kicks off the runner
@@ -1609,11 +1608,6 @@ export function readImportSource(
   switch (v) {
     case 'chatgpt-zip':
     case 'claude-zip':
-    case 'gmail-oauth':
-    case 'calendar-oauth':
-    case 'drive-oauth':
-    case 'notion-oauth':
-    case 'slack-oauth':
       return v
     default:
       return null

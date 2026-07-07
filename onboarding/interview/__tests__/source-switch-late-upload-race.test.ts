@@ -111,7 +111,7 @@ function stubImportStack(): {
     synthesizeOnDemand: async () => null,
   }
   const importPayloadResolver: ImportPayloadResolver = {
-    // `ChunkerInput` is `Buffer | OAuthRefs`; a non-null payload routes the
+    // `ChunkerInput` is a `Buffer`; a non-null payload routes the
     // engine into the import-running path (a null would re-emit "I don't see
     // your export yet"). An empty buffer suffices — the stub runner ignores it.
     resolve: async () => Buffer.from(''),

@@ -48,8 +48,6 @@ import type {
   SourceParser,
 } from '../../onboarding/history-import/types.ts'
 import { buildDefaultSourceParser } from '../../onboarding/history-import/default-source-parser.ts'
-import type { GmailClient } from '../../onboarding/history-import/oauth-gmail.ts'
-import type { CalendarClient } from '../../onboarding/history-import/oauth-calendar.ts'
 import type {
   ImportJobRunnerHook,
 } from '../../onboarding/interview/engine-internals.ts'
@@ -69,7 +67,6 @@ export interface BuildSynthesisImportJobRunnerInput {
   /**
    * Source → `ConversationRecord` stream. Optional: defaults to the zip
    * parser (`chatgpt-zip` / `claude-zip` — the live onboarding import path).
-   * The OAuth sources throw at call time unless a custom parser is supplied.
    */
   parse?: SourceParser
   /** Test seam: clock. Defaults to `Date.now`. */
@@ -119,12 +116,7 @@ export function buildSynthesisImportJobRunner(
   const now = input.now ?? Date.now
   const uuid = input.uuid ?? defaultUuid
   const logFailure = input.logFailure ?? defaultLogFailure
-  const parse: SourceParser =
-    input.parse ??
-    buildDefaultSourceParser({
-      gmailClient: throwingGmailClient,
-      calendarClient: throwingCalendarClient,
-    })
+  const parse: SourceParser = input.parse ?? buildDefaultSourceParser()
   // In-process result + cancellation (the synthesis run is single-process; the
   // result is consumed by the engine in the same process the moment the job
   // completes, so it does not need an `import_results` row for resume).
@@ -397,34 +389,4 @@ function defaultLogFailure(stage: string, err: unknown): void {
   console.warn(
     `[synthesis-import-runner] ${stage}: ${err instanceof Error ? err.message : String(err)}`,
   )
-}
-
-// ── Throwing OAuth clients — the live onboarding import is zip-only. The
-//    default parser's gmail/calendar branches throw if an OAuth source is
-//    ever routed here without a custom parser. ────────────────────────────
-async function* throwingThreadIterable(): AsyncIterable<{ thread_id: string; snippet?: string }> {
-  throw new Error('synthesis-import-runner: gmail client not wired (zip-only path)')
-  // eslint-disable-next-line @typescript-eslint/no-unreachable
-  yield { thread_id: 'unreachable' }
-}
-
-async function* throwingEventIterable(): AsyncIterable<{ event_id: string; start_ms: number }> {
-  throw new Error('synthesis-import-runner: calendar client not wired (zip-only path)')
-  // eslint-disable-next-line @typescript-eslint/no-unreachable
-  yield { event_id: 'unreachable', start_ms: 0 }
-}
-
-const throwingGmailClient: GmailClient = {
-  listThreads() {
-    return throwingThreadIterable()
-  },
-  async getThread(): Promise<never> {
-    throw new Error('synthesis-import-runner: gmail client not wired (zip-only path)')
-  },
-}
-
-const throwingCalendarClient: CalendarClient = {
-  listEvents() {
-    return throwingEventIterable()
-  },
 }
