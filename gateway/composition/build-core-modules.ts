@@ -40,10 +40,6 @@ import {
   type ComposedTelemetrySinks,
 } from '../../onboarding/telemetry/index.ts'
 import {
-  buildOnboardingResumeHandler,
-  registerOnboardingResumeCron,
-} from '../../onboarding/interview/resume-cron.ts'
-import {
   buildImportRunningHandler,
   registerImportRunningCron,
 } from '../../onboarding/interview/import-running-cron.ts'
@@ -579,39 +575,6 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         }
         if (seanCfg.interval_ms !== undefined) registerInput.interval_ms = seanCfg.interval_ms
         registerSeanEllisCron(registerInput)
-      }
-
-      // Trident 6 (2026-05-13) — resume-on-reconnect cron. Independent
-      // of the Sean Ellis cron; gated on `onboarding_resume_cron` being
-      // supplied so legacy callers and tests that don't construct the
-      // engine here stay unaffected.
-      const resumeCfg = input.onboarding_resume_cron
-      if (resumeCfg !== undefined) {
-        const cron = ctx.graph.get<{
-          jobs: CronJobRegistry
-          handlers: CronHandlerRegistry
-        }>('cron')
-        const handlerDeps: Parameters<typeof buildOnboardingResumeHandler>[0] = {
-          engine: resumeCfg.engine,
-          db: input.db,
-        }
-        if (resumeCfg.resume_gap_ms !== undefined) {
-          handlerDeps.resume_gap_ms = resumeCfg.resume_gap_ms
-        }
-        if (resumeCfg.canDeliver !== undefined) {
-          handlerDeps.canDeliver = resumeCfg.canDeliver
-        }
-        const handler = buildOnboardingResumeHandler(handlerDeps)
-        const registerInput: Parameters<typeof registerOnboardingResumeCron>[0] = {
-          project_slug: input.project_slug,
-          jobs: cron.jobs,
-          handlers: cron.handlers,
-          handler,
-        }
-        if (resumeCfg.interval_ms !== undefined) {
-          registerInput.interval_ms = resumeCfg.interval_ms
-        }
-        registerOnboardingResumeCron(registerInput)
       }
 
       // S12 (2026-05-16) — import-running cron-tick. Independent of the

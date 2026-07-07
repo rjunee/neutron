@@ -583,38 +583,6 @@ export interface PlatformAdapter {
   getBundledCoreRoots(): readonly string[]
 
   /**
-   * P2-v3 S2 (2026-05-18) — feature flag accessor for the LLM
-   * conversational router. Returns true when the router should be
-   * allowed to fire at all (i.e., NEUTRON_ONBOARDING_CONVERSATIONAL is
-   * set to a non-opt-out value). The engine ALSO consults
-   * `getOnboardingConversationalPhases()` for per-phase narrowing.
-   *
-   * Default false through S5; planned default true starting S6 (per
-   * design § 7.1).
-   *
-   * Both adapters read `process.env.NEUTRON_ONBOARDING_CONVERSATIONAL`
-   * and parse via the shared `runtime/env-flag-tokens.ts` helper. The
-   * flag is process-env-driven (not tier-specific) — the Open and
-   * Managed adapters return identical answers given identical env.
-   */
-  getOnboardingConversational(): boolean
-
-  /**
-   * P2-v3 S2 (2026-05-18) — per-phase narrowing for the LLM
-   * conversational router. Returns `'all'` when the env flag is a
-   * bool-on token (router enabled for every phase with a non-null
-   * `PHASE_KNOWLEDGE` entry), an empty Set when the flag is off, or a
-   * Set of explicit phases when the flag is a comma-separated phase
-   * list. Mirrors the `NEUTRON_LLM_ONBOARDING_PHASES` tri-state shape
-   * already used by `resolveEnabledPhases`.
-   *
-   * The engine narrows the router call site with:
-   *   const ps = platform.getOnboardingConversationalPhases()
-   *   const phaseEnabled = ps === 'all' || ps.has(state.phase)
-   */
-  getOnboardingConversationalPhases(): ReadonlySet<OnboardingPhase> | 'all'
-
-  /**
    * P7.4 Phase 2 — per-project project-level backup remote config.
    * Returns `null` when no remote is configured (Open before the user
    * wires one; Managed before lazy-provisioning runs).

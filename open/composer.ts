@@ -89,7 +89,6 @@ import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
 } from '../gateway/realmode-composer/build-phase-spec-resolver.ts'
-import { buildGatewayLlmRouter } from '../gateway/realmode-composer/build-llm-router.ts'
 import { buildGatewayAnthropicMessagesClient } from '../gateway/realmode-composer/build-anthropic-messages-client.ts'
 import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
@@ -1118,16 +1117,6 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildPersonaSummarizer({ anthropicClient: onboardingAnthropicClient })
         : undefined
-    // Conversational freeform router — only fires when
-    // `NEUTRON_ONBOARDING_CONVERSATIONAL` is enabled (platform adapter gate),
-    // but wiring it costs nothing and shares the same warm client.
-    const llmRouter =
-      onboardingAnthropicClient !== null
-        ? buildGatewayLlmRouter({
-            anthropicClient: onboardingAnthropicClient,
-            personaLoader,
-          })
-        : undefined
     // Per-project opening message (Item 11) — consumed by the default-built
     // onboarding handoff inside `buildLandingStack` to compose a custom,
     // synthesis-grounded opener per project instead of the generic template.
@@ -1260,7 +1249,6 @@ export function buildOpenGraphComposer(
       // agentNameSuggester intentionally NOT wired (DROP the agent-NAME step,
       // 2026-07-01) — Open onboarding never names the orchestrator.
       ...(personaSummarizer !== undefined ? { personaSummarizer } : {}),
-      ...(llmRouter !== undefined ? { llmRouter } : {}),
       ...(projectOpeningComposer !== undefined ? { projectOpeningComposer } : {}),
       ...(wowPickerLlm !== undefined ? { wowPickerLlm } : {}),
       // Warm accumulating synthesis substrate — `buildLandingStack` threads it

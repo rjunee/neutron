@@ -22,7 +22,7 @@
  * the terminal branches (advance + analysis prompt, failed retry/skip
  * prompt, budget-exceeded partial-value prompt) fire.
  *
- * Wiring shape mirrors `resume-cron.ts`:
+ * Wiring shape (per-project cron registration):
  *   - `name`: `onboarding-import-running-<project_slug>`
  *   - `handler`: `'onboarding.import_running_tick'`
  *   - `schedule`: `{ kind: 'interval_ms', interval_ms: 15s default }`
