@@ -14,10 +14,24 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `108e161` — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions)
-  ~82% done:** K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged (9/11). Remaining: **K10** (docs cluster,
-  orchestrator-managed) and **K11** (engine excision). K4b deferred.
+- **main HEAD:** `7855767` — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+  K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **K11 IN PROGRESS:** all **K11a** leaf-extraction +
+  re-anchor units merged; **K11a6-remainder** re-anchors merged (coverage-loss caught 5× by Codex,
+  each split into `*.die.test.ts`); **K11b0** (dead web-chat `ChatBridge` excision — the K11b1
+  prerequisite) merged as **#240** (`7855767`). Remaining: **K10** (docs cluster,
+  orchestrator-managed) and **K11b1** (the conversational-drive deletion — now UNBLOCKED),
+  then K11c/K11d/K11b2/K11b3 + D-K11-4 rider. K4b deferred.
   **CI GREEN.**
+  - **✅ K11b0 (#240, merged 2026-07-06):** excised `buildWebChatBridge` + bridge-only helpers
+    (chat-bridge.ts 2522→552 lines); re-pointed 4 live slug-compare sites onto `constantTimeEqual`
+    (the anti-enumeration invariant, ISSUE #34, was previously enforced ONLY on the dead bridge —
+    bridge deletion would have silently dropped it). **Fable liveness adjudication (2026-07-06):**
+    bridge VERIFIED dead-in-prod (landing server reads `options.bridge` zero times, `/ws/chat`→404,
+    every live client on `/ws/app/chat`); K11b0 behavior-preserving (`app-ws-surface.ts` untouched);
+    Managed clean (vendors Open via `vendor/neutron` submodule, zero own-code refs to deleted
+    symbols). Codex's 3 REQUEST_CHANGES findings all describe **pre-existing main drift**, not K11b0
+    regressions → **filed as K11-F1** (engagement-mode unenforced on live app-ws + vestigial
+    `runWithActiveProject`; user-reachable but NOT a security gap — resolver falls back to global).
   - **Window auxiliary units merged this batch:** FX1 #226 (`/code` pre-check narrow — audit
     caught the K8 over-broad reject), FX2 #227 (restore K3-deleted import-resume coverage,
     mutation-proven), RT1 #228 (Ralph/SPEC.md governed-mode tripwire — forces `ralph=false` +
@@ -33,7 +47,10 @@ land — it is what a fresh context reads to resume without re-deriving anything
     4 missed paired-edits (D-K11-4 `rate_limit_paused` live route, §7.5 flag also in retained
     resolver, C2 barrel re-exports, D-K11-7 unowned OAuth purge). **Read those callouts before
     running any K11 sub-unit.**
-  - **PAUSED before K11a** per owner instruction (2026-07-06). Foundation batch complete.
+  - **RESUMED (2026-07-06, autonomy grant):** K11a + K11a6-remainder + K11b0 driven to merge.
+    **Next: K11b1** — before dispatch, grep the Managed repo for `onboarding_resume_cron` /
+    `handleStartOnboarding` (D-K11-1) cross-repo, since K11b1 deletes `resume-cron.ts` +
+    `start-onboarding.ts` wholesale.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
