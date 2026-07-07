@@ -47,6 +47,54 @@ router, both deleted (§7.2/§7.3). The headline "brief incident" assertion (rou
   `notifyImportUpload`/`pollImportRunningTick`, both RETAINED.
 The fixture JSON `tests/fixtures/m2/mira-conversational-tangents.json` co-deletes (PR-B note).
 
+### `tests/integration/m2-mira-v3-tangent-coverage.test.ts` — DIE
+Verified pure-drive: auto-generates one test per `PHASE_KNOWLEDGE[phase].expected_tangents`
+entry, boots the engine at each phase, stubs the router with the pack's `expected_action`, fires
+`engine.advance`, asserts no-phase-advance + router-consulted-once + S2-r2 `state_delta`
+whitelist survival. Router consult (`shouldConsultRouter`), `dispatchRouterDecision`, and the
+`state_delta` allow-key guard (engine.ts:368-384) are ALL K11b1 deletions — the whole assertion
+surface is the dead drive. Retained sub-behavior coverage:
+- pack integrity sentinel (`totalTangentTests ≥ 50` guarding PHASE_KNOWLEDGE content): pack
+  content is retained via K11a2b in `phase-spec-resolver.ts`; content shape covered by
+  `onboarding/interview/__tests__/phase-knowledge.test.ts` retained half. (If PR-B finds the
+  pack-emptiness sentinel is ONLY here, port that one module-level sentinel into
+  phase-knowledge.test.ts at delete time — it needs no engine.)
+
+### `tests/integration/onboarding-resume-on-reconnect.test.ts` — DIE
+Verified pure-drive: 9 `engine.advance` calls; pins the 24h-gap welcome-back resume drive
+(`engine.advance` gap detection → resume ButtonPrompt → `[A] Continue` consumeChoice →
+personality_offered → agent_name_chosen). The resume/gap-fill conversational drive is deleted
+(§7.2) and its cron twin (§7.6) is verified dead-configured in prod (Fable sweep §1: no live
+composer passes `onboarding_resume_cron`). Retained sub-behavior coverage:
+- transcript JSONL append-only across restart: `TranscriptWriter` pinned by surviving
+  `tests/integration/m2-single-source-import.test.ts` + `upload-roundtrip-web.test.ts`.
+- PROD reconnect behavior (composer `on_session_open` re-emit/seed, which replaced the engine
+  resume): `tests/integration/import-watch-rearm-on-reconnect.open.test.ts` + the re-anchored
+  reconnect tests from #238 (`engine-blank-chat-on-reconnect-bug1`, re-anchored this unit).
+
+### `tests/integration/onboarding-resume-cron.test.ts` — DIE
+(plan list-C member; acceptance-grep hit is a doc comment `engine.advance(...)` at :9, plus it
+constructs the resume cron itself.) Pins `resume-cron.ts` behavior end-to-end: stale-row sweep →
+proactive welcome-back emit → `resume_active_prompt_id` idempotency → terminal-phase exclusion,
+plus the `last_advanced_at` freshness contract that only the cron reads. `resume-cron.ts` is
+deleted whole (§7.6, Fable sweep VERIFIED-DEAD: `onboarding_resume_cron` config passed by
+nobody). No retained reader of onboarding `last_advanced_at` staleness survives — nothing to
+port. Co-deletes with `resume-cron.ts` in K11b1.
+
+### `tests/integration/button-primitive-phase-walk.die.test.ts` — DIE (already split)
+Pre-existing die-half from the #238 SPLIT of `button-primitive-cross-channel.test.ts`; header
+already carries the `// DIES WITH K11b1` contract. Retained half (button-primitive / adapter /
+router grammar) already re-anchored and surviving in `button-primitive-cross-channel.test.ts`.
+Byte-unchanged this unit.
+
+### `tests/integration/m2-walkthrough-test-helpers.ts` — DIE (helper, co-delete)
+Not a test; drive-walk helper. Importers at HEAD: `conversational-onboarding-end-to-end`,
+`m2-mira-v3-conversational-fixture`, `m2-mira-v3-tangent-coverage`, `m2-soren-v2-fixture.open`
+(all DIE, above/§4), `onboarding/interview/__tests__/interview-testkit.ts` (§7.4 triage cohort),
+and the two list-A files re-anchored this unit (`import-analysis-presented-freeform-routing`,
+`personality-name-slug-projects-flow.open`) whose surviving halves no longer import it. After
+PR-B deletes the cohort it has zero importers. No retained behavior of its own.
+
 ## 3. K11a5-pinned survivors (list D) resolved
 
 (appended as decided)
