@@ -20,7 +20,6 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { ProjectDb } from '../../persistence/index.ts'
-import type { CronJobRegistry } from '../../cron/jobs.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
 import { ButtonStore } from '../../channels/button-store.ts'
 import {
@@ -51,7 +50,6 @@ import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts
 import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
 import type {
   PhaseSpecResolver,
-  LlmCallFn,
 } from '../../onboarding/interview/phase-spec-resolver.ts'
 import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
 import { TranscriptWriter } from '../../onboarding/interview/transcript.ts'
@@ -203,83 +201,6 @@ export interface BuildLandingStackInput {
    * the default-built hook).
    */
   projectOpeningComposer?: import('./build-onboarding-handoff.ts').ComposeProjectOpeningFn
-  /**
-   * T2 r3 (2026-05-13) — shared `CronJobRegistry`. When supplied AND
-   * `wowDispatcher` is left unset (production path), threaded through
-   * to `buildWowDispatcherHook` so action 07 (overnight-pass) registers
-   * its job in the SAME registry the per-instance `CronScheduler` reads
-   * from. Without it the registration goes into a dead local registry
-   * and the scheduler never fires the job — silently dropping the
-   * overnight brief tomorrow morning. Production composer constructs
-   * the registry once and threads it into BOTH this field AND
-   * `CompositionInput.cron_jobs` so scheduler + wow-dispatcher share.
-   *
-   * Optional for back-compat — when omitted (or when a caller-supplied
-   * `wowDispatcher` is present), the wow-dispatcher falls back to a
-   * fresh local registry (pre-r3 behaviour). Tests injecting a recorder
-   * hook never hit this code path.
-   */
-  cronJobs?: CronJobRegistry
-  /**
-   * T2 r3 (2026-05-13) — test seam — wow-dispatcher inter-action pause
-   * override. Production omits (uses the 5s default per § 2.5); tests
-   * pass 0 to skip the chat-cadence pauses in unit/integration runs.
-   * Ignored when a caller-supplied `wowDispatcher` is present.
-   */
-  wowInterActionPauseMs?: number
-  /**
-   * T2 r3 (2026-05-13) — test seam — sleep override threaded into both
-   * the WowDispatcher (inter-action pause + freeform-ack) and the
-   * ActionRunner (substrate-error retry delay). Production omits (uses
-   * `Bun.sleep`); tests pass a no-op so the action-runner's 30s retry
-   * delay does not blow up wall-clock time when action 01 throws.
-   * Ignored when a caller-supplied `wowDispatcher` is present.
-   */
-  wowSleep?: (ms: number) => Promise<void>
-  /**
-   * 2026-06-10 (wow-hang-resilience) — per-action hard timeout threaded
-   * into the ActionRunner via `buildWowDispatcherHook`. Production
-   * omits (60s default per `DEFAULT_ACTION_TIMEOUT_MS`); tests pass a
-   * small value so deliberately-hung actions settle within test
-   * wall-clock. Ignored when a caller-supplied `wowDispatcher` is
-   * present.
-   */
-  wowActionTimeoutMs?: number
-  /**
-   * P2 v2 S9 (Codex S9-r1 P1) — picker LLM for the wow-moment LLM
-   * selection per spec § 5.3. Threaded into `buildWowDispatcherHook`'s
-   * `pickerLlm` so the production composer actually exercises the LLM
-   * picker instead of silently falling back to the deterministic
-   * predicate set. When absent (or when a caller-supplied
-   * `wowDispatcher` is present and reaches this builder), production
-   * runs in fallback mode and the wow-dispatcher logs a structured
-   * warning on construction.
-   */
-  wowPickerLlm?: LlmCallFn
-  /**
-   * 2026-05-28 wow-cleanup r3 (Codex cross-model BLOCKER, Argus r2) —
-   * wow-dispatcher prompt-resolution probe poll cadence override (test
-   * seam). Production omits and the default-built probe polls every
-   * 500ms; tests pass 5-20ms so the probe loop spins tightly. Ignored
-   * when a caller-supplied `wowDispatcher` is present.
-   */
-  wowPromptResolutionPollMs?: number
-  /**
-   * 2026-05-28 wow-cleanup r3 — sleep override for the default-built
-   * `ButtonStoreResolutionProbe`'s poll loop. Distinct from `wowSleep`
-   * (which drives the dispatcher's inter-action pause). Production
-   * omits (`Bun.sleep`); tests inject a no-op so the probe loop
-   * resolves on the first peek without burning wall-clock. Ignored
-   * when a caller-supplied `wowDispatcher` is present.
-   */
-  wowPromptResolutionSleep?: (ms: number) => Promise<void>
-  /**
-   * 2026-05-28 wow-cleanup r3 — `now()` override for the default-built
-   * probe's deadline math. Production omits (`Date.now`); tests inject
-   * a deterministic clock. Ignored when a caller-supplied
-   * `wowDispatcher` is present.
-   */
-  wowPromptResolutionNow?: () => number
   /**
    * T4 (2026-05-13) — history-import job-runner hook. When provided,
    * the engine routes the `import_offered` zip choices through it (an

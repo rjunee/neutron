@@ -1124,13 +1124,6 @@ export function buildOpenGraphComposer(
       onboardingAnthropicClient !== null
         ? buildProjectOpeningMessageComposer({ anthropicClient: onboardingAnthropicClient })
         : undefined
-    // Wow-moment picker (Item 1 root cause + Item 8) — the `LlmCallFn` the
-    // wow dispatcher uses to choose + word the per-project overnight/background
-    // items from the synthesis. Same warm substrate, BEST_MODEL.
-    const wowPickerLlm =
-      llmCallSubstrate !== null
-        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate })
-        : undefined
 
     // WAVE 2 Track A — per-project persona resolver. Reads the canonical
     // `projects.persona` label (the same column the settings drawer + onboarding
@@ -1230,7 +1223,6 @@ export function buildOpenGraphComposer(
       internal_handle,
       platform,
       cookieToUserClaim,
-      cronJobs,
       // ISSUES #318 — app-level Claude-auth gate (defense in depth for the
       // installer gate). When the box boots with NO substrate credential,
       // `GET /chat` renders an "Authenticate Claude" page instead of a chat
@@ -1250,7 +1242,6 @@ export function buildOpenGraphComposer(
       // 2026-07-01) — Open onboarding never names the orchestrator.
       ...(personaSummarizer !== undefined ? { personaSummarizer } : {}),
       ...(projectOpeningComposer !== undefined ? { projectOpeningComposer } : {}),
-      ...(wowPickerLlm !== undefined ? { wowPickerLlm } : {}),
       // Warm accumulating synthesis substrate — `buildLandingStack` threads it
       // into `buildSynthesisSession` → `buildSynthesisImportJobRunner` so the
       // live import reads the whole export through ONE warm `claude` REPL that
