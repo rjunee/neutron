@@ -304,16 +304,17 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
 - **Chat-command filters.** `mountOpenCores` chains the bundled free-Core filters
   (`/cal`, `/email`, `/remind`, `/research`) via
   `buildChainedChatCommandFilter([...])` and the composer threads the result into
-  `buildLandingStack` → `buildWebChatBridge`. The web-chat bridge invokes the
-  filter at the top of the `user_message` handler and, when a Core claims the
-  command, ships the Core's reply as an `agent_message` and short-circuits both
-  the live-agent turn and the onboarding engine — mirroring the Expo
-  `createAppWsSurface` seam (`gateway/http/app-ws-surface.ts`). Before this the
-  Open web chat had no slash-command interception at all; a typed `/cal` fell
-  through to the LLM. Each Core's MCP tools and its chat-command filter share **one
-  backend instance** (the pre-built `calendarClient` seam, one
-  `EmailProjectCacheResolver`, the Research `project_backend`) — agent-native
-  parity.
+  `createAppWsSurface` (`gateway/http/app-ws-surface.ts`) as `chat_command_filter`.
+  The app-ws surface invokes the filter at the top of the `user_message` /
+  `button_choice` path (`app-ws-surface.ts:605` / `:783`) and, when a Core claims
+  the command, ships the Core's reply as an `agent_message` and short-circuits the
+  live-agent turn (`appWsChatTurn` / `build-live-agent-turn.ts`). (K11b0 excised
+  the dead `/ws/chat` `buildWebChatBridge` that once also carried this filter;
+  `/ws/app/chat` is now the sole owner chat transport.) Before this the Open chat
+  had no slash-command interception at all; a typed `/cal` fell through to the LLM.
+  Each Core's MCP tools and its chat-command filter share **one backend instance**
+  (the pre-built `calendarClient` seam, one `EmailProjectCacheResolver`, the
+  Research `project_backend`) — agent-native parity.
 - **Optional-until-credentialed.** A per-instance `OAuthTokenManager` over the
   `SecretsStore`. With no `NEUTRON_CORES_GOOGLE_CLIENT_ID` (the zero-creds Open
   default) the Calendar/Gmail/Workspace backends fall back to in-memory clients —
@@ -2963,17 +2964,22 @@ ignores `@neutron` inside inline-code / fenced blocks / blockquotes; rejects
 `classifyTaggedIntent` (inline-answer vs delegate-to-subagent, by leading
 imperative verb or explicit `/delegate [research|review]`).
 
-**The routing gate (the live seam).** `gateway/http/chat-bridge.ts`
-`handleProjectTopicInbound` reads the per-project mode (injected
-`resolveEngagementMode`, wired in `build-landing-stack.ts` off this instance's
-`projects` table, read-only + failure-safe → `all_messages`). In `tag_gated` a
-non-mention post **persists to the shared transcript** (`persistProjectUserTurnOnly`)
-and clears the optimistic typing dots with a no-render `agent_ack` — **no agent
-turn, no typing indicator**. The transcript ALWAYS persists in both modes; only
-the agent-turn TRIGGER is gated. A tagged TASK (in `tag_gated`) routes to the
-optional `delegateDispatch` hook (the gap#3 `agent-dispatch/` family) which spawns
-a background subagent that reports back into the thread; a tagged question is
-answered inline.
+**The routing gate — NOT currently wired (K11b0).** The engagement-mode gate
+lived ONLY on the `/ws/chat` bridge's `handleProjectTopicInbound`
+(`gateway/http/chat-bridge.ts`), which K11b0 excised — the bridge was fully dead
+in production (onboarding + chat unified on `/ws/app/chat`). So `tag_gated`
+enforcement is **currently unenforced on any live surface**: the app-ws seam
+engages the agent on every project-topic turn regardless of mode. The pure core
+above and the settings/MCP surfaces below remain (the mode still persists), but
+nothing reads it at ingress. Re-implementing the gate on the app-ws seam
+(`gateway/http/app-ws-surface.ts`) is tracked in the K11b0 D-note
+(`docs/plans/2026-07-02-world-class-refactor-plan.md`, near D8). Intended design
+for when it is revived: read the per-project mode (read-only + failure-safe →
+`all_messages`); in `tag_gated` a non-mention post **persists to the shared
+transcript WITHOUT an agent turn** (the transcript ALWAYS persists in both modes;
+only the agent-turn TRIGGER is gated); a tagged TASK routes to a `delegateDispatch`
+hook (a background subagent that reports back into the thread); a tagged question
+is answered inline.
 
 **Surfaces (agent-native parity).** Human admin: PATCH
 `/api/app/projects/<id>/settings` whitelists `agent_engagement_mode`
@@ -3697,20 +3703,29 @@ Trident run → real result → morning brief) is proven by the overnight test
 suite, which drives the run to terminal through the same store the engine
 polls.
 
-## Post-onboarding chat surface (`gateway/http/chat-bridge.ts`, `landing/chat.ts`)
+## Post-onboarding chat surface (`/ws/app/chat` → `appWsChatTurn` / `gateway/realmode-composer/build-live-agent-turn.ts`)
 
 Once onboarding reaches `phase==completed`, the chat surface is a normal
-live-agent chat on EVERY topic — the General topic (`web:<uid>`) and each
-per-project topic (`web:<uid>:<project>`) alike.
+live-agent chat on EVERY topic — the General topic and each per-project topic
+(`app:<owner>:<project_id>`) alike.
 
-**Routing (server).** `handleInbound` gates a typed `user_message`:
-`isLiveAgentEligible` returns true iff the onboarding row is `phase==completed`,
-and the turn dispatches to `build-live-agent-turn` (the warm per-(project,topic)
-CC session) instead of the engine. Project topics route through
-`handleProjectTopicInbound`; General routes inline. A `button_choice` TAP always
-bypasses this gate and drives `engine.advance` — so the onboarding wow
-final-handoff buttons (mobile-app / telegram-bind / skip / done) keep working
-even after the topic is live.
+**Routing (server).** `/ws/app/chat` (`createAppWsSurface`,
+`gateway/http/app-ws-surface.ts`) is the sole chat transport for the React owner
+UI. In Open this is **Path 1 — ONE path**: every conversational frame — a typed
+`user_message` AND a tapped `button_choice` — dispatches to `appWsChatTurn`, the
+warm per-(project,topic) live CC session built by `build-live-agent-turn.ts`, on
+General and each project topic alike. There is no `engine.advance` branch for chat
+turns; the onboarding engine is retained ONLY for the import pipeline, and the
+live agent's onboarding seam carries the interview until the owner is onboarded,
+then it is steady-state chat. A free-Core slash command is intercepted first by
+the chained `chat_command_filter` (`app-ws-surface.ts:605` / `:783`).
+
+> K11b0 (2026-07-06): the legacy `/ws/chat` `ChatBridge` this section once
+> described (`handleInbound` / `isLiveAgentEligible` / `handleProjectTopicInbound`,
+> client `landing/chat.ts`) was excised — it was fully dead in production. The
+> dated GO-LIVE notes below reference that removed bridge as historical context;
+> the live-agent turn mechanics they cite (per-(instance,topic) serialization,
+> first-turn system-prompt composition) live on unchanged in `build-live-agent-turn.ts`.
 
 > GO-LIVE P0 (2026-06-20): General previously stayed on the engine path while a
 > final-handoff prompt was pending (`final_handoff_active === true`). An owner

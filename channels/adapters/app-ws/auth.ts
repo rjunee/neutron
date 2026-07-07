@@ -28,6 +28,13 @@
  */
 
 import { jwtVerify } from 'jose'
+// Timing-safe slug comparison (ISSUE #34). The HS256 bearer's verified
+// `project_slug` claim is cross-checked against this gateway's slug; a plain
+// `!==` short-circuits on the first byte mismatch and leaks the shared-prefix
+// length of this instance's slug through response timing. Route it through the
+// shared constant-time primitive (the same one the landing cookie + gateway
+// surfaces use).
+import { constantTimeEqual } from '../../../runtime/constant-time-equal.ts'
 
 export type AppWsAuthMode = 'dev-bypass' | 'hs256'
 
@@ -143,7 +150,7 @@ async function resolveHs256(
     }
     const tokenProjectSlug = (payload as { project_slug?: unknown }).project_slug
     if (tokenProjectSlug !== undefined && tokenProjectSlug !== null) {
-      if (typeof tokenProjectSlug !== 'string' || tokenProjectSlug !== project_slug) {
+      if (typeof tokenProjectSlug !== 'string' || !constantTimeEqual(tokenProjectSlug, project_slug)) {
         return {
           code: 'project_mismatch',
           message: `app-ws: JWT project_slug=${JSON.stringify(tokenProjectSlug)} but this gateway is '${project_slug}'`,

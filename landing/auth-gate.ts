@@ -53,6 +53,14 @@ import type {
   ConsumedStartToken,
   VerifyStartTokenInput,
 } from '../runtime/start-token-types.ts'
+// Timing-safe slug comparison (ISSUE #34). The per-instance start-token /
+// cookie slug validation below compares a caller-supplied slug (a verified JWT
+// `project_slug` claim, or the decoded session-cookie slug) against this
+// gateway's slug. A plain `===` short-circuits on the first byte mismatch, so
+// the response latency leaks the shared-prefix length of this instance's slug.
+// Route every such compare through the shared constant-time primitive — the
+// same one `session-cookie.ts` already uses for the cookie HMAC.
+import { constantTimeEqual } from '../runtime/constant-time-equal.ts'
 import type { KeyLike } from 'jose'
 import {
   formatSetCookie,
@@ -215,13 +223,13 @@ async function startTokenSlugMatchesInstance(
   opts: AuthGateOptions,
   now_ms: number,
 ): Promise<boolean> {
-  if (claimSlug === opts.project_slug) return true
+  if (constantTimeEqual(claimSlug, opts.project_slug)) return true
   const ih = opts.internal_handle
   if (ih === undefined || ih.length === 0) return false
   if (opts.ownerRegistry !== undefined) {
     try {
       const current = opts.ownerRegistry.getCurrentUrlSlugByInternalHandle(ih)
-      if (current !== null && current === claimSlug) return true
+      if (current !== null && constantTimeEqual(current, claimSlug)) return true
     } catch {
       // Fail-closed — fall through to the slug-history shim.
     }
@@ -310,7 +318,7 @@ export async function evaluateAuthGate(
 
   // Branch 1: valid session cookie → allow / redirect / mint-and-redirect.
   const cookieSlug = readSessionCookie(req, opts.cookie_secret, now())
-  if (cookieSlug !== null && cookieSlug === opts.project_slug) {
+  if (cookieSlug !== null && constantTimeEqual(cookieSlug, opts.project_slug)) {
     // 2026-06-03 — pending-redirect HTTP 302 fallback (Sam's incident).
     // Checked FIRST so a plain page reload after a slug rename lands the
     // user on the new subdomain even when the live `slug_renamed` WS
