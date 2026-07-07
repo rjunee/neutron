@@ -250,7 +250,44 @@ Additional §7.3/§7.4 co-deletes that do NOT hit the drive-grep (router/fixture
 
 ### 4b. Adjudicated this unit (families not covered by plan/PR citations)
 
-(appended when the family analyses land)
+**wow family:**
+| file | judgment |
+|---|---|
+| `onboarding/interview/__tests__/wow-fired.test.ts` | DIE — drive-internal `dispatchWowAndAdvance`/`consumeWowFallbackChoice` pins; its engine-free STATIC_PHASE_SPECS['wow_fired'] no-leak test covered by `phase-prompts-no-leak.test.ts:41,58` (loops every spec); legacy-copy guard ported to `max-oauth-offered-prompt-spec.test.ts` (this unit) |
+| `onboarding/interview/__tests__/wow-fired-hang-resilience.test.ts` | DIE — ActionRunner per-action timeout (the retained-live half) covered by `onboarding/wow-moment/__tests__/action-runner.test.ts:131,152`; engine best-effort completion policy is drive-internal |
+| `gateway/__tests__/wow-fired-push-integration.test.ts` | DIE — all pins are the engine↔push wiring inside `dispatchWowAndAdvance` (engine.ts ~4741-4760) + start() crash-resume; the retained push-emitter contract (raw topic_id → project_id resolution, skip-no-devices, single dispatch, error propagation) fully covered by `gateway/__tests__/wow-push-emitter.test.ts` |
+| `gateway/realmode-composer/__tests__/wow-fired-composer.test.ts` | **DIE after SPLIT (this unit)** — serialize-via-probe covered by `wow-fired-serialize.test.ts:97,200,247`; action-07 cron registration by `tests/integration/wow-moment-fires.test.ts:269` + `cron/scheduler.test.ts`; sendText WS-absent by `open/__tests__/wow-brief-history-persist.test.ts:183`. The ONE uncovered retained-live pin — `WowChannelAdapter.emitPrompt` WS-absent peek-BEFORE-persist throw + no-dead-`button_prompts`-row (`build-wow-dispatcher.ts:405-408`, its Test 9) — ported to **new survivor `gateway/realmode-composer/__tests__/wow-channel-adapter-undelivered.test.ts`** (+ mid-send-race + happy-path + sendText parity). PR-B dispatch note: the composer default-builds `wowDispatcher`/resolution-probe assertions (its Test 1 Phase A / Test 8) pin wiring consumed ONLY by the dying `dispatchWowAndAdvance` — if K11b1 orphans `deps.wowDispatcher`, that wiring is K11d material; deliberately not re-pinned |
+
+**max-oauth family** (all three DIE after the SPLIT this unit — the retained-live prompt-spec/builder pins lived engine-free INSIDE the dying files and are ported verbatim to **new survivor `onboarding/interview/__tests__/max-oauth-offered-prompt-spec.test.ts`**: STATIC single-CTA exact body + `Connect Claude Max` option label + no-API-key/skip/free-tier copy, substrate-aware Shape-1 bodies (claude-ack / chatgpt / null), rejection-stitching, `awaiting_byo_paste` Skip escape hatch, wow_fired legacy-copy guard — `phase-spec-resolver.test.ts:105,245,931-968` pins routing metadata but stubs bodies):
+| file | judgment |
+|---|---|
+| `onboarding/interview/__tests__/max-oauth-offered.test.ts` | DIE — routing tests 3-6/8-9/11 are `consumeMaxOauthChoice` (engine.ts:8591) + private helpers, reachable ONLY from deleted `consumeChoice` (dispatch engine.ts:4040); retained copy/builder pins ported (above) |
+| `onboarding/interview/__tests__/phase-max-oauth-offered-auto-skip.test.ts` | DIE — copy/builder pins ported (above); the auto-skip describes exercise `maybeAutoAdvancePastMaxOauthOffered` (engine-agent-name.ts:499-544), which is retained-but-DEAD per the owner addendum (K11d prune; its only retained caller is `emitCurrentPhasePrompt` engine.ts:1841, never reached at this phase in prod) — deliberately not re-pinned, same ruling as `engine-agent-name-suggestion-wiring` (§3) |
+| `onboarding/interview/__tests__/phase-max-oauth-offered-transition-autoskip.test.ts` | DIE — pins `advanceFromPersonaReviewed`'s transition-time auto-skip call (engine-persona.ts:1073, reached only via consumeChoice → dies) into the same retained-but-dead callee; identity-bridge behavior falls under the K11d ruling above |
+
+**engine-core / signup family:**
+| file | judgment |
+|---|---|
+| `onboarding/interview/__tests__/engine-skeleton.test.ts` | DIE — start/advance idempotency, retry, crash-recovery, race orchestration: all drive-internal; STATIC_PHASE_SPECS consumed tautologically |
+| `onboarding/interview/__tests__/engine-multi-turn-signup.test.ts` | DIE — signup walk drive-internal; the retained name-extraction heuristic (also reached by LIVE `post-turn-extractor.ts:368`) covered engine-free by `extract-agent-name.test.ts` + `extracted-fields-sanitize.test.ts` |
+| `onboarding/interview/__tests__/engine-advance-choice-parity.test.ts` | DIE — advance→consumeChoice parity port (its own header); per-user isolation exercised only through the drive |
+| `onboarding/interview/__tests__/signup-asks-name.test.ts` | DIE (per §7.4 "triage, don't bulk-delete" — triaged here) — capture heuristics covered by `extract-agent-name.test.ts`/`extracted-fields-sanitize.test.ts`; llmRouter backfill dies with the router; `recordUserFirstName` hook has no non-engine caller (dead) |
+| `onboarding/interview/__tests__/option-numbered-pick.test.ts` | DIE — `parseBareOptionNumber` (engine-internals.ts:1553) callers are engine-agent-name.ts:104 (retained-but-dead) + engine-persona.ts:193 (consumeChoice route, dies) → function is dead post-K11b1, no coverage owed |
+| `onboarding/interview/__tests__/timezone-autoskip.test.ts` | **DIE after SPLIT (this unit)** — `engine.start` `?tz=` capture + `sanitizeBrowserTimezone` (engine-internals.ts:1500, sole caller engine.ts:1353 = start) die; the LIVE timezone mechanism is `instance_metadata.timezone` (covered by `app-focus-current-surface-timezone.test.ts`, unrelated path). Its SOLE retained-live pin — the live envelope's never-ask-timezone rule (`skills/_envelope.md`, loaded by `gateway/http/app-ws-surface.ts` + `landing/chat-react/controller.ts`) — ported verbatim to **new survivor `onboarding/interview/__tests__/onboarding-envelope-timezone-rule.test.ts`** |
+| `onboarding/interview/__tests__/onboarding-to-general-handoff.test.ts` | DIE — engine handoff orchestration drive-internal; retained `buildOnboardingHandoffHook`/`defaultProjectIdSlugifier` (live: `build-landing-stack.ts:1038`, `build-onboarding-finalize.ts:76`) covered engine-free by `build-onboarding-handoff.test.ts` + `onboarding-handoff-content-aware-seeds.test.ts`; live completion analog by `build-onboarding-finalize.test.ts:510-562` |
+| `onboarding/interview/__tests__/engine-slug-history-fallback.test.ts` | DIE — lazy-rekey-on-`start` is engine.start-internal; part of the retained-but-dead engine-slug open half (no coverage owed) |
+| `onboarding/interview/__tests__/slug-chosen.test.ts` | DIE — consumeChoice slug-rename branch + start auto-confirm guards (engine-slug open half, retained-but-dead); retained slug prompt spec covered engine-free by `slug-chosen-prompt-spec.test.ts`; live rename runtime is `runtime/slug-picker-*` (own tests) |
+| `onboarding/interview/__tests__/shells-created-no-filter.test.ts` | DIE — `buildWowSignalsFromState` is a PRIVATE engine method (engine.ts:5008, sole call engine.ts:4771 in the dying wow-fire path); the LIVE shell-creation contract (freeform-added kept, declined honored, confirmed-wins, import union/cap) covered by `build-onboarding-finalize.test.ts:309-508` |
+
+**import/personality leftovers:**
+| file | judgment |
+|---|---|
+| `onboarding/interview/__tests__/path1-solicited-upload-starts-job.test.ts` | **SURVIVOR — NOT a co-delete.** Drives ONLY retained `notifyImportUpload` (zero drive calls; the grep hit was a doc comment, reworded this unit). It IS the finest-grained retained coverage of the solicited-upload job-start gate (`importAffordanceOffered`, #130 seed-then-start, managed/affordance-off no-ops, concurrency guards). PR-B must NOT delete it |
+| `onboarding/interview/__tests__/projects-proposed-share-freeform-cache-bust.test.ts` | DIE — share-freeform cache-invalidation ordering (engine.ts:5095-5099) + `splitFreeformProjectList` (engine.ts:9648) are drive-private; retained projects_proposed builder covered by sibling `projects-proposed-zero-state`/`single-cta` builder tests |
+| `onboarding/interview/__tests__/personality-offered-legacy-buttons.test.ts` | DIE — legacy no-suggester branch of `consumePersonalityOfferedChoice` (drive); live suggester flow covered engine-free by `personality-character-suggester.test.ts` + `personality-offered-character-buttons.test.ts` |
+| `onboarding/interview/__tests__/personality-offered-suggester-wiring.test.ts` | DIE — engine-side memoize wiring lives in retained-but-dead `getOrStartCharacterSuggestions` (engine.ts:8378 → engine-agent-name.ts:330; K11d); the LIVE character suggester (wired `open/composer.ts:1113` + preamble) covered engine-free by `personality-character-suggester.test.ts` (incl. memo readers) + `personality-offered-character-buttons.test.ts` (render + index parse + byte cap) + `onboarding-preamble.test.ts` |
+| `onboarding/interview/__tests__/phase-state-router-whitelist.test.ts` | DIE — `ROUTER_AMEND_ALLOWED_KEYS`/`whitelistRouterStateDelta` are co-deleted WITH `dispatchRouterDecision` (behavior removed wholesale, D-K11-6; its own header says so) — no coverage owed |
+| `onboarding/interview/__tests__/interaction-mode-substep-routing.test.ts` | DIE — `resolveInteractionMode` sub_step awareness + `BUTTONS_ONLY_NUDGE_TEXT` live in the deleted interaction-mode.ts remainder; the one retained-live behavior it touches (import-running status re-poll `pollImportRunningAndAdvance`) covered by `import-running-cron-tick.test.ts` via the retained cron |
 
 ## 5. Comment-only grep hits neutralized (survivor files, no behavior change)
 
@@ -261,6 +298,7 @@ tests re-run green) so the acceptance grep returns only DIE-manifest files:
 - `tests/integration/import-failed-routes-to-analysis-presented.test.ts` (:198)
 - `tests/integration/import-resume-button.test.ts` (:250)
 - `tests/integration/nd2-real-export-path1-import-runs.test.ts` (:131)
+- `onboarding/interview/__tests__/path1-solicited-upload-starts-job.test.ts` (:177 — SURVIVOR, see §4b)
 
 Also verified done (no action needed):
 - `onboarding/interview/__tests__/source-switch-late-upload-race.test.ts` — K11a3 race-half

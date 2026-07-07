@@ -175,7 +175,7 @@ describe('ND2 — solicited Path-1 upload at a conversational phase starts a job
 
   test('open mode, NO onboarding_state row yet (#130 race): upload SEEDS the row + STARTS the import', async () => {
     // THE #130 BUG. The open-mode live-agent onboarding never calls
-    // `engine.start()`; the onboarding_state row is created lazily + async by
+    // the engine `start` drive; the onboarding_state row is created lazily + async by
     // the fire-and-forget post-turn extractor. #130 moved the import offer to
     // right after the name, so a fresh-install owner uploads BEFORE the
     // background extractor has created the row → `notifyImportUpload` reads
