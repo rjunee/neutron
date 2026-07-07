@@ -98,8 +98,6 @@ function stubPlatformAdapter(): PlatformAdapter & {
     reloadCaddy: async () => undefined,
     regenerateSudoers: async () => undefined,
     getBundledCoreRoots: () => [process.cwd()] as const,
-    getOnboardingConversational: () => false,
-    getOnboardingConversationalPhases: () => new Set(),
     getProjectBackupRemoteConfig: async () => remoteState.config,
     setProjectBackupRemoteConfig: async () => {
       throw new Error('not supported in stub')

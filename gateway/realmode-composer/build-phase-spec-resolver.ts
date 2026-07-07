@@ -19,15 +19,13 @@
  * + cooldown reporting all happen inside the substrate's per-call
  * dispatch path.
  *
- * 2026-05-12 — default rollout flipped to LLM-on for ALL eligible
- * onboarding phases. `resolveEnabledPhases` reads
- * `NEUTRON_LLM_ONBOARDING_DEFAULT` (defaults to ON) and the optional
- * explicit `NEUTRON_LLM_ONBOARDING_PHASES` override. The static
- * `STATIC_PHASE_SPECS` table stays the deterministic fallback for any
- * LLM failure (timeout, parse error, allow-list rejection) per the
- * per-call resilience in `phase-spec-resolver.ts`. Returns `null` when:
- *   - `NEUTRON_LLM_ONBOARDING_PHASES`/`_DEFAULT` opted out of every
- *     phase (e.g. `_PHASES=off` or `_DEFAULT=0`)
+ * LLM rephrasing is ON for ALL eligible onboarding phases
+ * (`allLlmEligiblePhases()`) — the per-phase env gate
+ * (`NEUTRON_LLM_ONBOARDING_PHASES`/`_DEFAULT`) was collapsed in K11b1.
+ * The static `STATIC_PHASE_SPECS` table stays the deterministic
+ * fallback for any LLM failure (timeout, parse error, allow-list
+ * rejection) per the per-call resilience in `phase-spec-resolver.ts`.
+ * Returns `null` when:
  *   - the caller passed `input.substrate === null` (i.e. the instance
  *     had no Anthropic credentials resolved at composer-boot time) —
  *     the engine falls through to the static `PHASE_PROMPTS` table so
@@ -44,7 +42,7 @@
 
 import {
   buildLlmPhaseSpecResolver,
-  resolveEnabledPhases,
+  allLlmEligiblePhases,
   type BuildLlmPhaseSpecResolverInput,
   type LlmCallFn,
   type PhaseContextBundle,
@@ -211,18 +209,14 @@ export interface BuildPhaseSpecResolverInput {
 
 /**
  * Build the production phase-spec resolver. Returns `null` when:
- *   - the env opts out of every phase (e.g. `NEUTRON_LLM_ONBOARDING_PHASES=off`
- *     or `NEUTRON_LLM_ONBOARDING_DEFAULT=0` with no explicit phase list),
- *     so the resolver would no-op every call, OR
  *   - the caller passed `input.substrate === null` (i.e. the instance
  *     has no Anthropic credentials resolved — no point wiring a
  *     resolver that will always fail-fast its LLM call)
  *
- * Default policy (2026-05-12 sprint): both env vars unset → resolver
- * wires every LLM-eligible phase. Per-call LLM failures (timeout / parse
- * error / allow-list reject) still fall back to the static spec inside
- * the resolver itself — operator-level opt-out is for "no LLM at all,
- * even when healthy."
+ * Policy: LLM rephrasing is wired for every LLM-eligible phase
+ * (`allLlmEligiblePhases()`); the per-phase env gate was collapsed in
+ * K11b1. Per-call LLM failures (timeout / parse error / allow-list
+ * reject) still fall back to the static spec inside the resolver itself.
  *
  * The engine's `phaseSpecResolver` dep is optional — passing `null`
  * here cleanly disables the LLM path for that instance.
@@ -230,7 +224,7 @@ export interface BuildPhaseSpecResolverInput {
 export async function buildPhaseSpecResolver(
   input: BuildPhaseSpecResolverInput,
 ): Promise<PhaseSpecResolver | null> {
-  const enabled_phases = resolveEnabledPhases(input.env)
+  const enabled_phases = allLlmEligiblePhases()
   if (enabled_phases.size === 0) {
     return null
   }

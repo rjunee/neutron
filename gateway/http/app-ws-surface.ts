@@ -157,11 +157,11 @@ export interface CreateAppWsSurfaceOptions {
   /**
    * Onboarding consolidation (2026-06-26) — fired once per WS `open`, right
    * after `session_ready`. The Open composer uses it to drive the unified
-   * onboarding: if the owner has not finished onboarding it calls
-   * `engine.start({ topic_id: app:<user> })`, which emits the first onboarding
-   * prompt over THIS socket (the SAME surface steady-state chat uses). A no-op
-   * for fully-onboarded owners. Must never throw — the surface wraps it so a
-   * hook failure can't tear down the socket.
+   * onboarding: if the owner has not finished onboarding it runs an
+   * `appWsChatTurn` on the live CC session (topic `app:<user>`), which emits
+   * the first onboarding prompt over THIS socket (the SAME surface steady-state
+   * chat uses). A no-op for fully-onboarded owners. Must never throw — the
+   * surface wraps it so a hook failure can't tear down the socket.
    */
   on_session_open?: (input: {
     user_id: string

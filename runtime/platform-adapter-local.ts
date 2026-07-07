@@ -61,7 +61,6 @@ import {
   type SetProjectBackupRemoteConfigInput,
   type SlugAvailabilityProbe,
 } from './platform-adapter.ts'
-import { resolveOnboardingConversational } from './onboarding-conversational-flag.ts'
 import type { OnboardingPhase } from '../onboarding/interview/phase.ts'
 
 const execFileAsync = promisify(execFile)
@@ -250,19 +249,6 @@ export function buildLocalPlatformAdapter(
   const nowFn = input.now ?? ((): number => Date.now())
   /** Pending generated keys; per-project to allow concurrent flows. */
   const pendingKeypairs = new Map<string, PendingKeypair>()
-  // Path 1 (onboarding-as-CC-session, 2026-06-27) — the conversational flag is
-  // COLLAPSED. Onboarding now runs entirely in the live CC session (see
-  // open/composer.ts + onboarding/interview/post-turn-extractor.ts); the engine
-  // no longer drives conversational turns, so its per-turn `shouldConsultRouter`
-  // gate is dead on the live path. We hard-pin the accessor to always-on (the
-  // pre-collapse default) and no longer read `NEUTRON_ONBOARDING_CONVERSATIONAL`
-  // — ONE path, no flag. `resolveOnboardingConversational` is retained only for
-  // back-compat callers/tests; nothing in production consults the env var now.
-  const conversational: ReturnType<typeof resolveOnboardingConversational> = {
-    enabled: true,
-    phases: 'all',
-  }
-
   const slugAvailability: SlugAvailabilityProbe = {
     /**
      * Open single-instance: every grammar-legal slug is available
@@ -316,14 +302,6 @@ export function buildLocalPlatformAdapter(
       // Sprint C repo split moves the managed root behind the Managed
       // adapter only.
       return [publicRoot] as const
-    },
-
-    getOnboardingConversational(): boolean {
-      return conversational.enabled
-    },
-
-    getOnboardingConversationalPhases(): ReadonlySet<OnboardingPhase> | 'all' {
-      return conversational.phases
     },
 
     async getProjectBackupRemoteConfig(

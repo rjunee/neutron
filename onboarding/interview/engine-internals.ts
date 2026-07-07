@@ -61,7 +61,6 @@ import type {
   AgentNameSuggestions,
 } from './agent-name-suggester.ts'
 import { detectImportSourceMention } from './import-source-copy.ts'
-import type { LlmRouter } from './llm-router.ts'
 import type {
   CharacterSuggesterResult,
   PersonalityCharacterSuggester,
@@ -1007,20 +1006,6 @@ export interface InterviewEngineDeps {
   uuid?: () => string
   /** Override the resume-on-reconnect window (24h default). */
   resume_gap_ms?: number
-  /**
-   * P2-v3 S2 (2026-05-18) — LLM router. When wired AND the env flag is
-   * on AND the phase has a non-null `PHASE_KNOWLEDGE` pack, the
-   * engine's freeform fall-through (normalAdvance, ~line 2710) routes
-   * the inbound text through `route(...)` BEFORE the existing
-   * synthetic-`__freeform__` consumeChoice cascade. The router's
-   * decision (advance / answer / amend) drives the next step per
-   * design § 2.3. When the dep is absent OR the flag is off OR
-   * `PHASE_KNOWLEDGE[phase]` is null, the engine takes the v2 path
-   * unchanged. Production composer wires this via
-   * `gateway/realmode-composer/build-llm-router.ts`; tests inject a
-   * deterministic stub.
-   */
-  llmRouter?: LlmRouter
   /**
    * P2-v3 S2 (2026-05-18) — PlatformAdapter. Provides the
    * `getOnboardingConversational()` / `getOnboardingConversationalPhases()`

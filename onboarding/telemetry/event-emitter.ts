@@ -64,7 +64,6 @@ export type OnboardingEventName =
   | 'onboarding.failed'
   | 'onboarding.sean_ellis_prompt_emitted'
   | 'onboarding.sean_ellis_response'
-  | 'onboarding.router_decision'
 
 export const ALL_ONBOARDING_EVENT_NAMES: ReadonlyArray<OnboardingEventName> = [
   'signup.started',
@@ -97,7 +96,6 @@ export const ALL_ONBOARDING_EVENT_NAMES: ReadonlyArray<OnboardingEventName> = [
   'onboarding.failed',
   'onboarding.sean_ellis_prompt_emitted',
   'onboarding.sean_ellis_response',
-  'onboarding.router_decision',
 ]
 
 export type OnboardingEventLevel = 'info' | 'warn' | 'error'
@@ -318,37 +316,6 @@ export interface SeanEllisResponsePayload {
   freeform?: string
 }
 
-/**
- * P2-v3 S2 (2026-05-18) — `onboarding.router_decision`. Emitted once per
- * LLM router invocation (i.e., once per freeform inbound on a phase
- * with a non-null PHASE_KNOWLEDGE pack when
- * `NEUTRON_ONBOARDING_CONVERSATIONAL=1`). Per design § 7.4. Mirrors the
- * fields on `RouterTelemetryEvent` in `onboarding/interview/llm-router.ts`
- * — the composer wires the router's `onRouteCompleted` hook to call
- * `OnboardingTelemetry.emit(...)` with this payload.
- *
- * **No PII in the row.** `reasoning_redacted` is bounded ≤ 100 chars and
- * the user's verbatim text never leaves the router. Mirrors design § 7.4.
- */
-export interface RouterDecisionPayload {
-  /** The phase the router fired on (BEFORE any state advance). */
-  phase: string
-  /** Action the router emitted (advance / answer / amend). */
-  action: 'advance' | 'answer' | 'amend'
-  /** Confidence 0..1. */
-  confidence: number
-  /** True when the router escalated Haiku → Sonnet. */
-  escalated_to_sonnet: boolean
-  /** True when either model call timed out. */
-  timed_out: boolean
-  /** True when the router degraded to a synth ask-clarify answer. */
-  clarify_synthesised: boolean
-  /** First 100 chars of the router's diagnostic. Never the full text. */
-  reasoning_redacted: string
-  /** Wall-clock time spent in the router (Haiku + optional Sonnet). */
-  latency_ms: number
-}
-
 export type OnboardingEventPayloadByName = {
   'signup.started': SignupStartedPayload
   'signup.oauth_complete': SignupOauthCompletePayload
@@ -380,7 +347,6 @@ export type OnboardingEventPayloadByName = {
   'onboarding.failed': OnboardingFailedPayload
   'onboarding.sean_ellis_prompt_emitted': SeanEllisPromptEmittedPayload
   'onboarding.sean_ellis_response': SeanEllisResponsePayload
-  'onboarding.router_decision': RouterDecisionPayload
 }
 
 /**

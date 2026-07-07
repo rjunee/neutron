@@ -531,20 +531,6 @@ export interface BuildLandingStackInput {
    */
   platform?: import('../../runtime/platform-adapter.ts').PlatformAdapter
   /**
-   * P2-v3 S2 (Argus r2 BLOCKING #1, 2026-05-18) — LLM router instance.
-   * When supplied AND `platform.getOnboardingConversational()` is true
-   * AND the current phase has a non-null `PHASE_KNOWLEDGE` entry, the
-   * engine's `normalAdvance` freeform fall-through routes the inbound
-   * through the router instead of synthesising `__freeform__`. Tests
-   * inject a deterministic stub; production composer
-   * (`gateway/index.ts`) wires this via
-   * `buildGatewayLlmRouter({ anthropicClient, onboardingTelemetry })`
-   * with the SAME `OnboardingTelemetry` instance the rest of the
-   * composer uses, so router-decision events land in
-   * `gateway_events.payload_json` for the M2 metrics view.
-   */
-  llmRouter?: import('../../onboarding/interview/llm-router.ts').LlmRouter
-  /**
    * v0.1.80 (2026-05-22) — personality character suggester. When wired,
    * the engine fires `generate(...)` on `personality_offered` phase entry
    * and memoizes the 5 character picks into
@@ -1072,13 +1058,8 @@ export function buildOnboardingEnginePieces(
     // here. The library is consumed at synthesis time inside
     // `PersonaComposer` (see archetypes wiring above), so the engine's
     // personality_offered phase stays string-only per spec § 3.9.
-    // P2-v3 S2 (Argus r2 BLOCKING #1) — thread the LlmRouter +
-    // PlatformAdapter so the engine's freeform fall-through actually
-    // routes through the LLM when the env flag is on. Without these
-    // two threads, `NEUTRON_ONBOARDING_CONVERSATIONAL=1` is a no-op in
-    // production because `shouldConsultRouter` returns false on a
-    // missing platform dep and `llmRouter` is undefined on the engine.
-    ...(input.llmRouter !== undefined ? { llmRouter: input.llmRouter } : {}),
+    // PlatformAdapter thread — retained for the engine's non-router
+    // platform accessors.
     ...(input.platform !== undefined ? { platform: input.platform } : {}),
     // v0.1.80 (2026-05-22) — character suggester + persona summarizer.
     // Both are optional; missing deps fall back to deterministic static

@@ -44,7 +44,6 @@ import { getOptionalKeyOffer } from '../optional-keys.ts'
 import { STATIC_PHASE_SPECS } from './phase-prompts.ts'
 import { RESERVED_OPTION_VALUES } from '../../channels/button-primitive.ts'
 import type { RequiredField } from './required-fields-audit.ts'
-import { OPTIN_TOKENS, OPTOUT_TOKENS } from '../../runtime/env-flag-tokens.ts'
 import { CONVERSATIONAL_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
 
 // ---------------------------------------------------------------------------
@@ -1357,11 +1356,10 @@ export interface LlmPhaseSpecResolverDeps {
   llm: LlmCallFn
 
   /**
-   * Comma-separated phase names enabled for LLM rephrasing. Production
-   * passes `process.env['NEUTRON_LLM_ONBOARDING_PHASES']`. When the
-   * resulting set is empty, the resolver returns `null` for every
-   * phase — which the engine maps to the static fallback. This is the
-   * default; ladder phases on by editing the env var.
+   * Phase names enabled for LLM rephrasing. Production passes the full
+   * LLM-eligible set (`allLlmEligiblePhases()`) — the per-phase env gate
+   * was collapsed in K11b1. When the set is empty, the resolver returns
+   * `null` for every phase — which the engine maps to the static fallback.
    */
   enabled_phases: ReadonlySet<OnboardingPhase>
 
@@ -2027,97 +2025,3 @@ export function allLlmEligiblePhases(): ReadonlySet<OnboardingPhase> {
   return out
 }
 
-/**
- * Parse the comma-separated phase list from `NEUTRON_LLM_ONBOARDING_PHASES`
- * into a typed set. Unknown phase names are silently dropped (operators
- * see no LLM rephrasing for those entries; the static spec wins). Empty
- * input returns an empty set — callers decide whether empty means
- * "off" or "default-on" via `resolveEnabledPhases`.
- */
-export function parseEnabledPhasesEnv(
-  raw: string | undefined,
-): ReadonlySet<OnboardingPhase> {
-  if (typeof raw !== 'string' || raw.length === 0) {
-    return new Set<OnboardingPhase>()
-  }
-  const valid = allLlmEligiblePhases()
-  const out = new Set<OnboardingPhase>()
-  for (const part of raw.split(',')) {
-    const trimmed = part.trim()
-    if (trimmed.length === 0) continue
-    if (valid.has(trimmed as OnboardingPhase)) {
-      out.add(trimmed as OnboardingPhase)
-    }
-  }
-  return out
-}
-
-/**
- * 2026-05-12 sprint — single source of truth for which phases the LLM
- * resolver should rephrase, given the gateway process's env block.
- *
- * Policy (new default: LLM-on for ALL eligible phases):
- *
- * Precedence — `NEUTRON_LLM_ONBOARDING_PHASES` always wins when set
- * (operator override). `NEUTRON_LLM_ONBOARDING_DEFAULT` only takes
- * effect when `_PHASES` is unset / empty.
- *
- * `NEUTRON_LLM_ONBOARDING_PHASES`:
- *   - `unset` / `""` / `"   "` — fall through to `_DEFAULT` (below).
- *   - one of `off`/`none`/`disabled`/`no`/`false`/`0` — hard opt-out;
- *     resolver wires no phases regardless of `_DEFAULT`.
- *   - one of `all`/`1`/`true`/`yes`/`on`/`enabled` — opt-in for every
- *     LLM-eligible phase (same as default-on).
- *   - comma-separated list (`signup,name_chosen,...`) — exactly those
- *     phases. Unknown / null-intent names dropped.
- *
- * `NEUTRON_LLM_ONBOARDING_DEFAULT`:
- *   - `unset` — default ON (every eligible phase).
- *   - one of `1`/`true`/`yes`/`on`/`enabled`/`all` — default ON.
- *   - one of `off`/`none`/`disabled`/`no`/`false`/`0`/`""` — default OFF.
- *
- * The result is the set of phases the LLM call will fire for; phases
- * NOT in the set fall through to the deterministic `STATIC_PHASE_SPECS`
- * table.
- *
- * Failure-mode contract: even when a phase IS in the enabled set, any
- * LLM error (timeout, parse, allow-list rejection) still falls back to
- * the static spec for that phase. The set decides "should we ATTEMPT
- * the LLM call"; the per-call resilience is unchanged.
- */
-export function resolveEnabledPhases(
-  env: { [key: string]: string | undefined } | NodeJS.ProcessEnv,
-): ReadonlySet<OnboardingPhase> {
-  const rawPhases = env['NEUTRON_LLM_ONBOARDING_PHASES']
-  const phasesTrimmed = typeof rawPhases === 'string' ? rawPhases.trim() : ''
-
-  if (phasesTrimmed.length > 0) {
-    const lowered = phasesTrimmed.toLowerCase()
-    if (OPTOUT_TOKENS.has(lowered)) return new Set<OnboardingPhase>()
-    if (OPTIN_TOKENS.has(lowered)) return allLlmEligiblePhases()
-    return parseEnabledPhasesEnv(phasesTrimmed)
-  }
-
-  // `_PHASES` unset/empty → fall through to `_DEFAULT` (default-on).
-  //
-  // Codex r1 P1 (2026-05-12): distinguish a truly-absent variable
-  // (`undefined`) from a present-but-empty one (`""`). Systemd drop-ins
-  // routinely use `Environment=NEUTRON_LLM_ONBOARDING_DEFAULT=` to
-  // explicitly clear the parent unit's value — that operator intent is
-  // "opt-out", NOT "fall back to default-on". The OPTOUT_TOKENS set
-  // already lists `""`; honor that contract before reaching the
-  // "absent ⇒ default-on" branch.
-  const rawDefault = env['NEUTRON_LLM_ONBOARDING_DEFAULT']
-  if (rawDefault === undefined) {
-    // Truly absent → default-on. The unit template explicitly sets `1`
-    // for clarity, but a missing-env-var dev mode still gets the new
-    // default behavior.
-    return allLlmEligiblePhases()
-  }
-  const defaultTrimmed = typeof rawDefault === 'string' ? rawDefault.trim().toLowerCase() : ''
-  if (OPTOUT_TOKENS.has(defaultTrimmed)) return new Set<OnboardingPhase>()
-  if (OPTIN_TOKENS.has(defaultTrimmed)) return allLlmEligiblePhases()
-  // Unrecognized token — treat as opt-out to be safe (operator typo
-  // shouldn't silently enable LLM globally).
-  return new Set<OnboardingPhase>()
-}

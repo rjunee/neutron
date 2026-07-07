@@ -97,15 +97,6 @@ export {
 } from './interview/sqlite-state-store.ts'
 
 export {
-  DEFAULT_RESUME_SWEEP_INTERVAL_MS,
-  ONBOARDING_RESUME_HANDLER_NAME,
-  buildOnboardingResumeHandler,
-  buildOnboardingResumeJob,
-  registerOnboardingResumeCron,
-  type OnboardingResumeHandlerDeps,
-} from './interview/resume-cron.ts'
-
-export {
   DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS,
   ONBOARDING_IMPORT_RUNNING_HANDLER_NAME,
   buildImportRunningHandler,
@@ -185,13 +176,6 @@ export {
   type PersonaEditResponse,
   type PersonaEditStatus,
 } from './api/persona-edit.ts'
-
-export {
-  handleStartOnboarding,
-  type StartOnboardingRequest,
-  type StartOnboardingResponse,
-  type StartOnboardingStatus,
-} from './api/start-onboarding.ts'
 
 // Sprint B (2026-05-20) — admin-observability moved to the Managed
 // provisioning module (`provisioning/onboarding-api/admin-observability.ts`).
