@@ -29,6 +29,17 @@ export function buildDefaultSourceParser(): (
         return parseChatgptExport(asBuffer(source, payload))
       case 'claude-zip':
         return parseClaudeExport(asBuffer(source, payload))
+      default:
+        // Defensive boundary (K11c Codex r1): `ImportSource` is narrowed to
+        // the two zip sources, but the DB `import_jobs.source` CHECK
+        // constraint (migration 0040, immutable history) still permits the
+        // legacy `-oauth` strings. A stale/legacy row that reaches the parser
+        // must fail loud + typed, never fall through as an `undefined` return.
+        throw new ImportError(
+          'parse_failed',
+          source,
+          `unsupported import source: ${source} (only chatgpt-zip/claude-zip are supported)`,
+        )
     }
   }
 }

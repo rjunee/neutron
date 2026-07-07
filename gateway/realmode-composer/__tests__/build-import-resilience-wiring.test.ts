@@ -151,6 +151,40 @@ test('BLOCKER #3 — composer default-builds a non-null ImportResumeReadinessPro
   ).toBe(false)
 })
 
+test('K11c (Codex r1) — a legacy non-zip source is NOT resumable even with a file on disk', async () => {
+  const pieces = buildOnboardingEnginePieces({
+    db,
+    project_slug: OWNER,
+    owner_home: ownerHome,
+    static_dir: workdir,
+    internal_handle: 't-aaaaaaaa',
+  })
+  const probe = pieces.importResumeReadiness!
+  // A legacy `gmail-oauth` row can still exist (migration 0040's
+  // `import_jobs.source` CHECK constraint permits it), even though the
+  // OAuth sources were purged. Place a same-named file on disk so the ONLY
+  // thing keeping the probe from returning true is the non-zip source
+  // guard — the UI must never advertise a resume for such a row.
+  const importsDir = join(ownerHome, 'imports')
+  mkdirSync(importsDir, { recursive: true })
+  writeFileSync(join(importsDir, 'gmail-oauth.zip'), 'fake-bytes')
+  db.raw().run(
+    `INSERT INTO import_jobs (job_id, project_slug, source, status,
+        dollars_spent, pass1_chunks_done, pass1_chunks_total,
+        chunks_total_known, started_at)
+     VALUES ('j-oauth', ?, 'gmail-oauth', 'cancelled', 0, 0, 0, 0, ?)`,
+    [OWNER, 1_700_000_000_000],
+  )
+  expect(
+    await probe.isResumable({
+      project_slug: OWNER,
+      user_id: USER,
+      source: 'gmail-oauth' as unknown as ImportSource,
+      job_id: 'j-oauth',
+    }),
+  ).toBe(false)
+})
+
 test('BLOCKER #3 — explicit null override still opts out of the probe (legacy back-compat)', async () => {
   const pieces = buildOnboardingEnginePieces({
     db,

@@ -150,10 +150,17 @@ export function buildImportResumeHandler(
       )
     }
     const source = row.source as ImportSource
+    // Defensive boundary (K11c Codex r1): `row.source` is an unvalidated DB
+    // string. `ImportSource` is narrowed to the two zip sources, but the
+    // `import_jobs.source` CHECK constraint (migration 0040, immutable
+    // history) still permits the legacy `-oauth` strings. A stale/legacy
+    // non-zip row must be refused cleanly here — never resolved or
+    // dispatched to `runner.start`. (`unsupported_source` is the HTTP JSON
+    // error string, not the `ImportErrorCode` enum.)
+    if (!ZIP_SOURCES.includes(source)) {
+      return jsonResponse({ error: 'unsupported_source', source }, 409)
+    }
     // Only ZIP-backed sources have an on-disk artefact to verify here.
-    // Every live source is zip-backed; the guard stays defensive against
-    // any legacy non-zip `source` string that a historical row could
-    // carry (those fall through to the resolver rather than 409'ing).
     if (ZIP_SOURCES.includes(source)) {
       const zipPath = zipPathForSource(input.owner_home, source)
       if (!fs.existsSync(zipPath)) {
