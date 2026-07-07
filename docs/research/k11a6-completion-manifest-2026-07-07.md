@@ -34,6 +34,19 @@ guard, ALL deleted by K11b1 (§7.2/§7.3). Retained sub-behaviors covered elsewh
   `post-turn-extractor-removed-projects.test.ts` (the retained extraction seam that replaced
   router `state_delta` in prod).
 
+### `tests/integration/m2-mira-v3-conversational-fixture.test.ts` — DIE
+Verified pure-drive: boots a real `InterviewEngine` + fixture-fed `LlmRouter`, walks
+`tests/fixtures/m2/mira-conversational-tangents.json` via `engine.advance` per phase; asserts
+phase advancement, `state_fields_populated`, and router actions — the conversational drive +
+router, both deleted (§7.2/§7.3). The headline "brief incident" assertion (router `answer` ≠
+`advance` at `import_upload_pending`) IS router behavior — dead. Retained sub-behavior coverage:
+- PHASE_KNOWLEDGE pack content (retained via K11a2b move into `phase-spec-resolver.ts`):
+  `onboarding/interview/__tests__/phase-knowledge.test.ts` retained (non-router) half.
+- import upload/analysis progression in prod: re-anchored `tests/integration/
+  import-analysis-presented.test.ts`, `import-resume-button.test.ts` (#237) drive
+  `notifyImportUpload`/`pollImportRunningTick`, both RETAINED.
+The fixture JSON `tests/fixtures/m2/mira-conversational-tangents.json` co-deletes (PR-B note).
+
 ## 3. K11a5-pinned survivors (list D) resolved
 
 (appended as decided)
