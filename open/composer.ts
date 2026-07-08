@@ -39,10 +39,7 @@ import { buildLocalPlatformAdapter } from '../runtime/platform-adapter-local.ts'
 import type { PlatformAdapter } from '../runtime/platform-adapter.ts'
 import { isSpaClientRoute } from '../landing/spa-routes.ts'
 import { CronJobRegistry } from '../cron/jobs.ts'
-import {
-  buildLandingStack,
-  resolveLandingStaticDir,
-} from '../gateway/realmode-composer/build-landing-stack.ts'
+import { resolveLandingStaticDir } from '../gateway/realmode-composer/build-landing-stack.ts'
 import { buildLiveAgentTurn } from '../gateway/realmode-composer/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '../gateway/realmode-composer/build-live-agent-turn.ts'
 import { buildProjectDocComposer } from '../gateway/realmode-composer/build-project-doc-composer.ts'
@@ -101,6 +98,8 @@ import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/mes
 import { mountOpenCores } from '../gateway/cores/mount-open-cores.ts'
 import { wireSubstrates } from './wiring/substrates.ts'
 import { wireMemory } from './wiring/memory.ts'
+import { wireLandingStack } from './wiring/landing.ts'
+import { wireUploads } from './wiring/uploads.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '../gateway/boot-helpers.ts'
 import {
@@ -956,51 +955,31 @@ export function buildOpenGraphComposer(
       persistToken: (token) => persistOauthTokenToEnv(token),
       requestRestart: () => requestSupervisorRestart(),
     }).handle
-    const landing = buildLandingStack({
+    // ── The landing stack (C3b: carved to open/wiring/landing.ts) ──────────
+    // The `buildLandingStack({...})` call — the onboarding InterviewEngine + chat
+    // UI + WS surface — moves into `wireLandingStack(ctx, deps)`. Fields already
+    // on the narrow wiring context (`db` / `project_slug` / `owner_home` /
+    // `internal_handle` / `env`) come from `wiringCtx`; the ~20 composed locals
+    // (the late-bound routers, install-token handler, onboarding LLM hooks, the
+    // synthesis import substrate, the shared GBrain sync hook) thread through the
+    // typed `deps` bag. `importUseSynthesis: true` and the per-request
+    // `chatAuthGate` (via `resolveOpenLlmPool` + live `env`) are preserved
+    // verbatim inside the wiring module. The returned `landing` is consumed
+    // downstream via `landing.*` exactly as today.
+    const { landing } = wireLandingStack(wiringCtx, {
       installTokenHandler,
-      db,
-      project_slug,
-      owner_home,
       appWsButtonPromptRouter,
       appWsImportProgressRouter,
       static_dir,
-      internal_handle,
       platform,
       cookieToUserClaim,
-      // ISSUES #318 — app-level Claude-auth gate (defense in depth for the
-      // installer gate). When the box boots with NO substrate credential,
-      // `GET /chat` renders an "Authenticate Claude" page instead of a chat
-      // that silently produces nothing. Evaluated per request (reads live env)
-      // so a restart-with-token clears it. Same credential predicate the
-      // composer's substrate wiring uses (`resolveOpenLlmPool`).
-      chatAuthGate: { isUnauthenticated: () => resolveOpenLlmPool(env) === null },
-      ...(phaseSpecResolver !== null ? { phaseSpecResolver } : {}),
-      // ONE warm LLM path (see construction above) — wiring these is the
-      // fix for the `pickerLlm not configured` deterministic-fallback bug
-      // class the owner hit live. All route through the same `cc-llm`
-      // warm interview session; omitted (undefined) only when LLM-less.
-      ...(personalityCharacterSuggester !== undefined
-        ? { personalityCharacterSuggester }
-        : {}),
-      // agentNameSuggester intentionally NOT wired (DROP the agent-NAME step,
-      // 2026-07-01) — Open onboarding never names the orchestrator.
-      ...(personaSummarizer !== undefined ? { personaSummarizer } : {}),
-      ...(projectOpeningComposer !== undefined ? { projectOpeningComposer } : {}),
-      // Warm accumulating synthesis substrate — `buildLandingStack` threads it
-      // into `buildSynthesisSession` → `buildSynthesisImportJobRunner` so the
-      // live import reads the whole export through ONE warm `claude` REPL that
-      // ACCUMULATES a user-model across passes (NO `reset_context_per_turn`, NO
-      // `/clear`). The per-chunk `buildImportJobRunnerHook` path is retired from
-      // the live onboarding flow (Step 2b, 2026-06-17). `importUseSynthesis`
-      // opts THIS single-owner composer onto the synthesis runner.
-      ...(importSubstrate !== null ? { importSubstrate } : {}),
-      importUseSynthesis: true,
-      // Path 1 (2026-06-27) — thread the SHARED GBrain syncHook into the
-      // onboarding/import project-page indexer so materialized projects fan out
-      // to MEMORY/gbrain (`entities/projects/<slug>.md` + gbrain put_page), not
-      // disk-only. Previously unwired in Open, so imported insights never
-      // reached the agent's memory recall (build-landing-stack.ts:1016).
-      importGbrainSyncHook: gbrainSyncHook,
+      resolveOpenLlmPool,
+      phaseSpecResolver,
+      personalityCharacterSuggester,
+      personaSummarizer,
+      projectOpeningComposer,
+      importSubstrate,
+      gbrainSyncHook,
     })
 
     // ── Import-upload surface (P2 v2 § 6.1 S4 + Upload Resume Phase 2) ──────
@@ -1022,107 +1001,30 @@ export function buildOpenGraphComposer(
     // marker so the live session continues + the post-turn extractor can finish
     // onboarding (which materializes the imported projects). The watcher is
     // late-bound (it needs onboarding state wired further below) via this holder.
+    // The Path-1 late-bound `importWatchHolder` stays COMPOSER-OWNED: its
+    // `.watch` setter lives deep below (post-onboarding wiring), far from this
+    // carve, so the composer creates the holder here and threads it into
+    // `wireUploads` as the READER — both close over the SAME reference. (NOT a
+    // `late<T>` seam — that is C3d's job.)
     const importWatchHolder: { watch?: (user_id: string) => void } = {}
-    const engineForUpload: Pick<typeof landing.engine, 'notifyImportUpload'> = {
-      notifyImportUpload: async (input) => {
-        const result = await landing.engine.notifyImportUpload(input)
-        importWatchHolder.watch?.(input.user_id)
-        return result
-      },
-    }
     // Single-owner POSIX identity — the process uid/gid the owner runs as.
     const uploadUid = process.getuid?.() ?? 0
     const uploadGid = process.getgid?.() ?? 0
-
-    const { buildImportUploadHandler, TOPIC_ID_FALLBACK, TOPIC_ID_HEADER } =
-      await import('../gateway/upload/import-upload-handler.ts')
-    // Bare single-shot `POST /api/upload/<source>` handler. Writes the export
-    // ZIP to `<owner_home>/imports/<source>.zip` then notifies the engine.
-    const import_upload_handler = buildImportUploadHandler({
-      owner_home,
-      uid: uploadUid,
-      gid: uploadGid,
-      project_slug,
-      engine: engineForUpload,
-      onTopicIdMissing: () => {
-        console.warn(
-          `[upload] open ${TOPIC_ID_HEADER} missing — falling back to topic_id=${TOPIC_ID_FALLBACK}. The engine's post-upload button emit is dropped unless a sender is registered for ${TOPIC_ID_FALLBACK}.`,
-        )
-      },
+    const {
+      import_upload_handler,
+      chunked_upload_handler,
+      import_resume_handler,
+      cleanups: uploadCleanups,
+    } = await wireUploads(wiringCtx, {
+      landing,
+      uploadUid,
+      uploadGid,
+      importWatchHolder,
     })
-
-    // Chunked resumable upload handler — owns
-    // `POST /api/upload/<source>/start`,
-    // `PATCH /api/upload/<source>/<upload_id>`, and
-    // `HEAD /api/upload/<source>/<upload_id>`. Shares the engine + owner_home +
-    // uid/gid + `notifyImportUpload` bridge with the bare handler so the
-    // post-upload advance fires identically. Per-upload session state persists
-    // in `upload_sessions` (migration 0048) on the single-owner project.db; a
-    // long-lived sweeper marks expired sessions + unlinks partial files and is
-    // torn down via `realmode_cleanups` on shutdown.
-    const { buildChunkedUploadHandler } = await import(
-      '../gateway/upload/chunked-upload-handler.ts'
-    )
-    const { SqliteUploadSessionStore } = await import(
-      '../gateway/upload/upload-session-store.ts'
-    )
-    const { ChunkedUploadSweeper } = await import(
-      '../gateway/upload/chunked-upload-sweeper.ts'
-    )
-    const uploadSessionStore = new SqliteUploadSessionStore(db)
-    const chunked_upload_handler = buildChunkedUploadHandler({
-      owner_home,
-      uid: uploadUid,
-      gid: uploadGid,
-      project_slug,
-      engine: engineForUpload,
-      store: uploadSessionStore,
-      onTopicIdMissing: () => {
-        console.warn(
-          `[chunked-upload] open ${TOPIC_ID_HEADER} missing — falling back to topic_id=${TOPIC_ID_FALLBACK}.`,
-        )
-      },
-    })
-    const uploadSweeper = new ChunkedUploadSweeper({
-      store: uploadSessionStore,
-      owner_home,
-      project_slug,
-    })
-    uploadSweeper.start()
-    realmodeCleanups.push(() => {
-      try {
-        uploadSweeper.stop()
-      } catch {
-        // best-effort shutdown cleanup
-      }
-    })
-
-    // Import-resume route (`POST /api/import/<job_id>/resume`) — mounted
-    // against the SAME runner / payload-resolver / state-store the engine
-    // drives so tapping the chat `resume_import` button after a parse failure
-    // doesn't 404. `buildLandingStack` surfaces all three on the engine return
-    // shape; they are non-null whenever the engine built a default runner.
-    let import_resume_handler: CompositionInput['import_resume_handler']
-    const resumeRunner = landing.importJobRunner
-    const resumePayloadResolver = landing.importPayloadResolver
-    const resumeStateStore = landing.stateStore
-    if (resumeRunner !== null && resumePayloadResolver !== null) {
-      const { buildImportResumeHandler } = await import(
-        '../gateway/upload/import-resume-handler.ts'
-      )
-      import_resume_handler = buildImportResumeHandler({
-        db,
-        project_slug,
-        owner_home,
-        runner: resumeRunner,
-        payloadResolver: resumePayloadResolver,
-        stateStore: resumeStateStore,
-      })
-    } else {
-      console.warn(
-        `[composer] open import-resume handler NOT mounted — runner=${resumeRunner !== null} resolver=${resumePayloadResolver !== null}. resume_import button in chat will 404 if tapped.`,
-      )
-    }
+    // The sweeper `stop()` hook collected into `wireUploads`'s `cleanups` is
+    // re-registered HERE, at the carve site, so it lands at the SAME point in the
+    // cleanup sequence (the sweeper `start()`→`push(stop)` previously ran inline).
+    for (const cleanup of uploadCleanups) realmodeCleanups.push(cleanup)
 
     // Wrap the landing fetch with a thin single-owner auth gate: a fresh
     // visit (no session cookie) mints the owner session cookie AND a one-shot
