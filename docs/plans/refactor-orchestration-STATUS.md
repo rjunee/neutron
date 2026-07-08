@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `77cecd5` (L6 #270 merged 2026-07-08; @neutronai/wire-types leaf + option-shape unification) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `8d9c141` (C3a #272 merged 2026-07-08; first `open/composer.ts` wiring carve → `open/wiring/{context,substrates,memory}.ts`, verbatim, prewarm live-ref + cleanups preserved) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -358,11 +358,29 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
    browser-safe end-to-end; guarding an env read can silently defeat build-time inlining on another
    surface — verify all three (server / Expo-inlined / processless-browser).** CI flake on `anchor-walker`
    (unrelated concurrency test) cleared by re-run → [[neutron-open-anchor-walker-ci-flake]].
-7. **IN FLIGHT:** none (dispatching next batch).
-8. **Next dispatchable (wave 3):** **C3a** (carve `open/composer.ts` wiring modules — substrates/prewarm/
-   memory, `opus`, lane composer; serial C3a→C3b→C3c→C3d after C2; delicate — prewarm-never-rejects,
-   trident-fire warm-per-repo-cwd, enableToolBridge care). **L5** (relative-import autofix sweep, `haiku`,
-   lane none — deps L4/L6 met; the sweep that follows the L-relocations). **M1/M2** = Managed (cross-repo).
+7. **C3a** ✅ #272 (first `open/composer.ts` carve → `open/wiring/{context,substrates,memory}.ts`). The
+   4015-line closure's substrate slice (`cc-llm-*` phase-spec + prewarm, `cc-agent-*` live-chat, ephemeral
+   `cc-trident-*` factory, warm-per-cwd `cc-trident-fire-*` cache) + memory slice (`cc-scribe-*` extraction,
+   lazy fail-soft GBrain, `cc-reflection-*` judge, `scribeOnUserTurn`, Cores fan-out) carved VERBATIM into
+   narrow-`OpenWiringContext` leaf modules; composer −326/+49. **Two required deviations only:** `let
+   prewarmSettled` → `prewarmSettledRef: {settled}` **live reference** (cold-window budget elevation reads
+   the live value the never-rejecting prewarm `.then` flips — a snapshot would break it); inline
+   `realmodeCleanups.push` → a returned `cleanups[]` the composer re-registers AT THE SAME SITE (SIGTERM
+   order byte-identical, GBrain-close before fan-out-stop). Characterization snapshot pins Open's
+   `CompositionInput` field-key set. **Codex REQUEST_CHANGES (test-gap, not a defect):** memory tests
+   discarded captured substrate opts → a future `enableToolBridge:true` on `cc-scribe`/`cc-reflection`
+   would slip; FIXED by dispatching each via its consumer (scribe `extractAndWrite`, reflection
+   `onTurnComplete` behind a cue) + asserting no-bridge + ephemeral. **Lesson: `buildLlmCallSubstrate`
+   invokes `substrateFactory` LAZILY (on `start()`) — a boundary test must DISPATCH the substrate, not just
+   build it; and scribe filters text < `SCRIBE_MIN_CHARS` (80) before dispatch.** Local doc-link lane flake
+   (pre-existing, unrelated) did NOT recur on CI (`test` green 8m16s).
+8. **IN FLIGHT:** none (dispatching C3b).
+9. **Next dispatchable (wave 3):** **C3b** (carve `open/composer.ts` uploads + landing-stack + onboarding
+   seams — chunked upload+sweeper, `buildLandingStack` call, Path-1 trio + import watcher,
+   `importUseSynthesis:true` preserved; `opus`, lane composer; serial after C3a). Then **C3c** (http-shell
+   → named `OpenOwnerGate`), **C3d** (app surfaces + app-ws + return assembly + `late<T>` holders). **L5**
+   (relative-import autofix sweep, `haiku`) — HOLD until the C3 relocations settle (avoid import-rewrite
+   conflicts). **M1/M2** = Managed (cross-repo, deferred). **K10 strictly LAST (wave 9).**
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
