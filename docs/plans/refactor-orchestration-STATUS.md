@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `cffddc2` (C1 #265 merged 2026-07-08; typed BootConfig; no-cycles HARD-ERROR) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `77b3cd1` (W5 #263 merged 2026-07-08; chat-core resilience; WAVE 2 local units DONE) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -328,16 +328,27 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
      canonical-decimal guard (`0x10`→16). Codex r2 port-precedence finding DECLINED (fail-loud is the C1
      mandate; prod passes a resolved config; explicit-port precedence preserved for valid/unset env; all
      cited `boot({port:0})` callers pass).
-3. **IN FLIGHT:** **W5** (chat-core resilience `[BEHAVIOR]`, `opus`, lane transport) — build #263,
-   through **3 Codex rounds** (r1: dup-resume-on-late-session_ready + fallback-on-closed-socket + GAP-2
-   web `online` wiring; r2: durable-store `failed`→`queued` round-trip + native mobile ack-timeout parity
-   [+ caught 11 pre-existing mobile heartbeat failures round-1's verify missed] + docs restore; r3:
-   deactivated client springing back to life on a late socket open). FIX 7 pushed; awaiting final Codex +
-   CI + merge.
-4. **Next dispatchable after W5 lands:** **L6** (wire-types leaf, `opus`, lanes transport+clients) — deps
-   met (L1/L2) but **held until W5 lands** (shared transport/chat-core). **L5** (relative-import autofix
-   sweep, `haiku`) — deps met (L4) but **held until W5 lands** (both rewrite chat-core imports). **C2**
-   (boot-helpers split, `opus`, composer) now unblocked (C1 done). **M1/M2** = Managed (cross-repo).
+3. **W5** ✅ #263 (chat-core connection resilience `[BEHAVIOR]`).
+   - **W5 note — WAVE 2 LOCAL UNITS COMPLETE.** The 4 shared socket-lifecycle gaps (heartbeat/half-open,
+     reachability reconnect, ack-timeout→`failed`, resume-on-every-reopen) + a fully-wired per-message
+     `failed`/retry affordance on BOTH web and mobile. **7 Codex rounds** — a real defect each round,
+     all fixed: dup-resume on late `session_ready`; fallback-on-closed-socket unhandled rejection; GAP-2
+     web `online` listener; durable-store `failed`→`queued` corruption; native mobile ack-timeout parity
+     (+ 11 pre-existing mobile heartbeat failures round-1's verify missed); deactivated-client revival on
+     late open; heartbeat-not-rearmed-on-foreground; web+mobile retry wiring → per-message `flushOne`
+     (was resending all unacked). Orchestrator merged current `main` (C1) into the branch mid-review to
+     clear branch-lag artifacts — **lesson: a long-running unit's branch goes stale when siblings merge;
+     re-integrate `origin/main` (code + docs) before final review, or Codex flags the missing sibling
+     changes as regressions.**
+4. **Wave 2 status:** LOCAL units DONE (L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓). Only **M1/M2** (Managed,
+   cross-repo neutron-managed) remain from the §16 wave-2 row — deferred to a Managed pass.
+5. **IN FLIGHT (wave 3):** **C2** (boot-helpers split + delete the 8 dead exports, `opus`, lane composer)
+   — dispatched off `77b3cd1`; co-delete caveat (the barrel re-export block in `gateway/index.ts`) + full
+   `test` suite required (deletion/guardrail lessons).
+6. **Next dispatchable (wave 3):** **L6** (wire-types leaf, `opus`, lanes transport+clients — deletes
+   ~1300 mirrored lines, unifies the 5 option shapes; deps L1/L2 met, transport lane now free post-W5).
+   **L5** (relative-import autofix sweep, `haiku`) — deps L4 met, but **sequence AFTER L6** (both rewrite
+   imports; L5 is the sweep that should follow L6's relocations). **C3a–C3d** serial after C2.
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 

@@ -1961,7 +1961,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [ ] F7 · [ ] F8 · [x] F9 ✅ #194 (pilot)
 - [ ] O1 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
 - [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
-- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [ ] W2 · [ ] W3a · [ ] W3 · [ ] W4 · [ ] W5 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
+- [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [ ] W2 · [ ] W3a · [ ] W3 · [ ] W4 · [x] W5 ✅ #263 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
 - [ ] M0 · [ ] M1 · [ ] M2 · [ ] M3 (riders) · [ ] M4 · [ ] M5 · [ ] M6
 - [ ] N1 · [ ] N2 · [ ] N3 · [ ] N4 · [ ] N5 · [ ] N6 · [ ] N7 · [ ] N8
 - [ ] S0 · [ ] S1 · [ ] S2 · [ ] S3
