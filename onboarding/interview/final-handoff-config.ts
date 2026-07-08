@@ -32,9 +32,10 @@
  *   - `TELEGRAM_BIND_TOKEN_TTL_MS` — 1-hour validity window per spec.
  *
  * Argus-check: every reference to the mobile-app URL in the prompt
- * builders + landing surface imports `MOBILE_APP_URL` from THIS file —
- * the URL is derived from `NEUTRON_WEB_APP_BASE` in exactly one place
- * (here), never typed out as a literal elsewhere.
+ * builders + landing surface imports `MOBILE_APP_URL` from the canonical
+ * derivation — the URL is derived from `NEUTRON_WEB_APP_BASE` in exactly
+ * one place (`../../contracts/handoff-config.ts` since L2; this file
+ * re-exports it), never typed out as a literal elsewhere.
  *
  * L2 (2026-07) — `MOBILE_APP_URL` + `TELEGRAM_BIND_TOKEN_TTL_MS` (and the
  * private `WEB_APP_BASE` helper) moved to `../../contracts/handoff-config.ts`

@@ -3,11 +3,12 @@
  *
  * Argus-check: the mobile-app URL is referenced exactly once across the
  * codebase. The canonical declaration lives in
- * `onboarding/interview/final-handoff-config.ts` as `MOBILE_APP_URL`,
- * and `landing/server.ts` re-exports it (so the brief's "single
+ * `contracts/handoff-config.ts` as `MOBILE_APP_URL` (moved there in L2,
+ * 2026-07; `onboarding/interview/final-handoff-config.ts` and
+ * `landing/server.ts` both re-export it, so the brief's "single
  * source-of-truth constant in landing/server.ts" assertion still holds
  * at the import surface). Every reference to the literal URL string
- * outside those two files is a regression.
+ * outside those files is a regression.
  */
 
 import { describe, expect, test } from 'bun:test'
