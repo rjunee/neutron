@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `bea07d6` (C3b #274 merged 2026-07-08; second `open/composer.ts` carve → `open/wiring/{landing,uploads}.ts`, verbatim landing-stack + upload surface, late-bound importWatchHolder composer-owned) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `e69ccb3` (C3c #276 merged 2026-07-08; third `open/composer.ts` carve → `open/wiring/owner-gate.ts` security-sensitive http-shell, verbatim + the plan-sanctioned two-claim-block dedup, Codex APPROVE clean) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -388,18 +388,31 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
    the surviving worktree (landing.ts/uploads.ts already written) → finished clean. **Lesson: an agent that
    dies mid-flight with a worktree can be resumed with `SendMessage` + a "continue from exactly where you
    stopped" recap, avoiding a full restart.** Hit the shallow-clone rebase trap (`git fetch --unshallow`).
-9. **IN FLIGHT:** none (dispatching C3c).
-10. **Next dispatchable (wave 3):** **C3c** (carve `open/composer.ts` http-shell → a NAMED, unit-tested
-   `OpenOwnerGate` module: the cookie/start-token gate + `coldStartRedirect`/`hasResumableState` + React
-   bootstrap HTML injection + `openFetch`; `opus`, lane composer; serial after C3b). **CARE — security-
-   sensitive:** single-use `?start=` JTI claim; cookie minted ONLY on first claim; stale-cookie-over-wiped-DB
-   cold-start fallback; bootstrap injected by exact-string replace on the `/chat-react.js` tag; **the TWO
-   verbatim copies of the claim-token block converge onto ONE** (the plan-sanctioned dedup — do it as an
-   explicit, separately-tested step, logic otherwise verbatim; hardening is S1/S2, NOT here). Then **C3d**
-   (app surfaces + app-ws receiver + return assembly + the four `late<T>` holders — deref-before-bind
-   log-loudly-and-no-op except throw under `NODE_ENV=test`). **L5** (relative-import autofix sweep, `haiku`)
-   — HOLD until the C3 relocations settle. **M1/M2** = Managed (cross-repo, deferred). **K10 strictly LAST
-   (wave 9).**
+9. **C3c** ✅ #276 (third composer carve → `open/wiring/owner-gate.ts`, the security-sensitive http-shell).
+   `buildOpenOwnerGate(ctx, deps)` extracts `coldStartRedirect` + `hasResumableState` + the React-shell
+   bootstrap injection + `openFetch` + the module-level `formatOwnerSetCookie`, VERBATIM. **Verified against
+   the original before merge:** the bootstrap injection is a REGEX (`/chat-react\.js(?:\?v=[^"]*)?`, ISSUES
+   #353 versioning) NOT the plan's stale "exact-string" — the agent correctly preserved CURRENT behavior;
+   the two claim-then-mint blocks (SPA deep-link + `/chat` `?start=`) were byte-identical (only `spaRes` vs
+   `res`) → converged onto `claimAndMintThenServe(startToken, sourceRes, url)` (same `startToken!==null`
+   guard, `withReactBootstrap` then cookie-only-if-minted). `readProjectRows` left composer-owned (shared
+   with the `projects_changed` emit + rail), threaded as the injection reader. 10 security tests pin
+   single-use JTI, cookie-only-on-first-claim (incl. failed-claim), stale-cookie cold-start (null + throw),
+   injection + guard-no-op, cross-slug-cookie-ignored, and a parametrized both-call-sites-identical dedup
+   test. **Codex APPROVE first pass, no findings** (independently verified the security semantics). composer
+   −277. Lesson: when the plan's spec cites an OLD mechanism (exact-string), DIFF the deleted lines to
+   confirm what the code ACTUALLY does now before trusting either the spec or the agent's summary.
+10. **IN FLIGHT:** C3d (final composer carve — dispatched).
+11. **Next dispatchable (wave 3):** **C3d** (IN FLIGHT — app-ws receiver + app surfaces + return assembly +
+   the four late-bound holders → `late<T>` seams). **CARE — the ONLY sanctioned semantic change:** `late<T>`
+   deref-before-bind LOGS + increments a `system_events` counter + NO-OPs in prod (byte-identical to today's
+   `holder.x?.foo()` silent-no-op-when-unset), and THROWS only under `NODE_ENV=test`; every holder BIND stays
+   at its current closure site. Return literal gets `OpenComposition = CompositionInput &
+   Required<Pick<…,openSurfaces>>` so a dropped slice fails COMPILE. `importWatchHolder` may stay a plain
+   object (shared with C3b `wireUploads`) if converting it risks the uploads contract. After C3d, the C3
+   chain is COMPLETE and the composer is a lean orchestrator. **L5** (relative-import autofix sweep, `haiku`)
+   — UNBLOCKS once C3d lands (was held for the C3 relocations). **M1/M2** = Managed (cross-repo, deferred).
+   **K10 strictly LAST (wave 9).**
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
