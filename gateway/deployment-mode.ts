@@ -34,13 +34,6 @@ export const DEFAULT_DEPLOYMENT_MODE: DeploymentMode = 'open'
 /** Canonical public env key (M2.6 Ph0) — the sole key read since K11b2. */
 export const DEPLOYMENT_ROLE_ENV = 'NEUTRON_ROLE'
 
-/** K11b2 tombstone — the retired pre-M2.6 alias env key. It NO LONGER selects a
- *  mode (removed after verifying, across neutron-open + neutron-managed incl. the
- *  provisioner scripts + systemd templates, that nothing sets it). Retained ONLY
- *  so a stray untracked box that still sets it is flagged LOUDLY instead of
- *  silently degrading to `open` — see {@link resolveDeploymentMode}. */
-export const RETIRED_DEPLOYMENT_MODE_ALIAS = 'NEUTRON_DEPLOYMENT_MODE'
-
 const KNOWN_MODES: ReadonlySet<DeploymentMode> = new Set<DeploymentMode>([
   'open',
   'managed',
@@ -57,23 +50,22 @@ function normalizeMode(raw: string): DeploymentMode | undefined {
  * `NEUTRON_ROLE`; unknown / unset values fall back to the default `'open'`.
  * Case-insensitive + trimmed so `NEUTRON_ROLE=Connect ` works.
  *
- * K11b2 safety: the retired `NEUTRON_DEPLOYMENT_MODE` alias no longer selects a
- * mode. Because mode gates managed-only credential isolation
- * (`resolve-llm-credentials.ts`), a box that set ONLY the retired alias must not
- * silently degrade to `open` (which would drop that isolation) — if the alias is
- * present we emit a LOUD error telling the operator to migrate to `NEUTRON_ROLE`.
- * Resolution still returns the default; the alias never re-selects a mode.
+ * K11b2 (owner-approved 2026-07-08): the pre-M2.6 `NEUTRON_DEPLOYMENT_MODE`
+ * back-compat alias was REMOVED after verifying nothing sets it across
+ * neutron-open + neutron-managed (provisioner scripts, systemd templates, env —
+ * only test fixtures matched). `NEUTRON_ROLE` is now the sole mode key. Accepted
+ * trade-off, stated plainly (no false guard): mode gates managed-only credential
+ * isolation (`resolve-llm-credentials.ts` refuses the shared env key unless
+ * `mode !== 'open'`), so a box that set ONLY the retired alias (and no
+ * `NEUTRON_ROLE`) now resolves to `'open'` and could use that shared key. No such
+ * box exists in either repo; the sole residual is an untracked hand-set env on
+ * the live Managed VPS — owner-accepted. Fix if ever hit: set `NEUTRON_ROLE=managed`.
  */
 export function resolveDeploymentMode(
   env: Record<string, string | undefined> = process.env,
 ): DeploymentMode {
   const fromRole = normalizeMode(env[DEPLOYMENT_ROLE_ENV] ?? '')
   if (fromRole !== undefined) return fromRole
-  if ((env[RETIRED_DEPLOYMENT_MODE_ALIAS] ?? '').trim() !== '') {
-    console.error(
-      `[deployment-mode] ${RETIRED_DEPLOYMENT_MODE_ALIAS} is set but was RETIRED in K11b2 and is now IGNORED — set ${DEPLOYMENT_ROLE_ENV} instead. Resolving to '${DEFAULT_DEPLOYMENT_MODE}' until migrated.`,
-    )
-  }
   return DEFAULT_DEPLOYMENT_MODE
 }
 

@@ -51,9 +51,12 @@ describe('resolveDeploymentMode', () => {
   })
 
   // K11b2 — the retired `NEUTRON_DEPLOYMENT_MODE` alias is now INERT: it never
-  // selects a mode, and a box that sets ONLY the alias resolves to the default
-  // `open` (NOT `managed`). It is loudly flagged so an untracked box can't
-  // silently drop managed-only credential isolation.
+  // selects a mode. A box that sets ONLY the alias resolves to the default
+  // `open` (NOT `managed`). Accepted trade-off (owner-approved): mode gates
+  // managed-only credential isolation, so an alias-only box loses that isolation
+  // — no such box exists in either repo (verified); migrate any stray box to
+  // `NEUTRON_ROLE`. These pins lock the alias-inert contract against a regression
+  // that accidentally re-honors the alias.
   describe('K11b2 — retired NEUTRON_DEPLOYMENT_MODE alias is inert', () => {
     test('alias-only "managed" resolves to open (alias no longer selects a mode)', () => {
       expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'managed' })).toBe('open')
@@ -65,37 +68,10 @@ describe('resolveDeploymentMode', () => {
       ).toBe('open')
     })
 
-    test('a set alias is surfaced loudly (console.error) for migration', () => {
-      const original = console.error
-      const calls: string[] = []
-      console.error = (...args: unknown[]) => {
-        calls.push(args.map(String).join(' '))
-      }
-      try {
-        expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'managed' })).toBe('open')
-      } finally {
-        console.error = original
-      }
+    test('canonical NEUTRON_ROLE still wins over a stray alias', () => {
       expect(
-        calls.some(
-          (l) => l.includes('NEUTRON_DEPLOYMENT_MODE') && l.includes('NEUTRON_ROLE'),
-        ),
-      ).toBe(true)
-    })
-
-    test('no spurious warning when the alias is absent', () => {
-      const original = console.error
-      let count = 0
-      console.error = () => {
-        count += 1
-      }
-      try {
-        expect(resolveDeploymentMode({ NEUTRON_ROLE: 'managed' })).toBe('managed')
-        expect(resolveDeploymentMode({})).toBe('open')
-      } finally {
-        console.error = original
-      }
-      expect(count).toBe(0)
+        resolveDeploymentMode({ NEUTRON_ROLE: 'managed', NEUTRON_DEPLOYMENT_MODE: 'open' }),
+      ).toBe('managed')
     })
   })
 })
