@@ -222,6 +222,56 @@ describe('W5 GAP-2 — notifyReachable reconnects now + resets backoff', () => {
 })
 
 // ===========================================================================
+// FIX 7 — a deactivated client stays quiescent even if an in-flight socket
+// opens LATE (ChatWsClient)
+// ===========================================================================
+describe('W5 FIX 7 — a late onopen while inactive must not wake the client', () => {
+  it('ignores a late open while backgrounded, then reconnects cleanly on reactivation', () => {
+    const clock = new VirtualClock()
+    const sockets: FakeSocket[] = []
+    let opens = 0
+    const client = new ChatWsClient({
+      url: 'wss://test/ws/app/chat',
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      onOpen: () => {
+        opens++
+      },
+      minBackoffMs: 500,
+      maxBackoffMs: 15_000,
+      jitter: () => 0,
+      heartbeatIntervalMs: 25_000,
+      heartbeatTimeoutMs: 10_000,
+      setTimeoutFn: clock.set,
+      clearTimeoutFn: clock.clear,
+    })
+
+    client.connect() // socket[0] in flight (status connecting)
+    client.setActive(false) // backgrounded BEFORE it opened
+    sockets[0]!.fireOpen() // the connect resolves LATE, while inactive
+
+    // Must stay quiescent: not open, onOpen never fired (no resume-fallback
+    // armed), and the just-opened socket was closed.
+    expect(client.getStatus()).not.toBe('open')
+    expect(opens).toBe(0)
+    expect(sockets[0]!.closed).toBe(true)
+    // No heartbeat started: advancing past the interval sends no ping.
+    clock.advance(25_000)
+    expect(sockets[0]!.frames('ping').length).toBe(0)
+
+    // Reactivation re-establishes the socket (the guard didn't strand us offline).
+    client.setActive(true)
+    expect(sockets.length).toBe(2) // a fresh socket opened
+    sockets[1]!.fireOpen()
+    expect(client.getStatus()).toBe('open')
+    expect(opens).toBe(1) // now onOpen fires normally → resume/drain resume
+  })
+})
+
+// ===========================================================================
 // GAP-4 — ack-timeout → failed → resend on reconnect (WebChatSession)
 // ===========================================================================
 describe('W5 GAP-4 — a never-acked send flips to failed, never a stuck clock', () => {

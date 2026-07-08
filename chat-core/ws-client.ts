@@ -236,6 +236,23 @@ export class ChatWsClient {
     socket.onopen = () => {
       // Ignore a late callback from a socket we've already replaced/force-closed.
       if (this.socket !== socket) return
+      // FIX 7 — the client was deactivated (backgrounded) or closed AFTER this
+      // socket's connect was already in flight. A deactivated client must stay
+      // quiescent: do NOT transition to `open`, start the heartbeat, or fire
+      // `onOpen` (which arms the resume-fallback + drains the queue). Close the
+      // just-opened socket and null our ref so its later `onclose` can't
+      // double-schedule; leave a resumable status (`idle`) so a subsequent
+      // `setActive(true)` reconnects cleanly rather than stranding the client.
+      if (!this.active || this.closedByUser) {
+        this.socket = null
+        try {
+          socket.close()
+        } catch {
+          /* already closed */
+        }
+        if (!this.closedByUser) this.setStatus('idle')
+        return
+      }
       this.attempt = 0
       this.setStatus('open')
       this.startHeartbeat()
