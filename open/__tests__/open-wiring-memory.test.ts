@@ -109,4 +109,57 @@ describe('wireMemory', () => {
       await runCleanups(w.cleanups)
     }
   }, 15_000)
+
+  // Security boundary (mirrors open-wiring-substrates.test.ts): the native-MCP
+  // tool bridge is the owner conversational `cc-agent-*` REPL ONLY. The
+  // background `cc-scribe-*` extraction and `cc-reflection-*` correction-judge
+  // substrates run one-shot work over untrusted-ish content and MUST NOT opt
+  // into the bridge; both are per-call `ephemeral`. `buildLlmCallSubstrate`
+  // invokes the fake factory LAZILY (on `start()`), so we DISPATCH each
+  // substrate through its consumer — scribe via the awaitable `extractAndWrite`,
+  // reflection via `onTurnComplete` (fire-and-forget behind a correction cue) —
+  // then assert the captured ClaudeCodeSubstrateOptions. A future mutation that
+  // adds `enableToolBridge: true` to either memory substrate fails HERE (the
+  // presence/cleanup assertions above would not catch it).
+  test('memory substrates never opt into the tool bridge; both are ephemeral', async () => {
+    const captured: ClaudeCodeSubstrateOptions[] = []
+    const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
+      captured.push(opts)
+      return { start: () => cannedHandle(opts.substrate_instance_id) }
+    }
+    const w = wireMemory(makeCtx({ substrateFactory }))
+    try {
+      // Drive the scribe extraction (awaitable → deterministic dispatch). The
+      // text must clear SCRIBE_MIN_CHARS (80) or `shouldExtract` filters it out
+      // before any substrate dispatch.
+      await w.scribe!.extractAndWrite({
+        text: 'Ada Lovelace is the lead engineer at Analytical Engines Incorporated, headquartered in central London, and she personally mentors the whole platform team.',
+      })
+      // Drive the reflection judge: a cue-bearing turn passes the deterministic
+      // pre-gate and fires the (fire-and-forget) detection; poll until its
+      // substrate.start() records the opts.
+      w.reflection.onTurnComplete({
+        user_text: 'No, you should always use British spelling from now on.',
+        agent_text: 'I used American spelling.',
+      })
+      for (let i = 0; i < 200; i++) {
+        if (captured.some((o) => o.substrate_instance_id === 'cc-reflection-owner')) break
+        await Bun.sleep(5)
+      }
+
+      const scribeOpts = captured.find((o) => o.substrate_instance_id === 'cc-scribe-owner')
+      const reflectionOpts = captured.find((o) => o.substrate_instance_id === 'cc-reflection-owner')
+      // Both background substrates were dispatched…
+      expect(scribeOpts).toBeDefined()
+      expect(reflectionOpts).toBeDefined()
+      // …NEITHER enables the tool bridge (owner conversational REPL only)…
+      expect(scribeOpts!.enableToolBridge).not.toBe(true)
+      expect(reflectionOpts!.enableToolBridge).not.toBe(true)
+      // …and BOTH are per-call ephemeral (one-shot isolation).
+      expect(scribeOpts!.ephemeral).toBe(true)
+      expect(reflectionOpts!.ephemeral).toBe(true)
+    } finally {
+      await runCleanups(w.cleanups)
+    }
+  }, 15_000)
 })
