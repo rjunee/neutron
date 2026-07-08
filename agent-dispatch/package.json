@@ -4,6 +4,10 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
-    "@neutronai/trident": "workspace:*"
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/tools": "workspace:*",
+    "@neutronai/trident": "workspace:*",
+    "@neutronai/work-board": "workspace:*"
   }
 }

@@ -4,7 +4,9 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
+    "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
-    "@neutronai/runtime": "workspace:*"
+    "@neutronai/runtime": "workspace:*",
+    "jose": "^5.9.0"
   }
 }

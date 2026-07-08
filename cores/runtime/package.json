@@ -9,7 +9,10 @@
   },
   "private": true,
   "dependencies": {
+    "@neutronai/auth": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
     "zod": "^3.23.8"
   }
 }

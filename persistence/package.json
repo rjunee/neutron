@@ -2,5 +2,8 @@
   "name": "@neutronai/persistence",
   "type": "module",
   "main": "./index.ts",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@neutronai/migrations": "workspace:*"
+  }
 }

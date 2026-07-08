@@ -14,8 +14,11 @@
   },
   "private": true,
   "dependencies": {
-    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/auth": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
     "@neutronai/tasks": "workspace:*"
   },
   "neutron": {
@@ -23,7 +26,9 @@
       "read:tasks_core.db",
       "write:tasks_core.db"
     ],
-    "tier_support": ["regular"],
+    "tier_support": [
+      "regular"
+    ],
     "tools": [
       {
         "name": "tasks_create",
@@ -31,30 +36,65 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "title":      { "type": "string", "description": "Task title — short imperative phrase." },
-            "due_date":   { "type": "string", "description": "Optional ISO-8601 date or datetime the task is due." },
-            "priority":   { "type": "integer", "description": "Optional priority on the canonical 0-3 scale (3 = most urgent, 0 = lowest)." },
-            "project_id": { "type": "string", "description": "Optional project scope for owners with multiple projects." }
+            "title": {
+              "type": "string",
+              "description": "Task title — short imperative phrase."
+            },
+            "due_date": {
+              "type": "string",
+              "description": "Optional ISO-8601 date or datetime the task is due."
+            },
+            "priority": {
+              "type": "integer",
+              "description": "Optional priority on the canonical 0-3 scale (3 = most urgent, 0 = lowest)."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope for owners with multiple projects."
+            }
           },
-          "required": ["title"]
+          "required": [
+            "title"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "id":   { "type": "string" },
+            "id": {
+              "type": "string"
+            },
             "task": {
               "type": "object",
               "properties": {
-                "id":         { "type": "string" },
-                "title":      { "type": "string" },
-                "status":     { "type": "string" },
-                "created_at": { "type": "number" },
-                "updated_at": { "type": "number" }
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "number"
+                },
+                "updated_at": {
+                  "type": "number"
+                }
               },
-              "required": ["id", "title", "status", "created_at", "updated_at"]
+              "required": [
+                "id",
+                "title",
+                "status",
+                "created_at",
+                "updated_at"
+              ]
             }
           },
-          "required": ["id", "task"]
+          "required": [
+            "id",
+            "task"
+          ]
         },
         "capability_required": "write:tasks_core.db"
       },
@@ -64,9 +104,23 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "project_id": { "type": "string", "description": "Optional project scope." },
-            "status":     { "type": "string", "enum": ["open", "done", "all"], "description": "Filter by status. Default 'open'." },
-            "limit":      { "type": "integer", "description": "Maximum number of rows to return. Backend default applies when omitted." }
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "open",
+                "done",
+                "all"
+              ],
+              "description": "Filter by status. Default 'open'."
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of rows to return. Backend default applies when omitted."
+            }
           }
         },
         "output_schema": {
@@ -77,21 +131,47 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "id":         { "type": "string" },
-                  "title":      { "type": "string" },
-                  "status":     { "type": "string" },
-                  "due_date":   { "type": "string" },
-                  "priority":   { "type": "integer" },
-                  "project_id": { "type": "string" },
-                  "created_at": { "type": "number" },
-                  "updated_at": { "type": "number" },
-                  "completed_at": { "type": "number" }
+                  "id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "due_date": {
+                    "type": "string"
+                  },
+                  "priority": {
+                    "type": "integer"
+                  },
+                  "project_id": {
+                    "type": "string"
+                  },
+                  "created_at": {
+                    "type": "number"
+                  },
+                  "updated_at": {
+                    "type": "number"
+                  },
+                  "completed_at": {
+                    "type": "number"
+                  }
                 },
-                "required": ["id", "title", "status", "created_at", "updated_at"]
+                "required": [
+                  "id",
+                  "title",
+                  "status",
+                  "created_at",
+                  "updated_at"
+                ]
               }
             }
           },
-          "required": ["results"]
+          "required": [
+            "results"
+          ]
         },
         "capability_required": "read:tasks_core.db"
       },
@@ -101,19 +181,39 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string", "description": "Id of the task to update." },
+            "task_id": {
+              "type": "string",
+              "description": "Id of the task to update."
+            },
             "fields": {
               "type": "object",
               "properties": {
-                "title":      { "type": "string" },
-                "due_date":   { "type": "string" },
-                "priority":   { "type": "integer" },
-                "project_id": { "type": "string" },
-                "status":     { "type": "string", "enum": ["open", "done"] }
+                "title": {
+                  "type": "string"
+                },
+                "due_date": {
+                  "type": "string"
+                },
+                "priority": {
+                  "type": "integer"
+                },
+                "project_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "open",
+                    "done"
+                  ]
+                }
               }
             }
           },
-          "required": ["task_id", "fields"]
+          "required": [
+            "task_id",
+            "fields"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -121,16 +221,34 @@
             "task": {
               "type": "object",
               "properties": {
-                "id":         { "type": "string" },
-                "title":      { "type": "string" },
-                "status":     { "type": "string" },
-                "created_at": { "type": "number" },
-                "updated_at": { "type": "number" }
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "number"
+                },
+                "updated_at": {
+                  "type": "number"
+                }
               },
-              "required": ["id", "title", "status", "created_at", "updated_at"]
+              "required": [
+                "id",
+                "title",
+                "status",
+                "created_at",
+                "updated_at"
+              ]
             }
           },
-          "required": ["task"]
+          "required": [
+            "task"
+          ]
         },
         "capability_required": "write:tasks_core.db"
       },
@@ -140,9 +258,14 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string", "description": "Id of the task to complete." }
+            "task_id": {
+              "type": "string",
+              "description": "Id of the task to complete."
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -150,15 +273,30 @@
             "task": {
               "type": "object",
               "properties": {
-                "id":           { "type": "string" },
-                "title":        { "type": "string" },
-                "status":       { "type": "string" },
-                "completed_at": { "type": "number" }
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "completed_at": {
+                  "type": "number"
+                }
               },
-              "required": ["id", "title", "status", "completed_at"]
+              "required": [
+                "id",
+                "title",
+                "status",
+                "completed_at"
+              ]
             }
           },
-          "required": ["task"]
+          "required": [
+            "task"
+          ]
         },
         "capability_required": "write:tasks_core.db"
       },
@@ -168,17 +306,30 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string", "description": "Id of the task to delete." }
+            "task_id": {
+              "type": "string",
+              "description": "Id of the task to delete."
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "ok":      { "type": "boolean", "const": true },
-            "task_id": { "type": "string" }
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "task_id": {
+              "type": "string"
+            }
           },
-          "required": ["ok", "task_id"]
+          "required": [
+            "ok",
+            "task_id"
+          ]
         },
         "capability_required": "write:tasks_core.db"
       },
@@ -188,8 +339,14 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "project_id":         { "type": "string", "description": "Optional. Omit for cross-project; pass to narrow to one project." },
-            "limit_alternatives": { "type": "integer", "description": "Optional runner-up count surfaced alongside the chosen candidate. Default 3, cap 5." }
+            "project_id": {
+              "type": "string",
+              "description": "Optional. Omit for cross-project; pass to narrow to one project."
+            },
+            "limit_alternatives": {
+              "type": "integer",
+              "description": "Optional runner-up count surfaced alongside the chosen candidate. Default 3, cap 5."
+            }
           }
         },
         "output_schema": {
@@ -200,30 +357,67 @@
                 {
                   "type": "object",
                   "properties": {
-                    "id":         { "type": "string" },
-                    "title":      { "type": "string" },
-                    "status":     { "type": "string" },
-                    "created_at": { "type": "number" },
-                    "updated_at": { "type": "number" }
+                    "id": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "number"
+                    },
+                    "updated_at": {
+                      "type": "number"
+                    }
                   },
-                  "required": ["id", "title", "status", "created_at", "updated_at"]
+                  "required": [
+                    "id",
+                    "title",
+                    "status",
+                    "created_at",
+                    "updated_at"
+                  ]
                 },
-                { "type": "null" }
+                {
+                  "type": "null"
+                }
               ]
             },
-            "rationale":    { "type": "string" },
-            "alternatives": { "type": "array" },
+            "rationale": {
+              "type": "string"
+            },
+            "alternatives": {
+              "type": "array"
+            },
             "audit": {
               "type": "object",
               "properties": {
-                "candidates_considered": { "type": "integer" },
-                "focus_score_used":      { "type": "boolean" },
-                "llm_model":             { "type": "string" }
+                "candidates_considered": {
+                  "type": "integer"
+                },
+                "focus_score_used": {
+                  "type": "boolean"
+                },
+                "llm_model": {
+                  "type": "string"
+                }
               },
-              "required": ["candidates_considered", "focus_score_used", "llm_model"]
+              "required": [
+                "candidates_considered",
+                "focus_score_used",
+                "llm_model"
+              ]
             }
           },
-          "required": ["candidate", "rationale", "alternatives", "audit"]
+          "required": [
+            "candidate",
+            "rationale",
+            "alternatives",
+            "audit"
+          ]
         },
         "capability_required": "read:tasks_core.db"
       }
@@ -241,19 +435,40 @@
         "props_schema": {
           "type": "object",
           "properties": {
-            "path":  { "type": "string", "const": "/projects/<project_id>/tasks" },
-            "label": { "type": "string", "const": "Tasks" },
-            "emoji": { "type": "string", "const": "✅" },
-            "order": { "type": "integer", "const": 30 }
+            "path": {
+              "type": "string",
+              "const": "/projects/<project_id>/tasks"
+            },
+            "label": {
+              "type": "string",
+              "const": "Tasks"
+            },
+            "emoji": {
+              "type": "string",
+              "const": "✅"
+            },
+            "order": {
+              "type": "integer",
+              "const": 30
+            }
           },
-          "required": ["path", "label", "emoji", "order"]
+          "required": [
+            "path",
+            "label",
+            "emoji",
+            "order"
+          ]
         }
       }
     ],
     "billing_hooks": [],
     "linked_sources": [],
     "secrets": [],
-    "compat": { "coreApi": "^0.1.0" },
-    "build": { "neutronVersion": "0.2.0" }
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.2.0"
+    }
   }
 }

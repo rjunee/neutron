@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/tabs",
+  "type": "module",
+  "main": "./registry.ts",
+  "private": true
+}

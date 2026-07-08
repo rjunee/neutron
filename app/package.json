@@ -14,6 +14,10 @@
   },
   "dependencies": {
     "@neutron/chat-core": "workspace:*",
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/connect": "workspace:*",
+    "@neutronai/landing": "workspace:*",
+    "@neutronai/tabs": "workspace:*",
     "@op-engineering/op-sqlite": "17.0.0",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@shopify/flash-list": "2.3.2",

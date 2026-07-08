@@ -4,6 +4,15 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
-    "@neutronai/persistence": "workspace:*"
+    "@neutronai/auth": "workspace:*",
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/project-credentials": "workspace:*",
+    "@neutronai/prompts": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/tools": "workspace:*",
+    "@neutronai/work-board": "workspace:*"
   }
 }

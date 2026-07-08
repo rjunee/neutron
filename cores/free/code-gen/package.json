@@ -16,8 +16,12 @@
   },
   "private": true,
   "dependencies": {
+    "@neutronai/auth": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",
-    "@neutronai/cores-runtime": "workspace:*"
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/prompts": "workspace:*"
   },
   "neutron": {
     "capabilities": [
@@ -27,7 +31,9 @@
       "host:gh",
       "network:github"
     ],
-    "tier_support": ["regular"],
+    "tier_support": [
+      "regular"
+    ],
     "tools": [
       {
         "name": "codegen_dispatch",
@@ -35,19 +41,37 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task":          { "type": "string", "description": "Plain-language description of the code change the runner should attempt." },
-            "repo_path":     { "type": "string", "description": "Optional absolute path to the working repository. Defaults to the host repo the Core is installed into." },
-            "target_branch": { "type": "string", "description": "Optional name for the feature branch the runner opens. Auto-generated from the task slug when omitted." },
-            "project_id":    { "type": "string", "description": "Optional project scope; defaults to the active project from MCP-session context." }
+            "task": {
+              "type": "string",
+              "description": "Plain-language description of the code change the runner should attempt."
+            },
+            "repo_path": {
+              "type": "string",
+              "description": "Optional absolute path to the working repository. Defaults to the host repo the Core is installed into."
+            },
+            "target_branch": {
+              "type": "string",
+              "description": "Optional name for the feature branch the runner opens. Auto-generated from the task slug when omitted."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope; defaults to the active project from MCP-session context."
+            }
           },
-          "required": ["task"]
+          "required": [
+            "task"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "capability_required": "write:codegen_core.tasks"
       },
@@ -57,16 +81,31 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "cancelled"] }
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "cancelled"
+              ]
+            }
           },
-          "required": ["status"]
+          "required": [
+            "status"
+          ]
         },
         "capability_required": "read:codegen_core.tasks"
       },
@@ -76,19 +115,36 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "pr_number":     { "type": "integer" },
-            "branch":        { "type": "string" },
-            "worktree":      { "type": "string" },
-            "summary":       { "type": "string" }
+            "pr_number": {
+              "type": "integer"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "worktree": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
           },
-          "required": ["pr_number", "branch", "worktree", "summary"]
+          "required": [
+            "pr_number",
+            "branch",
+            "worktree",
+            "summary"
+          ]
         },
         "capability_required": "read:codegen_core.tasks"
       },
@@ -98,17 +154,35 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "cancelled":    { "type": "boolean" },
-            "prior_status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "cancelled"] }
+            "cancelled": {
+              "type": "boolean"
+            },
+            "prior_status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "cancelled"
+              ]
+            }
           },
-          "required": ["cancelled", "prior_status"]
+          "required": [
+            "cancelled",
+            "prior_status"
+          ]
         },
         "capability_required": "write:codegen_core.tasks"
       }
@@ -128,7 +202,11 @@
     "billing_hooks": [],
     "linked_sources": [],
     "secrets": [],
-    "compat": { "coreApi": "^0.1.0" },
-    "build": { "neutronVersion": "0.1.0" }
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.1.0"
+    }
   }
 }

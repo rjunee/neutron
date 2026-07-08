@@ -6,6 +6,9 @@
   "dependencies": {
     "@assistant-ui/react": "^0.14.23",
     "@neutron/chat-core": "workspace:*",
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/onboarding": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
     "jose": "^5.9.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
@@ -14,6 +17,7 @@
     "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "20.9.0",
     "@types/react": "~19.1.0",
     "@types/react-dom": "~19.1.0"
   }

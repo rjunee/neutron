@@ -11,8 +11,12 @@
   },
   "private": true,
   "dependencies": {
+    "@neutronai/auth": "workspace:*",
+    "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",
-    "@neutronai/cores-runtime": "workspace:*"
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
   },
   "neutron": {
     "capabilities": [
@@ -21,7 +25,10 @@
       "network:browse",
       "agent:dispatch_subagent"
     ],
-    "tier_support": ["regular", "private"],
+    "tier_support": [
+      "regular",
+      "private"
+    ],
     "tools": [
       {
         "name": "research_start",
@@ -29,15 +36,24 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string", "description": "The research question — natural-language prompt. Cannot be blank." },
+            "query": {
+              "type": "string",
+              "description": "The research question — natural-language prompt. Cannot be blank."
+            },
             "depth": {
               "type": "string",
-              "enum": ["quick", "standard", "deep"],
+              "enum": [
+                "quick",
+                "standard",
+                "deep"
+              ],
               "description": "Optional depth hint. Defaults to 'standard'."
             },
             "sources": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Optional list of source hints (URLs, keywords, document titles)."
             },
             "project_id": {
@@ -45,15 +61,30 @@
               "description": "Per-project storage scope; defaults to 'default'."
             }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] }
+            "task_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed"
+              ]
+            }
           },
-          "required": ["task_id", "status"]
+          "required": [
+            "task_id",
+            "status"
+          ]
         },
         "capability_required": "write:research_core.db"
       },
@@ -63,22 +94,51 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "project_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] },
-            "error": { "type": "string" },
-            "created_at": { "type": "number" },
-            "updated_at": { "type": "number" },
-            "completed_at": { "type": "number" }
+            "task_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed"
+              ]
+            },
+            "error": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "number"
+            },
+            "updated_at": {
+              "type": "number"
+            },
+            "completed_at": {
+              "type": "number"
+            }
           },
-          "required": ["task_id", "status", "created_at", "updated_at"]
+          "required": [
+            "task_id",
+            "status",
+            "created_at",
+            "updated_at"
+          ]
         },
         "capability_required": "read:research_core.db"
       },
@@ -88,54 +148,125 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "project_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id"]
+          "required": [
+            "task_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] },
+            "task_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed"
+              ]
+            },
             "brief": {
               "type": "object",
               "properties": {
-                "topic": { "type": "string" },
-                "key_findings": { "type": "array", "items": { "type": "string" } },
+                "topic": {
+                  "type": "string"
+                },
+                "key_findings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "sources": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "title": { "type": "string" },
-                      "url": { "type": "string" },
-                      "note": { "type": "string" }
+                      "title": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "type": "string"
+                      },
+                      "note": {
+                        "type": "string"
+                      }
                     },
-                    "required": ["title"]
+                    "required": [
+                      "title"
+                    ]
                   }
                 },
-                "confidence_level": { "type": "string", "enum": ["low", "medium", "high"] },
-                "recommendations": { "type": "array", "items": { "type": "string" } },
+                "confidence_level": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high"
+                  ]
+                },
+                "recommendations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "claims": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "claim": { "type": "string" },
-                      "evidence": { "type": "string" },
-                      "citation": { "type": "string" },
-                      "confidence": { "type": "string", "enum": ["low", "medium", "high", "unverified"] }
+                      "claim": {
+                        "type": "string"
+                      },
+                      "evidence": {
+                        "type": "string"
+                      },
+                      "citation": {
+                        "type": "string"
+                      },
+                      "confidence": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high",
+                          "unverified"
+                        ]
+                      }
                     },
-                    "required": ["claim", "confidence"]
+                    "required": [
+                      "claim",
+                      "confidence"
+                    ]
                   }
                 }
               },
-              "required": ["topic", "key_findings", "sources", "confidence_level", "recommendations"]
+              "required": [
+                "topic",
+                "key_findings",
+                "sources",
+                "confidence_level",
+                "recommendations"
+              ]
             },
-            "error": { "type": "string" }
+            "error": {
+              "type": "string"
+            }
           },
-          "required": ["task_id", "status"]
+          "required": [
+            "task_id",
+            "status"
+          ]
         },
         "capability_required": "read:research_core.db"
       },
@@ -145,20 +276,46 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string" },
-            "project_id": { "type": "string" },
-            "budget_ms": { "type": "number" },
-            "tools": { "type": "array", "items": { "type": "string" } }
+            "query": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "budget_ms": {
+              "type": "number"
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] }
+            "task_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "failed"
+              ]
+            }
           },
-          "required": ["task_id", "status"]
+          "required": [
+            "task_id",
+            "status"
+          ]
         },
         "capability_required": "write:research_core.db"
       },
@@ -168,18 +325,33 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "project_id": { "type": "string" },
-            "limit": { "type": "number" },
-            "since": { "type": "number" }
+            "project_id": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "since": {
+              "type": "number"
+            }
           },
-          "required": ["project_id"]
+          "required": [
+            "project_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "briefs": { "type": "array", "items": { "type": "object" } }
+            "briefs": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           },
-          "required": ["briefs"]
+          "required": [
+            "briefs"
+          ]
         },
         "capability_required": "read:research_core.db"
       },
@@ -189,18 +361,34 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "project_id": { "type": "string" },
-            "query": { "type": "string" },
-            "limit": { "type": "number" }
+            "project_id": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            }
           },
-          "required": ["project_id", "query"]
+          "required": [
+            "project_id",
+            "query"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "hits": { "type": "array", "items": { "type": "object" } }
+            "hits": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           },
-          "required": ["hits"]
+          "required": [
+            "hits"
+          ]
         },
         "capability_required": "read:research_core.db"
       },
@@ -210,20 +398,40 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "claim_id": { "type": "string" },
-            "citation": { "type": "string" },
-            "project_id": { "type": "string" }
+            "claim_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
           },
-          "required": ["claim_id", "citation", "project_id"]
+          "required": [
+            "claim_id",
+            "citation",
+            "project_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "claim_id": { "type": "string" },
-            "citation": { "type": "string" },
-            "updated_at": { "type": "number" }
+            "claim_id": {
+              "type": "string"
+            },
+            "citation": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "number"
+            }
           },
-          "required": ["claim_id", "citation", "updated_at"]
+          "required": [
+            "claim_id",
+            "citation",
+            "updated_at"
+          ]
         },
         "capability_required": "write:research_core.db"
       },
@@ -233,18 +441,34 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "project_id": { "type": "string" },
-            "only_unverified": { "type": "boolean" }
+            "task_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "only_unverified": {
+              "type": "boolean"
+            }
           },
-          "required": ["task_id", "project_id"]
+          "required": [
+            "task_id",
+            "project_id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "claims": { "type": "array", "items": { "type": "object" } }
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           },
-          "required": ["claims"]
+          "required": [
+            "claims"
+          ]
         },
         "capability_required": "read:research_core.db"
       }
@@ -263,7 +487,13 @@
     ],
     "billing_hooks": [],
     "linked_sources": [
-      { "kind": "custom", "scope": "read", "target_kinds": ["workspace"] }
+      {
+        "kind": "custom",
+        "scope": "read",
+        "target_kinds": [
+          "workspace"
+        ]
+      }
     ],
     "secrets": [
       {
@@ -275,7 +505,11 @@
         "install_prompt": "Paste your Tavily API key (https://tavily.com — free tier available). Optional: without it, /research deep runs vault-search-only."
       }
     ],
-    "compat": { "coreApi": "^0.1.0" },
-    "build": { "neutronVersion": "0.2.0" }
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.2.0"
+    }
   }
 }

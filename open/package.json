@@ -1,0 +1,28 @@
+{
+  "name": "@neutronai/open",
+  "type": "module",
+  "main": "./server.ts",
+  "private": true,
+  "dependencies": {
+    "@neutronai/agent-dispatch": "workspace:*",
+    "@neutronai/agent-settings": "workspace:*",
+    "@neutronai/auth": "workspace:*",
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/cron": "workspace:*",
+    "@neutronai/doc-search": "workspace:*",
+    "@neutronai/gateway": "workspace:*",
+    "@neutronai/landing": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/onboarding": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/project-credentials": "workspace:*",
+    "@neutronai/reflection": "workspace:*",
+    "@neutronai/reminders": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/scribe": "workspace:*",
+    "@neutronai/skill-forge": "workspace:*",
+    "@neutronai/tasks": "workspace:*",
+    "@neutronai/trident": "workspace:*",
+    "@neutronai/work-board": "workspace:*"
+  }
+}

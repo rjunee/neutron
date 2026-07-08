@@ -5,5 +5,9 @@
   "private": true,
   "devDependencies": {
     "gbrain": "github:garrytan/gbrain#8058144"
+  },
+  "dependencies": {
+    "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
   }
 }

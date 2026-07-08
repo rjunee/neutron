@@ -7,27 +7,21 @@
       "dependencies": {
         "@neutronai/auth": "workspace:*",
         "@neutronai/channels": "workspace:*",
-        "@neutronai/connect": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cron": "workspace:*",
         "@neutronai/gateway": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
-        "@neutronai/landing": "workspace:*",
-        "@neutronai/mcp": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/onboarding": "workspace:*",
+        "@neutronai/open": "workspace:*",
         "@neutronai/persistence": "workspace:*",
-        "@neutronai/reminders": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "@neutronai/tools": "workspace:*",
-        "@neutronai/trident": "workspace:*",
         "@neutronai/watchdog": "workspace:*",
       },
       "devDependencies": {
-        "@happy-dom/global-registrator": "20.9.0",
         "@types/bun": "latest",
         "dependency-cruiser": "17.4.3",
-        "happy-dom": "20.9.0",
         "jose": "^5.9.0",
         "typescript": "5.9.3",
       },
@@ -35,7 +29,11 @@
     "agent-dispatch": {
       "name": "@neutronai/agent-dispatch",
       "dependencies": {
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+        "@neutronai/tools": "workspace:*",
         "@neutronai/trident": "workspace:*",
+        "@neutronai/work-board": "workspace:*",
       },
     },
     "app": {
@@ -43,6 +41,10 @@
       "version": "0.0.1",
       "dependencies": {
         "@neutron/chat-core": "workspace:*",
+        "@neutronai/channels": "workspace:*",
+        "@neutronai/connect": "workspace:*",
+        "@neutronai/landing": "workspace:*",
+        "@neutronai/tabs": "workspace:*",
         "@op-engineering/op-sqlite": "17.0.0",
         "@react-native-async-storage/async-storage": "2.2.0",
         "@shopify/flash-list": "2.3.2",
@@ -76,6 +78,7 @@
     "auth": {
       "name": "@neutronai/auth",
       "dependencies": {
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
       },
@@ -83,8 +86,10 @@
     "channels": {
       "name": "@neutronai/channels",
       "dependencies": {
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
+        "jose": "^5.9.0",
       },
     },
     "chat-core": {
@@ -94,13 +99,22 @@
       "name": "@neutronai/connect",
       "version": "0.0.0",
       "dependencies": {
+        "@neutronai/channels": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
+        "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/onboarding": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
         "jose": "^5.9.0",
       },
       "devDependencies": {
         "gbrain": "github:garrytan/gbrain#8058144",
       },
+    },
+    "contracts": {
+      "name": "@neutronai/contracts",
     },
     "core-sdk": {
       "name": "@neutronai/core-sdk",
@@ -112,33 +126,48 @@
       "name": "@neutronai/agent-settings",
       "version": "0.1.0",
       "dependencies": {
+        "@neutronai/connect": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
       },
     },
     "cores/free/calendar": {
       "name": "@neutronai/calendar-core",
       "version": "0.2.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
-        "@neutronai/runtime": "workspace:*",
+        "@neutronai/gateway": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
+        "@neutronai/tools": "workspace:*",
       },
     },
     "cores/free/code-gen": {
       "name": "@neutronai/codegen-core",
       "version": "0.2.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
+        "@neutronai/prompts": "workspace:*",
       },
     },
     "cores/free/email": {
       "name": "@neutronai/email-managed-core",
       "version": "0.2.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
       },
     },
@@ -148,16 +177,20 @@
       "dependencies": {
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
-        "@neutronai/runtime": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
       },
     },
     "cores/free/reminders": {
       "name": "@neutronai/reminders-core",
       "version": "0.2.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
         "@neutronai/cron": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "@neutronai/reminders": "workspace:*",
         "@neutronai/tasks": "workspace:*",
       },
@@ -166,8 +199,12 @@
       "name": "@neutronai/research-core",
       "version": "0.2.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
       },
     },
     "cores/free/scraping": {
@@ -176,14 +213,19 @@
       "dependencies": {
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
       },
     },
     "cores/free/tasks": {
       "name": "@neutronai/tasks-core",
       "version": "0.2.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "@neutronai/tasks": "workspace:*",
       },
     },
@@ -191,7 +233,10 @@
       "name": "@neutronai/cores-runtime",
       "version": "0.1.0",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "zod": "^3.23.8",
       },
     },
@@ -207,6 +252,7 @@
     "cron": {
       "name": "@neutronai/cron",
       "dependencies": {
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
       },
     },
@@ -220,18 +266,48 @@
     "gateway": {
       "name": "@neutronai/gateway",
       "dependencies": {
+        "@neutron/chat-core": "workspace:*",
+        "@neutronai/agent-dispatch": "workspace:*",
         "@neutronai/agent-settings": "workspace:*",
+        "@neutronai/app": "workspace:*",
+        "@neutronai/auth": "workspace:*",
         "@neutronai/calendar-core": "workspace:*",
+        "@neutronai/channels": "workspace:*",
         "@neutronai/codegen-core": "workspace:*",
+        "@neutronai/connect": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
+        "@neutronai/core-sdk": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
+        "@neutronai/cron": "workspace:*",
+        "@neutronai/doc-search": "workspace:*",
         "@neutronai/email-managed-core": "workspace:*",
+        "@neutronai/gateway": "workspace:*",
         "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/google-workspace-core": "workspace:*",
+        "@neutronai/jwt-validator": "workspace:*",
+        "@neutronai/landing": "workspace:*",
+        "@neutronai/mcp": "workspace:*",
+        "@neutronai/message-search": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/onboarding": "workspace:*",
+        "@neutronai/open": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
+        "@neutronai/project-credentials": "workspace:*",
+        "@neutronai/reminders": "workspace:*",
         "@neutronai/reminders-core": "workspace:*",
         "@neutronai/research-core": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
         "@neutronai/scraping-core": "workspace:*",
+        "@neutronai/scribe": "workspace:*",
+        "@neutronai/skill-forge": "workspace:*",
+        "@neutronai/tabs": "workspace:*",
+        "@neutronai/tasks": "workspace:*",
         "@neutronai/tasks-core": "workspace:*",
+        "@neutronai/tools": "workspace:*",
+        "@neutronai/trident": "workspace:*",
+        "@neutronai/watchdog": "workspace:*",
+        "@neutronai/work-board": "workspace:*",
         "jose": "^5.9.0",
       },
     },
@@ -239,6 +315,10 @@
       "name": "@neutronai/gbrain-memory",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/mcp": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+        "@neutronai/tools": "workspace:*",
       },
       "devDependencies": {
         "gbrain": "github:garrytan/gbrain#8058144",
@@ -257,6 +337,9 @@
       "dependencies": {
         "@assistant-ui/react": "^0.14.23",
         "@neutron/chat-core": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
+        "@neutronai/onboarding": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
         "jose": "^5.9.0",
         "react": "19.1.0",
         "react-dom": "19.1.0",
@@ -265,6 +348,7 @@
         "remark-gfm": "^4.0.0",
       },
       "devDependencies": {
+        "@happy-dom/global-registrator": "20.9.0",
         "@types/react": "~19.1.0",
         "@types/react-dom": "~19.1.0",
       },
@@ -273,8 +357,9 @@
       "name": "@neutronai/mcp",
       "dependencies": {
         "@neutronai/channels": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
         "@neutronai/core-sdk": "workspace:*",
-        "@neutronai/runtime": "workspace:*",
+        "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/tools": "workspace:*",
       },
     },
@@ -288,17 +373,65 @@
     },
     "migrations": {
       "name": "@neutronai/migrations",
+      "dependencies": {
+        "@neutronai/open": "workspace:*",
+      },
     },
     "onboarding": {
       "name": "@neutronai/onboarding",
       "dependencies": {
         "@neutronai/channels": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
+        "@neutronai/cron": "workspace:*",
+        "@neutronai/gateway": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/onboarding": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/reminders": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+        "@neutronai/tasks": "workspace:*",
+        "@neutronai/trident": "workspace:*",
         "jose": "^5.9.0",
+      },
+    },
+    "open": {
+      "name": "@neutronai/open",
+      "dependencies": {
+        "@neutronai/agent-dispatch": "workspace:*",
+        "@neutronai/agent-settings": "workspace:*",
+        "@neutronai/auth": "workspace:*",
+        "@neutronai/channels": "workspace:*",
+        "@neutronai/cron": "workspace:*",
+        "@neutronai/doc-search": "workspace:*",
+        "@neutronai/gateway": "workspace:*",
+        "@neutronai/landing": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/onboarding": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
+        "@neutronai/project-credentials": "workspace:*",
+        "@neutronai/reflection": "workspace:*",
+        "@neutronai/reminders": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+        "@neutronai/scribe": "workspace:*",
+        "@neutronai/skill-forge": "workspace:*",
+        "@neutronai/tasks": "workspace:*",
+        "@neutronai/trident": "workspace:*",
+        "@neutronai/work-board": "workspace:*",
       },
     },
     "persistence": {
       "name": "@neutronai/persistence",
+      "dependencies": {
+        "@neutronai/migrations": "workspace:*",
+      },
+    },
+    "project-credentials": {
+      "name": "@neutronai/project-credentials",
+      "dependencies": {
+        "@neutronai/auth": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
+      },
     },
     "prompts": {
       "name": "@neutronai/prompts",
@@ -312,18 +445,38 @@
     "reminders": {
       "name": "@neutronai/reminders",
       "dependencies": {
+        "@neutronai/channels": "workspace:*",
+        "@neutronai/core-sdk": "workspace:*",
         "@neutronai/cron": "workspace:*",
+        "@neutronai/gateway": "workspace:*",
+        "@neutronai/landing": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
       },
     },
     "runtime": {
       "name": "@neutronai/runtime",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
+        "@neutronai/app": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/gbrain-memory": "workspace:*",
+        "@neutronai/jwt-validator": "workspace:*",
+        "@neutronai/mcp": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+        "@neutronai/scribe": "workspace:*",
+        "@neutronai/tools": "workspace:*",
+        "jose": "^5.9.0",
       },
     },
     "scribe": {
       "name": "@neutronai/scribe",
+      "dependencies": {
+        "@neutronai/gbrain-memory": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+      },
       "devDependencies": {
         "gbrain": "github:garrytan/gbrain#8058144",
       },
@@ -331,34 +484,66 @@
     "skill-forge": {
       "name": "@neutronai/skill-forge",
       "dependencies": {
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/tools": "workspace:*",
       },
+    },
+    "tabs": {
+      "name": "@neutronai/tabs",
     },
     "tasks": {
       "name": "@neutronai/tasks",
       "dependencies": {
+        "@neutronai/contracts": "workspace:*",
+        "@neutronai/cron": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/onboarding": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/reminders": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
       },
     },
     "tools": {
       "name": "@neutronai/tools",
       "dependencies": {
         "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
       },
     },
     "trident": {
       "name": "@neutronai/trident",
       "dependencies": {
+        "@neutronai/auth": "workspace:*",
+        "@neutronai/channels": "workspace:*",
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/project-credentials": "workspace:*",
+        "@neutronai/prompts": "workspace:*",
+        "@neutronai/runtime": "workspace:*",
+        "@neutronai/tools": "workspace:*",
+        "@neutronai/work-board": "workspace:*",
       },
     },
     "watchdog": {
       "name": "@neutronai/watchdog",
       "dependencies": {
         "@neutronai/cron": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
+        "@neutronai/tools": "workspace:*",
+      },
+    },
+    "work-board": {
+      "name": "@neutronai/work-board",
+      "dependencies": {
+        "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/migrations": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "@neutronai/tools": "workspace:*",
       },
     },
@@ -796,6 +981,8 @@
 
     "@neutronai/connect": ["@neutronai/connect@workspace:connect"],
 
+    "@neutronai/contracts": ["@neutronai/contracts@workspace:contracts"],
+
     "@neutronai/core-sdk": ["@neutronai/core-sdk@workspace:core-sdk"],
 
     "@neutronai/cores": ["@neutronai/cores@workspace:cores"],
@@ -828,7 +1015,11 @@
 
     "@neutronai/onboarding": ["@neutronai/onboarding@workspace:onboarding"],
 
+    "@neutronai/open": ["@neutronai/open@workspace:open"],
+
     "@neutronai/persistence": ["@neutronai/persistence@workspace:persistence"],
+
+    "@neutronai/project-credentials": ["@neutronai/project-credentials@workspace:project-credentials"],
 
     "@neutronai/prompts": ["@neutronai/prompts@workspace:prompts"],
 
@@ -848,6 +1039,8 @@
 
     "@neutronai/skill-forge": ["@neutronai/skill-forge@workspace:skill-forge"],
 
+    "@neutronai/tabs": ["@neutronai/tabs@workspace:tabs"],
+
     "@neutronai/tasks": ["@neutronai/tasks@workspace:tasks"],
 
     "@neutronai/tasks-core": ["@neutronai/tasks-core@workspace:cores/free/tasks"],
@@ -857,6 +1050,8 @@
     "@neutronai/trident": ["@neutronai/trident@workspace:trident"],
 
     "@neutronai/watchdog": ["@neutronai/watchdog@workspace:watchdog"],
+
+    "@neutronai/work-board": ["@neutronai/work-board@workspace:work-board"],
 
     "@nodable/entities": ["@nodable/entities@2.1.1", "", {}, "sha512-Pig3HxDIoMgjdEH8OCf/dkcTmLFjJRjWuq8jSnklu284/TKOPibSRERmOykiwmyXTtv61mP+44f3GMx0tLAyjg=="],
 
@@ -2682,7 +2877,7 @@
 
     "write-file-atomic": ["write-file-atomic@4.0.2", "", { "dependencies": { "imurmurhash": "^0.1.4", "signal-exit": "^3.0.7" } }, "sha512-7KxauUdBmSdWnmpaGFg+ppNjKF8uNLry8LyzjauQDOVONfFLNKrKvQOxZ/VuTIcS/gge/YNahf5RIIQWTSarlg=="],
 
-    "ws": ["ws@8.21.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="],
+    "ws": ["ws@6.2.4", "", { "dependencies": { "async-limiter": "~1.0.0" } }, "sha512-PNIUUyLI5YpkJZj60YBzX1o0ByQ4ovvfmq9N/Kig/PAYbVlGyz4R6G0SEWrD0O9acc0sT2+IdMBVLFv8FSi0Nw=="],
 
     "xcode": ["xcode@3.0.1", "", { "dependencies": { "simple-plist": "^1.1.0", "uuid": "^7.0.3" } }, "sha512-kCz5k7J7XbJtjABOvkc5lJmkiDh8VhjVCGNiqdKCscmVpdVUpEAyXv1xmCLkQJ5dsHqx3IPO4XW+NTDhU/fatA=="],
 
@@ -2751,6 +2946,8 @@
     "@expo/cli/glob": ["glob@13.0.6", "", { "dependencies": { "minimatch": "^10.2.2", "minipass": "^7.1.3", "path-scurry": "^2.0.2" } }, "sha512-Wjlyrolmm8uDpm/ogGyXZXb1Z+Ca2B8NbJwqBVg0axK9GbBeoS7yGV6vjXnYdGm6X53iehEuxxbyiKp8QmN4Vw=="],
 
     "@expo/cli/minimatch": ["minimatch@9.0.9", "", { "dependencies": { "brace-expansion": "^2.0.2" } }, "sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg=="],
+
+    "@expo/cli/ws": ["ws@8.21.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="],
 
     "@expo/config/glob": ["glob@13.0.6", "", { "dependencies": { "minimatch": "^10.2.2", "minipass": "^7.1.3", "path-scurry": "^2.0.2" } }, "sha512-Wjlyrolmm8uDpm/ogGyXZXb1Z+Ca2B8NbJwqBVg0axK9GbBeoS7yGV6vjXnYdGm6X53iehEuxxbyiKp8QmN4Vw=="],
 
@@ -2980,8 +3177,6 @@
 
     "@react-native/dev-middleware/serve-static": ["serve-static@1.16.3", "", { "dependencies": { "encodeurl": "~2.0.0", "escape-html": "~1.0.3", "parseurl": "~1.3.3", "send": "~0.19.1" } }, "sha512-x0RTqQel6g5SY7Lg6ZreMmsOzncHFU7nhnRWkKgWuMTu5NN0DR5oruckMqRvacAN9d5w6ARnRBXl9xhDCgfMeA=="],
 
-    "@react-native/dev-middleware/ws": ["ws@6.2.4", "", { "dependencies": { "async-limiter": "~1.0.0" } }, "sha512-PNIUUyLI5YpkJZj60YBzX1o0ByQ4ovvfmq9N/Kig/PAYbVlGyz4R6G0SEWrD0O9acc0sT2+IdMBVLFv8FSi0Nw=="],
-
     "@react-navigation/core/react-is": ["react-is@19.2.7", "", {}, "sha512-kZFnouyVv7eP/Phmrlo9FK+zcAdriZJvzxXHF1Sl1P377WSGe2G/JxVolhTrB/jeV47lKImhNUsijjHAAbcl/A=="],
 
     "@typescript-eslint/typescript-estree/minimatch": ["minimatch@10.2.5", "", { "dependencies": { "brace-expansion": "^5.0.5" } }, "sha512-MULkVLfKGYDFYejP07QOurDLLQpcjk7Fw+7jXS2R2czRQzR56yHRveU5NDJEOviH+hETZKSkIk5c+T23GjFUMg=="],
@@ -3046,6 +3241,8 @@
 
     "gbrain/zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
+    "happy-dom/ws": ["ws@8.21.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="],
+
     "hoist-non-react-statics/react-is": ["react-is@16.13.1", "", {}, "sha512-24e6ynE2H+OKt4kqsOvNd8kBpV65zoxbA4BVsEOB3ARVWQki/DHzaUoC5KuON/BiccDaCCTZBuOcfZs70kR8bQ=="],
 
     "hosted-git-info/lru-cache": ["lru-cache@10.4.3", "", {}, "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ=="],
@@ -3098,6 +3295,8 @@
 
     "openai/@types/node": ["@types/node@18.19.130", "", { "dependencies": { "undici-types": "~5.26.4" } }, "sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg=="],
 
+    "openai/ws": ["ws@8.21.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="],
+
     "ora/chalk": ["chalk@2.4.2", "", { "dependencies": { "ansi-styles": "^3.2.1", "escape-string-regexp": "^1.0.5", "supports-color": "^5.3.0" } }, "sha512-Mti+f9lpJNcwF4tWV8/OrTTtF1gZi+f8FqlyAdouralcFWFQWF2+NgCHShjkCb+IFBLq9buZwE1xckQU4peSuQ=="],
 
     "parse-entities/@types/unist": ["@types/unist@2.0.11", "", {}, "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA=="],
@@ -3131,8 +3330,6 @@
     "react-devtools-core/ws": ["ws@7.5.11", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": "^5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-zS54Oen9bITtp7kp2XM3AydrCIq1D+HwJOuH+c+e4LfpL/lotP5osijd+UoMnxwAam1GN8R4KtLAyIrIcBNpiA=="],
 
     "react-native/commander": ["commander@12.1.0", "", {}, "sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA=="],
-
-    "react-native/ws": ["ws@6.2.4", "", { "dependencies": { "async-limiter": "~1.0.0" } }, "sha512-PNIUUyLI5YpkJZj60YBzX1o0ByQ4ovvfmq9N/Kig/PAYbVlGyz4R6G0SEWrD0O9acc0sT2+IdMBVLFv8FSi0Nw=="],
 
     "react-native-web/@react-native/normalize-colors": ["@react-native/normalize-colors@0.74.89", "", {}, "sha512-qoMMXddVKVhZ8PA1AbUCk83trpd6N+1nF2A6k1i6LsQObyS92fELuk8kU/lQs6M7BsMHwqyLCpQJ1uFgNvIQXg=="],
 
