@@ -565,19 +565,10 @@ test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect
   expect(warnCalls.some((line) => line.includes('loaded from SHARED'))).toBe(false)
 })
 
-test('managed mode: shared env key still refused', async () => {
-  const pool = await resolveLlmCredentials({
-    internal_handle: 'casey-test',
-    apiKeys: api_keys,
-    provider: 'anthropic',
-    env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
-    env: {
-      NEUTRON_ROLE: 'managed',
-      ANTHROPIC_API_KEY: 'sk-ant-shared-global',
-    },
-  })
-  expect(pool).toBeNull()
-})
+// (K11b2 removed a second `NEUTRON_ROLE: 'managed'` shared-key-refused test that
+// was a strict subset of the WARN-checking one above — the managed-mode security
+// pin lives in that test; the retired NEUTRON_DEPLOYMENT_MODE alias no longer
+// grants managed isolation, which is pinned in deployment-mode.test.ts.)
 
 test('connect mode: shared env key also refused (only open may use it)', async () => {
   const pool = await resolveLlmCredentials({

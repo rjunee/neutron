@@ -49,4 +49,53 @@ describe('resolveDeploymentMode', () => {
       expect(resolveDeploymentMode({ NEUTRON_ROLE: 'banana' })).toBe('open')
     })
   })
+
+  // K11b2 — the retired `NEUTRON_DEPLOYMENT_MODE` alias is now INERT: it never
+  // selects a mode, and a box that sets ONLY the alias resolves to the default
+  // `open` (NOT `managed`). It is loudly flagged so an untracked box can't
+  // silently drop managed-only credential isolation.
+  describe('K11b2 — retired NEUTRON_DEPLOYMENT_MODE alias is inert', () => {
+    test('alias-only "managed" resolves to open (alias no longer selects a mode)', () => {
+      expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'managed' })).toBe('open')
+    })
+
+    test('alias is ignored even when NEUTRON_ROLE is unknown (no fallthrough)', () => {
+      expect(
+        resolveDeploymentMode({ NEUTRON_ROLE: 'banana', NEUTRON_DEPLOYMENT_MODE: 'managed' }),
+      ).toBe('open')
+    })
+
+    test('a set alias is surfaced loudly (console.error) for migration', () => {
+      const original = console.error
+      const calls: string[] = []
+      console.error = (...args: unknown[]) => {
+        calls.push(args.map(String).join(' '))
+      }
+      try {
+        expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'managed' })).toBe('open')
+      } finally {
+        console.error = original
+      }
+      expect(
+        calls.some(
+          (l) => l.includes('NEUTRON_DEPLOYMENT_MODE') && l.includes('NEUTRON_ROLE'),
+        ),
+      ).toBe(true)
+    })
+
+    test('no spurious warning when the alias is absent', () => {
+      const original = console.error
+      let count = 0
+      console.error = () => {
+        count += 1
+      }
+      try {
+        expect(resolveDeploymentMode({ NEUTRON_ROLE: 'managed' })).toBe('managed')
+        expect(resolveDeploymentMode({})).toBe('open')
+      } finally {
+        console.error = original
+      }
+      expect(count).toBe(0)
+    })
+  })
 })
