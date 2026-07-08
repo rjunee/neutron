@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `9f201b1` (L3 #262 merged 2026-07-08; no-cycles now HARD-ERROR) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `cffddc2` (C1 #265 merged 2026-07-08; typed BootConfig; no-cycles HARD-ERROR) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -316,15 +316,28 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
      repointed the source-text extraction. **Lesson → [[refactor-lphase-source-text-guardrail-trap]]:
      relocations pass tsc/matrix/depcruise via shims but break by-path source-text guardrails — run the
      FULL `test` check on every L-relocation.**
-2. **IN FLIGHT:** **W5** (chat-core resilience `[BEHAVIOR]`, `opus`, lane transport) — build done (#263)
-   but in **Codex-fix**: 3 real issues (duplicate resume/resend on late `session_ready`; fallback firing
-   on a closed socket → unhandled rejection; GAP-2 `notifyReachable` not wired into the production web
-   `online` listener). Delegated back to the W5 build agent.
-3. **Next dispatchable** (L3 done → composer lane free): **C1** (typed BootConfig, `opus`, lane composer
-   — the flagship long-pole). **M1/M2** = Managed (cross-repo neutron-managed).
-   - **L6** (wire-types leaf, `opus`, lanes transport+clients) — deps met (L1/L2) but **holds until W5
-     lands** (shared transport lane / chat-core). **L5** (relative-import autofix sweep, `haiku`) — deps
-     met (L4) but **holds until W5 lands** (both rewrite chat-core imports).
+2. **C1** ✅ #265 (the flagship BootConfig long-pole).
+   - **C1 note:** `config/` leaf resolves+validates env ONCE into a frozen `BootConfig` (68 fields,
+     verbatim defaults, documented scope-exclusions for Expo/OS/subprocess-IPC/test vars); numeric knobs
+     fail LOUD (no silent NaN); dual-entrypoint DB trap fixed; `open/server.ts` env-mutation → a shim
+     writing FROM config; composer sub-builders still read `process.env` via the shim (marked to die —
+     deliberate follow-up). Codex r1 caught 2 real verbatim-fidelity regressions → FIXED: (a) `.url_slug`
+     effective-home desync (raw `config.ownerHome` ignored the rename on an `OWNER_HOME`-unset box — the
+     legacy `open/server.ts` mutated `OWNER_HOME ||= neutronHome` before boot read it; now resolves from
+     `config.ownerHome ?? config.neutronHome`, the value the shim publishes); (b) `NEUTRON_PORT` lost its
+     canonical-decimal guard (`0x10`→16). Codex r2 port-precedence finding DECLINED (fail-loud is the C1
+     mandate; prod passes a resolved config; explicit-port precedence preserved for valid/unset env; all
+     cited `boot({port:0})` callers pass).
+3. **IN FLIGHT:** **W5** (chat-core resilience `[BEHAVIOR]`, `opus`, lane transport) — build #263,
+   through **3 Codex rounds** (r1: dup-resume-on-late-session_ready + fallback-on-closed-socket + GAP-2
+   web `online` wiring; r2: durable-store `failed`→`queued` round-trip + native mobile ack-timeout parity
+   [+ caught 11 pre-existing mobile heartbeat failures round-1's verify missed] + docs restore; r3:
+   deactivated client springing back to life on a late socket open). FIX 7 pushed; awaiting final Codex +
+   CI + merge.
+4. **Next dispatchable after W5 lands:** **L6** (wire-types leaf, `opus`, lanes transport+clients) — deps
+   met (L1/L2) but **held until W5 lands** (shared transport/chat-core). **L5** (relative-import autofix
+   sweep, `haiku`) — deps met (L4) but **held until W5 lands** (both rewrite chat-core imports). **C2**
+   (boot-helpers split, `opus`, composer) now unblocked (C1 done). **M1/M2** = Managed (cross-repo).
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
