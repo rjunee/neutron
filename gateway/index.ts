@@ -152,9 +152,17 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
  * `NEUTRON_INSTANCE_SLUG` now come from the frozen config instead of a second
  * independent `process.env` read. This keeps the composer + boot from
  * desyncing on the resolved slug (the hazard the C1 brief flags).
+ *
+ * The `.url_slug` lookup uses the EFFECTIVE owner home — `config.ownerHome ??
+ * config.neutronHome` — i.e. the exact value {@link envShimFromBootConfig}
+ * publishes to `OWNER_HOME`. This preserves the old Open flow bit-for-bit: the
+ * legacy `open/server.ts` mutated `process.env.OWNER_HOME ||= neutronHome`
+ * BEFORE `boot()` read it, so an `OWNER_HOME`-unset box with `<NEUTRON_HOME>/
+ * .url_slug` resolved the slug from that file. Reading raw `config.ownerHome`
+ * alone would silently ignore the rename file on such a box.
  */
 export function resolveOwnerSlugFromConfig(config: BootConfig): string {
-  const ownerHome = config.ownerHome
+  const ownerHome = config.ownerHome ?? config.neutronHome
   if (ownerHome !== undefined && ownerHome !== '') {
     const slugFile = join(ownerHome, '.url_slug')
     if (existsSync(slugFile)) {

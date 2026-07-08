@@ -80,4 +80,18 @@ describe('C1 BootConfig — numeric knobs fail loud (never NaN)', () => {
   test('port 0 (random-free-port request) is accepted', () => {
     expect(resolveBootConfig({ NEUTRON_PORT: '0' }).port).toBe(0)
   })
+
+  // Regression (Codex, C1 review): the legacy `resolveListenPort` rejected
+  // non-canonical lexicals via `String(parsed) === fromEnv.trim()`. A naive
+  // `Number(raw)` would silently accept them (`0x10`→16, `1e3`→1000), loosening
+  // validation. The canonical-decimal guard preserves the old strictness.
+  test('non-canonical NEUTRON_PORT lexicals throw (hex / scientific / sign / leading-zero)', () => {
+    for (const bad of ['0x10', '1e3', '+16', '016', '0b1', '1_6']) {
+      expect(() => resolveBootConfig({ NEUTRON_PORT: bad })).toThrow('NEUTRON_PORT')
+    }
+  })
+
+  test('surrounding whitespace on NEUTRON_PORT is tolerated (canonical after trim)', () => {
+    expect(resolveBootConfig({ NEUTRON_PORT: '  9001  ' }).port).toBe(9001)
+  })
 })

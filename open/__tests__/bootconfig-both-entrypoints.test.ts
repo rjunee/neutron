@@ -16,12 +16,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../../tests/support/test-isolation.ts'
-import { boot, type BootHandle } from '../../gateway/index.ts'
+import { boot, resolveOwnerSlugFromConfig, type BootHandle } from '../../gateway/index.ts'
 import { resolveBootConfig, envShimFromBootConfig } from '../../config/index.ts'
 import { startOpenServer } from '../server.ts'
 import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
@@ -115,5 +116,44 @@ describe('C1 — both entrypoints boot against the SAME DB (dual-entrypoint fix)
     expect(resolveBootConfig(process.env).role).toBe('open')
     process.env['NEUTRON_ROLE'] = 'managed'
     expect(resolveBootConfig(process.env).role).toBe('managed')
+  })
+})
+
+// Regression (Codex, C1 review): the legacy `open/server.ts` mutated
+// `process.env.OWNER_HOME ||= neutronHome` BEFORE `boot()` read it for the
+// `.url_slug` lookup. Reading raw `config.ownerHome` alone would silently ignore
+// the rename file on an `OWNER_HOME`-unset box whose `.url_slug` lives in
+// `<NEUTRON_HOME>`. The slug must resolve from the EFFECTIVE owner home
+// (`config.ownerHome ?? config.neutronHome`) — the same value the shim publishes.
+describe('C1 — .url_slug resolves from the effective owner home when OWNER_HOME is unset', () => {
+  test('OWNER_HOME unset + <NEUTRON_HOME>/.url_slug present → slug from file (not instanceSlug)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'c1-urlslug-'))
+    try {
+      writeFileSync(join(dir, '.url_slug'), 'renamed\n')
+      const config = resolveBootConfig({
+        NEUTRON_HOME: dir,
+        OWNER_HOME: undefined,
+        NEUTRON_INSTANCE_SLUG: 'old',
+      })
+      expect(config.ownerHome).toBeUndefined()
+      expect(config.neutronHome).toBe(dir)
+      expect(resolveOwnerSlugFromConfig(config)).toBe('renamed')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('OWNER_HOME unset + no .url_slug file → falls through to NEUTRON_INSTANCE_SLUG', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'c1-urlslug-'))
+    try {
+      const config = resolveBootConfig({
+        NEUTRON_HOME: dir,
+        OWNER_HOME: undefined,
+        NEUTRON_INSTANCE_SLUG: 'old',
+      })
+      expect(resolveOwnerSlugFromConfig(config)).toBe('old')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

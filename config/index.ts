@@ -135,6 +135,18 @@ function optionalIntKnob(name: string, min: number, max: number) {
         })
         return z.NEVER
       }
+      // Canonical-decimal guard, preserved BIT-FOR-BIT from the legacy
+      // `resolveListenPort` (`String(parsed) === fromEnv.trim()`): reject
+      // non-canonical lexicals that `Number()` would silently accept — hex
+      // (`0x10`→16), scientific (`1e3`→1000), signs/leading-zeros (`+16`,
+      // `016`). Trimmed whitespace is allowed (matches `.trim()`).
+      if (String(n) !== raw.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${name}=${JSON.stringify(raw)} is not a canonical decimal integer`,
+        })
+        return z.NEVER
+      }
       if (n < min || n > max) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
