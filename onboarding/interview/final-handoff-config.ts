@@ -32,28 +32,20 @@
  *   - `TELEGRAM_BIND_TOKEN_TTL_MS` — 1-hour validity window per spec.
  *
  * Argus-check: every reference to the mobile-app URL in the prompt
- * builders + landing surface imports `MOBILE_APP_URL` from THIS file —
- * the URL is derived from `NEUTRON_WEB_APP_BASE` in exactly one place
- * (here), never typed out as a literal elsewhere.
+ * builders + landing surface imports `MOBILE_APP_URL` from the canonical
+ * derivation — the URL is derived from `NEUTRON_WEB_APP_BASE` in exactly
+ * one place (`../../contracts/handoff-config.ts` since L2; this file
+ * re-exports it), never typed out as a literal elsewhere.
+ *
+ * L2 (2026-07) — `MOBILE_APP_URL` + `TELEGRAM_BIND_TOKEN_TTL_MS` (and the
+ * private `WEB_APP_BASE` helper) moved to `../../contracts/handoff-config.ts`
+ * (a node-free leaf — critic-layering.md §2.1 edges #7 `landing → onboarding`
+ * and #9 `cores/free/agent-settings → onboarding`); `landing/server.ts` and
+ * `cores/free/agent-settings/src/backend.ts` now import directly from there.
+ * Re-exported below so any other existing import specifier stays valid.
  */
 
-/**
- * Web app base host, env-configured with NO default. On a self-hosted
- * Open install the operator sets `NEUTRON_WEB_APP_BASE` to their web-app
- * origin; when unset it is the empty string and any web-app affordance is
- * absent (Open is local-first).
- */
-const WEB_APP_BASE = (process.env.NEUTRON_WEB_APP_BASE ?? '').replace(/\/+$/, '')
-
-/**
- * The mobile install/landing page (`landing/mobile.html`, served at
- * `/mobile` by `landing/server.ts` on the configured web-app + per-instance
- * surfaces). Native apps are not published yet — the page gives honest
- * Add-to-Home-Screen instructions and coming-soon store placeholders
- * (`landing/mobile-install-config.ts`). Derived from `NEUTRON_WEB_APP_BASE`:
- * empty string when the host is not configured (no hosted default).
- */
-export const MOBILE_APP_URL = WEB_APP_BASE ? `${WEB_APP_BASE}/mobile` : ''
+export { MOBILE_APP_URL, TELEGRAM_BIND_TOKEN_TTL_MS } from '../../contracts/handoff-config.ts'
 
 /**
  * Fallback Telegram bot username (without `@`). Production sets
@@ -62,15 +54,6 @@ export const MOBILE_APP_URL = WEB_APP_BASE ? `${WEB_APP_BASE}/mobile` : ''
  * dev/test runs render a non-empty `t.me/...` URL.
  */
 export const DEFAULT_TELEGRAM_BOT_USERNAME = 'neutron_assistant_bot'
-
-/**
- * TTL for a freshly-minted Telegram-bind token. The brief calls for 1
- * hour so a user who taps the `[B] Connect a Telegram bot` button has
- * comfortable headroom to follow the deep link (open Telegram, hit
- * "Start", land at the bot). The bot-side `/start bind:<token>` handler
- * is a follow-up sprint — see ISSUES.md.
- */
-export const TELEGRAM_BIND_TOKEN_TTL_MS = 60 * 60 * 1_000
 
 /**
  * Resolve the Telegram bot username from env, falling back to the

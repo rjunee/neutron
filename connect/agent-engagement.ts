@@ -15,7 +15,8 @@
  *   - `tag_gated`     — the agent engages ONLY when a member @-mentions it
  *                       (`@neutron`); members converse freely otherwise.
  *
- * This module is PURE (no I/O, no imports) so it can be unit-tested in
+ * This module is PURE (no I/O; its only import is the node-free
+ * `contracts/agent-engagement.ts` leaf, post-L2) so it can be unit-tested in
  * isolation and reused at BOTH the routing seam (the chat-bridge agent-turn
  * trigger) and the project-settings surface. It contains three pieces:
  *
@@ -31,29 +32,21 @@
  * still see each other and the agent has the conversation as context the next
  * time it IS tagged. Persistence is the caller's job; this module never gates
  * it.
+ *
+ * L2 (2026-07) — piece 1 (the mode vocabulary + type guard) moved to
+ * `../contracts/agent-engagement.ts` (a node-free leaf); this file re-exports
+ * it so existing import specifiers stay valid. Pieces 2-4
+ * (`detectAgentMention`, `resolveEngagement`, `classifyTaggedIntent`) are
+ * routing LOGIC, not a stranded contract, and stay here.
  */
 
-/** The two engagement modes a shared project can be in (spec, Ryan-locked). */
-export type AgentEngagementMode = 'tag_gated' | 'all_messages'
-
-/** Every valid mode — iterated by the settings PATCH validator + tests. */
-export const ALL_AGENT_ENGAGEMENT_MODES: readonly AgentEngagementMode[] = [
-  'tag_gated',
-  'all_messages',
-]
-
-/**
- * The schema + write-side default. A new shared project behaves like a
- * single-person chat (the agent sees every message) until the owner opts into
- * `tag_gated` (spec §"DEFAULT", Ryan 2026-06-26). Existing projects therefore
- * need no behaviour change.
- */
-export const DEFAULT_AGENT_ENGAGEMENT_MODE: AgentEngagementMode = 'all_messages'
-
-/** Narrow an untrusted value (wire body / DB read) to a valid mode. */
-export function isAgentEngagementMode(value: unknown): value is AgentEngagementMode {
-  return value === 'tag_gated' || value === 'all_messages'
-}
+import type { AgentEngagementMode } from '../contracts/agent-engagement.ts'
+export type { AgentEngagementMode }
+export {
+  ALL_AGENT_ENGAGEMENT_MODES,
+  DEFAULT_AGENT_ENGAGEMENT_MODE,
+  isAgentEngagementMode,
+} from '../contracts/agent-engagement.ts'
 
 /**
  * The handles/aliases (WITHOUT the leading `@`) that trigger the agent in

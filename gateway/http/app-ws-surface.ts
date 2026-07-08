@@ -54,6 +54,14 @@ import type {
   AppWsClientPlatform,
   AppWsSessionRegistry,
 } from '../../channels/adapters/app-ws/session-registry.ts'
+// L2 (2026-07) — `ChatCommandFilter` + `ChatCommandFilterResult` moved to
+// `../../contracts/chat-command-filter.ts` (a node-free leaf — see that
+// file's header for the "stranded contract" rationale).
+import type {
+  ChatCommandFilter,
+  ChatCommandFilterResult,
+} from '../../contracts/chat-command-filter.ts'
+export type { ChatCommandFilter, ChatCommandFilterResult }
 
 export interface AppWsSocketData {
   /** Discriminator for the multiplexed websocket handler in compose.ts. */
@@ -110,34 +118,6 @@ export interface AppWsSurface {
   websocket: WebSocketHandler<AppWsSocketData>
   /** Surface exposes the underlying adapter so wiring can register it on the router. */
   adapter: AppWsAdapter
-}
-
-/**
- * Pre-dispatch chat-command filter. Returns a non-null response when
- * the inbound is a recognised command (e.g. `/remind <body>`); the
- * surface posts the response back via the session registry and SKIPS
- * `adapter.dispatchInbound` so the LLM path doesn't fire. Returning
- * `null` lets the inbound fall through to the normal LLM dispatch.
- */
-export interface ChatCommandFilter {
-  match(input: {
-    user_id: string
-    project_slug: string
-    channel_topic_id: string
-    project_id?: string
-    body: string
-  }): Promise<ChatCommandFilterResult | null>
-}
-
-export interface ChatCommandFilterResult {
-  /** A short reply line for the chat surface to render. */
-  text: string
-  /** Optional structured payload (search hits, drawer list, etc.). */
-  data?: unknown
-  /** Optional deep-link the channel may surface as a tap target. */
-  deep_link?: string
-  /** Populated only when the command was malformed or denied. */
-  error?: { code: string; message: string }
 }
 
 export interface CreateAppWsSurfaceOptions {

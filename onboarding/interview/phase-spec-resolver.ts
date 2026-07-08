@@ -45,6 +45,10 @@ import { STATIC_PHASE_SPECS } from './phase-prompts.ts'
 import { RESERVED_OPTION_VALUES } from '../../channels/button-primitive.ts'
 import type { RequiredField } from './required-fields-audit.ts'
 import { CONVERSATIONAL_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
+// L2 (2026-07) — `LlmCallFn` moved to `../../contracts/llm-call.ts` (a
+// node-free leaf so `tasks/prioritize-llm.ts` can depend on the signature
+// without importing this package — critic-layering.md §2.1 edge #10).
+import type { LlmCallFn } from '../../contracts/llm-call.ts'
 
 // ---------------------------------------------------------------------------
 // Context bundle
@@ -1251,12 +1255,12 @@ export interface PhaseSpecResolver {
  * Substrate-shaped LLM call. Production wires Anthropic Haiku 4.5 via the
  * instance-resolved Anthropic credentials; tests inject a stub returning
  * a deterministic JSON string.
+ *
+ * L2 (2026-07) — moved to `../../contracts/llm-call.ts`; re-exported here
+ * (imported above for local use in `LlmPhaseSpecResolverDeps` below) so
+ * existing import specifiers stay valid.
  */
-export type LlmCallFn = (input: {
-  system: string
-  user: string
-  max_tokens: number
-}) => Promise<string>
+export type { LlmCallFn }
 
 export interface LlmPhaseSpecResolverDeps {
   /** Anthropic Messages API substrate. Resolver wraps with timeout. */

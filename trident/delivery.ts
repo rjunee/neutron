@@ -29,23 +29,19 @@
  * It talks to the channel layer through a minimal structural `OutboundSink`
  * (one `send` method) that the production `ChannelRouter` satisfies, so the
  * trident package never imports the channels runtime.
+ *
+ * L2 (2026-07) — `OutboundSink` (independently declared here AND in
+ * `gateway/proactive/sink.ts`, byte-identical shape) unified onto
+ * `./outbound-sink.ts`; this file re-exports it so existing import
+ * specifiers stay valid.
  */
 
 import type { InlineChoice, OutgoingMessage, Topic } from '../channels/types.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
-
-/**
- * Minimal structural outbound seam — the subset of `ChannelRouter` this
- * module needs. `ChannelRouter.send(OutgoingMessage)` satisfies it
- * structurally, so production passes the router directly; tests pass a
- * recording fake. Kept structural (not an import of `ChannelRouter`) so
- * the trident package stays free of the channels runtime.
- */
-export interface OutboundSink {
-  send(message: OutgoingMessage): Promise<string>
-}
+import type { OutboundSink } from './outbound-sink.ts'
+export type { OutboundSink }
 
 /** The composed body + optional buttons for a terminal result post. */
 export interface ComposedDelivery {

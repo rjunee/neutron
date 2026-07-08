@@ -8,19 +8,17 @@
  * local (not an import of `ChannelRouter`) so the proactive modules stay free
  * of the channels runtime and are trivially faked in tests with a recording
  * sink.
+ *
+ * L2 (2026-07) — `OutboundSink` (independently declared here AND in
+ * `trident/delivery.ts`, byte-identical shape) unified onto
+ * `trident/outbound-sink.ts`; this file re-exports it so existing import
+ * specifiers stay valid.
  */
 
 import type { OutgoingMessage, Topic } from '../../channels/types.ts'
+import type { OutboundSink } from '../../trident/outbound-sink.ts'
 
-export type { OutgoingMessage, Topic }
-
-/**
- * Minimal outbound seam — the subset of `ChannelRouter` the proactive layer
- * needs. `ChannelRouter.send(OutgoingMessage)` satisfies it structurally.
- */
-export interface OutboundSink {
-  send(message: OutgoingMessage): Promise<string>
-}
+export type { OutgoingMessage, Topic, OutboundSink }
 
 /**
  * Build a `Topic` for a proactive post from a raw `channel_topic_id`

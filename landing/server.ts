@@ -33,12 +33,15 @@ import { fileURLToPath } from 'node:url'
 // 2026-05-28 final-handoff sprint — re-export the canonical MOBILE_APP_URL
 // constant so the landing surface (favicon link, OG meta, future deep-link
 // route, debug pages) can reference it without duplicating the string. The
-// single source of truth lives in `onboarding/interview/final-handoff-config.ts`
-// alongside the prompt builders that surface the URL to the user. A grep for
-// the URL literal across .ts sources should match only that one definition —
-// see `landing/__tests__/mobile-app-url-constant.test.ts` which guards the
+// single source of truth lives in `contracts/handoff-config.ts` (moved there
+// L2, 2026-07 — critic-layering.md §2.1 edge #7 `landing → onboarding`;
+// `onboarding/interview/final-handoff-config.ts`, which owns the adjacent
+// prompt builders that surface the URL to the user, keeps its own re-export
+// of the same leaf). A grep for the URL literal across .ts sources should
+// match only that one definition — see
+// `landing/__tests__/mobile-app-url-constant.test.ts` which guards the
 // property.
-export { MOBILE_APP_URL } from '../onboarding/interview/final-handoff-config.ts'
+export { MOBILE_APP_URL } from '../contracts/handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'

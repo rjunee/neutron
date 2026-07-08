@@ -30,19 +30,11 @@
  */
 
 import type { Event } from '../../events.ts'
-
-export interface McpToolResolver {
-  /**
-   * Resolve a tool call against the per-instance MCP server. The resolver is
-   * the boundary between "substrate" and "tool runtime" — at S3 the per-instance
-   * MCP server hasn't shipped yet, so callers can pass a minimal in-process
-   * resolver for tests. P1 S4 lands the production resolver.
-   *
-   * Returns the JSON-serialisable result. Throws to signal a tool-runtime
-   * error; the shim surfaces those as an `error` event with `retryable: false`.
-   */
-  (call: { call_id: string; tool_name: string; args: unknown }): Promise<unknown>
-}
+// L2 (2026-07) — `McpToolResolver` moved to `../../../contracts/mcp-tool-resolver.ts`
+// (a node-free leaf so `mcp/server.ts` can depend on the shape without
+// importing `runtime` — critic-layering.md §2.1 edge #11: `mcp → runtime`).
+import type { McpToolResolver } from '../../../contracts/mcp-tool-resolver.ts'
+export type { McpToolResolver }
 
 export interface McpShimOptions {
   /** Resolver — see McpToolResolver. */
