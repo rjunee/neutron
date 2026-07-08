@@ -2,5 +2,8 @@
   "name": "@neutronai/tabs",
   "type": "module",
   "main": "./registry.ts",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@neutronai/wire-types": "workspace:*"
+  }
 }

@@ -48,6 +48,7 @@
     "work-board",
     "project-credentials",
     "contracts",
+    "wire-types",
     "config"
   ],
   "scripts": {

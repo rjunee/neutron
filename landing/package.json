@@ -9,6 +9,7 @@
     "@neutronai/contracts": "workspace:*",
     "@neutronai/onboarding": "workspace:*",
     "@neutronai/runtime": "workspace:*",
+    "@neutronai/wire-types": "workspace:*",
     "jose": "^5.9.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",

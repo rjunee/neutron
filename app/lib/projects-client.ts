@@ -20,12 +20,15 @@ export type PrivacyMode = 'private' | 'public';
 export type BillingMode = 'personal';
 
 /**
- * Connect group-chat agent engagement mode. The app side keeps its own copy
- * of this literal union (mirroring `PrivacyMode` above) so the client bundle
- * doesn't import the gateway's `connect/agent-engagement.ts`. Source of truth
- * is that module + migration 0088; this duplicate must stay in lockstep.
+ * Connect group-chat agent engagement mode. L6: no longer a hand mirror — the
+ * vocabulary is owned by `@neutronai/contracts` (L2 leaf, `agent-engagement.ts`)
+ * and re-exported by the node-free `@neutronai/wire-types` leaf, which the Expo
+ * bundle may import (contracts-band, `app-bundle-purity`-safe). Imported for
+ * local use here + re-exported so `app/lib/projects.ts` + the settings UI keep
+ * resolving it from this module.
  */
-export type AgentEngagementMode = 'tag_gated' | 'all_messages';
+import type { AgentEngagementMode } from '@neutronai/wire-types';
+export type { AgentEngagementMode } from '@neutronai/wire-types';
 
 export const ALL_PRIVACY_MODES: readonly PrivacyMode[] = ['private', 'public'];
 

@@ -1,606 +1,70 @@
 /**
- * @neutronai/channels/app-ws — wire envelopes for the Expo-app WebSocket
- * surface (P5.1 + P5.2).
+ * @neutronai/channels/app-ws — wire envelopes for the Expo-app / web-React
+ * WebSocket surface (P5.1 + P5.2).
  *
- * The shape is intentionally a strict superset of the existing landing
- * `ChatOutbound` (`type: 'agent_message'` etc.) so the Expo client and
- * the landing `chat.ts` client can converge on a single renderer in a
- * later P5 sprint without breaking either surface today.
+ * ── L6 (2026-07): types moved to `@neutronai/wire-types` ──────────────────
+ * The envelope UNION + all its member interfaces were extracted into the
+ * node-free `@neutronai/wire-types` leaf so the pure clients (Expo app,
+ * landing React) can import ONE source instead of the hand mirror that used
+ * to live at `app/lib/ws-envelope.ts` (deleted in L6). This file is now the
+ * channel-side barrel: it RE-EXPORTS those types (so every existing
+ * server-side import specifier `channels/adapters/app-ws/envelope` stays
+ * valid) and KEEPS the runtime decode/sanitize VALUE helpers + the wire caps,
+ * which encode channel-side validation rather than the wire shape. The
+ * `appWsTopicId` / `appWsProjectTopicId` / `parseAppWsTopicId` derivation also
+ * moved to `@neutronai/wire-types` (`./topic-id.ts`) — re-exported below.
  *
- * Versioning: every envelope carries `v: 1`. Future envelopes that
- * introduce breaking field shapes bump `v` and ship a new union
- * member — the Expo client drops envelopes whose `v` it doesn't
- * understand.
- *
- * P5.2 — every inbound and outbound envelope (except the synthetic
- * `error` envelope) carries an optional `project_id`. The client
- * tags messages with the active project; the gateway stashes the
- * value on the AppWsAdapter session and echoes it back so the client
- * shows the message in the right project transcript. Per-project
- * routing inside the agent loop is a later P5.x concern — for now
- * the gateway just round-trips the value (sprint roadmap § 4 / P5.2
- * out-of-scope note).
+ * The shape is a strict superset of the landing `ChatOutbound`. Versioning:
+ * every envelope carries `v: 1`; a breaking field shape bumps `v` and ships a
+ * new union member — the client drops envelopes whose `v` it doesn't understand.
  */
 
-export interface AppWsInboundUserMessage {
-  v: 1
-  type: 'user_message'
-  body: string
-  /** Client-generated id used for echo correlation (optional). */
-  client_msg_id?: string
-  /** P5.2 — project this message belongs to. Optional for back-compat. */
-  project_id?: string
-  /**
-   * P5.1 — image attachment URLs uploaded before the send. The client
-   * uploads each attachment via the gateway's upload endpoint, then
-   * the returned URL rides on this field. Capped at 8 entries / 512
-   * chars per URL by `decodeAppWsInbound` so a malformed client can't
-   * push huge arrays through the wire.
-   */
-  attachments?: ReadonlyArray<string>
-}
+import type {
+  AppWsInbound,
+  AppWsInboundUserMessage,
+  AppWsInboundResume,
+  AppWsInboundReceipt,
+  AppWsInboundReaction,
+  AppWsInboundEdit,
+  AppWsInboundButtonChoice,
+} from '@neutronai/wire-types'
 
-/**
- * Chat-sync foundation (Phase 1) — gap-fill request. A reconnecting (or
- * second) device sends `{ v:1, type:'resume', after_seq:N }` and the surface
- * replays `WHERE topic_id = ? AND seq > N ORDER BY seq` from the durable
- * message log so the client fills the gap it missed while the socket was
- * down. `after_seq:0` (a cold client with an empty local store) replays the
- * whole transcript (bounded by the server's replay page size).
- */
-export interface AppWsInboundResume {
-  v: 1
-  type: 'resume'
-  /** Highest server `seq` the client has already applied locally. */
-  after_seq: number
-}
+// L6 — re-export the full envelope wire-type union (owned by
+// @neutronai/wire-types) so consumers of this module keep working unchanged.
+export type {
+  AppWsInbound,
+  AppWsInboundUserMessage,
+  AppWsInboundResume,
+  AppWsInboundReceipt,
+  AppWsInboundReaction,
+  AppWsInboundEdit,
+  AppWsInboundButtonChoice,
+  AppWsOutbound,
+  AppWsOutboundSessionReady,
+  AppWsOutboundUserMessageEcho,
+  AppWsOutboundAgentMessageOption,
+  AppWsOutboundAgentMessageDocRef,
+  AppWsOutboundAgentMessageUploadAffordance,
+  AppWsOutboundAgentMessage,
+  AppWsOutboundAgentMessagePartial,
+  AppWsOutboundError,
+  AppWsOutboundAgentTyping,
+  AppWsOutboundProjectsChanged,
+  AppWsOutboundReceiptUpdate,
+  AppWsOutboundReactionUpdate,
+  AppWsOutboundEditUpdate,
+  AppWsWorkBoardItem,
+  AppWsRunProgress,
+  AppWsOutboundWorkBoardChanged,
+  AppWsOutboundImportProgress,
+  AppWsOutboundOnboardingCompleted,
+  WireAgentMessageOption,
+} from '@neutronai/wire-types'
 
-/**
- * Track B Phase 4 (delivery + read receipts) — a client reports it has READ
- * (viewed) a message. Delivery is server-tracked (recorded for every connected
- * device at fan-out time), so the only receipt a client sends is `read`. The
- * server attributes it to the SOCKET's device id (stashed at upgrade) — the
- * client never self-reports a device id here, so it can't forge another
- * device's receipt. `seq` is the message's server seq when the client knows it
- * (orders/scopes the replay); omitted otherwise.
- */
-export interface AppWsInboundReceipt {
-  v: 1
-  type: 'receipt'
-  message_id: string
-  state: 'read'
-  seq?: number
-}
-
-/**
- * Track B Phase 4 (message reactions) — a client adds or removes an emoji
- * reaction on a message. The server attributes it to the SOCKET's device id
- * (stashed at upgrade) — the client never self-reports a device id here, so it
- * can't forge another device's reaction (same anti-forge posture as the read
- * receipt). `seq` is the message's server seq when the client knows it; omitted
- * otherwise.
- */
-export interface AppWsInboundReaction {
-  v: 1
-  type: 'reaction'
-  message_id: string
-  emoji: string
-  action: 'add' | 'remove'
-  seq?: number
-}
-
-/**
- * Track B Phase 4 (message edit/delete) — a client edits or deletes a message it
- * authored. The server AUTHORIZES it against the message's author (resolved from
- * the message log) — a human socket may mutate `user` messages, the agent may
- * mutate `agent` messages — and the editor is taken from the SOCKET, never the
- * frame. `body` is the new text on an `edit`; absent/ignored on a `delete`.
- * `seq` is the message's server seq when the client knows it; omitted otherwise.
- */
-export interface AppWsInboundEdit {
-  v: 1
-  type: 'edit'
-  message_id: string
-  action: 'edit' | 'delete'
-  body?: string
-  seq?: number
-}
-
-/**
- * Onboarding consolidation (2026-06-26) — a button/quick-reply CHOICE from the
- * client. When the unified chat surface is in onboarding mode the agent emits
- * `agent_message` envelopes carrying `options[]` + `prompt_id`; tapping an option
- * sends THIS frame so the server can resolve the structured choice against the
- * engine's persisted `button_prompts` row (NOT a freeform text answer — a
- * button-only phase has `allow_freeform:false`, so the choice MUST carry the
- * `prompt_id` + `choice_value` to advance deterministically). Kept as a SEPARATE
- * decoder (like resume/receipt/reaction/edit) so the user_message path keeps its
- * narrow type. `freeform_text` rides along only when the active prompt allowed a
- * typed answer (`choice_value === '__freeform__'`).
- */
-export interface AppWsInboundButtonChoice {
-  v: 1
-  type: 'button_choice'
-  prompt_id: string
-  choice_value: string
-  freeform_text?: string
-}
-
-export type AppWsInbound = AppWsInboundUserMessage
-
-export interface AppWsOutboundSessionReady {
-  v: 1
-  type: 'session_ready'
-  user_id: string
-  project_slug: string
-  topic_id: string
-  ts: number
-  /** P5.2 — project_id carried on the upgrade query string. */
-  project_id?: string
-  /**
-   * Chat-sync foundation — the highest persisted `seq` for this topic at
-   * connect time. Lets a client that already holds the full transcript skip
-   * an unnecessary `resume` round-trip (it only resumes when its local
-   * cursor < `last_seen_seq`). Absent when the topic has no persisted
-   * messages or the durable log isn't wired.
-   */
-  last_seen_seq?: number
-}
-
-export interface AppWsOutboundUserMessageEcho {
-  v: 1
-  type: 'user_message'
-  user_id: string
-  body: string
-  message_id: string
-  ts: number
-  /** Echoed back when the inbound carried one. Lets the client correlate. */
-  client_msg_id?: string
-  /** P5.2 — echoed so the client can show the message in the right project. */
-  project_id?: string
-  /** P5.1 — echoed attachments so the optimistic bubble can reconcile. */
-  attachments?: ReadonlyArray<string>
-  /**
-   * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
-   * The client orders by `seq` (never by clock) and advances its resume
-   * cursor to `max(seq)`. Absent when the durable log isn't wired (legacy
-   * in-memory-only behaviour).
-   */
-  seq?: number
-  /**
-   * Track B Phase 4 — receipt aggregate carried inline on the message. The
-   * server records `delivered` for every device connected at fan-out time and
-   * stamps the list here (so a receiving device knows it's been delivered);
-   * `read_by` is folded on replay so a reconnecting device sees current read
-   * state. Both absent when the receipt log isn't wired.
-   */
-  delivered_by?: ReadonlyArray<string>
-  read_by?: ReadonlyArray<string>
-}
-
-export interface AppWsOutboundAgentMessageOption {
-  label: string
-  body: string
-  value: string
-  image_url?: string
-  decoration?: {
-    style?: 'default' | 'destructive' | 'primary'
-    icon_custom_emoji_id?: string
-  }
-}
-
-export interface AppWsOutboundAgentMessageDocRef {
-  /** Human-readable label rendered next to the link in the client. */
-  label: string
-  /** Channel-resolved URL — `neutron://docs/...` for project-scoped. */
-  url: string
-  /** Owner project_id, or null for vault-legacy references. */
-  project_id: string | null
-  /** Path relative to the project's `docs/` root (or vault root). */
-  path: string
-}
-
-/**
- * M2 chat-upload UX — drives the Expo client's upload affordances during
- * onboarding phases that expect a ChatGPT / Claude export ZIP. Mirrors the
- * landing `ChatOutbound.upload_affordance` so a single `phase-prompts`
- * metadata field renders the same drag-drop / file-picker hint across both
- * web chat surfaces. Absent on every other agent_message; the client treats
- * absence as "clear the affordance" so the hint disappears when the engine
- * advances past the import phases.
- */
-export interface AppWsOutboundAgentMessageUploadAffordance {
-  source: 'chatgpt' | 'claude'
-}
-
-export interface AppWsOutboundAgentMessage {
-  v: 1
-  type: 'agent_message'
-  body: string
-  message_id: string
-  ts: number
-  prompt_id?: string
-  options?: ReadonlyArray<AppWsOutboundAgentMessageOption>
-  allow_freeform?: boolean
-  kind?: 'buttons' | 'image-gallery'
-  /** Optional inline citations: array of `{ title, url }` pairs. */
-  citations?: ReadonlyArray<{ title: string; url: string }>
-  /** Optional image URLs the client should render below the body. */
-  image_urls?: ReadonlyArray<string>
-  /**
-   * P7.3 — structured doc references resolved against the app channel.
-   * Each entry has a deep-link URL the Expo client can pass to
-   * `Linking.openURL(...)` to land in the in-app doc reader at the
-   * referenced location. Inline `[label](docs:/...)` markers in
-   * `body` are pre-rewritten to the same `neutron://docs/...` URL
-   * shape; this field is for the agent's structured-citation slot
-   * (the docs-side mirror of `citations`).
-   */
-  doc_refs?: ReadonlyArray<AppWsOutboundAgentMessageDocRef>
-  /** P5.2 — project this agent message belongs to. */
-  project_id?: string
-  /**
-   * ISSUE #18 — top-level deep-link the client should consider navigating
-   * to after rendering the message. The Expo client's
-   * `<ChatDeepLinkNavigator>` consumes this once per message_id via
-   * `router.push(deep_link)`. Cores emit at the top level of the envelope
-   * (NOT nested under a Core-private metadata field) so one client-side
-   * consumer handles every Core's deep-link uniformly.
-   */
-  deep_link?: string
-  /**
-   * M2 chat-upload UX — when set, the Expo client shows a phase-aware hint
-   * above the composer + accepts ZIP drag-drop / paste / picker for the
-   * advertised source(s). Absence on subsequent agent_messages clears the
-   * affordance so the hint disappears as the engine leaves the import
-   * phases.
-   */
-  upload_affordance?: AppWsOutboundAgentMessageUploadAffordance
-  /**
-   * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
-   * Ordering + resume-cursor key, same semantics as the user echo's `seq`.
-   * Absent when the durable log isn't wired.
-   */
-  seq?: number
-  /**
-   * Track B Phase 4 — receipt aggregate carried inline (same semantics as the
-   * user echo). `delivered_by` = devices connected at fan-out; `read_by` folded
-   * on replay. The client's UI doesn't show ticks on agent messages, but the
-   * read state still drives cross-device unread reconciliation.
-   */
-  delivered_by?: ReadonlyArray<string>
-  read_by?: ReadonlyArray<string>
-  /**
-   * FIX #333 — a TRANSIENT system notification (the cold-start "⏳ Waking up…"
-   * ack): the client renders it as a quiet centered system pill, and it is
-   * NEVER persisted to the durable chat_log (no `seq`), so a reload can't
-   * re-hydrate it as a chat bubble. Absent for a normal agent reply.
-   */
-  system_notice?: boolean
-}
-
-/**
- * P5.1 — streaming chunk for an in-flight agent message.
- *
- * Successive partials for the same `message_id` append to a growing
- * buffer client-side; the final canonical `AppWsOutboundAgentMessage`
- * replaces the buffer with the full body + attaches metadata. The
- * server-side substrate dispatcher does NOT emit these envelopes today
- * (P5.1 ships the client primitive only); a later P5.x sprint wires
- * the chunked-emit path when the agent loop opts in.
- */
-export interface AppWsOutboundAgentMessagePartial {
-  v: 1
-  type: 'agent_message_partial'
-  /** Stable id across the stream — the final `agent_message` carries the same id. */
-  message_id: string
-  /** Text appended to the client buffer. */
-  body_delta: string
-  /** Server-emit time of this chunk. */
-  ts: number
-  /** P5.2 parity — project this stream belongs to. */
-  project_id?: string
-}
-
-export interface AppWsOutboundError {
-  v: 1
-  type: 'error'
-  code: string
-  message: string
-}
-
-/**
- * Chat transport — server-authoritative typing indicator (Ryan-directed
- * "we have a typing indicator for this purpose"). Emitted on the app-ws path
- * the moment the gateway begins working a live-agent turn (`state:'start'`)
- * and again when the turn settles (`state:'end'`, on BOTH success and
- * failure). Unlike a client-side optimistic guess, this is driven by the
- * server actually picking up + finishing the turn, so warm turns (every turn
- * after the cold first one) get a real "agent is replying…" affordance for
- * their whole 5–240s duration.
- *
- * EPHEMERAL by design: typing frames are NOT persisted to the chat log and
- * carry no `seq` — they're fanned directly to the topic's live devices and
- * never replayed on `resume` (a stale "typing…" must never survive a
- * reconnect). The client clears typing on the next `agent_message` regardless,
- * so a dropped `end` frame can't wedge the indicator. Back-to-back `start`
- * frames are idempotent for the client (it just stays in the typing state).
- *
- * Mirrors the legacy `web:` path's `agent_typing_start` / `agent_typing_end`
- * `ChatOutbound` frames (`landing/server.ts`) collapsed into one envelope with
- * a `state` discriminator so the Expo wire union stays compact.
- */
-export interface AppWsOutboundAgentTyping {
-  v: 1
-  type: 'agent_typing'
-  /** `start` when the agent begins a turn; `end` when it settles. */
-  state: 'start' | 'end'
-  ts: number
-  /** P5.2 parity — project the in-flight turn belongs to. */
-  project_id?: string
-}
-
-/**
- * Single-owner Open — a live project-list refresh.
- *
- * THE BUG (P2 follow-up to #84): the served `/chat` HTML injects the owner's
- * project list ONCE at page-load (`open/composer.ts` projectsBootstrapScript).
- * A brand-new owner bootstraps with `__neutron_projects=[]`; when onboarding
- * then CREATES projects in the SAME session there was no signal to refresh, so
- * the Documents/Tasks/Admin tabs only appeared after a manual reload. The
- * server fans this frame out over the app-ws topic the moment the project set
- * changes; the client refreshes its rail + (when transitioning General→a first
- * project) auto-selects it so the per-project tabs render live, no reload.
- *
- * Carries the full canonical list (not a delta) so the client apply is
- * idempotent + order-independent — the same shape the page bootstrap injects.
- */
-export interface AppWsOutboundProjectsChanged {
-  v: 1
-  type: 'projects_changed'
-  /**
-   * Fresh canonical project list, mirroring the boot bootstrap. Each entry
-   * carries the rail-redesign fields alongside id + label:
-   *   - `emoji`   — the resolved rail glyph (never empty; a default when unset).
-   *   - `unread`  — count of unread agent messages on this project (0 = caught
-   *                 up; honest, never a fabricated badge).
-   *   - `last_activity_at` — ISO activity sort key; the list is already ordered
-   *                 most-recent-first, but the client keeps it for local re-sort.
-   *   - `activity` — M1 UX REDESIGN: ONE derived rail state (`idle`/`working`/
-   *                 `attention`) — working = a live chat turn or live build or
-   *                 inline action; attention (wins) = a failed-not-done item or a
-   *                 stalled live run.
-   *   - `preview` / `preview_from` — M1 UX REDESIGN: the last chat message,
-   *                 markdown-stripped + server-truncated (~90 chars), and who sent
-   *                 it (`user`/`agent`) so the rail can prefix `You: `. Null = none.
-   *   - `live_runs` — M1 UX REDESIGN: count of the project's live (non-terminal)
-   *                 bound runs, for the Work-tab badge + pane toggle count.
-   */
-  projects: ReadonlyArray<{
-    id: string
-    label: string
-    emoji: string
-    unread: number
-    last_activity_at: string
-    activity: 'idle' | 'working' | 'attention'
-    preview: string | null
-    preview_from: 'user' | 'agent' | null
-    live_runs: number
-  }>
-  /**
-   * The project the client should make active when it currently has none — the
-   * first project, mirroring the page bootstrap's `active_project_id`. Null when
-   * the list is empty. The client only auto-selects on a 0→N transition so it
-   * never hijacks a user who deliberately navigated to General.
-   */
-  active_project_id: string | null
-  ts: number
-}
-
-/**
- * Track B Phase 4 — a receipt-state update for one already-delivered message.
- * Fanned out to EVERY device on the topic whenever a device reads a message
- * (or the agent reads an inbound user message). Carries the FULL current
- * aggregate (not a delta) so the client merge is idempotent + order-independent
- * — the same union semantics as the inline `delivered_by`/`read_by` on the
- * message envelope. Also replayed (per message with receipts) after a resume.
- */
-export interface AppWsOutboundReceiptUpdate {
-  v: 1
-  type: 'receipt_update'
-  message_id: string
-  /** The message's server seq (lets a client scope/ignore stale updates). */
-  seq?: number
-  delivered_by: ReadonlyArray<string>
-  read_by: ReadonlyArray<string>
-  ts: number
-  /** P5.2 parity — project the underlying message belongs to. */
-  project_id?: string
-}
-
-/**
- * Track B Phase 4 (message reactions) — the FULL current reaction aggregate for
- * one message. Fanned out to EVERY device on the topic whenever a device
- * adds/removes a reaction, and replayed (per message with reactions) after a
- * resume. Unlike the receipt aggregate (a monotonic union the client
- * accumulates), the client REPLACES its reaction set with whichever
- * `reaction_update` carries the highest `rev` — that's what lets a removal
- * actually clear a reaction.
- */
-export interface AppWsOutboundReactionUpdate {
-  v: 1
-  type: 'reaction_update'
-  message_id: string
-  /** The message's server seq (lets a client scope/ignore stale updates). */
-  seq?: number
-  /** Monotonic per-message reaction revision (last-writer-wins key). */
-  rev: number
-  /** The active `(emoji, device_id)` reactions on the message. */
-  reactions: ReadonlyArray<{ emoji: string; device_id: string }>
-  ts: number
-  /** P5.2 parity — project the underlying message belongs to. */
-  project_id?: string
-}
-
-/**
- * Track B Phase 4 (message edit/delete) — the current edit state of one message.
- * Fanned out to EVERY device on the topic whenever the author edits/deletes a
- * message, and replayed (per edited/deleted message) after a resume. The client
- * REPLACES its body with whichever `edit_update` carries the highest `rev`
- * (last-writer-wins, chat-core `pickEditState`); a `deleted` update tombstones
- * the bubble and clears the body.
- */
-export interface AppWsOutboundEditUpdate {
-  v: 1
-  type: 'edit_update'
-  message_id: string
-  /** The message's server seq (lets a client scope/ignore stale updates). */
-  seq?: number
-  /** Monotonic per-message edit revision (last-writer-wins key). */
-  rev: number
-  /** The message's current body after the edit (`''` for a delete tombstone). */
-  body: string
-  /** True once the message has been tombstoned (deleted). */
-  deleted: boolean
-  /** unix-ms time of the edit/delete (drives the "edited" marker). */
-  edited_at: number
-  ts: number
-  /** P5.2 parity — project the underlying message belongs to. */
-  project_id?: string
-}
-
-/**
- * One Work Board row, in wire shape. Decoupled from `work-board/store.ts`'s
- * `WorkBoardItem` (the envelope module stays dependency-free); the composer's
- * push helper maps the store rows onto this shape.
- */
-export interface AppWsWorkBoardItem {
-  id: string
-  title: string
-  status: 'upcoming' | 'in_progress' | 'done' | 'failed'
-  sort_order: number
-  design_doc_ref: string | null
-  inline_active: boolean
-  linked_run_id: string | null
-  created_at: string
-  updated_at: string
-  completed_at: string | null
-  /**
-   * Item 1 (M1 trident-UX hardening) — the bound trident run's LIVE progress,
-   * present ONLY on an item whose `linked_run_id` names a live run. Mirrors
-   * `RunProgress` (`trident/run-progress.ts`); the client renders it as a compact
-   * sub-label ("🔨 building · round 1 · 4m", "⚠️ stalled 11m", "✅ merged · PR #7").
-   */
-  run_progress?: AppWsRunProgress
-}
-
-/** Item 1 — the wire shape of a bound run's live progress (see `RunProgress`). */
-export interface AppWsRunProgress {
-  run_id: string
-  phase_label: 'planning' | 'building' | 'reviewing' | 'merged' | 'failed' | 'cancelled'
-  round: number
-  started_at: string
-  last_advanced_at: string
-  elapsed_ms: number
-  stalled: boolean
-  stalled_ms: number | null
-  pr: number | null
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
-  failure_reason: string | null
-}
-
-/**
- * Work Board (Phase 1a) — the FULL current board snapshot for one project,
- * fanned out to every device on the owner's topic after a committed board
- * mutation (agent tool OR HTTP write — both ride the one shared store's
- * `onChange`). Full snapshot (not a delta) so the client apply is idempotent
- * + order-independent, mirroring `projects_changed`.
- */
-export interface AppWsOutboundWorkBoardChanged {
-  v: 1
-  type: 'work_board_changed'
-  /** The board, active+next first (board order) then completed (reverse-chron). */
-  items: ReadonlyArray<AppWsWorkBoardItem>
-  /** Server-derived project the board belongs to (P5.2 parity). */
-  project_id?: string
-  ts: number
-}
-
-/**
- * Onboarding history-import — live progress for the in-flight import job.
- *
- * Fanned to the owner's app-ws topic every ~5s by the import-running cron
- * (`onboarding/interview/import-running-cron.ts` → `engine-import-routing.ts`)
- * while a ChatGPT/Claude history import processes, so a long import (minutes,
- * for hundreds of conversations) visibly works instead of stalling on a one-shot
- * "received" banner. Collapses the legacy `web:` path's `import_progress`
- * `ChatOutbound` frame (`landing/server.ts`) onto the consolidated app-ws wire.
- *
- * EPHEMERAL + UI-only: NOT persisted, carries no `seq`, never replayed on
- * `resume` — mirrors `agent_typing` / `work_board_changed`. Terminal statuses
- * normally arrive via the phase advance + analysis `agent_message`, not here;
- * the client clears its spinner defensively if a terminal frame does land.
- */
-export interface AppWsOutboundImportProgress {
-  v: 1
-  type: 'import_progress'
-  /** The import job this update belongs to. */
-  job_id: string
-  status:
-    | 'queued'
-    | 'pass1-running'
-    | 'pass2-running'
-    | 'rate_limit_cooling_off'
-    | 'rate_limit_paused'
-    | 'completed'
-    | 'failed'
-    | 'cancelled'
-  /** 1 = triage pass (counting conversations), 2 = synthesis pass. */
-  pass: 1 | 2
-  /** 0..1 fractional progress within the current pass. */
-  pct: number
-  /**
-   * Whether the chunk denominator is stable (render "N of M") vs still
-   * streaming (count-only). Mirrors `ImportJob.chunks_total_known` end-to-end.
-   */
-  chunks_total_known: boolean
-  /** Human-readable progress line, e.g. "reading conversation N of M…". */
-  body?: string
-  ts: number
-}
-
-/**
- * Fired ONCE at the onboarding→completed transition (from the idempotent
- * finalizer, so it can't double-fire). A pure signal frame — it carries no
- * payload beyond its type. The web client reacts to it to run the Managed
- * post-onboarding claim redirect: IF (and only if) a claim URL was injected
- * into the page bootstrap (`window.__neutron_post_onboarding_claim_url`, from
- * env `NEUTRON_POST_ONBOARDING_CLAIM_URL`) the client navigates there; on Open
- * self-host that config is absent, so the client no-ops and onboarding
- * completes normally. The URL is deliberately NOT carried on the frame — it
- * lives in the client bootstrap config so the redirect target is a Managed-
- * overlay concern the server injects, not a per-frame value.
- */
-export interface AppWsOutboundOnboardingCompleted {
-  v: 1
-  type: 'onboarding_completed'
-  ts: number
-}
-
-export type AppWsOutbound =
-  | AppWsOutboundSessionReady
-  | AppWsOutboundUserMessageEcho
-  | AppWsOutboundAgentMessage
-  | AppWsOutboundAgentMessagePartial
-  | AppWsOutboundReceiptUpdate
-  | AppWsOutboundReactionUpdate
-  | AppWsOutboundEditUpdate
-  | AppWsOutboundProjectsChanged
-  | AppWsOutboundWorkBoardChanged
-  | AppWsOutboundOnboardingCompleted
-  | AppWsOutboundAgentTyping
-  | AppWsOutboundImportProgress
-  | AppWsOutboundError
+// L6 — topic-id derivation moved to @neutronai/wire-types (killed the
+// `landing/chat-react/config.ts` browser mirror); re-exported so existing
+// server importers (gateway/projects/sqlite-store, open tests) stay valid.
+export { appWsTopicId, appWsProjectTopicId, parseAppWsTopicId } from '@neutronai/wire-types'
 
 /**
  * Decode an inbound envelope. Returns `null` on a wrong-shape envelope
@@ -922,30 +386,3 @@ export function sanitizeDeviceId(raw: unknown): string | null {
  *  Mirrors `@neutronai/chat-core`'s `AGENT_DEVICE_ID`; the wire value is the bare
  *  string `agent`. */
 export const AGENT_DEVICE_ID = 'agent'
-
-/** Synthetic `channel_topic_id` for an Expo session. */
-export function appWsTopicId(user_id: string): string {
-  return `app:${user_id}`
-}
-
-/**
- * Per-project `channel_topic_id` for a web session — `app:<user_id>:<project_id>`.
- * The web React client opens ONE socket per active project (reconnecting on a
- * project switch) so persistence + seq + resume + fan-out all scope to this
- * per-project topic string; General stays on the user-scoped {@link appWsTopicId}.
- * User-scoped (NOT a bare `wow-shell-<id>`) so two users opening the same project
- * never share a transcript — mirrors the proven `landing/server.ts`
- * `web:<user>:<project>` model. Mobile keeps the single `app:<user>` socket +
- * `project_id`-field switch model (it does NOT use this), so per-project binding
- * is gated on `platform === 'web'` at the surface.
- */
-export function appWsProjectTopicId(user_id: string, project_id: string): string {
-  return `app:${user_id}:${project_id}`
-}
-
-/** Parse `app:<user_id>` back to `user_id`. Returns `null` on mismatch. */
-export function parseAppWsTopicId(topic_id: string): string | null {
-  if (!topic_id.startsWith('app:')) return null
-  const user_id = topic_id.slice('app:'.length)
-  return user_id.length > 0 ? user_id : null
-}

@@ -45,6 +45,7 @@
         "@neutronai/connect": "workspace:*",
         "@neutronai/landing": "workspace:*",
         "@neutronai/tabs": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
         "@op-engineering/op-sqlite": "17.0.0",
         "@react-native-async-storage/async-storage": "2.2.0",
         "@shopify/flash-list": "2.3.2",
@@ -89,11 +90,15 @@
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
         "jose": "^5.9.0",
       },
     },
     "chat-core": {
       "name": "@neutronai/chat-core",
+      "dependencies": {
+        "@neutronai/wire-types": "workspace:*",
+      },
     },
     "config": {
       "name": "@neutronai/config",
@@ -343,6 +348,7 @@
         "@neutronai/contracts": "workspace:*",
         "@neutronai/onboarding": "workspace:*",
         "@neutronai/runtime": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
         "jose": "^5.9.0",
         "react": "19.1.0",
         "react-dom": "19.1.0",
@@ -466,6 +472,7 @@
         "@neutronai/mcp": "workspace:*",
         "@neutronai/scribe": "workspace:*",
         "@neutronai/tools": "workspace:*",
+        "@neutronai/wire-types": "workspace:*",
         "jose": "^5.9.0",
       },
     },
@@ -490,6 +497,9 @@
     },
     "tabs": {
       "name": "@neutronai/tabs",
+      "dependencies": {
+        "@neutronai/wire-types": "workspace:*",
+      },
     },
     "tasks": {
       "name": "@neutronai/tasks",
@@ -534,6 +544,12 @@
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "@neutronai/tools": "workspace:*",
+      },
+    },
+    "wire-types": {
+      "name": "@neutronai/wire-types",
+      "dependencies": {
+        "@neutronai/contracts": "workspace:*",
       },
     },
     "work-board": {
@@ -1050,6 +1066,8 @@
     "@neutronai/trident": ["@neutronai/trident@workspace:trident"],
 
     "@neutronai/watchdog": ["@neutronai/watchdog@workspace:watchdog"],
+
+    "@neutronai/wire-types": ["@neutronai/wire-types@workspace:wire-types"],
 
     "@neutronai/work-board": ["@neutronai/work-board@workspace:work-board"],
 

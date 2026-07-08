@@ -9,26 +9,25 @@
  * echo carries the same `client_msg_id`.
  */
 
+import type { WireAgentMessageOption } from '@neutronai/wire-types'
+
 export type MessageRole = 'user' | 'agent'
 
 /**
  * P1b (onboarding / quick-reply buttons) — one selectable option attached to an
- * agent message. Mirrors the app-ws wire shape
- * (`AppWsOutboundAgentMessageOption`): `label` is the visible face, `value` is
- * the routing key the client posts back (NOT `label`), `body` is the canonical
- * text, and `image_url` drives image-gallery thumbnails. Transport-agnostic so
- * the web (React) and mobile (RN) surfaces render from one shape.
+ * agent message. `label` is the visible face, `value` is the routing key the
+ * client posts back (NOT `label`), `body` is the canonical text, and
+ * `image_url` drives image-gallery thumbnails. Transport-agnostic so the web
+ * (React) and mobile (RN) surfaces render from one shape.
+ *
+ * L6 (option-shape unification): this is now an ALIAS of the ONE canonical
+ * {@link WireAgentMessageOption} in `@neutronai/wire-types` — it was one of
+ * three byte-identical declarations (with the app-ws envelope's
+ * `AppWsOutboundAgentMessageOption` and the deleted `app/lib/ws-envelope.ts`
+ * mirror). Kept under its historic name so every `chat-core` consumer is
+ * unchanged.
  */
-export interface ChatMessageOption {
-  label: string
-  body: string
-  value: string
-  image_url?: string
-  decoration?: {
-    style?: 'default' | 'destructive' | 'primary'
-    icon_custom_emoji_id?: string
-  }
-}
+export type ChatMessageOption = WireAgentMessageOption
 
 /** P1b — the render mode for an agent message's option set. */
 export type PromptKind = 'buttons' | 'image-gallery'

@@ -22,32 +22,20 @@
  * the caller can fall back to the loading default.
  */
 
-/** Where a tab lives. Mirrors `TabScope` in `tabs/registry.ts`. */
-export type TabScope = 'project' | 'global';
+// L6 — the `TabDescriptor` wire shape (+ `TabScope` / `TabSource` /
+// `TabMountKind` / `TabMount`) is owned by the node-free
+// `@neutronai/wire-types` leaf. This client used to re-declare it BY HAND (a
+// comment-only mirror of `tabs/registry.ts`); it now imports + re-exports the
+// ONE source, so the mirror-parity test is a plain import-and-use contract.
+import type { TabDescriptor } from '@neutronai/wire-types';
 
-/** Who contributes the tab. Mirrors `TabSource` in `tabs/registry.ts`. */
-export type TabSource = 'builtin' | 'core' | 'custom';
-
-/** How a client renders the tab body. Mirrors `TabMountKind`. */
-export type TabMountKind = 'builtin' | 'webview';
-
-export interface TabMount {
-  kind: TabMountKind;
-  /** builtin → route/view key (`chat` | `docs` | `tasks`); webview → URL. */
-  target: string;
-}
-
-/** Engine tab descriptor. Mirrors `TabDescriptor` in `tabs/registry.ts`. */
-export interface TabDescriptor {
-  key: string;
-  label: string;
-  scope: TabScope;
-  source: TabSource;
-  /** Present only when `source === 'core'`. */
-  core_slug?: string;
-  order: number;
-  mount: TabMount;
-}
+export type {
+  TabDescriptor,
+  TabMount,
+  TabMountKind,
+  TabScope,
+  TabSource,
+} from '@neutronai/wire-types';
 
 interface ProjectTabsResponse {
   ok: boolean;
