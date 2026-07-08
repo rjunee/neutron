@@ -25,9 +25,11 @@ import { initialDocLinkFromLocation } from './doc-link-nav.ts'
 // L6 — topic-id derivation moved to the node-free @neutronai/wire-types leaf.
 // This file's inline `appWsTopicId` / `appWsProjectTopicId` mirror existed ONLY
 // to keep the browser bundle from pulling in the (node-only) channels package;
-// wire-types being node-free removes that reason. Imported for local use here
-// and re-exported below so any config.ts importer stays valid.
-import { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types'
+// wire-types being node-free removes that reason. BROWSER-SAFETY: import from
+// the NARROW `topic-id` subpath — NOT the barrel — so this browser bundle
+// doesn't drag in the leaf's `doc-links` module (which reads `process.env`).
+// Imported for local use here and re-exported below so any importer stays valid.
+import { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types/topic-id.ts'
 
 export interface ProjectTab {
   id: string
@@ -134,10 +136,11 @@ export interface WindowLike {
   __neutron_post_onboarding_claim_url?: string
 }
 
-// L6 — `appWsTopicId` / `appWsProjectTopicId` now come from
-// `@neutronai/wire-types` (imported above); re-exported here so existing
-// `landing/chat-react/config` importers keep resolving them from this module.
-export { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types'
+// L6 — `appWsTopicId` / `appWsProjectTopicId` now come from the narrow
+// `@neutronai/wire-types/topic-id` subpath (imported above); re-exported here so
+// existing `landing/chat-react/config` importers keep resolving them from this
+// module without dragging the leaf's `doc-links` into the browser bundle.
+export { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types/topic-id.ts'
 
 /**
  * The store key + WS topic for a given active project (null = General). The

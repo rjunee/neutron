@@ -46,37 +46,58 @@
 export type DocLinkChannel = 'app' | 'web' | 'telegram'
 
 /**
+ * Whether a `process.env` bag is present. `typeof process` never throws even
+ * when `process` is an undeclared global — so this is SAFE in a browser bundle
+ * that ships no `process` shim (the landing `chat-react` bundle, which imports
+ * this leaf transitively via the barrel but never actually calls doc-links).
+ * Every `process.env` read below is gated on this so module-init + call-time
+ * both stay browser-safe (Codex L6 review: the barrel must not throw
+ * `ReferenceError: process is not defined` at import in the browser).
+ */
+const HAS_PROCESS_ENV = typeof process !== 'undefined' && !!process.env
+
+/**
  * Web base for the app surface (doc-link 'web' channel). Env-configured with
  * NO hosted default. Resolves `NEUTRON_WEB_APP_BASE` (Node/server) first, then
  * `EXPO_PUBLIC_NEUTRON_WEB_APP_BASE` (Expo bundle) — the ONE asymmetric
  * mapping the L6 unification preserves (see the module header). When neither
- * is set it is the empty string, which makes the web doc-link a RELATIVE
- * `/projects/<id>/docs?path=…` URL. `buildDocLink` (web channel) and
- * `parseDocLink` (its `webPrefix` matcher) both read this at CALL time, so the
- * build↔parse round-trip stays consistent for whatever value it resolves to.
+ * is set (including the browser, where `process` is absent) it is the empty
+ * string, which makes the web doc-link a RELATIVE `/projects/<id>/docs?path=…`
+ * URL. Both reads are DIRECT member accesses gated by {@link HAS_PROCESS_ENV}
+ * so (a) they never throw in a browser and (b) `babel-preset-expo` can still
+ * statically INLINE `process.env.EXPO_PUBLIC_NEUTRON_WEB_APP_BASE` into the
+ * Expo bundle (it only inlines literal member expressions, not `process.env[x]`).
  *
- * Trailing slashes are stripped so `WEB_APP_BASE + '/projects/'` never
+ * Resolved LAZILY on every call (never cached at module-init) so the env is
+ * honored if set after import and tests aren't import-order-fragile.
+ * `buildDocLink` (web channel) + `parseDocLink` (its `webPrefix` matcher) both
+ * call this, so build↔parse round-trips stay consistent.
+ *
+ * Trailing slashes are stripped so `webAppBase() + '/projects/'` never
  * produces a double slash.
  */
 export function webAppBase(): string {
-  return (
-    process.env.NEUTRON_WEB_APP_BASE ??
-    process.env.EXPO_PUBLIC_NEUTRON_WEB_APP_BASE ??
-    ''
-  ).replace(/\/+$/, '')
+  const server = HAS_PROCESS_ENV ? process.env.NEUTRON_WEB_APP_BASE : undefined
+  const expo = HAS_PROCESS_ENV ? process.env.EXPO_PUBLIC_NEUTRON_WEB_APP_BASE : undefined
+  return (server ?? expo ?? '').replace(/\/+$/, '')
 }
-// Back-compat const (boot-time snapshot). `buildDocLink`/`parseDocLink` read
-// `webAppBase()` at CALL time so the env is honored if set after import and so
-// tests are not order-fragile.
+
+/**
+ * Back-compat const (boot-time snapshot) — resolved via the browser-safe
+ * {@link webAppBase} so module-init never touches a missing `process`. In the
+ * browser this snapshots to `''`; `buildDocLink`/`parseDocLink` recompute the
+ * live value per call regardless.
+ */
 export const WEB_APP_BASE = webAppBase()
 
 /**
  * Vault read-redirector base for legacy (non-project-scoped) doc references.
  * Configurable via the `VAULT_REDIRECTOR_BASE` env var; the default is a
- * placeholder that self-hosted installs override.
+ * placeholder that self-hosted installs override. Guarded so module-init is
+ * browser-safe (falls back to the placeholder when `process` is absent).
  */
 export const VAULT_REDIRECTOR_BASE =
-  process.env.VAULT_REDIRECTOR_BASE ?? 'https://vault.example.test'
+  (HAS_PROCESS_ENV ? process.env.VAULT_REDIRECTOR_BASE : undefined) ?? 'https://vault.example.test'
 
 /** Expo deep-link scheme registered in `app/app.json`. */
 export const NEUTRON_SCHEME = 'neutron'
