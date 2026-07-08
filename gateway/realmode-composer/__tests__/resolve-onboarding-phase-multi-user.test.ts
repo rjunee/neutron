@@ -40,11 +40,11 @@ test('loadCurrentOnboardingPhase returns the right user phase when multiple user
   await store.upsert({
     project_slug: 't',
     user_id: 'u-B',
-    phase: 'max_oauth_offered',
+    phase: 'persona_reviewed',
   })
 
   expect(loadCurrentOnboardingPhase(db, 't', 'u-A')).toBe('signup')
-  expect(loadCurrentOnboardingPhase(db, 't', 'u-B')).toBe('max_oauth_offered')
+  expect(loadCurrentOnboardingPhase(db, 't', 'u-B')).toBe('persona_reviewed')
 })
 
 test('loadCurrentOnboardingPhase returns null for a user that has no row on the project', async () => {

@@ -172,7 +172,7 @@ export interface PhaseIntent {
 
 /**
  * Per-phase intent table. Phases driven externally (identity_oauth,
- * import_running, persona_synthesizing, wow_fired, completed, failed)
+ * import_running, persona_synthesizing, completed, failed)
  * map to null and are never LLM-generated — those advance via direct
  * state writes from other modules.
  */
@@ -242,23 +242,14 @@ export const PHASE_INTENTS: Readonly<Record<string, PhaseIntent | null>> = {
     max_body_chars: 480,
   },
   persona_reviewed: {
-    // P2 v2 § 3.14: post-persona transit; the user is invited to wrap
-    // up before the Max-attach step.
-    goal: 'Acknowledge the synthesized persona and transition into the Max-attach step.',
+    // P2 v2 § 3.14: post-persona transit — the final onboarding checkpoint.
+    // (K11e: the old `max_oauth_offered`/`wow_fired` walk steps after this were
+    // deleted; `persona_reviewed` now advances straight to `completed`. Any
+    // Max-OAuth credential attach happens via the post-completion gate page, not
+    // an in-conversation walk step — keep this goal free of the removed phases.)
+    goal: 'Acknowledge the synthesized persona and confirm the user is ready to finish — this is the final onboarding checkpoint before completion.',
     shape: 'free-text',
     allowed_option_values: [],
-    max_body_chars: 240,
-  },
-  // P2 v2 § 3.15 — max_oauth_offered. 2026-05-28 single-CTA collapse:
-  // the only option presented is "Connect Claude Max". BYO API key + free
-  // tier are gone from the surface (admin interface for substrate switch
-  // is a future sprint per Sam 2026-05-28). The engine auto-skips this
-  // phase entirely for owners whose substrate already has a Max-OAuth
-  // refresh token persisted, so most users never see this prompt at all.
-  max_oauth_offered: {
-    goal: 'Offer the Claude Max attach handoff. Single CTA; the engine auto-skips this phase when the owner already has a max_oauth_refresh secret.',
-    shape: 'pick-only',
-    allowed_option_values: ['attach_max'],
     max_body_chars: 240,
   },
   // Phases driven externally — engine never asks the resolver for these.
@@ -266,7 +257,6 @@ export const PHASE_INTENTS: Readonly<Record<string, PhaseIntent | null>> = {
   instance_provisioned: null,
   import_running: null,
   persona_synthesizing: null,
-  wow_fired: null,
   completed: null,
   failed: null,
   // Special-cased phases — the engine builds these via dedicated
@@ -982,7 +972,7 @@ const PACK_PROJECTS_PROPOSED: PhaseKnowledgePack = {
 
 const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
   why_we_ask:
-    "The agent just synthesised your persona from everything we collected. Before we move to the final step (attaching your Claude Max or BYO key), this is your last checkpoint to read it and call out anything that doesn't sound right. Most users skim and accept; the option to revise is there if something feels off.",
+    "The agent just synthesised your persona from everything we collected. This is your last checkpoint to read it and call out anything that doesn't sound right before onboarding completes. Most users skim and accept; the option to revise is there if something feels off.",
   faqs: {
     what_was_synthesised:
       "Three files: SOUL.md (the agent's personality + operating principles), USER.md (what the agent knows about YOU - name, projects, interests, context), and per-project context files. Everything lives in your instance; nothing was sent anywhere external.",
@@ -995,9 +985,9 @@ const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
     revisit_slug:
       "Slug revisits are supported here but rare - the slug picker tends to land cleanly on the first pass. Available if you've changed your mind.",
     move_on_default:
-      "Saying 'looks good' / 'move on' / 'next' advances to max_oauth_offered (or directly to wow_fired if you already attached Max via the import flow).",
+      "Saying 'looks good' / 'move on' / 'next' completes onboarding - this is the final checkpoint.",
     what_max_offers:
-      "Next phase is the Max-connect prompt - a single 'Connect Claude Max' button that links the agent to your Claude Max subscription via OAuth. If you already attached Max during the import phase, this step auto-skips entirely.",
+      "If you haven't connected Claude Max yet, you'll be prompted to after onboarding completes - a single 'Connect Claude Max' button that links the agent to your Claude Max subscription via OAuth. If you already attached Max during the import phase, that step is skipped.",
   },
   expected_tangents: [
     {
@@ -1030,7 +1020,7 @@ const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
     {
       user_text_example: 'looks good',
       canonical_value: null,
-      summary: 'explicit accept - free-text advance to max_oauth_offered',
+      summary: 'explicit accept - free-text advance to completion',
     },
     {
       user_text_example: 'move on',
@@ -1041,85 +1031,6 @@ const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
       user_text_example: 'yep ship it',
       canonical_value: null,
       summary: 'enthusiastic accept - free-text advance',
-    },
-  ],
-}
-
-const PACK_MAX_OAUTH_OFFERED: PhaseKnowledgePack = {
-  why_we_ask:
-    "We need a Claude Max subscription to run premium models (Sonnet / Opus) for synthesis and deep-reasoning tasks. One click connects your Max sub so the agent runs on your existing Anthropic quota - no separate billing, no API key to paste. If you already attached Max earlier in onboarding (e.g. during import) we skip this step entirely.",
-  faqs: {
-    attach_max_what_it_does:
-      "Connect Claude Max links the agent to your Claude Max subscription via OAuth. The agent runs on your Max quota - no separate billing, no API key to manage. We never see your Anthropic credentials; the OAuth token is scoped to message-generation only.",
-    privacy_max_oauth:
-      "The OAuth flow grants scoped access to Anthropic's messages API only - we can't see your conversations from chat.anthropic.com, can't read your Claude usage history, and can't touch billing. The token is stored encrypted in your instance.",
-    quota_concerns:
-      "If you're worried about burning Max quota - the agent uses Haiku 4.5 for most onboarding/routing work (cheap), Sonnet only when needed (escalation), and Opus only for explicit deep-reasoning tasks. Typical daily usage is well under 5% of a Max Pro plan.",
-    no_max_sub:
-      "Right now Claude Max is required to keep going - we use premium models for persona synthesis, brief generation, and deep reasoning. A future admin interface will let you switch substrates (BYO Anthropic key or free tier) but that's not in the onboarding flow yet. If you don't have Max, the simplest path is to subscribe and re-open this chat - your progress so far is preserved.",
-    can_change_later:
-      "The substrate choice is reversible from settings (admin interface lands in a future sprint). Switching credentials doesn't lose state - the agent transparently reconnects.",
-    // WAVE 1 credential-management — up-front OPTIONAL keys. The system runs
-    // fully on Claude Max alone; these only ADD capabilities. Copy is derived
-    // from the canonical `onboarding/optional-keys.ts` offer registry so the
-    // onboarding answer and the stored activation stay in lockstep.
-    optional_openai_key:
-      `${getOptionalKeyOffer('openai_api_key')!.question} ${getOptionalKeyOffer('openai_api_key')!.activation} Skipping is fine — ${getOptionalKeyOffer('openai_api_key')!.skip_note}`,
-    optional_codex_auth:
-      `${getOptionalKeyOffer('codex_auth')!.question} ${getOptionalKeyOffer('codex_auth')!.activation} Skipping is fine — ${getOptionalKeyOffer('codex_auth')!.skip_note}`,
-  },
-  expected_tangents: [
-    {
-      user_text_example: 'what does connecting max actually do?',
-      expected_action: 'answer',
-      summary: 'asks about Max connect mechanics - route to attach_max_what_it_does FAQ',
-    },
-    {
-      user_text_example: 'what does attaching Max give you access to?',
-      expected_action: 'answer',
-      summary: 'asks about Max OAuth scope - route to privacy_max_oauth FAQ',
-    },
-    {
-      user_text_example: 'will the agent burn through my Max quota?',
-      expected_action: 'answer',
-      summary: 'asks about Max consumption - route to quota_concerns FAQ',
-    },
-    {
-      user_text_example: "I don't have Claude Max",
-      expected_action: 'answer',
-      summary: 'no Max sub - route to no_max_sub FAQ (no skip path in onboarding right now)',
-    },
-    {
-      user_text_example: 'can I change this later?',
-      expected_action: 'answer',
-      summary: 'asks about reversibility - route to can_change_later FAQ',
-    },
-    {
-      user_text_example: 'can I add an OpenAI key for embeddings?',
-      expected_action: 'answer',
-      summary: 'asks about the optional OpenAI key - route to optional_openai_key FAQ',
-    },
-    {
-      user_text_example: 'do you support codex / cross-model reviews?',
-      expected_action: 'answer',
-      summary: 'asks about the optional Codex auth - route to optional_codex_auth FAQ',
-    },
-  ],
-  advance_examples: [
-    {
-      user_text_example: 'connect max',
-      canonical_value: 'attach_max',
-      summary: "explicit connect - canonical_value='attach_max' (pick-only)",
-    },
-    {
-      user_text_example: "let's connect my Max subscription",
-      canonical_value: 'attach_max',
-      summary: "verbose connect - canonical_value='attach_max'",
-    },
-    {
-      user_text_example: 'go ahead',
-      canonical_value: 'attach_max',
-      summary: "implicit accept - canonical_value='attach_max' (single CTA)",
     },
   ],
 }
@@ -1143,26 +1054,22 @@ export const PHASE_KNOWLEDGE: Readonly<Record<OnboardingPhase, PhaseKnowledgePac
   import_upload_pending: PACK_IMPORT_UPLOAD_PENDING,
   personality_offered: PACK_PERSONALITY_OFFERED,
 
-  // S3 — hand-authored (2026-05-18). Covers the remaining seven
-  // user-input-bearing phases per the brief § 4. Eleven of eighteen
-  // phases now carry packs; the remaining seven (identity_oauth,
-  // instance_provisioned, import_running, persona_synthesizing, wow_fired,
-  // completed, failed) stay forever-null because they don't accept
-  // routable text.
+  // S3 — hand-authored (2026-05-18). Covers the remaining user-input-bearing
+  // phases per the brief § 4. The externally-driven phases (identity_oauth,
+  // instance_provisioned, import_running, persona_synthesizing, completed,
+  // failed) stay forever-null because they don't accept routable text.
   import_analysis_presented: PACK_IMPORT_ANALYSIS_PRESENTED,
   work_interview_gap_fill: PACK_WORK_INTERVIEW_GAP_FILL,
   agent_name_chosen: PACK_AGENT_NAME_CHOSEN,
   slug_chosen: PACK_SLUG_CHOSEN,
   projects_proposed: PACK_PROJECTS_PROPOSED,
   persona_reviewed: PACK_PERSONA_REVIEWED,
-  max_oauth_offered: PACK_MAX_OAUTH_OFFERED,
 
   // Forever-null — transit / terminal / external-driven phases.
   identity_oauth: null,
   instance_provisioned: null,
   import_running: null,
   persona_synthesizing: null,
-  wow_fired: null,
   completed: null,
   failed: null,
 }

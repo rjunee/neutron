@@ -96,14 +96,14 @@ test('finalize completes onboarding: persona, projects row, rail refresh', async
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       user_first_name: 'Sam',
       agent_name: 'Atlas',
       primary_projects: ['Topline Revenue', 'Home Assistant'],
     },
   })
-  expect(seeded.phase).toBe('wow_fired')
+  expect(seeded.phase).toBe('persona_reviewed')
 
   const finalizer = buildOnboardingFinalize(h.deps)
   await finalizer.finalize({ user_id: USER_ID, topic_id: TOPIC_ID, state: seeded })
@@ -154,7 +154,7 @@ test('finalize is idempotent: a second call on a completed row is a no-op', asyn
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
   })
 
@@ -190,7 +190,7 @@ test('finalize does NOT emit the onboarding-complete signal when the terminal up
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
   })
 
@@ -233,7 +233,7 @@ test('finalize reuses a pre-existing project whose name slugifies to the same id
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Acme'] },
   })
 
@@ -272,7 +272,7 @@ test('finalize materializes from import_result.proposed_projects when supplied',
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     // No primary_projects in phase_state — the import_result drives projects.
     phase_state_patch: { user_first_name: 'Sam' },
   })
@@ -313,7 +313,7 @@ test('finalize unions interview-named projects with import_result.proposed_proje
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       user_first_name: 'Sam',
       primary_projects: ['Topline Revenue', 'Acme', 'Book'],
@@ -361,7 +361,7 @@ test('finalize honors a curation DROP — a dropped project is never materialize
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       user_first_name: 'Sam',
       primary_projects: ['Topline Revenue', 'Acme', 'Book'],
@@ -422,7 +422,7 @@ test('finalize caps the IMPORT contribution to the displayed set — proposed pr
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       user_first_name: 'Sam',
       primary_projects: NINE_PROPOSED.slice(0, MAX_ANALYSIS_PROJECTS),
@@ -469,7 +469,7 @@ test('finalize preserves an EXPLICIT user add even when its name collides with a
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       user_first_name: 'Sam',
       primary_projects: [...NINE_PROPOSED.slice(0, MAX_ANALYSIS_PROJECTS), 'Phantom Eight'],
@@ -524,7 +524,7 @@ test('finalize emits a General closing message + one per-project opening (items 
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       user_first_name: 'Sam',
       agent_name: 'Atlas',
@@ -573,7 +573,7 @@ test('no-context project opens with the HONEST prompt, not a fabricated status (
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Mystery Thing'] },
   })
   const finalizer = buildOnboardingFinalize(deps)
@@ -598,7 +598,7 @@ test('a project WITH import context keeps a real summary opening (not the honest
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', primary_projects: ['Topline Revenue'] },
   })
   const finalizer = buildOnboardingFinalize(deps)
@@ -642,7 +642,7 @@ test('finalize with NO projects emits an honest closing (no "I created your proj
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { user_first_name: 'Sam', agent_name: 'Atlas', primary_projects: [] },
   })
   const finalizer = buildOnboardingFinalize(deps)
@@ -665,7 +665,7 @@ test('finalize without an emitChatMessage seam still completes (no closing/openi
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue'] },
   })
   const finalizer = buildOnboardingFinalize(h.deps)
@@ -685,7 +685,7 @@ test('finalize materializes hobby/interest answers as projects (non_work_interes
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       primary_projects: ['Topline Revenue'],
       // Conversationally-captured hobbies (the shape post-turn-extractor writes).
@@ -728,7 +728,7 @@ test('finalize dedups a hobby against a same-named work project (work wins, one 
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       primary_projects: ['Photography'], // also named as a hobby below
       non_work_interests: [{ name: 'Photography' }, { name: 'Baking' }],
@@ -757,7 +757,7 @@ test('finalize honors a dropped hobby (dropped_projects excludes the interest sl
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: {
       primary_projects: ['Topline Revenue'],
       non_work_interests: [{ name: 'Woodworking' }],
@@ -810,7 +810,7 @@ test('finalize emits the agentic kickoff body when the kickoff fires (one dedupe
   const seeded = await h.stateStore.upsert({
     project_slug: PROJECT_SLUG,
     user_id: USER_ID,
-    phase: 'wow_fired',
+    phase: 'persona_reviewed',
     phase_state_patch: { primary_projects: ['Topline Revenue', 'Quiet Corner'] },
   })
   const finalizer = buildOnboardingFinalize(h.deps)
