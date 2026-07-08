@@ -39,6 +39,37 @@ import {
 } from './types.ts'
 import { ChatWsClient, type ConnStatus, type SocketLike } from './ws-client.ts'
 
+/**
+ * GAP-4 — default ack-timeout (ms). A `sent` message whose server echo hasn't
+ * reconciled it within this window flips to `failed` so the UI can swap the
+ * stuck 🕓 clock for a retry affordance. Deliberately GENEROUS relative to the
+ * actual ack latency: the ack is the server's `user_message` ECHO (a persist +
+ * seq-stamp + fan-out — sub-second), which is INDEPENDENT of the agent turn
+ * (fire-and-forget, up to ~240s). So 15s can never be tripped by a slow-but-live
+ * turn, only by a genuinely lost socket — and the flip never itself resends (the
+ * resend is the reconnect's idempotent `flushUnacked`), so it can neither
+ * double-send a live turn nor fight the one-reply-per-turn substrate.
+ */
+export const DEFAULT_ACK_TIMEOUT_MS = 15_000
+/**
+ * GAP-5 — resume fallback (ms). On every (re)open the server normally announces
+ * `session_ready` immediately, which drives resume + queue-drain. This fallback
+ * fires resume+drain anyway if `session_ready` hasn't arrived within the window,
+ * so a reconnect ALWAYS catches up + drains even against a server that never
+ * announces. Kept short but > a normal announce RTT so a healthy connect never
+ * double-resumes.
+ */
+export const DEFAULT_RESUME_FALLBACK_MS = 2_000
+
+/** Default single-shot timer that never keeps the host process alive (Node/Bun
+ *  `unref`), so a pending ack/resume timer can't block a test run or a clean
+ *  shutdown. Injectable per-session for deterministic tests. */
+function defaultSetTimeout(fn: () => void, ms: number): unknown {
+  const handle = setTimeout(fn, ms)
+  ;(handle as { unref?: () => void }).unref?.()
+  return handle
+}
+
 export interface WebChatSessionOptions {
   /** WS URL, e.g. `wss://host/ws/app/chat?token=…&platform=web`. */
   url: string
@@ -74,6 +105,15 @@ export interface WebChatSessionOptions {
   device_id?: string
   generateId?: () => string
   now?: () => number
+  /** GAP-4 — ack-timeout window (ms). Default {@link DEFAULT_ACK_TIMEOUT_MS};
+   *  0 disables the failed-state flip. */
+  ackTimeoutMs?: number
+  /** GAP-5 — resume-fallback window (ms). Default {@link DEFAULT_RESUME_FALLBACK_MS};
+   *  0 disables the fallback (session_ready remains the sole resume trigger). */
+  resumeFallbackMs?: number
+  /** Injectable single-shot timer (tests). Default: unref'd `setTimeout`. */
+  setTimeoutFn?: (fn: () => void, ms: number) => unknown
+  clearTimeoutFn?: (handle: unknown) => void
 }
 
 export class WebChatSession {
@@ -89,6 +129,16 @@ export class WebChatSession {
   /** message_ids we've already sent a `read` receipt for — so re-rendering a
    *  visible message doesn't re-emit a receipt on every change. */
   private readonly readSent = new Set<string>()
+  /** GAP-4 — per-message (client_msg_id → handle) ack-deadline timers. A row that
+   *  never gets its echo flips `sent` → `failed` when its timer fires. */
+  private readonly ackTimers = new Map<string, unknown>()
+  private readonly ackTimeoutMs: number
+  /** GAP-5 — the pending resume fallback for the current open (null when a
+   *  session_ready already drove resume, or between opens). */
+  private resumeFallbackHandle: unknown = null
+  private readonly resumeFallbackMs: number
+  private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown
+  private readonly clearTimeoutFn: (handle: unknown) => void
 
   constructor(opts: WebChatSessionOptions) {
     this.topic_id = opts.topic_id
@@ -101,12 +151,22 @@ export class WebChatSession {
     this.engine = new SyncEngine(this.store)
     this.onChange = opts.onChange
     this.onFrame = opts.onFrame
+    this.ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS
+    this.resumeFallbackMs = opts.resumeFallbackMs ?? DEFAULT_RESUME_FALLBACK_MS
+    this.setTimeoutFn = opts.setTimeoutFn ?? defaultSetTimeout
+    this.clearTimeoutFn = opts.clearTimeoutFn ?? ((h) => clearTimeout(h as never))
 
     const wsOpts: ConstructorParameters<typeof ChatWsClient>[0] = {
       url: opts.url,
       createSocket:
         opts.createSocket ??
         ((url: string) => new WebSocket(url) as unknown as SocketLike),
+      // GAP-5 — on EVERY (re)open, guarantee resume + queue-drain runs. The fast
+      // path is the server's session_ready (handled in handleInbound); this arms
+      // a fallback that fires the same resume+drain if session_ready never lands.
+      onOpen: () => {
+        this.armResumeFallback()
+      },
       onMessage: (data) => {
         void this.handleInbound(data)
       },
@@ -120,14 +180,60 @@ export class WebChatSession {
     this.ws.connect()
   }
 
-  /** Close the connection (no reconnect until `start()` again). */
+  /** Close the connection (no reconnect until `start()` again) and tear down all
+   *  session timers (ack deadlines + resume fallback) so nothing leaks. */
   stop(): void {
     this.ws.close()
+    this.clearAllTimers()
   }
 
   /** AppState bridge — call on focus/blur / visibilitychange. */
   setActive(active: boolean): void {
     this.ws.setActive(active)
+  }
+
+  /**
+   * GAP-2 — network-reachability signal. Delegates to the transport: resets the
+   * reconnect backoff and reconnects NOW so a regained network doesn't wait out
+   * the dead-air backoff. THE SEAM: a surface wires this to its platform's
+   * connectivity event and calls it — chat-core intentionally does NOT subscribe
+   * to any platform API here:
+   *   - web / mobile-web: `addEventListener('online', () => session.notifyReachable())`
+   *   - native (Expo): NetInfo `addEventListener(s => s.isConnected && session.notifyReachable())`
+   *     bridged through the W6 native transport shim.
+   * Doubles as the manual "retry connection" action for a UI affordance.
+   */
+  notifyReachable(): void {
+    this.ws.notifyReachable()
+  }
+
+  /**
+   * GAP-5 — flush-before-suspend hook. A surface calls this on backgrounding
+   * (web `visibilitychange` → hidden / `pagehide`; native `AppState` → background)
+   * to push typed-but-unsent (`queued`) messages onto the wire NOW, before the OS
+   * suspends the tab/app and freezes timers. Best-effort: a closed socket simply
+   * leaves them queued for the next reconnect. Drains QUEUED only (not a full
+   * unacked resend) so backgrounding never re-sends an already in-flight message.
+   */
+  async flushBeforeSuspend(): Promise<void> {
+    await this.flush()
+  }
+
+  /**
+   * GAP-4 — manual retry affordance. Re-drives every not-yet-`acked` send
+   * (`queued` / `sent` / `failed`) over the CURRENT open socket, idempotently on
+   * `client_msg_id` (the server de-dupes, and the `was_new` guard means a
+   * re-delivery never re-fires the agent). A no-op while the socket is down —
+   * the reconnect's own `resumeAndFlush` re-drives them then, or the UI can wire
+   * the retry button to {@link notifyReachable} to force that reconnect.
+   */
+  async retry(): Promise<void> {
+    const flushed = await this.queue.flushUnacked((envelope) => {
+      const ok = this.ws.send(envelope)
+      if (!ok) throw new Error('socket not open')
+    }, this.topic_id)
+    this.armAckTimersFor(flushed)
+    if (flushed.length > 0) this.emitChange()
   }
 
   /** Connection status snapshot. */
@@ -179,6 +285,9 @@ export class WebChatSession {
     // On (re)connect the server announces the topic + high-water seq. That's
     // our trigger to fill the gap and flush anything queued while offline.
     if (env['type'] === 'session_ready') {
+      // GAP-5 — session_ready is the FAST path for resume; cancel the on-open
+      // fallback so a normal connect resumes exactly once (no double-resume).
+      this.clearResumeFallback()
       // Stale-store reset detection (M1) — BEFORE resuming, check whether the
       // server's high-water seq regressed below our local cursor (server wiped /
       // reinstalled under us). If so the local transcript is from a dead server;
@@ -219,6 +328,12 @@ export class WebChatSession {
     const msg = normalizeInbound(data)
     if (msg === null) return
     await this.engine.applyInbound(this.topic_id, msg)
+    // GAP-4 — this echo (a user_message carrying our client_msg_id) reconciled
+    // the optimistic row to `acked`; cancel its pending ack deadline so it can't
+    // spuriously flip to `failed` after the fact.
+    if (msg.client_msg_id !== null && msg.client_msg_id.length > 0) {
+      this.clearAckTimer(msg.client_msg_id)
+    }
     this.emitChange()
   }
 
@@ -330,6 +445,7 @@ export class WebChatSession {
       const ok = this.ws.send(envelope)
       if (!ok) throw new Error('socket not open')
     }, this.topic_id)
+    this.armAckTimersFor(flushed)
     if (flushed.length > 0) this.emitChange()
   }
 
@@ -338,7 +454,71 @@ export class WebChatSession {
       const ok = this.ws.send(envelope)
       if (!ok) throw new Error('socket not open')
     }, this.topic_id)
+    this.armAckTimersFor(flushed)
     if (flushed.length > 0) this.emitChange()
+  }
+
+  /**
+   * GAP-5 — arm the on-open resume fallback. Called from the transport's
+   * `onOpen`; the timer fires resume + queue-drain only if a `session_ready`
+   * (which cancels it) hasn't already done so, so every open resumes exactly once.
+   */
+  private armResumeFallback(): void {
+    this.clearResumeFallback()
+    if (this.resumeFallbackMs <= 0) return
+    this.resumeFallbackHandle = this.setTimeoutFn(() => {
+      this.resumeFallbackHandle = null
+      void this.resumeAndFlush()
+    }, this.resumeFallbackMs)
+  }
+
+  private clearResumeFallback(): void {
+    if (this.resumeFallbackHandle !== null) {
+      this.clearTimeoutFn(this.resumeFallbackHandle)
+      this.resumeFallbackHandle = null
+    }
+  }
+
+  /** GAP-4 — arm an ack deadline for every freshly-`sent` row from a flush. The
+   *  fire-time check re-reads the store, so arming a row that is already `failed`
+   *  (a resend) is harmless. Idempotent: an existing timer is left in place. */
+  private armAckTimersFor(flushed: readonly ChatMessage[]): void {
+    for (const m of flushed) {
+      if (m.status === 'sent') this.armAckTimer(m.client_msg_id)
+    }
+  }
+
+  private armAckTimer(client_msg_id: string): void {
+    if (client_msg_id.length === 0 || this.ackTimeoutMs <= 0) return
+    if (this.ackTimers.has(client_msg_id)) return
+    const handle = this.setTimeoutFn(() => {
+      void this.onAckTimeout(client_msg_id)
+    }, this.ackTimeoutMs)
+    this.ackTimers.set(client_msg_id, handle)
+  }
+
+  /** Deadline elapsed with no echo — flip `sent` → `failed` (only if the row is
+   *  STILL `sent`: a row that already reconciled to `acked`, or was re-driven,
+   *  is left alone) so the UI shows a retry affordance instead of a stuck clock. */
+  private async onAckTimeout(client_msg_id: string): Promise<void> {
+    this.ackTimers.delete(client_msg_id)
+    const row = await this.store.getByClientMsgId(this.topic_id, client_msg_id)
+    if (row === null || row.status !== 'sent') return
+    await this.store.upsert({ ...row, status: 'failed' })
+    this.emitChange()
+  }
+
+  private clearAckTimer(client_msg_id: string): void {
+    const handle = this.ackTimers.get(client_msg_id)
+    if (handle === undefined) return
+    this.clearTimeoutFn(handle)
+    this.ackTimers.delete(client_msg_id)
+  }
+
+  private clearAllTimers(): void {
+    this.clearResumeFallback()
+    for (const handle of this.ackTimers.values()) this.clearTimeoutFn(handle)
+    this.ackTimers.clear()
   }
 
   private emitChange(): void {

@@ -86,6 +86,8 @@ export {
 
 export {
   ChatWsClient,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
   type ConnStatus,
   type SocketLike,
   type ChatWsClientOptions,

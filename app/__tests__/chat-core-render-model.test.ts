@@ -155,6 +155,14 @@ describe('deliveryState', () => {
     expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'acked' }))).toBe('delivered');
   });
 
+  it('W5 GAP-4 — maps a never-acked (failed) send to the retry state, not a stuck clock', () => {
+    expect(deliveryState(userMsg({ client_msg_id: 'c', status: 'failed' }))).toBe('failed');
+    // A failed row never masquerades as ✓✓ delivered/read even if receipts leaked in.
+    expect(
+      deliveryState(userMsg({ client_msg_id: 'c', status: 'failed', read_by: ['agent'] })),
+    ).toBe('failed');
+  });
+
   it('returns null for agent messages (no outbound ticks)', () => {
     expect(deliveryState(agentMsg({ message_id: 'a1' }))).toBeNull();
   });
@@ -184,6 +192,7 @@ describe('deliveryState', () => {
   it('glyphs escalate pending → sent → delivered → read (read shares ✓✓)', () => {
     expect(deliveryGlyph('pending')).toBe('🕓');
     expect(deliveryGlyph('sent')).toBe('✓');
+    expect(deliveryGlyph('failed')).toBe('⚠️');
     expect(deliveryGlyph('delivered')).toBe('✓✓');
     expect(deliveryGlyph('read')).toBe('✓✓');
   });

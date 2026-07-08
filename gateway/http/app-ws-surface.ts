@@ -357,6 +357,23 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           )
           return
         }
+        // W5 GAP-1 — app-level heartbeat. The chat-core client pings after
+        // inbound silence to detect a half-open socket (wifi↔cellular handoff /
+        // device sleep the OS never surfaced as a close). Answer with a `pong`
+        // so a healthy-but-idle socket is proven live and NOT force-closed. A
+        // transport control frame: it short-circuits BEFORE the message decoders,
+        // so it never persists, never assigns a seq, and never runs an agent turn
+        // — it cannot fight the one-reply-per-turn substrate. (Even without this
+        // reply the client stays correct — any inbound counts as liveness — but
+        // this keeps idle sockets from tripping the `malformed_envelope` path.)
+        if (
+          typeof parsed === 'object' &&
+          parsed !== null &&
+          (parsed as { type?: unknown }).type === 'ping'
+        ) {
+          ws.send(JSON.stringify({ v: 1, type: 'pong', ts: Date.now() }))
+          return
+        }
         // Chat-sync foundation — gap-fill request. Replay everything after
         // the client's cursor to THIS socket only (the requesting device),
         // so a reconnect / cold-open fills its gap without re-broadcasting

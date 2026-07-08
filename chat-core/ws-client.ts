@@ -17,6 +17,30 @@
 
 export type ConnStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
 
+/**
+ * Default app-level heartbeat cadence (ms). The client pings ONLY after this
+ * much INBOUND silence, so on a busy socket it never fires. 25s sits under the
+ * common 30–60s proxy / load-balancer idle-close window (so a genuinely idle
+ * socket is kept warm) and far above any per-turn cadence — a heartbeat can
+ * neither be confused with nor fight the one-reply-per-turn agent substrate,
+ * because a `ping` is a transport control frame the server answers with `pong`
+ * WITHOUT running an agent turn (see gateway/http/app-ws-surface.ts).
+ */
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 25_000
+/**
+ * Default missed-pong deadline (ms). After a ping is sent, ANY inbound frame (a
+ * `pong`, or ordinary traffic) proves the socket live and cancels the deadline;
+ * if NOTHING arrives within this window the socket is half-open (a wifi↔cellular
+ * handoff or a device sleep the OS never surfaced as `onclose`) and is
+ * force-closed so `scheduleReconnect` actually fires. 10s tolerates a slow but
+ * live RTT without stranding a dead socket.
+ */
+export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 10_000
+
+/** The app-level heartbeat frame. A transport control frame — the server
+ *  short-circuits it to a `pong` and never runs an agent turn for it. */
+const PING_FRAME = { v: 1, type: 'ping' } as const
+
 /** Minimal socket surface the client drives. The browser `WebSocket` and
  *  Bun's `WebSocket` both satisfy it; tests pass a fake. */
 export interface SocketLike {
@@ -44,6 +68,14 @@ export interface ChatWsClientOptions {
   /** Jitter in [0,1) added as a fraction of the computed delay (default
    *  Math.random); injectable for deterministic tests. */
   jitter?: () => number
+  /**
+   * Heartbeat interval in ms — the client pings after this much inbound silence
+   * (default {@link DEFAULT_HEARTBEAT_INTERVAL_MS}). Set to 0 to DISABLE the
+   * heartbeat entirely (tests that only exercise reconnect/backoff).
+   */
+  heartbeatIntervalMs?: number
+  /** Missed-pong deadline in ms (default {@link DEFAULT_HEARTBEAT_TIMEOUT_MS}). */
+  heartbeatTimeoutMs?: number
   /** Injectable timers (tests). Default: global setTimeout/clearTimeout. */
   setTimeoutFn?: (fn: () => void, ms: number) => unknown
   clearTimeoutFn?: (handle: unknown) => void
@@ -63,6 +95,10 @@ export class ChatWsClient {
   private active = true
   private closedByUser = false
   private reconnectHandle: unknown = null
+  /** GAP-1 — heartbeat: the pending idle-ping timer (fires a ping after silence). */
+  private heartbeatHandle: unknown = null
+  /** GAP-1 — heartbeat: the pending missed-pong deadline (fires a force-close). */
+  private pongDeadlineHandle: unknown = null
 
   constructor(options: ChatWsClientOptions) {
     this.opts = {
@@ -71,8 +107,17 @@ export class ChatWsClient {
       minBackoffMs: options.minBackoffMs ?? 500,
       maxBackoffMs: options.maxBackoffMs ?? 15_000,
       jitter: options.jitter ?? Math.random,
+      heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+      heartbeatTimeoutMs: options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
       setTimeoutFn:
-        options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms) as unknown),
+        options.setTimeoutFn ??
+        ((fn, ms) => {
+          const handle = setTimeout(fn, ms)
+          // A background heartbeat/reconnect timer must never keep the host
+          // process alive (Node/Bun `unref`), so it can't block a clean exit.
+          ;(handle as { unref?: () => void }).unref?.()
+          return handle
+        }),
       clearTimeoutFn: options.clearTimeoutFn ?? ((h) => clearTimeout(h as never)),
     }
     this.onOpen = options.onOpen
@@ -109,6 +154,9 @@ export class ChatWsClient {
     this.active = active
     if (!active) {
       this.cancelReconnect()
+      // Stop pinging while backgrounded — mobile OSes freeze/sever the socket
+      // anyway, so a heartbeat there just burns battery / mis-fires on resume.
+      this.clearHeartbeat()
       return
     }
     if (this.closedByUser) return
@@ -116,6 +164,25 @@ export class ChatWsClient {
       this.attempt = 0
       this.openSocket()
     }
+  }
+
+  /**
+   * GAP-2 — network-reachability signal. A surface wires this to its platform's
+   * "connectivity regained" event (browser `online`; NetInfo `isConnected` on
+   * native, via the W6 bridge) so a reconnect fires the INSTANT the network is
+   * back instead of waiting out the (up-to-`maxBackoffMs`) backoff. Resets the
+   * backoff to base and reconnects NOW when we're not already open/connecting;
+   * a no-op after an explicit `close()` or while backgrounded (`setActive`
+   * owns the foreground/background lifecycle). Safe to call spuriously — an
+   * already-open socket is left untouched (a genuinely half-open one is caught
+   * by the heartbeat).
+   */
+  notifyReachable(): void {
+    if (this.closedByUser || !this.active) return
+    this.attempt = 0
+    this.cancelReconnect()
+    if (this.status === 'open' || this.status === 'connecting') return
+    this.openSocket()
   }
 
   /** Send a frame. Returns false when the socket isn't open (caller should
@@ -134,6 +201,7 @@ export class ChatWsClient {
   close(): void {
     this.closedByUser = true
     this.cancelReconnect()
+    this.clearHeartbeat()
     this.setStatus('closed')
     if (this.socket !== null) {
       try {
@@ -146,6 +214,7 @@ export class ChatWsClient {
   }
 
   private openSocket(): void {
+    this.clearHeartbeat()
     this.setStatus(this.attempt === 0 ? 'connecting' : 'reconnecting')
     let socket: SocketLike
     try {
@@ -156,11 +225,19 @@ export class ChatWsClient {
     }
     this.socket = socket
     socket.onopen = () => {
+      // Ignore a late callback from a socket we've already replaced/force-closed.
+      if (this.socket !== socket) return
       this.attempt = 0
       this.setStatus('open')
+      this.startHeartbeat()
       if (this.onOpen !== undefined) this.onOpen()
     }
     socket.onmessage = (ev) => {
+      if (this.socket !== socket) return
+      // GAP-1 — ANY inbound frame proves the socket is alive: reset the idle
+      // heartbeat countdown (and clear any pending pong deadline) BEFORE
+      // surfacing the frame, so a busy socket never pings.
+      this.noteActivity()
       if (this.onMessage === undefined) return
       const raw = ev.data
       if (typeof raw === 'string') {
@@ -178,12 +255,99 @@ export class ChatWsClient {
       // we don't double-schedule.
     }
     socket.onclose = () => {
+      // A stale socket's late close (we already moved on via force-close /
+      // reconnect) must not re-schedule — that would double the backoff clock.
+      if (this.socket !== socket) return
       this.socket = null
+      this.clearHeartbeat()
       if (this.closedByUser || !this.active) {
         if (!this.closedByUser) this.setStatus('idle')
         return
       }
       this.scheduleReconnect()
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // GAP-1 — heartbeat / half-open detection.
+  //
+  // Implemented on the injectable single-shot timer (no `setInterval`) so it
+  // shares the reconnect machine's fake-clock testability. The heartbeat is
+  // purely IDLE-driven: every inbound frame reschedules it, so a ping is sent
+  // only after `heartbeatIntervalMs` of true silence; a missed pong (no inbound
+  // within `heartbeatTimeoutMs`) force-closes the half-open socket so the normal
+  // reconnect/backoff path runs.
+  // ---------------------------------------------------------------------------
+
+  /** (Re)arm the idle-ping timer. No-op unless the socket is open and the
+   *  heartbeat is enabled (`heartbeatIntervalMs > 0`). */
+  private startHeartbeat(): void {
+    this.clearHeartbeat()
+    if (this.status !== 'open') return
+    if (this.opts.heartbeatIntervalMs <= 0) return
+    this.heartbeatHandle = this.opts.setTimeoutFn(() => {
+      this.heartbeatHandle = null
+      this.sendPing()
+    }, this.opts.heartbeatIntervalMs)
+  }
+
+  /** Idle window elapsed → ping and start the missed-pong deadline. A send that
+   *  throws (socket already dying) is itself proof the socket is dead. */
+  private sendPing(): void {
+    if (this.socket === null || this.status !== 'open') return
+    try {
+      this.socket.send(JSON.stringify(PING_FRAME))
+    } catch {
+      this.forceCloseDead()
+      return
+    }
+    this.pongDeadlineHandle = this.opts.setTimeoutFn(() => {
+      this.pongDeadlineHandle = null
+      // No inbound (not even a pong) within the deadline → half-open. Kill it so
+      // scheduleReconnect fires; without this the socket looks "connected"
+      // forever and the client silently misses every message.
+      this.forceCloseDead()
+    }, this.opts.heartbeatTimeoutMs)
+  }
+
+  /** Inbound traffic = liveness. Clear the pending pong deadline and restart the
+   *  idle countdown so the next ping is a fresh `heartbeatIntervalMs` away. */
+  private noteActivity(): void {
+    this.clearHeartbeat()
+    this.startHeartbeat()
+  }
+
+  /** Proactively drop a socket the heartbeat proved dead and drive the reconnect
+   *  path (mirrors `onclose`, but for a half-open socket whose `onclose` never
+   *  fires). Nulls `this.socket` first so the dead socket's eventual `onclose`
+   *  is ignored (the stale-guard above) and we don't double-schedule. */
+  private forceCloseDead(): void {
+    const dead = this.socket
+    this.clearHeartbeat()
+    this.socket = null
+    if (dead !== null) {
+      try {
+        dead.close()
+      } catch {
+        /* already closed */
+      }
+    }
+    if (this.closedByUser || !this.active) {
+      if (!this.closedByUser) this.setStatus('idle')
+      return
+    }
+    this.scheduleReconnect()
+  }
+
+  /** Tear down both heartbeat timers (no leaks, no double-scheduling). */
+  private clearHeartbeat(): void {
+    if (this.heartbeatHandle !== null) {
+      this.opts.clearTimeoutFn(this.heartbeatHandle)
+      this.heartbeatHandle = null
+    }
+    if (this.pongDeadlineHandle !== null) {
+      this.opts.clearTimeoutFn(this.pongDeadlineHandle)
+      this.pongDeadlineHandle = null
     }
   }
 
