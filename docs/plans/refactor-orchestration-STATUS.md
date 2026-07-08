@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `e69ccb3` (C3c #276 merged 2026-07-08; third `open/composer.ts` carve → `open/wiring/owner-gate.ts` security-sensitive http-shell, verbatim + the plan-sanctioned two-claim-block dedup, Codex APPROVE clean) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `6983738` (C3d #278 merged 2026-07-08; FINAL `open/composer.ts` carve → `open/wiring/{late,app-ws}.ts`, `late<T>` holder seams + typed `OpenComposition` return, Codex APPROVE clean — **C3 CHAIN COMPLETE:** composer 4015→2681 lines, 8 `open/wiring/*` leaves) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -402,17 +402,26 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
    test. **Codex APPROVE first pass, no findings** (independently verified the security semantics). composer
    −277. Lesson: when the plan's spec cites an OLD mechanism (exact-string), DIFF the deleted lines to
    confirm what the code ACTUALLY does now before trusting either the spec or the agent's summary.
-10. **IN FLIGHT:** C3d (final composer carve — dispatched).
-11. **Next dispatchable (wave 3):** **C3d** (IN FLIGHT — app-ws receiver + app surfaces + return assembly +
-   the four late-bound holders → `late<T>` seams). **CARE — the ONLY sanctioned semantic change:** `late<T>`
-   deref-before-bind LOGS + increments a `system_events` counter + NO-OPs in prod (byte-identical to today's
-   `holder.x?.foo()` silent-no-op-when-unset), and THROWS only under `NODE_ENV=test`; every holder BIND stays
-   at its current closure site. Return literal gets `OpenComposition = CompositionInput &
-   Required<Pick<…,openSurfaces>>` so a dropped slice fails COMPILE. `importWatchHolder` may stay a plain
-   object (shared with C3b `wireUploads`) if converting it risks the uploads contract. After C3d, the C3
-   chain is COMPLETE and the composer is a lean orchestrator. **L5** (relative-import autofix sweep, `haiku`)
-   — UNBLOCKS once C3d lands (was held for the C3 relocations). **M1/M2** = Managed (cross-repo, deferred).
-   **K10 strictly LAST (wave 9).**
+10. **C3d** ✅ #278 (FINAL composer carve → `open/wiring/{late,app-ws}.ts`). **C3 CHAIN COMPLETE** — composer
+   4015→2681 lines across 8 `open/wiring/*` leaves. `late<T>(name)` two-phase seam: deref-before-bind LOGS
+   (`console.error [open] event=late_deref_before_bind`) + bumps an in-process counter (no `system_events`
+   table exists → in-process Map + injectable sink) + NO-OPs in prod (returns undefined, skips fn —
+   byte-identical to the old `holder.x?.foo()`), THROWS only under `NODE_ENV=test`. **Call-site mapping
+   verified correct:** presence-checks (`adapter !== undefined`) → `isBound()` + guarded `get()!` (pure, no
+   log/throw); fire-and-forget `?.send()` → `deref(...)`; bind sites unmoved. `dispatchBoardHolder` +
+   `onboardingMsg` + `appWs` on the seam; **`importWatchHolder` kept a PLAIN object** (converting it would
+   touch the landed C3b `wireUploads` reader contract — plan's lower-risk escape hatch). `wireAppWs(ctx, deps)`
+   carves the app-ws receiver/adapter/delivery-sink (~745 lines). Return typed `OpenComposition = CompositionInput
+   & Required<Pick<…33 unconditional surfaces>>` (excludes the 5 LLM-less-omitted: `doc_search`,
+   `import_resume_handler`, `trident`, `trident_build_dispatch`, `agent_dispatch`) + a `@ts-expect-error`
+   proving a dropped surface fails compile. **Codex APPROVE, no findings.** composer −837.
+11. **IN FLIGHT:** L5 (relative-import autofix sweep — dispatched, `sonnet` routed-up for the 795-change purity
+   verification).
+12. **Next dispatchable:** **L5** (IN FLIGHT — eslint `import/no-relative-packages` autofix, `../<workspace>/…`
+   → `@neutronai/<workspace>/…`, ~795 escapes, PURE-RENAME, one PR, suite green, CI rule enforced; care:
+   env-at-load modules keep import positions). After L5 the **L-phase is DONE** (L1-L7). Then the C-phase tail
+   (**C4** data-driven surface registry → **C5** auth-gate seam → **C6** cred-resolver → **C7** rename →
+   **C8**) and waves 4-9. **M1/M2** = Managed (cross-repo, deferred). **K10 strictly LAST (wave 9).**
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
