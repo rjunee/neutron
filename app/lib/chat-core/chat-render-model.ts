@@ -147,7 +147,7 @@ export function rowKey(message: ChatMessage): string {
  * device other than the sender — the agent loop (which marks every inbound
  * user message read once it picks it up) or a second device on the account.
  */
-export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read';
+export type DeliveryState = 'pending' | 'sent' | 'failed' | 'delivered' | 'read';
 
 /**
  * Map a message's send status + receipt aggregate to its ladder state.
@@ -165,6 +165,11 @@ export function deliveryState(
       return 'pending'; // 🕓 — written locally, not yet on the wire (offline)
     case 'sent':
       return 'sent'; // ✓ — handed to the socket, awaiting the server echo
+    case 'failed':
+      // W5 GAP-4 — handed to the socket but the ack never arrived within the
+      // ack-timeout, so the socket was silently lost. NOT a stuck 🕓 clock: the
+      // UI shows a retry affordance; the send is re-driven on the next reconnect.
+      return 'failed';
     case 'acked':
       // ✓✓ delivered; promotes to read once another device/agent has read it.
       return isReadByOther(message.read_by, selfDeviceId) ? 'read' : 'delivered';
@@ -207,6 +212,8 @@ export function deliveryGlyph(state: DeliveryState): string {
       return '🕓';
     case 'sent':
       return '✓';
+    case 'failed':
+      return '⚠️'; // W5 GAP-4 — retry affordance, not a stuck clock
     case 'delivered':
       return '✓✓';
     case 'read':

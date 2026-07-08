@@ -117,10 +117,20 @@ export interface MessageReaction {
  *  - `queued` — written to the local store, not yet handed to the socket
  *    (offline, or buffered before flush).
  *  - `sent`   — handed to the socket; awaiting the server echo.
+ *  - `failed` — GAP-4: handed to the socket but no ack arrived within the
+ *    ack-timeout window, so the socket was (silently) lost. A terminal-until-
+ *    retried state that lets the UI swap the stuck 🕓 clock for a retry
+ *    affordance. NOT a lost send: it is re-driven (idempotently, on
+ *    `client_msg_id`) on the next reconnect and reconciles to `acked` when the
+ *    echo finally lands.
  *  - `acked`  — the server echo (with `seq` + `message_id`) has reconciled
  *    it. Inbound agent/user messages from the server are born `acked`.
+ *
+ * Status only ever advances (`queued` → `sent` → `failed` → `acked`); a later
+ * echo always wins, so a `failed` row that is re-sent and finally echoed lands
+ * on `acked`. See {@link SendStatus} rank in store.ts.
  */
-export type SendStatus = 'queued' | 'sent' | 'acked'
+export type SendStatus = 'queued' | 'sent' | 'failed' | 'acked'
 
 /**
  * The canonical local representation of a chat message. Nullable (not

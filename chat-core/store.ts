@@ -322,7 +322,12 @@ export function normalizeReactions(
   return cleaned.length > 0 ? sortReactions(cleaned) : null
 }
 
-const STATUS_RANK = { queued: 0, sent: 1, acked: 2 } as const
+// GAP-4 — `failed` ranks ABOVE `sent` (an ack-timeout flips sent → failed) but
+// BELOW `acked` (a late echo still wins, resolving a failed row to acked). This
+// keeps status strictly monotonic, so the merge never regresses: a re-delivery /
+// resume echo (born `acked`) always beats a local `failed`, and a re-sent failed
+// row simply stays `failed` on the wire until its echo lands.
+const STATUS_RANK = { queued: 0, sent: 1, failed: 2, acked: 3 } as const
 function advanceStatus(a: ChatMessage['status'], b: ChatMessage['status']): ChatMessage['status'] {
   return STATUS_RANK[b] >= STATUS_RANK[a] ? b : a
 }

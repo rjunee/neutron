@@ -86,6 +86,8 @@ export {
 
 export {
   ChatWsClient,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
   type ConnStatus,
   type SocketLike,
   type ChatWsClientOptions,
@@ -93,4 +95,9 @@ export {
 
 export { OpfsChatStore, createWebStore } from './stores/opfs-store.ts'
 
-export { WebChatSession, type WebChatSessionOptions } from './web-session.ts'
+export {
+  WebChatSession,
+  DEFAULT_ACK_TIMEOUT_MS,
+  DEFAULT_RESUME_FALLBACK_MS,
+  type WebChatSessionOptions,
+} from './web-session.ts'

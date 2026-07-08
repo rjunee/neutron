@@ -66,6 +66,9 @@ export interface UseMobileChatResult {
   deleteMessage: (messageId: string) => void;
   /** P1b — answer an agent prompt by tapping an option (or a freeform reply). */
   chooseOption: (promptId: string, choiceValue: string, freeform?: string) => void;
+  /** W5 GAP-4 — retry a failed send (the ⚠️ affordance). Per-message: re-drives
+   *  ONLY this `client_msg_id`, idempotently. */
+  retry: (clientMsgId: string) => void;
   /** This device's id — passed to `deliveryState` so a message's read tick
    *  excludes the sender's own device. Empty until the session constructs. */
   selfDeviceId: string;
@@ -254,6 +257,11 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     [],
   );
 
+  const retry = useCallback((clientMsgId: string): void => {
+    if (clientMsgId.length === 0) return;
+    void sessionRef.current?.retry(clientMsgId);
+  }, []);
+
   const rows = useMemo(() => buildRenderRows(messages, stream), [messages, stream]);
 
   return {
@@ -268,6 +276,7 @@ export function useMobileChat(projectId: string): UseMobileChatResult {
     editMessage,
     deleteMessage,
     chooseOption,
+    retry,
     selfDeviceId,
   };
 }

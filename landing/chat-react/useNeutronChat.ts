@@ -64,9 +64,19 @@ export function useNeutronChatVm(controller: NeutronChatController): ChatViewMod
     const onVisibility = (): void => {
       controller.setActive(document.visibilityState === 'visible')
     }
+    // W5 GAP-2 — the browser's network-regain signal. On `online`, tell the
+    // controller (→ session → transport) to reset backoff and reconnect NOW,
+    // instead of waiting out the exponential backoff after a flap. (The NATIVE
+    // NetInfo equivalent is the documented W6 seam on the native bridge — only
+    // the web `online` listener belongs here.)
+    const onOnline = (): void => {
+      controller.notifyReachable()
+    }
     document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('online', onOnline)
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('online', onOnline)
       unsub()
       controller.stop()
     }

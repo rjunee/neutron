@@ -1387,3 +1387,73 @@ describe('NeutronChatController — chat-rail stability (SEV1 2026-07-01)', () =
     controller.stop()
   })
 })
+
+describe('NeutronChatController — W5 GAP-4 failed-send retry affordance', () => {
+  it('retry(client_msg_id) delegates to the session', async () => {
+    const retried: string[] = []
+    const session: ControllerSession = {
+      start: () => {},
+      stop: () => {},
+      setActive: () => {},
+      status: () => 'open',
+      send: async () => {},
+      messages: async () => [],
+      pendingCount: async () => 0,
+      retry: async (cmid: string) => {
+        retried.push(cmid)
+      },
+      device_id: 'dev-test',
+    }
+    const controller = new NeutronChatController({
+      projectId: null,
+      createSession: () => session,
+    })
+    await controller.retry('cmid-fail')
+    expect(retried).toEqual(['cmid-fail'])
+    controller.stop()
+  })
+
+  it('surfaces delivery=failed in the view model for a timed-out send (drives the ⚠️ retry affordance)', async () => {
+    // A send whose ack never arrived (WebChatSession flipped it sent → failed).
+    const store = new InMemoryStore()
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: 'cmid-fail',
+      message_id: null,
+      seq: null,
+      role: 'user',
+      body: 'never acked',
+      project_id: null,
+      attachments: null,
+      created_at: 1,
+      status: 'failed',
+    })
+    const sockets: FakeSocket[] = []
+    const controller = new NeutronChatController({
+      projectId: null,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store,
+          createSocket: () => {
+            const s = new FakeSocket()
+            sockets.push(s)
+            return s
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+          device_id: 'dev-self',
+        }),
+    })
+    controller.start()
+    await tick()
+
+    const failed = controller.getViewModel().messages.find((m) => m.text === 'never acked')
+    expect(failed?.status).toBe('failed')
+    // `buildDeliveryIndex` keys the RetryAffordance off `delivery === 'failed'`.
+    expect(failed?.delivery).toBe('failed')
+    controller.stop()
+  })
+})

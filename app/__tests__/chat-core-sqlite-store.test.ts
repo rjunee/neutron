@@ -293,6 +293,22 @@ describe('SqliteChatStore — Store contract (real bun:sqlite)', () => {
     expect(row?.status).toBe('acked');
   });
 
+  it('W5 GAP-4 — round-trips a `failed` send (cold-open must NOT revert it to a pending clock)', async () => {
+    const db = freshDb();
+    const first = await SqliteChatStore.open(bunExecutor(db));
+    // A send that timed out awaiting its ack (flipped sent → failed).
+    await first.upsert(msg({ client_msg_id: 'c-fail', body: 'never acked', created_at: 5, status: 'failed' }));
+    expect((await first.list(TOPIC))[0]?.status).toBe('failed');
+
+    // Cold-open (app restart) over the same DB: the failed row must read back as
+    // `failed`, not `queued` — otherwise the retry affordance reverts to 🕓.
+    const reopened = await SqliteChatStore.open(bunExecutor(db));
+    const [row] = await reopened.list(TOPIC);
+    expect(row?.status).toBe('failed');
+    // And it is NOT surfaced as a pending (queued) send.
+    expect((await reopened.pendingSends(TOPIC)).length).toBe(0);
+  });
+
   it('cold-opens from a persisted DB file (instant restart, offline read)', async () => {
     const db = freshDb();
     const first = await SqliteChatStore.open(bunExecutor(db));

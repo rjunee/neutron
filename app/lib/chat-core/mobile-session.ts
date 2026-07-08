@@ -34,6 +34,7 @@
 
 import {
   ChatWsClient,
+  DEFAULT_ACK_TIMEOUT_MS,
   InMemoryStore,
   normalizeEditUpdate,
   normalizeInbound,
@@ -78,9 +79,28 @@ export interface MobileChatSessionOptions {
   device_id?: string;
   generateId?: () => string;
   now?: () => number;
-  /** Injectable reconnect timer (tests). Defaults to global setTimeout. */
+  /** W5 GAP-4 — ack-timeout window (ms). Default {@link DEFAULT_ACK_TIMEOUT_MS};
+   *  0 disables the sent→failed flip. Parity with WebChatSession. */
+  ackTimeoutMs?: number;
+  /** W5 GAP-1 — heartbeat cadence (ms) passed through to the transport; the
+   *  client pings after this much inbound silence to detect a half-open socket.
+   *  Defaults to the transport default. Set to 0 to DISABLE (tests whose injected
+   *  timer fires immediately, so a real-cadence heartbeat would mis-fire). */
+  heartbeatIntervalMs?: number;
+  /** W5 GAP-1 — missed-pong deadline (ms), passed through to the transport. */
+  heartbeatTimeoutMs?: number;
+  /** Injectable reconnect timer (tests). Defaults to global setTimeout. Also
+   *  drives the ack-timeout deadlines. */
   setTimeoutFn?: (fn: () => void, ms: number) => unknown;
   clearTimeoutFn?: (handle: unknown) => void;
+}
+
+/** Default single-shot timer that never keeps the RN JS runtime / a test process
+ *  alive (unref), so a pending ack timer can't block a clean shutdown. */
+function defaultSetTimeout(fn: () => void, ms: number): unknown {
+  const handle = setTimeout(fn, ms);
+  (handle as { unref?: () => void }).unref?.();
+  return handle;
 }
 
 export class MobileChatSession {
@@ -97,6 +117,12 @@ export class MobileChatSession {
   private readonly onFrame: ((data: unknown) => void) | undefined;
   /** message_ids we've already reported `read` for (de-dups re-renders). */
   private readonly readSent = new Set<string>();
+  /** W5 GAP-4 — per-message (client_msg_id → handle) ack-deadline timers. A row
+   *  that never gets its echo flips `sent` → `failed` when its timer fires. */
+  private readonly ackTimers = new Map<string, unknown>();
+  private readonly ackTimeoutMs: number;
+  private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimeoutFn: (handle: unknown) => void;
 
   constructor(opts: MobileChatSessionOptions) {
     this.topic_id = opts.topic_id;
@@ -110,6 +136,9 @@ export class MobileChatSession {
     this.engine = new SyncEngine(this.store);
     this.onChange = opts.onChange;
     this.onFrame = opts.onFrame;
+    this.ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS;
+    this.setTimeoutFn = opts.setTimeoutFn ?? defaultSetTimeout;
+    this.clearTimeoutFn = opts.clearTimeoutFn ?? ((h) => clearTimeout(h as never));
 
     const wsOpts: ConstructorParameters<typeof ChatWsClient>[0] = {
       url: opts.url,
@@ -124,6 +153,8 @@ export class MobileChatSession {
       },
     };
     if (opts.onStatus !== undefined) wsOpts.onStatus = opts.onStatus;
+    if (opts.heartbeatIntervalMs !== undefined) wsOpts.heartbeatIntervalMs = opts.heartbeatIntervalMs;
+    if (opts.heartbeatTimeoutMs !== undefined) wsOpts.heartbeatTimeoutMs = opts.heartbeatTimeoutMs;
     if (opts.setTimeoutFn !== undefined) wsOpts.setTimeoutFn = opts.setTimeoutFn;
     if (opts.clearTimeoutFn !== undefined) wsOpts.clearTimeoutFn = opts.clearTimeoutFn;
     this.ws = new ChatWsClient(wsOpts);
@@ -134,9 +165,11 @@ export class MobileChatSession {
     this.ws.connect();
   }
 
-  /** Close the connection (no reconnect until `start()` again). */
+  /** Close the connection (no reconnect until `start()` again) and tear down the
+   *  ack-deadline timers so nothing leaks. */
   stop(): void {
     this.ws.close();
+    this.clearAllTimers();
   }
 
   /** AppState bridge — call on foreground (`true`) / background (`false`). */
@@ -183,6 +216,27 @@ export class MobileChatSession {
     await this.queue.enqueue(enqueueInput);
     this.emitChange();
     await this.flush();
+  }
+
+  /**
+   * W5 GAP-4 — per-message manual retry (parity with WebChatSession). Re-drives
+   * ONLY the send with this `client_msg_id` (the failed bubble the user tapped)
+   * over the current open socket — never its siblings. Idempotent on
+   * `client_msg_id` (the server de-dupes; the `was_new` guard means the
+   * re-delivery never re-fires the agent), and re-arms that message's ack
+   * deadline (the `has()` guard in {@link armAckTimer} prevents a duplicate timer
+   * if a reconnect-flush races it). A no-op while the socket is down — the
+   * reconnect's `resumeAndFlush` re-drives it then.
+   */
+  async retry(client_msg_id: string): Promise<void> {
+    const flushed = await this.queue.flushOne((envelope) => {
+      const ok = this.ws.send(envelope);
+      if (!ok) throw new Error('socket not open');
+    }, this.topic_id, client_msg_id);
+    if (flushed !== null) {
+      this.armAckTimersFor([flushed]);
+      this.emitChange();
+    }
   }
 
   /** Current ordered transcript (for rendering / cold-open hydration). */
@@ -328,6 +382,12 @@ export class MobileChatSession {
     const msg = normalizeInbound(data);
     if (msg === null) return;
     await this.engine.applyInbound(this.topic_id, msg);
+    // W5 GAP-4 — this echo (a user_message carrying our client_msg_id) reconciled
+    // the optimistic row to `acked`; cancel its ack deadline so it can't later
+    // spuriously flip to `failed`.
+    if (msg.client_msg_id !== null && msg.client_msg_id.length > 0) {
+      this.clearAckTimer(msg.client_msg_id);
+    }
     this.emitChange();
   }
 
@@ -356,6 +416,7 @@ export class MobileChatSession {
       const ok = this.ws.send(envelope);
       if (!ok) throw new Error('socket not open');
     }, this.topic_id);
+    this.armAckTimersFor(flushed);
     if (flushed.length > 0) this.emitChange();
   }
 
@@ -364,7 +425,51 @@ export class MobileChatSession {
       const ok = this.ws.send(envelope);
       if (!ok) throw new Error('socket not open');
     }, this.topic_id);
+    this.armAckTimersFor(flushed);
     if (flushed.length > 0) this.emitChange();
+  }
+
+  /**
+   * W5 GAP-4 — parity with WebChatSession. Arm an ack deadline for every freshly
+   * `sent` row from a flush; when it fires without the echo having reconciled the
+   * row, flip `sent` → `failed` so the render layer shows a retry affordance
+   * instead of a permanently-stuck 🕓 clock. NEVER auto-resends (the resend is the
+   * reconnect's idempotent `flushUnacked`), so it can't double-send a slow-but-
+   * live turn or fight the one-reply-per-turn substrate.
+   */
+  private armAckTimersFor(flushed: readonly ChatMessage[]): void {
+    for (const m of flushed) {
+      if (m.status === 'sent') this.armAckTimer(m.client_msg_id);
+    }
+  }
+
+  private armAckTimer(client_msg_id: string): void {
+    if (client_msg_id.length === 0 || this.ackTimeoutMs <= 0) return;
+    if (this.ackTimers.has(client_msg_id)) return;
+    const handle = this.setTimeoutFn(() => {
+      void this.onAckTimeout(client_msg_id);
+    }, this.ackTimeoutMs);
+    this.ackTimers.set(client_msg_id, handle);
+  }
+
+  private async onAckTimeout(client_msg_id: string): Promise<void> {
+    this.ackTimers.delete(client_msg_id);
+    const row = await this.store.getByClientMsgId(this.topic_id, client_msg_id);
+    if (row === null || row.status !== 'sent') return; // already acked/failed, or gone
+    await this.store.upsert({ ...row, status: 'failed' });
+    this.emitChange();
+  }
+
+  private clearAckTimer(client_msg_id: string): void {
+    const handle = this.ackTimers.get(client_msg_id);
+    if (handle === undefined) return;
+    this.clearTimeoutFn(handle);
+    this.ackTimers.delete(client_msg_id);
+  }
+
+  private clearAllTimers(): void {
+    for (const handle of this.ackTimers.values()) this.clearTimeoutFn(handle);
+    this.ackTimers.clear();
   }
 
   private emitChange(): void {

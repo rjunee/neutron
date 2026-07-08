@@ -82,3 +82,29 @@ describe('createWebStore — graceful degradation', () => {
     await storeContract(store)
   })
 })
+
+// W5 GAP-4 — the `failed` send status must round-trip through EVERY Store impl:
+// a persisted failed row read back as `queued` would revert a retry affordance to
+// a false pending clock. InMemoryStore + the opfs snapshot both round-trip the
+// full ChatMessage (no status allow-list), so this locks that in; SqliteChatStore
+// has an explicit allow-list, covered in app/__tests__/chat-core-sqlite-store.test.ts.
+describe('failed-status round-trip (W5 GAP-4)', () => {
+  async function assertFailedRoundTrips(store: Store): Promise<void> {
+    await store.upsert(msg({ client_msg_id: 'c-fail', body: 'never acked', status: 'failed' }))
+    expect((await store.getByClientMsgId(TOPIC, 'c-fail'))?.status).toBe('failed')
+    expect((await store.list(TOPIC))[0]?.status).toBe('failed')
+    // A failed row is NOT a pending (queued) send.
+    expect((await store.pendingSends(TOPIC)).length).toBe(0)
+    // Status stays monotonic: a late echo (born acked) still wins over failed …
+    await store.upsert(msg({ client_msg_id: 'c-fail', message_id: 'srv', seq: 3, body: 'never acked', status: 'acked' }))
+    expect((await store.getByClientMsgId(TOPIC, 'c-fail'))?.status).toBe('acked')
+  }
+
+  it('InMemoryStore round-trips failed', async () => {
+    await assertFailedRoundTrips(new InMemoryStore())
+  })
+
+  it('createWebStore round-trips failed', async () => {
+    await assertFailedRoundTrips(await createWebStore())
+  })
+})

@@ -97,6 +97,11 @@ function makeSession(store: SqliteChatStore, frames: unknown[] = []) {
       changes += 1;
     },
     onFrame: (data) => frames.push(data),
+    // The injected timer below fires on the next microtask (so the reconnect
+    // backoff is deterministic without a real wait); a real-cadence heartbeat
+    // would therefore mis-fire immediately on open, so disable it here. The
+    // heartbeat has its own dedicated coverage in chat-core/__tests__/resilience.test.ts.
+    heartbeatIntervalMs: 0,
     // Fire the reconnect backoff on the next microtask so reconnection is
     // deterministic in tests (no real 500ms+ wait).
     setTimeoutFn: (fn: () => void) => {
@@ -566,5 +571,154 @@ describe('MobileChatSession — stale-store reset on server reinstall (M1)', () 
     await tick();
     expect(await store.lastSeenSeq(TOPIC)).toBe(40);
     expect((await session.messages()).length).toBe(2);
+  });
+});
+
+/** A virtual clock: single-shot timers fired by `advance`, re-queried each step
+ *  so rescheduled timers (the ws heartbeat) fire correctly. */
+class VirtualClock {
+  now = 0;
+  private nextId = 1;
+  private timers: Array<{ id: number; at: number; fn: () => void }> = [];
+  readonly set = (fn: () => void, ms: number): unknown => {
+    const id = this.nextId++;
+    this.timers.push({ id, at: this.now + ms, fn });
+    return id;
+  };
+  readonly clear = (h: unknown): void => {
+    this.timers = this.timers.filter((t) => t.id !== h);
+  };
+  advance(ms: number): void {
+    const target = this.now + ms;
+    for (;;) {
+      const due = this.timers.filter((t) => t.at <= target).sort((a, b) => a.at - b.at)[0];
+      if (due === undefined) break;
+      this.timers = this.timers.filter((t) => t.id !== due.id);
+      this.now = due.at;
+      due.fn();
+    }
+    this.now = target;
+  }
+}
+
+describe('MobileChatSession — W5 GAP-4 ack-timeout (parity with WebChatSession)', () => {
+  it('flips a never-acked send sent → failed, then re-drives it on reconnect (never a stuck clock)', async () => {
+    const store = await freshStore();
+    const clock = new VirtualClock();
+    const sockets: FakeSocket[] = [];
+    const session = new MobileChatSession({
+      url: URL,
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      generateId: () => 'ack-x',
+      now: (() => {
+        let t = 1000;
+        return () => (t += 1);
+      })(),
+      ackTimeoutMs: 15_000,
+      heartbeatIntervalMs: 0, // isolate GAP-4 from the GAP-1 heartbeat
+      setTimeoutFn: clock.set,
+      clearTimeoutFn: clock.clear,
+    });
+
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+
+    // Send while open → delivered, marked `sent` (the 🕓 clock).
+    await session.send('important', { client_msg_id: 'ack-x' });
+    await tick();
+    expect((await session.messages())[0]?.status).toBe('sent');
+
+    // The echo never arrives → after the ack-timeout the clock is NOT stuck:
+    // it flips to `failed` so the render layer shows a retry affordance.
+    clock.advance(15_000);
+    await tick();
+    expect((await session.messages())[0]?.status).toBe('failed');
+
+    // Reconnect: a fresh socket opens and the failed send is re-driven idempotently.
+    sockets[0]!.close();
+    clock.advance(1_000); // fire the reconnect backoff → new socket
+    await tick();
+    const s2 = sockets.at(-1)!;
+    s2.open();
+    s2.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 2 });
+    await tick();
+    const resent = s2.sentEnvelopes().filter((e) => e['type'] === 'user_message');
+    expect(resent.length).toBe(1); // exactly one resend
+    expect(resent[0]).toMatchObject({ body: 'important', client_msg_id: 'ack-x' });
+
+    // The echo finally lands → reconciles to a single acked row (no dup, no stuck clock).
+    s2.deliver({
+      v: 1,
+      type: 'user_message',
+      message_id: 'srv-1',
+      client_msg_id: 'ack-x',
+      seq: 7,
+      body: 'important',
+      ts: 3,
+    });
+    await tick();
+    const msgs = await session.messages();
+    expect(msgs.length).toBe(1);
+    expect(msgs[0]?.status).toBe('acked');
+    expect(msgs[0]?.seq).toBe(7);
+    session.stop();
+  });
+});
+
+describe('MobileChatSession — W5 GAP-4 per-message retry (FIX 11 parity)', () => {
+  function failedRow(client_msg_id: string, body: string, created_at: number) {
+    return {
+      topic_id: TOPIC,
+      client_msg_id,
+      message_id: null,
+      seq: null,
+      role: 'user' as const,
+      body,
+      project_id: null,
+      attachments: null,
+      created_at,
+      status: 'failed' as const,
+    };
+  }
+
+  it('retry(idA) re-drives ONLY message A, never its siblings', async () => {
+    const store = await freshStore();
+    await store.upsert(failedRow('A', 'alpha', 1));
+    await store.upsert(failedRow('B', 'beta', 2));
+    const sockets: FakeSocket[] = [];
+    const session = new MobileChatSession({
+      url: URL,
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      // Open WITHOUT a session_ready so the resume path (re-drives ALL unacked)
+      // can't confound the per-message retry; no ack timers / heartbeat noise.
+      heartbeatIntervalMs: 0,
+      ackTimeoutMs: 0,
+    });
+    session.start();
+    sockets[0]!.open();
+    await tick();
+    expect(sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'user_message').length).toBe(0);
+
+    await session.retry('A');
+    await tick();
+    const sent = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'user_message');
+    expect(sent.map((e) => e['body'])).toEqual(['alpha']);
+    expect(sent[0]?.['client_msg_id']).toBe('A');
+    expect((await session.messages()).find((m) => m.client_msg_id === 'B')?.status).toBe('failed');
+    session.stop();
   });
 });

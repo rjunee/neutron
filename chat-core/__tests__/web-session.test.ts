@@ -23,6 +23,10 @@ class FakeSocket implements SocketLike {
   open(): void {
     this.onopen?.()
   }
+  fireClose(): void {
+    this.closed = true
+    this.onclose?.()
+  }
   deliver(obj: unknown): void {
     this.onmessage?.({ data: JSON.stringify(obj) })
   }
@@ -57,6 +61,22 @@ function readyFrame(last_seen_seq?: number): Record<string, unknown> {
   return f
 }
 
+/**
+ * Model a real reconnect: the live socket drops and a FRESH one opens (a new
+ * `session_ready` announce follows on the new socket). A reconnect is ALWAYS a
+ * new socket in production — the server emits exactly one `session_ready` per
+ * connection — so a bare second `session_ready` on the same socket is not a
+ * reconnect. The setActive toggle reopens synchronously (bypassing the transport's
+ * backoff timer). Returns the new socket. `open()` it, then deliver its
+ * `session_ready`.
+ */
+function reconnect(session: WebChatSession, sockets: FakeSocket[]): FakeSocket {
+  sockets.at(-1)!.fireClose()
+  session.setActive(false) // cancel the auto-reconnect timer
+  session.setActive(true) // synchronously open a fresh socket
+  return sockets.at(-1)!
+}
+
 describe('WebChatSession — optimistic send + offline queue', () => {
   it('renders a send immediately (queued) even before the socket opens', async () => {
     const { session, sockets } = setup()
@@ -88,7 +108,7 @@ describe('WebChatSession — optimistic send + offline queue', () => {
 })
 
 describe('WebChatSession — gap-free reconnect (resume)', () => {
-  it('sends a resume request from the local cursor on session_ready', async () => {
+  it('sends a resume request from the local cursor on reconnect', async () => {
     const { session, sockets } = setup()
     session.start()
     sockets[0]!.open()
@@ -97,10 +117,13 @@ describe('WebChatSession — gap-free reconnect (resume)', () => {
     sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'a', ts: 1 })
     sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm2', seq: 2, body: 'b', ts: 2 })
     await new Promise((r) => setTimeout(r, 0))
-    // Simulate a reconnect announce — the session must resume after_seq=2.
-    sockets[0]!.deliver(readyFrame(2))
+    // Reconnect: a fresh socket opens and announces session_ready — the session
+    // must resume after_seq=2 (its local cursor) on the NEW socket.
+    const s2 = reconnect(session, sockets)
+    s2.open()
+    s2.deliver(readyFrame(2))
     await new Promise((r) => setTimeout(r, 0))
-    const resumes = sockets[0]!.resumeFrames()
+    const resumes = s2.resumeFrames()
     expect(resumes.at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 2 })
   })
 
@@ -133,16 +156,15 @@ describe('WebChatSession — gap-free reconnect (resume)', () => {
     await new Promise((r) => setTimeout(r, 0))
     expect(sockets[0]!.sentUserMessages().map((e) => e['body'])).toEqual(['important'])
     // The connection drops before the server echoes it (no user_message echo
-    // applied → row stays `sent`, never `acked`). A reconnect announce arrives.
-    sockets[0]!.deliver(readyFrame())
+    // applied → row stays `sent`, never `acked`). A fresh socket reconnects.
+    const s2 = reconnect(session, sockets)
+    s2.open()
+    s2.deliver(readyFrame())
     await new Promise((r) => setTimeout(r, 0))
-    // The send is retried (idempotent server-side on client_msg_id).
-    const bodies = sockets[0]!.sentUserMessages().map((e) => e['body'])
-    expect(bodies).toEqual(['important', 'important'])
-    // Both retries carry the same client_msg_id so the server de-dupes.
-    expect(
-      sockets[0]!.sentUserMessages().every((e) => e['client_msg_id'] === 'cmid-keep'),
-    ).toBe(true)
+    // The send is retried on the new socket (idempotent server-side on client_msg_id).
+    const bodies = s2.sentUserMessages().map((e) => e['body'])
+    expect(bodies).toEqual(['important'])
+    expect(s2.sentUserMessages().every((e) => e['client_msg_id'] === 'cmid-keep')).toBe(true)
   })
 
   it('forwards every raw inbound frame to onFrame without affecting persistence', async () => {
@@ -286,5 +308,98 @@ describe('WebChatSession — stale-store reset on server reinstall (M1)', () => 
     expect(await store.lastSeenSeq(TOPIC)).toBe(40)
     expect((await session.messages()).length).toBe(2)
     expect(sockets[0]!.resumeFrames().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
+  })
+})
+
+describe('WebChatSession — W5 GAP-4 per-message retry (FIX 10)', () => {
+  function failedRow(client_msg_id: string, body: string, created_at: number) {
+    return {
+      topic_id: TOPIC,
+      client_msg_id,
+      message_id: null,
+      seq: null,
+      role: 'user' as const,
+      body,
+      project_id: null,
+      attachments: null,
+      created_at,
+      status: 'failed' as const,
+    }
+  }
+
+  it('re-drives ONLY the tapped message, never its siblings', async () => {
+    const store = new InMemoryStore()
+    // Two sends that both timed out awaiting their ack (status `failed`).
+    await store.upsert(failedRow('A', 'alpha', 1))
+    await store.upsert(failedRow('B', 'beta', 2))
+    const sockets: FakeSocket[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      // Open the socket WITHOUT a session_ready + no fallback, so the reconnect
+      // resume path (which re-drives ALL unacked) can't confound this — isolating
+      // the manual per-message retry.
+      resumeFallbackMs: 0,
+      ackTimeoutMs: 0,
+    })
+    session.start()
+    sockets[0]!.open()
+    await new Promise((r) => setTimeout(r, 0))
+    // Nothing auto-flushed (no session_ready, no fallback).
+    expect(sockets[0]!.sentUserMessages().length).toBe(0)
+
+    // Tap retry on A only → ONLY A is re-driven; B is untouched.
+    await session.retry('A')
+    await new Promise((r) => setTimeout(r, 0))
+    const sent = sockets[0]!.sentUserMessages()
+    expect(sent.map((e) => e['body'])).toEqual(['alpha'])
+    expect(sent[0]?.['client_msg_id']).toBe('A')
+    // B remains failed + un-sent (its own affordance still available).
+    expect((await session.messages()).find((m) => m.client_msg_id === 'B')?.status).toBe('failed')
+  })
+
+  it('is idempotent (client_msg_id) and a re-drive keeps a single store row', async () => {
+    const store = new InMemoryStore()
+    await store.upsert(failedRow('A', 'alpha', 1))
+    const sockets: FakeSocket[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      resumeFallbackMs: 0,
+      ackTimeoutMs: 0,
+    })
+    session.start()
+    sockets[0]!.open()
+    await session.retry('A')
+    await session.retry('A') // tapped twice
+    await new Promise((r) => setTimeout(r, 0))
+    // Same client_msg_id every time (the server de-dupes); one local row.
+    expect(sockets[0]!.sentUserMessages().every((e) => e['client_msg_id'] === 'A')).toBe(true)
+    // The server echo reconciles to a single acked row.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'user_message',
+      message_id: 'srv-A',
+      client_msg_id: 'A',
+      seq: 3,
+      body: 'alpha',
+      ts: 9,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    const msgs = await session.messages()
+    expect(msgs.length).toBe(1)
+    expect(msgs[0]?.status).toBe('acked')
   })
 })

@@ -526,7 +526,10 @@ function parseAttachments(raw: SqlValue | undefined): readonly string[] | null {
 }
 
 function normalizeStatus(raw: SqlValue | undefined): ChatMessage['status'] {
-  return raw === 'sent' || raw === 'acked' ? raw : 'queued';
+  // W5 GAP-4 — `failed` MUST round-trip: a persisted failed row that read back as
+  // `queued` after cold-open would revert its retry affordance to a false pending
+  // clock. Every non-terminal-known value still falls back to `queued`.
+  return raw === 'sent' || raw === 'acked' || raw === 'failed' ? raw : 'queued';
 }
 
 /**

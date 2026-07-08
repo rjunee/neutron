@@ -105,6 +105,7 @@ export function ChatSyncSurface({
     editMessage,
     deleteMessage,
     chooseOption,
+    retry,
     selfDeviceId,
   } = useMobileChat(projectId);
 
@@ -345,11 +346,12 @@ export function ChatSyncSurface({
           onEdit={editMessage}
           onDelete={deleteMessage}
           onChoose={onChoose}
+          onRetry={retry}
           onDocRef={onDocRef}
         />
       );
     },
-    [selfDeviceId, attachmentAuth, chosenByPrompt, onToggleReaction, editMessage, deleteMessage, onChoose, onDocRef],
+    [selfDeviceId, attachmentAuth, chosenByPrompt, onToggleReaction, editMessage, deleteMessage, onChoose, retry, onDocRef],
   );
 
   const onViewableItemsChanged = useCallback(
@@ -473,6 +475,7 @@ function ChatRow({
   onEdit,
   onDelete,
   onChoose,
+  onRetry,
   onDocRef,
 }: {
   row: RenderRow;
@@ -483,6 +486,7 @@ function ChatRow({
   onEdit: (messageId: string, body: string) => void;
   onDelete: (messageId: string) => void;
   onChoose: (value: string, promptId?: string) => void;
+  onRetry: (clientMsgId: string) => void;
   onDocRef: (ref: ChatMessageDocRef) => void;
 }): React.JSX.Element {
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -641,7 +645,21 @@ function ChatRow({
                   edited
                 </Text>
               ) : null}
-              {delivery !== null ? (
+              {delivery === 'failed' ? (
+                // W5 GAP-4 — a failed send: the ⚠️ glyph is a tappable retry
+                // affordance (per-message, idempotent), not a dead warning.
+                // Parity with the web ⚠️ "Failed — retry" button.
+                <Pressable
+                  onPress={() => onRetry(message.client_msg_id)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Message failed to send — retry"
+                  hitSlop={8}
+                >
+                  <Text style={[styles.delivery, styles.deliveryFailed]}>
+                    {deliveryGlyph(delivery)} retry
+                  </Text>
+                </Pressable>
+              ) : delivery !== null ? (
                 <Text
                   style={[styles.delivery, delivery === 'read' ? styles.deliveryRead : null]}
                   accessibilityLabel={`delivery: ${delivery}`}
@@ -820,6 +838,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   deliveryRead: { color: THEME.accent, opacity: 1 },
+  deliveryFailed: { color: THEME.warning, opacity: 1 },
   metaRow: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-end', gap: SPACING.xs },
   editedLabel: { ...TYPOGRAPHY.caption, color: THEME.text_muted, opacity: 0.7, marginTop: 2 },
   editedLabelUser: { color: THEME.background, opacity: 0.6 },

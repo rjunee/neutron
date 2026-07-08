@@ -49,7 +49,7 @@ export type RenderRole = 'user' | 'agent'
  * mobile `DeliveryState`; redefined here so the browser bundle doesn't pull in
  * the RN `app/` package.
  */
-export type DeliveryState = 'pending' | 'sent' | 'delivered' | 'read'
+export type DeliveryState = 'pending' | 'sent' | 'failed' | 'delivered' | 'read'
 
 /**
  * BUG 3 (live history-import progress) — the in-flight state of a ChatGPT/Claude
@@ -200,6 +200,12 @@ export interface ControllerSession {
   start(): void
   stop(): void
   setActive(active: boolean): void
+  /** W5 GAP-2 — network-reachability signal: reset backoff + reconnect NOW
+   *  (optional so legacy fakes still satisfy the interface). */
+  notifyReachable?(): void
+  /** W5 GAP-4 — re-drive not-yet-acked sends (a failed message's retry action).
+   *  Idempotent on client_msg_id (optional so legacy fakes still satisfy). */
+  retry?(client_msg_id: string): Promise<void>
   status(): ConnStatus
   send(
     body: string,
@@ -476,6 +482,27 @@ export class NeutronChatController {
   setActive(active: boolean): void {
     this.activeState = active
     this.session.setActive(active)
+  }
+
+  /**
+   * W5 GAP-2 — the browser regained connectivity (`online` event). Forward to the
+   * session so it resets its reconnect backoff and reconnects immediately instead
+   * of waiting out the dead-air backoff. A no-op against a legacy fake session that
+   * doesn't implement it.
+   */
+  notifyReachable(): void {
+    this.session.notifyReachable?.()
+  }
+
+  /**
+   * W5 GAP-4 — retry a failed send. The web UI's ⚠️ "Failed — retry" affordance
+   * calls this with the failed message's client_msg_id; it re-drives every
+   * not-yet-`acked` send over the current socket, idempotently on client_msg_id
+   * (the server de-dupes and the `was_new` guard means a re-delivery never
+   * re-fires the agent). A no-op against a legacy fake session without `retry`.
+   */
+  async retry(client_msg_id: string): Promise<void> {
+    await this.session.retry?.(client_msg_id)
   }
 
   getViewModel(): ChatViewModel {
@@ -1219,6 +1246,10 @@ export function deliveryFor(m: ChatMessage, selfDeviceId: string): DeliveryState
   if (m.role !== 'user') return null
   if (m.status === 'queued') return 'pending'
   if (m.status === 'sent') return 'sent'
+  // W5 GAP-4 — the ack never arrived within the ack-timeout: show a retry
+  // affordance, not a stuck clock (and never a false ✓✓ delivered). Checked
+  // before the read-aggregate fall-through, which assumes an acked row.
+  if (m.status === 'failed') return 'failed'
   const readBy = m.read_by
   if (readBy !== null && readBy !== undefined) {
     for (const id of readBy) {

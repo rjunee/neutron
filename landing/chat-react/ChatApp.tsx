@@ -309,6 +309,51 @@ function MessageActions(): React.JSX.Element | null {
 }
 
 /**
+ * W5 GAP-4 — per-message delivery-failure state + a retry callback, shared to the
+ * bubbles (which only get the render id via `useMessage`). Keyed by render `id`
+ * (= the client_msg_id for user sends). When a send's ack never arrives its
+ * status flips `sent`→`failed` ({@link deliveryFor}), and this surfaces the ⚠️
+ * "Failed — retry" affordance instead of a stuck 🕓 clock — mirroring the mobile
+ * `deliveryState`/`deliveryGlyph('failed') → '⚠️'` mapping so web and mobile agree.
+ * Agent-native parity: retry re-drives the same idempotent send the reconnect path
+ * would.
+ */
+interface DeliveryCtx {
+  /** renderId → true when that user message failed to deliver. */
+  byRenderId: Map<string, boolean>
+  onRetry: (renderId: string) => void
+}
+const DeliveryContext = createContext<DeliveryCtx | null>(null)
+
+/** The ⚠️ "Failed — retry" affordance under a user bubble whose send timed out
+ *  awaiting its ack. Renders nothing for any non-failed message. */
+function RetryAffordance(): React.JSX.Element | null {
+  const ctx = useContext(DeliveryContext)
+  const message = useMessage()
+  if (ctx === null) return null
+  if (ctx.byRenderId.get(message.id) !== true) return null
+  return (
+    <button
+      type="button"
+      className="car-msg-failed"
+      onClick={() => ctx.onRetry(message.id)}
+      aria-label="Message failed to send — retry"
+    >
+      ⚠️ Failed — retry
+    </button>
+  )
+}
+
+/** Build the renderId → failed index (only user sends can fail). */
+function buildDeliveryIndex(messages: readonly RenderMessage[]): Map<string, boolean> {
+  const map = new Map<string, boolean>()
+  for (const m of messages) {
+    if (m.role === 'user' && m.delivery === 'failed') map.set(m.id, true)
+  }
+  return map
+}
+
+/**
  * P1b (onboarding / quick-reply buttons) — per-message option metadata + a
  * choose callback, shared down to the assistant-ui message components (which
  * only receive the render id via `useMessage`). Keyed by the render `id` so an
@@ -511,6 +556,7 @@ function UserMessage(): React.JSX.Element {
           <EditedMarker />
           <MessageReactions />
           <MessageActions />
+          <RetryAffordance />
         </div>
       </MessagePrimitive.Root>
     </>
@@ -1685,6 +1731,16 @@ function MountedConversation({
     }),
     [messages, controller],
   )
+  const deliveryCtx = useMemo<DeliveryCtx>(
+    () => ({
+      byRenderId: buildDeliveryIndex(messages),
+      // renderId is the client_msg_id for user sends; retry re-drives it idempotently.
+      onRetry: (renderId) => {
+        void controller.retry(renderId)
+      },
+    }),
+    [messages, controller],
+  )
   // FIX #338 — per-message time labels + day dividers. Recomputed when the list
   // changes (the Today/Yesterday wording tracks the clock closely enough).
   const metaCtx = useMemo<MetaCtx>(
@@ -1707,6 +1763,7 @@ function MountedConversation({
     <ReactionsContext.Provider value={reactionsCtx}>
     <EditsContext.Provider value={editsCtx}>
     <ButtonsContext.Provider value={buttonsCtx}>
+    <DeliveryContext.Provider value={deliveryCtx}>
     <MetaContext.Provider value={metaCtx}>
       <ConversationRuntimeHost
         controller={controller}
@@ -1729,6 +1786,7 @@ function MountedConversation({
         />
       </ConversationRuntimeHost>
     </MetaContext.Provider>
+    </DeliveryContext.Provider>
     </ButtonsContext.Provider>
     </EditsContext.Provider>
     </ReactionsContext.Provider>
