@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrations } from '../migrations/runner.ts'
@@ -14,6 +13,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph } from './composition.ts'
+import { resolveBootConfig, type BootConfig } from '../config/index.ts'
 
 
 // Shared boot-time helpers — extracted to `./boot-helpers.ts` (Argus
@@ -110,18 +110,6 @@ export interface BootServer {
 }
 
 /**
- * Resolve the per-instance SQLite path. Production: the systemd unit sets
- * `NEUTRON_DB_PATH=<OWNER_HOME>/project.db`. Dev fallback when neither env nor
- * a CLI flag set a path: a stable per-user default under
- * `~/.local/share/neutron/` so `bun run gateway/index.ts` works out of the box.
- */
-function resolveDbPath(): string {
-  const fromEnv = process.env['NEUTRON_DB_PATH']
-  if (fromEnv !== undefined && fromEnv !== '') return fromEnv
-  return join(homedir(), '.local', 'share', 'neutron', 'owner.db')
-}
-
-/**
  * Resolve the per-instance url_slug used by every JWT-claim equality check
  * inside the gateway (chat-bridge.validateStartToken etc.). Resolution
  * order:
@@ -156,6 +144,27 @@ export function resolveOwnerSlug(env: NodeJS.ProcessEnv = process.env): string {
   return env['NEUTRON_INSTANCE_SLUG'] ?? 'dev'
 }
 
+/**
+ * C1 — the BootConfig-threaded owner-slug resolver `boot()` uses. Identical
+ * precedence to {@link resolveOwnerSlug} above (file `.url_slug` >
+ * `NEUTRON_INSTANCE_SLUG` > `'dev'`), preserved BIT-FOR-BIT: the `.url_slug`
+ * FILE read (a filesystem read, not an env read) stays, while `OWNER_HOME` +
+ * `NEUTRON_INSTANCE_SLUG` now come from the frozen config instead of a second
+ * independent `process.env` read. This keeps the composer + boot from
+ * desyncing on the resolved slug (the hazard the C1 brief flags).
+ */
+export function resolveOwnerSlugFromConfig(config: BootConfig): string {
+  const ownerHome = config.ownerHome
+  if (ownerHome !== undefined && ownerHome !== '') {
+    const slugFile = join(ownerHome, '.url_slug')
+    if (existsSync(slugFile)) {
+      const fromFile = readFileSync(slugFile, 'utf8').trim()
+      if (fromFile.length > 0) return fromFile
+    }
+  }
+  return config.instanceSlug ?? 'dev'
+}
+
 
 export interface BootOptions {
   composer?: GraphComposer
@@ -172,16 +181,27 @@ export interface BootOptions {
    * Otherwise CLI flag > env > default-7800 wins.
    */
   port?: number
+  /**
+   * C1 — the frozen, validated {@link BootConfig}. When omitted, `boot()`
+   * resolves it once from `process.env` via `resolveBootConfig`. The
+   * entrypoints (`open/server.ts`, `gateway/index.ts`) resolve it themselves
+   * and thread it here so boot(), the composer, and the process.env shim all
+   * read the SAME resolution — no divergent second `process.env` read.
+   */
+  config?: BootConfig
 }
 
 export async function boot(options: BootOptions = {}): Promise<BootHandle> {
-  const dbPath = resolveDbPath()
+  // C1 — resolve+validate env ONCE. When the caller (an entrypoint) already
+  // resolved it, thread theirs so we never re-read process.env divergently.
+  const config = options.config ?? resolveBootConfig(process.env)
+  const dbPath = config.dbPath
   mkdirSync(dirname(dbPath), { recursive: true })
 
   const db = ProjectDb.open(dbPath)
   applyMigrations(db.raw())
 
-  const project_slug = resolveOwnerSlug()
+  const project_slug = resolveOwnerSlugFromConfig(config)
   const bootedAt = Date.now()
 
   // Compose the module graph if the caller supplied a composer. We capture
@@ -269,7 +289,14 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // this commit boot() never opened any HTTP port, so the systemd unit's
   // ExecStart `--port=<allocated>` had nothing on the other end and Caddy
   // proxied to a closed upstream on every real provision.
-  const port = resolveListenPort(process.argv, process.env, options.port)
+  // Port precedence stays argv-coupled (--port > NEUTRON_PORT > default), but
+  // the env half is the config's validated `NEUTRON_PORT` rather than a second
+  // raw `process.env` read — so a bad NEUTRON_PORT already failed loud upstream.
+  const port = resolveListenPort(
+    process.argv,
+    { NEUTRON_PORT: config.port === undefined ? undefined : String(config.port) },
+    options.port,
+  )
   // The websocket option is required for `server.upgrade(req, { data })`
   // to work; we always pass one even when no landing server is wired so
   // a future mid-boot composition switch can flip it on without
@@ -305,7 +332,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         // wider bind with NEUTRON_HOST=0.0.0.0 once they front it with auth / a
         // trusted network — see .env.example and the Open README's exposure
         // warning.
-        hostname: process.env.NEUTRON_HOST ?? '127.0.0.1',
+        hostname: config.host,
         fetch: async (req: Request, srv): Promise<Response> => {
           try {
             // Sprint 18 — when the chain is wired, route through it (it
@@ -354,7 +381,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       // alive on the keep-alive idle timer (~5 min) and `bun test` hangs
       // at suite end. systemd-spawned production processes do not set
       // NODE_ENV, so their semantics are unchanged.
-      const force = opts?.force ?? process.env['NODE_ENV'] === 'test'
+      const force = opts?.force ?? config.nodeEnv === 'test'
       await server.stop(force)
     },
   }
@@ -595,8 +622,30 @@ if (import.meta.main) {
   // install path), the injected composer mounts the cross-instance API on
   // the per-instance port. Without it (dev / smoke / Open self-host), the
   // boot shell only opens /healthz — same dev shape as Sprint 4.
+  // C1 dual-entrypoint fix — resolve+validate env ONCE and thread it into
+  // boot(). This unifies the DB path: boot() now opens `config.dbPath`
+  // (`NEUTRON_DB_PATH` else `<NEUTRON_HOME>/project.db`, the single-source
+  // `migrations/db-path.ts` precedence) instead of the old divergent
+  // `~/.local/share/neutron/owner.db` fallback. So `bun start:gateway` on a box
+  // whose Open DB lives at `<NEUTRON_HOME>/project.db` opens the RIGHT DB, not a
+  // fresh empty one.
+  const config = resolveBootConfig(process.env)
   const composer = await loadGraphComposerFromEnv()
-  await boot(composer !== undefined ? { composer } : {})
+  // …and it must not SILENTLY serve a healthz-only shell where a real product
+  // is expected. With no injected composer module the gateway entrypoint only
+  // exposes /healthz — legitimate for a bare dev gateway, but a footgun on an
+  // Open self-host box (which should run `bun start` → open/server.ts for the
+  // full onboarding+chat product). If the resolved DB already exists on disk
+  // (an installed Open box), say so loudly rather than booting a bare shell.
+  if (composer === undefined && config.role === 'open' && existsSync(config.dbPath)) {
+    console.warn(
+      `[boot] gateway entrypoint: role=open, no NEUTRON_GRAPH_COMPOSER_MODULE, but an ` +
+        `existing DB was found at ${config.dbPath}. This entrypoint serves ONLY /healthz. ` +
+        `For the full Open onboarding+chat product run \`bun start\` (open/server.ts). ` +
+        `Booting the /healthz shell against ${config.dbPath}.`,
+    )
+  }
+  await boot(composer !== undefined ? { composer, config } : { config })
   // The Bun.serve listener + watchdog setInterval both keep the event loop
   // alive until shutdown() clears them from inside the SIGTERM handler. No
   // additional keep-alive needed.

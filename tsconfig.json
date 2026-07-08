@@ -36,6 +36,7 @@
     "tests/fixtures/**/*.ts",
     "scripts/**/*.ts",
     "core-sdk/**/*.ts",
+    "config/**/*.ts",
     "channels/**/*.ts",
     "connect/**/*.ts",
     "watchdog/**/*.ts",

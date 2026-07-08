@@ -236,6 +236,15 @@ export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
   /**
+   * C1 — the frozen, validated {@link BootConfig} the entrypoint resolved. The
+   * Open entrypoint threads it here so the composer shares boot()'s single env
+   * resolution. Sub-builders still read `env` (kept in lockstep by the
+   * `open/server.ts` process.env write-back shim) until a later unit migrates
+   * them to read `config` directly; passing it now closes the entrypoint→
+   * composer half of the "boot re-reads env independently" hazard.
+   */
+  config?: import('../config/index.ts').BootConfig
+  /**
    * Substrate-construction seam, threaded verbatim into BOTH the onboarding
    * phase-spec substrate AND the live-chat substrate via
    * `buildLlmCallSubstrate({ substrateFactory })`. Defaults to undefined →

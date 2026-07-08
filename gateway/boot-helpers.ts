@@ -450,8 +450,9 @@ export const defaultListProjects: ListProjectsResolver = async (
  * Resolve the per-instance data dir (`<owner_home>`). Honors `OWNER_HOME`
  * when explicitly set; otherwise derives from `NEUTRON_DB_PATH` via the
  * locked layout `<owner_home>/db/project.db` (so `dirname(dirname(dbPath))`
- * yields owner_home). Dev fallback: `~/.local/share/neutron/` — same shape
- * as `resolveDbPath`'s fallback so the two stay consistent.
+ * yields owner_home). Dev fallback: `~/.local/share/neutron/`. (This is the
+ * Managed owner-home derivation; the single-owner DB path itself is resolved by
+ * `config`/`migrations/db-path.ts` since C1.)
  */
 export function resolveOwnerHome(env: NodeJS.ProcessEnv): string {
   const fromEnv = env['OWNER_HOME']
