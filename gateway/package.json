@@ -20,7 +20,6 @@
     "@neutronai/cron": "workspace:*",
     "@neutronai/doc-search": "workspace:*",
     "@neutronai/email-managed-core": "workspace:*",
-    "@neutronai/gateway": "workspace:*",
     "@neutronai/gbrain-memory": "workspace:*",
     "@neutronai/google-workspace-core": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
