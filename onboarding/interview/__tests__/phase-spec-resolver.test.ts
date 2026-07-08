@@ -1056,12 +1056,14 @@ describe('persona_reviewed guidance is free of K11e-deleted phases', () => {
     }
   })
 
-  test('the tangent-answer knowledge pack names no deleted phase', () => {
-    const strings = [pack!.why_we_ask, ...Object.values(pack!.faqs)]
-    for (const s of strings) {
-      for (const dead of DELETED_PHASES) {
-        expect(s).not.toContain(dead)
-      }
+  test('the whole knowledge pack (why_we_ask + faqs + tangents + advance_examples) names no deleted phase', () => {
+    // Deep-scan every string in the pack, not just why_we_ask/faqs — the stale
+    // reference Codex r2 caught lived in `advance_examples[].summary`, a few-shot
+    // anchor the resolver also uses. Serialize-and-scan so any future field is
+    // covered too.
+    const serialized = JSON.stringify(pack)
+    for (const dead of DELETED_PHASES) {
+      expect(serialized).not.toContain(dead)
     }
   })
 })

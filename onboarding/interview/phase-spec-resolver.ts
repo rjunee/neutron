@@ -172,7 +172,7 @@ export interface PhaseIntent {
 
 /**
  * Per-phase intent table. Phases driven externally (identity_oauth,
- * import_running, persona_synthesizing, wow_fired, completed, failed)
+ * import_running, persona_synthesizing, completed, failed)
  * map to null and are never LLM-generated — those advance via direct
  * state writes from other modules.
  */
@@ -1020,7 +1020,7 @@ const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
     {
       user_text_example: 'looks good',
       canonical_value: null,
-      summary: 'explicit accept - free-text advance to max_oauth_offered',
+      summary: 'explicit accept - free-text advance to completion',
     },
     {
       user_text_example: 'move on',
@@ -1054,12 +1054,10 @@ export const PHASE_KNOWLEDGE: Readonly<Record<OnboardingPhase, PhaseKnowledgePac
   import_upload_pending: PACK_IMPORT_UPLOAD_PENDING,
   personality_offered: PACK_PERSONALITY_OFFERED,
 
-  // S3 — hand-authored (2026-05-18). Covers the remaining seven
-  // user-input-bearing phases per the brief § 4. Eleven of eighteen
-  // phases now carry packs; the remaining seven (identity_oauth,
-  // instance_provisioned, import_running, persona_synthesizing, wow_fired,
-  // completed, failed) stay forever-null because they don't accept
-  // routable text.
+  // S3 — hand-authored (2026-05-18). Covers the remaining user-input-bearing
+  // phases per the brief § 4. The externally-driven phases (identity_oauth,
+  // instance_provisioned, import_running, persona_synthesizing, completed,
+  // failed) stay forever-null because they don't accept routable text.
   import_analysis_presented: PACK_IMPORT_ANALYSIS_PRESENTED,
   work_interview_gap_fill: PACK_WORK_INTERVIEW_GAP_FILL,
   agent_name_chosen: PACK_AGENT_NAME_CHOSEN,
