@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `954779c` — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `f27c66c` (K11e #251 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -104,9 +104,21 @@ land — it is what a fresh context reads to resume without re-deriving anything
       phase DEFINITIONS (phase-prompts + enum + transitions). ⚠️ NOT data-only — `POST_MAX_OAUTH_PHASES`
       (`resolve-onboarding-phase.ts:47-48`) is LIVE creds-gate logic; legacy sqlite rows at these phase
       strings need a compat decision (served-by-path trap). Needs its own liveness pass; Managed-adjacent.
-    - **Remaining autonomous tail:** K11e (phase-def prune, needs liveness pass), K11b3 (web:-registry
-      comment-truth — WowChannelAdapter bullet now MOOT, deleted with build-wow-dispatcher.ts in K11d),
-      K10 (docs cluster). K11b2 owner-gated (above).
+    - **✅ K11e DONE (#251, main `f27c66c` 2026-07-08):** pruned the orphaned `max_oauth_offered`/
+      `wow_fired` phase DEFINITIONS (union + `LEGAL_TRANSITIONS` + `ALL_PHASES` + phase-prompts +
+      resolver packs), net −465 LOC. **Served-by-path trap handled atomically:** `POST_MAX_OAUTH_PHASES`
+      widened `ReadonlySet<OnboardingPhase>`→`ReadonlySet<string>` keeping the legacy literals verbatim +
+      `loadCurrentOnboardingPhase` returns the RAW DB string, so stranded pre-#243 legacy `onboarding_state`
+      rows still classify as post-max at the creds gate (new stranded-`wow_fired` compat test proves it).
+      `persona_reviewed` forward chain collapsed → `completed`. **Codex 3 rounds:** r1 blocker (persona_reviewed
+      LLM guidance still NAMING the deleted phases — injected goal + tangent-answer FAQs, a user-visible lie
+      at the final checkpoint) FIXED; r2 two more stale refs (advance_examples summary + enum doc-comments)
+      FIXED + guard broadened to deep-scan the pack; r3 re-raise **DECLINED** (see known-divergence). Verified:
+      root tsc + 44-config matrix clean, 895 onboarding/gateway tests / 0 fail, full `test` check green.
+    - **Remaining autonomous tail:** **K10** (docs cluster, sequenced LAST — Ralph governed-mode landmine).
+      K11b2 owner-gated (above). [✅ K11c #247, K11d #248, K11e #251, K11b3 done-by-verification, D-K11-4 KEEP]
+      → K11 is functionally COMPLETE modulo the owner-gated K11b2; **Wave 1 closed, Wave 2 (L-layering) opens
+      after K10.**
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
@@ -235,6 +247,15 @@ Net wave-1 so far: **~−17.7k LOC** removed behind green gates. Every unit's Co
   dead path, so live behavior is identical pre/post-K4. Pinned by a characterization test in
   `engine-advance-choice-parity.test.ts` (asserts current buggy `advanced`; flip to
   `no_active_prompt` + phase `signup` in the fix unit). Owner: a later onboarding fix unit / K11.
+- **K11e:** the LIVE dynamic `buildPersonaReviewedPromptSpec` "Looks good" CTA returns
+  `next_phase_on_default: 'slug_chosen'` (`phase-prompts.ts:1635/1672`), while K11e retargeted the
+  *static* spec + transition table to `completed`. **Byte-identical on main** (K11e never touched the
+  dynamic builder — a definition-prune) and **intentional**: already pinned by
+  `m2-ux-surface-fixes.test.ts:64`. Not the claimed live bug — a backward-to-slug accept would make
+  onboarding un-completable, but it completes in prod; the live "Looks good" is routed by the engine's
+  `consumePersonaReviewedChoice` handler, not this fallback. Codex r3 REQUEST_CHANGES DECLINED
+  (documented on PR #251). Owner: a later onboarding-flow audit unit (align dynamic builder's default
+  with the static spec / finalize routing).
 
 **Review pattern (holding across every unit):** build agent → orchestrator diff review → Codex
 cross-review (EVERY unit found ≥1 real defect: vacuous assertions, one-directional parity holes,
