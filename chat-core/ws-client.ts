@@ -57,6 +57,13 @@ export interface ChatWsClientOptions {
   createSocket: (url: string) => SocketLike
   /** Fired on every successful (re)open. Use to send `resume` + flush queue. */
   onOpen?: () => void
+  /**
+   * Fired whenever the socket goes away UNEXPECTEDLY (a real `onclose`, or a
+   * heartbeat-driven force-close of a half-open socket) — NOT on an explicit
+   * `close()`. A surface uses it to tear down any per-open state armed in
+   * `onOpen` (e.g. the resume fallback) so it can't fire on a dead socket.
+   */
+  onClose?: () => void
   /** Fired for each inbound frame, parsed from JSON (raw string on parse fail). */
   onMessage?: (data: unknown) => void
   /** Fired on every connection-status transition. */
@@ -83,9 +90,10 @@ export interface ChatWsClientOptions {
 
 export class ChatWsClient {
   private readonly opts: Required<
-    Omit<ChatWsClientOptions, 'onOpen' | 'onMessage' | 'onStatus'>
+    Omit<ChatWsClientOptions, 'onOpen' | 'onClose' | 'onMessage' | 'onStatus'>
   >
   private readonly onOpen: (() => void) | undefined
+  private readonly onClose: (() => void) | undefined
   private readonly onMessage: ((data: unknown) => void) | undefined
   private readonly onStatus: ((status: ConnStatus) => void) | undefined
 
@@ -121,6 +129,7 @@ export class ChatWsClient {
       clearTimeoutFn: options.clearTimeoutFn ?? ((h) => clearTimeout(h as never)),
     }
     this.onOpen = options.onOpen
+    this.onClose = options.onClose
     this.onMessage = options.onMessage
     this.onStatus = options.onStatus
   }
@@ -260,6 +269,9 @@ export class ChatWsClient {
       if (this.socket !== socket) return
       this.socket = null
       this.clearHeartbeat()
+      // Notify the surface the socket is gone (tear down per-open state) BEFORE
+      // deciding whether to reconnect.
+      if (this.onClose !== undefined) this.onClose()
       if (this.closedByUser || !this.active) {
         if (!this.closedByUser) this.setStatus('idle')
         return
@@ -332,6 +344,9 @@ export class ChatWsClient {
         /* already closed */
       }
     }
+    // Same teardown notification as `onclose` (the dead socket's own onclose is
+    // now stale-guarded, so this is the ONLY onClose for a force-close).
+    if (this.onClose !== undefined) this.onClose()
     if (this.closedByUser || !this.active) {
       if (!this.closedByUser) this.setStatus('idle')
       return

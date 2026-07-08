@@ -200,6 +200,9 @@ export interface ControllerSession {
   start(): void
   stop(): void
   setActive(active: boolean): void
+  /** W5 GAP-2 — network-reachability signal: reset backoff + reconnect NOW
+   *  (optional so legacy fakes still satisfy the interface). */
+  notifyReachable?(): void
   status(): ConnStatus
   send(
     body: string,
@@ -476,6 +479,16 @@ export class NeutronChatController {
   setActive(active: boolean): void {
     this.activeState = active
     this.session.setActive(active)
+  }
+
+  /**
+   * W5 GAP-2 — the browser regained connectivity (`online` event). Forward to the
+   * session so it resets its reconnect backoff and reconnects immediately instead
+   * of waiting out the dead-air backoff. A no-op against a legacy fake session that
+   * doesn't implement it.
+   */
+  notifyReachable(): void {
+    this.session.notifyReachable?.()
   }
 
   getViewModel(): ChatViewModel {

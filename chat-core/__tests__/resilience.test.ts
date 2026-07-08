@@ -264,15 +264,21 @@ describe('W5 GAP-4 — a never-acked send flips to failed, never a stuck clock',
     await tick()
     expect((await session.messages())[0]?.status).toBe('failed')
 
-    // Reconnect announce → the failed send is re-driven (idempotent).
-    sockets[0]!.deliver(readyFrame())
+    // Reconnect: a FRESH socket opens (the realistic model — one session_ready
+    // per connection) and the failed send is re-driven idempotently on it.
+    sockets[0]!.fireClose()
+    session.setActive(false) // cancel the auto-reconnect timer
+    session.setActive(true) // synchronously open a fresh socket
+    const s2 = sockets[1]!
+    s2.fireOpen()
+    s2.deliver(readyFrame())
     await tick()
-    const bodies = sockets[0]!.frames('user_message').map((e) => e['body'])
-    expect(bodies).toEqual(['important', 'important']) // resent
-    expect(sockets[0]!.frames('user_message').every((e) => e['client_msg_id'] === 'cmid-x')).toBe(true)
+    const bodies = s2.frames('user_message').map((e) => e['body'])
+    expect(bodies).toEqual(['important']) // resent on the new socket
+    expect(s2.frames('user_message').every((e) => e['client_msg_id'] === 'cmid-x')).toBe(true)
 
     // The echo finally lands → reconciles to a single acked row (no dup).
-    sockets[0]!.deliver({
+    s2.deliver({
       v: 1,
       type: 'user_message',
       message_id: 'srv-1',
@@ -365,5 +371,93 @@ describe('W5 GAP-5 — every re-open resumes from MAX seq and drains the queue',
     clock.advance(10_000)
     await tick()
     expect(sockets[0]!.frames('resume').length).toBe(1)
+  })
+
+  it('FIX 1 — a late session_ready AFTER the fallback fired does NOT double-resume/resend', async () => {
+    const store = new InMemoryStore()
+    // Cursor at seq 5 so the (single) resume is after_seq=5.
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: '',
+      message_id: 'srv-5',
+      seq: 5,
+      role: 'agent',
+      body: 'earlier',
+      project_id: null,
+      attachments: null,
+      created_at: 1,
+      status: 'acked',
+    })
+    const { session, sockets, clock } = makeSession(2_000, store)
+    session.start()
+    await session.send('drain me', { client_msg_id: 'q1' }) // queued while offline
+    await tick()
+
+    sockets[0]!.fireOpen()
+    // Fallback fires first (no session_ready yet): resume #1 + resend #1.
+    clock.advance(2_000)
+    await tick()
+    expect(sockets[0]!.frames('resume').length).toBe(1)
+    expect(sockets[0]!.frames('user_message').length).toBe(1)
+
+    // session_ready arrives LATE (no seq regression → no reset). It must NOT
+    // resume or resend a second time on this same open.
+    sockets[0]!.deliver(readyFrame(5))
+    await tick()
+    expect(sockets[0]!.frames('resume').length).toBe(1) // still exactly one
+    expect(sockets[0]!.frames('user_message').length).toBe(1) // no duplicate resend
+  })
+
+  it('FIX 1 — a late session_ready that RESETS the store DOES re-resume from 0', async () => {
+    const store = new InMemoryStore()
+    // Stale transcript from a now-dead server: cursor at seq 40.
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: '',
+      message_id: 'old40',
+      seq: 40,
+      role: 'agent',
+      body: 'stale',
+      project_id: null,
+      attachments: null,
+      created_at: 1,
+      status: 'acked',
+    })
+    const { session, sockets, clock, store: s } = makeSession(2_000, store)
+    session.start()
+    sockets[0]!.fireOpen()
+    // Fallback fires: resume #1 from the stale MAX (after_seq=40).
+    clock.advance(2_000)
+    await tick()
+    expect(sockets[0]!.frames('resume').at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
+
+    // A late session_ready reports a REGRESSED high-water seq (fresh server) →
+    // stale-store reset → a fresh resume-from-0 is mandatory even though the
+    // fallback already resumed.
+    sockets[0]!.deliver(readyFrame(2))
+    await tick()
+    expect(await s.lastSeenSeq(TOPIC)).toBe(0) // stale transcript wiped
+    const resumes = sockets[0]!.frames('resume')
+    expect(resumes.length).toBe(2)
+    expect(resumes.at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 0 })
+  })
+
+  it('FIX 2 — the fallback never fires on a closed socket (no throw / unhandled rejection)', async () => {
+    const { session, sockets, clock } = makeSession(2_000)
+    session.start()
+    await session.send('queued while offline', { client_msg_id: 'q1' }) // would throw if flushed on a dead socket
+    await tick()
+
+    sockets[0]!.fireOpen() // arms the 2s fallback …
+    sockets[0]!.fireClose() // … but the socket drops before session_ready
+    await tick()
+
+    // Past the fallback window: it was cancelled on close (onClose), so no resume
+    // is attempted on the dead socket and nothing rejects.
+    clock.advance(5_000)
+    await tick()
+    expect(sockets[0]!.frames('resume').length).toBe(0)
+    expect(sockets[0]!.frames('user_message').length).toBe(0)
+    session.stop() // cancel the transport's pending reconnect (real-timer hygiene)
   })
 })

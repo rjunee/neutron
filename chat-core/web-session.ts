@@ -136,6 +136,13 @@ export class WebChatSession {
   /** GAP-5 — the pending resume fallback for the current open (null when a
    *  session_ready already drove resume, or between opens). */
   private resumeFallbackHandle: unknown = null
+  /** GAP-5 — whether resume+drain has already run for the CURRENT open. Reset to
+   *  false on every (re)open; set true whenever `resumeAndFlush` runs (fallback OR
+   *  session_ready). Guarantees exactly one resume per open — a late session_ready
+   *  arriving AFTER the fallback fired does NOT resume/resend a second time,
+   *  UNLESS its stale-store reconcile actually reset the store (which needs a
+   *  fresh resume-from-0). */
+  private resumedThisOpen = false
   private readonly resumeFallbackMs: number
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown
   private readonly clearTimeoutFn: (handle: unknown) => void
@@ -161,11 +168,18 @@ export class WebChatSession {
       createSocket:
         opts.createSocket ??
         ((url: string) => new WebSocket(url) as unknown as SocketLike),
-      // GAP-5 — on EVERY (re)open, guarantee resume + queue-drain runs. The fast
-      // path is the server's session_ready (handled in handleInbound); this arms
-      // a fallback that fires the same resume+drain if session_ready never lands.
+      // GAP-5 — on EVERY (re)open, guarantee resume + queue-drain runs EXACTLY
+      // once. Reset the per-open guard, then arm a fallback that fires resume+drain
+      // if the server's session_ready (the fast path, in handleInbound) never lands.
       onOpen: () => {
+        this.resumedThisOpen = false
         this.armResumeFallback()
+      },
+      // GAP-5 / FIX 2 — the socket is gone: cancel any pending resume fallback so
+      // it can't fire resume+drain on a dead socket (a dropped send whose flush
+      // callback throws would otherwise become an unhandled rejection).
+      onClose: () => {
+        this.clearResumeFallback()
       },
       onMessage: (data) => {
         void this.handleInbound(data)
@@ -288,12 +302,18 @@ export class WebChatSession {
       // GAP-5 — session_ready is the FAST path for resume; cancel the on-open
       // fallback so a normal connect resumes exactly once (no double-resume).
       this.clearResumeFallback()
-      // Stale-store reset detection (M1) — BEFORE resuming, check whether the
-      // server's high-water seq regressed below our local cursor (server wiped /
-      // reinstalled under us). If so the local transcript is from a dead server;
-      // drop it so the resume below re-syncs the fresh transcript from seq 0.
-      await this.reconcileServerReset(data)
-      await this.resumeAndFlush()
+      // Stale-store reset detection (M1) — ALWAYS run (even if the fallback
+      // already resumed): check whether the server's high-water seq regressed
+      // below our local cursor (server wiped / reinstalled under us). If so the
+      // local transcript is from a dead server; drop it so a fresh resume
+      // re-syncs the transcript from seq 0.
+      const didReset = await this.reconcileServerReset(data)
+      // FIX 1 — resume EXACTLY once per open: if the on-open fallback already
+      // resumed (from the stale MAX cursor), don't resume/resend again — UNLESS
+      // the reconcile just wiped the store, which mandates a fresh resume-from-0.
+      if (!this.resumedThisOpen || didReset) {
+        await this.resumeAndFlush()
+      }
       return
     }
     // Track B Phase 4 — a receipt_update carries the latest delivered/read
@@ -426,10 +446,11 @@ export class WebChatSession {
    * so the UI drops the stale messages immediately, before the replay lands.
    * A no-op on every normal connect (server at/ahead of us, or no reported seq).
    */
-  private async reconcileServerReset(frame: unknown): Promise<void> {
+  private async reconcileServerReset(frame: unknown): Promise<boolean> {
     const serverMaxSeq = parseSessionReadyMaxSeq(frame)
     const { reset } = await this.engine.reconcileServerReset(this.topic_id, serverMaxSeq)
     if (reset) this.emitChange()
+    return reset
   }
 
   /** Send the resume request from our local cursor, then re-drive every
@@ -439,6 +460,9 @@ export class WebChatSession {
    *  retry is idempotent server-side (`client_msg_id`) and the surface's
    *  `was_new` guard stops it re-firing the agent. */
   private async resumeAndFlush(): Promise<void> {
+    // FIX 1 — mark this open as resumed so a later session_ready (or a redundant
+    // fallback) doesn't resume/resend a second time on the same connection.
+    this.resumedThisOpen = true
     const resume = await this.engine.resumeRequest(this.topic_id)
     this.ws.send(resume)
     const flushed = await this.queue.flushUnacked((envelope) => {
@@ -468,7 +492,15 @@ export class WebChatSession {
     if (this.resumeFallbackMs <= 0) return
     this.resumeFallbackHandle = this.setTimeoutFn(() => {
       this.resumeFallbackHandle = null
-      void this.resumeAndFlush()
+      // FIX 2 — belt-and-suspenders: never resume on a socket that isn't open
+      // (onClose already clears this timer; this guards a stray fire), and
+      // `.catch` a failed resume so it just waits for the next reconnect instead
+      // of surfacing as an unhandled rejection.
+      if (this.ws.getStatus() !== 'open') return
+      void this.resumeAndFlush().catch(() => {
+        /* resume/drain failed (socket dropped mid-flush) — the next reconnect's
+           resumeAndFlush re-drives it; nothing to surface here. */
+      })
     }, this.resumeFallbackMs)
   }
 
