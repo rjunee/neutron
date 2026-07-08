@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `83cb8c9` (L4 #258 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `8303007` (L7 #260 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -299,12 +299,19 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
 **Wave 1: DONE** (all K units merged; K10 deferred to wave 9 — Ralph landmine; K11b2 ✅ #257 owner-approved delete).
 
 **Wave 2 ready-set (§16 wave-2 row: L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓ · M1 M2):**
-1. **L1** ✅ #253 · **L2** ✅ #255 · **L4** ✅ #258.
-2. **Next dispatchable** (deps met, distinct lanes, cap 3): **L7** (chat-core scope rename, `sonnet`,
-   lane clients — needs Expo+web bundle build verify),
-   **L3** (DAG edge cuts / injection-shaped, `opus`, lanes composer+data), **C1** (typed BootConfig,
-   `opus`, lane composer — starts the composer long-pole), **W5** (chat-core resilience `[BEHAVIOR]`,
-   `opus`, lane transport). **M1/M2** = Managed (cross-repo neutron-managed).
+1. **L1** ✅ #253 · **L2** ✅ #255 · **L4** ✅ #258 · **L7** ✅ #260.
+   - **L7 note:** pure `@neutron/chat-core` → `@neutronai/chat-core` scope rename (the one outlier of 41).
+     Codex REQUEST_CHANGES caught the agent mechanically renaming the old scope inside **dated
+     point-in-time snapshots** (2026-07-02 audit set, AS-BUILT-archive, dated QA, migration `0079`
+     comment) → corrupted them ("rename X → X"); reverted those, kept the rename only in the living
+     current-state docs (AS_BUILT, SYSTEM-OVERVIEW). Codex #1 (plan-docs still name old scope) DECLINED —
+     `docs/plans/*` name the old scope as the unit's OWN spec; grep-acceptance is scoped to code/config.
+2. **IN FLIGHT** (distinct lanes): **L3** (DAG edge cuts / injection-shaped, `opus`, lanes composer+data —
+   flips depcruise no-cycles to hard-error, SCC=∅), **W5** (chat-core resilience `[BEHAVIOR]`, `opus`,
+   lane transport — 4 socket-lifecycle gaps + flap-sim test).
+3. **Next dispatchable after those:** **C1** (typed BootConfig, `opus`, lane composer — starts the
+   composer long-pole; conflicts with L3 on composer, dispatch after L3 lands). **M1/M2** = Managed
+   (cross-repo neutron-managed).
 3. **L6** depends on L1/L2 (wire-types leaf); **L5** depends on L4 (workspace promotion) then the
    relative-import autofix sweep. Sequence L-lane so L3's no-cycles hard-flip lands after L1/L2 relocate.
 
