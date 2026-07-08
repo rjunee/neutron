@@ -117,8 +117,26 @@ land — it is what a fresh context reads to resume without re-deriving anything
       root tsc + 44-config matrix clean, 895 onboarding/gateway tests / 0 fail, full `test` check green.
     - **Remaining autonomous tail:** **K10** (docs cluster, sequenced LAST — Ralph governed-mode landmine).
       K11b2 owner-gated (above). [✅ K11c #247, K11d #248, K11e #251, K11b3 done-by-verification, D-K11-4 KEEP]
-      → K11 is functionally COMPLETE modulo the owner-gated K11b2; **Wave 1 closed, Wave 2 (L-layering) opens
-      after K10.**
+      → K11 is functionally COMPLETE modulo the owner-gated K11b2; **Wave 1 closed, Wave 2 (L-layering) OPEN
+      now** (K10 stays sequenced last, wave 9 — Ralph landmine).
+
+## Wave 2 (L layering → C → W5 → M1/M2) — IN PROGRESS
+
+- **✅ L1 DONE (#253, main `39a44b2` 2026-07-08):** chat-protocol wire types (`ChatOutbound` + its 10
+  `*Outbound` member interfaces) extracted VERBATIM (JSDoc byte-identical — verified via diff) out of
+  the `landing/server.ts` edge module into the new leaf `landing/chat-protocol.ts`; `server.ts` keeps a
+  re-export barrel (+ a local `import type` for its own `emitSessionReady` signature). 7 PRODUCTION
+  importers flipped to the leaf (gateway/open/reminders — the real inbound edges cut); test-file importers
+  left on the barrel per §2.2 (L5 sweep rewrites them). Scope narrowed: `ChatInbound`/`PendingChatClaim`/
+  `ChatBridge` were already dead (excised in K11b0). Codex found NO code regression; its 2 "blockers" were
+  STATUS.md base-staleness (branch predated #252) → resolved by rebase onto current main. Matrix 44/44,
+  landing+gateway 2638 / reminders+open green, depcruise clean.
+- **⏳ L2 IN FLIGHT** (contracts leaf · `sonnet` · lane none) — build agent dispatched off `39a44b2`,
+  branch `refactor/l2-contracts-leaf`. Relocates stranded contract types/constants (OnboardingPhase/
+  ALL_PHASES, AgentEngagementMode, LlmCallFn, ImportJobRunnerHook, ChatCommandFilter, McpToolResolver,
+  MOBILE_APP_URL/TELEGRAM_BIND_TOKEN_TTL_MS, OutboundSink ×2 unify) to node-free leaf(s) with re-export
+  shims; lands DAG cuts #1,4,7,9,10,11. Agent flagged to re-derive anchors (K11 churn) + verify
+  WebChatSenderRegistry still exists.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
@@ -264,21 +282,19 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
 
 ## Ready-set / queue (order: waves 1–9; K10 LAST)
 
-**Wave 1 remaining:**
-1. **#222** (live-fix, Codex APPROVE, CI pending) — WorkBoardTab unmount-guard flake fix
-   (lane clients). Merge on green.
-2. **K6 / K7 / K10** — docs cluster, all **lane docs → SERIALIZE**. Orchestrator-managed:
-   K7 `git add`s untracked plans/research docs that live only in the MAIN tree (a fresh
-   worktree can't see them). K10 (public root `SPEC.md`) sequenced **LAST** — D-4 governed-mode
-   landmine (`detectRalphMode` triggers on SPEC.md existence; git-mode.ts:100-142). Order:
-   K7 (truth pass + git-add) → K6 (changelog consolidation) → K10 (SPEC.md).
-3. **K11** — one onboarding flow + flag purge (`opus`, lane engine, ~−5-6k LOC). BLOCKED on
-   the chat-bridge sender-registry split (D3) — do K11 after/with it, or extract the
-   `WebChatSenderRegistry` first. Overlaps K4b. **Highest-risk remaining unit.**
+**Wave 1: DONE** (all K units merged; K10 deferred to wave 9 — Ralph landmine; K11b2 owner-gated).
 
-**Then waves 2–9** (L layering → C → D → P → O → X → W → M → N → S) per the §16 wave table.
-Do NOT start wave 2 (L1 chat-protocol extraction) until K11 lands — L1 must not extract code
-K11 removes.
+**Wave 2 ready-set (§16 wave-2 row: L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓ · M1 M2):**
+1. **L1** ✅ #253. **L2** ⏳ in flight (lane none).
+2. **Next dispatchable** (deps met, distinct lanes, cap 3): **L7** (chat-core scope rename, `sonnet`,
+   lane clients — needs Expo+web bundle build verify), **L4** (manifest honesty, `sonnet`, lane ci),
+   **L3** (DAG edge cuts / injection-shaped, `opus`, lanes composer+data), **C1** (typed BootConfig,
+   `opus`, lane composer — starts the composer long-pole), **W5** (chat-core resilience `[BEHAVIOR]`,
+   `opus`, lane transport). **M1/M2** = Managed (cross-repo neutron-managed).
+3. **L6** depends on L1/L2 (wire-types leaf); **L5** depends on L4 (workspace promotion) then the
+   relative-import autofix sweep. Sequence L-lane so L3's no-cycles hard-flip lands after L1/L2 relocate.
+
+**Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
 ## Protocol (full detail in plan §1.5)
 
