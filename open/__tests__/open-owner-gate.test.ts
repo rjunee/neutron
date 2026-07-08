@@ -16,8 +16,9 @@
  *      the `!html.includes('/chat-react.js')` guard no-ops when the tag is absent.
  *   5. Host-bound HMAC cookie — a cookie signed for a DIFFERENT slug is ignored
  *      (`readSessionCookie` returns null for a non-matching slug → cold-start).
- *
- * (The two-copies-converge assertion lives in the follow-up dedup commit.)
+ *   6. The two former byte-identical claim-then-mint blocks (SPA deep-link +
+ *      `/chat` `?start=` gate), converged onto one shared helper, still
+ *      claim-then-mint IDENTICALLY (same single-use JTI / mint-on-first-claim).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -222,4 +223,32 @@ describe('owner gate — host-bound HMAC cookie (cross-instance / stale-slug ign
     expect(res.status).toBe(302)
     expect(res.headers.get('location') ?? '').toMatch(/^\/chat\?start=/)
   })
+})
+
+describe('owner gate — the two converged claim-then-mint call sites are identical', () => {
+  // Both the SPA deep-link (`GET /projects/…?start=`) path and the `/chat?start=`
+  // gate now share `claimAndMintThenServe`. Proving BOTH exhibit the SAME
+  // claim-then-mint + single-use semantics is what pins the dedup as behavior-
+  // preserving.
+  const cases: Array<{ name: string; path: (t: string) => string }> = [
+    { name: '/chat?start=', path: (t) => `/chat?start=${encodeURIComponent(t)}` },
+    {
+      name: 'SPA deep-link /projects/p1/docs?start=',
+      path: (t) => `/projects/p1/docs?start=${encodeURIComponent(t)}`,
+    },
+  ]
+  for (const { name, path } of cases) {
+    test(`${name}: first mints the cookie + injects; replay mints nothing`, async () => {
+      const { openFetch, startTokenAuth } = makeGate()
+      const token = startTokenAuth.mint({ project_slug: PROJECT_SLUG, user_id: OWNER_USER_ID })
+
+      const first = await openFetch(getReq(path(token)), FAKE_SERVER)
+      expect(first.headers.get('set-cookie')).not.toBeNull()
+      // Both call sites run the SAME React-bootstrap injection on the body.
+      expect(await first.text()).toContain('window.__neutron_projects=')
+
+      const replay = await openFetch(getReq(path(token)), FAKE_SERVER)
+      expect(replay.headers.get('set-cookie')).toBeNull()
+    })
+  }
 })

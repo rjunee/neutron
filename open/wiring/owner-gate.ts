@@ -25,9 +25,13 @@
  *      `claimStartToken` → `startTokenAuth.claimStartTokenJti`; the cookie is
  *      minted ONLY on the first successful claim.
  *
- * (A follow-up commit converges the TWO byte-identical claim-then-mint blocks in
- * the SPA-deep-link path and the `/chat` `?start=` gate onto ONE shared helper;
- * this commit is the VERBATIM extraction with both blocks still inline.)
+ * THE ONE SANCTIONED DEVIATION (plan-cited old `:1418-1426` and `:1442-1450`):
+ * the TWO byte-identical claim-then-mint blocks in the SPA-deep-link path and
+ * the `/chat` `?start=` gate are converged onto the single inline
+ * `claimAndMintThenServe(startToken, sourceRes, url)` helper below. Both former
+ * call sites now share it, preserving the exact claim-then-mint / single-use JTI
+ * / cookie-mint-only-on-first-claim semantics (the only per-site difference was
+ * the source-Response local — `spaRes` vs `res` — now a parameter).
  *
  * This is a NEW leaf the composer imports DOWNWARD — it must never import back
  * into `open/composer.ts`. The shared rail-row reader (`readProjectRows`) is
@@ -286,6 +290,28 @@ export function buildOpenOwnerGate(
     }
   }
 
+  // THE ONE SANCTIONED DEDUP — the shared claim-then-mint tail. Both the SPA
+  // deep-link path and the `/chat` `?start=` gate previously inlined a
+  // byte-identical block here (old `:1418-1426` and `:1442-1450`), differing
+  // only in the source-Response local (`spaRes` vs `res`, now the `sourceRes`
+  // param). Converged onto ONE helper: claim the `?start=` JTI single-use
+  // FIRST, inject the React bootstrap into the served response, and append the
+  // owner Set-Cookie ONLY when the claim succeeded (cookie-mint-only-on-first-
+  // claim). Behavior-identical to the two former inline blocks.
+  const claimAndMintThenServe = async (
+    startToken: string | null,
+    sourceRes: Response | Promise<Response>,
+    url: URL,
+  ): Promise<Response> => {
+    const minted = startToken !== null ? await claimStartToken(startToken) : false
+    const r = await withReactBootstrap(sourceRes)
+    const headers = new Headers(r.headers)
+    if (minted) {
+      headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
+    }
+    return new Response(r.body, { status: r.status, headers })
+  }
+
   const openFetch = (
     req: Request,
     server: import('bun').Server<unknown>,
@@ -344,17 +370,9 @@ export function buildOpenOwnerGate(
         // Arrived with a `?start=` token (a shared link opened in a fresh
         // browser that already went through the mint bounce): claim it
         // single-use + mint the cookie, then inject + serve — identical to the
-        // /chat `?start=` gate below.
+        // /chat `?start=` gate below (shared `claimAndMintThenServe`).
         const startToken = url.searchParams.get('start')
-        return (async (): Promise<Response> => {
-          const minted = startToken !== null ? await claimStartToken(startToken) : false
-          const r = await withReactBootstrap(spaRes)
-          const headers = new Headers(r.headers)
-          if (minted) {
-            headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
-          }
-          return new Response(r.body, { status: r.status, headers })
-        })()
+        return claimAndMintThenServe(startToken, spaRes, url)
       }
       return withReactBootstrap(spaRes)
     }
@@ -370,15 +388,7 @@ export function buildOpenOwnerGate(
     // the owner session at most once within its TTL.
     if (isGet && url.pathname === '/chat' && !hasValidCookie) {
       const startToken = url.searchParams.get('start')
-      return (async (): Promise<Response> => {
-        const minted = startToken !== null ? await claimStartToken(startToken) : false
-        const r = await withReactBootstrap(res)
-        const headers = new Headers(r.headers)
-        if (minted) {
-          headers.append('set-cookie', formatOwnerSetCookie(project_slug, cookieSecret, url))
-        }
-        return new Response(r.body, { status: r.status, headers })
-      })()
+      return claimAndMintThenServe(startToken, res, url)
     }
     // A /chat load WITH a valid cookie (e.g. arriving with a fresh `?start=`)
     // still needs the project bootstrap injected.
