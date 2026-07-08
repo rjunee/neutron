@@ -218,6 +218,27 @@ export class MobileChatSession {
     await this.flush();
   }
 
+  /**
+   * W5 GAP-4 — per-message manual retry (parity with WebChatSession). Re-drives
+   * ONLY the send with this `client_msg_id` (the failed bubble the user tapped)
+   * over the current open socket — never its siblings. Idempotent on
+   * `client_msg_id` (the server de-dupes; the `was_new` guard means the
+   * re-delivery never re-fires the agent), and re-arms that message's ack
+   * deadline (the `has()` guard in {@link armAckTimer} prevents a duplicate timer
+   * if a reconnect-flush races it). A no-op while the socket is down — the
+   * reconnect's `resumeAndFlush` re-drives it then.
+   */
+  async retry(client_msg_id: string): Promise<void> {
+    const flushed = await this.queue.flushOne((envelope) => {
+      const ok = this.ws.send(envelope);
+      if (!ok) throw new Error('socket not open');
+    }, this.topic_id, client_msg_id);
+    if (flushed !== null) {
+      this.armAckTimersFor([flushed]);
+      this.emitChange();
+    }
+  }
+
   /** Current ordered transcript (for rendering / cold-open hydration). */
   async messages(): Promise<ChatMessage[]> {
     return this.engine.messages(this.topic_id);

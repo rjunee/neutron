@@ -140,6 +140,36 @@ export class SendQueue {
     return flushed
   }
 
+  /**
+   * Per-message retry (W5 GAP-4): re-drive a SINGLE not-yet-acked message — the
+   * one whose failed bubble the user tapped "retry" on. Unlike {@link
+   * flushUnacked} (the reconnect path, which re-drives EVERY unacked send), this
+   * touches ONLY `client_msg_id` and never resends siblings — the per-bubble
+   * affordance has per-message semantics. Idempotent: the frame carries the same
+   * `client_msg_id`, so the server de-dupes it (and the `was_new` guard means the
+   * re-delivery never re-fires the agent). A no-op — returns `null` — when the
+   * message is absent, already `acked`, or the socket throws. A `queued` row
+   * advances to `sent`; a `sent`/`failed` row is re-sent without a status change
+   * (the echo reconciles it to `acked`; monotonic status never regresses).
+   */
+  async flushOne(
+    send: SendFn,
+    topic_id: string,
+    client_msg_id: string,
+  ): Promise<ChatMessage | null> {
+    const msg = await this.store.getByClientMsgId(topic_id, client_msg_id)
+    if (msg === null || msg.status === 'acked') return null
+    try {
+      await send(toEnvelope(msg))
+    } catch {
+      return null
+    }
+    if (msg.status === 'queued') {
+      await this.store.upsert({ ...msg, status: 'sent' })
+    }
+    return { ...msg, status: 'sent' }
+  }
+
   /** Count of messages still awaiting delivery (queued) for a topic. */
   async pendingCount(topic_id: string): Promise<number> {
     return (await this.store.pendingSends(topic_id)).length

@@ -234,20 +234,25 @@ export class WebChatSession {
   }
 
   /**
-   * GAP-4 — manual retry affordance. Re-drives every not-yet-`acked` send
-   * (`queued` / `sent` / `failed`) over the CURRENT open socket, idempotently on
-   * `client_msg_id` (the server de-dupes, and the `was_new` guard means a
-   * re-delivery never re-fires the agent). A no-op while the socket is down —
-   * the reconnect's own `resumeAndFlush` re-drives them then, or the UI can wire
-   * the retry button to {@link notifyReachable} to force that reconnect.
+   * GAP-4 — per-message manual retry affordance. Re-drives ONLY the send with
+   * this `client_msg_id` (the failed bubble the user tapped) over the CURRENT
+   * open socket — NOT its siblings. Idempotent (the server de-dupes on
+   * `client_msg_id`, and the `was_new` guard means the re-delivery never re-fires
+   * the agent), and it re-arms that message's ack deadline (the `has()` guard in
+   * {@link armAckTimer} means a manual retry racing the reconnect-flush can't
+   * arm a duplicate timer). A no-op while the socket is down — the reconnect's
+   * own `resumeAndFlush` re-drives it then, or the UI can wire the button to
+   * {@link notifyReachable} to force that reconnect.
    */
-  async retry(): Promise<void> {
-    const flushed = await this.queue.flushUnacked((envelope) => {
+  async retry(client_msg_id: string): Promise<void> {
+    const flushed = await this.queue.flushOne((envelope) => {
       const ok = this.ws.send(envelope)
       if (!ok) throw new Error('socket not open')
-    }, this.topic_id)
-    this.armAckTimersFor(flushed)
-    if (flushed.length > 0) this.emitChange()
+    }, this.topic_id, client_msg_id)
+    if (flushed !== null) {
+      this.armAckTimersFor([flushed])
+      this.emitChange()
+    }
   }
 
   /** Connection status snapshot. */

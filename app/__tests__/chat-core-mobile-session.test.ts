@@ -672,3 +672,53 @@ describe('MobileChatSession — W5 GAP-4 ack-timeout (parity with WebChatSession
     session.stop();
   });
 });
+
+describe('MobileChatSession — W5 GAP-4 per-message retry (FIX 11 parity)', () => {
+  function failedRow(client_msg_id: string, body: string, created_at: number) {
+    return {
+      topic_id: TOPIC,
+      client_msg_id,
+      message_id: null,
+      seq: null,
+      role: 'user' as const,
+      body,
+      project_id: null,
+      attachments: null,
+      created_at,
+      status: 'failed' as const,
+    };
+  }
+
+  it('retry(idA) re-drives ONLY message A, never its siblings', async () => {
+    const store = await freshStore();
+    await store.upsert(failedRow('A', 'alpha', 1));
+    await store.upsert(failedRow('B', 'beta', 2));
+    const sockets: FakeSocket[] = [];
+    const session = new MobileChatSession({
+      url: URL,
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      // Open WITHOUT a session_ready so the resume path (re-drives ALL unacked)
+      // can't confound the per-message retry; no ack timers / heartbeat noise.
+      heartbeatIntervalMs: 0,
+      ackTimeoutMs: 0,
+    });
+    session.start();
+    sockets[0]!.open();
+    await tick();
+    expect(sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'user_message').length).toBe(0);
+
+    await session.retry('A');
+    await tick();
+    const sent = sockets[0]!.sentEnvelopes().filter((e) => e['type'] === 'user_message');
+    expect(sent.map((e) => e['body'])).toEqual(['alpha']);
+    expect(sent[0]?.['client_msg_id']).toBe('A');
+    expect((await session.messages()).find((m) => m.client_msg_id === 'B')?.status).toBe('failed');
+    session.stop();
+  });
+});

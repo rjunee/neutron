@@ -310,3 +310,96 @@ describe('WebChatSession — stale-store reset on server reinstall (M1)', () => 
     expect(sockets[0]!.resumeFrames().at(-1)).toEqual({ v: 1, type: 'resume', after_seq: 40 })
   })
 })
+
+describe('WebChatSession — W5 GAP-4 per-message retry (FIX 10)', () => {
+  function failedRow(client_msg_id: string, body: string, created_at: number) {
+    return {
+      topic_id: TOPIC,
+      client_msg_id,
+      message_id: null,
+      seq: null,
+      role: 'user' as const,
+      body,
+      project_id: null,
+      attachments: null,
+      created_at,
+      status: 'failed' as const,
+    }
+  }
+
+  it('re-drives ONLY the tapped message, never its siblings', async () => {
+    const store = new InMemoryStore()
+    // Two sends that both timed out awaiting their ack (status `failed`).
+    await store.upsert(failedRow('A', 'alpha', 1))
+    await store.upsert(failedRow('B', 'beta', 2))
+    const sockets: FakeSocket[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      // Open the socket WITHOUT a session_ready + no fallback, so the reconnect
+      // resume path (which re-drives ALL unacked) can't confound this — isolating
+      // the manual per-message retry.
+      resumeFallbackMs: 0,
+      ackTimeoutMs: 0,
+    })
+    session.start()
+    sockets[0]!.open()
+    await new Promise((r) => setTimeout(r, 0))
+    // Nothing auto-flushed (no session_ready, no fallback).
+    expect(sockets[0]!.sentUserMessages().length).toBe(0)
+
+    // Tap retry on A only → ONLY A is re-driven; B is untouched.
+    await session.retry('A')
+    await new Promise((r) => setTimeout(r, 0))
+    const sent = sockets[0]!.sentUserMessages()
+    expect(sent.map((e) => e['body'])).toEqual(['alpha'])
+    expect(sent[0]?.['client_msg_id']).toBe('A')
+    // B remains failed + un-sent (its own affordance still available).
+    expect((await session.messages()).find((m) => m.client_msg_id === 'B')?.status).toBe('failed')
+  })
+
+  it('is idempotent (client_msg_id) and a re-drive keeps a single store row', async () => {
+    const store = new InMemoryStore()
+    await store.upsert(failedRow('A', 'alpha', 1))
+    const sockets: FakeSocket[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store,
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      resumeFallbackMs: 0,
+      ackTimeoutMs: 0,
+    })
+    session.start()
+    sockets[0]!.open()
+    await session.retry('A')
+    await session.retry('A') // tapped twice
+    await new Promise((r) => setTimeout(r, 0))
+    // Same client_msg_id every time (the server de-dupes); one local row.
+    expect(sockets[0]!.sentUserMessages().every((e) => e['client_msg_id'] === 'A')).toBe(true)
+    // The server echo reconciles to a single acked row.
+    sockets[0]!.deliver({
+      v: 1,
+      type: 'user_message',
+      message_id: 'srv-A',
+      client_msg_id: 'A',
+      seq: 3,
+      body: 'alpha',
+      ts: 9,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    const msgs = await session.messages()
+    expect(msgs.length).toBe(1)
+    expect(msgs[0]?.status).toBe('acked')
+  })
+})
