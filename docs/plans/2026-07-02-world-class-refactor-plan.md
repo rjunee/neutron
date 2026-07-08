@@ -1954,7 +1954,7 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [x] G1 ✅ #203 · [x] G2 ✅ #211 · [x] G3 ✅ #205 · [x] G4 ✅ #210 · [x] G5 ✅ #204 · [x] G6 ✅ #206 · [x] G7 ✅ #208 · [x] G8 ✅ #213 · [x] G9 ✅ #209 · [x] G10 ✅ #202
 - [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [x] K6 ✅ #225 · [x] K7 ✅ #224 · [x] K8 · [x] K9 · [ ] K10 · [x] K11 ✅ #240/#242/#243/#247/#248/#251/#257 (fully closed)
 - Window auxiliary units: [x] FX1 ✅ #226 (`/code` pre-check narrow) · [x] FX2 ✅ #227 (K3 coverage restore) · [x] RT1 ✅ #228 (Ralph/SPEC tripwire) · [x] K11-pre ✅ #229 (K11a6 test re-anchor) · [~] M0 (Managed CI — PR neutron-managed#123 open, merges in Managed repo)
-- [x] L1 ✅ #253 · [x] L2 ✅ #255 · [x] L3 ✅ #262 · [x] L4 ✅ #258 · [ ] L5 · [ ] L6 · [x] L7 ✅ #260
+- [x] L1 ✅ #253 · [x] L2 ✅ #255 · [x] L3 ✅ #262 · [x] L4 ✅ #258 · [ ] L5 · [x] L6 ✅ #270 · [x] L7 ✅ #260
 - [x] C1 ✅ #265 · [x] C2 ✅ #268 · [ ] C3a · [ ] C3b · [ ] C3c · [ ] C3d · [ ] C4 · [ ] C5 · [ ] C6 · [ ] C7 · [ ] C8
 - [ ] D1 · [ ] D2 · [ ] D3 · [ ] D4 · [ ] D5 · [ ] D6 · [ ] D7 · [ ] D8 · [ ] D9a · [ ] D9b · [ ] D9c · [ ] D9d
 - [ ] P1 · [ ] P2 · [ ] P3 · [ ] P4 · [ ] P5 · [ ] P6 · [ ] P7 · [ ] P8 · [ ] P9 · [ ] P10 · [ ] P11
