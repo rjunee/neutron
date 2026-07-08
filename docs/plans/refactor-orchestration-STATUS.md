@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `77b3cd1` (W5 #263 merged 2026-07-08; chat-core resilience; WAVE 2 local units DONE) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `0633d89` (C2 #268 merged 2026-07-08; boot-helpers split + 8 dead exports deleted) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
