@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `8d9c141` (C3a #272 merged 2026-07-08; first `open/composer.ts` wiring carve → `open/wiring/{context,substrates,memory}.ts`, verbatim, prewarm live-ref + cleanups preserved) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `bea07d6` (C3b #274 merged 2026-07-08; second `open/composer.ts` carve → `open/wiring/{landing,uploads}.ts`, verbatim landing-stack + upload surface, late-bound importWatchHolder composer-owned) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -374,13 +374,32 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
    invokes `substrateFactory` LAZILY (on `start()`) — a boundary test must DISPATCH the substrate, not just
    build it; and scribe filters text < `SCRIBE_MIN_CHARS` (80) before dispatch.** Local doc-link lane flake
    (pre-existing, unrelated) did NOT recur on CI (`test` green 8m16s).
-8. **IN FLIGHT:** none (dispatching C3b).
-9. **Next dispatchable (wave 3):** **C3b** (carve `open/composer.ts` uploads + landing-stack + onboarding
-   seams — chunked upload+sweeper, `buildLandingStack` call, Path-1 trio + import watcher,
-   `importUseSynthesis:true` preserved; `opus`, lane composer; serial after C3a). Then **C3c** (http-shell
-   → named `OpenOwnerGate`), **C3d** (app surfaces + app-ws + return assembly + `late<T>` holders). **L5**
-   (relative-import autofix sweep, `haiku`) — HOLD until the C3 relocations settle (avoid import-rewrite
-   conflicts). **M1/M2** = Managed (cross-repo, deferred). **K10 strictly LAST (wave 9).**
+8. **C3b** ✅ #274 (second composer carve → `open/wiring/{landing,uploads}.ts`). The `buildLandingStack({...})`
+   call (onboarding engine + chat UI + WS) → `wireLandingStack(ctx, deps)` (13-field deps bag; all `!==null`
+   / `!==undefined` conditional spreads preserved so an omitted field is never keyed; `importUseSynthesis:true`
+   + per-request `chatAuthGate` via threaded `resolveOpenLlmPool(ctx.env)` verbatim) + the import-upload
+   surface (`import_upload_handler`, chunked handler + `SqliteUploadSessionStore` + `ChunkedUploadSweeper`,
+   `import_resume_handler`) → `wireUploads(ctx, deps)`. Byte-for-byte verbatim; composer −139. **Late-bound
+   `importWatchHolder` kept COMPOSER-OWNED** (composer creates it, threads it into `wireUploads` as the reader;
+   `.watch` setter stays deep in composer — NOT a `late<T>` seam, that's C3d); sweeper `stop()` in returned
+   `cleanups`, re-registered at carve site. **Codex REQUEST_CHANGES (test-gap):** the two-sided resume
+   null-guard (`runner && resolver`) had only a `runner:null` test; added the `resolver:null` arm. First
+   dispatch died (0 tool uses), second died mid-work on an API connection drop — RESUMED via SendMessage from
+   the surviving worktree (landing.ts/uploads.ts already written) → finished clean. **Lesson: an agent that
+   dies mid-flight with a worktree can be resumed with `SendMessage` + a "continue from exactly where you
+   stopped" recap, avoiding a full restart.** Hit the shallow-clone rebase trap (`git fetch --unshallow`).
+9. **IN FLIGHT:** none (dispatching C3c).
+10. **Next dispatchable (wave 3):** **C3c** (carve `open/composer.ts` http-shell → a NAMED, unit-tested
+   `OpenOwnerGate` module: the cookie/start-token gate + `coldStartRedirect`/`hasResumableState` + React
+   bootstrap HTML injection + `openFetch`; `opus`, lane composer; serial after C3b). **CARE — security-
+   sensitive:** single-use `?start=` JTI claim; cookie minted ONLY on first claim; stale-cookie-over-wiped-DB
+   cold-start fallback; bootstrap injected by exact-string replace on the `/chat-react.js` tag; **the TWO
+   verbatim copies of the claim-token block converge onto ONE** (the plan-sanctioned dedup — do it as an
+   explicit, separately-tested step, logic otherwise verbatim; hardening is S1/S2, NOT here). Then **C3d**
+   (app surfaces + app-ws receiver + return assembly + the four `late<T>` holders — deref-before-bind
+   log-loudly-and-no-op except throw under `NODE_ENV=test`). **L5** (relative-import autofix sweep, `haiku`)
+   — HOLD until the C3 relocations settle. **M1/M2** = Managed (cross-repo, deferred). **K10 strictly LAST
+   (wave 9).**
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
