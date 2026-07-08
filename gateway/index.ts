@@ -30,11 +30,9 @@ import {
   type HttpHandler,
 } from './boot-helpers.ts'
 export {
-  createTasksCoreOwnerRegistry,
   resolveRegistryDbPath,
   resolveOwnerRegistryRow,
   resolveListenPort,
-  defaultListProjects,
   resolveOwnerHome,
   resolveRepoRoot,
   buildChainedChatCommandFilter,
@@ -44,13 +42,7 @@ export {
   readPatternFromPrompts,
   buildCoresBackendFactories,
   wrapResearchBackendWithDefaultProjectId,
-  loadAnthropicOAuthConfigFromEnv,
   buildResearchLlmCallForOwner,
-  resolveIdentityPublicBaseUrl,
-  resolveBaseDomain,
-  buildMaxOAuthGateHandler,
-  buildMaxOauthHandoffUrl,
-  buildGateLandingServer,
 } from './boot-helpers.ts'
 export type {
   TasksCoreOwnerRegistry,
