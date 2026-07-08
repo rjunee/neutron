@@ -20,24 +20,19 @@
  * is present (a misconfigured Managed box).
  *
  * NAMING (M2.6 Ph0 reconciliation, brief § 2): `NEUTRON_ROLE` is the canonical
- * public env key (matches the LOCK + roadmap GROUP C). `NEUTRON_DEPLOYMENT_MODE`
- * is kept as a back-compat ALIAS so every already-rendered systemd unit (which
- * sets `NEUTRON_DEPLOYMENT_MODE=managed`) keeps working unchanged. Precedence:
- * `NEUTRON_ROLE` > `NEUTRON_DEPLOYMENT_MODE` > default `'open'`. Both resolve
- * through the SAME `resolveDeploymentMode(env)` — one resolver, two accepted
- * keys — so there is exactly one source of truth for "what shape is this box."
+ * public env key (matches the LOCK + roadmap GROUP C) and, as of K11b2, the
+ * SOLE key `resolveDeploymentMode` reads. A pre-M2.6 back-compat alias env key
+ * was retired in K11b2 after verifying (across neutron-open and neutron-managed,
+ * incl. the provisioner scripts and systemd unit templates) that nothing set
+ * it — it was dead surface.
  */
 
 export type DeploymentMode = 'open' | 'managed' | 'connect'
 
 export const DEFAULT_DEPLOYMENT_MODE: DeploymentMode = 'open'
 
-/** Canonical public env key (M2.6 Ph0). Takes precedence over the alias. */
+/** Canonical public env key (M2.6 Ph0) — the sole key read since K11b2. */
 export const DEPLOYMENT_ROLE_ENV = 'NEUTRON_ROLE'
-
-/** Back-compat alias key (pre-M2.6). Still read; lower precedence than the
- *  canonical `NEUTRON_ROLE`. Keeps rendered systemd units working unchanged. */
-export const DEPLOYMENT_MODE_ENV = 'NEUTRON_DEPLOYMENT_MODE'
 
 const KNOWN_MODES: ReadonlySet<DeploymentMode> = new Set<DeploymentMode>([
   'open',
@@ -52,17 +47,25 @@ function normalizeMode(raw: string): DeploymentMode | undefined {
 
 /**
  * Resolve the deployment mode from an environment bag. Reads the canonical
- * `NEUTRON_ROLE` first, then the back-compat `NEUTRON_DEPLOYMENT_MODE` alias;
- * unknown / unset values fall back to the default `'open'`. Case-insensitive +
- * trimmed so `NEUTRON_ROLE=Connect ` works.
+ * `NEUTRON_ROLE`; unknown / unset values fall back to the default `'open'`.
+ * Case-insensitive + trimmed so `NEUTRON_ROLE=Connect ` works.
+ *
+ * K11b2 (owner-approved 2026-07-08): the pre-M2.6 `NEUTRON_DEPLOYMENT_MODE`
+ * back-compat alias was REMOVED after verifying nothing sets it across
+ * neutron-open + neutron-managed (provisioner scripts, systemd templates, env —
+ * only test fixtures matched). `NEUTRON_ROLE` is now the sole mode key. Accepted
+ * trade-off, stated plainly (no false guard): mode gates managed-only credential
+ * isolation (`resolve-llm-credentials.ts` refuses the shared env key unless
+ * `mode !== 'open'`), so a box that set ONLY the retired alias (and no
+ * `NEUTRON_ROLE`) now resolves to `'open'` and could use that shared key. No such
+ * box exists in either repo; the sole residual is an untracked hand-set env on
+ * the live Managed VPS — owner-accepted. Fix if ever hit: set `NEUTRON_ROLE=managed`.
  */
 export function resolveDeploymentMode(
   env: Record<string, string | undefined> = process.env,
 ): DeploymentMode {
   const fromRole = normalizeMode(env[DEPLOYMENT_ROLE_ENV] ?? '')
   if (fromRole !== undefined) return fromRole
-  const fromAlias = normalizeMode(env[DEPLOYMENT_MODE_ENV] ?? '')
-  if (fromAlias !== undefined) return fromAlias
   return DEFAULT_DEPLOYMENT_MODE
 }
 

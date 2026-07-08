@@ -539,7 +539,7 @@ test('T15 — gemini provider ignores CLAUDE_CODE_OAUTH_TOKEN (Anthropic-only en
 // ('open', the default) the shared key stays the legit, simplest auth
 // model. The deployment-shape signal is `resolveDeploymentMode(env)` —
 // the SAME env bag callers already pass (process.env in production,
-// where systemd sets NEUTRON_ROLE / NEUTRON_DEPLOYMENT_MODE).
+// where systemd sets NEUTRON_ROLE).
 
 test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect signal)', async () => {
   const pool = await resolveLlmCredentials({
@@ -565,18 +565,32 @@ test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect
   expect(warnCalls.some((line) => line.includes('loaded from SHARED'))).toBe(false)
 })
 
-test('managed mode (legacy NEUTRON_DEPLOYMENT_MODE alias): shared env key still refused', async () => {
+// K11b2 boundary characterization (owner-approved trade-off, made explicit so
+// it's greppable, not hidden): the retired `NEUTRON_DEPLOYMENT_MODE` alias no
+// longer confers managed isolation. A box that set ONLY the alias resolves to
+// `open` (see deployment-mode.ts) and therefore MAY load the shared env key —
+// the exact opposite of the deleted alias-keyed test. Nothing sets the alias in
+// either repo; the managed-mode security pin now lives solely on `NEUTRON_ROLE`
+// (the WARN-checking test above). This test documents the accepted new behavior.
+test('K11b2: retired NEUTRON_DEPLOYMENT_MODE alias → open → shared key IS usable (isolation now keyed on NEUTRON_ROLE only)', async () => {
   const pool = await resolveLlmCredentials({
     internal_handle: 'casey-test',
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
     env: {
-      NEUTRON_DEPLOYMENT_MODE: 'managed',
+      NEUTRON_DEPLOYMENT_MODE: 'managed', // retired alias — ignored, resolves 'open'
       ANTHROPIC_API_KEY: 'sk-ant-shared-global',
     },
   })
-  expect(pool).toBeNull()
+  expect(pool).not.toBeNull()
+  if (pool === null) return
+  // Prove the SHARED env key was actually loaded (not merely a non-null pool):
+  // the alias resolving to 'open' is exactly what lets the box-global fallback
+  // through — the contract this pins.
+  const sel = selectCredential(pool)
+  expect(sel?.secret).toBe('sk-ant-shared-global')
+  expect(sel?.kind).toBe('api_key')
 })
 
 test('connect mode: shared env key also refused (only open may use it)', async () => {
