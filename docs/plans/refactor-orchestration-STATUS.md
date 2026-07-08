@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `0633d89` (C2 #268 merged 2026-07-08; boot-helpers split + 8 dead exports deleted) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `77cecd5` (L6 #270 merged 2026-07-08; @neutronai/wire-types leaf + option-shape unification) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -342,13 +342,27 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
      changes as regressions.**
 4. **Wave 2 status:** LOCAL units DONE (L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓). Only **M1/M2** (Managed,
    cross-repo neutron-managed) remain from the §16 wave-2 row — deferred to a Managed pass.
-5. **IN FLIGHT (wave 3):** **C2** (boot-helpers split + delete the 8 dead exports, `opus`, lane composer)
-   — dispatched off `77b3cd1`; co-delete caveat (the barrel re-export block in `gateway/index.ts`) + full
-   `test` suite required (deletion/guardrail lessons).
-6. **Next dispatchable (wave 3):** **L6** (wire-types leaf, `opus`, lanes transport+clients — deletes
-   ~1300 mirrored lines, unifies the 5 option shapes; deps L1/L2 met, transport lane now free post-W5).
-   **L5** (relative-import autofix sweep, `haiku`) — deps L4 met, but **sequence AFTER L6** (both rewrite
-   imports; L5 is the sweep that should follow L6's relocations). **C3a–C3d** serial after C2.
+5. **C2** ✅ #268 (boot-helpers split + delete the 8 dead exports + `loadInstanceEnvOverlay`; Codex APPROVE
+   first pass; full suite 807/807; contract-neutral — only dead re-exports removed from the Managed-pinned
+   `gateway/index.ts`; boot-helpers.ts → a `composer-contract.ts` shim).
+6. **L6** ✅ #270 (`@neutronai/wire-types` leaf + option-shape unification). 5 option shapes → 1 canonical
+   `WireAgentMessageOption` + 2 explicit projections (ButtonOption's lossy Telegram `metadata` edge;
+   InlineChoice's render projection + "label carries display text"); ~770 mirror lines deleted; G3 parity
+   tests converted from drift-guards to contract tests. **Codex caught a browser-safety regression** (2
+   rounds): the barrel re-exports `doc-links`, which read `process.env` at module-init → crashed the
+   landing browser bundle; r1 guarded it but the runtime `HAS_PROCESS_ENV` gate then defeated Expo's
+   compile-time inlining (returned `''` on Expo); r2 fixed with **try/catch around DIRECT member reads**
+   (babel inlines for Expo, throws-caught for processless browser, runtime read for server) + config.ts
+   imports topic-id from the narrow subpath so doc-links never enters the browser bundle. **Lesson →
+   [[refactor-lphase-source-text-guardrail-trap]] cousin: a shared leaf imported by browser code must be
+   browser-safe end-to-end; guarding an env read can silently defeat build-time inlining on another
+   surface — verify all three (server / Expo-inlined / processless-browser).** CI flake on `anchor-walker`
+   (unrelated concurrency test) cleared by re-run → [[neutron-open-anchor-walker-ci-flake]].
+7. **IN FLIGHT:** none (dispatching next batch).
+8. **Next dispatchable (wave 3):** **C3a** (carve `open/composer.ts` wiring modules — substrates/prewarm/
+   memory, `opus`, lane composer; serial C3a→C3b→C3c→C3d after C2; delicate — prewarm-never-rejects,
+   trident-fire warm-per-repo-cwd, enableToolBridge care). **L5** (relative-import autofix sweep, `haiku`,
+   lane none — deps L4/L6 met; the sweep that follows the L-relocations). **M1/M2** = Managed (cross-repo).
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
