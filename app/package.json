@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@neutron/chat-core": "workspace:*",
+    "@neutronai/chat-core": "workspace:*",
     "@neutronai/channels": "workspace:*",
     "@neutronai/connect": "workspace:*",
     "@neutronai/landing": "workspace:*",

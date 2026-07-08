@@ -2,7 +2,7 @@
  * @neutronai/message-search — full-text search over the user's CHAT HISTORY.
  *
  * The chat-history twin of `@neutronai/doc-search`. The full-text index lives
- * in the `@neutron/chat-core` {@link Store} (SQLite FTS5 on op-sqlite/wasm,
+ * in the `@neutronai/chat-core` {@link Store} (SQLite FTS5 on op-sqlite/wasm,
  * tokenised JS in-memory otherwise); this package is the runtime + agent-tool
  * surface over it, exposing the `message_search` tool so the live agent can
  * recall what was said earlier mid-conversation.

@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — reconnecting WebSocket client.
+ * @neutronai/chat-core — reconnecting WebSocket client.
  *
  * Transport half of the sync stack: an AppState-aware socket with
  * exponential backoff + jitter (research doc §4/§6 — the RN-recommended

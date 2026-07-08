@@ -15,8 +15,8 @@
  *     checkmark ladder (queued → sent → delivered), Telegram-style.
  */
 
-import { groupReactions as groupReactionsCore, type ReactionChip } from '@neutron/chat-core';
-import type { ChatMessage } from '@neutron/chat-core';
+import { groupReactions as groupReactionsCore, type ReactionChip } from '@neutronai/chat-core';
+import type { ChatMessage } from '@neutronai/chat-core';
 
 export type { ReactionChip };
 

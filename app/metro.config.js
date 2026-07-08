@@ -1,8 +1,8 @@
 // @neutronai/app — Metro config for the Neutron monorepo (mobile Phase 2).
 //
-// The Expo app consumes `@neutron/chat-core`, a workspace package whose source
+// The Expo app consumes `@neutronai/chat-core`, a workspace package whose source
 // lives at the repo root (`../chat-core`) and is symlinked into
-// `app/node_modules/@neutron/chat-core`. Out of the box Metro only watches the
+// `app/node_modules/@neutronai/chat-core`. Out of the box Metro only watches the
 // app folder and would fail to resolve the package's real files. This config
 // adds the standard Expo-monorepo wiring:
 //   - watch the repo root so changes to chat-core are picked up + bundled;

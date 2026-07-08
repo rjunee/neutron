@@ -15,7 +15,7 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, it } from 'bun:test';
 
-import type { SocketLike } from '@neutron/chat-core';
+import type { SocketLike } from '@neutronai/chat-core';
 
 import { MobileChatSession } from '../lib/chat-core/mobile-session';
 import {

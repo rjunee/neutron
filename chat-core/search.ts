@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — full-text MESSAGE search over the local transcript.
+ * @neutronai/chat-core — full-text MESSAGE search over the local transcript.
  *
  * The complement to `@neutronai/doc-search` (which searches the owner's
  * project markdown): this searches the user's CHAT HISTORY — every message

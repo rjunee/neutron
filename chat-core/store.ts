@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — the local message Store interface + a reference
+ * @neutronai/chat-core — the local message Store interface + a reference
  * in-memory implementation.
  *
  * The Store is the only persistence seam the sync engine + send-queue

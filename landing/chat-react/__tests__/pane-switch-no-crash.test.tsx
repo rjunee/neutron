@@ -53,7 +53,7 @@ describe('#354 guard — Work pane mounted + rapid project switch never crashes'
   it('no infinite loop / no error boundary under switch + pane + unrelated re-renders', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act, useState } = await import('react')
-    const { InMemoryStore, WebChatSession } = await import('@neutron/chat-core')
+    const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
     const { NeutronChatController } = await import('../controller.ts')
     const { useNeutronChatVm } = await import('../useNeutronChat.ts')
     const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')

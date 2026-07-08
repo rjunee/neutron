@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
-import type { ChatMessage, ConnStatus, ReactionAction } from '@neutron/chat-core';
+import type { ChatMessage, ConnStatus, ReactionAction } from '@neutronai/chat-core';
 
 import { httpToWs, loadAppConfig } from '../config';
 import { useAuthSession } from '../session';

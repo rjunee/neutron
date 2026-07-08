@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — the append-only sync engine.
+ * @neutronai/chat-core — the append-only sync engine.
  *
  * Tiny by design (research doc §5: "low hundreds of LOC"). Append-only chat
  * has no write conflicts, so sync reduces to:

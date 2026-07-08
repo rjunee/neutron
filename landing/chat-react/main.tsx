@@ -14,7 +14,7 @@
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { WebChatSession, createWebStore } from '@neutron/chat-core'
+import { WebChatSession, createWebStore } from '@neutronai/chat-core'
 
 import { ProjectShell } from './ProjectShell.tsx'
 import {

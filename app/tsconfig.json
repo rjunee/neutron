@@ -2,7 +2,7 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
-    // `@neutron/chat-core` is consumed as raw TS source (its internal imports
+    // `@neutronai/chat-core` is consumed as raw TS source (its internal imports
     // use explicit `.ts` extensions). noEmit is already set by the Expo base.
     "allowImportingTsExtensions": true,
     "paths": {

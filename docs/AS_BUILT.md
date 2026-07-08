@@ -2466,7 +2466,7 @@ the existing path; this only un-drops the intermediate progress frames. tsc clea
 ## 2026-06-29 — M1: stale-client-store auto-reset on server reinstall
 
 **Problem.** A fresh Neutron Open server reinstall showed a STALE chat: the web
-client's offline local store (`@neutron/chat-core` OPFS snapshot, origin-scoped
+client's offline local store (`@neutronai/chat-core` OPFS snapshot, origin-scoped
 `neutron-chat-core.json`) — and the mobile op-sqlite store (`neutron-chat.db`) —
 survive a server uninstall+reinstall behind the same origin/device. The server's
 per-topic `seq` counter restarts at 1 on a fresh install, but the client resumed

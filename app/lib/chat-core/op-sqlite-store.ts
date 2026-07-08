@@ -14,7 +14,7 @@
  * until the native build is present.
  */
 
-import { InMemoryStore, type Store } from '@neutron/chat-core';
+import { InMemoryStore, type Store } from '@neutronai/chat-core';
 
 import {
   SqliteChatStore,

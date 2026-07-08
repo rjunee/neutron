@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — transport-agnostic chat-sync client library.
+ * @neutronai/chat-core — transport-agnostic chat-sync client library.
  *
  * The shared logic layer of the web↔mobile chat stack (research doc §7):
  * a reconnecting WS client, an idempotent offline send-queue, an append-only

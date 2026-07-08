@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — the idempotent offline send-queue.
+ * @neutronai/chat-core — the idempotent offline send-queue.
  *
  * Keyed by `client_msg_id` (research doc §5: "idempotency-keyed
  * (client_msg_id) send-queue"). Enqueue writes the message to the local

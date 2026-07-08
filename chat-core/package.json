@@ -1,5 +1,5 @@
 {
-  "name": "@neutron/chat-core",
+  "name": "@neutronai/chat-core",
   "type": "module",
   "main": "./index.ts",
   "private": true

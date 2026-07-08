@@ -1,7 +1,7 @@
 /**
  * @neutronai/gateway — server-side wiring for the `message_search` agent tool.
  *
- * The gateway does not keep a `@neutron/chat-core` message Store; it keeps
+ * The gateway does not keep a `@neutronai/chat-core` message Store; it keeps
  * per-topic conversation history in `ButtonStore` (each "turn" is an agent
  * prompt body plus, when the user replied, their resolution text). This module
  * adapts that history into the {@link MessageHistorySource} the message-search

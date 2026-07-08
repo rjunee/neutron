@@ -5,7 +5,7 @@
   "private": true,
   "dependencies": {
     "@assistant-ui/react": "^0.14.23",
-    "@neutron/chat-core": "workspace:*",
+    "@neutronai/chat-core": "workspace:*",
     "@neutronai/contracts": "workspace:*",
     "@neutronai/onboarding": "workspace:*",
     "@neutronai/runtime": "workspace:*",

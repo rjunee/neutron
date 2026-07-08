@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — shared, transport-agnostic types.
+ * @neutronai/chat-core — shared, transport-agnostic types.
  *
  * The append-only chat-sync model (research doc §5/§7): every message is
  * immutable, single-author, and ordered by a server-assigned monotonic

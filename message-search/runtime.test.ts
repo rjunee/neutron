@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import { InMemoryStore, type ChatMessage } from '@neutron/chat-core'
+import { InMemoryStore, type ChatMessage } from '@neutronai/chat-core'
 
 import {
   HistorySourceMessageSearchRuntime,
