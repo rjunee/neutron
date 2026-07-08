@@ -115,6 +115,24 @@ describe('wireUploads — handler wiring + sweeper cleanup + resume null-guard',
     expect(typeof w.chunked_upload_handler).toBe('function')
     for (const c of w.cleanups) c()
   })
+
+  test('resume handler is NOT mounted when the payload resolver is null (other half of the two-sided guard)', async () => {
+    // The guard is `runner !== null && resolver !== null` — the runner-null case
+    // above covers one arm; this covers the OTHER (runner present, resolver null)
+    // so a future refactor cannot accidentally mount resume with a missing resolver.
+    const importWatchHolder: { watch?: (user_id: string) => void } = {}
+    const w = await wireUploads(makeCtx(), {
+      landing: makeLanding({ onNotify: () => {}, resolver: null }),
+      uploadUid: process.getuid?.() ?? 0,
+      uploadGid: process.getgid?.() ?? 0,
+      importWatchHolder,
+    })
+    expect(w.import_resume_handler).toBeUndefined()
+    // The upload surface is still fully wired regardless of the resume guard.
+    expect(typeof w.import_upload_handler).toBe('function')
+    expect(typeof w.chunked_upload_handler).toBe('function')
+    for (const c of w.cleanups) c()
+  })
 })
 
 describe('wireUploads — late-bound importWatchHolder reader/setter share one reference', () => {
