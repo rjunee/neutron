@@ -95,6 +95,12 @@
     "chat-core": {
       "name": "@neutronai/chat-core",
     },
+    "config": {
+      "name": "@neutronai/config",
+      "dependencies": {
+        "zod": "^3.23.8",
+      },
+    },
     "connect": {
       "name": "@neutronai/connect",
       "version": "0.0.0",
@@ -970,6 +976,8 @@
     "@neutronai/chat-core": ["@neutronai/chat-core@workspace:chat-core"],
 
     "@neutronai/codegen-core": ["@neutronai/codegen-core@workspace:cores/free/code-gen"],
+
+    "@neutronai/config": ["@neutronai/config@workspace:config"],
 
     "@neutronai/connect": ["@neutronai/connect@workspace:connect"],
 

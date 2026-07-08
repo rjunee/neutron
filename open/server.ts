@@ -26,41 +26,36 @@
 
 import { randomBytes } from 'node:crypto'
 
-import { boot, loadGraphComposerFromEnv, resolveOwnerSlug } from '../gateway/index.ts'
+import { boot, loadGraphComposerFromEnv, resolveOwnerSlugFromConfig } from '../gateway/index.ts'
 import type { BootHandle } from '../gateway/index.ts'
+import { resolveBootConfig, envShimFromBootConfig } from '../config/index.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
-import { resolveNeutronHome, resolveOpenDbPath } from './owner-identity.ts'
 
 /**
  * Boot the single-owner Open server. Returns the live `BootHandle` so
  * embedded callers can drive + shut down the server in-process.
  *
- * Operates on `process.env` deliberately: the config it fills below (OWNER_HOME
- * / NEUTRON_DB_PATH / cookie secret) must be visible to `boot()`, which reads
- * `process.env` directly for the DB path, slug, host, and port. Taking a
- * divergent `env` arg here would silently desync those — `boot()` would still
- * open the default DB + slug (Codex r1 P2). Callers wanting isolation set the
- * env vars on `process.env` before calling, or boot the composer + `boot()`
- * themselves (see open/__tests__/open-boot-shell.test.ts).
+ * C1 — the env resolution is now a single frozen {@link BootConfig}
+ * (`resolveBootConfig`) threaded into BOTH `boot()` and the composer, so the
+ * old "boot() re-reads process.env independently of the composer" desync
+ * (Codex r1 P2) is closed structurally. This function still WRITES a few
+ * derived values back onto `process.env` — the SHIM (`envShimFromBootConfig`):
+ * below-the-seam readers (the composer's sub-builders, still reading
+ * `process.env` today) keep working unchanged. The shim is MARKED TO DIE once
+ * those readers thread BootConfig directly. Never clobbers an operator-set
+ * value (writes only into an empty slot).
  */
 export async function startOpenServer(): Promise<BootHandle> {
   const env = process.env
   // Managed deploy-config injection wins — defer to the injected composer.
   const injected = await loadGraphComposerFromEnv(env)
   if (injected !== undefined) {
-    return boot({ composer: injected })
+    return boot({ composer: injected, config: resolveBootConfig(env) })
   }
 
-  const neutronHome = resolveNeutronHome(env)
-  // Keep the gateway's data dir + the composer's owner_home in lockstep under
-  // NEUTRON_HOME unless the operator pinned them explicitly.
-  if (env['OWNER_HOME'] === undefined || env['OWNER_HOME'] === '') {
-    env['OWNER_HOME'] = neutronHome
-  }
-  if (env['NEUTRON_DB_PATH'] === undefined || env['NEUTRON_DB_PATH'] === '') {
-    env['NEUTRON_DB_PATH'] = resolveOpenDbPath(env)
-  }
+  // Ephemeral cookie-secret default must land on env BEFORE we freeze config so
+  // the generated value flows into both the frozen config and the shim below.
   if (
     env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] === undefined ||
     env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] === ''
@@ -72,11 +67,23 @@ export async function startOpenServer(): Promise<BootHandle> {
     )
   }
 
-  const composer = buildOpenGraphComposer({ env })
-  const handle = await boot({ composer })
+  const config = resolveBootConfig(env)
 
-  const slug = resolveOwnerSlug(env)
-  const host = env['NEUTRON_HOST'] ?? '127.0.0.1'
+  // SHIM (marked to die): fill OWNER_HOME / NEUTRON_DB_PATH from the frozen
+  // config so below-seam readers see them, keeping the gateway data dir + the
+  // composer's owner_home in lockstep under NEUTRON_HOME. Only fills empty
+  // slots — an operator pin is never overwritten.
+  const shim = envShimFromBootConfig(config)
+  for (const [key, value] of Object.entries(shim)) {
+    if (env[key] === undefined || env[key] === '') env[key] = value
+  }
+
+  const composer = buildOpenGraphComposer({ env, config })
+  const handle = await boot({ composer, config })
+
+  const slug = resolveOwnerSlugFromConfig(config)
+  const neutronHome = config.neutronHome
+  const host = config.host
   const port = handle.server.port
   console.info('')
   console.info('  ┌─────────────────────────────────────────────────────────────')

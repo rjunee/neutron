@@ -47,7 +47,8 @@
     "tabs",
     "work-board",
     "project-credentials",
-    "contracts"
+    "contracts",
+    "config"
   ],
   "scripts": {
     "start": "bun run open/server.ts",
