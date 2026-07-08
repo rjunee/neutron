@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto'
 // the RETAINED production symbols (routed senders, the web button-prompt
 // renderer, the sender/slug-shim registries) remain, so the import surface
 // collapses to the three types those still reference.
-import type { ChatOutbound } from '../../landing/server.ts'
+import type { ChatOutbound } from '../../landing/chat-protocol.ts'
 import type { SendButtonPromptFn } from '../../onboarding/interview/engine.ts'
 import type { ButtonPrompt } from '../../channels/button-primitive.ts'
 

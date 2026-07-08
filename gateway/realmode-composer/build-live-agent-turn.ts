@@ -64,7 +64,7 @@ import {
   RESERVED_OPTION_VALUES,
   VALUE_BYTE_CAP,
 } from '../../channels/button-primitive.ts'
-import type { ChatOutbound } from '../../landing/server.ts'
+import type { ChatOutbound } from '../../landing/chat-protocol.ts'
 import { getBestModel } from '../../runtime/models.ts'
 import { assembleSystemPrompt } from '../../runtime/system-prompt.ts'
 import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
