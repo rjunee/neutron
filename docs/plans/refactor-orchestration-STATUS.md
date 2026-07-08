@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `703a49a` (L2 #255 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `83cb8c9` (L4 #258 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -68,17 +68,19 @@ land — it is what a fresh context reads to resume without re-deriving anything
       `pollImportRunningTick` cron seam). `import-paused-auto-resume.test.ts` already survived K11b1
       anchored on the retained `buildImportRunningHandler` (3/3 green) — no code change; delete-together
       was the wrong branch (would kill live behavior + leave the 6 dangling status enumerators). Exec-plan §10 row marked resolved.
-    - **⏸️ K11b2 DEFERRED — owner/OPS-gated (reasoning CORRECTED 2026-07-07).** In-source: NOTHING in
-      current source sets `NEUTRON_DEPLOYMENT_MODE`/`NEUTRON_ROLE` (not the per-tenant provisioner
-      `systemd.ts`, not `neutron-managed/src/` anywhere, not the live dogfood `.env`/plist). **⚠️ Earlier
-      claim "managed-mode derived from the identity key" was WRONG:** `deployment-mode.ts` resolves mode
-      purely from env (`NEUTRON_ROLE` > `NEUTRON_DEPLOYMENT_MODE` > `open`); the identity key only warns
-      on misconfig + forces the narrow shared-projects-resolver. So the alias IS load-bearing for any box
-      that sets it. The genuine residual = the live **Managed control-plane** unit (remote-VPS infra, in
-      no repo). Removing the alias safely is a **2-step ops migration** (add `NEUTRON_ROLE=managed` to the
-      live unit + deploy → then delete the alias read) — step 1 is against production infra, not safely
-      doable headlessly. **Unblock:** Ryan confirms/migrates the live managed unit to `NEUTRON_ROLE`.
-      Exec-plan §8 carries the full corrected banner.
+    - **✅ K11b2 DONE (#257, merged 2026-07-08) — OWNER-APPROVED DELETE.** Ryan delegated the call
+      2026-07-08 ("if you can't find it in either repo, safe to delete — make the call"). Re-verified
+      exhaustively: every `NEUTRON_DEPLOYMENT_MODE` hit is a test fixture / vendored test; the Managed
+      provisioner (`provision-hetzner.sh`, `neutron-service.sh`, `install.sh`, `.env.example`) sets NEITHER
+      `NEUTRON_ROLE` NOR the alias → removal is behavior-preserving. Alias branch deleted; `NEUTRON_ROLE`
+      is the sole mode key. **Codex 5 rounds** — my first pass added a `console.error` tombstone; Codex
+      correctly called it *worse than a clean delete* (logs but still resolves `open`, so the credential
+      boundary is unchanged — a false protection) + confirmed NO implemented boot tripwire → reverted to a
+      **clean delete** with the accepted trade-off documented plainly (alias-only box → `open` → could use
+      the shared env key; no such box exists; sole residual = untracked hand-set VPS env, owner-accepted).
+      r3/r4 strengthened the boundary test + caught a real `TS2345`. Security pin (`NEUTRON_ROLE=managed`
+      refuses shared key) preserved. Exec-plan §8 rewritten to DONE. **K11 tail now FULLY closed** (only
+      K10 remains, wave 9).
     - **✅ K11b3 DONE-BY-VERIFICATION (no code change needed).** After K11b0 (bridge) + K11d
       (build-wow-dispatcher.ts) deletions, the unit is moot: `landing.registry` appears in `open/composer.ts`
       ONLY in 2 comments (:1875/:1966) that describe the legacy `web:` path in PAST tense ("were delivered…
@@ -142,12 +144,13 @@ land — it is what a fresh context reads to resume without re-deriving anything
   (MOBILE_APP_URL canonical home). matrix 45/45; env-load-order preserved in `contracts/handoff-config.ts`.
   **⚠️ resume note:** agent worktrees are shallow/grafted — `git rebase origin/main` needs `git fetch
   --unshallow` first (see [[refactor-worktree-shallow-rebase-trap]]).
-- **⏳ L4 IN FLIGHT** (manifest honesty + workspace promotion · `sonnet` · lane ci) — dispatched off
-  `703a49a`, branch `refactor/l4-manifest-honesty`. Promotes the 5 floating dirs (open/, tabs/,
-  work-board/, project-credentials/, **contracts/** [new L2 leaf]) to workspaces + declares real deps
-  (audit: gateway declares 12/imports 39; runtime declares 1). Higher blast radius (changes module
-  resolution) — verify `bun install` + matrix + broad tests + app/metro purity. Accept: depgraph
-  declared-vs-actual delta = 0.
+- **✅ L4 DONE (#258, main `83cb8c9`, merged 2026-07-08)** (manifest honesty + workspace promotion ·
+  `sonnet` · lane ci). Promoted the 5 floating dirs (open/, tabs/, work-board/, project-credentials/,
+  **contracts/** [new L2 leaf]) to real workspaces + declared their true deps. **Codex found the real
+  bug:** the AST audit miscounted intra-package `@neutronai/<self>/…` imports, so gateway/runtime/
+  onboarding each declared THEMSELVES as a dependency — removed the 3 self-dep lines. `bun install` +
+  full matrix (47 tsconfigs) + broad tests + app/metro purity all green. Depgraph declared-vs-actual
+  delta = 0.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
@@ -293,12 +296,12 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
 
 ## Ready-set / queue (order: waves 1–9; K10 LAST)
 
-**Wave 1: DONE** (all K units merged; K10 deferred to wave 9 — Ralph landmine; K11b2 owner-gated).
+**Wave 1: DONE** (all K units merged; K10 deferred to wave 9 — Ralph landmine; K11b2 ✅ #257 owner-approved delete).
 
 **Wave 2 ready-set (§16 wave-2 row: L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓ · M1 M2):**
-1. **L1** ✅ #253 · **L2** ✅ #255. **L4** ⏳ in flight (lane ci).
+1. **L1** ✅ #253 · **L2** ✅ #255 · **L4** ✅ #258.
 2. **Next dispatchable** (deps met, distinct lanes, cap 3): **L7** (chat-core scope rename, `sonnet`,
-   lane clients — needs Expo+web bundle build verify), **L4** (manifest honesty, `sonnet`, lane ci),
+   lane clients — needs Expo+web bundle build verify),
    **L3** (DAG edge cuts / injection-shaped, `opus`, lanes composer+data), **C1** (typed BootConfig,
    `opus`, lane composer — starts the composer long-pole), **W5** (chat-core resilience `[BEHAVIOR]`,
    `opus`, lane transport). **M1/M2** = Managed (cross-repo neutron-managed).
