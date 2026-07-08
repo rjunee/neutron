@@ -242,9 +242,12 @@ export const PHASE_INTENTS: Readonly<Record<string, PhaseIntent | null>> = {
     max_body_chars: 480,
   },
   persona_reviewed: {
-    // P2 v2 § 3.14: post-persona transit; the user is invited to wrap
-    // up before the Max-attach step.
-    goal: 'Acknowledge the synthesized persona and transition into the Max-attach step.',
+    // P2 v2 § 3.14: post-persona transit — the final onboarding checkpoint.
+    // (K11e: the old `max_oauth_offered`/`wow_fired` walk steps after this were
+    // deleted; `persona_reviewed` now advances straight to `completed`. Any
+    // Max-OAuth credential attach happens via the post-completion gate page, not
+    // an in-conversation walk step — keep this goal free of the removed phases.)
+    goal: 'Acknowledge the synthesized persona and confirm the user is ready to finish — this is the final onboarding checkpoint before completion.',
     shape: 'free-text',
     allowed_option_values: [],
     max_body_chars: 240,
@@ -969,7 +972,7 @@ const PACK_PROJECTS_PROPOSED: PhaseKnowledgePack = {
 
 const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
   why_we_ask:
-    "The agent just synthesised your persona from everything we collected. Before we move to the final step (attaching your Claude Max or BYO key), this is your last checkpoint to read it and call out anything that doesn't sound right. Most users skim and accept; the option to revise is there if something feels off.",
+    "The agent just synthesised your persona from everything we collected. This is your last checkpoint to read it and call out anything that doesn't sound right before onboarding completes. Most users skim and accept; the option to revise is there if something feels off.",
   faqs: {
     what_was_synthesised:
       "Three files: SOUL.md (the agent's personality + operating principles), USER.md (what the agent knows about YOU - name, projects, interests, context), and per-project context files. Everything lives in your instance; nothing was sent anywhere external.",
@@ -982,9 +985,9 @@ const PACK_PERSONA_REVIEWED: PhaseKnowledgePack = {
     revisit_slug:
       "Slug revisits are supported here but rare - the slug picker tends to land cleanly on the first pass. Available if you've changed your mind.",
     move_on_default:
-      "Saying 'looks good' / 'move on' / 'next' advances to max_oauth_offered (or directly to wow_fired if you already attached Max via the import flow).",
+      "Saying 'looks good' / 'move on' / 'next' completes onboarding - this is the final checkpoint.",
     what_max_offers:
-      "Next phase is the Max-connect prompt - a single 'Connect Claude Max' button that links the agent to your Claude Max subscription via OAuth. If you already attached Max during the import phase, this step auto-skips entirely.",
+      "If you haven't connected Claude Max yet, you'll be prompted to after onboarding completes - a single 'Connect Claude Max' button that links the agent to your Claude Max subscription via OAuth. If you already attached Max during the import phase, that step is skipped.",
   },
   expected_tangents: [
     {

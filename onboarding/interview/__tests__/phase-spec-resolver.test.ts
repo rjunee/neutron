@@ -20,6 +20,7 @@ import {
   materializeSpec,
   parseLlmSpec,
   PHASE_INTENTS,
+  PHASE_KNOWLEDGE,
   TimeoutError,
   validateReply,
   withTimeout,
@@ -1028,5 +1029,39 @@ describe('body↔options in-phase invariant', () => {
     expect(spec).not.toBeNull()
     expect(spec!.body).toBe('What should I call you?')
     expect(spec!.options.length).toBe(0)
+  })
+})
+
+// K11e (2026-07-07, Codex r1 blocker) — deleting the `max_oauth_offered` /
+// `wow_fired` phases must not leave the still-LIVE `persona_reviewed` guidance
+// naming them. Its `goal` is injected verbatim into the rephrase system prompt
+// (`buildSystemPrompt` → `Phase intent: ${intent.goal}`) and its knowledge pack
+// feeds tangent answers ("what happens next?") — so a stale reference is a
+// user-visible lie at the final checkpoint, not inert copy. Guard against
+// regression: the persona_reviewed intent + knowledge strings reference no
+// deleted phase identifier.
+describe('persona_reviewed guidance is free of K11e-deleted phases', () => {
+  const DELETED_PHASES = ['max_oauth_offered', 'wow_fired'] as const
+  const intent = PHASE_INTENTS.persona_reviewed
+  const pack = PHASE_KNOWLEDGE.persona_reviewed
+
+  test('persona_reviewed is still a live LLM-eligible phase (guarding the right thing)', () => {
+    expect(intent).not.toBeNull()
+    expect(pack).not.toBeNull()
+  })
+
+  test('the injected intent goal names no deleted phase', () => {
+    for (const dead of DELETED_PHASES) {
+      expect(intent!.goal).not.toContain(dead)
+    }
+  })
+
+  test('the tangent-answer knowledge pack names no deleted phase', () => {
+    const strings = [pack!.why_we_ask, ...Object.values(pack!.faqs)]
+    for (const s of strings) {
+      for (const dead of DELETED_PHASES) {
+        expect(s).not.toContain(dead)
+      }
+    }
   })
 })
