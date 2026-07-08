@@ -584,6 +584,7 @@ test('K11b2: retired NEUTRON_DEPLOYMENT_MODE alias → open → shared key IS us
     },
   })
   expect(pool).not.toBeNull()
+  if (pool === null) return
   // Prove the SHARED env key was actually loaded (not merely a non-null pool):
   // the alias resolving to 'open' is exactly what lets the box-global fallback
   // through — the contract this pins.
