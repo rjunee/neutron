@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
   DEFAULT_DEPLOYMENT_MODE,
-  DEPLOYMENT_MODE_ENV,
   DEPLOYMENT_ROLE_ENV,
   resolveDeploymentMode,
 } from './deployment-mode.ts'
@@ -13,24 +12,23 @@ describe('resolveDeploymentMode', () => {
   })
 
   test('resolves managed (case-insensitive, trimmed)', () => {
-    expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'managed' })).toBe('managed')
-    expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: '  Managed ' })).toBe('managed')
+    expect(resolveDeploymentMode({ NEUTRON_ROLE: 'managed' })).toBe('managed')
+    expect(resolveDeploymentMode({ NEUTRON_ROLE: '  Managed ' })).toBe('managed')
   })
 
   test('resolves open explicitly', () => {
-    expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'open' })).toBe('open')
+    expect(resolveDeploymentMode({ NEUTRON_ROLE: 'open' })).toBe('open')
   })
 
   test('unknown value falls back to default open', () => {
-    expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'banana' })).toBe('open')
+    expect(resolveDeploymentMode({ NEUTRON_ROLE: 'banana' })).toBe('open')
   })
 
   // M2.6 Ph0 — connect profile + NEUTRON_ROLE canonical/alias reconciliation
-  // (brief § 2, test § 6.6).
+  // (brief § 2, test § 6.6). Alias retired in K11b2.
   describe('M2.6 Ph0 — connect profile + NEUTRON_ROLE', () => {
-    test('canonical key names', () => {
+    test('canonical key name', () => {
       expect(DEPLOYMENT_ROLE_ENV).toBe('NEUTRON_ROLE')
-      expect(DEPLOYMENT_MODE_ENV).toBe('NEUTRON_DEPLOYMENT_MODE')
     })
 
     test('resolves connect via the canonical NEUTRON_ROLE (case-insensitive, trimmed)', () => {
@@ -43,30 +41,11 @@ describe('resolveDeploymentMode', () => {
       expect(resolveDeploymentMode({ NEUTRON_ROLE: 'managed' })).toBe('managed')
     })
 
-    test('back-compat alias intact: NEUTRON_DEPLOYMENT_MODE=managed still resolves', () => {
-      expect(resolveDeploymentMode({ NEUTRON_DEPLOYMENT_MODE: 'managed' })).toBe('managed')
-    })
-
-    test('NEUTRON_ROLE wins when both are set (canonical > alias)', () => {
-      expect(
-        resolveDeploymentMode({
-          NEUTRON_ROLE: 'connect',
-          NEUTRON_DEPLOYMENT_MODE: 'managed',
-        }),
-      ).toBe('connect')
-    })
-
     test('unset → open', () => {
       expect(resolveDeploymentMode({})).toBe('open')
     })
 
-    test('unknown NEUTRON_ROLE falls through to the alias, then default', () => {
-      expect(
-        resolveDeploymentMode({
-          NEUTRON_ROLE: 'banana',
-          NEUTRON_DEPLOYMENT_MODE: 'managed',
-        }),
-      ).toBe('managed')
+    test('unknown NEUTRON_ROLE falls straight to default open (no alias fallthrough)', () => {
       expect(resolveDeploymentMode({ NEUTRON_ROLE: 'banana' })).toBe('open')
     })
   })

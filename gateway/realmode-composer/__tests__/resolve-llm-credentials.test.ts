@@ -539,7 +539,7 @@ test('T15 — gemini provider ignores CLAUDE_CODE_OAUTH_TOKEN (Anthropic-only en
 // ('open', the default) the shared key stays the legit, simplest auth
 // model. The deployment-shape signal is `resolveDeploymentMode(env)` —
 // the SAME env bag callers already pass (process.env in production,
-// where systemd sets NEUTRON_ROLE / NEUTRON_DEPLOYMENT_MODE).
+// where systemd sets NEUTRON_ROLE).
 
 test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect signal)', async () => {
   const pool = await resolveLlmCredentials({
@@ -565,14 +565,14 @@ test('managed mode: shared env key is REFUSED → null + refusal WARN (reconnect
   expect(warnCalls.some((line) => line.includes('loaded from SHARED'))).toBe(false)
 })
 
-test('managed mode (legacy NEUTRON_DEPLOYMENT_MODE alias): shared env key still refused', async () => {
+test('managed mode: shared env key still refused', async () => {
   const pool = await resolveLlmCredentials({
     internal_handle: 'casey-test',
     apiKeys: api_keys,
     provider: 'anthropic',
     env_vars: ['ANTHROPIC_API_KEY_CASEY_TEST', 'ANTHROPIC_API_KEY'],
     env: {
-      NEUTRON_DEPLOYMENT_MODE: 'managed',
+      NEUTRON_ROLE: 'managed',
       ANTHROPIC_API_KEY: 'sk-ant-shared-global',
     },
   })

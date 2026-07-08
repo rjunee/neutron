@@ -807,8 +807,7 @@ export function buildOnboardingEnginePieces(
     // instance_provisioned / slug_chosen and swaps the hosted Max OAuth
     // handoff for a local setup-token paste; managed (and the deferred
     // `connect` tier, which onboards as managed until B2) keep the full
-    // hosted sequence. Resolved from `NEUTRON_ROLE` / `NEUTRON_DEPLOYMENT_MODE`
-    // per gateway/deployment-mode.ts.
+    // hosted sequence. Resolved from `NEUTRON_ROLE` per gateway/deployment-mode.ts.
     deploymentMode: resolveDeploymentMode() === 'open' ? 'open' : 'managed',
   })
   return {
