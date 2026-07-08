@@ -330,7 +330,7 @@ together.
 ### 5.2 Package-name inconsistencies
 
 Census: 40 workspace packages, 30 top-level `@neutronai/` + 9 `@neutronai/*` cores + **one
-`@neutron/`** — `chat-core` (chat-core/package.json:2), imported as `@neutronai/chat-core` by 43
+`@neutron/`** — `chat-core` (chat-core/package.json:2), imported as `@neutron/chat-core` by 43
 files + 3 manifests (app, landing, message-search) + app/metro.config.js. Rename is mechanical
 but must include the metro monorepo config and the raw-TS import path.
 

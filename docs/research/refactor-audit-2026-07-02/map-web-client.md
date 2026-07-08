@@ -6,7 +6,7 @@ Audit date: 2026-07-02. All paths relative to `/Users/ryan/repos/neutron-open`.
 
 `landing/` is four different things wearing one package name (`@neutronai/landing`):
 
-1. **The web chat client** — `landing/chat-react/` — a React 19 + assistant-ui SPA served at `GET /chat`, talking to the gateway's `/ws/app/chat` socket via the shared `@neutronai/chat-core` sync engine. This is the primary product surface for an Open self-host install (tabbed shell: Chat / Plan / Documents / Admin / Core webviews).
+1. **The web chat client** — `landing/chat-react/` — a React 19 + assistant-ui SPA served at `GET /chat`, talking to the gateway's `/ws/app/chat` socket via the shared `@neutron/chat-core` sync engine. This is the primary product surface for an Open self-host install (tabbed shell: Chat / Plan / Documents / Admin / Core webviews).
 2. **The landing HTTP server** — `landing/server.ts` (`createLandingServer`) — a `{fetch, websocket}` pair composed into the gateway process. Serves the SPA shell, lazily bundles the client with `Bun.build`, plus `/start` token rewrite, `/mobile`, brand assets, sign-up redirect, invite routes, the Claude-auth gate page.
 3. **An auth library** — `session-cookie.ts` (HMAC 30-day session cookie), `auth-gate.ts` (HTTP auth gate decision tree), `spa-routes.ts` — consumed by `gateway/http/compose.ts`, `gateway/http/cookie-user-claim.ts`, and `open/composer.ts`.
 4. **The de-facto chat wire-protocol type home** — `ChatOutbound` / `ChatBridge` / `PendingChatClaim` in `server.ts` are imported by 7 non-test production files across `gateway/`, `reminders/`, `open/`, `channels/` even though the landing server itself no longer runs any WebSocket.
@@ -81,7 +81,7 @@ Total `landing/` source ≈ 26k LOC including tests; non-test client ≈ 8.5k.
 **Out (landing imports):**
 - `../runtime/start-token-types.ts` (`auth-gate.ts:55`), `../runtime/constant-time-equal.ts` (`session-cookie.ts:30`)
 - `../onboarding/interview/final-handoff-config.ts` (`server.ts:41`) — edge → product-surface, wrong direction
-- `@neutronai/chat-core` (workspace) — session/sync/store for the React client
+- `@neutron/chat-core` (workspace) — session/sync/store for the React client
 - npm: `@assistant-ui/react`, `react`/`react-dom` 19.1, `react-markdown`, `rehype-sanitize`, `remark-gfm`, `jose` (declared in `landing/package.json`; installed under `landing/node_modules`)
 
 **In (who imports landing):** gateway (7+ files), open/composer, reminders, channels/app-ws, connect (comments only). The Expo app does NOT import landing (it has its own parallel clients — see § 6.3).
@@ -110,7 +110,7 @@ Evidence: root `tsconfig.json:41-43` includes only `landing/server.ts`, the **de
 **Sketch:** add `bunx tsc -p landing/chat-react/tsconfig.json --noEmit` (and the app's leaf config) as a CI step; remove the dead `landing/chat.ts` include.
 
 ### 6.3 [P1] Triple-declared wire types / duplicated API clients across web, mobile, gateway
-Every project surface has three hand-maintained copies of its wire shapes: gateway store types, `landing/chat-react/*-client.ts`, `app/lib/*-client.ts`. Documented as deliberate ("re-declared … so the browser bundle stays free of a gateway dependency", `chat-react/work-board-client.ts:31-34`), but they have **already drifted**: web `work-board-client.ts` has `RunPhaseLabel`/`RunProgress` (`:70-92`); the app twin (215 LOC vs 311) doesn't. `docs-client` twins: app 867 LOC with `BinaryUploadResult`/`BinarySource`; web 532 LOC without. Also duplicated: `project-credentials-client`, `tabs-client`/`project-tabs`, upload clients (`landing/upload-client.ts` 590 vs `app/lib/upload-client.ts` 517), topic-id derivation (`chat-react/config.ts:120-136` mirrors `channels/adapters/app-ws/envelope.ts`), and the controller/render-model layer (`controller.ts` vs `app/lib/chat-core/chat-render-model.ts` + `use-mobile-chat.ts`). `@neutronai/chat-core` already proves a shared leaf package bundles fine into both browser and RN.
+Every project surface has three hand-maintained copies of its wire shapes: gateway store types, `landing/chat-react/*-client.ts`, `app/lib/*-client.ts`. Documented as deliberate ("re-declared … so the browser bundle stays free of a gateway dependency", `chat-react/work-board-client.ts:31-34`), but they have **already drifted**: web `work-board-client.ts` has `RunPhaseLabel`/`RunProgress` (`:70-92`); the app twin (215 LOC vs 311) doesn't. `docs-client` twins: app 867 LOC with `BinaryUploadResult`/`BinarySource`; web 532 LOC without. Also duplicated: `project-credentials-client`, `tabs-client`/`project-tabs`, upload clients (`landing/upload-client.ts` 590 vs `app/lib/upload-client.ts` 517), topic-id derivation (`chat-react/config.ts:120-136` mirrors `channels/adapters/app-ws/envelope.ts`), and the controller/render-model layer (`controller.ts` vs `app/lib/chat-core/chat-render-model.ts` + `use-mobile-chat.ts`). `@neutron/chat-core` already proves a shared leaf package bundles fine into both browser and RN.
 **Sketch:** grow chat-core (or a sibling `api-clients/` leaf) to own wire types + fetch clients with injectable `fetchImpl`; keep platform-specific UX glue local.
 
 ### 6.4 [P1] Dead/legacy code stranded by the vanilla-client deletion

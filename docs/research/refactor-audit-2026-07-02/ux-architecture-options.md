@@ -16,7 +16,7 @@ All paths relative to repo root unless absolute. **[V]** = verified in code (fil
 
 ### 1.1 `app/` — the Expo client
 
-- **Stack** [V app/package.json]: `expo ~54.0.33`, `expo-router ~6.0.23`, `react-native 0.81.5`, **`react-native-web ~0.21.0` already a dependency** (:36), `@op-engineering/op-sqlite 17.0.0` (:19), `@shopify/flash-list 2.3.2` (:21), `expo-notifications ~0.32.13` (:27), `expo-document-picker ~14.0.8` (:25), `expo-web-browser` (:31), `react-native-reanimated ~4.1.1` (:34), `@neutronai/chat-core workspace:*` (:18).
+- **Stack** [V app/package.json]: `expo ~54.0.33`, `expo-router ~6.0.23`, `react-native 0.81.5`, **`react-native-web ~0.21.0` already a dependency** (:36), `@op-engineering/op-sqlite 17.0.0` (:19), `@shopify/flash-list 2.3.2` (:21), `expo-notifications ~0.32.13` (:27), `expo-document-picker ~14.0.8` (:25), `expo-web-browser` (:31), `react-native-reanimated ~4.1.1` (:34), `@neutron/chat-core workspace:*` (:18).
 - **Web output is already configured** [V]: `"build:web": "expo export --platform web"` (app/package.json:10) and `web: { bundler: "metro", output: "static" }` (app/app.json:19–22). The app was architected with a web target in mind: **20 source files carry `Platform.OS === 'web'` branches** [V grep], e.g. web file-input/drag-drop in the composer (app/components/InputComposer.tsx:120), localStorage token storage (app/lib/token-storage.ts), and the store fallback below.
 - **Screens: 21 route files** [V find on app/app/]: `index`, `login`, `focus`, `settings`, `integrations`, `admin` (2,188 LOC), `cores/[slug]`, `projects/index`, and per-project `chat`, `docs` (2,426 LOC), `workboard`, `tasks`, `reminders`, `backups`, `launcher`, `settings`, `cores/[slug]`, `cores/dtc-analytics`, plus two `_layout`s.
 - **Size: ~36,304 LOC** across app/app + app/components + app/lib [V wc].
@@ -27,11 +27,11 @@ All paths relative to repo root unless absolute. **[V]** = verified in code (fil
 - **The native chat surface is the repo's "Telegram-grade" one** [V app/components/ChatSyncSurface.tsx:1–22]: FlashList v2, durable local store, optimistic/offline send, gap-free resume, per-message delivery ladder (🕓→✓→✓✓→read), read receipts, reactions, edit/delete, streaming bubble — 885 LOC, plus `use-mobile-chat.ts` (280) and `mobile-session.ts` (420).
 - **Markdown**: hand-rolled 908-line state-machine renderer, `app/lib/markdown-render.tsx`, with an explicit anti-dependency guard: "no markdown-it, no remark, no mdast. The lib stays dependency-free so the Expo bundle doesn't grow" (:11–13). URL allow-list sanitization (:62 `URL_ALLOW`).
 - **Distribution status**: eas.json has development/preview/production channels [V app/eas.json], **but no native app is published**: "Native apps are not published yet — the page gives honest Add-to-Home-Screen instructions and coming-soon store placeholders" [V onboarding/interview/final-handoff-config.ts:49–53]; store rows render "coming soon" when URLs are empty [V landing/mobile-install-config.ts:44–49]. `/mobile` (landing/mobile.html:9) tells users to **install the web app to their home screen**.
-- Monorepo wiring: metro watches the workspace root to resolve `@neutronai/chat-core` [V app/metro.config.js:1–30].
+- Monorepo wiring: metro watches the workspace root to resolve `@neutron/chat-core` [V app/metro.config.js:1–30].
 
 ### 1.2 `landing/chat-react/` — the React-DOM client
 
-- **Stack** [V landing/package.json:7–15]: `@assistant-ui/react ^0.14.23`, `react-markdown ^9.0.1`, `remark-gfm ^4`, `rehype-sanitize ^6`, `jose`, `@neutronai/chat-core workspace:*`. Deps live in `landing/node_modules` (leaf install).
+- **Stack** [V landing/package.json:7–15]: `@assistant-ui/react ^0.14.23`, `react-markdown ^9.0.1`, `remark-gfm ^4`, `rehype-sanitize ^6`, `jose`, `@neutron/chat-core workspace:*`. Deps live in `landing/node_modules` (leaf install).
 - **Size: ~11,163 LOC including its 27 test files** [V wc]; UI core is ChatApp.tsx 1,530 + ProjectShell.tsx 509 + WorkBoardTab 845 + DocumentsTab 737 + SettingsTab 742 + IntegrationsTab 495 + controller.ts 1,184.
 - **assistant-ui coupling is shallow**: exactly 3 files import it [V grep] — `ChatApp.tsx:17–26` (Thread/Message/Composer/MessagePart *primitives*, not styled components), `useNeutronChat.ts:13` (`useExternalStoreRuntime`), `message-adapter.ts:14` (a type). All styling is plain CSS.
 - **Design system is plain CSS in the shell page**: `landing/chat-react.html`, 1,060 lines, ~208 `car-*` class references [V wc/grep], with a mobile breakpoint `@media (max-width: 720px)` (chat-react.html:376) and a `useMediaQuery` hook (ChatApp.tsx:796–806). Mobile browser is a supported mode today, not an afterthought.
@@ -41,7 +41,7 @@ All paths relative to repo root unless absolute. **[V]** = verified in code (fil
 
 ### 1.3 What is already shared
 
-- `@neutronai/chat-core` (4,805 LOC, repo-root leaf package [V chat-core/package.json, wc]) is consumed by BOTH clients [V app/package.json:18, landing/package.json:9]. It owns store/sync/send-queue/ws-client/session types — the transport+state layer is already unified. This is the plan's "chat-core precedent" [V plan:1101].
+- `@neutron/chat-core` (4,805 LOC, repo-root leaf package [V chat-core/package.json, wc]) is consumed by BOTH clients [V app/package.json:18, landing/package.json:9]. It owns store/sync/send-queue/ws-client/session types — the transport+state layer is already unified. This is the plan's "chat-core precedent" [V plan:1101].
 - Both clients speak the same app-ws envelope, but through **hand-maintained mirrors** (`app/lib/ws-envelope.ts`, `app/lib/doc-links.ts` 493 ↔ `runtime/doc-links.ts` 918 "byte-twin") that plan unit L6 deletes [V plan:465–476].
 
 ### 1.4 What is duplicated (the disease, measured)

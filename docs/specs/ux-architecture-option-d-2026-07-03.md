@@ -21,7 +21,7 @@ screens.
   added to the home screen (`landing/final-handoff-config.ts:49-53`).
 - `react-native-web` is already a dependency and the web export is already
   configured.
-- Transport/state is **already unified** on `@neutronai/chat-core` over one
+- Transport/state is **already unified** on `@neutron/chat-core` over one
   `/ws/app/chat` — there is no second sync engine to reconcile.
 - Every UI feature currently ships **twice** (M1 PRs #178/#179/#181 each touched
   both `app/` and `landing/chat-react`). Option D collapses that tax.
