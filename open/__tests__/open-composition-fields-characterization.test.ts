@@ -22,12 +22,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { ClaudeCodeSubstrateOptions } from '../../runtime/adapters/claude-code/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))

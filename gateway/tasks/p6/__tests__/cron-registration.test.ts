@@ -9,10 +9,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CronHandlerRegistry } from '../../../../cron/handlers.ts'
-import { CronJobRegistry } from '../../../../cron/jobs.ts'
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ProjectDb } from '../../../../persistence/index.ts'
+import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildNudgeEngineHandler,
   buildNudgeEngineJob,

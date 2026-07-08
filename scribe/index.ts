@@ -29,9 +29,9 @@
  * Email Cores' fire callbacks. See `gateway/index.ts` + `gateway/http/chat-bridge.ts`.
  */
 
-import type { Substrate } from '../runtime/substrate.ts'
-import type { SyncHook } from '../runtime/entity-writer.ts'
-import { writeEntity as defaultWriteEntity } from '../runtime/entity-writer.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
+import { writeEntity as defaultWriteEntity } from '@neutronai/runtime/entity-writer.ts'
 import { runExtraction } from './extract.ts'
 import {
   writeExtractionToGBrain,

@@ -32,11 +32,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { buildImportUploadHandler } from '../upload/import-upload-handler.ts'
-import type { AdvanceResult } from '../../onboarding/interview/engine.ts'
+import type { AdvanceResult } from '@neutronai/onboarding/interview/engine.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 // First 4 bytes are the local-file-header magic; trailing bytes keep

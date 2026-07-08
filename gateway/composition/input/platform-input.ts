@@ -1,4 +1,4 @@
-import type { PlatformAdapter } from '../../../runtime/platform-adapter.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 export interface PlatformCompositionInput {
   /**

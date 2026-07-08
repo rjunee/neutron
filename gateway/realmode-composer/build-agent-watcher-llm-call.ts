@@ -42,8 +42,8 @@ import {
 } from './build-llm-call-substrate.ts'
 import { composeSystemPrompt } from './index.ts'
 import type { PersonaPromptLoader } from './persona-loader.ts'
-import { getBestModel } from '../../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 
 /**
  * Substrate-shaped LLM call the watcher invokes. `system` carries the

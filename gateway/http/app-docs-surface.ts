@@ -39,8 +39,8 @@
 
 import { readFile } from 'node:fs/promises'
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { WebChatSessionProjectRegistry } from './chat-bridge.ts'
 import {
   CommentBodyTooLargeError,

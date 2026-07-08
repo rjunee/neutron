@@ -28,9 +28,9 @@ import {
   buildSubstrateWorkflowFire,
   type TridentWorkflowFirer,
 } from './inner-loop.ts'
-import type { Event } from '../runtime/events.ts'
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import type { SessionHandle } from '../runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { computeTransition } from './state-machine.ts'
 import type { MergeMode, TridentRun } from './store.ts'
 

@@ -35,7 +35,7 @@
 // (the Open-classified grammar home); this file re-exports it so the two
 // copies that briefly existed across the connect→runtime import edge can
 // never drift.
-import { SLUG_RE, SYNTHETIC_E2E_SLUG_RE } from '../runtime/slug-grammar.ts'
+import { SLUG_RE, SYNTHETIC_E2E_SLUG_RE } from '@neutronai/runtime/slug-grammar.ts'
 
 export { SLUG_RE, SYNTHETIC_E2E_SLUG_RE }
 

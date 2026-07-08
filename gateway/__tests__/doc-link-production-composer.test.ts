@@ -46,18 +46,18 @@ import {
   ChannelRouter,
   type Topic,
   type OutgoingMessage,
-} from '../../channels/index.ts'
-import { InMemoryAppWsSessionRegistry } from '../../channels/adapters/app-ws/session-registry.ts'
-import type { AppWsOutbound } from '../../channels/adapters/app-ws/envelope.ts'
-import { TelegramAdapter } from '../../channels/adapters/telegram/index.ts'
-import type { TelegramClient } from '../../channels/adapters/telegram/client.ts'
+} from '@neutronai/channels/index.ts'
+import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
+import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { TelegramAdapter } from '@neutronai/channels/adapters/telegram/index.ts'
+import type { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import {
   NEUTRON_SCHEME,
   VAULT_REDIRECTOR_BASE,
   WEB_APP_BASE,
-} from '../../runtime/doc-links.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/runtime/doc-links.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 

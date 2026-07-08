@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { ProjectDb } from '../../../persistence/index.ts'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { SecretsStore } from '../../../auth/secrets-store.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import {
   OAuthRefreshError,
   OAuthTokenManager,

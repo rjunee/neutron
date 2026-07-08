@@ -29,7 +29,7 @@
  * being marked fired.
  */
 
-import type { Reminder } from '../../reminders/store.ts'
+import type { Reminder } from '@neutronai/reminders/store.ts'
 import type { DevicePushTokenStore } from './store.ts'
 import {
   ExpoPushError,

@@ -9,8 +9,8 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { ToolRegistry } from '../tools/registry.ts'
-import { SubagentRegistry, newControlState } from '../runtime/subagent/index.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { SubagentRegistry, newControlState } from '@neutronai/runtime/subagent/index.ts'
 import {
   DISPATCH_AGENT_TOOL,
   DispatchService,

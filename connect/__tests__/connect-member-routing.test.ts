@@ -21,14 +21,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exportJWK, generateKeyPair, type KeyLike, SignJWT } from 'jose'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   createConnectApiHandler,
   type ConnectApiHandlers,
 } from '../api/server.ts'
 import { stampOriginInstance } from '../api/origin-tag.ts'
-import { JwksCache, type FetchLike } from '../../jwt-validator/index.ts'
+import { JwksCache, type FetchLike } from '@neutronai/jwt-validator/index.ts'
 import { ConnectedMembersStore } from '../connected-members-store.ts'
 import {
   acceptTrustedMember,

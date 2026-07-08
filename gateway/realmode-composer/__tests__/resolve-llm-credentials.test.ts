@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { ProjectDb } from '../../../persistence/index.ts'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { SecretsStore } from '../../../auth/secrets-store.ts'
-import { ApiKeyStore } from '../../../auth/api-key-store.ts'
-import { selectCredential } from '../../../runtime/credential-pool.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
+import { selectCredential } from '@neutronai/runtime/credential-pool.ts'
 import {
   envSuffixForSlug,
   resolveLlmCredentials,

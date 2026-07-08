@@ -31,7 +31,7 @@
  * table) is untouched.
  */
 
-import type { OnboardingPhase } from '../../contracts/onboarding-phase.ts'
+import type { OnboardingPhase } from '@neutronai/contracts/onboarding-phase.ts'
 export type { OnboardingPhase }
 
 /** Terminal phases — cannot transition further. */
@@ -145,4 +145,4 @@ export function isLegalTransition(
 }
 
 /** Full ordered list — useful for tests / UI / observability. */
-export { ALL_PHASES } from '../../contracts/onboarding-phase.ts'
+export { ALL_PHASES } from '@neutronai/contracts/onboarding-phase.ts'

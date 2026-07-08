@@ -213,8 +213,8 @@ describe('persistChosenAvatar', () => {
 describe('buildProfilePicEngineHook', () => {
   test('factory wraps pipeline + storage into a working ProfilePicEngineHook', async () => {
     // Build a minimal pipeline (gemini=null → fallback gallery served)
-    const { ProjectDb } = await import('../../../persistence/index.ts')
-    const { applyMigrations } = await import('../../../migrations/runner.ts')
+    const { ProjectDb } = await import('@neutronai/persistence/index.ts')
+    const { applyMigrations } = await import('@neutronai/migrations/runner.ts')
     const { ProfilePicPipeline } = await import('../pipeline.ts')
     const { buildProfilePicEngineHook } = await import('../storage.ts')
 
@@ -282,8 +282,8 @@ describe('buildProfilePicEngineHook', () => {
   })
 
   test('factory returns pending immediately when pipeline has not landed candidates yet (Codex r1 P1)', async () => {
-    const { ProjectDb } = await import('../../../persistence/index.ts')
-    const { applyMigrations } = await import('../../../migrations/runner.ts')
+    const { ProjectDb } = await import('@neutronai/persistence/index.ts')
+    const { applyMigrations } = await import('@neutronai/migrations/runner.ts')
     const { ProfilePicPipeline } = await import('../pipeline.ts')
     const { buildProfilePicEngineHook } = await import('../storage.ts')
     const { GeminiImagenClient } = await import('../gemini-imagegen.ts')
@@ -355,8 +355,8 @@ describe('buildProfilePicEngineHook', () => {
   })
 
   test('factory propagates pipeline failures as kind=failed', async () => {
-    const { ProjectDb } = await import('../../../persistence/index.ts')
-    const { applyMigrations } = await import('../../../migrations/runner.ts')
+    const { ProjectDb } = await import('@neutronai/persistence/index.ts')
+    const { applyMigrations } = await import('@neutronai/migrations/runner.ts')
     const { ProfilePicPipeline } = await import('../pipeline.ts')
     const { FallbackGallery } = await import('../fallback-gallery.ts')
     const { buildProfilePicEngineHook } = await import('../storage.ts')

@@ -49,7 +49,7 @@
  */
 
 import { SecretsStore, SecretsStoreError } from './secrets-store.ts'
-import { PROBE_MODEL } from '../runtime/models.ts'
+import { PROBE_MODEL } from '@neutronai/runtime/models.ts'
 
 const DEFAULT_SUB_LABEL = 'default'
 

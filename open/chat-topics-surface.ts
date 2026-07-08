@@ -36,9 +36,9 @@
  * so the client's `JSON.parse` never crashes).
  */
 
-import type { ButtonStore } from '../channels/button-store.ts'
-import { webTopicId } from '../gateway/http/web-topic-id.ts'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
+import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** Verified claim shape — matches `chat-topics-surface.ts:UserClaim`. */
 export interface OpenUserClaim {

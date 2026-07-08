@@ -11,7 +11,7 @@ import { describe, expect, it } from 'bun:test'
 
 import { InMemoryStore, type ChatMessage } from '@neutronai/chat-core'
 
-import { ToolRegistry, type ToolCallContext } from '../tools/registry.ts'
+import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
 
 import { StoreMessageSearchRuntime } from './runtime.ts'
 import { MESSAGE_SEARCH_TOOL, registerMessageSearchToolSurface } from './tool.ts'

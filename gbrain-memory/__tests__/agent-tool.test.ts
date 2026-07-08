@@ -10,7 +10,7 @@
 
 import { describe, test, expect } from 'bun:test'
 
-import { ToolRegistry, type ToolCallContext } from '../../tools/registry.ts'
+import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'
 import {
   GBrainUnavailableError,

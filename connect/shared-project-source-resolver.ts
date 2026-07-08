@@ -23,7 +23,7 @@
  * surface a non-blocking notice.
  */
 
-import type { Membership } from '../jwt-validator/index.ts'
+import type { Membership } from '@neutronai/jwt-validator/index.ts'
 import type { UnifiedProjectListSource } from './unified-project-list.ts'
 
 export interface SharedProjectSourceResolverInput {

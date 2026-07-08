@@ -10,7 +10,7 @@ import { Database } from 'bun:sqlite'
 import { ResearchClaimStore } from '../src/claim-store.ts'
 import {
   applyProjectScopedMigrations,
-} from '../../../../migrations/runner.ts'
+} from '@neutronai/migrations/runner.ts'
 import { DEFAULT_MIGRATIONS_DIR } from '../src/store-resolver.ts'
 
 function freshDb(): Database {

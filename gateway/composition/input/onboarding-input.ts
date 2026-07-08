@@ -2,9 +2,9 @@ import type {
   OnboardingTelemetry,
   EventLogger as OnboardingEventLogger,
   SeanEllisChannel,
-} from '../../../onboarding/telemetry/index.ts'
-import type { MorningBriefDeliverInput } from '../../../onboarding/overnight/morning-brief.ts'
-import type { InterviewEngine } from '../../../onboarding/interview/engine.ts'
+} from '@neutronai/onboarding/telemetry/index.ts'
+import type { MorningBriefDeliverInput } from '@neutronai/onboarding/overnight/morning-brief.ts'
+import type { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
 
 export interface OnboardingCompositionInput {
   /**

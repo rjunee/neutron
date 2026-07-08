@@ -18,9 +18,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { parseDocLink } from '../../../runtime/doc-links.ts'
-import type { ImportResult } from '../../../onboarding/history-import/types.ts'
-import type { MaterializeOutcome } from '../../../onboarding/wow-moment/project-materializer.ts'
+import { parseDocLink } from '@neutronai/runtime/doc-links.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
+import type { MaterializeOutcome } from '@neutronai/onboarding/wow-moment/project-materializer.ts'
 import type { ProjectOpeningDocs } from '../build-onboarding-handoff.ts'
 import {
   buildProjectKickoff,

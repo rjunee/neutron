@@ -35,11 +35,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
-import { SkillForgeProposalsStore } from '../../skill-forge/proposals-store.ts'
-import type { TridentRun } from '../../trident/store.ts'
+import { SkillForgeProposalsStore } from '@neutronai/skill-forge/proposals-store.ts'
+import type { TridentRun } from '@neutronai/trident/store.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')

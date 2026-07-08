@@ -39,10 +39,10 @@
  * `projects_changed` app-ws emit + topic-rail surface (it stays composer-owned).
  */
 
-import { isSpaClientRoute } from '../../landing/spa-routes.ts'
-import { readSessionCookie, signSessionCookie } from '../../landing/session-cookie.ts'
-import type { ConsumedTokensStore } from '../../runtime/start-token-types.ts'
-import type { LandingStackWithEngine } from '../../gateway/realmode-composer/build-landing-stack.ts'
+import { isSpaClientRoute } from '@neutronai/landing/spa-routes.ts'
+import { readSessionCookie, signSessionCookie } from '@neutronai/landing/session-cookie.ts'
+import type { ConsumedTokensStore } from '@neutronai/runtime/start-token-types.ts'
+import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
 import type { LocalStartTokenAuth } from '../local-start-token.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { ProjectActivity, PreviewFrom } from '../project-rail.ts'

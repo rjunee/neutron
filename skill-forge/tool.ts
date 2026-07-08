@@ -18,8 +18,8 @@
  *     silently — the same posture `dispatch_agent` uses for a costly action.
  */
 
-import type { JsonSchemaDocument } from '../core-sdk/types.ts'
-import type { ToolRegistry } from '../tools/registry.ts'
+import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { SkillForgeBackend } from './backend.ts'
 import type { ProposalEdits } from './types.ts'
 

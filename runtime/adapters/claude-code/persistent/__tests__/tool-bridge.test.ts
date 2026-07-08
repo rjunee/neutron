@@ -22,8 +22,8 @@ import {
   type PersistentReplSubstrateOptions,
   type ReplToolBridge,
 } from '../persistent-repl-substrate.ts'
-import { McpServer } from '../../../../../mcp/server.ts'
-import { ToolRegistry } from '../../../../../tools/registry.ts'
+import { McpServer } from '@neutronai/mcp/server.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()

@@ -37,9 +37,9 @@
  * sqlite_master / iterate the instance fleet.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
-import type { AgentEngagementMode } from '../../connect/agent-engagement.ts'
-import { appWsProjectTopicId } from '../../channels/adapters/app-ws/envelope.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { AgentEngagementMode } from '@neutronai/connect/agent-engagement.ts'
+import { appWsProjectTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import {
   type PrivacyMode,
   type BillingMode,

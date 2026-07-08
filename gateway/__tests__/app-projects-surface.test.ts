@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import {
   createAppProjectsSurface,

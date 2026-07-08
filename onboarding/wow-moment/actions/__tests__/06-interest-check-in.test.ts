@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { rmSync } from 'node:fs'
 import action06 from '../06-interest-check-in.ts'
 import { buildContext, makeFixture, teardown, type TestFixture } from '../../__tests__/test-helpers.ts'
-import type { Reminder } from '../../../../reminders/store.ts'
+import type { Reminder } from '@neutronai/reminders/store.ts'
 
 let fix: TestFixture
 

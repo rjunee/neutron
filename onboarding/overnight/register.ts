@@ -26,19 +26,19 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type {
   CronHandler,
   CronHandlerContext,
   CronHandlerRegistry,
   CronHandlerResult,
-} from '../../cron/handlers.ts'
+} from '@neutronai/cron/handlers.ts'
 import {
   detectMergeMode,
   defaultGitModeProbe,
   type GitModeProbe,
-} from '../../trident/git-mode.ts'
-import { TridentRunStore } from '../../trident/store.ts'
+} from '@neutronai/trident/git-mode.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { OvernightQueueStore, type OvernightItem } from './queue-store.ts'
 import {
   OvernightDispatcher,

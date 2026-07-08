@@ -1,5 +1,5 @@
-import type { ChannelRouter } from '../../../channels/router.ts'
-import type { Topic, IncomingEvent } from '../../../channels/types.ts'
+import type { ChannelRouter } from '@neutronai/channels/router.ts'
+import type { Topic, IncomingEvent } from '@neutronai/channels/types.ts'
 
 export interface ChannelsCompositionInput {
   /**

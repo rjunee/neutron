@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { createAppDocsSurface } from '../http/app-docs-surface.ts'
 import { DocStore } from '../http/doc-store.ts'
 import { DocVersionStore } from '../git/doc-version-store.ts'

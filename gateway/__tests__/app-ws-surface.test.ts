@@ -6,10 +6,10 @@ import {
   appWsTopicId,
   createAppWsAuthResolver,
   type AppWsOutbound,
-} from '../../channels/index.ts'
+} from '@neutronai/channels/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
-import type { IncomingEvent } from '../../channels/types.ts'
+import type { IncomingEvent } from '@neutronai/channels/types.ts'
 
 interface Harness {
   server: import('bun').Server<unknown>

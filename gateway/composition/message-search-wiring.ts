@@ -13,13 +13,13 @@
  * global search is the client store's job (web wasm-sqlite / RN op-sqlite).
  */
 
-import type { ButtonStore, ChatHistoryTurn } from '../../channels/button-store.ts'
-import type { ChatMessage } from '../../chat-core/types.ts'
+import type { ButtonStore, ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
+import type { ChatMessage } from '@neutronai/chat-core/types.ts'
 import {
   HistorySourceMessageSearchRuntime,
   type MessageHistorySource,
   type MessageSearchRuntime,
-} from '../../message-search/runtime.ts'
+} from '@neutronai/message-search/runtime.ts'
 
 /** Page size when walking ButtonStore history (it paginates by cursor). */
 const HISTORY_PAGE = 100

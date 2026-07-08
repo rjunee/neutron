@@ -28,10 +28,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
-import { ButtonStore } from '../../../channels/button-store.ts'
-import type { ButtonPrompt } from '../../../channels/button-primitive.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ButtonStore } from '@neutronai/channels/button-store.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import {
   evaluateImportTimeout,
   IMPORT_CONSOLIDATE_NO_PROGRESS_WINDOW_MS,

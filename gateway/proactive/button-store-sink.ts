@@ -32,8 +32,8 @@
  * Persist-before-send: a live-push failure never costs the durable record.
  */
 
-import type { ButtonStore } from '../../channels/button-store.ts'
-import type { ChatOutbound } from '../../landing/chat-protocol.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
+import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
 import type { OutboundSink, OutgoingMessage } from './sink.ts'
 

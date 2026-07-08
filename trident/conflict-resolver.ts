@@ -40,9 +40,9 @@
  * surface below so the CC subprocess can actually resolve + stage the conflicts.
  */
 
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import type { SessionHandle } from '../runtime/session-handle.ts'
-import { getBestModel } from '../runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { MergeConflictResolver } from './merge.ts'
 
 export interface BuildForgeConflictResolverOptions {

@@ -68,17 +68,17 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ButtonStore, type ChatHistoryTurn } from '../../channels/button-store.ts'
-import { buildButtonPrompt } from '../../channels/button-primitive.ts'
-import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
-import { InMemoryAppWsSessionRegistry } from '../../channels/adapters/app-ws/session-registry.ts'
+import { ButtonStore, type ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type {
   AppWsOutbound,
   AppWsOutboundAgentMessage,
-} from '../../channels/adapters/app-ws/envelope.ts'
-import type { OutgoingMessage, Topic } from '../../channels/types.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { AppChatStore, ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { webTopicId } from '../http/web-topic-id.ts'
 import {

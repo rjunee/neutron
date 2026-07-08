@@ -19,7 +19,7 @@
  * This is a PURE MOVE — no logic, control-flow, or comment changes.
  */
 
-import { type ButtonChoice } from '../../channels/button-primitive.ts'
+import { type ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import { isLegalTransition, TERMINAL_PHASES } from './phase.ts'
 import { validateAgentName } from './phase-prompts.ts'
 import { buildDiverseCharacterFallback, type CharacterSuggesterResult } from './personality-character-suggester.ts'
@@ -28,7 +28,7 @@ import {
   readMemoizedAgentNameSuggestions,
   type AgentNameSuggesterResult,
 } from './agent-name-suggester.ts'
-import { suggestedSlugFromAgentName } from '../../runtime/slug-picker-types.ts'
+import { suggestedSlugFromAgentName } from '@neutronai/runtime/slug-picker-types.ts'
 import { extractAgentNameFromFreeform } from './extract-agent-name.ts'
 import type { OnboardingState } from './state-store.ts'
 import type { AdvanceInput, AdvanceResult } from './engine-internals.ts'

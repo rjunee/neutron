@@ -20,7 +20,7 @@
  * Per docs/plans/cores-oauth-secret-resolution-sprint-brief.md § 2.3 + § 2.4.
  */
 
-import type { SecretsStore } from '../../auth/secrets-store.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 
 /** Default lead time before expiry to trigger a refresh (ms). 60s. */
 export const DEFAULT_REFRESH_LEAD_MS = 60_000

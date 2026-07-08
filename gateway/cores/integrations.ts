@@ -28,9 +28,9 @@
  * gateway/cores/oauth-token-manager.ts, auth/secrets-store.ts.
  */
 
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
-import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '../../auth/api-key-store.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
 import { metaLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,

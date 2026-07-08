@@ -33,7 +33,7 @@
  * helper returns null and the caller treats that as "pre-bootstrap".
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * Phases at or beyond `max_oauth_offered`. When the owner is in one of

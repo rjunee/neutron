@@ -49,7 +49,7 @@
  * never crashes.
  */
 
-import type { ButtonStore } from '../../channels/button-store.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { ownerIdentityMismatch, type OwnerHandleResolver } from './auth-helpers.ts'
 import { webTopicId } from './chat-bridge.ts'
 

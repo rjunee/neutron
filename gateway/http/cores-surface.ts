@@ -40,14 +40,14 @@
  * by `app-admin-surface.ts`.
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type {
   CoreInstallationRecord,
-} from '../../cores/runtime/installations-store.ts'
-import type { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
-import type { BundledCore } from '../../cores/runtime/bundled-registry.ts'
+} from '@neutronai/cores-runtime/installations-store.ts'
+import type { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import type { BundledCore } from '@neutronai/cores-runtime/bundled-registry.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 const PATH_BASE = '/api/cores'
 

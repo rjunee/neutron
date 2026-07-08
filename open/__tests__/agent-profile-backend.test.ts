@@ -39,10 +39,10 @@ import {
   buildAgentSettingsBackend,
   SETTINGS_BACKEND_UNAVAILABLE_ERROR,
   type AgentSettingsTelegram,
-} from '../../cores/free/agent-settings/index.ts'
-import { PersonaPromptLoader } from '../../gateway/realmode-composer/persona-loader.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/agent-settings'
+import { PersonaPromptLoader } from '@neutronai/gateway/realmode-composer/persona-loader.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** Open a migrated per-instance ProjectDb on disk (the agent-settings test pattern). */
 function openMigratedDb(dir: string): ProjectDb {

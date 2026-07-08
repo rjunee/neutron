@@ -39,13 +39,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
-import { InMemoryAppWsSessionRegistry } from '../../channels/adapters/app-ws/session-registry.ts'
-import { ChannelRouter } from '../../channels/router.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { ReminderStore } from '../../reminders/store.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { SecretAuditLog } from '@neutronai/cores-runtime'
 import { composeProductionGraph } from '../composition.ts'
 import {
@@ -64,7 +64,7 @@ import {
   buildSmartWrapComposer,
   loadManifest,
   parseAndExecuteRemindCommand,
-} from '../../cores/free/reminders/index.ts'
+} from '@neutronai/reminders-core'
 
 const OWNER = 'reminders-core-chat-project'
 const PROJECT = 'demo-project'

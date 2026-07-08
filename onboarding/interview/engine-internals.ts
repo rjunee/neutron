@@ -23,13 +23,13 @@ import type {
   ButtonChoice,
   ButtonPrompt,
   ChannelKindForButton,
-} from '../../channels/button-primitive.ts'
-import type { ButtonStore } from '../../channels/button-store.ts'
+} from '@neutronai/channels/button-primitive.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type {
   PlatformAdapter,
   SlugAvailabilityProbe,
-} from '../../runtime/platform-adapter.ts'
-import type { SlugPickerOutcome } from '../../runtime/slug-picker-types.ts'
+} from '@neutronai/runtime/platform-adapter.ts'
+import type { SlugPickerOutcome } from '@neutronai/runtime/slug-picker-types.ts'
 import type {
   ChunkerInput,
   ImportJob,

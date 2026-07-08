@@ -23,10 +23,10 @@
  * `undefined` (keyword + graph default), never throwing into the caller.
  */
 
-import { ApiKeyStore } from '../../auth/api-key-store.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
-import { ONBOARDING_OPENAI_LABEL } from '../../onboarding/optional-keys.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ONBOARDING_OPENAI_LABEL } from '@neutronai/onboarding/optional-keys.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export async function resolveOnboardingOpenAiKey(input: {
   db: ProjectDb

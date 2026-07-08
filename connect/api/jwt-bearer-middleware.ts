@@ -17,8 +17,8 @@
  * `origin` matches the body's stamp + apply per-scope authorization.
  */
 
-import { validateJwt, type JwksCache } from '../../jwt-validator/index.ts'
-import type { Membership } from '../../jwt-validator/claims.ts'
+import { validateJwt, type JwksCache } from '@neutronai/jwt-validator/index.ts'
+import type { Membership } from '@neutronai/jwt-validator/claims.ts'
 
 export interface ConnectAuthContext {
   /** Slug of the originating instance (workspace OR user) — derived from the

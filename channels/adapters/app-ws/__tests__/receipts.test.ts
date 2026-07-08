@@ -12,12 +12,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   AppChatReceiptStore,
   AppChatStore,
   ProjectDb,
-} from '../../../../persistence/index.ts'
+} from '@neutronai/persistence/index.ts'
 import type { OutgoingMessage, Topic } from '../../../types.ts'
 import { AppWsAdapter } from '../adapter.ts'
 import { AGENT_DEVICE_ID } from '../envelope.ts'

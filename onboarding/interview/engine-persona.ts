@@ -11,7 +11,7 @@
  * This is a PURE MOVE — no logic, control-flow, or comment changes.
  */
 
-import type { ButtonChoice } from '../../channels/button-primitive.ts'
+import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import { isLegalTransition, type OnboardingPhase } from './phase.ts'
 import {
   DEFAULT_PERSONALITY_SUGGESTIONS,

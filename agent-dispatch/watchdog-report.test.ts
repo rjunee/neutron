@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import type { AgentWatchdogEvent } from '../runtime/subagent/index.ts'
+import type { AgentWatchdogEvent } from '@neutronai/runtime/subagent/index.ts'
 import { buildDispatchWatchdogNotifier, type DispatchReport } from './index.ts'
 
 function event(over: Partial<AgentWatchdogEvent>): AgentWatchdogEvent {

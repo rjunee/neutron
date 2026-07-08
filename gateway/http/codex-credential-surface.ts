@@ -30,9 +30,9 @@
  * `{ ok, status: 'connected', scope }` after materializing to the scope's CODEX_HOME.
  */
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import type { CodexCredentialService, CodexTarget } from '../../trident/codex-credential.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
 
 export interface CodexCredentialSurfaceOptions {
   service: CodexCredentialService

@@ -52,7 +52,7 @@
 import type {
   ConsumedStartToken,
   VerifyStartTokenInput,
-} from '../runtime/start-token-types.ts'
+} from '@neutronai/runtime/start-token-types.ts'
 // Timing-safe slug comparison (ISSUE #34). The per-instance start-token /
 // cookie slug validation below compares a caller-supplied slug (a verified JWT
 // `project_slug` claim, or the decoded session-cookie slug) against this
@@ -60,7 +60,7 @@ import type {
 // the response latency leaks the shared-prefix length of this instance's slug.
 // Route every such compare through the shared constant-time primitive — the
 // same one `session-cookie.ts` already uses for the cookie HMAC.
-import { constantTimeEqual } from '../runtime/constant-time-equal.ts'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 import type { KeyLike } from 'jose'
 import {
   formatSetCookie,

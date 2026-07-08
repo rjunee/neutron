@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import type { ButtonStore } from '../../../channels/button-store.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { WebChatSenderRegistry } from '../../http/chat-bridge.ts'
 import { buildButtonStoreProactiveSink } from '../button-store-sink.ts'
 import { proactiveTopic, type OutgoingMessage } from '../sink.ts'

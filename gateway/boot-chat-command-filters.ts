@@ -142,7 +142,7 @@ export function buildTridentCodeChatCommandFilter(deps: {
       // prefixed `/code`. The real boundary check is `parseCodeCommand`
       // below — bare `startsWith` would wrongly claim `/codefoo`.
       if (!trimmed.startsWith('/code')) return null
-      const { parseAndExecuteCodeCommand, parseCodeCommand } = await import('../trident/code-command.ts')
+      const { parseAndExecuteCodeCommand, parseCodeCommand } = await import('@neutronai/trident/code-command.ts')
       // Share ONE grammar with the canonical parser (K8): `/code` must be
       // followed by EOL/whitespace. `/codefoo bar` is NOT a code command —
       // fall through to the LLM instead of pre-claiming it here (which, in the

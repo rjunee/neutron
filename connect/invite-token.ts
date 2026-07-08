@@ -26,7 +26,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { SignJWT, jwtVerify, type KeyLike, type JWTPayload } from 'jose'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export const INVITE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 export const INVITE_TOKEN_AUDIENCE = 'neutron-invite'

@@ -30,7 +30,7 @@
  * an orchestrator and never asks the owner to name it.
  */
 
-import { getBestModel } from '../../runtime/models.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AnthropicMessagesClient } from './agent-name-suggester.ts'
 import type { ExtractedFields } from './extracted-fields.ts'
 import { sanitizeUserFirstName } from './extracted-fields.ts'

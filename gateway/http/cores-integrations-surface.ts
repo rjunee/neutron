@@ -24,9 +24,9 @@
  * `cores-oauth-surface.ts`.
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
 import {
   buildIntegrationsStatus,

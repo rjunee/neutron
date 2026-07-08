@@ -17,11 +17,11 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { newCredentialPool } from '../../runtime/credential-pool.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { ClaudeCodeSubstrateOptions } from '../../runtime/adapters/claude-code/index.ts'
+import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
 

@@ -26,7 +26,7 @@
  * `cron_state` via the supplied `CronStateStore`.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   hostTimeZone,
   nextFireAfter,

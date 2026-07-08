@@ -36,7 +36,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import {
   CommentStore,
   defaultUlid,

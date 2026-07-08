@@ -17,7 +17,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { MOBILE_APP_URL } from '../server.ts'
-import { MOBILE_APP_URL as MOBILE_APP_URL_CONFIG } from '../../onboarding/interview/final-handoff-config.ts'
+import { MOBILE_APP_URL as MOBILE_APP_URL_CONFIG } from '@neutronai/onboarding/interview/final-handoff-config.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')

@@ -22,11 +22,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
-import type { MemoryStore } from '../../gbrain-memory/memory-store.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import type { MemoryStore } from '@neutronai/gbrain-memory/memory-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   createAppAdminSurface,
   type DeploymentTier,

@@ -1,5 +1,5 @@
-import type { TaskStore } from '../../../tasks/store.ts'
-import type { LlmCallFn } from '../../../onboarding/interview/phase-spec-resolver.ts'
+import type { TaskStore } from '@neutronai/tasks/store.ts'
+import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import type { PersonaPromptLoader } from '../../realmode-composer/persona-loader.ts'
 import type { BriefComposer, ProactiveContextSources } from '../../proactive/morning-brief.ts'
 import type { NudgeRater, ProactiveTopicCandidate } from '../../proactive/idle-nudge-sweep.ts'

@@ -21,10 +21,10 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { DocSearchIndex } from '../../doc-search/store.ts'
-import { DocSearchRuntime } from '../../doc-search/runtime.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
+import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from '../doc-search-live-enumerator.ts'
 
 let ownerHome: string

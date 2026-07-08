@@ -29,12 +29,12 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
-import { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
-import { sidecarDbPath } from '../../cores/runtime/data-namespace.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import { sidecarDbPath } from '@neutronai/cores-runtime/data-namespace.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')

@@ -35,8 +35,8 @@ import {
   STORE_LINKS_TOKEN,
   renderMobileInstallHtml,
 } from '../mobile-install-config.ts'
-import { MOBILE_APP_URL } from '../../onboarding/interview/final-handoff-config.ts'
-import { buildFinalHandoffMobileAppFollowupPromptSpec } from '../../onboarding/interview/final-handoff-prompts.ts'
+import { MOBILE_APP_URL } from '@neutronai/onboarding/interview/final-handoff-config.ts'
+import { buildFinalHandoffMobileAppFollowupPromptSpec } from '@neutronai/onboarding/interview/final-handoff-prompts.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 

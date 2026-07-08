@@ -14,7 +14,7 @@ import {
   CROSS_INSTANCE_TOKEN_TTL_SECONDS,
 } from '../api/mint-instance-token.ts'
 import { authorizeConnectRequest } from '../api/jwt-bearer-middleware.ts'
-import { JwksCache, type FetchLike, type Membership } from '../../jwt-validator/index.ts'
+import { JwksCache, type FetchLike, type Membership } from '@neutronai/jwt-validator/index.ts'
 
 async function fixtureKey(kid: string): Promise<{
   kid: string

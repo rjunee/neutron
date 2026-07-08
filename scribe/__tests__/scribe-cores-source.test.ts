@@ -16,14 +16,14 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { McpClient } from '../../gbrain-memory/memory-store.ts'
-import { GBrainMemoryStore } from '../../gbrain-memory/gbrain-memory-store.ts'
-import { GBrainSyncHook } from '../../gbrain-memory/GBrainSyncHook.ts'
-import { writeEntity } from '../../runtime/entity-writer.ts'
-import type { SyncHook } from '../../runtime/entity-writer.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { McpClient } from '@neutronai/gbrain-memory/memory-store.ts'
+import { GBrainMemoryStore } from '@neutronai/gbrain-memory/gbrain-memory-store.ts'
+import { GBrainSyncHook } from '@neutronai/gbrain-memory/GBrainSyncHook.ts'
+import { writeEntity } from '@neutronai/runtime/entity-writer.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { MAX_INFLIGHT, createState, snapshot } from '../scribe-budget.ts'
 import {
   createScribe,
@@ -31,7 +31,7 @@ import {
   composeEmailPayload,
   type WriteEntityFn,
 } from '../index.ts'
-import { bootPgliteBrain } from '../../gbrain-memory/__tests__/boot-pglite-brain.ts'
+import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-brain.ts'
 
 const t0 = Date.now()
 const PROJECT = 'acme-project'

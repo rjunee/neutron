@@ -40,13 +40,13 @@
  * routing LOGIC, not a stranded contract, and stay here.
  */
 
-import type { AgentEngagementMode } from '../contracts/agent-engagement.ts'
+import type { AgentEngagementMode } from '@neutronai/contracts/agent-engagement.ts'
 export type { AgentEngagementMode }
 export {
   ALL_AGENT_ENGAGEMENT_MODES,
   DEFAULT_AGENT_ENGAGEMENT_MODE,
   isAgentEngagementMode,
-} from '../contracts/agent-engagement.ts'
+} from '@neutronai/contracts/agent-engagement.ts'
 
 /**
  * The handles/aliases (WITHOUT the leading `@`) that trigger the agent in

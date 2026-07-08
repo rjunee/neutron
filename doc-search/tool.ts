@@ -16,8 +16,8 @@
  * results are plain JSON (the registry serialises them to the agent).
  */
 
-import type { JsonSchemaDocument } from '../core-sdk/types.ts'
-import type { ToolRegistry } from '../tools/registry.ts'
+import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { DocSearchRuntime } from './runtime.ts'
 
 export const DOC_SEARCH_TOOL = 'doc_search'

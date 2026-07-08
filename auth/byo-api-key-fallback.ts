@@ -16,7 +16,7 @@ import {
   newCredentialPool,
   type CredentialPool,
   type CredentialStrategy,
-} from '../runtime/credential-pool.ts'
+} from '@neutronai/runtime/credential-pool.ts'
 
 export interface BuildBYOApiKeyPoolInput {
   /** Frozen `internal_handle` — see auth/secrets-store.ts file header. */

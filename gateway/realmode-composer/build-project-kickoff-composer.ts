@@ -22,8 +22,8 @@
  * never a half-baked doc.
  */
 
-import type { AnthropicMessagesClient } from '../../onboarding/interview/anthropic-client.ts'
-import { getBestModel } from '../../runtime/models.ts'
+import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 
 /** Output budget per kickoff doc — a starting plan / research brief is 1-2
  *  screens, not a book (mirrors build-project-doc-composer's DOC_MAX_TOKENS). */

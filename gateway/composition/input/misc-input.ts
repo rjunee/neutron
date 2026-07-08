@@ -1,5 +1,5 @@
-import type { CronJobRegistry } from '../../../cron/jobs.ts'
-import type { ProjectDb } from '../../../persistence/index.ts'
+import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface MiscCompositionInput {
   db: ProjectDb

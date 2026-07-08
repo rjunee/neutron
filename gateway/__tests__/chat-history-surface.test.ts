@@ -15,10 +15,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ButtonStore, type ChatHistoryTurn } from '../../channels/button-store.ts'
-import { buildButtonPrompt } from '../../channels/button-primitive.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { ButtonStore, type ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import {
   createChatHistorySurface,

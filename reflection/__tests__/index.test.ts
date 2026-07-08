@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 import { createReflection } from '../index.ts'
 

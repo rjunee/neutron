@@ -10,7 +10,7 @@ import {
   buildProjectPageIndexer,
   type ProjectPageWriteEntityFn,
 } from '../build-project-page-indexer.ts'
-import type { SyncHook } from '../../../runtime/entity-writer.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 type WriteCall = {
   input: Parameters<ProjectPageWriteEntityFn>[0]

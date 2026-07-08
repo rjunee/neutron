@@ -42,7 +42,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ConnectAuthContext } from './api/jwt-bearer-middleware.ts'
 import type { MemberResolution } from './api/server.ts'
 import { assignLocalSlug, slugifyDisplayName } from './local-slug.ts'

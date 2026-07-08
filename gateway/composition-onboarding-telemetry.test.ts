@@ -12,16 +12,16 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../migrations/runner.ts'
-import { ProjectDb } from '../persistence/index.ts'
-import type { CronHandlerRegistry } from '../cron/handlers.ts'
-import type { CronJobRegistry } from '../cron/jobs.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import {
   OnboardingTelemetry,
   SEAN_ELLIS_HANDLER_NAME,
   type ComposedTelemetrySinks,
-} from '../onboarding/telemetry/index.ts'
-import { OVERNIGHT_HANDLER_NAME } from '../onboarding/overnight/register.ts'
+} from '@neutronai/onboarding/telemetry/index.ts'
+import { OVERNIGHT_HANDLER_NAME } from '@neutronai/onboarding/overnight/register.ts'
 import { composeProductionGraph } from './composition.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 

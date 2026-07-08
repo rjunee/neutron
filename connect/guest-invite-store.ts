@@ -22,7 +22,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { Access } from './connected-members-store.ts'
 
 /** The invite's read/write access grant (connect-spec §1.4, OQ-4). Identical

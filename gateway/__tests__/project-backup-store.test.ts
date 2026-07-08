@@ -36,7 +36,7 @@ import {
   classifyPushFailure,
 } from '../git/project-backup-store.ts'
 import type { BackupResult, RestoreResult } from '../git/project-backup-store.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 const execFileAsync = promisify(execFile)
 

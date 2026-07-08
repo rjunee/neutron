@@ -1,9 +1,9 @@
 import type {
   ConnectApiHandlers,
   JwtBearerMiddlewareOptions,
-} from '../../../runtime/connect-handlers.ts'
-import type { ChannelRouter } from '../../../channels/router.ts'
-import type { ProjectDb } from '../../../persistence/index.ts'
+} from '@neutronai/runtime/connect-handlers.ts'
+import type { ChannelRouter } from '@neutronai/channels/router.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface ConnectCompositionInput {
   /**

@@ -22,10 +22,10 @@
  * `metering_context.project_id` keying, a wall-clock timeout around the turn.
  */
 
-import { FAST_MODEL } from '../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import type { ToolDef } from '../core-sdk/types.ts'
-import { collectTokensToString } from '../runtime/collect-tokens.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ToolDef } from '@neutronai/core-sdk/types.ts'
+import { collectTokensToString } from '@neutronai/runtime/collect-tokens.ts'
 import { classifyReminderMessage, literalFallback, type ReminderShape } from './message-shape.ts'
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'

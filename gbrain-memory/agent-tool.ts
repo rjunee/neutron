@@ -30,8 +30,8 @@
  * serialises into the agent's `tool_result`.
  */
 
-import type { JsonSchemaDocument } from '../core-sdk/types.ts'
-import type { ToolRegistry } from '../tools/registry.ts'
+import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { isGbrainBinaryMissingError, type MemoryStore } from './memory-store.ts'
 
 export const GBRAIN_SEARCH_TOOL = 'gbrain_search'

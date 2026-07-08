@@ -25,7 +25,7 @@ import {
   selectCredential,
   type CredentialKind,
   type CredentialPool,
-} from '../../../runtime/credential-pool.ts'
+} from '@neutronai/runtime/credential-pool.ts'
 
 let owner_home: string
 

@@ -12,6 +12,7 @@
     "@neutronai/calendar-core": "workspace:*",
     "@neutronai/channels": "workspace:*",
     "@neutronai/codegen-core": "workspace:*",
+    "@neutronai/config": "workspace:*",
     "@neutronai/connect": "workspace:*",
     "@neutronai/contracts": "workspace:*",
     "@neutronai/core-sdk": "workspace:*",

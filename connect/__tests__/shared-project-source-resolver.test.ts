@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { resolveSharedProjectSources } from '../shared-project-source-resolver.ts'
-import type { Membership } from '../../jwt-validator/index.ts'
+import type { Membership } from '@neutronai/jwt-validator/index.ts'
 
 const MEMBERSHIPS: Membership[] = [
   { slug: 'alice', role: 'owner', kind: 'user' }, // own user instance — must be skipped

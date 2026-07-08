@@ -57,18 +57,18 @@
 
 import { randomUUID } from 'node:crypto'
 
-import type { ButtonStore } from '../../channels/button-store.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
   buildButtonPrompt,
   MAX_OPTIONS_TELEGRAM,
   RESERVED_OPTION_VALUES,
   VALUE_BYTE_CAP,
-} from '../../channels/button-primitive.ts'
-import type { ChatOutbound } from '../../landing/chat-protocol.ts'
-import { getBestModel } from '../../runtime/models.ts'
-import { assembleSystemPrompt } from '../../runtime/system-prompt.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
-import type { ToolDef } from '../../core-sdk/types.ts'
+} from '@neutronai/channels/button-primitive.ts'
+import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
+import { assembleSystemPrompt } from '@neutronai/runtime/system-prompt.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ToolDef } from '@neutronai/core-sdk/types.ts'
 import { collectTokensToString } from './build-llm-call-substrate.ts'
 import { buildOperatingDoctrineFragment } from './operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'

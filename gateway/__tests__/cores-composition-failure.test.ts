@@ -18,10 +18,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')

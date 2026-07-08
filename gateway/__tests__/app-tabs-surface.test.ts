@@ -21,15 +21,15 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import { createAppTabsSurface } from '../http/app-tabs-surface.ts'
-import type { TabDescriptor } from '../../tabs/registry.ts'
-import { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import type { TabDescriptor } from '@neutronai/tabs/registry.ts'
+import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
-import type { BundledCore } from '../../cores/runtime/bundled-registry.ts'
+import type { BundledCore } from '@neutronai/cores-runtime/bundled-registry.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 const __composedHandlers = new Map<string, ComposedHttpHandler>()

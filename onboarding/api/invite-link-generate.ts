@@ -19,7 +19,7 @@ export {
   issueInviteToken,
   verifyInviteToken,
   claimInviteToken,
-} from '../../connect/invite-token.ts'
+} from '@neutronai/connect/invite-token.ts'
 export type {
   InviteTokenErrorCode,
   InviteSigningKey,
@@ -27,4 +27,4 @@ export type {
   IssuedInviteToken,
   InviteTokenClaims,
   VerifyInviteTokenInput,
-} from '../../connect/invite-token.ts'
+} from '@neutronai/connect/invite-token.ts'

@@ -52,7 +52,7 @@
  * crash here would leak into the broader UX).
  */
 
-import type { ButtonStore, ChatHistoryTurn } from '../../channels/button-store.ts'
+import type { ButtonStore, ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
 import { ownerIdentityMismatch, type OwnerHandleResolver } from './auth-helpers.ts'
 import { webTopicId } from './chat-bridge.ts'
 

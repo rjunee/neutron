@@ -16,8 +16,8 @@
  * rows; this PR lands the persistence so neither needs a schema change.
  */
 
-import type { Topic } from '../channels/types.ts'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { Topic } from '@neutronai/channels/types.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;

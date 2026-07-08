@@ -14,7 +14,7 @@
  * a tight `ProjectDb` wrapper with explicit method-per-state-transition.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export type UploadSessionStatus = 'uploading' | 'complete' | 'expired'
 

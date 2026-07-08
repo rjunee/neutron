@@ -20,8 +20,8 @@
  * api.anthropic.com call.
  */
 
-import type { SessionHandle } from '../runtime/session-handle.ts'
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { DispatchTurn, DispatchTurnResult } from './service.ts'
 
 export interface CancellableDispatchTurnOptions {

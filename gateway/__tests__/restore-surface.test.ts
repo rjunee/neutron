@@ -48,8 +48,8 @@ import {
 } from '../git/project-backup-store.ts'
 import { createAppBackupsSurface } from '../http/app-backups-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 const execFileAsync = promisify(execFile)
 

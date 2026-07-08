@@ -39,12 +39,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
-import { InMemoryAppWsSessionRegistry } from '../../channels/adapters/app-ws/session-registry.ts'
-import { ChannelRouter } from '../../channels/router.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretAuditLog } from '@neutronai/cores-runtime'
 import { composeProductionGraph } from '../composition.ts'
 import {
@@ -62,7 +62,7 @@ import {
   buildProductionResearchCoreWiring,
   buildProjectResearchOrchestrator,
   type ResearchLlmCall,
-} from '../../cores/free/research/index.ts'
+} from '@neutronai/research-core'
 
 const OWNER = 'research-core-composer-project'
 const PROJECT = 'demo-project'

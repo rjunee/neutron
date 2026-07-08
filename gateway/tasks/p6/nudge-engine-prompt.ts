@@ -15,7 +15,7 @@
  * task_ids not in the slate before persisting.
  */
 
-import type { Task } from '../../../tasks/store.ts'
+import type { Task } from '@neutronai/tasks/store.ts'
 
 /** Hard cap on rationale length the validator enforces post-LLM. */
 export const NUDGE_RATIONALE_MAX_CHARS = 280

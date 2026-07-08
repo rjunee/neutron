@@ -7,7 +7,7 @@
  * vault-backup last run for instance X".
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { CronHandlerStatus } from './handlers.ts'
 
 export interface CronStateRow {

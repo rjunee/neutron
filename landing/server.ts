@@ -41,7 +41,7 @@ import { fileURLToPath } from 'node:url'
 // match only that one definition — see
 // `landing/__tests__/mobile-app-url-constant.test.ts` which guards the
 // property.
-export { MOBILE_APP_URL } from '../contracts/handoff-config.ts'
+export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'

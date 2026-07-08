@@ -15,7 +15,7 @@ import {
   newControlState,
   runAgentWatchdog,
   type ControlState,
-} from '../runtime/subagent/index.ts'
+} from '@neutronai/runtime/subagent/index.ts'
 import {
   DispatchService,
   type DispatchReport,

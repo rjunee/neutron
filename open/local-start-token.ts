@@ -30,7 +30,7 @@ import type {
   ClaimStartTokenJtiFn,
   ConsumedStartToken,
   VerifyStartTokenFn,
-} from '../runtime/start-token-types.ts'
+} from '@neutronai/runtime/start-token-types.ts'
 
 /** Single-owner start-token TTL — 15 min, mirrors the Managed JWT TTL. */
 export const LOCAL_START_TOKEN_TTL_MS = 15 * 60 * 1000

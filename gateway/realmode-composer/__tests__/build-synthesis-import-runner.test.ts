@@ -21,22 +21,22 @@ import { Database } from 'bun:sqlite'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
-import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type {
   ConversationRecord,
   ImportJob,
   ImportSource,
-} from '../../../onboarding/history-import/types.ts'
+} from '@neutronai/onboarding/history-import/types.ts'
 import {
   MemoryRawTranscriptStore,
   type ProjectSeed,
   type SynthesisResult,
   type WriteProjectSeedOutcome,
-} from '../../../onboarding/synthesis/index.ts'
+} from '@neutronai/onboarding/synthesis/index.ts'
 import { buildSynthesisSession, type SynthesisRunner } from '../build-synthesis-session.ts'
 import {
   buildSynthesisImportJobRunner,

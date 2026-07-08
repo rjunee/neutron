@@ -19,9 +19,9 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ConversationRecord } from '../../history-import/types.ts'
 import {
   runDeterministicPrepass,

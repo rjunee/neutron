@@ -15,7 +15,7 @@ import {
   topicForRun,
   type OutboundSink,
 } from './delivery.ts'
-import type { OutgoingMessage } from '../channels/types.ts'
+import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentPhase, TridentRun } from './store.ts'
 
 function runWith(overrides: Partial<TridentRun> = {}): TridentRun {

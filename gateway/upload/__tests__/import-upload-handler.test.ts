@@ -22,7 +22,7 @@ import {
   type ImportUploadDeps,
   type ImportUploadInstanceContext,
 } from '../import-upload-handler.ts'
-import type { AdvanceResult } from '../../../onboarding/interview/engine.ts'
+import type { AdvanceResult } from '@neutronai/onboarding/interview/engine.ts'
 
 // First 4 bytes are the local-file-header magic; trailing bytes keep
 // the fixture > 4 bytes so the magic check + the full-file write both

@@ -18,7 +18,7 @@
  * surface never mounts on Open self-hosted single-instance boxes.
  */
 
-import type { JwksCache } from '../jwt-validator/index.ts'
+import type { JwksCache } from '@neutronai/jwt-validator/index.ts'
 
 /**
  * Structural alias for the JWT-bearer auth context the connect API

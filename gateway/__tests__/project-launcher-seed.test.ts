@@ -26,7 +26,7 @@ import type {
 import type {
   BundledCore,
   BundledRegistry,
-} from '../../cores/runtime/bundled-registry.ts'
+} from '@neutronai/cores-runtime/bundled-registry.ts'
 
 function fakeBundledCore(slug: string, hasLauncherIcon = true): BundledCore {
   return {

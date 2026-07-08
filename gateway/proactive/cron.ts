@@ -13,8 +13,8 @@
  * shape so the composition layer drops these in identically.
  */
 
-import type { CronHandler, CronHandlerRegistry } from '../../cron/handlers.ts'
-import type { CronJobDef, CronJobRegistry } from '../../cron/jobs.ts'
+import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import {
   DEFAULT_BRIEF_INTERVAL_MS,
   runMorningBrief,

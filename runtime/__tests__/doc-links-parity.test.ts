@@ -25,7 +25,7 @@ const { buildDocLink: runtimeBuild, parseDocLink: runtimeParse } = await import(
   '../doc-links.ts'
 )
 const { buildDocLink: appBuild, parseDocLink: appParse } = await import(
-  '../../app/lib/doc-links.ts'
+  '@neutronai/app/lib/doc-links.ts'
 )
 
 const CHANNELS = ['app', 'web', 'telegram'] as const

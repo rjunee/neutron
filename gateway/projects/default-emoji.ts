@@ -15,4 +15,4 @@ export {
   defaultProjectEmoji,
   normaliseEmojiInput,
   resolveProjectEmoji,
-} from '../../contracts/default-emoji.ts'
+} from '@neutronai/contracts/default-emoji.ts'

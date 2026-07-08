@@ -14,7 +14,7 @@ import {
   type SharedProjectsResolver,
   type ProjectListItem,
 } from '../app-projects-surface.ts'
-import type { AppWsAuthResolver } from '../../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 
 function fixedAuth(user_id: string, project_slug: string): AppWsAuthResolver {
   return {

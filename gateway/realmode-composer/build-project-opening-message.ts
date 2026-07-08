@@ -46,8 +46,8 @@
  * over lazy-on-open (no first-open spinner).
  */
 
-import { getBestModel } from '../../runtime/models.ts'
-import type { AnthropicMessagesClient } from '../../onboarding/interview/anthropic-client.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
+import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
 import {
   OPENING_MESSAGE_MAX_CHARS,
   buildDeterministicProjectOpening,

@@ -16,7 +16,7 @@ import {
   canonicalPromptSeed,
   deriveIdempotencyKey,
   type ButtonChoice,
-} from '../../channels/button-primitive.ts'
+} from '@neutronai/channels/button-primitive.ts'
 import {
   isLegalTransition,
   TERMINAL_PHASES,

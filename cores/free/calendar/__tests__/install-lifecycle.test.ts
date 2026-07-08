@@ -21,9 +21,9 @@ import {
   type SecretsPrompter,
 } from '@neutronai/cores-runtime'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ProjectDb } from '../../../../persistence/index.ts'
-import { SecretsStore } from '../../../../auth/secrets-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 
 import {
   CORE_PACKAGE_NAME,
@@ -255,8 +255,8 @@ describe('install lifecycle — Calendar Core OAuth gating', () => {
     // with a `SecretsStorePrompter` reading the just-written row.
     // Assert the slug moves from `state.failures` → `state.installed`.
     const { reinstallFailedCore, SecretsStorePrompter, installBundledCores } =
-      await import('../../../../gateway/cores/install-bundled.ts')
-    const { ToolRegistry } = await import('../../../../tools/registry.ts')
+      await import('@neutronai/gateway/cores/install-bundled.ts')
+    const { ToolRegistry } = await import('@neutronai/tools/registry.ts')
 
     const tools = new ToolRegistry()
 

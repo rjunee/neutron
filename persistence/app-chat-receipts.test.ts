@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { AppChatReceiptStore } from './app-chat-receipts.ts'
 import { AppChatStore } from './app-chat-store.ts'
 import { ProjectDb } from './db.ts'

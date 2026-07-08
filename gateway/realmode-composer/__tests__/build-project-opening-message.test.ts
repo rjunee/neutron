@@ -18,8 +18,8 @@ import {
   OPENING_PROMPT_DOC_MAX_CHARS,
 } from '../build-project-opening-message.ts'
 import { OPENING_MESSAGE_MAX_CHARS, type ComposeProjectOpeningInput } from '../build-onboarding-handoff.ts'
-import type { AnthropicMessagesClient } from '../../../onboarding/interview/anthropic-client.ts'
-import { BEST_MODEL } from '../../../runtime/models.ts'
+import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
+import { BEST_MODEL } from '@neutronai/runtime/models.ts'
 
 function makeInput(overrides: Partial<ComposeProjectOpeningInput> = {}): ComposeProjectOpeningInput {
   return {

@@ -18,7 +18,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { OnboardingPhase, OnboardingDeploymentMode } from './phase.ts'
-import { VALUE_BYTE_CAP } from '../../channels/button-primitive.ts'
+import { VALUE_BYTE_CAP } from '@neutronai/channels/button-primitive.ts'
 import type { BlendedArchetype } from '../archetypes/compose.ts'
 
 /**

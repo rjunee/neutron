@@ -28,7 +28,7 @@
  */
 
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
-import type { ProjectCredentialStore } from '../../project-credentials/store.ts'
+import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { currentActiveProjectId } from './active-project-context.ts'
 
 /**

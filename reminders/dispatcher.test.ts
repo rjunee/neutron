@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { AgentSpec } from '../runtime/substrate.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import {
   buildReminderDispatcher,
   deriveReminderProjectId,

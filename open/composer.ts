@@ -31,64 +31,64 @@
  * composer leaves `default_handler` unset and `boot()` fills it.
  */
 
-import { newCredentialPool, type CredentialPool } from '../runtime/credential-pool.ts'
+import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildOpenInstallTokenHandler } from './install-token-handoff.ts'
 import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
-import { buildLocalPlatformAdapter } from '../runtime/platform-adapter-local.ts'
-import type { PlatformAdapter } from '../runtime/platform-adapter.ts'
-import { CronJobRegistry } from '../cron/jobs.ts'
-import { resolveLandingStaticDir } from '../gateway/realmode-composer/build-landing-stack.ts'
-import { buildLiveAgentTurn } from '../gateway/realmode-composer/build-live-agent-turn.ts'
-import type { LiveAgentOnboardingSeam } from '../gateway/realmode-composer/build-live-agent-turn.ts'
-import { buildProjectDocComposer } from '../gateway/realmode-composer/build-project-doc-composer.ts'
-import { buildProjectKickoffComposer } from '../gateway/realmode-composer/build-project-kickoff-composer.ts'
-import { buildProjectKickoff } from '../gateway/realmode-composer/build-project-kickoff.ts'
-import { buildProjectPageIndexer } from '../gateway/realmode-composer/build-project-page-indexer.ts'
-import { buildOnboardingFinalize } from '../gateway/realmode-composer/build-onboarding-finalize.ts'
-import { buildPostTurnExtractor } from '../onboarding/interview/post-turn-extractor.ts'
-import { auditRequiredFields } from '../onboarding/interview/required-fields-audit.ts'
-import { captureButtonBackedRequiredField } from '../onboarding/interview/button-backed-answer.ts'
+import { buildLocalPlatformAdapter } from '@neutronai/runtime/platform-adapter-local.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { resolveLandingStaticDir } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+import { buildLiveAgentTurn } from '@neutronai/gateway/realmode-composer/build-live-agent-turn.ts'
+import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/realmode-composer/build-live-agent-turn.ts'
+import { buildProjectDocComposer } from '@neutronai/gateway/realmode-composer/build-project-doc-composer.ts'
+import { buildProjectKickoffComposer } from '@neutronai/gateway/realmode-composer/build-project-kickoff-composer.ts'
+import { buildProjectKickoff } from '@neutronai/gateway/realmode-composer/build-project-kickoff.ts'
+import { buildProjectPageIndexer } from '@neutronai/gateway/realmode-composer/build-project-page-indexer.ts'
+import { buildOnboardingFinalize } from '@neutronai/gateway/realmode-composer/build-onboarding-finalize.ts'
+import { buildPostTurnExtractor } from '@neutronai/onboarding/interview/post-turn-extractor.ts'
+import { auditRequiredFields } from '@neutronai/onboarding/interview/required-fields-audit.ts'
+import { captureButtonBackedRequiredField } from '@neutronai/onboarding/interview/button-backed-answer.ts'
 import {
   buildImportAnalysisContextFragment,
   buildImportInFlightSteerFragment,
   buildOnboardingPreamble,
   buildOnboardingStepGuardFragment,
-} from '../onboarding/interview/onboarding-preamble.ts'
-import type { ImportResult } from '../onboarding/history-import/types.ts'
+} from '@neutronai/onboarding/interview/onboarding-preamble.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import {
   buildLlmCallSubstrate,
   collectTokensToString,
-} from '../gateway/realmode-composer/build-llm-call-substrate.ts'
-import { buildSubstrateWorkflowFire } from '../trident/inner-loop.ts'
-import { getBestModel } from '../runtime/models.ts'
+} from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import {
   FIRST_CONVERSATIONAL_TIMEOUT_MS_DEFAULT,
   PREWARM_AWAIT_CAP_MS_DEFAULT,
-} from '../onboarding/interview/llm-timeouts.ts'
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import { SubagentRegistry } from '../runtime/subagent/registry.ts'
-import { newControlState } from '../runtime/subagent/control.ts'
+} from '@neutronai/onboarding/interview/llm-timeouts.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import { newControlState } from '@neutronai/runtime/subagent/control.ts'
 import {
   DispatchService,
   buildCancellableDispatchTurn,
   defaultPersonaLoader,
   type DispatchBoardBinder,
-} from '../agent-dispatch/index.ts'
+} from '@neutronai/agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
-} from '../gateway/realmode-composer/build-phase-spec-resolver.ts'
-import { buildGatewayAnthropicMessagesClient } from '../gateway/realmode-composer/build-anthropic-messages-client.ts'
-import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer/build-project-opening-message.ts'
+} from '@neutronai/gateway/realmode-composer/build-phase-spec-resolver.ts'
+import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/realmode-composer/build-anthropic-messages-client.ts'
+import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/realmode-composer/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { DocSearchIndex } from '../doc-search/store.ts'
-import { DocSearchRuntime } from '../doc-search/runtime.ts'
+import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
+import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
-import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/message-search-wiring.ts'
-import { mountOpenCores } from '../gateway/cores/mount-open-cores.ts'
+import { buildButtonStoreMessageSearchRuntime } from '@neutronai/gateway/composition/message-search-wiring.ts'
+import { mountOpenCores } from '@neutronai/gateway/cores/mount-open-cores.ts'
 import { wireSubstrates } from './wiring/substrates.ts'
 import { wireMemory } from './wiring/memory.ts'
 import { wireLandingStack } from './wiring/landing.ts'
@@ -97,27 +97,27 @@ import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { late } from './wiring/late.ts'
 import type { OpenWiringContext } from './wiring/context.ts'
-import { buildChainedChatCommandFilter } from '../gateway/boot-helpers.ts'
+import { buildChainedChatCommandFilter } from '@neutronai/gateway/boot-helpers.ts'
 import {
   SkillForge,
   SkillForgeProposalsStore,
   buildSkillForgeBackend,
   buildSkillForgeChatCommandFilter,
   completedWorkflowFromTridentRun,
-} from '../skill-forge/index.ts'
+} from '@neutronai/skill-forge/index.ts'
 import {
   provisionAgentSkills,
   resolveAgentSkillsDir,
-} from '../runtime/adapters/claude-code/persistent/agent-skills.ts'
-import { TridentRunStore, type TridentRun } from '../trident/store.ts'
-import { runProgressForItem } from '../trident/run-progress.ts'
-import { SecretsStore } from '../auth/secrets-store.ts'
-import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
-import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
-import { PersonaPromptLoader } from '../gateway/realmode-composer/persona-loader.ts'
-import type { GraphComposer } from '../gateway/boot-helpers.ts'
-import type { CompositionInput } from '../gateway/composition.ts'
-import { buildLlmBriefComposer } from '../gateway/proactive/morning-brief.ts'
+} from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
+import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
+import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
+import { PersonaPromptLoader } from '@neutronai/gateway/realmode-composer/persona-loader.ts'
+import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
+import type { CompositionInput } from '@neutronai/gateway/composition.ts'
+import { buildLlmBriefComposer } from '@neutronai/gateway/proactive/morning-brief.ts'
 
 /**
  * C3d — the Open composition's return type. `CompositionInput` with the surfaces
@@ -171,24 +171,24 @@ export type OpenComposition = CompositionInput &
       | 'app_upload_surface'
     >
   >
-import { buildLlmNudgeRater } from '../gateway/proactive/idle-nudge-sweep.ts'
-import { buildButtonStoreProactiveSink } from '../gateway/proactive/button-store-sink.ts'
-import { resolveLocalTimezone } from '../gateway/proactive/local-timezone.ts'
-import { readSessionCookie } from '../landing/session-cookie.ts'
+import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-sweep.ts'
+import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
+import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
+import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 
 import {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
   buildStatusMdContextSource,
-} from '../reminders/index.ts'
+} from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
 // composition band (it reaches the WebChatSenderRegistry + landing protocol).
-import { buildButtonStoreReminderOutbound } from '../gateway/proactive/reminder-outbound.ts'
+import { buildButtonStoreReminderOutbound } from '@neutronai/gateway/proactive/reminder-outbound.ts'
 
 import { buildLocalStartTokenAuth } from './local-start-token.ts'
 import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
-import { createChatHistorySurface } from '../gateway/http/chat-history-surface.ts'
+import { createChatHistorySurface } from '@neutronai/gateway/http/chat-history-surface.ts'
 import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './owner-identity.ts'
 // L3 (2026-07) — build the Open agent-profile backend HERE (composition root)
 // and inject it into `mountOpenCores`, so the gateway core no longer imports the
@@ -199,25 +199,25 @@ import { buildOpenAgentProfileBackend } from './agent-profile-backend.ts'
 // against ONE single-owner localhost-trust resolver (Path A): the owner is the
 // only user and is already authed at the HTTP start-token/cookie layer, so the
 // app-bearer (`dev:<owner>`) is accepted directly. No feature flag, single path.
-import { createAppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
-import type { AppWsAuthResolver } from '../channels/adapters/app-ws/auth.ts'
-import { DocStore } from '../gateway/http/doc-store.ts'
-import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
-import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
-import { createAppProjectsSurface } from '../gateway/http/app-projects-surface.ts'
-import { SqliteProjectSettingsStore } from '../gateway/projects/sqlite-store.ts'
-import { resolveProjectEmoji } from '../contracts/default-emoji.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
+import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
+import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
+import { createAppProjectsSurface } from '@neutronai/gateway/http/app-projects-surface.ts'
+import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
+import { resolveProjectEmoji } from '@neutronai/contracts/default-emoji.ts'
 import {
   createProjectRow,
   materializeProjectScaffold,
   type ProjectScaffoldDeps,
-} from '../gateway/realmode-composer/project-create.ts'
-import type { CreateProjectToolService } from '../gateway/realmode-composer/create-project-tool.ts'
-import { createAppTasksSurface } from '../gateway/http/app-tasks-surface.ts'
-import { createAppUploadSurface } from '../gateway/http/app-upload-surface.ts'
-import { TaskStore } from '../tasks/store.ts'
-import { AppWsAdapter, optionsToInlineChoices } from '../channels/adapters/app-ws/adapter.ts'
-import { InMemoryAppWsSessionRegistry } from '../channels/adapters/app-ws/session-registry.ts'
+} from '@neutronai/gateway/realmode-composer/project-create.ts'
+import type { CreateProjectToolService } from '@neutronai/gateway/realmode-composer/create-project-tool.ts'
+import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
+import { createAppUploadSurface } from '@neutronai/gateway/http/app-upload-surface.ts'
+import { TaskStore } from '@neutronai/tasks/store.ts'
+import { AppWsAdapter, optionsToInlineChoices } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import {
   appWsTopicId,
   appWsProjectTopicId,
@@ -227,40 +227,40 @@ import {
   type AppWsOutboundOnboardingCompleted,
   type AppWsOutboundProjectsChanged,
   type AppWsOutboundWorkBoardChanged,
-} from '../channels/adapters/app-ws/envelope.ts'
-import { createWorkBoardSurface } from '../gateway/http/work-board-surface.ts'
-import { createProjectCredentialsSurface } from '../gateway/http/project-credentials-surface.ts'
-import { createCodexCredentialSurface } from '../gateway/http/codex-credential-surface.ts'
-import { ProjectCredentialStore } from '../project-credentials/store.ts'
-import { CodexCredentialService } from '../trident/codex-credential.ts'
-import { resolveCodexHome } from '../trident/codex-auth.ts'
-import { formatAvailableServicesFragment } from '../project-credentials/fragment.ts'
+} from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
+import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
+import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
+import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
+import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
   WorkBoardStore,
   workBoardProjectIdForKey,
   workBoardScopeKey,
   type WorkBoardItem,
-} from '../work-board/store.ts'
-import { isTerminalPhase } from '../trident/state-machine.ts'
-import { deriveRunProgress } from '../trident/run-progress.ts'
+} from '@neutronai/work-board/store.ts'
+import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
   deriveProjectActivity,
   truncatePreview,
   type ProjectActivity,
   type PreviewFrom,
 } from './project-rail.ts'
-import { WorkBoardSpecDocService } from '../work-board/spec-doc-service.ts'
-import { dispatchBoardBoundBuild } from '../trident/board-dispatch.ts'
-import { buildForgeConflictResolver } from '../trident/conflict-resolver.ts'
-import type { WorkBoardStartResult } from '../gateway/http/work-board-surface.ts'
-import { formatWorkBoardFragment } from '../work-board/fragment.ts'
-import { InMemoryConsumedTokens } from '../runtime/consumed-tokens-in-memory.ts'
+import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
+import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
+import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
+import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
-} from '../gateway/http/chat-bridge.ts'
-import type { OutgoingMessage } from '../channels/types.ts'
-import type { ChatOutbound } from '../landing/chat-protocol.ts'
+} from '@neutronai/gateway/http/chat-bridge.ts'
+import type { OutgoingMessage } from '@neutronai/channels/types.ts'
+import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */

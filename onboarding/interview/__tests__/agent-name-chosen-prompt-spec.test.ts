@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { buildAgentNameChosenPromptSpec } from '../phase-prompts.ts'
-import { VALUE_BYTE_CAP } from '../../../channels/button-primitive.ts'
+import { VALUE_BYTE_CAP } from '@neutronai/channels/button-primitive.ts'
 
 describe('buildAgentNameChosenPromptSpec', () => {
   test('renders the default suggestions as A/B/C name buttons (value = bare name)', () => {

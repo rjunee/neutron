@@ -32,10 +32,10 @@ import {
   buildButtonPrompt,
   type ButtonPrompt,
   type ButtonOption,
-} from '../../channels/button-primitive.ts'
-import type { CronHandler, CronHandlerRegistry } from '../../cron/handlers.ts'
-import type { CronJobDef, CronJobRegistry } from '../../cron/jobs.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/channels/button-primitive.ts'
+import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type {
   OnboardingTelemetry,
   SeanEllisResponsePayload,

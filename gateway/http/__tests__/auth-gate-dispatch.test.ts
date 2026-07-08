@@ -22,7 +22,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Server, WebSocketHandler } from 'bun'
 import { exportJWK, generateKeyPair, importJWK, type KeyLike } from 'jose'
 import { composeHttpHandler } from '../compose.ts'
-import { signSessionCookie } from '../../../landing/session-cookie.ts'
+import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
 import {
   issueStartToken,
   verifyStartTokenCryptographic,

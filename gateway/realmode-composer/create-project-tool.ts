@@ -17,8 +17,8 @@
  * scope. The ONLY agent input is the project `name`.
  */
 
-import type { JsonSchemaDocument } from '../../core-sdk/types.ts'
-import type { ToolRegistry } from '../../tools/registry.ts'
+import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 
 export const CREATE_PROJECT_TOOL = 'create_project'
 

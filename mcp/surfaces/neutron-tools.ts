@@ -12,9 +12,9 @@
  * the Cores layer + the production handlers.
  */
 
-import type { ToolRegistry } from '../../tools/registry.ts'
-import type { ToolHandler, ToolRegistration } from '../../tools/registry.ts'
-import type { NeutronCapability } from '../../core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
+import type { ToolHandler, ToolRegistration } from '@neutronai/tools/registry.ts'
+import type { NeutronCapability } from '@neutronai/core-sdk/types.ts'
 
 const objectSchema = { type: 'object', properties: {}, additionalProperties: true } as const
 

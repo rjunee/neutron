@@ -56,9 +56,9 @@ import { randomUUID } from 'node:crypto'
 import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type { ChannelKindForButton } from '../../channels/button-primitive.ts'
-import { parseAnyTopicId } from '../../channels/topic-id.ts'
-import type { InterviewEngine } from '../../onboarding/interview/engine.ts'
+import type { ChannelKindForButton } from '@neutronai/channels/button-primitive.ts'
+import { parseAnyTopicId } from '@neutronai/channels/topic-id.ts'
+import type { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
 import { csrfForbiddenResponse, evaluateCsrfOrigin } from './csrf-origin-guard.ts'
 import {
   extractTopicIdFromRequest,

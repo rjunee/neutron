@@ -25,9 +25,9 @@
 import type {
   ComposeProjectDocInput,
   ProjectDocComposer,
-} from '../../onboarding/wow-moment/project-materializer.ts'
-import type { AnthropicMessagesClient } from '../../onboarding/interview/anthropic-client.ts'
-import { getBestModel } from '../../runtime/models.ts'
+} from '@neutronai/onboarding/wow-moment/project-materializer.ts'
+import type { AnthropicMessagesClient } from '@neutronai/onboarding/interview/anthropic-client.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 
 /** Output budget per doc — a README/summary is 1-2 screens, not a book. */
 export const DOC_MAX_TOKENS = 2_000

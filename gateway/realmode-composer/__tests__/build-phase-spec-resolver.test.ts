@@ -35,11 +35,11 @@ import {
   InMemoryWebChatSenderRegistry,
   type WebChatSenderRegistry,
 } from '../../http/chat-bridge.ts'
-import type { ChatOutbound } from '../../../landing/server.ts'
+import type { ChatOutbound } from '@neutronai/landing/server.ts'
 import { _resetSkillsLoaderCache } from '../skills-loader.ts'
-import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 let tmp: string
 

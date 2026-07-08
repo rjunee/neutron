@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test'
 import { entitySlugify, SLUG_REGEX } from '../entity-slug.ts'
-import { slugify as scribeSlugify } from '../../scribe/write-to-gbrain.ts'
+import { slugify as scribeSlugify } from '@neutronai/scribe/write-to-gbrain.ts'
 
 describe('entitySlugify — pinned grammar (P2-8 consolidation)', () => {
   test('lower-cases, hyphenates non-alphanumeric runs, strips edge hyphens', () => {

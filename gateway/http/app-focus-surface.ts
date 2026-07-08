@@ -30,9 +30,9 @@
  * one instance can never see another instance's tasks / reminders.
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import { ReminderStore, type Reminder } from '../../reminders/store.ts'
-import { ALL_TASK_ORDERS, NO_PROJECT, TaskStore, type Task, type TaskOrder } from '../../tasks/store.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { ReminderStore, type Reminder } from '@neutronai/reminders/store.ts'
+import { ALL_TASK_ORDERS, NO_PROJECT, TaskStore, type Task, type TaskOrder } from '@neutronai/tasks/store.ts'
 
 /**
  * Window (in milliseconds) past `now` that counts as "due today" for

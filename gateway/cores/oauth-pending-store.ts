@@ -11,7 +11,7 @@
  * Per docs/plans/cores-oauth-secret-resolution-sprint-brief.md § 3.2.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** TTL for a pending row — 10 minutes. */
 export const PENDING_TTL_MS = 10 * 60 * 1_000

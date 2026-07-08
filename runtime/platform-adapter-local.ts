@@ -61,7 +61,7 @@ import {
   type SetProjectBackupRemoteConfigInput,
   type SlugAvailabilityProbe,
 } from './platform-adapter.ts'
-import type { OnboardingPhase } from '../contracts/onboarding-phase.ts'
+import type { OnboardingPhase } from '@neutronai/contracts/onboarding-phase.ts'
 
 const execFileAsync = promisify(execFile)
 

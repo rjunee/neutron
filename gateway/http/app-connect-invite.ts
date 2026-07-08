@@ -36,10 +36,10 @@
 import {
   issueInviteToken,
   type InviteSigningKey,
-} from '../../onboarding/api/invite-link-generate.ts'
+} from '@neutronai/onboarding/api/invite-link-generate.ts'
 import { canInviteRole } from './app-project-invite.ts'
-import { ConnectGuestInviteStore } from '../../connect/guest-invite-store.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import { ConnectGuestInviteStore } from '@neutronai/connect/guest-invite-store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** How the owner delivers the collaborator invite. A DELIVERY METHOD, not a
  *  trust tier — both land the same `role='collaborator'`. `link` works for

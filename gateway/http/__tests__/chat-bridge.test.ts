@@ -13,8 +13,8 @@ import {
   webTopicId,
   type WebChatSenderRegistry,
 } from '../chat-bridge.ts'
-import type { ButtonPrompt } from '../../../channels/button-primitive.ts'
-import type { ChatOutbound } from '../../../landing/server.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import type { ChatOutbound } from '@neutronai/landing/server.ts'
 
 describe('webTopicId', () => {
   test('returns stable web:<user_id> shape', () => {

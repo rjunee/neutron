@@ -42,7 +42,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createCipheriv, createDecipheriv, randomUUID } from 'node:crypto'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 const KEY_LENGTH_BYTES = 32 // 256-bit AES
 const IV_LENGTH_BYTES = 12 // GCM standard

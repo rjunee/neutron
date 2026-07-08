@@ -29,12 +29,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   GBrainUnavailableError,
   type McpClient,
-} from '../../gbrain-memory/memory-store.ts'
+} from '@neutronai/gbrain-memory/memory-store.ts'
 import { ConnectedMembersStore } from '../connected-members-store.ts'
 import { ConnectGuestInviteStore } from '../guest-invite-store.ts'
 import {
@@ -55,7 +55,7 @@ import {
   type GraphSnapshot,
   type SharedProjectGraphSource,
 } from '../shared-project-memory-mirror.ts'
-import { bootPgliteBrain } from '../../gbrain-memory/__tests__/boot-pglite-brain.ts'
+import { bootPgliteBrain } from '@neutronai/gbrain-memory/__tests__/boot-pglite-brain.ts'
 
 const RECEIVING = 'owner-host' // the host / owner instance slug
 

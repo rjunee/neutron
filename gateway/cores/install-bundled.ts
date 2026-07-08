@@ -31,27 +31,27 @@
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import type { ProjectDb } from '../../persistence/index.ts'
-import type { ToolRegistry } from '../../tools/registry.ts'
-import type { ApprovalPolicy } from '../../tools/registry.ts'
-import type { NeutronCapability } from '../../core-sdk/types.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
+import type { ApprovalPolicy } from '@neutronai/tools/registry.ts'
+import type { NeutronCapability } from '@neutronai/core-sdk/types.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import {
   buildBundledRegistry,
   type BundledCore,
   type BundledRegistry,
   type BundledRegistryEvent,
-} from '../../cores/runtime/bundled-registry.ts'
+} from '@neutronai/cores-runtime/bundled-registry.ts'
 import {
   CoreInstallationsStore,
-} from '../../cores/runtime/installations-store.ts'
-import { SecretAuditLog } from '../../cores/runtime/secret-audit.ts'
-import { CoreInstallError } from '../../cores/runtime/errors.ts'
+} from '@neutronai/cores-runtime/installations-store.ts'
+import { SecretAuditLog } from '@neutronai/cores-runtime/secret-audit.ts'
+import { CoreInstallError } from '@neutronai/cores-runtime/errors.ts'
 import {
   installCore,
   type InstallCoreResult,
   type SecretsPrompter,
-} from '../../cores/runtime/lifecycle.ts'
+} from '@neutronai/cores-runtime/lifecycle.ts'
 
 import type {
   CoreInstallFailure,
@@ -675,13 +675,13 @@ async function rehydrateExistingInstall(input: {
   audit: SecretAuditLog
   installations: CoreInstallationsStore
 }): Promise<InstallCoreResult> {
-  const { loadCoreFromDir } = await import('../../cores/runtime/loader.ts')
+  const { loadCoreFromDir } = await import('@neutronai/cores-runtime/loader.ts')
   const {
     allocateCoreNamespace,
     decideDataLayout,
-  } = await import('../../cores/runtime/data-namespace.ts')
+  } = await import('@neutronai/cores-runtime/data-namespace.ts')
   const { buildAuditedSecretsStore } = await import(
-    '../../cores/runtime/secret-audit.ts'
+    '@neutronai/cores-runtime/secret-audit.ts'
   )
   const { buildSecretsAccessor } = await import('@neutronai/cores-sdk')
 

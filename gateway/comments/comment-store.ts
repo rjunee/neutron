@@ -47,8 +47,8 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import { applyProjectScopedMigrations } from '../../migrations/runner.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import {
   materialiseAnchors,
   type AnchorRow,

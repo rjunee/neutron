@@ -16,15 +16,15 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { createAppAdminSurface } from '../http/app-admin-surface.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import { ProjectBackupStore } from '../git/project-backup-store.ts'
-import { buildLocalPlatformAdapter } from '../../runtime/platform-adapter-local.ts'
+import { buildLocalPlatformAdapter } from '@neutronai/runtime/platform-adapter-local.ts'
 import {
   PlatformOperationUnsupportedError,
   type PlatformAdapter,
-} from '../../runtime/platform-adapter.ts'
+} from '@neutronai/runtime/platform-adapter.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-

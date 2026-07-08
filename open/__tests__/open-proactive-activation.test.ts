@@ -17,10 +17,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
-import { appWsTopicId } from '../../channels/adapters/app-ws/envelope.ts'
+import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))

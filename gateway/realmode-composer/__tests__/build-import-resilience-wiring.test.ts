@@ -39,10 +39,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOnboardingEnginePieces } from '../build-landing-stack.ts'
-import type { ImportSource } from '../../../onboarding/history-import/types.ts'
+import type { ImportSource } from '@neutronai/onboarding/history-import/types.ts'
 
 const OWNER = 'alice'
 const USER = 'u-alice'

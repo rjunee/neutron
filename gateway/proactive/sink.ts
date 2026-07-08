@@ -15,8 +15,8 @@
  * specifiers stay valid.
  */
 
-import type { OutgoingMessage, Topic } from '../../channels/types.ts'
-import type { OutboundSink } from '../../trident/outbound-sink.ts'
+import type { OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
+import type { OutboundSink } from '@neutronai/trident/outbound-sink.ts'
 
 export type { OutgoingMessage, Topic, OutboundSink }
 

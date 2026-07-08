@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createAppWsAuthResolver } from '../../channels/index.ts';
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts';
 import { composeHttpHandler } from '../http/compose.ts';
 import { createAppDocsSurface } from '../http/app-docs-surface.ts';
 import { DocStore } from '../http/doc-store.ts';

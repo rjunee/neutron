@@ -19,9 +19,9 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
-import { ButtonStore } from '../../channels/button-store.ts'
+import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
   buildRoutedSendButtonPrompt,
   buildRoutedSendImportProgress,
@@ -43,17 +43,17 @@ import {
   type ProfilePicEngineHook,
   type SlugHistoryLookup,
   type SlugPickerEngineHook,
-} from '../../onboarding/interview/engine.ts'
-import type { SqliteOnboardingStateStore as OnboardingStateStoreType } from '../../onboarding/interview/sqlite-state-store.ts'
-import { PersonaComposer } from '../../onboarding/persona-gen/compose.ts'
-import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts'
-import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
+} from '@neutronai/onboarding/interview/engine.ts'
+import type { SqliteOnboardingStateStore as OnboardingStateStoreType } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import { PersonaComposer } from '@neutronai/onboarding/persona-gen/compose.ts'
+import { buildCringeChecker } from '@neutronai/onboarding/persona-gen/cringe-check.ts'
+import { ArchetypeLibrary } from '@neutronai/onboarding/archetypes/library.ts'
 import type {
   PhaseSpecResolver,
-} from '../../onboarding/interview/phase-spec-resolver.ts'
-import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
-import { TranscriptWriter } from '../../onboarding/interview/transcript.ts'
-import { createLandingServer, type LandingServer } from '../../landing/server.ts'
+} from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
+import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import { TranscriptWriter } from '@neutronai/onboarding/interview/transcript.ts'
+import { createLandingServer, type LandingServer } from '@neutronai/landing/server.ts'
 import {
   buildImportResumeReadinessProbe,
   ChainedImportPayloadResolver,

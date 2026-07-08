@@ -37,7 +37,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     expect(leaf).toContain('export const ALL_PHASES')
     expect(oldSite).not.toContain('export type OnboardingPhase =')
     expect(oldSite).not.toContain('export const ALL_PHASES')
-    expect(oldSite).toContain("from '../../contracts/onboarding-phase.ts'")
+    expect(oldSite).toContain("from '@neutronai/contracts/onboarding-phase.ts'")
   })
 
   test('agent-engagement.ts owns the mode vocabulary; connect/agent-engagement.ts re-exports', () => {
@@ -49,7 +49,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     expect(leaf).toContain('export function isAgentEngagementMode')
     expect(oldSite).not.toContain('export type AgentEngagementMode =')
     expect(oldSite).not.toContain('export const DEFAULT_AGENT_ENGAGEMENT_MODE')
-    expect(oldSite).toContain("from '../contracts/agent-engagement.ts'")
+    expect(oldSite).toContain("from '@neutronai/contracts/agent-engagement.ts'")
   })
 
   test('llm-call.ts owns LlmCallFn; phase-spec-resolver.ts re-exports', () => {
@@ -57,7 +57,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     const oldSite = read('onboarding/interview/phase-spec-resolver.ts')
     expect(leaf).toContain('export type LlmCallFn =')
     expect(oldSite).not.toContain('export type LlmCallFn =')
-    expect(oldSite).toContain("from '../../contracts/llm-call.ts'")
+    expect(oldSite).toContain("from '@neutronai/contracts/llm-call.ts'")
   })
 
   test('handoff-config.ts owns MOBILE_APP_URL + TELEGRAM_BIND_TOKEN_TTL_MS; final-handoff-config.ts re-exports', () => {
@@ -67,7 +67,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     expect(leaf).toContain('export const TELEGRAM_BIND_TOKEN_TTL_MS')
     expect(oldSite).not.toContain("WEB_APP_BASE = (process.env")
     expect(oldSite).not.toContain('export const TELEGRAM_BIND_TOKEN_TTL_MS =')
-    expect(oldSite).toContain("from '../../contracts/handoff-config.ts'")
+    expect(oldSite).toContain("from '@neutronai/contracts/handoff-config.ts'")
   })
 
   test('mcp-tool-resolver.ts owns McpToolResolver; mcp-shim.ts re-exports', () => {
@@ -75,7 +75,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     const oldSite = read('runtime/adapters/gpt-5-5-api/mcp-shim.ts')
     expect(leaf).toContain('export interface McpToolResolver')
     expect(oldSite).not.toContain('export interface McpToolResolver')
-    expect(oldSite).toContain("from '../../../contracts/mcp-tool-resolver.ts'")
+    expect(oldSite).toContain("from '@neutronai/contracts/mcp-tool-resolver.ts'")
   })
 
   test('chat-command-filter.ts owns ChatCommandFilter[Result]; app-ws-surface.ts re-exports', () => {
@@ -85,7 +85,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     expect(leaf).toContain('export interface ChatCommandFilterResult {')
     expect(oldSite).not.toContain('export interface ChatCommandFilter {')
     expect(oldSite).not.toContain('export interface ChatCommandFilterResult {')
-    expect(oldSite).toContain("from '../../contracts/chat-command-filter.ts'")
+    expect(oldSite).toContain("from '@neutronai/contracts/chat-command-filter.ts'")
   })
 
   test('trident/outbound-sink.ts is the ONE OutboundSink declaration; both old sites shim to it', () => {
@@ -97,7 +97,7 @@ describe('contracts/ leaf: symbols defined + old sites shim through', () => {
     expect(tridentOld).not.toContain('export interface OutboundSink {')
     expect(gatewayOld).not.toContain('export interface OutboundSink {')
     expect(tridentOld).toContain("from './outbound-sink.ts'")
-    expect(gatewayOld).toContain("from '../../trident/outbound-sink.ts'")
+    expect(gatewayOld).toContain("from '@neutronai/trident/outbound-sink.ts'")
   })
 })
 
@@ -105,21 +105,21 @@ describe('critic-layering.md §2.1 DAG cuts #1, #7, #9, #10, #11: consumers flip
   test('edge #1 (runtime → onboarding, OnboardingPhase): platform-adapter[.ts|-local.ts] import from contracts/', () => {
     for (const f of ['runtime/platform-adapter.ts', 'runtime/platform-adapter-local.ts']) {
       const src = read(f)
-      expect(src).toContain("import type { OnboardingPhase } from '../contracts/onboarding-phase.ts'")
+      expect(src).toContain("import type { OnboardingPhase } from '@neutronai/contracts/onboarding-phase.ts'")
       expect(src).not.toContain("from '../onboarding/interview/phase.ts'")
     }
   })
 
   test('edge #7 (landing → onboarding, MOBILE_APP_URL): landing/server.ts imports from contracts/', () => {
     const src = read('landing/server.ts')
-    expect(src).toContain("export { MOBILE_APP_URL } from '../contracts/handoff-config.ts'")
+    expect(src).toContain("export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'")
     expect(src).not.toContain("from '../onboarding/interview/final-handoff-config.ts'")
   })
 
   test('edge #9 (cores/free/agent-settings → onboarding, TELEGRAM_BIND_TOKEN_TTL_MS): backend.ts imports from contracts/', () => {
     const src = read('cores/free/agent-settings/src/backend.ts')
     expect(src).toContain(
-      "import { TELEGRAM_BIND_TOKEN_TTL_MS } from '../../../../contracts/handoff-config.ts'",
+      "import { TELEGRAM_BIND_TOKEN_TTL_MS } from '@neutronai/contracts/handoff-config.ts'",
     )
     // No IMPORT of the old onboarding path (a doc-comment mention of the
     // sibling `buildTelegramBindDeepLink` helper's home is fine).
@@ -128,13 +128,13 @@ describe('critic-layering.md §2.1 DAG cuts #1, #7, #9, #10, #11: consumers flip
 
   test('edge #10 (tasks → onboarding, LlmCallFn): prioritize-llm.ts imports from contracts/', () => {
     const src = read('tasks/prioritize-llm.ts')
-    expect(src).toContain("import type { LlmCallFn } from '../contracts/llm-call.ts'")
+    expect(src).toContain("import type { LlmCallFn } from '@neutronai/contracts/llm-call.ts'")
     expect(src).not.toContain('phase-spec-resolver.ts')
   })
 
   test('edge #11 (mcp → runtime, McpToolResolver): mcp/server.ts imports from contracts/', () => {
     const src = read('mcp/server.ts')
-    expect(src).toContain("import type { McpToolResolver } from '../contracts/mcp-tool-resolver.ts'")
+    expect(src).toContain("import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'")
     expect(src).not.toContain('runtime/adapters/gpt-5-5-api/mcp-shim.ts')
   })
 })

@@ -4,6 +4,7 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
+    "@neutronai/migrations": "workspace:*",
     "zod": "^3.23.8"
   }
 }

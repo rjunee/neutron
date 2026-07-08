@@ -19,14 +19,14 @@
  * This is a PURE MOVE — no logic, control-flow, or comment changes.
  */
 
-import { buildButtonPrompt, canonicalPromptSeed, deriveIdempotencyKey, type ButtonChoice } from '../../channels/button-primitive.ts'
+import { buildButtonPrompt, canonicalPromptSeed, deriveIdempotencyKey, type ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import { isLegalTransition, TERMINAL_PHASES, type OnboardingPhase } from './phase.ts'
 import {
   computeSlugSuggestionsForAgentName,
   SLUG_USE_ALT_PREFIX,
   SLUG_USE_SUGGESTED,
 } from './phase-prompts.ts'
-import { suggestedSlugFromAgentName, type SlugPickerOutcome } from '../../runtime/slug-picker-types.ts'
+import { suggestedSlugFromAgentName, type SlugPickerOutcome } from '@neutronai/runtime/slug-picker-types.ts'
 import { STATIC_PHASE_SPECS } from './phase-prompts.ts'
 import type { OnboardingState } from './state-store.ts'
 import type { AdvanceInput, AdvanceResult, SlugPickerEngineHookInput } from './engine-internals.ts'

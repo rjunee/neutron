@@ -9,12 +9,12 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { CronJobRegistry } from '../../../cron/jobs.ts'
-import { CronStateStore } from '../../../cron/state.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
-import { ReminderStore } from '../../../reminders/store.ts'
-import type { ButtonPrompt } from '../../../channels/button-primitive.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { CronStateStore } from '@neutronai/cron/state.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ReminderStore } from '@neutronai/reminders/store.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import type {
   BriefSubstrate,
   CapturedProject,

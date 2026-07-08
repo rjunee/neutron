@@ -27,9 +27,9 @@ import {
   type FireOutcome,
   type InnerLoopInput,
 } from './inner-loop.ts'
-import type { Event } from '../runtime/events.ts'
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import type { SessionHandle } from '../runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {

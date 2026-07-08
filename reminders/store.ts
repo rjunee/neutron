@@ -16,7 +16,7 @@
  * fire to schedule the next occurrence rather than terminate.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * Recurrence labels recognized by the store. `null` (the default for

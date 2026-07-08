@@ -34,8 +34,8 @@
  * handed.
  */
 
-import type { Triple } from '../runtime/auto-link.ts'
-import type { SyncHook } from '../runtime/entity-writer.ts'
+import type { Triple } from '@neutronai/runtime/auto-link.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 import { GBrainUnavailableError, type McpClient, type MemoryStore } from './memory-store.ts'
 
 /**

@@ -32,13 +32,13 @@
  * Telegram secrets are corrupt.
  */
 
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import { buildWebhookHandler } from '../../channels/adapters/telegram/webhook-server.ts'
-import type { IncomingEventReceiver } from '../../channels/types.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { buildWebhookHandler } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
+import type { IncomingEventReceiver } from '@neutronai/channels/types.ts'
 import type {
   TelegramStartCommandHandler,
   TelegramBindCommandHandler,
-} from '../../channels/adapters/telegram/webhook-server.ts'
+} from '@neutronai/channels/adapters/telegram/webhook-server.ts'
 
 export interface BuildTelegramWebhookSurfaceInput {
   /**

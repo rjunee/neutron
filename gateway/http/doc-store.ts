@@ -55,7 +55,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, normalize, relative, sep } from 'node:path'
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type {
   CommitKind,
   DocVersionStore,

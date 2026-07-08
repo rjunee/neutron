@@ -11,6 +11,7 @@
   },
   "private": true,
   "dependencies": {
+    "@neutronai/connect": "workspace:*",
     "@neutronai/contracts": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",

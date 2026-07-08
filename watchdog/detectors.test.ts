@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../migrations/runner.ts'
-import { ProjectDb } from '../persistence/index.ts'
-import { CronJobRegistry } from '../cron/jobs.ts'
-import { CronStateStore } from '../cron/state.ts'
-import { newCredentialPool } from '../runtime/credential-pool.ts'
-import { ProcessRegistry } from '../tools/process-registry.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { CronStateStore } from '@neutronai/cron/state.ts'
+import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
 import {
   CrashedAgentDetector,
   DbLockContentionDetector,

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GmailMessageMeta } from '@neutronai/email-managed-core'
 import type { PreMeetingBriefFireInput } from '@neutronai/calendar-core'
-import { composeCalendarPayload, composeEmailPayload } from '../../../scribe/index.ts'
+import { composeCalendarPayload, composeEmailPayload } from '@neutronai/scribe/index.ts'
 import { buildCalendarPreMeetingBriefSchedulerDeps } from '../calendar-wiring.ts'
 import {
   buildEmailTriageSchedulerDeps,

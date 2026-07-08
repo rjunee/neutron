@@ -19,9 +19,9 @@
  * HTTP surface holds.
  */
 
-import type { ToolRegistration } from '../../tools/registry.ts'
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ToolRegistration } from '@neutronai/tools/registry.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { StartOAuthResult } from '../http/cores-oauth-surface.ts'
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
 import {

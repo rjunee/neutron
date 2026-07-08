@@ -30,7 +30,7 @@ import {
   ResearchStoreResolver,
   buildProductionResearchCoreWiring,
   type ResearchLlmCall,
-} from '../../cores/free/research/index.ts'
+} from '@neutronai/research-core'
 
 import {
   buildResearchLlmCallForOwner,

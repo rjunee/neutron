@@ -37,7 +37,7 @@
 
 import { z } from 'zod'
 
-import { resolveNeutronHome, resolveOpenDbPath } from '../migrations/db-path.ts'
+import { resolveNeutronHome, resolveOpenDbPath } from '@neutronai/migrations/db-path.ts'
 
 /** The env bag shape we read. Matches `NodeJS.ProcessEnv`. */
 export type EnvBag = Record<string, string | undefined>

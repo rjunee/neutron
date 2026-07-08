@@ -42,8 +42,8 @@
 
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import type { EntityKind, SyncHook } from '../runtime/entity-writer.ts'
-import { entitySlugify } from '../runtime/entity-slug.ts'
+import type { EntityKind, SyncHook } from '@neutronai/runtime/entity-writer.ts'
+import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
 import type { ExtractedEntity, ExtractedRelation, ScribeExtraction } from './extract.ts'
 
 /**

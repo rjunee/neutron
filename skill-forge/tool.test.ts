@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { ToolRegistry } from '../tools/registry.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { SkillForgeBackend } from './backend.ts'
 import type { ApproveResult } from './forge.ts'
 import type { ProposalEdits, ProposalRecord } from './types.ts'

@@ -29,7 +29,7 @@
  * a task on its own.
  */
 
-import type { ProjectDb } from '../../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** Default skip-count threshold above which a task is demoted. */
 export const DEFAULT_DEMOTION_THRESHOLD = 3

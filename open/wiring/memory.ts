@@ -17,13 +17,13 @@
  * `realmodeCleanups` at the carve site so SIGTERM ordering is byte-identical.
  */
 
-import { buildLlmCallSubstrate } from '../../gateway/realmode-composer/build-llm-call-substrate.ts'
-import { buildGBrainMemory } from '../../gateway/realmode-composer/build-gbrain-memory.ts'
-import { resolveOnboardingOpenAiKey } from '../../gateway/realmode-composer/resolve-onboarding-openai-key.ts'
-import { createScribe, type Scribe, type UserTurnInput } from '../../scribe/index.ts'
-import { createState, defaultStatePath } from '../../scribe/scribe-budget.ts'
-import { mountCoresScribeFanOut } from '../../gateway/cores/mount-cores-scribe-fan-out.ts'
-import { createReflection, type Reflection } from '../../reflection/index.ts'
+import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import { buildGBrainMemory } from '@neutronai/gateway/realmode-composer/build-gbrain-memory.ts'
+import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/realmode-composer/resolve-onboarding-openai-key.ts'
+import { createScribe, type Scribe, type UserTurnInput } from '@neutronai/scribe/index.ts'
+import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.ts'
+import { mountCoresScribeFanOut } from '@neutronai/gateway/cores/mount-cores-scribe-fan-out.ts'
+import { createReflection, type Reflection } from '@neutronai/reflection/index.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
 

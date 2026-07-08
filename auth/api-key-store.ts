@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore, SecretsStoreError } from './secrets-store.ts'
 
 export type ApiKeyProvider = 'anthropic' | 'openai' | 'gemini'

@@ -29,16 +29,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAdminPersonalitySurface } from '../http/admin-personality-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { buildPhaseSpecResolver } from '../realmode-composer/build-phase-spec-resolver.ts'
 import { PersonaPromptLoader } from '../realmode-composer/persona-loader.ts'
-import type { Substrate, AgentSpec } from '../../runtime/substrate.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 // Sprint cc-substrate-migration-3-sites (2026-05-31) — production code
 // now consumes a `Substrate` rather than resolving credentials internally.

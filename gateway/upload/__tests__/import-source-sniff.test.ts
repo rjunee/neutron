@@ -28,11 +28,11 @@ import {
   type ImportUploadDeps,
   type ImportUploadInstanceContext,
 } from '../import-upload-handler.ts'
-import type { AdvanceResult } from '../../../onboarding/interview/engine.ts'
+import type { AdvanceResult } from '@neutronai/onboarding/interview/engine.ts'
 import {
   writeZip,
   type ZipWriteEntry,
-} from '../../../onboarding/history-import/__tests__/zip-writer.ts'
+} from '@neutronai/onboarding/history-import/__tests__/zip-writer.ts'
 
 let tmpRoots: string[] = []
 afterEach(() => {

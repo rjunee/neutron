@@ -7,7 +7,7 @@
  * primitive + a `registerCoreTool` helper that handles the prefixing.
  */
 
-import type { ToolRegistry, ToolRegistration } from '../../tools/registry.ts'
+import type { ToolRegistry, ToolRegistration } from '@neutronai/tools/registry.ts'
 
 export interface CoreToolRegistrationInput extends Omit<ToolRegistration, 'name'> {
   /** The unprefixed name as the Core sees it. */

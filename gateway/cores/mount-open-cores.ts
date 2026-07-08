@@ -49,16 +49,16 @@ import { SecretsStorePrompter } from './install-bundled.ts'
 // `open/composer.ts` and passed in as `agentSettingsProfile`) rather than
 // imported here, so this gateway composition core no longer reaches UP into the
 // `open` band. Only the structural `AgentProfileBackend` type is referenced.
-import type { AgentProfileBackend } from '../../cores/free/agent-settings/index.ts'
+import type { AgentProfileBackend } from '@neutronai/agent-settings'
 import type { ChatCommandFilter } from '../http/app-ws-surface.ts'
 import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { CoreCredentialResolver } from './core-credential-resolver.ts'
-import type { ProjectCredentialStore } from '../../project-credentials/store.ts'
+import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import type { Substrate, AgentSpec } from '../../runtime/substrate.ts'
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import { getBestModel } from '../../runtime/models.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import { collectTokensToString } from '../realmode-composer/build-llm-call-substrate.ts'
 
 import type { CalendarClient } from '@neutronai/calendar-core'

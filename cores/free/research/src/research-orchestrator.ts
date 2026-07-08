@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path'
 
 import type { NeutronManifest } from '@neutronai/cores-sdk'
 
-import { FAST_MODEL, SONNET_MODEL } from '../../../../runtime/models.ts'
+import { FAST_MODEL, SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 import {
   ResearchInputError,

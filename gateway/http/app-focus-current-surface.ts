@@ -13,9 +13,9 @@
  * jsonResponse + bearer-resolution shape of `app-focus-surface.ts`.
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
-import { NO_PROJECT, type Task } from '../../tasks/store.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { NO_PROJECT, type Task } from '@neutronai/tasks/store.ts'
 import { resolveOwnerDay, DEFAULT_OWNER_TIMEZONE } from '../tasks/p6/nudge-engine.ts'
 
 const FOCUS_CURRENT_PATH = '/api/app/focus/current'

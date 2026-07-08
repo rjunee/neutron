@@ -37,7 +37,7 @@ import type {
   TriageSchedulerOpts,
 } from '@neutronai/email-managed-core'
 
-import { composeEmailPayload } from '../../scribe/index.ts'
+import { composeEmailPayload } from '@neutronai/scribe/index.ts'
 import type { PushDispatcher } from '../push/dispatcher.ts'
 import type { ScribeFanOut } from './scribe-fan-out.ts'
 

@@ -42,9 +42,9 @@
 
 import { randomUUID } from 'node:crypto'
 
-import type { ProjectDb } from '../../../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
-import { SONNET_MODEL, FAST_MODEL } from '../../../../runtime/models.ts'
+import { SONNET_MODEL, FAST_MODEL } from '@neutronai/runtime/models.ts'
 
 /* -----------------------------------------------------------------
  * Brief shape — the public contract

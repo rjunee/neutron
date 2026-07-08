@@ -3,15 +3,15 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { ProjectDb } from '../../../../persistence/index.ts'
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ChannelRouter } from '../../../../channels/router.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
 import type {
   ChannelAdapter,
   IncomingEvent,
   Topic,
   OutgoingMessage,
-} from '../../../../channels/types.ts'
+} from '@neutronai/channels/types.ts'
 import type { ConnectAuthContext } from '../../jwt-bearer-middleware.ts'
 import type { TaggedContent } from '../../origin-tag.ts'
 import type { IncomingMessage } from '../../server.ts'

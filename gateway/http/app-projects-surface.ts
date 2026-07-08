@@ -38,14 +38,14 @@
  * scope (soft-delete is an onboarding/admin concern).
  */
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import {
   type AgentEngagementMode,
   ALL_AGENT_ENGAGEMENT_MODES,
   DEFAULT_AGENT_ENGAGEMENT_MODE,
   isAgentEngagementMode,
-} from '../../connect/agent-engagement.ts'
+} from '@neutronai/connect/agent-engagement.ts'
 import { defaultProjectEmoji, normaliseEmojiInput } from '../projects/default-emoji.ts'
 import {
   handleAppProjectInvite,

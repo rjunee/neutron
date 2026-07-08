@@ -23,8 +23,8 @@
 
 import { decodeJwt } from 'jose'
 
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import type { Membership } from '../../jwt-validator/index.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { Membership } from '@neutronai/jwt-validator/index.ts'
 
 /** Refresh the access JWT once it's within this many seconds of expiry. */
 export const FEDERATED_TOKEN_REFRESH_MARGIN_SECONDS = 120

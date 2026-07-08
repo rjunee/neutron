@@ -10,9 +10,9 @@
  * lives in `surfaces/`. The server is the multiplexer + dispatch layer.
  */
 
-import type { ToolRegistry } from '../tools/registry.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { currentTopicContext, type TopicContext, withTopicContext } from './topic-context.ts'
-import type { McpToolResolver } from '../contracts/mcp-tool-resolver.ts'
+import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 
 export interface McpServerOptions {
   project_slug: string

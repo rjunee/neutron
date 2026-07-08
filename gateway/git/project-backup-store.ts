@@ -88,7 +88,7 @@ import { promisify } from 'node:util'
 import type {
   PlatformAdapter,
   ProjectBackupRemoteConfig,
-} from '../../runtime/platform-adapter.ts'
+} from '@neutronai/runtime/platform-adapter.ts'
 
 const execFileAsync = promisify(execFile)
 

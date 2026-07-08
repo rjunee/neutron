@@ -23,10 +23,10 @@ import { join } from 'node:path'
 
 import { buildAgentWatcherLlmCall } from '../build-agent-watcher-llm-call.ts'
 import { PersonaPromptLoader } from '../persona-loader.ts'
-import { BEST_MODEL } from '../../../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
+import { BEST_MODEL } from '@neutronai/runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 let tmpRoot: string
 

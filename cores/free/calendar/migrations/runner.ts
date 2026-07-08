@@ -16,7 +16,7 @@ import type { Database } from 'bun:sqlite'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyProjectScopedMigrations } from '../../../../migrations/runner.ts'
+import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 
 /** Directory holding `0001_*.sql` / `0002_*.sql` / ... migrations. */
 export const MIGRATIONS_DIR: string = dirname(fileURLToPath(import.meta.url))

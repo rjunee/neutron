@@ -24,7 +24,7 @@
  * LLM with tool-call passthrough disabled).
  */
 
-import { SONNET_MODEL, FAST_MODEL } from '../../../../runtime/models.ts'
+import { SONNET_MODEL, FAST_MODEL } from '@neutronai/runtime/models.ts'
 
 import type {
   ResearchSubstrate,
