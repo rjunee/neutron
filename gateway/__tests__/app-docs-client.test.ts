@@ -24,7 +24,7 @@ import { composeHttpHandler } from '../http/compose.ts';
 import { createAppDocsSurface } from '../http/app-docs-surface.ts';
 import { DocStore } from '../http/doc-store.ts';
 
-import { DocsClient, DocsClientError } from '../../app/lib/docs-client';
+import { DocsClient, DocsClientError } from '@neutronai/app/lib/docs-client';
 
 const PROJECT_ID = 'demo-project';
 const PROJECT_SLUG = 'demo';

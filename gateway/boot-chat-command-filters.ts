@@ -115,9 +115,9 @@ export function buildTridentCodeChatCommandFilter(deps: {
     user_id: string
     channel_topic_id: string
   }) =>
-    | import('../trident/code-command.ts').TridentCodeContext
+    | import('@neutronai/trident/code-command.ts').TridentCodeContext
     | null
-    | Promise<import('../trident/code-command.ts').TridentCodeContext | null>
+    | Promise<import('@neutronai/trident/code-command.ts').TridentCodeContext | null>
   default_project_id?: string
   /** Message when `resolve_context` yields null (no build target wired). */
   unavailable_message?: string
@@ -128,7 +128,7 @@ export function buildTridentCodeChatCommandFilter(deps: {
    * already set one) so terminal result delivery routes the build's result
    * back to THIS surface instead of defaulting to Telegram.
    */
-  channel_kind?: import('../channels/types.ts').Topic['channel_kind']
+  channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
 }): import('./http/app-ws-surface.ts').ChatCommandFilter {
   const default_pid = deps.default_project_id ?? 'default'
   const channel_kind = deps.channel_kind ?? 'app_socket'

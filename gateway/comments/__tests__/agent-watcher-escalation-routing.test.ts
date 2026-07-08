@@ -162,11 +162,11 @@ function start(): Harness {
     // (which packs `<composed system>\n\n<user>` — the system body
     // containing any escalation splice is the prefix of each captured
     // string) so existing tests keep their string-array assertion shape.
-    const substrate: import('../../../runtime/substrate.ts').Substrate = {
-      start(spec): import('../../../runtime/session-handle.ts').SessionHandle {
+    const substrate: import('@neutronai/runtime/substrate.ts').Substrate = {
+      start(spec): import('@neutronai/runtime/session-handle.ts').SessionHandle {
         captured.push(spec.prompt)
         const events = (async function* (): AsyncGenerator<
-          import('../../../runtime/events.ts').Event,
+          import('@neutronai/runtime/events.ts').Event,
           void,
           void
         > {

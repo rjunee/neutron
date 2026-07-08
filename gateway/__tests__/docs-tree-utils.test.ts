@@ -17,7 +17,7 @@ import {
   findNodeByPath,
   freshEditorState,
   type DocTreeNode,
-} from '../../app/lib/docs-client';
+} from '@neutronai/app/lib/docs-client';
 
 function folder(path: string, name: string, children: DocTreeNode[]): DocTreeNode {
   return {

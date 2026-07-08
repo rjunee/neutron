@@ -234,7 +234,7 @@ export interface WireAppWsDeps {
   /** Diff-gated rail refresh (no-ops when the snapshot is unchanged). */
   emitProjectsChangedIfChanged: (user_id: string) => void
   /** Build the current `projects_changed` frame for a targeted seed on connect. */
-  buildProjectsChangedFrame: () => import('../../channels/adapters/app-ws/envelope.ts').AppWsOutboundProjectsChanged
+  buildProjectsChangedFrame: () => import('@neutronai/channels/adapters/app-ws/envelope.ts').AppWsOutboundProjectsChanged
   /** True while the owner is still onboarding. */
   isOnboardingActive: (user_id: string) => Promise<boolean>
   /**

@@ -706,7 +706,7 @@ test('finalize materializes hobby/interest answers as projects (non_work_interes
       proposed_projects: [],
       proposed_tasks: [],
       inferred_interests: [{ name: 'Photography', basis: 'you shared several photo edits' }],
-    } as unknown as import('../../../onboarding/history-import/types.ts').ImportResult,
+    } as unknown as import('@neutronai/onboarding/history-import/types.ts').ImportResult,
   })
 
   const names = h.db

@@ -273,7 +273,7 @@ export interface BuildOpenGraphComposerOptions {
    * them to read `config` directly; passing it now closes the entrypoint→
    * composer half of the "boot re-reads env independently" hazard.
    */
-  config?: import('../config/index.ts').BootConfig
+  config?: import('@neutronai/config/index.ts').BootConfig
   /**
    * Substrate-construction seam, threaded verbatim into BOTH the onboarding
    * phase-spec substrate AND the live-chat substrate via
@@ -290,8 +290,8 @@ export interface BuildOpenGraphComposerOptions {
    * the test still exercises the real composer's credential-pool wiring.
    */
   substrateFactory?: (
-    opts: import('../runtime/adapters/claude-code/index.ts').ClaudeCodeSubstrateOptions,
-  ) => import('../runtime/substrate.ts').Substrate
+    opts: import('@neutronai/runtime/adapters/claude-code/index.ts').ClaudeCodeSubstrateOptions,
+  ) => import('@neutronai/runtime/substrate.ts').Substrate
   /**
    * Install-token handoff seam (E2E). Production leaves this undefined →
    * `buildOpenInstallTokenHandler` with the real `.env`-persist + supervisor-

@@ -20,7 +20,7 @@ export interface MiscCompositionInput {
    * so the existing reminder tick behaviour is unchanged.
    */
   push_dispatcher?: {
-    onFired(reminder: import('../../../reminders/store.ts').Reminder): Promise<void>
+    onFired(reminder: import('@neutronai/reminders/store.ts').Reminder): Promise<void>
   }
   /**
    * P1.5 / Sprint 21 — realmode-composer cleanup callbacks. The realmode
@@ -56,8 +56,8 @@ export interface MiscCompositionInput {
    * runner).
    */
   trident?: {
-    fire_inner_workflow: import('../../../trident/inner-loop.ts').FireInnerWorkflow
-    run_host?: import('../../../trident/merge.ts').RunHostCommand
+    fire_inner_workflow: import('@neutronai/trident/inner-loop.ts').FireInnerWorkflow
+    run_host?: import('@neutronai/trident/merge.ts').RunHostCommand
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**
      * Skill-forge trigger (parity gap #5) — an OPTIONAL observer the trident
@@ -68,7 +68,7 @@ export interface MiscCompositionInput {
      * runs, so the hook stays generic. Failure-safe: the trident module wraps
      * the call in try/catch so a hook error never un-terminates a finished run.
      */
-    on_run_terminal?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
+    on_run_terminal?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**
      * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
      * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
@@ -79,7 +79,7 @@ export interface MiscCompositionInput {
      * live instead of on the client's 15 s poll fallback. Failure-safe: the tick
      * loop wraps the call so a fan outage never blocks the tick.
      */
-    on_run_transition?: (run: import('../../../trident/store.ts').TridentRun) => Promise<void>
+    on_run_transition?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**
      * Per-owner CODEX_HOME dir for the OPTIONAL cross-model review (Part B).
      * When set, the trident loop threads it into the inner workflow so the codex
@@ -99,7 +99,7 @@ export interface MiscCompositionInput {
      * rather than a raw static dir.
      */
     resolve_codex_home?: (
-      run: import('../../../trident/store.ts').TridentRun,
+      run: import('@neutronai/trident/store.ts').TridentRun,
     ) => string | null
     /**
      * Bounded Forge merge-conflict resolver (#342). Threaded into the trident
@@ -109,7 +109,7 @@ export interface MiscCompositionInput {
      * hard-failing. The composer wires this to `buildForgeConflictResolver` over
      * the ephemeral substrate factory. Absent → a conflict escalates to chat.
      */
-    resolve_conflict?: import('../../../trident/merge.ts').MergeConflictResolver
+    resolve_conflict?: import('@neutronai/trident/merge.ts').MergeConflictResolver
     /**
      * Terminal-result delivery sink (#339). The trident module posts each run's
      * terminal completion message ("✅ done, merged" / "❌ failed: <reason>")
@@ -119,7 +119,7 @@ export interface MiscCompositionInput {
      * the durable app-ws adapter (`AppWsAdapter.send`: persists to the chat log +
      * fans live to any open socket). Absent → the module falls back to the router.
      */
-    delivery_sink?: import('../../../trident/delivery.ts').OutboundSink
+    delivery_sink?: import('@neutronai/trident/delivery.ts').OutboundSink
   }
   /**
    * T2 r3 (2026-05-13) — Argus BLOCKING #1: pre-constructed
@@ -146,7 +146,7 @@ export interface MiscCompositionInput {
    * unregistered (the unchanged pre-doc-search behaviour).
    */
   doc_search?: {
-    runtime: import('../../../doc-search/runtime.ts').DocSearchRuntime
+    runtime: import('@neutronai/doc-search/runtime.ts').DocSearchRuntime
   }
   /**
    * Message-search (chat-history twin of doc-search) — when supplied, the
@@ -157,7 +157,7 @@ export interface MiscCompositionInput {
    * source); omitting it leaves the surface unregistered.
    */
   message_search?: {
-    runtime: import('../../../message-search/runtime.ts').MessageSearchRuntime
+    runtime: import('@neutronai/message-search/runtime.ts').MessageSearchRuntime
   }
   /**
    * Memory recall (P0-2 — `gbrain_search`) — when supplied, the `tools`
@@ -173,7 +173,7 @@ export interface MiscCompositionInput {
    * behaviour).
    */
   gbrain_search?: {
-    store: import('../../../gbrain-memory/memory-store.ts').MemoryStore
+    store: import('@neutronai/gbrain-memory/memory-store.ts').MemoryStore
   }
   /**
    * Agent-dispatch family (parity gap #3 — the named-specialist + ad-hoc
@@ -187,7 +187,7 @@ export interface MiscCompositionInput {
    * the report-back sink); omitting it leaves the surface unregistered.
    */
   agent_dispatch?: {
-    service: import('../../../agent-dispatch/service.ts').DispatchService
+    service: import('@neutronai/agent-dispatch/service.ts').DispatchService
   }
   /**
    * Skill-forge (auto-skillify, parity gap #5) — when supplied, the `tools`
@@ -201,7 +201,7 @@ export interface MiscCompositionInput {
    * `trident.on_run_terminal`).
    */
   skill_forge?: {
-    backend: import('../../../skill-forge/backend.ts').SkillForgeBackend
+    backend: import('@neutronai/skill-forge/backend.ts').SkillForgeBackend
   }
   /**
    * Work Board (Phase 1a) — when supplied, the `tools` module registers the
@@ -214,13 +214,13 @@ export interface MiscCompositionInput {
    * is taken from the server-injected `ToolCallContext`, never an agent arg.
    */
   work_board?: {
-    store: import('../../../work-board/store.ts').WorkBoardStore
+    store: import('@neutronai/work-board/store.ts').WorkBoardStore
     /**
      * M1 on-disk spec — when supplied, `work_board_add` persists a non-trivial
      * `spec` to a per-project `plans/` doc and links the card's `design_doc_ref`
      * at it. Omitted → title-only adds (unchanged behaviour).
      */
-    spec_doc?: import('../../../work-board/spec-doc-service.ts').WorkBoardSpecDocService
+    spec_doc?: import('@neutronai/work-board/spec-doc-service.ts').WorkBoardSpecDocService
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the
@@ -234,15 +234,15 @@ export interface MiscCompositionInput {
    * shared board store (existence + ask-gate lookups + the run binding).
    */
   trident_build_dispatch?: {
-    store: import('../../../trident/store.ts').TridentRunStore
-    work_board: import('../../../trident/board-dispatch.ts').TridentBoardBinder
+    store: import('@neutronai/trident/store.ts').TridentRunStore
+    work_board: import('@neutronai/trident/board-dispatch.ts').TridentBoardBinder
     /** Owner HOME base — the chokepoint resolves each project's own
      *  `<home>/Projects/<slug>/code` workspace under it (see `board-dispatch.ts`). */
     repo_path: string
     resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-    resolveMergeMode?: () => Promise<import('../../../trident/store.ts').MergeMode>
+    resolveMergeMode?: () => Promise<import('@neutronai/trident/store.ts').MergeMode>
     resolveRalph?: () => Promise<boolean>
-    channel_kind?: import('../../../channels/types.ts').Topic['channel_kind']
+    channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number
     max_ralph_rounds?: number
     /**
@@ -270,7 +270,7 @@ export interface MiscCompositionInput {
    * store in the #149 credential store, materialize to the per-project CODEX_HOME).
    */
   codex_credential?: {
-    service: import('../../../trident/codex-credential.ts').CodexCredentialService
+    service: import('@neutronai/trident/codex-credential.ts').CodexCredentialService
   }
   /**
    * Create-project capability — when supplied, the `tools` module registers the

@@ -231,11 +231,11 @@ async function buildResolver(
   h: Harness,
   captured: string[],
 ): Promise<NonNullable<Awaited<ReturnType<typeof buildPhaseSpecResolver>>>> {
-  const substrate: import('../../runtime/substrate.ts').Substrate = {
-    start(spec): import('../../runtime/session-handle.ts').SessionHandle {
+  const substrate: import('@neutronai/runtime/substrate.ts').Substrate = {
+    start(spec): import('@neutronai/runtime/session-handle.ts').SessionHandle {
       captured.push(spec.prompt)
       const events = (async function* (): AsyncGenerator<
-        import('../../runtime/events.ts').Event,
+        import('@neutronai/runtime/events.ts').Event,
         void,
         void
       > {

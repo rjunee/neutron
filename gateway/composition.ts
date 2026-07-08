@@ -406,7 +406,7 @@ export async function composeProductionGraph(
   // inside `boot()` AFTER its `graph` variable was assigned, so its
   // catch could `await graph.shutdown()`. Now we own the lifecycle
   // until `return`: if the HTTP composition throws (the only realistic
-  // path is `import('../connect/api/server.ts')` failing
+  // path is `import('@neutronai/connect/api/server.ts')` failing
   // under a Managed boot when the submodule is unreadable), tear down
   // the graph BEFORE re-throwing so the caller's catch doesn't see a
   // half-running gateway it can't reach.

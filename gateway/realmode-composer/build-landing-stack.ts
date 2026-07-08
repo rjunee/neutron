@@ -237,7 +237,7 @@ export interface BuildLandingStackInput {
    * (K3, 2026-07-03) — the per-chunk `importPass1Llm` / `importPass2Llm`
    * caller-override seams were removed with the dead per-chunk runner.
    */
-  importSubstrate?: import('../../runtime/substrate.ts').Substrate
+  importSubstrate?: import('@neutronai/runtime/substrate.ts').Substrate
   /**
    * 2026-06-17 (Step 2b — synthesis cut-over). Opt the LIVE import flow onto
    * the ONE accumulating synthesis session (`onboarding/synthesis/*` via
@@ -267,7 +267,7 @@ export interface BuildLandingStackInput {
    * (K3, 2026-07-03) — type repointed from the deleted per-chunk barrel's
    * `ImportPopulatorSyncHook` alias to the underlying `SyncHook`.
    */
-  importGbrainSyncHook?: import('../../runtime/entity-writer.ts').SyncHook
+  importGbrainSyncHook?: import('@neutronai/runtime/entity-writer.ts').SyncHook
   /**
    * Item 4 (2026-06-11) — LLM doc composer for the wow-moment project
    * materializer (README + transcript-summary synthesis).
@@ -281,7 +281,7 @@ export interface BuildLandingStackInput {
    *      falls back to `null` (template docs).
    */
   wowMaterializerComposer?:
-    | import('../../onboarding/wow-moment/project-materializer.ts').ProjectDocComposer
+    | import('@neutronai/onboarding/wow-moment/project-materializer.ts').ProjectDocComposer
     | null
   /**
    * Item 4 (2026-06-11) — memory-layer indexer for the wow-moment
@@ -294,7 +294,7 @@ export interface BuildLandingStackInput {
    * entities/ tree + memory store.
    */
   wowMaterializerIndexer?:
-    | import('../../onboarding/wow-moment/project-materializer.ts').ProjectPageIndexFn
+    | import('@neutronai/onboarding/wow-moment/project-materializer.ts').ProjectPageIndexFn
     | null
   /**
    * 2026-05-25 (import-pipeline-resilience sprint, Part G.2 + Argus
@@ -316,7 +316,7 @@ export interface BuildLandingStackInput {
    * inject a deterministic parser that yields canned conversations
    * without spinning up zip parsing.
    */
-  importParse?: import('../../onboarding/history-import/types.ts').SourceParser
+  importParse?: import('@neutronai/onboarding/history-import/types.ts').SourceParser
   /**
    * T4 (2026-05-13) — clock override threaded into the default-built
    * runner. Tests pass a fixed-time `now()` so chunk timestamps land
@@ -406,7 +406,7 @@ export interface BuildLandingStackInput {
    * thread, the `NEUTRON_ONBOARDING_CONVERSATIONAL` env flag is a
    * no-op in production.
    */
-  platform?: import('../../runtime/platform-adapter.ts').PlatformAdapter
+  platform?: import('@neutronai/runtime/platform-adapter.ts').PlatformAdapter
   /**
    * v0.1.80 (2026-05-22) — personality character suggester. When wired,
    * the engine fires `generate(...)` on `personality_offered` phase entry
@@ -417,7 +417,7 @@ export interface BuildLandingStackInput {
    * via `buildPersonalityCharacterSuggester({ anthropicClient })` using
    * the same anthropicClient as the llmRouter.
    */
-  personalityCharacterSuggester?: import('../../onboarding/interview/personality-character-suggester.ts').PersonalityCharacterSuggester
+  personalityCharacterSuggester?: import('@neutronai/onboarding/interview/personality-character-suggester.ts').PersonalityCharacterSuggester
   /**
    * 2026-05-27 — agent-name suggester. When wired, the engine fires
    * `generate(...)` on `agent_name_chosen` phase entry and memoizes
@@ -427,7 +427,7 @@ export interface BuildLandingStackInput {
    * builds this via `buildAgentNameSuggester({ anthropicClient })`
    * using the SAME anthropicClient as the llmRouter + character suggester.
    */
-  agentNameSuggester?: import('../../onboarding/interview/agent-name-suggester.ts').AgentNameSuggester
+  agentNameSuggester?: import('@neutronai/onboarding/interview/agent-name-suggester.ts').AgentNameSuggester
   /**
    * v0.1.80 (2026-05-22) — persona summarizer. When wired, the engine
    * fires `summarize(...)` on `persona_reviewed` phase entry and
@@ -437,7 +437,7 @@ export interface BuildLandingStackInput {
    * Production wiring (gateway/index.ts) builds this via
    * `buildPersonaSummarizer({ anthropicClient })`.
    */
-  personaSummarizer?: import('../../onboarding/persona-gen/summarize.ts').PersonaSummarizer
+  personaSummarizer?: import('@neutronai/onboarding/persona-gen/summarize.ts').PersonaSummarizer
   /**
    * 2026-05-28 — per-instance SecretsStore. Threads into the engine so
    * `max_oauth_offered` can (a) detect an existing `max_oauth_refresh`

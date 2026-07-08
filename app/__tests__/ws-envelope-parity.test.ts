@@ -20,7 +20,7 @@ import {
   MAX_ATTACHMENT_URL_LEN,
   MAX_ATTACHMENTS_PER_MESSAGE,
   sanitizeAttachments,
-} from '../../channels/adapters/app-ws/envelope';
+} from '@neutronai/channels/adapters/app-ws/envelope';
 
 // The ONE source of the wire types (L6). The app + the server both import
 // these from here now.

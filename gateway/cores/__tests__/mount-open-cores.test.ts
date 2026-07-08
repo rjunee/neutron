@@ -107,7 +107,7 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
     NonNullable<(typeof mounted.backends)['agent_settings']>
   >[0]
   const built = (await mounted.backends['agent_settings']!(factoryCtx)) as {
-    backend: import('../../../cores/free/agent-settings/index.ts').AgentSettingsBackend
+    backend: import('@neutronai/agent-settings').AgentSettingsBackend
   }
   const nameRes = await built.backend.updateAgentName('Nova')
   expect(nameRes.success).toBe(true)

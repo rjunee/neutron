@@ -24,6 +24,7 @@
         "@typescript-eslint/parser": "8.60.1",
         "dependency-cruiser": "17.4.3",
         "eslint": "9.39.4",
+        "eslint-import-resolver-typescript": "3.10.1",
         "eslint-plugin-import": "2.32.0",
         "jose": "^5.9.0",
         "typescript": "5.9.3",

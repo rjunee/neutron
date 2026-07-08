@@ -131,7 +131,7 @@ describe('boot init-failure cleanup', () => {
       db,
       project_slug,
     }: {
-      db: import('../../persistence/index.ts').ProjectDb
+      db: import('@neutronai/persistence/index.ts').ProjectDb
       project_slug: string
     }): import('../composition.ts').CompositionInput => {
       const input: import('../composition.ts').CompositionInput = {

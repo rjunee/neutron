@@ -204,10 +204,10 @@ test('buildResearchLlmCallForOwner: null substrate throws no-credentials error',
 })
 
 test('buildResearchLlmCallForOwner: packs system+user into spec.prompt and returns accumulated tokens', async () => {
-  type AgentSpec = import('../../runtime/substrate.ts').AgentSpec
-  type Substrate = import('../../runtime/substrate.ts').Substrate
-  type SessionHandle = import('../../runtime/session-handle.ts').SessionHandle
-  type Event = import('../../runtime/events.ts').Event
+  type AgentSpec = import('@neutronai/runtime/substrate.ts').AgentSpec
+  type Substrate = import('@neutronai/runtime/substrate.ts').Substrate
+  type SessionHandle = import('@neutronai/runtime/session-handle.ts').SessionHandle
+  type Event = import('@neutronai/runtime/events.ts').Event
 
   const captured: AgentSpec[] = []
   const fakeSubstrate: Substrate = {
@@ -253,10 +253,10 @@ test('buildResearchLlmCallForOwner: packs system+user into spec.prompt and retur
 })
 
 test('buildResearchLlmCallForOwner: substrate errors rethrown with [research-core] prefix', async () => {
-  type AgentSpec = import('../../runtime/substrate.ts').AgentSpec
-  type Substrate = import('../../runtime/substrate.ts').Substrate
-  type SessionHandle = import('../../runtime/session-handle.ts').SessionHandle
-  type Event = import('../../runtime/events.ts').Event
+  type AgentSpec = import('@neutronai/runtime/substrate.ts').AgentSpec
+  type Substrate = import('@neutronai/runtime/substrate.ts').Substrate
+  type SessionHandle = import('@neutronai/runtime/session-handle.ts').SessionHandle
+  type Event = import('@neutronai/runtime/events.ts').Event
 
   const fakeSubstrate: Substrate = {
     start(_spec: AgentSpec): SessionHandle {
