@@ -9,8 +9,14 @@
     "./*": "./*"
   },
   "dependencies": {
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/gbrain-memory": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/onboarding": "workspace:*",
     "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
     "jose": "^5.9.0"
   },
   "devDependencies": {

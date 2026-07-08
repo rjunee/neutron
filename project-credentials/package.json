@@ -1,10 +1,10 @@
 {
-  "name": "@neutronai/tools",
+  "name": "@neutronai/project-credentials",
   "type": "module",
-  "main": "./index.ts",
+  "main": "./store.ts",
   "private": true,
   "dependencies": {
-    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/auth": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*"
   }

@@ -4,7 +4,13 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
+    "@neutronai/channels": "workspace:*",
+    "@neutronai/core-sdk": "workspace:*",
     "@neutronai/cron": "workspace:*",
-    "@neutronai/persistence": "workspace:*"
+    "@neutronai/gateway": "workspace:*",
+    "@neutronai/landing": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/runtime": "workspace:*"
   }
 }

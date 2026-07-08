@@ -42,7 +42,12 @@
     "auth",
     "onboarding",
     "landing",
-    "app"
+    "app",
+    "open",
+    "tabs",
+    "work-board",
+    "project-credentials",
+    "contracts"
   ],
   "scripts": {
     "start": "bun run open/server.ts",
@@ -52,30 +57,24 @@
     "migrate": "bun run migrations/runner.ts"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "20.9.0",
     "@types/bun": "latest",
     "dependency-cruiser": "17.4.3",
-    "happy-dom": "20.9.0",
     "jose": "^5.9.0",
     "typescript": "5.9.3"
   },
   "dependencies": {
     "@neutronai/auth": "workspace:*",
     "@neutronai/channels": "workspace:*",
-    "@neutronai/connect": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cron": "workspace:*",
     "@neutronai/gateway": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
-    "@neutronai/landing": "workspace:*",
-    "@neutronai/mcp": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/onboarding": "workspace:*",
+    "@neutronai/open": "workspace:*",
     "@neutronai/persistence": "workspace:*",
-    "@neutronai/reminders": "workspace:*",
     "@neutronai/runtime": "workspace:*",
     "@neutronai/tools": "workspace:*",
-    "@neutronai/trident": "workspace:*",
     "@neutronai/watchdog": "workspace:*"
   }
 }

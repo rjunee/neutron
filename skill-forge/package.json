@@ -4,6 +4,9 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
-    "@neutronai/persistence": "workspace:*"
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
+    "@neutronai/tools": "workspace:*"
   }
 }

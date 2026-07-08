@@ -14,9 +14,12 @@
   },
   "private": true,
   "dependencies": {
-    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/auth": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
+    "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/cron": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*",
     "@neutronai/reminders": "workspace:*",
     "@neutronai/tasks": "workspace:*"
   },
@@ -25,7 +28,9 @@
       "read:reminders_core.db",
       "write:reminders_core.db"
     ],
-    "tier_support": ["regular"],
+    "tier_support": [
+      "regular"
+    ],
     "tools": [
       {
         "name": "reminders_create",
@@ -33,21 +38,51 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "message":    { "type": "string", "description": "Reminder body — composed verbatim or wrapped by the fire-time agent." },
-            "fire_at":    { "type": "number", "description": "Unix seconds (UTC) when the reminder should fire (the FIRST occurrence when recurring)." },
-            "project_id": { "type": "string", "description": "Optional project scope; persisted as topic_id under the hood." },
-            "recurrence": { "type": "string", "enum": ["weekly", "monthly", "occasional"], "description": "Optional COARSE cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. For exact wall-clock cadences (daily at 9am, weekdays, annually) use `recurrence_spec` instead. Mutually exclusive with recurrence_spec." },
-            "recurrence_spec": { "type": "string", "description": "Optional FAITHFUL cron cadence — a standard 5-field cron expression (minute hour day-of-month month day-of-week). Examples: '0 9 * * *' = daily 09:00, '0 9 * * 1-5' = weekdays 09:00, '0 9 7 2 *' = annually on Feb 7, '0 */6 * * *' = every 6 hours. Wall-clock and DST-correct. Mutually exclusive with recurrence." }
+            "message": {
+              "type": "string",
+              "description": "Reminder body — composed verbatim or wrapped by the fire-time agent."
+            },
+            "fire_at": {
+              "type": "number",
+              "description": "Unix seconds (UTC) when the reminder should fire (the FIRST occurrence when recurring)."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope; persisted as topic_id under the hood."
+            },
+            "recurrence": {
+              "type": "string",
+              "enum": [
+                "weekly",
+                "monthly",
+                "occasional"
+              ],
+              "description": "Optional COARSE cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. For exact wall-clock cadences (daily at 9am, weekdays, annually) use `recurrence_spec` instead. Mutually exclusive with recurrence_spec."
+            },
+            "recurrence_spec": {
+              "type": "string",
+              "description": "Optional FAITHFUL cron cadence — a standard 5-field cron expression (minute hour day-of-month month day-of-week). Examples: '0 9 * * *' = daily 09:00, '0 9 * * 1-5' = weekdays 09:00, '0 9 7 2 *' = annually on Feb 7, '0 */6 * * *' = every 6 hours. Wall-clock and DST-correct. Mutually exclusive with recurrence."
+            }
           },
-          "required": ["message", "fire_at"]
+          "required": [
+            "message",
+            "fire_at"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "id":      { "type": "string" },
-            "fire_at": { "type": "number" }
+            "id": {
+              "type": "string"
+            },
+            "fire_at": {
+              "type": "number"
+            }
           },
-          "required": ["id", "fire_at"]
+          "required": [
+            "id",
+            "fire_at"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       },
@@ -57,9 +92,21 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "limit":      { "type": "integer", "description": "Maximum number of reminders to return. Backend default applies when omitted." },
-            "project_id": { "type": "string", "description": "Optional project scope; matched against the row's topic_id." },
-            "status":     { "type": "string", "enum": ["pending"], "description": "v1 only supports 'pending'. fired/cancelled history is not yet exposed; the field stays for forward-compat." }
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of reminders to return. Backend default applies when omitted."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope; matched against the row's topic_id."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending"
+              ],
+              "description": "v1 only supports 'pending'. fired/cancelled history is not yet exposed; the field stays for forward-compat."
+            }
           }
         },
         "output_schema": {
@@ -70,17 +117,38 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "id":         { "type": "string" },
-                  "message":    { "type": "string" },
-                  "fire_at":    { "type": "number" },
-                  "status":     { "type": "string" },
-                  "project_id": { "type": ["string", "null"] }
+                  "id": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "fire_at": {
+                    "type": "number"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "project_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
                 },
-                "required": ["id", "message", "fire_at", "status", "project_id"]
+                "required": [
+                  "id",
+                  "message",
+                  "fire_at",
+                  "status",
+                  "project_id"
+                ]
               }
             }
           },
-          "required": ["results"]
+          "required": [
+            "results"
+          ]
         },
         "capability_required": "read:reminders_core.db"
       },
@@ -90,19 +158,40 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "id":          { "type": "string", "description": "Pending reminder id to snooze." },
-            "new_fire_at": { "type": "number", "description": "Unix seconds (UTC) for the new fire time." }
+            "id": {
+              "type": "string",
+              "description": "Pending reminder id to snooze."
+            },
+            "new_fire_at": {
+              "type": "number",
+              "description": "Unix seconds (UTC) for the new fire time."
+            }
           },
-          "required": ["id", "new_fire_at"]
+          "required": [
+            "id",
+            "new_fire_at"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "id":               { "type": "string", "description": "Id of the newly-created reminder carrying the new fire_at." },
-            "cancelled_id":     { "type": "string", "description": "Id of the original reminder that was cancelled." },
-            "fire_at":          { "type": "number" }
+            "id": {
+              "type": "string",
+              "description": "Id of the newly-created reminder carrying the new fire_at."
+            },
+            "cancelled_id": {
+              "type": "string",
+              "description": "Id of the original reminder that was cancelled."
+            },
+            "fire_at": {
+              "type": "number"
+            }
           },
-          "required": ["id", "cancelled_id", "fire_at"]
+          "required": [
+            "id",
+            "cancelled_id",
+            "fire_at"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       },
@@ -112,16 +201,25 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Reminder id to cancel." }
+            "id": {
+              "type": "string",
+              "description": "Reminder id to cancel."
+            }
           },
-          "required": ["id"]
+          "required": [
+            "id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" }
+            "ok": {
+              "type": "boolean"
+            }
           },
-          "required": ["ok"]
+          "required": [
+            "ok"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       },
@@ -131,21 +229,48 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "id": { "type": "string", "description": "Pending reminder id to convert." },
-            "project_id": { "type": "string", "description": "Optional project scope for the new task. Defaults to the reminder's project." },
-            "priority": { "type": "integer", "description": "Optional priority 0..3 (3 = highest)." },
-            "title": { "type": "string", "description": "Optional title override; falls back to the reminder's message." }
+            "id": {
+              "type": "string",
+              "description": "Pending reminder id to convert."
+            },
+            "project_id": {
+              "type": "string",
+              "description": "Optional project scope for the new task. Defaults to the reminder's project."
+            },
+            "priority": {
+              "type": "integer",
+              "description": "Optional priority 0..3 (3 = highest)."
+            },
+            "title": {
+              "type": "string",
+              "description": "Optional title override; falls back to the reminder's message."
+            }
           },
-          "required": ["id"]
+          "required": [
+            "id"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "task_id": { "type": "string" },
-            "linked_reminder_id": { "type": ["string", "null"] },
-            "cancelled_reminder_id": { "type": "string" }
+            "task_id": {
+              "type": "string"
+            },
+            "linked_reminder_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cancelled_reminder_id": {
+              "type": "string"
+            }
           },
-          "required": ["task_id", "linked_reminder_id", "cancelled_reminder_id"]
+          "required": [
+            "task_id",
+            "linked_reminder_id",
+            "cancelled_reminder_id"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       },
@@ -155,19 +280,41 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "id":      { "type": "string", "description": "Pending reminder id to rewrite." },
-            "message": { "type": "string", "description": "New message body. Replaces the original verbatim." }
+            "id": {
+              "type": "string",
+              "description": "Pending reminder id to rewrite."
+            },
+            "message": {
+              "type": "string",
+              "description": "New message body. Replaces the original verbatim."
+            }
           },
-          "required": ["id", "message"]
+          "required": [
+            "id",
+            "message"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "id":          { "type": "string", "description": "Id of the new reminder carrying the new message." },
-            "replaced_id": { "type": "string", "description": "Id of the original reminder that was cancelled." },
-            "message":     { "type": "string", "description": "The new message body (echoed for confirmation)." }
+            "id": {
+              "type": "string",
+              "description": "Id of the new reminder carrying the new message."
+            },
+            "replaced_id": {
+              "type": "string",
+              "description": "Id of the original reminder that was cancelled."
+            },
+            "message": {
+              "type": "string",
+              "description": "The new message body (echoed for confirmation)."
+            }
           },
-          "required": ["id", "replaced_id", "message"]
+          "required": [
+            "id",
+            "replaced_id",
+            "message"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       }
@@ -187,7 +334,11 @@
     "billing_hooks": [],
     "linked_sources": [],
     "secrets": [],
-    "compat": { "coreApi": "^0.1.0" },
-    "build": { "neutronVersion": "0.1.0" }
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.1.0"
+    }
   }
 }

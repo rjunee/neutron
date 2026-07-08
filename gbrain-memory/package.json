@@ -4,7 +4,11 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/mcp": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/tools": "workspace:*"
   },
   "devDependencies": {
     "gbrain": "github:garrytan/gbrain#8058144"

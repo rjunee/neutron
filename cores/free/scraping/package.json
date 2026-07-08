@@ -11,12 +11,19 @@
   },
   "private": true,
   "dependencies": {
+    "@neutronai/cores-runtime": "workspace:*",
     "@neutronai/cores-sdk": "workspace:*",
-    "@neutronai/cores-runtime": "workspace:*"
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*"
   },
   "neutron": {
-    "capabilities": ["network:browse"],
-    "tier_support": ["regular", "private"],
+    "capabilities": [
+      "network:browse"
+    ],
+    "tier_support": [
+      "regular",
+      "private"
+    ],
     "tools": [
       {
         "name": "scrape_instagram",
@@ -30,26 +37,50 @@
             },
             "mode": {
               "type": "string",
-              "enum": ["json", "caption", "summary"],
+              "enum": [
+                "json",
+                "caption",
+                "summary"
+              ],
               "description": "Output shape. `json` = full dataset item (default); `caption` = caption text only; `summary` = human-readable digest with engagement counts."
             }
           },
-          "required": ["url"]
+          "required": [
+            "url"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "platform": { "type": "string" },
-            "mode": { "type": "string" },
-            "url": { "type": "string" },
-            "text": { "type": "string" },
+            "ok": {
+              "type": "boolean"
+            },
+            "platform": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
             "data": {},
-            "code": { "type": "string" },
-            "message": { "type": "string" },
-            "guidance": { "type": "string" }
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "guidance": {
+              "type": "string"
+            }
           },
-          "required": ["ok"]
+          "required": [
+            "ok"
+          ]
         },
         "capability_required": "network:browse"
       },
@@ -65,7 +96,12 @@
             },
             "mode": {
               "type": "string",
-              "enum": ["json", "text", "summary", "article"],
+              "enum": [
+                "json",
+                "text",
+                "summary",
+                "article"
+              ],
               "description": "Output shape. `json` = full dataset items (default); `text` = handle + timestamp + body; `summary` = digest with engagement counts; `article` = X long-form Article body as markdown (URL must be the share-tweet URL, not /i/article/<id>)."
             },
             "thread": {
@@ -73,22 +109,42 @@
               "description": "When true, fetch the full conversation and return only the original author's tweets (keeps the thread coherent). Ignored in `article` mode."
             }
           },
-          "required": ["url"]
+          "required": [
+            "url"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "platform": { "type": "string" },
-            "mode": { "type": "string" },
-            "url": { "type": "string" },
-            "text": { "type": "string" },
+            "ok": {
+              "type": "boolean"
+            },
+            "platform": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
             "data": {},
-            "code": { "type": "string" },
-            "message": { "type": "string" },
-            "guidance": { "type": "string" }
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "guidance": {
+              "type": "string"
+            }
           },
-          "required": ["ok"]
+          "required": [
+            "ok"
+          ]
         },
         "capability_required": "network:browse"
       }
@@ -106,7 +162,11 @@
         "install_prompt": "Paste your Apify API token (https://apify.com — free tier ~2000 results/month, no card). Optional: without it, Instagram/X scraping stays hidden and no-ops. Find it under Apify Console → Settings → Integrations → API token."
       }
     ],
-    "compat": { "coreApi": "^0.1.0" },
-    "build": { "neutronVersion": "0.2.0" }
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.2.0"
+    }
   }
 }

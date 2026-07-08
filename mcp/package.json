@@ -4,9 +4,10 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
-    "@neutronai/core-sdk": "workspace:*",
-    "@neutronai/tools": "workspace:*",
     "@neutronai/channels": "workspace:*",
-    "@neutronai/runtime": "workspace:*"
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/gbrain-memory": "workspace:*",
+    "@neutronai/tools": "workspace:*"
   }
 }

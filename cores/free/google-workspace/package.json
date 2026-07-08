@@ -11,9 +11,10 @@
   },
   "private": true,
   "dependencies": {
-    "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/cores-runtime": "workspace:*",
-    "@neutronai/runtime": "workspace:*"
+    "@neutronai/cores-sdk": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/persistence": "workspace:*"
   },
   "neutron": {
     "capabilities": [
@@ -24,7 +25,9 @@
       "read:google_workspace_core.docs",
       "write:google_workspace_core.docs"
     ],
-    "tier_support": ["regular"],
+    "tier_support": [
+      "regular"
+    ],
     "tools": [
       {
         "name": "drive_list",
@@ -32,10 +35,22 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string", "description": "Drive v3 `q` filter (e.g. \"name contains 'report' and trashed = false\"). When omitted, lists non-trashed files." },
-            "folder_id": { "type": "string", "description": "Restrict the listing to direct children of this Drive folder id." },
-            "page_size": { "type": "integer", "description": "Maximum files to return. Backend default applies when omitted." },
-            "page_token": { "type": "string", "description": "Opaque cursor returned by a prior call. Omit on the first page." }
+            "query": {
+              "type": "string",
+              "description": "Drive v3 `q` filter (e.g. \"name contains 'report' and trashed = false\"). When omitted, lists non-trashed files."
+            },
+            "folder_id": {
+              "type": "string",
+              "description": "Restrict the listing to direct children of this Drive folder id."
+            },
+            "page_size": {
+              "type": "integer",
+              "description": "Maximum files to return. Backend default applies when omitted."
+            },
+            "page_token": {
+              "type": "string",
+              "description": "Opaque cursor returned by a prior call. Omit on the first page."
+            }
           }
         },
         "output_schema": {
@@ -46,19 +61,44 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "id":            { "type": "string" },
-                  "name":          { "type": "string" },
-                  "mime_type":     { "type": "string" },
-                  "modified_time": { "type": "string", "description": "ISO-8601 RFC 3339 modifiedTime." },
-                  "size":          { "type": ["integer", "null"], "description": "Byte size; null for Google-native files (Docs/Sheets) which report no size." },
-                  "web_view_link": { "type": "string" }
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "mime_type": {
+                    "type": "string"
+                  },
+                  "modified_time": {
+                    "type": "string",
+                    "description": "ISO-8601 RFC 3339 modifiedTime."
+                  },
+                  "size": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Byte size; null for Google-native files (Docs/Sheets) which report no size."
+                  },
+                  "web_view_link": {
+                    "type": "string"
+                  }
                 },
-                "required": ["id", "name", "mime_type"]
+                "required": [
+                  "id",
+                  "name",
+                  "mime_type"
+                ]
               }
             },
-            "next_page_token": { "type": "string" }
+            "next_page_token": {
+              "type": "string"
+            }
           },
-          "required": ["files"]
+          "required": [
+            "files"
+          ]
         },
         "capability_required": "read:google_workspace_core.drive"
       },
@@ -68,10 +108,17 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "file_id":          { "type": "string" },
-            "export_mime_type": { "type": "string", "description": "Override the export MIME type for Google-native files (e.g. 'text/csv', 'text/plain', 'text/markdown')." }
+            "file_id": {
+              "type": "string"
+            },
+            "export_mime_type": {
+              "type": "string",
+              "description": "Override the export MIME type for Google-native files (e.g. 'text/csv', 'text/plain', 'text/markdown')."
+            }
           },
-          "required": ["file_id"]
+          "required": [
+            "file_id"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -79,16 +126,38 @@
             "file": {
               "type": "object",
               "properties": {
-                "id":            { "type": "string" },
-                "name":          { "type": "string" },
-                "mime_type":     { "type": "string" },
-                "content_text":  { "type": "string", "description": "Exported / downloaded UTF-8 text content." },
-                "exported_as":   { "type": ["string", "null"], "description": "The export MIME type used for Google-native files; null for direct-download files." }
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "content_text": {
+                  "type": "string",
+                  "description": "Exported / downloaded UTF-8 text content."
+                },
+                "exported_as": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The export MIME type used for Google-native files; null for direct-download files."
+                }
               },
-              "required": ["id", "name", "mime_type", "content_text"]
+              "required": [
+                "id",
+                "name",
+                "mime_type",
+                "content_text"
+              ]
             }
           },
-          "required": ["file"]
+          "required": [
+            "file"
+          ]
         },
         "capability_required": "read:google_workspace_core.drive"
       },
@@ -98,12 +167,27 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "name":      { "type": "string" },
-            "mime_type": { "type": "string", "description": "MIME type to store the file as (e.g. 'text/plain', 'text/csv', 'text/markdown')." },
-            "content":   { "type": "string", "description": "UTF-8 text body of the new file." },
-            "folder_id": { "type": "string", "description": "Optional parent folder id. When omitted, the file lands in My Drive root." }
+            "name": {
+              "type": "string"
+            },
+            "mime_type": {
+              "type": "string",
+              "description": "MIME type to store the file as (e.g. 'text/plain', 'text/csv', 'text/markdown')."
+            },
+            "content": {
+              "type": "string",
+              "description": "UTF-8 text body of the new file."
+            },
+            "folder_id": {
+              "type": "string",
+              "description": "Optional parent folder id. When omitted, the file lands in My Drive root."
+            }
           },
-          "required": ["name", "mime_type", "content"]
+          "required": [
+            "name",
+            "mime_type",
+            "content"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -111,15 +195,29 @@
             "file": {
               "type": "object",
               "properties": {
-                "id":            { "type": "string" },
-                "name":          { "type": "string" },
-                "mime_type":     { "type": "string" },
-                "web_view_link": { "type": "string" }
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "web_view_link": {
+                  "type": "string"
+                }
               },
-              "required": ["id", "name", "mime_type"]
+              "required": [
+                "id",
+                "name",
+                "mime_type"
+              ]
             }
           },
-          "required": ["file"]
+          "required": [
+            "file"
+          ]
         },
         "capability_required": "write:google_workspace_core.drive"
       },
@@ -129,21 +227,40 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "spreadsheet_id": { "type": "string" },
-            "range":          { "type": "string", "description": "A1 notation (e.g. 'Sheet1!A1:C10' or 'Sheet1')." }
+            "spreadsheet_id": {
+              "type": "string"
+            },
+            "range": {
+              "type": "string",
+              "description": "A1 notation (e.g. 'Sheet1!A1:C10' or 'Sheet1')."
+            }
           },
-          "required": ["spreadsheet_id", "range"]
+          "required": [
+            "spreadsheet_id",
+            "range"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "range":  { "type": "string", "description": "The A1 range the API actually resolved." },
+            "range": {
+              "type": "string",
+              "description": "The A1 range the API actually resolved."
+            },
             "values": {
               "type": "array",
-              "items": { "type": "array", "items": { "type": "string" } }
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           },
-          "required": ["range", "values"]
+          "required": [
+            "range",
+            "values"
+          ]
         },
         "capability_required": "read:google_workspace_core.sheets"
       },
@@ -153,24 +270,48 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "spreadsheet_id": { "type": "string" },
-            "range":          { "type": "string", "description": "A1 notation of the table to append to (e.g. 'Sheet1!A1')." },
+            "spreadsheet_id": {
+              "type": "string"
+            },
+            "range": {
+              "type": "string",
+              "description": "A1 notation of the table to append to (e.g. 'Sheet1!A1')."
+            },
             "values": {
               "type": "array",
               "description": "Rows to append; each row is an array of cell values.",
-              "items": { "type": "array", "items": { "type": "string" } }
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           },
-          "required": ["spreadsheet_id", "range", "values"]
+          "required": [
+            "spreadsheet_id",
+            "range",
+            "values"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "updated_range": { "type": "string" },
-            "updated_rows":  { "type": "integer" },
-            "updated_cells": { "type": "integer" }
+            "updated_range": {
+              "type": "string"
+            },
+            "updated_rows": {
+              "type": "integer"
+            },
+            "updated_cells": {
+              "type": "integer"
+            }
           },
-          "required": ["updated_range", "updated_rows", "updated_cells"]
+          "required": [
+            "updated_range",
+            "updated_rows",
+            "updated_cells"
+          ]
         },
         "capability_required": "write:google_workspace_core.sheets"
       },
@@ -180,24 +321,48 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "spreadsheet_id": { "type": "string" },
-            "range":          { "type": "string", "description": "A1 notation anchoring the top-left of the write (e.g. 'Sheet1!A1:C3')." },
+            "spreadsheet_id": {
+              "type": "string"
+            },
+            "range": {
+              "type": "string",
+              "description": "A1 notation anchoring the top-left of the write (e.g. 'Sheet1!A1:C3')."
+            },
             "values": {
               "type": "array",
               "description": "Rows to write; each row is an array of cell values.",
-              "items": { "type": "array", "items": { "type": "string" } }
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           },
-          "required": ["spreadsheet_id", "range", "values"]
+          "required": [
+            "spreadsheet_id",
+            "range",
+            "values"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "updated_range": { "type": "string" },
-            "updated_rows":  { "type": "integer" },
-            "updated_cells": { "type": "integer" }
+            "updated_range": {
+              "type": "string"
+            },
+            "updated_rows": {
+              "type": "integer"
+            },
+            "updated_cells": {
+              "type": "integer"
+            }
           },
-          "required": ["updated_range", "updated_rows", "updated_cells"]
+          "required": [
+            "updated_range",
+            "updated_rows",
+            "updated_cells"
+          ]
         },
         "capability_required": "write:google_workspace_core.sheets"
       },
@@ -207,9 +372,13 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "document_id": { "type": "string" }
+            "document_id": {
+              "type": "string"
+            }
           },
-          "required": ["document_id"]
+          "required": [
+            "document_id"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -217,14 +386,26 @@
             "document": {
               "type": "object",
               "properties": {
-                "document_id": { "type": "string" },
-                "title":       { "type": "string" },
-                "body_text":   { "type": "string" }
+                "document_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "body_text": {
+                  "type": "string"
+                }
               },
-              "required": ["document_id", "title", "body_text"]
+              "required": [
+                "document_id",
+                "title",
+                "body_text"
+              ]
             }
           },
-          "required": ["document"]
+          "required": [
+            "document"
+          ]
         },
         "capability_required": "read:google_workspace_core.docs"
       },
@@ -234,18 +415,32 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "title": { "type": "string" },
-            "body":  { "type": "string", "description": "Optional initial text body inserted at the top of the new document." }
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string",
+              "description": "Optional initial text body inserted at the top of the new document."
+            }
           },
-          "required": ["title"]
+          "required": [
+            "title"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "document_id": { "type": "string" },
-            "title":       { "type": "string" }
+            "document_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
           },
-          "required": ["document_id", "title"]
+          "required": [
+            "document_id",
+            "title"
+          ]
         },
         "capability_required": "write:google_workspace_core.docs"
       },
@@ -255,19 +450,37 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "document_id": { "type": "string" },
-            "text":        { "type": "string", "description": "Text to insert." },
-            "index":       { "type": "integer", "description": "Optional 1-based insertion offset. When omitted, text is appended at the end of the document body." }
+            "document_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert."
+            },
+            "index": {
+              "type": "integer",
+              "description": "Optional 1-based insertion offset. When omitted, text is appended at the end of the document body."
+            }
           },
-          "required": ["document_id", "text"]
+          "required": [
+            "document_id",
+            "text"
+          ]
         },
         "output_schema": {
           "type": "object",
           "properties": {
-            "document_id":   { "type": "string" },
-            "replies_count": { "type": "integer" }
+            "document_id": {
+              "type": "string"
+            },
+            "replies_count": {
+              "type": "integer"
+            }
           },
-          "required": ["document_id", "replies_count"]
+          "required": [
+            "document_id",
+            "replies_count"
+          ]
         },
         "capability_required": "write:google_workspace_core.docs"
       }
@@ -278,7 +491,9 @@
       {
         "kind": "google-drive",
         "scope": "read_write",
-        "target_kinds": ["user"],
+        "target_kinds": [
+          "user"
+        ],
         "description": "Google Drive v3 + Sheets v4 + Docs v1 — list/read/upload Drive files, read/append/update Sheet ranges, read/create/update Docs on the user's account. The Core requests THREE Google OAuth scopes under one grant: `drive` (Drive file read + create), `spreadsheets` (Sheets read/append/update), and `documents` (Docs read/create/update)."
       }
     ],
@@ -292,7 +507,11 @@
         "install_prompt": "Connect your Google account so Neutron can read and create files in Drive (drive), read and write Sheets (spreadsheets), and read and edit Docs (documents)."
       }
     ],
-    "compat": { "coreApi": "^0.1.0" },
-    "build": { "neutronVersion": "0.1.0" }
+    "compat": {
+      "coreApi": "^0.1.0"
+    },
+    "build": {
+      "neutronVersion": "0.1.0"
+    }
   }
 }

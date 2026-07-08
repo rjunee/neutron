@@ -5,7 +5,16 @@
   "private": true,
   "dependencies": {
     "@neutronai/channels": "workspace:*",
+    "@neutronai/contracts": "workspace:*",
+    "@neutronai/cron": "workspace:*",
+    "@neutronai/gateway": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
+    "@neutronai/onboarding": "workspace:*",
     "@neutronai/persistence": "workspace:*",
+    "@neutronai/reminders": "workspace:*",
+    "@neutronai/runtime": "workspace:*",
+    "@neutronai/tasks": "workspace:*",
+    "@neutronai/trident": "workspace:*",
     "jose": "^5.9.0"
   }
 }

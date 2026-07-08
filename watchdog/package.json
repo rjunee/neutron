@@ -4,9 +4,10 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
+    "@neutronai/cron": "workspace:*",
+    "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/runtime": "workspace:*",
-    "@neutronai/cron": "workspace:*",
     "@neutronai/tools": "workspace:*"
   }
 }
