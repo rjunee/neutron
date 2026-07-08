@@ -4044,7 +4044,7 @@ leaf `tsc -p landing/chat-react/tsconfig.json` both clean; `bun test
 landing/chat-react` green (38 pass). The full suite runs in CI. Vanilla stays the
 default behind the flag.
 
-## 2026-06-21 — Track B Phase 4 (slice 3): message reactions over `@neutron/chat-core`
+## 2026-06-21 — Track B Phase 4 (slice 3): message reactions over `@neutronai/chat-core`
 
 **What shipped.** Per-message emoji reactions across the web + mobile chat stack,
 built ON the existing chat-core engine (NO fork of the sync engine), MIRRORING
@@ -4126,7 +4126,7 @@ reaction persistence + cold-reopen), and a happy-dom `component.test.tsx` that
 asserts a chip reaches the real assistant-ui DOM. Root + all leaf tsc clean;
 full `bun test` green.
 
-## 2026-06-21 — Track B Phase 4 (slice 2): delivery + read receipts over `@neutron/chat-core`
+## 2026-06-21 — Track B Phase 4 (slice 2): delivery + read receipts over `@neutronai/chat-core`
 
 **What shipped.** A per-message delivery ladder — `pending → sent → delivered →
 read` — across the web + mobile chat stack, built ON the existing chat-core
@@ -4441,7 +4441,7 @@ first cut had regressed into a 120s loop) stays green.
 
 **What shipped.** Full-text search over CHAT MESSAGE history — the complement to
 the just-merged doc search (#18, over project markdown). The user and the live
-agent can now search their conversations. The index lives in the `@neutron/chat-core`
+agent can now search their conversations. The index lives in the `@neutronai/chat-core`
 **Store** (the seam the sync engine + send-queue already depend on), so search
 rides BOTH durable backends without forking the engine.
 
@@ -4702,7 +4702,7 @@ the Obsidian `obs.*` redirector confirmation (the other half of gap-audit cat 13
 
 **Problem.** The parity-research doc (`web-chat-telegram-parity-architecture-
 2026-06-20`) ranks the web chat as "nowhere near Telegram." Phase 1 shipped the
-hard part — `@neutron/chat-core` (WS client + send-queue + append-only sync
+hard part — `@neutronai/chat-core` (WS client + send-queue + append-only sync
 engine + local Store) on the app-ws surface with a monotonic `seq` + resume.
 Phase 3 is the largest/riskiest chunk: replace the 4.5k-line bespoke vanilla-TS
 web client with the locked stack (**React + `@assistant-ui/react`, MIT, bring-
@@ -5711,9 +5711,9 @@ list, now Calendar + Email + Google Workspace).
 (`cores-composition`, `cores-surface`, `cores-oauth-surface`, install-lifecycle).
 
 
-## 2026-06-20 — Mobile chat Phase 2: Telegram-grade RN chat over @neutron/chat-core (WAVE 2 Track B)
+## 2026-06-20 — Mobile chat Phase 2: Telegram-grade RN chat over @neutronai/chat-core (WAVE 2 Track B)
 
-Builds on Phase 1 (#6 — server `seq`/resume/multi-device + the `@neutron/chat-core`
+Builds on Phase 1 (#6 — server `seq`/resume/multi-device + the `@neutronai/chat-core`
 engine). Phase 2 gives the Expo/RN app durable local persistence, offline send,
 gap-free reconnect, instant cold-open, foreground push catch-up, and a Telegram-grade
 FlashList v2 UI — all by REUSING the existing chat-core engine, not re-implementing
@@ -5724,7 +5724,7 @@ at the end of this entry for the Argus-driven corrections.
 
 **1. RN local store — op-sqlite behind the chat-core `Store` seam.**
 - `app/lib/chat-core/sqlite-store.ts` — `SqliteChatStore implements Store` (the
-  `@neutron/chat-core` interface). Driver-agnostic: it talks to a minimal async
+  `@neutronai/chat-core` interface). Driver-agnostic: it talks to a minimal async
   `SqliteExecutor`, not to op-sqlite directly, so the SAME class is verified on a
   REAL SQLite engine (`bun:sqlite`) in the unit suite and runs on op-sqlite on
   device. It is the op-sqlite analog of chat-core's OPFS web store.
@@ -5774,8 +5774,8 @@ at the end of this entry for the Argus-driven corrections.
 
 **4. Build plumbing.**
 - `app/metro.config.js` — monorepo Metro config (watch the repo root + resolve from
-  both node_modules) so the app bundles the workspace `@neutron/chat-core` source.
-- `app/package.json` — adds `@neutron/chat-core` (workspace), `@op-engineering/op-sqlite@17.0.0`,
+  both node_modules) so the app bundles the workspace `@neutronai/chat-core` source.
+- `app/package.json` — adds `@neutronai/chat-core` (workspace), `@op-engineering/op-sqlite@17.0.0`,
   `@shopify/flash-list@2.3.2`. `app/tsconfig.json` — `allowImportingTsExtensions`
   (chat-core is consumed as raw TS with `.ts` import specifiers; noEmit already set).
 - op-sqlite + FlashList v2 both require the New Architecture, already on
@@ -5988,7 +5988,7 @@ exactly as documented in §2 of the entry below. That boot is **out of scope for
 this public PR** (brief: OPEN-repo only, never touch managed). The open-repo half
 of the wiring — the adapter's optional `chat_log` seam, graceful degrade when
 absent, and the `createWebStore()` OPFS-or-in-memory web store — is complete and
-tested here. The one open-repo loose end (a speculative unused `@neutron/chat-core`
+tested here. The one open-repo loose end (a speculative unused `@neutronai/chat-core`
 dep on `landing/package.json`) is removed (see the web-wiring note below).
 
 **Cross-model review (Codex/GPT-5) — one fix taken, three follow-ups logged.**
@@ -6026,7 +6026,7 @@ Argus's blocking set). Triaged:
   web+native account gets one device's links in the wrong scheme. Needs
   per-device envelope encoding in the registry fan-out; deferred (P2).
 
-## 2026-06-21 — Chat-sync foundation (Phase 1): server `seq`/`resume`/multi-device + `@neutron/chat-core`
+## 2026-06-21 — Chat-sync foundation (Phase 1): server `seq`/`resume`/multi-device + `@neutronai/chat-core`
 
 The first phase of web↔mobile Telegram-parity (research:
 `web-chat-telegram-parity-architecture-2026-06-20`). Delivers the defining
@@ -6062,7 +6062,7 @@ identity-aware per-device unregister, and a dead-socket sweep that never aborts
 the fan-out. Combined with per-client `seq` cursors, web + phone converge on
 one transcript.
 
-**4. `@neutron/chat-core` — transport-agnostic client lib (new workspace).**
+**4. `@neutronai/chat-core` — transport-agnostic client lib (new workspace).**
 The shared logic the web (and, Phase 2, mobile) clients consume:
 - `Store` interface + `InMemoryStore` (ordering: by `seq`, never clock;
   optimistic tail last) and an OPFS-backed `OpfsChatStore` with
@@ -6086,7 +6086,7 @@ surface, the chat-core integration is delivered as the fully-tested
 `WebChatSession` composition (consumed by the seq-aware app web client).
 Repointing `landing/chat.ts` itself — and adopting `createWebStore()` there — is
 deferred to the Phase-3 web UI uplift, where the client is migrated anyway.
-(Fix-round: the speculative `@neutron/chat-core` dep that had been added to
+(Fix-round: the speculative `@neutronai/chat-core` dep that had been added to
 `landing/package.json` was removed — `landing/` imports nothing from chat-core,
 so the declaration was a decoupled artifact that bundled nothing; it'll be added
 back when the client is actually migrated. Argus BLOCKING #2.)

@@ -19,7 +19,7 @@
 -- `topic_id`; the value is stamped on the outbound WS envelope and a client
 -- replays the gap with `{ type:'resume', after_seq:N }` →
 -- `WHERE topic_id = ? AND seq > ? ORDER BY seq`. This is the server half of
--- the hand-rolled append-only sync engine (see `@neutron/chat-core`): the
+-- the hand-rolled append-only sync engine (see `@neutronai/chat-core`): the
 -- doc's "server-assigned monotonic seq + per-client cursor + idempotent
 -- send-queue keyed by client_msg_id" shape.
 --

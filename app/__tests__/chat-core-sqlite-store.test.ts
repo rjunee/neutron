@@ -14,7 +14,7 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, it } from 'bun:test';
 
-import type { ChatMessage } from '@neutron/chat-core';
+import type { ChatMessage } from '@neutronai/chat-core';
 
 import {
   SqliteChatStore,

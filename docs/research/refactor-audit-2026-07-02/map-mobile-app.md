@@ -4,7 +4,7 @@ Audit date: 2026-07-02. All paths relative to `/Users/ryan/repos/neutron-open` u
 
 ## 1. Purpose & responsibilities
 
-`app/` is the Expo (React Native + react-native-web) client — the primary product surface for a Neutron Open install. It renders login/OAuth handoff, a Focus screen, the projects list, per-project tabs (Chat, Apps/launcher, Tasks, Reminders, Docs, Work Board, Backups, Settings, Core webviews), global Settings/Integrations, and an Admin console (persona editor, gateway restart, memory, cores, project backup, Max-account reauth). It consumes the gateway exclusively over `/api/app/*` HTTP + `/ws/app/chat` WS; the chat transport/sync engine is the shared `@neutron/chat-core` workspace package ("share logic, not views" — `app/lib/chat-core/mobile-session.ts:1-34`).
+`app/` is the Expo (React Native + react-native-web) client — the primary product surface for a Neutron Open install. It renders login/OAuth handoff, a Focus screen, the projects list, per-project tabs (Chat, Apps/launcher, Tasks, Reminders, Docs, Work Board, Backups, Settings, Core webviews), global Settings/Integrations, and an Admin console (persona editor, gateway restart, memory, cores, project backup, Max-account reauth). It consumes the gateway exclusively over `/api/app/*` HTTP + `/ws/app/chat` WS; the chat transport/sync engine is the shared `@neutronai/chat-core` workspace package ("share logic, not views" — `app/lib/chat-core/mobile-session.ts:1-34`).
 
 ## 2. Module inventory
 
@@ -45,13 +45,13 @@ Big ones: `ProjectSettingsDrawer.tsx` 1,298 (settings sections + Connect members
 1. **Gateway `/api/app/*` HTTP surface** (bearer token from login). Endpoints observed in `lib/*-client.ts`: `/api/app/projects[/<id>/{settings,tabs,tasks,reminders,launcher,docs/*,work-board*,backups,restore,invite,credentials*,connect-members*,connect-invites}]`, `/api/app/{focus,focus/current}`, `/api/app/admin/{connectors,memory,gateway/restart,project-backup/*,max-oauth/mint-reauth-token}`, `/api/app/persona/*`, `/api/app/devices/{register,unregister}`, `/api/app/upload*`, `/api/app/chat/send`.
 2. **`/ws/app/chat`** per-user topic `app:<user_id>` (`components/ChatSyncSurface.tsx:117`), frame shapes mirrored in `lib/ws-envelope.ts` ← `channels/adapters/app-ws/envelope.ts` (parity test `app/__tests__/ws-envelope-parity.test.ts`).
 3. **Tabs resolver**: `GET /api/app/projects/<id>/tabs` — the engine (`tabs/registry.ts` + `gateway/http/app-tabs-surface.ts`) is declared the single source of truth; `lib/tabs-client.ts:8-24` re-declares its wire types "byte-for-byte"; `lib/project-tabs.ts` maps descriptors → expo-router routes; hardcoded `PROJECT_TABS` survives only as pre-fetch fallback (`lib/project-tabs.ts:37-51`).
-4. **`@neutron/chat-core`** — the ONLY workspace dependency (`app/package.json:16`), consumed as raw TS source via `allowImportingTsExtensions` (`app/tsconfig.json`) + metro monorepo wiring (`app/metro.config.js`).
+4. **`@neutronai/chat-core`** — the ONLY workspace dependency (`app/package.json:16`), consumed as raw TS source via `allowImportingTsExtensions` (`app/tsconfig.json`) + metro monorepo wiring (`app/metro.config.js`).
 5. **Deep-link scheme** `neutron://docs/<project_id>/<path>?line=N|range=N-M` + web `/projects/<id>/docs?path=…` — producer is `runtime/doc-links.ts`, consumer is `app/_layout.tsx:36-59` via the mirror `lib/doc-links.ts` (parity test lives gateway-side: `gateway/__tests__/doc-links-parity.test.ts` per `lib/doc-links.ts:7-10`).
 6. **Push payloads** (`expo-notifications`) → `lib/push-deep-link-dispatch.ts` route mapping; device registration via `/api/app/devices/*`.
 
 ## 4. Workspace dependencies
 
-- **Out (package.json)**: `@neutron/chat-core` only. Everything else is Expo/RN ecosystem.
+- **Out (package.json)**: `@neutronai/chat-core` only. Everything else is Expo/RN ecosystem.
 - **Out (actual imports)**: same, PLUS a test-only cross-workspace reach: `app/__tests__/ws-envelope-parity.test.ts:25` and `app/__tests__/chat-retry-reupload-attachments.test.ts` import `../../channels/adapters/app-ws/envelope` directly (works only because bun test runs from the repo root; the app *bundle* stays clean).
 - **In**: none (no other workspace imports `app/`). `landing/chat-react` is a *sibling* re-implementation, not a consumer (§6.2).
 
@@ -61,7 +61,7 @@ Big ones: `ProjectSettingsDrawer.tsx` 1,298 (settings sections + Connect members
 routes (app/app/*)  →  components/  →  lib/*-state.tsx (providers)
                                      →  lib/*-state-reducer.ts (pure)
                                      →  lib/*-client.ts (fetch wrappers)
-                                     →  lib/chat-core/* → @neutron/chat-core
+                                     →  lib/chat-core/* → @neutronai/chat-core
 cross-cutting: lib/{config,session,theme,token-storage,push,doc-links,ws-envelope}
 ```
 Conventions are explicit and mostly honored: reducers/helpers are React-free and RN-free for bun-testability (`lib/project-tabs.ts:4-8`); clients take `{base_url, token}` at construction and are server-authoritative; providers own cancellation. The big exception is the monster routes, which inline all four layers (§6.1).

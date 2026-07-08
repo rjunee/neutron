@@ -3,7 +3,7 @@
  * client (Track B Phase 3).
  *
  * The React surface is the web client that talks to the **app-ws** WebSocket
- * surface (`/ws/app/chat`) through `@neutron/chat-core`'s `WebChatSession` —
+ * surface (`/ws/app/chat`) through `@neutronai/chat-core`'s `WebChatSession` —
  * the Phase-1 transport with a monotonic per-topic `seq` + resume replay. This
  * is now the single unified chat socket (the legacy vanilla client's
  * `/ws/chat` onboarding socket was removed).

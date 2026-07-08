@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core/stores — durable web local store over OPFS.
+ * @neutronai/chat-core/stores — durable web local store over OPFS.
  *
  * Implements the {@link Store} interface against the Origin Private File
  * System (research doc §5 — "wasm-SQLite/OPFS on web"). This is the Phase-1

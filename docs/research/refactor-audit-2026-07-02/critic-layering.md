@@ -277,7 +277,7 @@ Note what this says about the README: **gateway is not a "substrate" module — 
 - **reminders** declares cron+persistence; actually imports channels, core-sdk, **gateway**, **landing**, runtime.
 - **`open/`, `work-board/`, `tabs/`, `project-credentials/` have no package.json at all** and are absent from the root `workspaces` list (package.json:5-46), yet: `open/` is the production composition root (96 relative cross-imports out; imported back by gateway and migrations); `work-board/` is imported by 6+ modules (gateway, trident, agent-dispatch, open, app, landing); `tabs/registry.ts` is the tab source of truth consumed by `gateway/http/app-tabs-surface.ts`. These live implicitly in the *root* package, whose own dependency block (package.json:62-80) is also wrong (missing doc-search, reflection, scribe, tasks, skill-forge that `open/composer.ts` imports).
 - Inverse rot exists too: `cores/free/calendar` and `google-workspace` declare `@neutronai/runtime` and never import it.
-- Naming drift: `chat-core` is `@neutron/chat-core` (not `@neutronai/`); `agent-settings` lacks the `-core` suffix all other Cores carry.
+- Naming drift: `chat-core` is `@neutronai/chat-core` (not `@neutronai/`); `agent-settings` lacks the `-core` suffix all other Cores carry.
 
 Consequences: (a) no tool can compute a real build/typecheck order; (b) extracting ANY package to npm (the stated plan for core-sdk) or into another repo silently breaks; (c) the CI typecheck gap (root tsc include list) is partially *caused* by this — there is no per-package tsc because packages aren't real.
 

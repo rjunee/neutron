@@ -52,7 +52,7 @@ import {
   type ReactionAction,
   type SocketLike,
   type Store,
-} from '@neutron/chat-core';
+} from '@neutronai/chat-core';
 
 export interface MobileChatSessionOptions {
   /** WS URL, e.g. `wss://host/ws/app/chat?token=…&platform=native`. */

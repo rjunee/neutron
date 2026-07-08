@@ -2275,7 +2275,7 @@ ADDITIVELY activates a capability.
   handoff (tracked in that deployment's repo) persists into an encrypted
   per-instance secrets store with an HMAC-gated `/complete`.
 
-## Message search (chat-history FTS) — `@neutron/chat-core` + `@neutronai/message-search`
+## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 
 The chat-history twin of doc-search: full-text search over the user's CHAT
 MESSAGES (not docs), so both the user and the live agent can find "where did we
@@ -2318,7 +2318,7 @@ the existing per-platform durable store without forking the engine.
   can recall earlier turns mid-conversation. Server search is per-topic by
   design; cross-topic global search is the client store's job.
 
-## Delivery + read receipts (Track B Phase 4) — `@neutron/chat-core` + app-ws
+## Delivery + read receipts (Track B Phase 4) — `@neutronai/chat-core` + app-ws
 
 The per-message delivery ladder — **`pending → sent → delivered → read`** —
 across the web + mobile chat stack, built ON the chat-core engine (the sync
@@ -2490,7 +2490,7 @@ indicator. No feature flags — one live path.
 > fresh onboarding renders + advances over the single socket; Documents + Admin
 > tabs render.
 
-## Message reactions (Track B Phase 4, slice 3) — `@neutron/chat-core` + app-ws
+## Message reactions (Track B Phase 4, slice 3) — `@neutronai/chat-core` + app-ws
 
 Per-message emoji reactions across the web + mobile chat stack, MIRRORING the
 receipts slice above (per-message metadata, multi-device sync over chat-core,
@@ -3860,7 +3860,7 @@ path.
 > above for the current serving contract (`landing/server.ts:1205`).
 
 React + `@assistant-ui/react` (MIT, bring-your-own-transport) is the web chat
-surface, reusing the Phase-1 `@neutron/chat-core` sync engine.
+surface, reusing the Phase-1 `@neutronai/chat-core` sync engine.
 
 **Transport.** The React client connects through chat-core's `WebChatSession`
 to the **app-ws** surface (`/ws/app/chat`, `app:<user_id>` topic) — a

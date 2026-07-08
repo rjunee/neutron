@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import type { ChatMessage } from '@neutron/chat-core';
+import type { ChatMessage } from '@neutronai/chat-core';
 
 import { dispatchUnseenDeepLinks } from '../lib/chat-core/deep-link-dispatch';
 

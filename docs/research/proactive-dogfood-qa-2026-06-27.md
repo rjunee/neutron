@@ -23,16 +23,16 @@
 
 ## Boot / harness findings
 
-### B1. `bun run open/server.ts` before `bun install` dies on `@neutron/chat-core` — NOT a product bug
+### B1. `bun run open/server.ts` before `bun install` dies on `@neutronai/chat-core` — NOT a product bug
 First boot attempt (stale/incomplete `node_modules`) failed with
-`Cannot find module '@neutron/chat-core' from message-search/runtime.ts`.
+`Cannot find module '@neutronai/chat-core' from message-search/runtime.ts`.
 **Investigated thoroughly** (this is the kind of thing that looks like a P0
 fresh-clone-boot break): after a proper `bun install`, `bun run open/server.ts`
-resolves `@neutron/chat-core` fine via bun's workspace map at runtime — even
-though bun does **not** create a `node_modules/@neutron/chat-core` symlink (it
+resolves `@neutronai/chat-core` fine via bun's workspace map at runtime — even
+though bun does **not** create a `node_modules/@neutronai/chat-core` symlink (it
 links `@neutronai/*` workspaces but not the lone `@neutron/`-scoped one). The
 live `~/neutron/core` server runs the same way (no symlink, resolves fine).
-`bun -e "import('@neutron/chat-core')"` is an unreliable proxy (eval has no
+`bun -e "import('@neutronai/chat-core')"` is an unreliable proxy (eval has no
 workspace context) — the real `bun run <entry>` path works.
 **Verdict:** ✅ not a bug. Documented so the next QA pass doesn't re-chase it.
 

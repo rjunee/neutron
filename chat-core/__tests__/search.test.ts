@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — message-search (JS path) contract tests.
+ * @neutronai/chat-core — message-search (JS path) contract tests.
  *
  * Exercises the pure-JS search that backs {@link InMemoryStore} (and the OPFS
  * web store + offline fallback): query sanitisation, AND-of-terms matching,

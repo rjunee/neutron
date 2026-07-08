@@ -29,7 +29,7 @@ import { ChatErrorBoundary } from './ChatErrorBoundary.tsx'
 import { PlansPane } from './PlansPane.tsx'
 import { useChatRuntime } from './useNeutronChat.ts'
 
-import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutron/chat-core'
+import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutronai/chat-core'
 import type { ChatViewModel, RenderMessage, ImportProgressVM, SystemNoticeVM } from './controller.ts'
 import type { NeutronChatController } from './controller.ts'
 import type { BootstrapConfig, ProjectTab } from './config.ts'

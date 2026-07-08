@@ -13,7 +13,7 @@
  * `message_id` ever trigger navigation.
  */
 
-import type { ChatMessage } from '@neutron/chat-core';
+import type { ChatMessage } from '@neutronai/chat-core';
 
 export function dispatchUnseenDeepLinks(
   messages: ReadonlyArray<ChatMessage>,

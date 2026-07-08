@@ -4,7 +4,7 @@
  *
  * The complement to `@neutronai/doc-search`: that searches the owner's project
  * MARKDOWN; this searches their CHAT HISTORY. The actual full-text index lives
- * in the `@neutron/chat-core` {@link Store} (SQLite FTS5 on op-sqlite/wasm,
+ * in the `@neutronai/chat-core` {@link Store} (SQLite FTS5 on op-sqlite/wasm,
  * tokenised JS in-memory otherwise) — this module is the thin request-mapping
  * + tool-surface layer over it, so nothing here re-implements ranking or
  * highlighting (the Store owns both).
@@ -29,7 +29,7 @@ import {
   type MessageSearchHit,
   type MessageSearchOptions,
   type Store,
-} from '@neutron/chat-core'
+} from '@neutronai/chat-core'
 
 /** A scoped message-search request, as the agent tool issues it. */
 export interface MessageSearchRequest {

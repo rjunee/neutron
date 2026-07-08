@@ -1,6 +1,6 @@
 /**
  * @neutronai/app — durable RN local store over SQLite, implementing the
- * `@neutron/chat-core` {@link Store} interface (research doc §5/§6 — "op-
+ * `@neutronai/chat-core` {@link Store} interface (research doc §5/§6 — "op-
  * sqlite on RN", "the same SQLite model as the server").
  *
  * This is the Phase-2 mobile durable substrate. It is the op-sqlite analog
@@ -20,7 +20,7 @@
  * Contract parity (the reason this can't drift from `InMemoryStore`): the
  * identity key, the optimistic↔echo merge, and the display ordering are NOT
  * re-derived here — they reuse `messageIdentity`, `mergeMessage`, and
- * `compareForDisplay` straight from `@neutron/chat-core`. SQLite is pure
+ * `compareForDisplay` straight from `@neutronai/chat-core`. SQLite is pure
  * storage + lookup; the semantics are the engine's.
  */
 
@@ -42,7 +42,7 @@ import {
   type MessageSearchOptions,
   type PromptKind,
   type Store,
-} from '@neutron/chat-core';
+} from '@neutronai/chat-core';
 
 /** A SQL bind value. Mirrors what op-sqlite / bun:sqlite accept. */
 export type SqlValue = string | number | null;

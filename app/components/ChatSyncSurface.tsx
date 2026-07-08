@@ -37,7 +37,7 @@ import { FlashList } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 
-import type { ChatMessage, ChatMessageDocRef, ConnStatus } from '@neutron/chat-core';
+import type { ChatMessage, ChatMessageDocRef, ConnStatus } from '@neutronai/chat-core';
 
 import {
   deliveryGlyph,

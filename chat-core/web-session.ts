@@ -1,5 +1,5 @@
 /**
- * @neutron/chat-core — `WebChatSession`: the high-level composition a web
+ * @neutronai/chat-core — `WebChatSession`: the high-level composition a web
  * client instantiates to get Telegram-grade behaviour with no UI-framework
  * change. It wires the four primitives together:
  *

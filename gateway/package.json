@@ -4,7 +4,7 @@
   "main": "./index.ts",
   "private": true,
   "dependencies": {
-    "@neutron/chat-core": "workspace:*",
+    "@neutronai/chat-core": "workspace:*",
     "@neutronai/agent-dispatch": "workspace:*",
     "@neutronai/agent-settings": "workspace:*",
     "@neutronai/app": "workspace:*",

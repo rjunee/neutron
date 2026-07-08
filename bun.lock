@@ -40,8 +40,8 @@
       "name": "@neutronai/app",
       "version": "0.0.1",
       "dependencies": {
-        "@neutron/chat-core": "workspace:*",
         "@neutronai/channels": "workspace:*",
+        "@neutronai/chat-core": "workspace:*",
         "@neutronai/connect": "workspace:*",
         "@neutronai/landing": "workspace:*",
         "@neutronai/tabs": "workspace:*",
@@ -93,7 +93,7 @@
       },
     },
     "chat-core": {
-      "name": "@neutron/chat-core",
+      "name": "@neutronai/chat-core",
     },
     "connect": {
       "name": "@neutronai/connect",
@@ -266,13 +266,13 @@
     "gateway": {
       "name": "@neutronai/gateway",
       "dependencies": {
-        "@neutron/chat-core": "workspace:*",
         "@neutronai/agent-dispatch": "workspace:*",
         "@neutronai/agent-settings": "workspace:*",
         "@neutronai/app": "workspace:*",
         "@neutronai/auth": "workspace:*",
         "@neutronai/calendar-core": "workspace:*",
         "@neutronai/channels": "workspace:*",
+        "@neutronai/chat-core": "workspace:*",
         "@neutronai/codegen-core": "workspace:*",
         "@neutronai/connect": "workspace:*",
         "@neutronai/contracts": "workspace:*",
@@ -282,7 +282,6 @@
         "@neutronai/cron": "workspace:*",
         "@neutronai/doc-search": "workspace:*",
         "@neutronai/email-managed-core": "workspace:*",
-        "@neutronai/gateway": "workspace:*",
         "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/google-workspace-core": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
@@ -336,7 +335,7 @@
       "name": "@neutronai/landing",
       "dependencies": {
         "@assistant-ui/react": "^0.14.23",
-        "@neutron/chat-core": "workspace:*",
+        "@neutronai/chat-core": "workspace:*",
         "@neutronai/contracts": "workspace:*",
         "@neutronai/onboarding": "workspace:*",
         "@neutronai/runtime": "workspace:*",
@@ -366,7 +365,7 @@
     "message-search": {
       "name": "@neutronai/message-search",
       "dependencies": {
-        "@neutron/chat-core": "workspace:*",
+        "@neutronai/chat-core": "workspace:*",
         "@neutronai/core-sdk": "workspace:*",
         "@neutronai/tools": "workspace:*",
       },
@@ -385,7 +384,6 @@
         "@neutronai/cron": "workspace:*",
         "@neutronai/gateway": "workspace:*",
         "@neutronai/migrations": "workspace:*",
-        "@neutronai/onboarding": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/reminders": "workspace:*",
         "@neutronai/runtime": "workspace:*",
@@ -465,7 +463,6 @@
         "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
         "@neutronai/mcp": "workspace:*",
-        "@neutronai/runtime": "workspace:*",
         "@neutronai/scribe": "workspace:*",
         "@neutronai/tools": "workspace:*",
         "jose": "^5.9.0",
@@ -963,8 +960,6 @@
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.4", "", { "dependencies": { "@tybys/wasm-util": "^0.10.1" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow=="],
 
-    "@neutron/chat-core": ["@neutron/chat-core@workspace:chat-core"],
-
     "@neutronai/agent-dispatch": ["@neutronai/agent-dispatch@workspace:agent-dispatch"],
 
     "@neutronai/agent-settings": ["@neutronai/agent-settings@workspace:cores/free/agent-settings"],
@@ -976,6 +971,8 @@
     "@neutronai/calendar-core": ["@neutronai/calendar-core@workspace:cores/free/calendar"],
 
     "@neutronai/channels": ["@neutronai/channels@workspace:channels"],
+
+    "@neutronai/chat-core": ["@neutronai/chat-core@workspace:chat-core"],
 
     "@neutronai/codegen-core": ["@neutronai/codegen-core@workspace:cores/free/code-gen"],
 

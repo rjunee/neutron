@@ -1,13 +1,13 @@
 /**
  * Integration test: the React data layer (NeutronChatController) over a REAL
- * `@neutron/chat-core` WebChatSession + a fake socket. Exercises the whole
+ * `@neutronai/chat-core` WebChatSession + a fake socket. Exercises the whole
  * chat-core contract end-to-end (sync engine + store + send-queue + the
  * additive onFrame stream) the way the React UI drives it — no DOM, no network.
  */
 
 import { describe, expect, it } from 'bun:test'
-import { InMemoryStore, WebChatSession } from '@neutron/chat-core'
-import type { ChatMessage, SocketLike } from '@neutron/chat-core'
+import { InMemoryStore, WebChatSession } from '@neutronai/chat-core'
+import type { ChatMessage, SocketLike } from '@neutronai/chat-core'
 
 import { NeutronChatController, type ControllerSession } from '../controller.ts'
 

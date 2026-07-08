@@ -1,6 +1,6 @@
 /**
  * landing/chat-react — `NeutronChatController`: the framework-agnostic data
- * layer that bridges `@neutron/chat-core`'s `WebChatSession` to the
+ * layer that bridges `@neutronai/chat-core`'s `WebChatSession` to the
  * assistant-ui `ExternalStoreRuntime`.
  *
  * Why a controller and not "just a hook": the defining Telegram-grade
@@ -26,7 +26,7 @@
  * over the chat-core contract without a DOM or a socket.
  */
 
-import { groupReactions } from '@neutron/chat-core'
+import { groupReactions } from '@neutronai/chat-core'
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
@@ -39,7 +39,7 @@ import type {
   ReactionAction,
   ReactionChip,
   SendStatus,
-} from '@neutron/chat-core'
+} from '@neutronai/chat-core'
 
 export type RenderRole = 'user' | 'agent'
 

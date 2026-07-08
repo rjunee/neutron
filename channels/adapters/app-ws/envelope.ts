@@ -919,7 +919,7 @@ export function sanitizeDeviceId(raw: unknown): string | null {
 /** Track B Phase 4 — synthetic device id the gateway attributes to the agent
  *  loop when it reads (picks up) an inbound user message. Lets a single-device
  *  sender see the read tick the moment the agent acts, with no second device.
- *  Mirrors `@neutron/chat-core`'s `AGENT_DEVICE_ID`; the wire value is the bare
+ *  Mirrors `@neutronai/chat-core`'s `AGENT_DEVICE_ID`; the wire value is the bare
  *  string `agent`. */
 export const AGENT_DEVICE_ID = 'agent'
 
