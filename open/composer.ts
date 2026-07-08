@@ -94,16 +94,14 @@ import { buildProjectOpeningMessageComposer } from '../gateway/realmode-composer
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { buildGBrainMemory } from '../gateway/realmode-composer/build-gbrain-memory.ts'
-import { resolveOnboardingOpenAiKey } from '../gateway/realmode-composer/resolve-onboarding-openai-key.ts'
 import { DocSearchIndex } from '../doc-search/store.ts'
 import { DocSearchRuntime } from '../doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
 import { buildButtonStoreMessageSearchRuntime } from '../gateway/composition/message-search-wiring.ts'
-import { createScribe, type Scribe, type UserTurnInput } from '../scribe/index.ts'
-import { createState, defaultStatePath } from '../scribe/scribe-budget.ts'
-import { mountCoresScribeFanOut } from '../gateway/cores/mount-cores-scribe-fan-out.ts'
 import { mountOpenCores } from '../gateway/cores/mount-open-cores.ts'
+import { wireSubstrates } from './wiring/substrates.ts'
+import { wireMemory } from './wiring/memory.ts'
+import type { OpenWiringContext } from './wiring/context.ts'
 import { buildChainedChatCommandFilter } from '../gateway/boot-helpers.ts'
 import {
   SkillForge,
@@ -119,7 +117,6 @@ import {
 import { TridentRunStore, type TridentRun } from '../trident/store.ts'
 import { runProgressForItem } from '../trident/run-progress.ts'
 import { SecretsStore } from '../auth/secrets-store.ts'
-import { createReflection, type Reflection } from '../reflection/index.ts'
 import { buildPersonalityCharacterSuggester } from '../onboarding/interview/personality-character-suggester.ts'
 import { buildPersonaSummarizer } from '../onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '../gateway/realmode-composer/persona-loader.ts'
@@ -482,183 +479,32 @@ export function buildOpenGraphComposer(
     // createClaudeCodeSubstrateAuto default.
     const substrateFactory = options.substrateFactory
 
-    // WARM conversational substrate for the onboarding phase-spec LLM
-    // rephrasing — the snappy-conversational core of the onboarding rework
-    // (2026-06-17 single-session architecture, Step 1).
-    //
-    // NOT `ephemeral`: a session-less phase-spec dispatch REUSES the ONE warm,
-    // pre-warmed `claude` REPL keyed on (instance, owner, project, credential)
-    // rather than cold-spawning a fresh heavy session (MCP + dev-channel +
-    // plugins + system-prompt load, ~10-30s) EVERY onboarding turn just to
-    // rephrase a prompt that has a static fallback. Context is ALLOWED to
-    // accumulate across the conversation (no `reset_context_per_turn` → no
-    // `/clear`) — an accumulating model of the onboarding so far is desired,
-    // and the conversational SHORT timeout tier (3s, llm-timeouts.ts) means a
-    // turn is always snappy: fast real answer on the warm session, or instant
-    // static fallback.
-    //
-    // The `ephemeral` one-shot-isolation flag exists for the MANAGED gateway's
-    // SHARED `cc-llm-*` substrate (7+ stateless utility callers that must not
-    // bleed cross-purpose into one transcript). On Open this substrate is
-    // SINGLE-PURPOSE — wired only into `buildPhaseSpecResolver` below — so
-    // reusing one warm session is correct, not a collapse. `skip_permissions`
-    // mirrors `liveAgentSubstrate` so the headless REPL doesn't block on
-    // interactive prompts.
-    const llmCallSubstrate =
-      llmPool !== null
-        ? buildLlmCallSubstrate({
-            pool: llmPool,
-            substrate_instance_id: `cc-llm-${internal_handle}`,
-            cwd: owner_home,
-            internal_handle,
-            user_id: OWNER_USER_ID,
-            project_slug,
-            skip_permissions: true,
-            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-          })
-        : null
-
-    // Pre-warm the conversational session at onboarding start (fire-and-forget,
-    // behind the loading indicator). The cold warm-up (~10-30s) is paid ONCE
-    // here at composer build — NOT on the user's first turn — so the first real
-    // phase-spec dispatch hits a HOT session. Best-effort: any failure (no
-    // credentials at warm-up, transient spawn error) is swallowed; the engine's
-    // static phase prompts cover a cold/failed warm session, and the next real
-    // turn re-spawns the warm REPL lazily. Skipped entirely when LLM-less.
-    //
-    // 2026-06-18 (synthesis-completes fix): capture the pre-warm promise so the
-    // phase-spec resolver can AWAIT it (bounded) before its FIRST dispatch. If
-    // the owner answers the first question before the cold spawn settles, the
-    // first real turn would otherwise race the ~11-30s spawn and time out at the
-    // 12s conversational tier into the static fallback (the live-signup symptom).
-    // Awaiting readiness OUTSIDE the conversational timeout means only the cold
-    // first turn waits; warm turns stay snappy.
-    const prewarmReady: Promise<void> | null =
-      llmCallSubstrate !== null ? prewarmSubstrate(llmCallSubstrate) : null
-    // Track whether the pre-warm has SETTLED so the resolver can elevate the
-    // budget for EVERY conversational dispatch in the cold window — not just the
-    // first (2026-06-18 cold-start fix, round 2: the live owner-signup raced the
-    // first TWO turns against the cold spawn and both timed out at 12 s). The flag
-    // flips true when the (never-rejecting) pre-warm promise resolves; until then,
-    // early turns get the cold-spawn-sized `first_call_timeout_ms` budget.
-    let prewarmSettled = prewarmReady === null
-    if (prewarmReady !== null) {
-      void prewarmReady.then(() => {
-        prewarmSettled = true
-      })
+    // ── CC-spawn substrates (C3a: carved to open/wiring/substrates.ts) ──────
+    // The warm onboarding phase-spec (`cc-llm-*`) substrate + its pre-warm, the
+    // warm live-chat (`cc-agent-*`, the ONLY tool-bridge substrate), the
+    // per-worktree ephemeral factory, and the warm per-repo-cwd trident-fire
+    // factory. Built once from the narrow wiring context and consumed downstream
+    // verbatim. `prewarmSettledRef` is a LIVE reference the pre-warm `.then`
+    // flips (cold-window budget elevation reads `.settled`, not a snapshot).
+    const wiringCtx: OpenWiringContext = {
+      llmPool,
+      internal_handle,
+      owner_home,
+      project_slug,
+      env,
+      db,
+      prewarmSubstrate,
+      ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     }
-
-    // Dedicated WARM conversational substrate for post-onboarding live chat
-    // turns (no `ephemeral`; keyed per-dispatch on metering_context).
-    const liveAgentSubstrate =
-      llmPool !== null
-        ? buildLlmCallSubstrate({
-            pool: llmPool,
-            substrate_instance_id: `cc-agent-${internal_handle}`,
-            cwd: owner_home,
-            internal_handle,
-            user_id: OWNER_USER_ID,
-            project_slug,
-            skip_permissions: true,
-            // P0-1 — the owner's WARM conversational REPL is the ONE substrate
-            // that opts into the native-MCP tool bridge, so the live chat agent
-            // can call Cores/doc-search/memory/reminders mid-reasoning over a
-            // structured stdio-MCP transport (the in-process registry, fronted by
-            // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
-            // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
-            enableToolBridge: true,
-            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-          })
-        : null
-
-    // Foundational Trident build-agent runner (Forge / Argus) — the `/code
-    // <task>` autonomous build loop, on the CC-subprocess substrate.
-    //
-    // Per-WORKTREE + per-build isolation: rather than ONE substrate fixed at
-    // `owner_home`, this is a FACTORY that builds a FRESH ephemeral substrate
-    // per dispatch, rooted at the run's worktree (`input.repo_path`). So each
-    // Forge/Argus turn runs IN its own worktree on a disposable `cc-trident-*`
-    // REPL — never `owner_home`, never the owner's warm conversational
-    // (`cc-agent-*`) pool — so one build's context can never bleed into another
-    // build or into the owner's live chat. (`AgentSpec` carries no per-call cwd,
-    // so per-worktree dispatch HAS to re-root the substrate per turn; this
-    // closes the two hardening items the first prod-boot wiring PR deferred.)
-    //
-    // When no credential resolves (`llmPool === null`) the dispatch stays null
-    // and `composition.trident` is left unset — the tick loop runs its
-    // restart-safe `stubAdvanceDeps` no-op, the unchanged LLM-less behaviour.
-    // A FRESH ephemeral CC-subprocess substrate per turn, rooted at the call's
-    // cwd. Shared by the Trident build loop and the agent-dispatch family below
-    // (each passes its own `instance_id` prefix) so both spawn through the SAME
-    // path (NEVER a direct api.anthropic.com call). Throws on an empty pool so a
-    // dispatch surfaces as a crashed turn rather than a silent no-op.
-    const makeEphemeralSubstrate =
-      (instance_prefix: string) =>
-      (cwd: string): Substrate => {
-        const s =
-          llmPool === null
-            ? null
-            : buildLlmCallSubstrate({
-                pool: llmPool,
-                substrate_instance_id: `${instance_prefix}-${internal_handle}`,
-                cwd,
-                internal_handle,
-                user_id: OWNER_USER_ID,
-                project_slug,
-                skip_permissions: true,
-                ephemeral: true,
-                ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-              })
-        if (s === null) {
-          throw new Error(`${instance_prefix}: empty Anthropic credential pool`)
-        }
-        return s
-      }
-
-    // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
-    // loop is one native CC Dynamic Workflow. The composer threads a FIRE seam
-    // (`buildSubstrateWorkflowFire`); the build-core trident module wraps it with
-    // `buildWorkflowFirer`. The fire seam invokes the `Workflow` tool on a WARM
-    // (non-ephemeral) substrate and SETTLES the launching turn immediately —
-    // billing-exempt (the owner's Max-OAuth pool, NOT a per-build `claude -p`).
-    // The workflow then runs DETACHED in the background and persists its TYPED
-    // result to `code_trident_runs.inner_result`, which the durable tick loop
-    // harvests by runId.
-    //
-    // WARM-PER-REPO: the persistent pool keys on (instance, user, project,
-    // credential) — NOT cwd — so a single shared instance id would pin every
-    // run's worktree creation to the FIRST repo's cwd. The workflow's Forge agent
-    // uses `isolation:'worktree'`, which forks the worktree from the FIRE turn's
-    // git cwd, so each distinct repo needs its OWN warm pool entry. This memoized
-    // factory builds ONE non-ephemeral `cc-trident-fire-*` substrate PER repo cwd
-    // (distinct instance id), reused across fires so that repo's background
-    // workflows accumulate in ONE responsive REPL (the verified N-parallel model)
-    // and survive the turn settle. NO `enableToolBridge` (Workflow is a native CC
-    // tool, not an MCP bridge tool); NO `ephemeral` (warm — an ephemeral REPL
-    // would be disposed on settle and abort the detached workflow). Null pool
-    // leaves `composition.trident` unset → the loop's restart-safe stub no-op.
-    const fireSubstrateByCwd = new Map<string, Substrate>()
-    const makeWarmFireSubstrate = (cwd: string): Substrate => {
-      const cached = fireSubstrateByCwd.get(cwd)
-      if (cached !== undefined) return cached
-      if (llmPool === null) throw new Error('cc-trident-fire: empty Anthropic credential pool')
-      // djb2 over the cwd → a short, stable, per-repo instance discriminator.
-      let h = 5381
-      for (let i = 0; i < cwd.length; i++) h = (((h << 5) + h) ^ cwd.charCodeAt(i)) >>> 0
-      const built = buildLlmCallSubstrate({
-        pool: llmPool,
-        substrate_instance_id: `cc-trident-fire-${internal_handle}-${h.toString(36)}`,
-        cwd,
-        internal_handle,
-        user_id: OWNER_USER_ID,
-        project_slug,
-        skip_permissions: true,
-        ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-      })
-      if (built === null) throw new Error('cc-trident-fire: empty Anthropic credential pool')
-      fireSubstrateByCwd.set(cwd, built)
-      return built
-    }
+    const {
+      llmCallSubstrate,
+      liveAgentSubstrate,
+      makeEphemeralSubstrate,
+      makeWarmFireSubstrate,
+      prewarmReady,
+      prewarmSettledRef,
+      cleanups: substrateCleanups,
+    } = wireSubstrates(wiringCtx)
     const tridentFireInnerWorkflow =
       llmPool !== null
         ? buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate })
@@ -804,6 +650,10 @@ export function buildOpenGraphComposer(
     // `buildLandingStack` (it needs `scribeOnUserTurn`) — can register the
     // `gbrain serve` close hook. Returned on `realmode_cleanups`.
     const realmodeCleanups: Array<() => void> = []
+    // Substrate teardown hooks (C3a): registered here — the point at which the
+    // substrate wiring's inline cleanups previously ran. None exist today (the
+    // array is empty), but the contract stays wired for the C3b-d carves.
+    for (const cleanup of substrateCleanups) realmodeCleanups.push(cleanup)
 
     // ── Doc search (QMD-equivalent) — index + agent tools ──────────────────
     // gap-audit P1 #9 / cat 13: Neutron agents could read a KNOWN doc path
@@ -842,149 +692,22 @@ export function buildOpenGraphComposer(
       docSearchRuntime = null
     }
 
-    // ── Scribe: chat-time entity extraction → GBrain (P0 daily-driver) ─────
-    // gap-audit P0-3 / cat 7: the scribe package (`scribe/`) ships the whole
-    // extract→GBrain path AND the chat-bridge fires `scribeOnUserTurn` after
-    // every real user turn — but the param is OPTIONAL and the Open self-host
-    // composer never threaded it, so chat-time extraction was DEAD in Open:
-    // every person/company mention stayed a manual wiki entry. This wires it ON.
-    //
-    // A DEDICATED `cc-scribe-*` substrate (not the conversational `cc-agent-*`
-    // one) keeps background extraction isolated from the live chat REPL — scribe
-    // is a stateless one-shot caller (build-llm-call-substrate.ts names it
-    // explicitly), so `ephemeral: true` gives per-extraction isolation on the
-    // persistent substrate rather than accumulating extraction prompts into a
-    // chat transcript. Gated on `llmPool` exactly like every other substrate:
-    // LLM-less boxes have no extractor, so scribe stays off and the chat path is
-    // unaffected (`scribeOnUserTurn` omitted → bridge no-ops).
-    const scribeSubstrate =
-      llmPool !== null
-        ? buildLlmCallSubstrate({
-            pool: llmPool,
-            substrate_instance_id: `cc-scribe-${internal_handle}`,
-            cwd: owner_home,
-            internal_handle,
-            user_id: OWNER_USER_ID,
-            project_slug,
-            skip_permissions: true,
-            ephemeral: true,
-            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-          })
-        : null
-
-    // GBrain memory wiring is the scribe write target. `buildGBrainMemory` is
-    // LAZY + FAIL-SOFT by contract: it emits ONE loud boot warning when the
-    // `gbrain` binary is absent from PATH, then every memory op degrades to a
-    // single latched failure (the entity page still lands on disk; only the
-    // GBrain fan-out no-ops). So a missing/unresolvable GBrain NEVER crashes a
-    // chat turn — it degrades with a clear log, exactly as the spec requires.
-    // Built only when scribe can run (there is no point standing up a write
-    // target with no extractor to feed it).
-    // GBrain wiring is hoisted out of the scribe closure so the SAME syncHook
-    // feeds three consumers: the chat-time scribe (below), the onboarding
-    // materializer's project-page indexer (threaded into `buildLandingStack` as
-    // `importGbrainSyncHook` so imported/onboarding projects land in MEMORY/
-    // gbrain — previously unwired in Open), and the Path 1 onboarding finalize.
-    // Lazy + fail-soft: building it never spawns `gbrain serve` until first use.
-    //
-    // ND1: activate GBrain semantic embeddings from the owner's onboarding-
-    // captured OpenAI key (ApiKeyStore, provider=openai label=onboarding;
-    // internal_handle == project_slug). When present, GBrain serves with
-    // OpenAI `text-embedding-3-large`; absent → keyword + graph default.
-    //
-    // LAZY resolution (not an eager read here): this composition runs ONCE at
-    // process boot, but the key is captured LATER — during onboarding / via the
-    // admin Integrations surface, over the already-running server. An eager read
-    // at boot would miss every freshly-pasted key until a restart (the bug:
-    // "Openai embeddings key is supposed to be wired to Gbrain"). Threading a
-    // resolver thunk instead defers the read to the FIRST `gbrain serve` spawn
-    // (first memory op, after onboarding), so the key flips on embeddings at the
-    // next turn — exactly what the onboarding offer promises. Best-effort: the
-    // resolver swallows store errors and returns undefined (keyword + graph).
-    const gbrainMemory = buildGBrainMemory({
-      owner_home,
-      project_slug,
-      env,
-      resolveOpenAiKey: () =>
-        resolveOnboardingOpenAiKey({ db, owner_home, internal_handle, project_slug }),
-    })
-    realmodeCleanups.push(() => {
-      void gbrainMemory.close().catch(() => undefined)
-    })
-    const gbrainSyncHook = gbrainMemory.syncHook
-    const scribe: Scribe | null =
-      scribeSubstrate !== null
-        ? createScribe({
-            substrate: scribeSubstrate,
-            syncHook: gbrainSyncHook,
-            ownerDataDir: owner_home,
-            project_slug,
-            budget: createState(defaultStatePath(owner_home)),
-          })
-        : null
-
-    // ── Reflection: diary + corrections-log (P1 daily-driver, gap-audit §(c) #10) ──
-    // The lightweight self-improvement loop COMPLEMENTING scribe/GBrain (which
-    // capture entity knowledge). Two stores under the owner home:
-    //   - diary/        — the agent's own append-only short reflections
-    //   - corrections/  — owner corrections of the agent (what was wrong / right
-    //                     / why), read back into context so future sessions adapt
-    //                     SILENTLY (Vajra's corrections-log mechanism).
-    // The correction JUDGE is an LLM call, so it gets its OWN dedicated ephemeral
-    // `cc-reflection-*` substrate (per-judgement isolation, never pollutes the
-    // chat REPL) — same shape as scribe's `cc-scribe-*`. When LLM-less the
-    // substrate is omitted: detection is OFF but the diary + context read-back
-    // still function, so the layer degrades gracefully.
-    const reflectionSubstrate =
-      llmPool !== null
-        ? buildLlmCallSubstrate({
-            pool: llmPool,
-            substrate_instance_id: `cc-reflection-${internal_handle}`,
-            cwd: owner_home,
-            internal_handle,
-            user_id: OWNER_USER_ID,
-            project_slug,
-            skip_permissions: true,
-            ephemeral: true,
-            ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-          })
-        : null
-    const reflection: Reflection = createReflection({
-      ownerDataDir: owner_home,
-      ...(reflectionSubstrate !== null ? { substrate: reflectionSubstrate } : {}),
-    })
-
-    // Production-shape hook threaded into `buildLandingStack` → the chat-bridge.
-    // `scribe` is `const`, so TS preserves the `!== null` narrowing inside the
-    // closure (the extraction is fire-and-forget; `handleUserTurn` returns void
-    // and swallows its own errors — it never throws into the chat path).
-    const scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined =
-      scribe !== null ? (input: UserTurnInput): void => scribe.handleUserTurn(input) : undefined
-
-    // ── Cores→scribe phase-2 fan-out (Vajra parity gap #1) ─────────────────
-    // The chat-turn extractor (`scribeOnUserTurn` above) is only HALF of scribe:
-    // the phase-2 Cores→scribe fan-out lets the scheduled Calendar + Email Cores
-    // contribute their OWN ambient extraction (today's events / inbox mail →
-    // GBrain). That seam (`scribeFanOut` in `gateway/cores/{calendar,email-managed}
-    // -wiring.ts`) was built but never threaded — its only callers were tests, so
-    // per-Core memory extraction was DEAD. Mount it here so it runs on the live
-    // single-owner Open boot path, gated on scribe being live (no extraction
-    // target otherwise — LLM-less boxes are unaffected). Until a Google-backed
-    // calendar/gmail client is composed in (separate parity gap), the in-memory
-    // fallback clients yield an empty calendar/inbox, so the schedulers run
-    // harmlessly and fan out nothing; the wire goes live with zero further
-    // changes the moment a real client is supplied. Cleanup drains in-flight
-    // extractions + tears the schedulers down at SIGTERM.
-    if (scribe !== null) {
-      const coresFanOut = mountCoresScribeFanOut({
-        scribe,
-        project_slug,
-        owner_home,
-      })
-      realmodeCleanups.push(() => {
-        void coresFanOut.stop().catch(() => undefined)
-      })
-    }
+    // ── Scribe / GBrain / reflection (C3a: carved to open/wiring/memory.ts) ──
+    // The dedicated `cc-scribe-*` extraction substrate, the lazy fail-soft
+    // GBrain memory + its `syncHook`, the `cc-reflection-*` correction judge +
+    // `reflection`, the `scribeOnUserTurn` chat-bridge hook, and the Cores→scribe
+    // phase-2 fan-out. Self-contained given the wiring context. Its teardown
+    // hooks (GBrain close, fan-out stop) append onto `realmodeCleanups` HERE, at
+    // the carve site, so SIGTERM ordering stays byte-identical.
+    const {
+      gbrainMemory,
+      gbrainSyncHook,
+      scribe,
+      reflection,
+      scribeOnUserTurn,
+      cleanups: memoryCleanups,
+    } = wireMemory(wiringCtx)
+    for (const cleanup of memoryCleanups) realmodeCleanups.push(cleanup)
 
     // ── Free Cores → Open boot (Vajra parity gap #2) ───────────────────────
     // Compose the bundled free Cores (Calendar / Email / Google-Workspace /
@@ -1086,7 +809,7 @@ export function buildOpenGraphComposer(
             // Elevate the budget for EVERY dispatch in the cold window, not just the
             // first (round 2): the live owner-signup raced the first two turns and
             // both timed out at 12 s. Once the pre-warm settles, turns go snappy.
-            isWarmReady: (): boolean => prewarmSettled,
+            isWarmReady: (): boolean => prewarmSettledRef.settled,
           }
         : {}),
       // Belt to awaitReady's suspenders (2026-06-18 cold-start fix): give cold-window
