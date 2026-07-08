@@ -36,7 +36,12 @@ export type {
   ReminderLlm,
   BuildReminderDispatcherInput,
 } from './dispatcher.ts'
-export { buildButtonStoreReminderOutbound } from './outbound.ts'
+// `buildButtonStoreReminderOutbound` moved UP to
+// `gateway/proactive/reminder-outbound.ts` (L3, 2026-07): the concrete delivery
+// impl reaches the gateway WebChatSenderRegistry + landing chat protocol, so it
+// belongs at the composition root. `reminders` keeps only the `ReminderOutbound`
+// SEAM (exported above from ./dispatcher.ts). An upward move gets no re-export
+// shim here — that would recreate the reminders→gateway edge this cut removes.
 export { buildStatusMdContextSource } from './context.ts'
 export {
   classifyReminderMessage,

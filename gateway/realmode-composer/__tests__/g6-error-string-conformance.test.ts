@@ -70,8 +70,12 @@ const SUBSTRATE_SRC_PATH = fileURLToPath(
     import.meta.url,
   ),
 )
-const LLM_CALL_SRC_PATH = fileURLToPath(
-  new URL('../build-llm-call-substrate.ts', import.meta.url),
+// `collectTokensToString` (which throws the `cc-llm-call: aborted` producer)
+// was relocated out of build-llm-call-substrate.ts into the runtime leaf in L3
+// (the reminders→gateway DAG-edge cut). The literal is unchanged — only its home
+// moved — so the extraction points at the new file.
+const COLLECT_TOKENS_SRC_PATH = fileURLToPath(
+  new URL('../../../runtime/collect-tokens.ts', import.meta.url),
 )
 
 /**
@@ -330,10 +334,10 @@ test('G6 · isFreezeTimeout matches the REAL turn-timeout AND composer-abort pro
     /message: '(persistent-repl: turn timeout)', retryable: true/,
     'the `persistent-repl: turn timeout` producer literal',
   )
-  // Producer B: build-llm-call-substrate.ts absolute-ceiling AbortController —
+  // Producer B: runtime/collect-tokens.ts abort-signal listener —
   //   throw new Error('cc-llm-call: aborted')
   const composerAbort = extractFromSource(
-    LLM_CALL_SRC_PATH,
+    COLLECT_TOKENS_SRC_PATH,
     /throw new Error\('(cc-llm-call: aborted)'\)/,
     'the `cc-llm-call: aborted` composer-abort producer literal',
   )

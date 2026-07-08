@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { resolveOpenDbPath } from '../open/owner-identity.ts'
+import { resolveOpenDbPath } from './db-path.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 

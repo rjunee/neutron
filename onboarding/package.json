@@ -5,6 +5,7 @@
   "private": true,
   "dependencies": {
     "@neutronai/channels": "workspace:*",
+    "@neutronai/connect": "workspace:*",
     "@neutronai/contracts": "workspace:*",
     "@neutronai/cron": "workspace:*",
     "@neutronai/gateway": "workspace:*",

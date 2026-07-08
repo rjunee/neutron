@@ -98,9 +98,12 @@ module.exports = {
       name: 'no-cycles',
       comment:
         'No import cycles anywhere in the graph (production or test). This is the ' +
-        "audit's headline finding (28-module SCC) inverted into a gate: today every " +
-        'edge that forms a cycle is grandfathered by the baseline file; new cycles ' +
-        'are never grandfathered.',
+        "audit's headline finding (28-module SCC) inverted into a gate. As of L3 " +
+        '(2026-07) this is a TRUE HARD ERROR: the strongly-connected-component set ' +
+        'is EMPTY (SCC = ∅) — ZERO cycles remain in the baseline, so every cycle ' +
+        'edge now fails the build outright. New cycles were never grandfathered; ' +
+        'now no cycle is grandfathered at all, and the ratchet guard forbids ' +
+        're-adding one to the baseline.',
       severity: 'error',
       from: {},
       to: { circular: true },

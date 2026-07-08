@@ -38,7 +38,7 @@ import { join } from 'node:path'
 
 import type { EmbedderConfig } from './embedder-config.ts'
 import { isGbrainBinaryMissingError } from './memory-store.ts'
-import { type CommandRunner, bunCommandRunner } from './gbrain-doctor.ts'
+import { type CommandRunner, bunCommandRunner } from './command-runner.ts'
 import { resolveGbrainChildPath } from './resolve-gbrain-command.ts'
 
 /** OpenAI default the latent column is sized for (upgrade-without-rebuild). */

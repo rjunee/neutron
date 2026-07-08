@@ -51,7 +51,7 @@ import {
   verifyInviteToken,
   claimInviteToken,
   InviteTokenError,
-} from '../onboarding/api/invite-link-generate.ts'
+} from './invite-token.ts'
 import { ConnectedMembersStore, type Access } from './connected-members-store.ts'
 import {
   acceptTrustedMember,

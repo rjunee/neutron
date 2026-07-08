@@ -134,15 +134,21 @@ import { readSessionCookie, signSessionCookie } from '../landing/session-cookie.
 import {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
-  buildButtonStoreReminderOutbound,
   buildStatusMdContextSource,
 } from '../reminders/index.ts'
+// L3 (2026-07) — the reminder delivery impl moved UP into the gateway
+// composition band (it reaches the WebChatSenderRegistry + landing protocol).
+import { buildButtonStoreReminderOutbound } from '../gateway/proactive/reminder-outbound.ts'
 
 import { buildLocalStartTokenAuth } from './local-start-token.ts'
 import { buildProjectPersonaResolver } from './project-persona-resolver.ts'
 import { createOpenChatTopicsSurface } from './chat-topics-surface.ts'
 import { createChatHistorySurface } from '../gateway/http/chat-history-surface.ts'
 import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './owner-identity.ts'
+// L3 (2026-07) — build the Open agent-profile backend HERE (composition root)
+// and inject it into `mountOpenCores`, so the gateway core no longer imports the
+// `open` band.
+import { buildOpenAgentProfileBackend } from './agent-profile-backend.ts'
 // P1b (2026-06-26) — wire the per-project Documents backend + the cores
 // integrations/api-keys surface into the single-owner Open boot. Both authorize
 // against ONE single-owner localhost-trust resolver (Path A): the owner is the
@@ -155,7 +161,7 @@ import { createAppDocsSurface } from '../gateway/http/app-docs-surface.ts'
 import { createAppTabsSurface } from '../gateway/http/app-tabs-surface.ts'
 import { createAppProjectsSurface } from '../gateway/http/app-projects-surface.ts'
 import { SqliteProjectSettingsStore } from '../gateway/projects/sqlite-store.ts'
-import { resolveProjectEmoji } from '../gateway/projects/default-emoji.ts'
+import { resolveProjectEmoji } from '../contracts/default-emoji.ts'
 import {
   createProjectRow,
   materializeProjectScaffold,
@@ -1033,12 +1039,18 @@ export function buildOpenGraphComposer(
       projectCredentialStore,
       env,
       substrate: coresSubstrate,
-      // Settings Core (M1) — when `update_agent_name` / `update_personality`
-      // rewrites SOUL.md, drop the persona-loader cache entry so the change is
-      // spliced into the system prompt on the very next turn (the atomic write
-      // also bumps mtime as a backstop). Same loader instance the live agent
-      // turns read through.
-      onPersonaReload: (filename) => personaLoader.invalidate(filename),
+      // Settings Core (M1) — build the Open agent-profile backend at the
+      // composition root and inject it (L3 DAG cut: the gateway core no longer
+      // imports `open/`). When `update_agent_name` / `update_personality`
+      // rewrites SOUL.md, `onProfileChange` drops the persona-loader cache entry
+      // so the change is spliced into the system prompt on the very next turn
+      // (the atomic write also bumps mtime as a backstop). Same loader instance
+      // the live agent turns read through.
+      agentSettingsProfile: buildOpenAgentProfileBackend({
+        owner_home,
+        env,
+        onProfileChange: () => personaLoader.invalidate('SOUL.md'),
+      }),
     })
     realmodeCleanups.push(() => {
       coresWiring.cleanup()

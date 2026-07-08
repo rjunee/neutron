@@ -1,5 +1,14 @@
 /**
- * @neutronai/reminders — chat-surface outbound for fired reminders.
+ * @neutronai/gateway/proactive — chat-surface outbound for fired reminders.
+ *
+ * L3 (2026-07) — moved UP from `reminders/outbound.ts` into the gateway
+ * composition band. The `reminders` service defines the `ReminderOutbound`
+ * SEAM (`reminders/dispatcher.ts`); the concrete delivery IMPLEMENTATION —
+ * which reaches the gateway `WebChatSenderRegistry` + the `landing` chat
+ * protocol — belongs at the composition root, not inside the service. Wiring
+ * delivery through the seam here (instead of `reminders` importing gateway /
+ * landing) is the DAG-correct direction. The composer (`open/composer.ts`)
+ * constructs this and injects it as the dispatcher's `outbound`.
  *
  * Posts a composed reminder body into the originating chat topic exactly the
  * way the live-agent turn posts a reply (`build-live-agent-turn.ts` step 4):
@@ -19,11 +28,11 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { buildButtonPrompt } from '../channels/button-primitive.ts'
-import type { ButtonStore } from '../channels/button-store.ts'
-import type { ChatOutbound } from '../landing/chat-protocol.ts'
-import type { WebChatSenderRegistry } from '../gateway/http/chat-sender-registry.ts'
-import type { ReminderOutbound, ReminderOutboundInput } from './dispatcher.ts'
+import { buildButtonPrompt } from '../../channels/button-primitive.ts'
+import type { ButtonStore } from '../../channels/button-store.ts'
+import type { ChatOutbound } from '../../landing/chat-protocol.ts'
+import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
+import type { ReminderOutbound, ReminderOutboundInput } from '../../reminders/dispatcher.ts'
 
 /** Reply rows are HISTORY, not pending questions — never expire them out of
  *  hydration. Ten years ≈ never (mirrors build-live-agent-turn's TTL). */

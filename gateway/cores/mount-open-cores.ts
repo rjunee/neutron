@@ -45,7 +45,11 @@ import {
 } from '../boot-helpers.ts'
 import type { CoreBackendFactoryMap } from './install-bundled.ts'
 import { SecretsStorePrompter } from './install-bundled.ts'
-import { buildOpenAgentProfileBackend } from '../../open/agent-profile-backend.ts'
+// L3 (2026-07) — the Open agent-profile backend is INJECTED (built by
+// `open/composer.ts` and passed in as `agentSettingsProfile`) rather than
+// imported here, so this gateway composition core no longer reaches UP into the
+// `open` band. Only the structural `AgentProfileBackend` type is referenced.
+import type { AgentProfileBackend } from '../../cores/free/agent-settings/index.ts'
 import type { ChatCommandFilter } from '../http/app-ws-surface.ts'
 import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { CoreCredentialResolver } from './core-credential-resolver.ts'
@@ -112,14 +116,17 @@ export interface MountOpenCoresInput {
   /** Default project_id for filters whose inbound omits one. */
   default_project_id?: string
   /**
-   * Invalidate the `PersonaPromptLoader` cache for a persona file after an
-   * in-chat profile edit (`update_agent_name` / `update_personality`). Wired by
-   * the composer to `personaLoader.invalidate` so the rewritten SOUL.md lands on
-   * the very next agent turn without waiting for the mtime-cache path. Optional
-   * (tests omit it; the atomic write still bumps mtime so the change is picked
-   * up regardless).
+   * The Settings Core (M1) agent-profile writer — INJECTED by the composer
+   * (`open/composer.ts` builds `buildOpenAgentProfileBackend({...})` and passes
+   * it here) so `update_agent_name` / `update_personality` persist to
+   * `<owner_home>/persona/{agent-profile.json,SOUL.md}` and reflect on the next
+   * agent turn. Wiring it in from the composition root keeps this gateway core
+   * from importing the `open` band (L3 DAG cut). Optional — when omitted (tests
+   * that don't exercise agent-settings) the Cores backend factory falls back to
+   * its `available:false` no-op. The composer wires the backend's own
+   * `onProfileChange` to the persona-loader cache invalidation.
    */
-  onPersonaReload?: (filename: 'SOUL.md') => void
+  agentSettingsProfile?: AgentProfileBackend
 }
 
 export interface MountedOpenCores {
@@ -292,18 +299,16 @@ export async function mountOpenCores(
     credentialResolver,
     calendarClient,
     researchProjectBackend: researchWiring.project_backend,
-    // Settings Core (M1) — thread the Open-appropriate agent-profile writer so
-    // `update_agent_name` / `update_personality` actually persist (to
-    // `<owner_home>/persona/{agent-profile.json,SOUL.md}`) and reflect on the
-    // next agent turn, instead of falling back to the `available:false` no-op
-    // that returned SETTINGS_BACKEND_UNAVAILABLE_ERROR on every Open box.
-    agentSettingsProfile: buildOpenAgentProfileBackend({
-      owner_home: input.owner_home,
-      env,
-      ...(input.onPersonaReload !== undefined
-        ? { onProfileChange: (): void => input.onPersonaReload?.('SOUL.md') }
-        : {}),
-    }),
+    // Settings Core (M1) — the Open-appropriate agent-profile writer, INJECTED
+    // by the composer (L3 DAG cut) so `update_agent_name` / `update_personality`
+    // actually persist (to `<owner_home>/persona/{agent-profile.json,SOUL.md}`)
+    // and reflect on the next agent turn, instead of falling back to the
+    // `available:false` no-op that returned SETTINGS_BACKEND_UNAVAILABLE_ERROR on
+    // every Open box. When absent (agent-settings-agnostic tests) the backend
+    // factory installs its own no-op fallback.
+    ...(input.agentSettingsProfile !== undefined
+      ? { agentSettingsProfile: input.agentSettingsProfile }
+      : {}),
   })
 
   // ── Chained chat-command filter (the repo-wide gap — chain ALL free filters) ─

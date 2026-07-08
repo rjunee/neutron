@@ -3,7 +3,5 @@
   "type": "module",
   "main": "./index.ts",
   "private": true,
-  "dependencies": {
-    "@neutronai/open": "workspace:*"
-  }
+  "dependencies": {}
 }
