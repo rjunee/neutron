@@ -14,7 +14,7 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `f27c66c` (K11e #251 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `703a49a` (L2 #255 merged 2026-07-08) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -131,12 +131,23 @@ land — it is what a fresh context reads to resume without re-deriving anything
   `ChatBridge` were already dead (excised in K11b0). Codex found NO code regression; its 2 "blockers" were
   STATUS.md base-staleness (branch predated #252) → resolved by rebase onto current main. Matrix 44/44,
   landing+gateway 2638 / reminders+open green, depcruise clean.
-- **⏳ L2 IN FLIGHT** (contracts leaf · `sonnet` · lane none) — build agent dispatched off `39a44b2`,
-  branch `refactor/l2-contracts-leaf`. Relocates stranded contract types/constants (OnboardingPhase/
-  ALL_PHASES, AgentEngagementMode, LlmCallFn, ImportJobRunnerHook, ChatCommandFilter, McpToolResolver,
-  MOBILE_APP_URL/TELEGRAM_BIND_TOKEN_TTL_MS, OutboundSink ×2 unify) to node-free leaf(s) with re-export
-  shims; lands DAG cuts #1,4,7,9,10,11. Agent flagged to re-derive anchors (K11 churn) + verify
-  WebChatSenderRegistry still exists.
+- **✅ L2 DONE (#255, main `703a49a` 2026-07-08):** stranded contract types/constants relocated to a new
+  **node-free `contracts/` leaf** (+ `OutboundSink` unified into `trident/outbound-sink.ts`, which needs a
+  `channels/types.ts` type it can't take into the lowest band) with `export … from` shims at every old
+  site: OnboardingPhase/ALL_PHASES, AgentEngagementMode+defaults, LlmCallFn, ChatCommandFilter,
+  McpToolResolver, MOBILE_APP_URL/TELEGRAM_BIND_TOKEN_TTL_MS, OutboundSink×2→1. **DAG cuts #1/#7/#9
+  landed** (depcruise 21→16, ratchet OK); #10/#11 are type-only (grep-verified). `.dependency-cruiser.cjs`
+  registers `contracts` as a leaf band. **Skipped (already relocated):** ImportJobRunnerHook (K3),
+  WebChatSenderRegistry (alive, node-free); ChatOutbound cut by L1. Codex APPROVE; one comment-truth fix
+  (MOBILE_APP_URL canonical home). matrix 45/45; env-load-order preserved in `contracts/handoff-config.ts`.
+  **⚠️ resume note:** agent worktrees are shallow/grafted — `git rebase origin/main` needs `git fetch
+  --unshallow` first (see [[refactor-worktree-shallow-rebase-trap]]).
+- **⏳ L4 IN FLIGHT** (manifest honesty + workspace promotion · `sonnet` · lane ci) — dispatched off
+  `703a49a`, branch `refactor/l4-manifest-honesty`. Promotes the 5 floating dirs (open/, tabs/,
+  work-board/, project-credentials/, **contracts/** [new L2 leaf]) to workspaces + declares real deps
+  (audit: gateway declares 12/imports 39; runtime declares 1). Higher blast radius (changes module
+  resolution) — verify `bun install` + matrix + broad tests + app/metro purity. Accept: depgraph
+  declared-vs-actual delta = 0.
   Leak-gate allowlists the tracked refactor docs (plan + STATUS + INVARIANTS, §1.4 / D-11).
 - **Recurring CI flake to watch:** `Argus r2 … concurrent write+delete on same path keeps
   anchor live` fails intermittently on the throttled runner (hit twice this window; clears on
@@ -285,7 +296,7 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
 **Wave 1: DONE** (all K units merged; K10 deferred to wave 9 — Ralph landmine; K11b2 owner-gated).
 
 **Wave 2 ready-set (§16 wave-2 row: L1 L2 L3 L4 L7 · C1 · W5 · W8✓ F9✓ · M1 M2):**
-1. **L1** ✅ #253. **L2** ⏳ in flight (lane none).
+1. **L1** ✅ #253 · **L2** ✅ #255. **L4** ⏳ in flight (lane ci).
 2. **Next dispatchable** (deps met, distinct lanes, cap 3): **L7** (chat-core scope rename, `sonnet`,
    lane clients — needs Expo+web bundle build verify), **L4** (manifest honesty, `sonnet`, lane ci),
    **L3** (DAG edge cuts / injection-shaped, `opus`, lanes composer+data), **C1** (typed BootConfig,
