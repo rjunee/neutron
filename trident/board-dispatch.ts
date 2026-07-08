@@ -47,7 +47,7 @@ import {
 } from '../work-board/dispatch-readiness.ts'
 import { detectMergeMode, defaultGitModeProbe, detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
-import { slugifyTask } from './code-command.ts'
+import { slugifyTask } from './slugify-task.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 
 /**

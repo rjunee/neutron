@@ -79,6 +79,7 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
   const { SETTINGS_BACKEND_UNAVAILABLE_ERROR } = await import(
     '../../../cores/free/agent-settings/index.ts'
   )
+  const { buildOpenAgentProfileBackend } = await import('../../../open/agent-profile-backend.ts')
   const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
   const reloads: string[] = []
   const mounted = await mountOpenCores({
@@ -89,7 +90,13 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
     projectCredentialStore,
     env,
     substrate: null,
-    onPersonaReload: (filename) => reloads.push(filename),
+    // L3 — the agent-profile backend is now INJECTED (built by the composer),
+    // not constructed inside mountOpenCores from an `onPersonaReload` callback.
+    agentSettingsProfile: buildOpenAgentProfileBackend({
+      owner_home,
+      env,
+      onProfileChange: () => reloads.push('SOUL.md'),
+    }),
   })
   cleanups.push(() => mounted.cleanup())
 

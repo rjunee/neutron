@@ -104,7 +104,6 @@
         "@neutronai/gbrain-memory": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
         "@neutronai/migrations": "workspace:*",
-        "@neutronai/onboarding": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "jose": "^5.9.0",
@@ -126,7 +125,6 @@
       "name": "@neutronai/agent-settings",
       "version": "0.1.0",
       "dependencies": {
-        "@neutronai/connect": "workspace:*",
         "@neutronai/contracts": "workspace:*",
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cores-sdk": "workspace:*",
@@ -372,14 +370,12 @@
     },
     "migrations": {
       "name": "@neutronai/migrations",
-      "dependencies": {
-        "@neutronai/open": "workspace:*",
-      },
     },
     "onboarding": {
       "name": "@neutronai/onboarding",
       "dependencies": {
         "@neutronai/channels": "workspace:*",
+        "@neutronai/connect": "workspace:*",
         "@neutronai/contracts": "workspace:*",
         "@neutronai/cron": "workspace:*",
         "@neutronai/gateway": "workspace:*",
@@ -399,6 +395,7 @@
         "@neutronai/agent-settings": "workspace:*",
         "@neutronai/auth": "workspace:*",
         "@neutronai/channels": "workspace:*",
+        "@neutronai/contracts": "workspace:*",
         "@neutronai/cron": "workspace:*",
         "@neutronai/doc-search": "workspace:*",
         "@neutronai/gateway": "workspace:*",
@@ -446,8 +443,6 @@
         "@neutronai/channels": "workspace:*",
         "@neutronai/core-sdk": "workspace:*",
         "@neutronai/cron": "workspace:*",
-        "@neutronai/gateway": "workspace:*",
-        "@neutronai/landing": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/persistence": "workspace:*",
         "@neutronai/runtime": "workspace:*",

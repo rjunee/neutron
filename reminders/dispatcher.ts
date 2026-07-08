@@ -25,7 +25,7 @@
 import { FAST_MODEL } from '../runtime/models.ts'
 import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
 import type { ToolDef } from '../core-sdk/types.ts'
-import { collectTokensToString } from '../gateway/realmode-composer/build-llm-call-substrate.ts'
+import { collectTokensToString } from '../runtime/collect-tokens.ts'
 import { classifyReminderMessage, literalFallback, type ReminderShape } from './message-shape.ts'
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'
