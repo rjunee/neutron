@@ -22,6 +22,12 @@
  */
 
 import { initialDocLinkFromLocation } from './doc-link-nav.ts'
+// L6 — topic-id derivation moved to the node-free @neutronai/wire-types leaf.
+// This file's inline `appWsTopicId` / `appWsProjectTopicId` mirror existed ONLY
+// to keep the browser bundle from pulling in the (node-only) channels package;
+// wire-types being node-free removes that reason. Imported for local use here
+// and re-exported below so any config.ts importer stays valid.
+import { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types'
 
 export interface ProjectTab {
   id: string
@@ -128,23 +134,10 @@ export interface WindowLike {
   __neutron_post_onboarding_claim_url?: string
 }
 
-/** Synthetic app-ws topic id for a user. Mirrors `appWsTopicId` on the server
- *  (kept inline so the browser bundle doesn't pull in the channels package). */
-export function appWsTopicId(userId: string): string {
-  return `app:${userId}`
-}
-
-/**
- * Per-project app-ws topic id — `app:<user>:<project>`. Mirrors the server's
- * `appWsProjectTopicId` (channels/adapters/app-ws/envelope.ts). The web client
- * opens one socket per active project (reconnecting on a switch) so each
- * project's transcript + seq + resume scope to this topic; General uses the
- * user-scoped {@link appWsTopicId}. Kept inline so the browser bundle doesn't
- * pull in the channels package.
- */
-export function appWsProjectTopicId(userId: string, projectId: string): string {
-  return `app:${userId}:${projectId}`
-}
+// L6 — `appWsTopicId` / `appWsProjectTopicId` now come from
+// `@neutronai/wire-types` (imported above); re-exported here so existing
+// `landing/chat-react/config` importers keep resolving them from this module.
+export { appWsProjectTopicId, appWsTopicId } from '@neutronai/wire-types'
 
 /**
  * The store key + WS topic for a given active project (null = General). The

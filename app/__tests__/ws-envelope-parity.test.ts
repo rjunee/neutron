@@ -1,47 +1,40 @@
 /**
- * @neutronai/app — ws-envelope parity tests (P5.1).
+ * @neutronai/app — app-ws envelope CONTRACT test (G3, post-L6).
  *
- * Guards against drift between `app/lib/ws-envelope.ts` (Expo-side
- * mirror) and `channels/adapters/app-ws/envelope.ts` (server). The
- * Expo workspace is a separate bun workspace + the channels package
- * depends on `node:sqlite`, so we cannot import the server module
- * here — instead, we hand-test that each known envelope kind round-
- * trips through both representations identically.
- *
- * Bidirectional structural-equivalence trick: build a value typed as
- * the Expo type, assign it to the channels type, and back. TS
- * surfaces drift at compile time (caught by `bunx tsc --noEmit` in
- * the verify gate); these runtime assertions cover the JSON shape
- * the WS adapter actually sends + the surface decoder ingests.
+ * Before L6 this was a DRIFT GUARD between `app/lib/ws-envelope.ts` (a
+ * hand-written Expo mirror, now DELETED) and the server envelope in
+ * `channels/adapters/app-ws/envelope.ts`. L6 collapsed both onto ONE source:
+ * the node-free `@neutronai/wire-types` leaf owns the envelope TYPES, the
+ * server module re-exports them + keeps the decode/sanitize VALUE helpers, and
+ * the Expo app imports the types directly from the leaf. There is no longer a
+ * mirror to drift — so this is now a plain import-and-use CONTRACT test: the
+ * wire types construct as expected AND the surface decoders behave.
  */
 
 import { describe, expect, it } from 'bun:test';
 
+// The runtime decode/sanitize value helpers still live channel-side (they
+// encode wire validation, not the shape) — import them from there.
 import {
   decodeAppWsInbound,
   MAX_ATTACHMENT_URL_LEN,
   MAX_ATTACHMENTS_PER_MESSAGE,
   sanitizeAttachments,
 } from '../../channels/adapters/app-ws/envelope';
-import type {
-  AppWsOutbound as ServerOutbound,
-  AppWsOutboundAgentMessage as ServerAgentMessage,
-  AppWsOutboundAgentMessagePartial as ServerAgentMessagePartial,
-  AppWsOutboundUserMessageEcho as ServerUserEcho,
-  AppWsInboundUserMessage as ServerInbound,
-} from '../../channels/adapters/app-ws/envelope';
 
+// The ONE source of the wire types (L6). The app + the server both import
+// these from here now.
 import type {
   AppWsOutbound,
   AppWsOutboundAgentMessage,
   AppWsOutboundAgentMessagePartial,
   AppWsOutboundUserMessageEcho,
   AppWsInboundUserMessage,
-} from '../lib/ws-envelope';
+} from '@neutronai/wire-types';
 
-describe('agent_message envelope', () => {
-  it('round-trips between Expo + server types', () => {
-    const expo: AppWsOutboundAgentMessage = {
+describe('agent_message envelope (wire-types canonical)', () => {
+  it('constructs with the canonical option shape', () => {
+    const msg: AppWsOutboundAgentMessage = {
       v: 1,
       type: 'agent_message',
       body: 'hello',
@@ -55,19 +48,12 @@ describe('agent_message envelope', () => {
       doc_refs: [{ label: 'l', url: 'neutron://docs/x', project_id: 'p', path: 'x' }],
       project_id: 'p',
     };
-    const server: ServerAgentMessage = expo;
-    const back: AppWsOutboundAgentMessage = server;
-    expect(back.body).toBe('hello');
-    expect(back.options?.[0]?.value).toBe('a');
+    expect(msg.body).toBe('hello');
+    expect(msg.options?.[0]?.value).toBe('a');
   });
 
-  it('declares deep_link?: string on BOTH sides (ISSUE #18)', () => {
-    // Build a value typed as the Expo envelope WITH deep_link populated;
-    // assign across the type boundary in both directions. If either side
-    // drops `deep_link` from `AppWsOutboundAgentMessage`, this round-trip
-    // fails at compile time (caught by `bunx tsc --noEmit` in CI) AND
-    // the runtime equality assertion below fails.
-    const expo: AppWsOutboundAgentMessage = {
+  it('carries a top-level deep_link (ISSUE #18)', () => {
+    const msg: AppWsOutboundAgentMessage = {
       v: 1,
       type: 'agent_message',
       body: 'Opening task...',
@@ -75,16 +61,21 @@ describe('agent_message envelope', () => {
       ts: 1,
       deep_link: '/projects/p1/tasks/t1',
     };
-    const server: ServerAgentMessage = expo;
-    const back: AppWsOutboundAgentMessage = server;
-    expect(back.deep_link).toBe('/projects/p1/tasks/t1');
-    expect(server.deep_link).toBe('/projects/p1/tasks/t1');
+    expect(msg.deep_link).toBe('/projects/p1/tasks/t1');
   });
 });
 
 describe('agent_message_partial envelope', () => {
-  it('mirrors on both sides (P5.1 new wire shape)', () => {
-    const expo: AppWsOutboundAgentMessagePartial = {
+  it('is a member of the AppWsOutbound union', () => {
+    const msg: AppWsOutbound = {
+      v: 1,
+      type: 'agent_message_partial',
+      message_id: 'mid',
+      body_delta: 'x',
+      ts: 1,
+    };
+    expect(msg.type).toBe('agent_message_partial');
+    const partial: AppWsOutboundAgentMessagePartial = {
       v: 1,
       type: 'agent_message_partial',
       message_id: 'mid',
@@ -92,27 +83,13 @@ describe('agent_message_partial envelope', () => {
       ts: 1,
       project_id: 'p',
     };
-    const server: ServerAgentMessagePartial = expo;
-    const back: AppWsOutboundAgentMessagePartial = server;
-    expect(back.body_delta).toBe('chunk');
-  });
-
-  it('is a member of the AppWsOutbound union on both sides', () => {
-    const expo: AppWsOutbound = {
-      v: 1,
-      type: 'agent_message_partial',
-      message_id: 'mid',
-      body_delta: 'x',
-      ts: 1,
-    };
-    const server: ServerOutbound = expo;
-    expect(server.type).toBe('agent_message_partial');
+    expect(partial.body_delta).toBe('chunk');
   });
 });
 
 describe('user_message echo + inbound', () => {
-  it('carries attachments on both sides', () => {
-    const echo_expo: AppWsOutboundUserMessageEcho = {
+  it('carries attachments', () => {
+    const echo: AppWsOutboundUserMessageEcho = {
       v: 1,
       type: 'user_message',
       user_id: 'u',
@@ -121,22 +98,19 @@ describe('user_message echo + inbound', () => {
       ts: 1,
       attachments: ['https://cdn/a.png'],
     };
-    const echo_server: ServerUserEcho = echo_expo;
-    const echo_back: AppWsOutboundUserMessageEcho = echo_server;
-    expect(echo_back.attachments?.[0]).toBe('https://cdn/a.png');
+    expect(echo.attachments?.[0]).toBe('https://cdn/a.png');
 
-    const inbound_expo: AppWsInboundUserMessage = {
+    const inbound: AppWsInboundUserMessage = {
       v: 1,
       type: 'user_message',
       body: 'q',
       attachments: ['/api/app/upload/foo'],
     };
-    const inbound_server: ServerInbound = inbound_expo;
-    expect(inbound_server.attachments?.[0]).toBe('/api/app/upload/foo');
+    expect(inbound.attachments?.[0]).toBe('/api/app/upload/foo');
   });
 });
 
-describe('decodeAppWsInbound — attachments handling', () => {
+describe('decodeAppWsInbound — attachments handling (channel-side helper)', () => {
   it('accepts a well-formed attachments array', () => {
     const inbound = decodeAppWsInbound({
       v: 1,

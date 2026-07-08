@@ -23,7 +23,7 @@ import { useCallback, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';
-import type { AppWsOutboundAgentMessageOption } from './ws-envelope';
+import type { AppWsOutboundAgentMessageOption } from '@neutronai/wire-types';
 
 export interface ButtonOptionRowProps {
   options: ReadonlyArray<AppWsOutboundAgentMessageOption>;

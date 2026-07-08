@@ -29,6 +29,8 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 
+import type { WireAgentMessageOption } from '@neutronai/wire-types'
+
 /** Hard byte cap for `ButtonOption.value` per § 2.1 Pass-2 wire format. */
 export const VALUE_BYTE_CAP = 37
 /** Total Telegram callback_data byte cap. */
@@ -56,41 +58,32 @@ export const RESERVED_OPTION_VALUES: ReadonlySet<string> = new Set([
 
 export type ChannelKindForButton = 'telegram' | 'app-socket' | 'webhook'
 
-export interface ButtonOption {
-  /** A/B/C/D label rendered as the visible button face. */
-  label: string
-  /** Human-readable copy shown next to the label in the prompt body. */
-  body: string
-  /** Routing value the agent receives on tap. ≤ VALUE_BYTE_CAP UTF-8 bytes. */
-  value: string
-  /** Optional Bot API 9.6 inline-keyboard decoration. Ignored on non-Telegram. */
-  decoration?: { icon_custom_emoji_id?: string; style?: 'default' | 'destructive' | 'primary' }
-  /**
-   * Sprint 28 — when set, this option's renderable face is an image
-   * instead of (or in addition to) the text body. Used by the
-   * `profile_pic_generating` phase to surface generated portraits as
-   * tappable thumbnails. Channel-agnostic per the locked rule "ButtonPrompt
-   * is the lowest common denominator across surfaces":
-   *
-   *   - Web/app socket: render the image inline as a CSS-grid cell;
-   *     `body` falls back to alt-text.
-   *   - Telegram: send a `sendMediaGroup` with the gallery + a parallel
-   *     inline keyboard whose buttons reference the same `value`s. The
-   *     Telegram adapter is the surface that handles the multi-message
-   *     stitching; the contract here is just "callers can attach an
-   *     image_url and the wire format carries it".
-   *
-   * Format: an absolute or project-relative URL the channel can
-   * resolve to bytes. The pipeline writes project-relative URLs of
-   * the shape `/profile-pic/candidate/<candidate_id>.png` so the live
-   * gateway's static-file route can serve them; tests can pass
-   * `data:image/png;base64,...` URIs to keep the assertion off the wire.
-   *
-   * No byte-cap enforced beyond the cross-channel value cap (the URL
-   * itself does NOT travel on Telegram callback_data — only `value`
-   * does — so the URL length only needs to fit a normal HTTP path).
-   */
-  image_url?: string
+/**
+ * The channel-agnostic INPUT primitive for a tappable option.
+ *
+ * ── L6 (option-shape unification) ─────────────────────────────────────────
+ * `ButtonOption` is an EXPLICIT PROJECTION of the canonical
+ * {@link WireAgentMessageOption} (`@neutronai/wire-types`): it is a strict
+ * structural SUPERSET, adding ONLY the open `metadata` bag below. That
+ * `metadata` field is the LOSSY edge preserved explicitly here — it carries
+ * Telegram Bot-API decoration hints that are DROPPED when the option is
+ * projected onto the app-ws wire (the wire `options[]` never carries
+ * `metadata`). Every other field (`label` / `body` / `value` / `image_url` /
+ * `decoration`) is inherited verbatim from the canonical shape, so the three
+ * byte-identical wire declarations and this input primitive can never drift.
+ *
+ * Field notes carried over from the pre-L6 declaration:
+ *   - `label`     — the A/B/C/D face rendered as the visible button.
+ *   - `body`      — human-readable copy shown next to the label.
+ *   - `value`     — routing value the agent receives on tap; ≤ VALUE_BYTE_CAP
+ *                   UTF-8 bytes (enforced at runtime by `validateButtonPrompt`,
+ *                   NOT by the type — the wire shape imposes no cap).
+ *   - `decoration`— optional Bot API 9.6 inline-keyboard decoration.
+ *   - `image_url` — Sprint 28 image-gallery thumbnail (absolute or
+ *                   project-relative URL the channel resolves to bytes; the URL
+ *                   does NOT travel on Telegram callback_data — only `value`).
+ */
+export interface ButtonOption extends WireAgentMessageOption {
   /**
    * Optional channel-agnostic metadata. The Telegram adapter reads
    * `metadata.action_kind` to apply Bot API 9.6 emoji + style polish
@@ -102,6 +95,9 @@ export interface ButtonOption {
    * `action_kind` was reachable only via unsafe casts at the wire
    * boundary; promoting it onto the typed contract lets agents pass
    * it through `buildButtonPrompt` without surgery.
+   *
+   * L6: this is the ONE field that makes `ButtonOption` a superset of the
+   * canonical wire option — it never reaches the app-ws wire (lossy edge).
    */
   metadata?: { action_kind?: string; [key: string]: unknown }
 }

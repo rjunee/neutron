@@ -7,6 +7,7 @@
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/runtime": "workspace:*",
+    "@neutronai/wire-types": "workspace:*",
     "jose": "^5.9.0"
   }
 }

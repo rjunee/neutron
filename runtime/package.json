@@ -13,6 +13,7 @@
     "@neutronai/mcp": "workspace:*",
     "@neutronai/scribe": "workspace:*",
     "@neutronai/tools": "workspace:*",
+    "@neutronai/wire-types": "workspace:*",
     "jose": "^5.9.0"
   }
 }

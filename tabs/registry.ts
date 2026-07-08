@@ -37,49 +37,17 @@
  *      emitted now.
  */
 
-/** Where a tab lives: inside one project, or in the global app shell. */
-export type TabScope = 'project' | 'global'
+// L6 — the descriptor wire shape (`TabDescriptor` + its `TabScope` /
+// `TabSource` / `TabMountKind` / `TabMount` component types) moved to the
+// node-free `@neutronai/wire-types` leaf so BOTH clients import ONE source
+// instead of the hand-mirrored type blocks that used to live in
+// `app/lib/tabs-client.ts` + `landing/chat-react/tabs-client.ts` (deleted in
+// L6). This module KEEPS the resolver logic + `BUILTIN_TABS` +
+// `CoreTabContribution`, and re-exports the types so its existing importers
+// (the HTTP surface, both tab clients) stay valid.
+import type { TabDescriptor, TabScope } from '@neutronai/wire-types'
 
-/**
- * Who contributes the tab. `'builtin'` = engine-native (PR-1). `'core'` =
- * contributed by an installed Core's `project_tab` surface (PR-2). v2 will
- * add `'custom'` (user-built tabs) — do NOT emit it before that wave.
- */
-export type TabSource = 'builtin' | 'core' | 'custom'
-
-/**
- * How a client renders the tab body.
- *   - `'builtin'`: the client renders its OWN native view keyed by the
- *     descriptor `key` (an `expo-router` route on mobile, a React component
- *     on web). `target` is the stable route/view key.
- *   - `'webview'`: render the contributing Core's `project_tab` entry in a
- *     sandboxed webview/iframe at `target` (PR-2). `<project_id>` in the
- *     URL is substituted by the resolver, mirroring `open_app_tab`.
- */
-export type TabMountKind = 'builtin' | 'webview'
-
-export interface TabMount {
-  kind: TabMountKind
-  /** builtin → route/view key; webview → resolved URL. */
-  target: string
-}
-
-export interface TabDescriptor {
-  /** Stable identity. Builtin: `'chat' | 'work_board' | 'documents' | 'admin'`. */
-  key: string
-  /** Human label rendered on the tab. */
-  label: string
-  scope: TabScope
-  source: TabSource
-  /** Set only when `source === 'core'` (PR-2). Absent for builtins. */
-  core_slug?: string
-  /**
-   * Ascending sort key. Builtin tabs are spaced by 10 so PR-2 can slot
-   * Core-contributed tabs BETWEEN builtins without renumbering.
-   */
-  order: number
-  mount: TabMount
-}
+export type { TabDescriptor, TabMount, TabMountKind, TabScope, TabSource } from '@neutronai/wire-types'
 
 /**
  * The static builtin tab set. Per-project tabs first
