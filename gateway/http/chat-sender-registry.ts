@@ -8,7 +8,7 @@
  * directly from this sibling leaf module instead.
  */
 
-import type { ChatOutbound } from '../../landing/server.ts'
+import type { ChatOutbound } from '../../landing/chat-protocol.ts'
 
 /**
  * Per-session sender registry. Production wires the in-memory variant

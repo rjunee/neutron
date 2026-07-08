@@ -48,7 +48,7 @@
  * reconnect (the common case) are unaffected.
  */
 
-import type { ChatOutbound } from '../../landing/server.ts'
+import type { ChatOutbound } from '../../landing/chat-protocol.ts'
 import type { RecoveredReply } from '../../runtime/adapters/claude-code/index.ts'
 import type { WebChatSenderRegistry } from './chat-sender-registry.ts'
 

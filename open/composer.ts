@@ -224,7 +224,7 @@ import type {
 } from '../gateway/http/chat-bridge.ts'
 import { createAppWsSurface } from '../gateway/http/app-ws-surface.ts'
 import type { IncomingEvent, OutgoingMessage } from '../channels/types.ts'
-import type { ChatOutbound } from '../landing/server.ts'
+import type { ChatOutbound } from '../landing/chat-protocol.ts'
 
 export interface BuildOpenGraphComposerOptions {
   /** Override the process env (tests). Defaults to `process.env`. */
