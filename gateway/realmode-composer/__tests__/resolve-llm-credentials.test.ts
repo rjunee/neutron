@@ -584,6 +584,12 @@ test('K11b2: retired NEUTRON_DEPLOYMENT_MODE alias → open → shared key IS us
     },
   })
   expect(pool).not.toBeNull()
+  // Prove the SHARED env key was actually loaded (not merely a non-null pool):
+  // the alias resolving to 'open' is exactly what lets the box-global fallback
+  // through — the contract this pins.
+  const sel = selectCredential(pool)
+  expect(sel?.secret).toBe('sk-ant-shared-global')
+  expect(sel?.kind).toBe('api_key')
 })
 
 test('connect mode: shared env key also refused (only open may use it)', async () => {
