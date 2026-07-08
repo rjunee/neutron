@@ -1104,6 +1104,14 @@
   }
   .car-msg-action:hover { opacity: 1; text-decoration: underline; }
   .car-msg-action-danger:hover { color: var(--danger, #e5534b); }
+  /* W5 GAP-4 — a failed send's retry affordance (always visible, not hover-gated,
+     so a stuck send is never hidden). Mirrors the mobile ⚠️ 'failed' glyph. */
+  .car-msg-failed {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
+    font-size: 11px; background: none; border: none; cursor: pointer; padding: 0;
+    color: var(--danger, #e5534b);
+  }
+  .car-msg-failed:hover { text-decoration: underline; }
   .car-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
   .car-edit-input {
     width: 100%; min-height: 48px; resize: vertical; font: inherit;

@@ -269,6 +269,38 @@ describe('W5 FIX 7 — a late onopen while inactive must not wake the client', (
     expect(client.getStatus()).toBe('open')
     expect(opens).toBe(1) // now onOpen fires normally → resume/drain resume
   })
+
+  it('FIX 8 — re-arms the heartbeat when foregrounding an already-open socket', () => {
+    const clock = new VirtualClock()
+    const sockets: FakeSocket[] = []
+    const client = new ChatWsClient({
+      url: 'wss://test/ws/app/chat',
+      createSocket: () => {
+        const s = new FakeSocket()
+        sockets.push(s)
+        return s
+      },
+      minBackoffMs: 500,
+      maxBackoffMs: 15_000,
+      jitter: () => 0,
+      heartbeatIntervalMs: 25_000,
+      heartbeatTimeoutMs: 10_000,
+      setTimeoutFn: clock.set,
+      clearTimeoutFn: clock.clear,
+    })
+
+    client.connect()
+    sockets[0]!.fireOpen() // live socket, heartbeat armed
+    // Background a LIVE socket (stays open), then foreground it.
+    client.setActive(false)
+    client.setActive(true)
+    expect(client.getStatus()).toBe('open') // same socket, not reconnected
+    expect(sockets.length).toBe(1)
+
+    // Heartbeat must have resumed: after the idle interval a ping is sent again.
+    clock.advance(25_000)
+    expect(sockets[0]!.frames('ping').length).toBe(1)
+  })
 })
 
 // ===========================================================================

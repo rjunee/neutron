@@ -169,7 +169,17 @@ export class ChatWsClient {
       return
     }
     if (this.closedByUser) return
-    if (this.status !== 'open' && this.status !== 'connecting') {
+    if (this.status === 'open') {
+      // FIX 8 — foregrounding an ALREADY-OPEN socket (the common path: background
+      // the tab/app on a live socket, then return). `setActive(false)` cleared
+      // the heartbeat but left the socket `open`, so we must re-arm it here or
+      // half-open detection is lost for the rest of the socket's life. The idle
+      // timer restarts from now; if the socket silently went half-open while
+      // backgrounded, the next ping's missed pong force-closes it → reconnect.
+      this.startHeartbeat()
+      return
+    }
+    if (this.status !== 'connecting') {
       this.attempt = 0
       this.openSocket()
     }

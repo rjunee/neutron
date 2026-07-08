@@ -203,6 +203,9 @@ export interface ControllerSession {
   /** W5 GAP-2 — network-reachability signal: reset backoff + reconnect NOW
    *  (optional so legacy fakes still satisfy the interface). */
   notifyReachable?(): void
+  /** W5 GAP-4 — re-drive not-yet-acked sends (a failed message's retry action).
+   *  Idempotent on client_msg_id (optional so legacy fakes still satisfy). */
+  retry?(client_msg_id: string): Promise<void>
   status(): ConnStatus
   send(
     body: string,
@@ -489,6 +492,17 @@ export class NeutronChatController {
    */
   notifyReachable(): void {
     this.session.notifyReachable?.()
+  }
+
+  /**
+   * W5 GAP-4 — retry a failed send. The web UI's ⚠️ "Failed — retry" affordance
+   * calls this with the failed message's client_msg_id; it re-drives every
+   * not-yet-`acked` send over the current socket, idempotently on client_msg_id
+   * (the server de-dupes and the `was_new` guard means a re-delivery never
+   * re-fires the agent). A no-op against a legacy fake session without `retry`.
+   */
+  async retry(client_msg_id: string): Promise<void> {
+    await this.session.retry?.(client_msg_id)
   }
 
   getViewModel(): ChatViewModel {
