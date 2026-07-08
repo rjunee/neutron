@@ -12,7 +12,7 @@
 
 import type { ToolRegistry } from '../tools/registry.ts'
 import { currentTopicContext, type TopicContext, withTopicContext } from './topic-context.ts'
-import type { McpToolResolver } from '../runtime/adapters/gpt-5-5-api/mcp-shim.ts'
+import type { McpToolResolver } from '../contracts/mcp-tool-resolver.ts'
 
 export interface McpServerOptions {
   project_slug: string

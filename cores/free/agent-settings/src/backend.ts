@@ -39,7 +39,7 @@
  */
 
 import type { ProjectDb } from '../../../../persistence/index.ts'
-import { TELEGRAM_BIND_TOKEN_TTL_MS } from '../../../../onboarding/interview/final-handoff-config.ts'
+import { TELEGRAM_BIND_TOKEN_TTL_MS } from '../../../../contracts/handoff-config.ts'
 import {
   DEFAULT_AGENT_ENGAGEMENT_MODE,
   isAgentEngagementMode,

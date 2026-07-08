@@ -40,7 +40,7 @@ import type {
   CronJobRegistry,
 } from '../cron/jobs.ts'
 import type { ProjectDb } from '../persistence/index.ts'
-import type { LlmCallFn } from '../onboarding/interview/phase-spec-resolver.ts'
+import type { LlmCallFn } from '../contracts/llm-call.ts'
 import { computeFocusScore } from './focus-score.ts'
 
 /**

@@ -22,25 +22,17 @@
  * `work_interview_gap_fill`.
  *
  * Net drops (v1 only — entries removed): the four absorbed phases above.
+ *
+ * L2 (2026-07) — `OnboardingPhase` + `ALL_PHASES` moved to
+ * `../../contracts/onboarding-phase.ts` (a node-free leaf so cross-package
+ * consumers can depend on the phase vocabulary without importing this
+ * package — critic-layering.md §2.1 edge #1). This file re-exports both so
+ * existing import specifiers stay valid; everything below (the transition
+ * table) is untouched.
  */
 
-export type OnboardingPhase =
-  | 'signup'
-  | 'identity_oauth'
-  | 'instance_provisioned'
-  | 'ai_substrate_offered'
-  | 'import_upload_pending'
-  | 'import_running'
-  | 'import_analysis_presented'
-  | 'work_interview_gap_fill'
-  | 'personality_offered'
-  | 'agent_name_chosen'
-  | 'slug_chosen'
-  | 'projects_proposed'
-  | 'persona_synthesizing'
-  | 'persona_reviewed'
-  | 'completed'
-  | 'failed'
+import type { OnboardingPhase } from '../../contracts/onboarding-phase.ts'
+export type { OnboardingPhase }
 
 /** Terminal phases — cannot transition further. */
 export const TERMINAL_PHASES: ReadonlySet<OnboardingPhase> = new Set([
@@ -153,21 +145,4 @@ export function isLegalTransition(
 }
 
 /** Full ordered list — useful for tests / UI / observability. */
-export const ALL_PHASES: ReadonlyArray<OnboardingPhase> = [
-  'signup',
-  'identity_oauth',
-  'instance_provisioned',
-  'ai_substrate_offered',
-  'import_upload_pending',
-  'import_running',
-  'import_analysis_presented',
-  'work_interview_gap_fill',
-  'personality_offered',
-  'agent_name_chosen',
-  'slug_chosen',
-  'projects_proposed',
-  'persona_synthesizing',
-  'persona_reviewed',
-  'completed',
-  'failed',
-]
+export { ALL_PHASES } from '../../contracts/onboarding-phase.ts'

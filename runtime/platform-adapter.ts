@@ -50,7 +50,7 @@ import type {
   SlugHistoryProbe,
   SlugRegistryProbe,
 } from './slug-grammar.ts'
-import type { OnboardingPhase } from '../onboarding/interview/phase.ts'
+import type { OnboardingPhase } from '../contracts/onboarding-phase.ts'
 import type {
   ClaimStartTokenJtiFn,
   VerifyStartTokenFn,
