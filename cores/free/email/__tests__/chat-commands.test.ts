@@ -18,10 +18,8 @@ import {
 import {
   EmailProjectCacheResolver,
 } from '../src/cache.ts'
-import {
-  buildSeededInMemoryGmailClient,
-  buildStubEmailSummarizer,
-} from '../src/backend.ts'
+import { buildSeededInMemoryGmailClient } from '../src/in-memory.ts'
+import { buildStubEmailSummarizer } from '../src/summarizer.ts'
 
 function tmpHome(): { home: string; close: () => void } {
   const home = mkdtempSync(join(tmpdir(), 'email-cc-'))

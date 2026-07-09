@@ -13,7 +13,7 @@ import {
   renderTriagePrompt,
   triagePromptTemplateHash,
 } from '../src/triage.ts'
-import type { GmailMessageMeta } from '../src/backend.ts'
+import type { GmailMessageMeta } from '../src/contract.ts'
 
 function msg(
   id: string,

@@ -14,7 +14,7 @@ import {
   resolveProjectLabel,
 } from '../src/per-project-resolver.ts'
 import { EmailProjectCacheResolver } from '../src/cache.ts'
-import { buildSeededInMemoryGmailClient } from '../src/backend.ts'
+import { buildSeededInMemoryGmailClient } from '../src/in-memory.ts'
 
 function tmp(): { home: string; close: () => void } {
   const home = mkdtempSync(join(tmpdir(), 'email-resolver-'))
