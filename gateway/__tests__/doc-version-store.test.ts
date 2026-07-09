@@ -598,6 +598,69 @@ describe('DocVersionStore — concurrency', () => {
     expect(r2).toBe(true)
     expect(existsSync(join(h.projectRoot, '.docs-versions', 'HEAD'))).toBe(true)
   })
+
+  // D4 keyed-mutex adoption proof (refactor plan 2026-07-02 § D4).
+  // `withCommitLock` moved from a hand-rolled chained-promise map to the
+  // generic `gateway/http/keyed-mutex.ts` (which was itself modeled on
+  // the hand-rolled original). This test pins the THREE semantics the
+  // swap must preserve — it was written against the pre-swap
+  // implementation and passes unchanged against both:
+  //   1. mutual exclusion per project (no interleaving),
+  //   2. arrival-order FIFO within a project,
+  //   3. per-project granularity (other projects are NOT blocked).
+  // No git involved — the lock is exercised directly so the assertion
+  // is about the lock, not about subprocess timing.
+  it('D4 — commit lock serializes same-project sections in arrival order; different projects run in parallel', async () => {
+    type LockFn = <T>(project_id: string, fn: () => Promise<T>) => Promise<T>
+    const lock = (
+      h.store as unknown as { withCommitLock: LockFn }
+    ).withCommitLock.bind(h.store) as LockFn
+    const events: string[] = []
+    let releaseA!: () => void
+    const aHolds = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    const a = lock('p1', async () => {
+      events.push('a-start')
+      await aHolds
+      events.push('a-end')
+    })
+    const b = lock('p1', async () => {
+      events.push('b-start')
+    })
+    const c = lock('p2', async () => {
+      events.push('c-start')
+    })
+    // p2 proceeds while p1's first holder is parked → per-project
+    // granularity. b must NOT have started — a still holds p1.
+    await c
+    expect(events).toContain('a-start')
+    expect(events).toContain('c-start')
+    expect(events).not.toContain('b-start')
+    releaseA()
+    await Promise.all([a, b])
+    // a's section fully completes before b's begins (mutual exclusion
+    // + FIFO: b entered the queue before a released).
+    expect(events.indexOf('a-end')).toBeGreaterThan(events.indexOf('a-start'))
+    expect(events.indexOf('b-start')).toBeGreaterThan(events.indexOf('a-end'))
+  })
+
+  it('D4 — commit lock releases on throw and the queue keeps draining', async () => {
+    type LockFn = <T>(project_id: string, fn: () => Promise<T>) => Promise<T>
+    const lock = (
+      h.store as unknown as { withCommitLock: LockFn }
+    ).withCommitLock.bind(h.store) as LockFn
+    const failing = lock('p1', async () => {
+      throw new Error('boom')
+    })
+    let ran = false
+    const next = lock('p1', async () => {
+      ran = true
+    })
+    await expect(failing).rejects.toThrow('boom')
+    await next
+    expect(ran).toBe(true)
+  })
 })
 
 describe('DocVersionStore — failure modes', () => {

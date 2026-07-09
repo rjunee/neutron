@@ -71,6 +71,21 @@
  *   - Force-push or history rewrite (`+main`, `--force`).
  *   - Fetch / pull from the remote (push-only).
  *   - Branch / merge / multi-remote.
+ *
+ * Module layout (refactor plan 2026-07-02 § D4 — THIS file is the
+ * stable facade; the public export surface is unchanged):
+ *   - `git-exec.ts`        — shared `git` process wrapper + child-error
+ *                            introspection helpers (leaf; the same code
+ *                            `doc-version-store.ts` still duplicates
+ *                            privately — keep in sync).
+ *   - `snapshot-reader.ts` — read-only snapshot surface (list / preview /
+ *                            file body / file diff) + typed errors +
+ *                            sha/path validators, re-exported below.
+ *   - `restore.ts`         — the destructive restore op + preflight,
+ *                            re-exported below.
+ *   The facade keeps: ensureInit, backupNow (+ push pipeline + status
+ *   sidecars) and ALL FIVE concurrency maps — the backup/restore mutex
+ *   interlock stays HERE and must not distribute.
  */
 
 import { execFile } from 'node:child_process'
@@ -90,18 +105,63 @@ import type {
   ProjectBackupRemoteConfig,
 } from '@neutronai/runtime/platform-adapter.ts'
 
-const execFileAsync = promisify(execFile)
+import {
+  createGitExec,
+  errMessage,
+  errStderr,
+  errStdout,
+  extractGitFatal,
+  GIT_EXEC_TIMEOUT_MS,
+  hasStagedChanges as gitHasStagedChanges,
+} from './git-exec.ts'
+import type { GitExecFn, GitExecOptions, GitRepoContext } from './git-exec.ts'
+import {
+  getSnapshotFileContent as readSnapshotFileContent,
+  getSnapshotFileDiff as readSnapshotFileDiff,
+  listSnapshots as readSnapshotList,
+  previewSnapshot as readSnapshotPreview,
+} from './snapshot-reader.ts'
+import type {
+  SnapshotFileContent,
+  SnapshotFileDiff,
+  SnapshotPreview,
+  SnapshotSummary,
+} from './snapshot-reader.ts'
+import { performRestore, preflightRestore } from './restore.ts'
+import type { RestoreDeps, RestoreResult } from './restore.ts'
 
-/**
- * Hard timeout per `git` invocation for non-push ops. Push gets a
- * longer ceiling — see `PUSH_TIMEOUT_MS`. A healthy commit on a small
- * repo runs in <100 ms; a runaway is most likely a wedge.
- */
-const GIT_EXEC_TIMEOUT_MS = 30_000
+// Re-export the split-out public surface so every importer keeps using
+// `gateway/git/project-backup-store.ts` (D4 facade contract: the export
+// surface is byte-for-byte compatible; only the file layout changed).
+export {
+  SNAPSHOT_DEFAULT_LIMIT,
+  SNAPSHOT_MAX_LIMIT,
+  SNAPSHOT_DIFF_OUTPUT_CAP_BYTES,
+  SNAPSHOT_FILE_OUTPUT_CAP_BYTES,
+  SnapshotNotFoundError,
+  SnapshotPathNotFoundError,
+  RestoreUnavailableError,
+  InvalidSnapshotPathError,
+  InvalidSnapshotShaError,
+  assertSnapshotSha,
+  assertSnapshotPath,
+} from './snapshot-reader.ts'
+export type {
+  SnapshotSummary,
+  SnapshotFileStatus,
+  SnapshotFile,
+  SnapshotPreview,
+  SnapshotFileContent,
+  SnapshotFileDiff,
+} from './snapshot-reader.ts'
+export type { RestoreResult } from './restore.ts'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * Push timeout — project backups can be larger than per-edit doc
  * commits (binaries, Cores SQLite). Brief § 2.7 pins 5 minutes.
+ * (The 30s non-push ceiling lives in `git-exec.ts`.)
  */
 const PUSH_TIMEOUT_MS = 300_000
 
@@ -206,137 +266,6 @@ export interface ProjectBackupStoreOptions {
   gitBinary?: string
 }
 
-/** Cap on `git log`-derived snapshot pages exposed by `listSnapshots`. */
-export const SNAPSHOT_DEFAULT_LIMIT = 60
-export const SNAPSHOT_MAX_LIMIT = 200
-
-/** Cap on the diff body returned by `previewSnapshot`. */
-export const SNAPSHOT_DIFF_OUTPUT_CAP_BYTES = 200_000
-
-/** Cap on the file body returned by `getSnapshotFileContent`. */
-export const SNAPSHOT_FILE_OUTPUT_CAP_BYTES = 1_000_000
-
-/** Per-snapshot metadata returned by `listSnapshots`. */
-export interface SnapshotSummary {
-  sha: string
-  parent_sha: string | null
-  message: string
-  author_date: string
-  /** `git diff --shortstat` summary against the parent (or null on
-   *  the baseline commit). Cheap; lets the UI render a "12 files
-   *  changed" hint without a second round-trip per row. */
-  shortstat: { files_changed: number; insertions: number; deletions: number } | null
-}
-
-/** Per-file change classification at a snapshot, relative to the
- *  current working-tree HEAD (NOT the snapshot's parent — the UI cares
- *  about "what restoring this would change", which is HEAD↔sha). */
-export type SnapshotFileStatus = 'added' | 'modified' | 'deleted' | 'unchanged'
-
-export interface SnapshotFile {
-  path: string
-  status: SnapshotFileStatus
-  /** Size in bytes at the snapshot SHA (null when `status === 'deleted'`). */
-  size_bytes_at_sha: number | null
-}
-
-export interface SnapshotPreview {
-  sha: string
-  parent_sha: string | null
-  message: string
-  author_date: string
-  files: SnapshotFile[]
-}
-
-/** UTF-8 file body at a snapshot SHA. Binary content is returned as a
- *  base64-encoded string (the surface client must decode); for v1
- *  we conservatively flag anything that fails UTF-8 round-trip as
- *  `binary: true` so the UI can decline to render it inline. */
-export interface SnapshotFileContent {
-  sha: string
-  path: string
-  content: string
-  binary: boolean
-  size_bytes: number
-  truncated: boolean
-}
-
-/** Unified-diff body for one path at a snapshot SHA. */
-export interface SnapshotFileDiff {
-  sha: string
-  path: string
-  hunks: string
-  truncated: boolean
-}
-
-/** Result of a successful restore op. The recovery commit lands in the
- *  project's `.project-backup/` history; the working tree is updated to
- *  match `snapshot_sha` (whole-project) or has a single file replaced
- *  (single-file). */
-export interface RestoreResult {
-  /** SHA of the snapshot the restore pulled from. */
-  snapshot_sha: string
-  /** Previous HEAD SHA (recorded in the recovery commit message). */
-  prior_head_sha: string
-  /** SHA of the new recovery commit. */
-  recovery_commit_sha: string
-  /** Path that was restored, or null when the restore covered the
-   *  whole project. */
-  file_path: string | null
-  /** Wall-clock ms when the recovery commit landed. */
-  completed_at_ms: number
-}
-
-/** Raised when a snapshot SHA can't be found in the project backup
- *  history. Surfaces as 404 with code `snapshot_not_found`. */
-export class SnapshotNotFoundError extends Error {
-  readonly code = 'snapshot_not_found' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'SnapshotNotFoundError'
-  }
-}
-
-/** Raised when a path doesn't exist at the requested snapshot. Surfaces
- *  as 404 with code `snapshot_path_not_found`. */
-export class SnapshotPathNotFoundError extends Error {
-  readonly code = 'snapshot_path_not_found' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'SnapshotPathNotFoundError'
-  }
-}
-
-/** Raised when the restore substrate isn't usable on this gateway
- *  (no git binary, repo never initialized). 503. */
-export class RestoreUnavailableError extends Error {
-  readonly code = 'restore_unavailable' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'RestoreUnavailableError'
-  }
-}
-
-/** Raised when a path string fails the hostile-input checks shared by
- *  every project-backup file route (NUL bytes, absolute paths, `..`
- *  segments, hidden segments). 400. */
-export class InvalidSnapshotPathError extends Error {
-  readonly code = 'invalid_snapshot_path' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'InvalidSnapshotPathError'
-  }
-}
-
-/** Raised when a sha-shaped param doesn't match `[0-9a-f]{40}`. 400. */
-export class InvalidSnapshotShaError extends Error {
-  readonly code = 'invalid_snapshot_sha' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'InvalidSnapshotShaError'
-  }
-}
-
 /** Failure taxonomy for a push attempt (brief § 2.8). */
 export type PushFailureKind =
   | 'auth'
@@ -416,6 +345,16 @@ export class ProjectBackupStore {
   private readonly nowFn: () => number
   private readonly gitBinary: string
 
+  /** Bound `git` runner (see `git-exec.ts`). */
+  private readonly execGit: GitExecFn
+
+  /** Narrow repo view handed to the snapshot-reader / restore leaves —
+   *  path resolution + exec only, never the concurrency maps below. */
+  private readonly repo: GitRepoContext
+
+  /** Facade-owned collaborators `performRestore` needs (see `restore.ts`). */
+  private readonly restoreDeps: RestoreDeps
+
   /** Cached `git --version` probe. */
   private gitAvailableProbe: Promise<boolean> | null = null
 
@@ -450,6 +389,21 @@ export class ProjectBackupStore {
     this.logger = opts.logger ?? DEFAULT_LOGGER
     this.nowFn = opts.now ?? ((): number => Date.now())
     this.gitBinary = opts.gitBinary ?? 'git'
+    this.execGit = createGitExec(this.gitBinary)
+    this.repo = {
+      gitExec: (args, execOpts) => this.gitExec(args, execOpts),
+      isGitAvailable: () => this.isGitAvailable(),
+      gitDir: (project_id) => this.gitDir(project_id),
+      workTree: (project_id) => this.workTree(project_id),
+      gitDirArgs: (project_id) => this.gitDirArgs(project_id),
+      workArgs: (project_id) => this.workArgs(project_id),
+    }
+    this.restoreDeps = {
+      backupNow: (project_id) => this.backupNow(project_id),
+      seedGitignore: (project_id) => this.seedGitignore(project_id),
+      logger: (event, fields) => this.logger(event, fields),
+      now: () => this.nowFn(),
+    }
   }
 
   /** Probe + cache `git --version`. False = degraded (no backup). */
@@ -609,8 +563,9 @@ export class ProjectBackupStore {
     // restore. r2's map split correctly isolated backup vs restore
     // result shapes but left `backupNow` walking past `inFlightRestore`
     // entirely. Between restore()'s implicit pre-restore backupNow
-    // clearing `inFlight` (line ~1374) and the recovery commit landing
-    // (~line 1471), a scheduler tick / run-now HTTP would:
+    // clearing `inFlight` (the `await deps.backupNow` at the top of
+    // `performRestore` in restore.ts) and the recovery commit landing
+    // (end of `performRestore`), a scheduler tick / run-now HTTP would:
     //   (a) race on `.project-backup/index.lock` (visible as
     //       stage_failed / commit_failed; recovery commit may not land)
     //   (b) land a backup commit of the partial-restore tree, leaving
@@ -619,10 +574,12 @@ export class ProjectBackupStore {
     //       semantics (the banner's "walk back to prior_head" would
     //       jump two commits, not one).
     //
-    // SAFE WITH THE IMPLICIT PRE-RESTORE backupNow: restore()'s IIFE
-    // calls `await this.backupNow(...)` BEFORE the outer
-    // `this.inFlightRestore.set(project_id, op)` runs (the IIFE yields
-    // on the implicit backupNow's first await, and the set runs
+    // SAFE WITH THE IMPLICIT PRE-RESTORE backupNow: restore() calls
+    // `performRestore(...)` (an async function — its body runs
+    // synchronously up to its first await, which IS the implicit
+    // `await deps.backupNow(...)`) BEFORE the outer
+    // `this.inFlightRestore.set(project_id, op)` runs (performRestore
+    // yields on that implicit backupNow's first await, and the set runs
     // synchronously after that yield) — so this check observes
     // `undefined` for the implicit call. No self-deadlock.
     // Loop pattern (not a single await) — with ISSUE #46's restore()
@@ -976,347 +933,63 @@ export class ProjectBackupStore {
 
   /**
    * P7.4 restore UI — list snapshots (commits) in the project's
-   * `.project-backup/` history, newest first. The first commit
-   * (`init: project-backup ...`) IS included so users can rewind to
-   * the as-imported state.
-   *
-   * Returns `{ snapshots: [], next_cursor: null }` when the backup
-   * repo hasn't been initialized yet (no snapshots to restore from).
-   * Throws `RestoreUnavailableError` only when the git binary itself
-   * is missing on this gateway.
+   * `.project-backup/` history, newest first. Delegates to
+   * `snapshot-reader.ts` (see its doc comment for the full contract).
    */
   async listSnapshots(
     project_id: string,
     opts: { limit?: number; before_sha?: string } = {},
   ): Promise<{ snapshots: SnapshotSummary[]; next_cursor: string | null }> {
-    if (!(await this.isGitAvailable())) {
-      throw new RestoreUnavailableError('git binary not available')
-    }
-    if (!existsSync(join(this.gitDir(project_id), 'HEAD'))) {
-      return { snapshots: [], next_cursor: null }
-    }
-    const limit = clampSnapshotLimit(opts.limit)
-    const args = this.gitDirArgs(project_id).concat([
-      'log',
-      '--no-color',
-      `--pretty=format:%H%x00%P%x00%aI%x00%s`,
-      `--max-count=${limit + 1}`,
-    ])
-    if (opts.before_sha !== undefined) {
-      assertSnapshotSha(opts.before_sha)
-      args.push(`${opts.before_sha}~1`)
-    }
-    const { stdout } = await this.gitExec(args, { allowNonZero: true })
-    if (stdout.length === 0) {
-      return { snapshots: [], next_cursor: null }
-    }
-    const lines = stdout.split('\n').filter((l) => l.length > 0)
-    const all: Array<Omit<SnapshotSummary, 'shortstat'>> = []
-    for (const line of lines) {
-      const parts = line.split('\u0000')
-      const [sha = '', parents = '', date = '', ...subjectParts] = parts
-      if (sha.length === 0) continue
-      const message = subjectParts.join('\u0000')
-      const parentSha = parents.split(' ')[0] ?? ''
-      all.push({
-        sha,
-        parent_sha: parentSha.length > 0 ? parentSha : null,
-        message,
-        author_date: date,
-      })
-    }
-    const page = all.length <= limit ? all : all.slice(0, limit)
-    // Per-row shortstat; parallelize with a small concurrency cap so a
-    // page of 200 rows doesn't fan out 200 simultaneous git processes.
-    const shortstats = await this.fetchShortstats(
-      project_id,
-      page.map((entry) => ({ sha: entry.sha, parent_sha: entry.parent_sha })),
-    )
-    const snapshots: SnapshotSummary[] = page.map((entry, idx) => ({
-      ...entry,
-      shortstat: shortstats[idx] ?? null,
-    }))
-    const cursor =
-      all.length <= limit
-        ? null
-        : (page[page.length - 1]?.sha ?? null)
-    return { snapshots, next_cursor: cursor }
-  }
-
-  /**
-   * Compute per-row shortstats serially in small batches. `git diff
-   * --shortstat <parent>..<sha>` is cheap on small commits but
-   * cumulatively expensive — capping concurrency at 4 keeps the
-   * cumulative wall-clock < 1s for a 60-row page even on cold cache.
-   */
-  private async fetchShortstats(
-    project_id: string,
-    rows: Array<{ sha: string; parent_sha: string | null }>,
-  ): Promise<Array<SnapshotSummary['shortstat']>> {
-    const out: Array<SnapshotSummary['shortstat']> = new Array(rows.length).fill(null)
-    const CONCURRENCY = 4
-    let next = 0
-    const workers: Array<Promise<void>> = []
-    const run = async (): Promise<void> => {
-      while (true) {
-        const idx = next
-        next += 1
-        if (idx >= rows.length) return
-        const row = rows[idx]!
-        if (row.parent_sha === null) {
-          out[idx] = null
-          continue
-        }
-        try {
-          const { stdout } = await this.gitExec(
-            this.gitDirArgs(project_id).concat([
-              'diff',
-              '--shortstat',
-              '--no-color',
-              `${row.parent_sha}..${row.sha}`,
-            ]),
-            { allowNonZero: true },
-          )
-          out[idx] = parseShortstat(stdout)
-        } catch {
-          out[idx] = null
-        }
-      }
-    }
-    for (let i = 0; i < CONCURRENCY; i += 1) {
-      workers.push(run())
-    }
-    await Promise.all(workers)
-    return out
+    return readSnapshotList(this.repo, project_id, opts)
   }
 
   /**
    * Build the file-level preview shape: every path touched between
    * `sha` and the current working tree, plus the snapshot's metadata.
-   *
-   * Status semantics are HEAD-relative (NOT parent-relative): the UI
-   * cares about "what would restoring this snapshot do to the live
-   * tree?", not "what did this snapshot add over the previous tick".
-   *   `added`     — exists at sha but not at HEAD
-   *   `deleted`   — exists at HEAD but not at sha
-   *   `modified`  — exists at both, content differs
-   *   (unchanged paths are NOT returned in v1 — they would balloon
-   *   the response shape for a large repo with no UI value)
+   * Delegates to `snapshot-reader.ts` (HEAD-relative status semantics
+   * documented there).
    */
   async previewSnapshot(
     project_id: string,
     sha: string,
   ): Promise<SnapshotPreview> {
-    if (!(await this.isGitAvailable())) {
-      throw new RestoreUnavailableError('git binary not available')
-    }
-    assertSnapshotSha(sha)
-    if (!existsSync(join(this.gitDir(project_id), 'HEAD'))) {
-      throw new SnapshotNotFoundError(
-        `no backup repo for project=${project_id}`,
-      )
-    }
-    await this.assertSnapshotExists(project_id, sha)
-    const meta = await this.readSnapshotMeta(project_id, sha)
-    // `diff --name-status HEAD..sha` returns the per-path change
-    // status — A / M / D / R<NN> / C<NN>. We collapse renames into
-    // (deleted-source, added-target) for v1; restoring a rename is
-    // legal but the UI doesn't need to render the source+target pair
-    // as one row to ship the v1 surface.
-    const { stdout } = await this.gitExec(
-      this.gitDirArgs(project_id).concat([
-        'diff',
-        '--name-status',
-        '--no-color',
-        '-z',
-        `HEAD..${sha}`,
-      ]),
-      { allowNonZero: true },
-    )
-    const files = parseNameStatusZ(stdout)
-    // Fill in per-path sizes for the files-at-sha shape. `git cat-file
-    // -s <sha>:<path>` is cheap and parallelizable.
-    const sized = await this.fetchSnapshotFileSizes(project_id, sha, files)
-    return {
-      sha,
-      parent_sha: meta.parent_sha,
-      message: meta.message,
-      author_date: meta.author_date,
-      files: sized,
-    }
-  }
-
-  private async fetchSnapshotFileSizes(
-    project_id: string,
-    sha: string,
-    files: Array<{ path: string; status: SnapshotFileStatus }>,
-  ): Promise<SnapshotFile[]> {
-    const out: SnapshotFile[] = new Array(files.length)
-    const CONCURRENCY = 4
-    let next = 0
-    const workers: Array<Promise<void>> = []
-    const run = async (): Promise<void> => {
-      while (true) {
-        const idx = next
-        next += 1
-        if (idx >= files.length) return
-        const f = files[idx]!
-        if (f.status === 'deleted') {
-          out[idx] = { path: f.path, status: f.status, size_bytes_at_sha: null }
-          continue
-        }
-        try {
-          const { stdout } = await this.gitExec(
-            this.gitDirArgs(project_id).concat([
-              'cat-file',
-              '-s',
-              `${sha}:${f.path}`,
-            ]),
-          )
-          const size = Number(stdout.trim())
-          out[idx] = {
-            path: f.path,
-            status: f.status,
-            size_bytes_at_sha: Number.isFinite(size) ? size : null,
-          }
-        } catch {
-          out[idx] = { path: f.path, status: f.status, size_bytes_at_sha: null }
-        }
-      }
-    }
-    for (let i = 0; i < CONCURRENCY; i += 1) {
-      workers.push(run())
-    }
-    await Promise.all(workers)
-    return out
+    return readSnapshotPreview(this.repo, project_id, sha)
   }
 
   /**
-   * Read a single file's body at a snapshot SHA. Returns `binary: true`
-   * (and an empty `content` body) when the bytes don't round-trip
-   * cleanly through UTF-8. Truncates over the configured cap.
-   *
-   * Path safety: every input runs through `assertSnapshotPath` which
-   * mirrors the doc-store's hostile-input checks (no `..`, no absolute
-   * paths, no NUL bytes, no hidden segments).
+   * Read a single file's body at a snapshot SHA. Delegates to
+   * `snapshot-reader.ts` (binary sniff + truncation cap documented
+   * there).
    */
   async getSnapshotFileContent(
     project_id: string,
     sha: string,
     relPath: string,
   ): Promise<SnapshotFileContent> {
-    if (!(await this.isGitAvailable())) {
-      throw new RestoreUnavailableError('git binary not available')
-    }
-    assertSnapshotSha(sha)
-    assertSnapshotPath(relPath)
-    if (!existsSync(join(this.gitDir(project_id), 'HEAD'))) {
-      throw new SnapshotNotFoundError(`no backup repo for project=${project_id}`)
-    }
-    await this.assertSnapshotExists(project_id, sha)
-    let stdout: string
-    try {
-      const result = await this.gitExec(
-        this.gitDirArgs(project_id).concat([
-          'cat-file',
-          'blob',
-          `${sha}:${relPath}`,
-        ]),
-      )
-      stdout = result.stdout
-    } catch (err) {
-      throw new SnapshotPathNotFoundError(
-        `path '${relPath}' not found at snapshot ${sha} (${errMessage(err)})`,
-      )
-    }
-    const bytes = Buffer.byteLength(stdout, 'utf8')
-    // Cheap binary sniff: any 0x00 byte in the first 8 KB. The version
-    // store's pre-write `Buffer.byteLength` round-trip already screens
-    // text-files from binaries via the extension whitelist, but the
-    // project-level repo accepts arbitrary files — so a PDF, SQLite db,
-    // or PNG could land at a snapshot and the surface MUST flag those
-    // as binary rather than emit a corrupt UTF-8 body to the client.
-    const slice = stdout.slice(0, 8192)
-    const looksBinary = slice.includes('\u0000')
-    let truncated = false
-    let body = looksBinary ? '' : stdout
-    if (body.length > SNAPSHOT_FILE_OUTPUT_CAP_BYTES) {
-      body = body.slice(0, SNAPSHOT_FILE_OUTPUT_CAP_BYTES)
-      truncated = true
-    }
-    return {
-      sha,
-      path: relPath,
-      content: body,
-      binary: looksBinary,
-      size_bytes: bytes,
-      truncated,
-    }
+    return readSnapshotFileContent(this.repo, project_id, sha, relPath)
   }
 
   /**
    * Unified diff for a single file between the current working tree
-   * (HEAD-as-of-snapshot-call) and `sha`. The diff direction is
-   * `HEAD..sha` so the `+` lines are "what restoring this snapshot
-   * would add" and `-` lines are "what it would remove". Truncates
-   * at the configured cap.
+   * and `sha`. Delegates to `snapshot-reader.ts`.
    */
   async getSnapshotFileDiff(
     project_id: string,
     sha: string,
     relPath: string,
   ): Promise<SnapshotFileDiff> {
-    if (!(await this.isGitAvailable())) {
-      throw new RestoreUnavailableError('git binary not available')
-    }
-    assertSnapshotSha(sha)
-    assertSnapshotPath(relPath)
-    if (!existsSync(join(this.gitDir(project_id), 'HEAD'))) {
-      throw new SnapshotNotFoundError(`no backup repo for project=${project_id}`)
-    }
-    await this.assertSnapshotExists(project_id, sha)
-    const { stdout } = await this.gitExec(
-      this.gitDirArgs(project_id).concat([
-        'diff',
-        '--unified=3',
-        '--no-color',
-        `HEAD..${sha}`,
-        '--',
-        relPath,
-      ]),
-      { allowNonZero: true },
-    )
-    let hunks = extractProjectBackupDiffHunks(stdout)
-    let truncated = false
-    if (Buffer.byteLength(hunks, 'utf8') > SNAPSHOT_DIFF_OUTPUT_CAP_BYTES) {
-      const sliced = Buffer.from(hunks, 'utf8').slice(
-        0,
-        SNAPSHOT_DIFF_OUTPUT_CAP_BYTES,
-      )
-      hunks = `${sliced.toString('utf8')}\n... (diff truncated at ${SNAPSHOT_DIFF_OUTPUT_CAP_BYTES} bytes) ...`
-      truncated = true
-    }
-    return { sha, path: relPath, hunks, truncated }
+    return readSnapshotFileDiff(this.repo, project_id, sha, relPath)
   }
 
   /**
    * Restore the project tree to `snapshot_sha`. Two granularities,
-   * gated on `file_path`:
+   * gated on `file_path` — the destructive op itself lives in
+   * `restore.ts:performRestore` (whole-project read-tree + clean vs
+   * single-file checkout / staged removal, append-only recovery
+   * commit, implicit pre-restore snapshot — all documented there).
    *
-   *   - `file_path === null` (whole-project): the working tree is
-   *     reset to the snapshot's tree, then a NEW commit lands on top
-   *     referencing both the prior HEAD SHA and the snapshot SHA. The
-   *     git history is APPEND-ONLY — no rebase / no rewrite — so the
-   *     prior HEAD remains reachable and a user who picked the wrong
-   *     snapshot can restore-from-the-restore-commit.
-   *
-   *   - `file_path === '<rel>'` (single-file): only the named path is
-   *     touched. `git checkout snapshot_sha -- <path>` swaps that one
-   *     blob into the working tree; a follow-up `git add -A && git
-   *     commit` lands the recovery commit. Same append-only semantics.
-   *
-   * Path safety: `assertSnapshotPath` runs on `file_path` before any
-   * filesystem syscall.
+   * What stays HERE is the concurrency interlock (plan § D4 — the five
+   * per-project maps must not distribute):
    *
    * Concurrency: serializes against both the scheduler's `backupNow`
    * (via the shared per-project `inFlight` map) AND any concurrent
@@ -1325,56 +998,18 @@ export class ProjectBackupStore {
    * parallel with this restore receives a `BackupResult`, not a
    * `RestoreResult` (Argus r1 IMPORTANT — the previous cast pattern
    * returned the wrong shape).
-   *
-   * Pre-restore implicit snapshot: before any destructive op, this
-   * method fires `backupNow(project_id)` to land a snapshot of the
-   * live (potentially dirty) working tree (Argus r1 BLOCKER #2).
-   * Without that snapshot, `git rev-parse HEAD` (used to set
-   * `prior_head_sha`) would point at the LAST BACKED-UP commit and
-   * the undo banner would walk back to a stale tree rather than
-   * the user's actual pre-restore working state.
    */
   async restore(
     project_id: string,
     snapshot_sha: string,
     file_path: string | null,
   ): Promise<RestoreResult> {
-    if (!(await this.isGitAvailable())) {
-      throw new RestoreUnavailableError('git binary not available')
-    }
-    assertSnapshotSha(snapshot_sha)
-    if (file_path !== null) {
-      assertSnapshotPath(file_path)
-    }
-    if (!existsSync(join(this.gitDir(project_id), 'HEAD'))) {
-      throw new SnapshotNotFoundError(`no backup repo for project=${project_id}`)
-    }
-    await this.assertSnapshotExists(project_id, snapshot_sha)
-    // Argus r3 BLOCKER #1 — the UI's per-row "Restore this file only"
-    // button is offered for every diff row in the preview, including
-    // rows with status='deleted' (path exists in the live tree / at
-    // HEAD but not at the requested snapshot). A naive `cat-file -e`
-    // preflight that rejects absent-at-snapshot paths would 404 every
-    // single-file restore against a deleted row, which contradicts the
-    // UX contract: "restore this file to its state at <snapshot>" —
-    // and that state, for a deleted row, IS the file's absence.
-    // The probe below classifies presence so the destructive op can
-    // either run `checkout sha -- path` (path present at snapshot) or
-    // stage a removal (path absent at snapshot) without bailing.
-    let snapshotHasPath = true
-    if (file_path !== null) {
-      try {
-        await this.gitExec(
-          this.gitDirArgs(project_id).concat([
-            'cat-file',
-            '-e',
-            `${snapshot_sha}:${file_path}`,
-          ]),
-        )
-      } catch {
-        snapshotHasPath = false
-      }
-    }
+    const { snapshotHasPath } = await preflightRestore(
+      this.repo,
+      project_id,
+      snapshot_sha,
+      file_path,
+    )
     // Serialize concurrent restores AND any in-flight backup on the
     // same project, both via the same LOOP that re-reads both maps
     // after every wakeup.
@@ -1397,32 +1032,35 @@ export class ProjectBackupStore {
     // is the same shape: combine both waits into one loop that
     // re-reads BOTH maps after every wake. JS single-threadedness +
     // microtask FIFO guarantees only one waiter exits at a time and
-    // installs the next restore op (synchronously, at line 1619).
+    // installs the next restore op (synchronously, at the
+    // `inFlightRestore.set` below).
     //
-    // The implicit pre-restore backupNow at line ~1429 is SAFE — but
-    // the temporal proof is subtle, so spelling it out:
+    // The implicit pre-restore backupNow (the first await inside
+    // `performRestore`) is SAFE — but the temporal proof is subtle,
+    // so spelling it out:
     //
-    //   (a) `op = (async () => { ... await this.backupNow ... })()` —
-    //       the IIFE BEGINS executing synchronously on construction
-    //       (ES spec: async function bodies run sync until the first
-    //       `await`). So the IIFE's sync prefix runs FIRST, INCLUDING
+    //   (a) `op = performRestore(...)` — an async function's body
+    //       BEGINS executing synchronously on invocation (ES spec:
+    //       async function bodies run sync until the first `await`).
+    //       So performRestore's sync prefix runs FIRST, INCLUDING
     //       backupNow's own sync prefix.
-    //   (b) backupNow's sync prefix (line 605-637) reads `inFlight`
-    //       (undefined here — the combined loop above just confirmed
-    //       both maps were empty before we got here) and then its own
-    //       loop reads `inFlightRestore` (still undefined — `set` at
-    //       line 1619 hasn't run yet, we're still inside the
-    //       synchronous tail of the IIFE-construction expression).
-    //       The loop exits cleanly; backupNow installs its `inFlight`
-    //       entry, awaits `doBackupNow`, yields.
-    //   (c) NOW the IIFE has yielded (at its `await this.backupNow`).
-    //       Control returns to the caller. Line 1619
-    //       `inFlightRestore.set(project_id, op)` runs.
+    //   (b) backupNow's sync prefix (everything before it awaits the
+    //       `doBackupNow` run it installs) reads `inFlight` (undefined
+    //       here — the combined loop above just confirmed both maps
+    //       were empty before we got here) and then its own loop reads
+    //       `inFlightRestore` (still undefined — the `set` below
+    //       hasn't run yet, we're still inside the synchronous tail of
+    //       the performRestore invocation expression). The loop exits
+    //       cleanly; backupNow installs its `inFlight` entry, awaits
+    //       `doBackupNow`, yields.
+    //   (c) NOW performRestore has yielded (at its `await
+    //       deps.backupNow`). Control returns to the caller. The
+    //       `inFlightRestore.set(project_id, op)` below runs.
     //
     // No self-deadlock: backupNow's loop check at (b) runs BEFORE
     // `inFlightRestore.set` at (c), so it cannot observe THIS
     // restore's own op. A concurrent unrelated restore arriving while
-    // our IIFE is yielded WOULD see our op (correct cross-serialise
+    // our op is yielded WOULD see our op (correct cross-serialise
     // direction — that restore's outer combined loop would await us).
     while (true) {
       const r = this.inFlightRestore.get(project_id)
@@ -1434,266 +1072,19 @@ export class ProjectBackupStore {
         /* prior op's failure is its own caller's problem */
       }
     }
-    const op = (async (): Promise<RestoreResult> => {
-      const workTree = this.workTree(project_id)
-      // Argus r1 BLOCKER #2 — capture the LIVE working tree before any
-      // destructive op. Between 6h backup ticks the working tree carries
-      // uncommitted user edits; `git rev-parse HEAD` points at the last
-      // BACKED-UP commit, not the live state. Without this implicit
-      // snapshot the destructive ops below (read-tree / clean for whole-
-      // project, `checkout sha -- path` for single-file) would overwrite
-      // those edits and the undo banner's `prior_head_sha` would walk
-      // back to the stale snapshot rather than the user's actual
-      // pre-restore tree. After `backupNow` lands, HEAD references a
-      // commit that contains the live tree — so the recovery commit's
-      // `prior_head_sha` (read below) captures the user's work as a
-      // reachable git object, recoverable via the undo banner.
-      //
-      // `backupNow` is a no-op (returns `commit_sha: null`) when the
-      // tree is clean, so the only on-disk cost when the user has
-      // nothing dirty is one `git add -A` + `git diff --cached --quiet`
-      // probe. Uses the (now-separate) `inFlight` backup mutex; the
-      // restore's own `inFlightRestore` entry keeps a second restore
-      // from racing.
-      try {
-        await this.backupNow(project_id)
-      } catch (err) {
-        // A backup failure is loud but not fatal — proceed with the
-        // restore using HEAD-as-prior-head and document the gap. The
-        // alternative (abort restore on backup failure) would leave
-        // the user unable to recover from a corrupt working tree.
-        this.logger('restore_pre_snapshot_failed', {
-          project_id,
-          error_message: errMessage(err),
-        })
-      }
-      const priorHead = await this.gitExec(
-        this.gitDirArgs(project_id).concat(['rev-parse', 'HEAD']),
-      )
-      const prior_head_sha = priorHead.stdout.trim()
-      // Argus r3 BLOCKER #1 — the outer `snapshotHasPath` probe says
-      // the path is absent at the requested snapshot. That's a valid
-      // restore request ONLY if the path actually exists somewhere in
-      // the live tree / at HEAD — otherwise "restore <path> to its
-      // state at <sha>" is a request to remove a path that is already
-      // absent everywhere, which is nonsense and must surface as 404.
-      // The HEAD probe happens INSIDE the IIFE (rather than alongside
-      // the outer cat-file probe) because the implicit pre-restore
-      // backupNow may have advanced HEAD: a file the user created
-      // between 6h ticks now lives at the post-backupNow HEAD even
-      // though it was not at the pre-restore HEAD the outer probe
-      // could have seen. Probing here uses the freshest possible HEAD.
-      if (file_path !== null && !snapshotHasPath) {
-        try {
-          await this.gitExec(
-            this.gitDirArgs(project_id).concat([
-              'cat-file',
-              '-e',
-              `${prior_head_sha}:${file_path}`,
-            ]),
-          )
-        } catch {
-          throw new SnapshotPathNotFoundError(
-            `path '${file_path}' not found at snapshot ${snapshot_sha}`,
-          )
-        }
-      }
-      // Re-seed the brief-pinned `.gitignore` so the restore can't
-      // unstick the project's exclusion rules.
-      try {
-        await this.seedGitignore(project_id)
-      } catch {
-        /* non-fatal — restore proceeds */
-      }
-      const completedAt = (): number => this.nowFn()
-      if (file_path === null) {
-        // Whole-project restore. `git checkout sha -- :/` would copy
-        // every path AT THE SNAPSHOT into the working tree, but it
-        // would NOT remove paths that exist in the live tree and
-        // didn't exist at the snapshot. The two-step pattern below
-        // (read-tree + checkout-index + clean) produces exact-match
-        // semantics: after it runs, the working tree matches the
-        // snapshot's tree byte-for-byte (modulo files that the
-        // `.gitignore` filters out, which we leave alone).
-        //
-        // 1) Update the index to match the snapshot tree.
-        await this.gitExec(
-          this.workArgs(project_id).concat([
-            'read-tree',
-            '--reset',
-            '-u',
-            snapshot_sha,
-          ]),
-          { cwd: workTree },
-        )
-        // 2) Remove any non-ignored, non-tracked files left in the
-        // working tree (these are files that existed at HEAD but not
-        // at the snapshot). `clean -f -d -x` would also wipe ignored
-        // files which would nuke node_modules / build outputs the
-        // user explicitly excluded — so we run WITHOUT `-x` so the
-        // .gitignore body keeps everything it normally protects.
-        await this.gitExec(
-          this.workArgs(project_id).concat(['clean', '-f', '-d']),
-          { cwd: workTree },
-        )
-      } else if (snapshotHasPath) {
-        // Single-file restore — path present at snapshot. `checkout
-        // sha -- <path>` writes the file at `path` from `sha`'s tree
-        // into the working tree (replaces or creates as needed). The
-        // user's other files stay untouched.
-        await this.gitExec(
-          this.workArgs(project_id).concat([
-            'checkout',
-            snapshot_sha,
-            '--',
-            file_path,
-          ]),
-          { cwd: workTree },
-        )
-      } else {
-        // Argus r3 BLOCKER #1 — single-file restore against an absent-
-        // at-snapshot path (preview row with status='deleted'). The
-        // "restore to <snapshot>" semantic for an absent path is "the
-        // path doesn't exist at <snapshot>, so remove it from the live
-        // tree." We delete the path off disk best-effort here; the
-        // staging block below uses `git add -u -- <path>` to record
-        // the deletion against the index (works whether the path was
-        // tracked-on-disk, tracked-but-missing-on-disk, or already
-        // gone). Subdirectory cleanup is not attempted — git doesn't
-        // track empty directories anyway, so a now-empty parent dir
-        // is a no-op in the recovery commit.
-        const absPath = join(workTree, file_path as string)
-        if (existsSync(absPath)) {
-          try {
-            await unlink(absPath)
-          } catch {
-            // best-effort; if the unlink fails (e.g. it's actually a
-            // directory we don't expect, or permission glitch), the
-            // index-update below still tries to stage the deletion.
-            // A genuinely impossible removal will surface as a no-op
-            // recovery commit, which is acceptable: the user's view
-            // of "restore failed" arrives via the file still being
-            // present on disk after the call returns.
-          }
-        }
-      }
-      // Stage + commit the recovery snapshot on top of HEAD. The
-      // commit message embeds BOTH the prior HEAD and the snapshot
-      // SHA so the history is self-describing — a future "undo this
-      // restore" surface only needs the prior_head_sha to walk back.
-      //
-      // Argus r1 IMPORTANT — single-file restore must stage ONLY the
-      // restored path. `git add -A` would sweep any unrelated dirty
-      // edits in the working tree into the recovery commit, which
-      // contradicts the inline comment above ("user's other files
-      // stay untouched") and (worse) makes the recovery commit lie
-      // about what the restore actually did. The implicit backupNow
-      // we ran above has already snapshotted those unrelated edits
-      // into a separate commit, so they remain reachable via the undo
-      // banner — they just don't belong inside THIS commit.
-      if (file_path === null) {
-        await this.gitExec(this.workArgs(project_id).concat(['add', '-A']), {
-          cwd: workTree,
-        })
-      } else if (snapshotHasPath) {
-        await this.gitExec(
-          this.workArgs(project_id).concat(['add', '--', file_path]),
-          { cwd: workTree },
-        )
-      } else {
-        // Argus r3 BLOCKER #1 — absent-at-snapshot single-file restore.
-        // `add -u -- <path>` stages the index update for the path
-        // (deletion if the file is now gone from disk, no-op if both
-        // index and disk already lack it). `add -- <path>` would NOT
-        // record a deletion — it only stages currently-present files.
-        await this.gitExec(
-          this.workArgs(project_id).concat(['add', '-u', '--', file_path]),
-          { cwd: workTree },
-        )
-      }
-      // A genuine no-op restore (the working tree was already at the
-      // snapshot) would have nothing staged; allow-empty so the
-      // recovery commit STILL lands so the user-visible history
-      // always reflects the restore action.
-      const iso = new Date(completedAt()).toISOString()
-      const target = file_path === null ? 'project' : file_path
-      const message = `restore: ${target} from ${snapshot_sha.slice(0, 12)} at ${iso}\n\nprior-head: ${prior_head_sha}\nsnapshot: ${snapshot_sha}`
-      await this.gitExec(
-        this.workArgs(project_id).concat([
-          'commit',
-          '--allow-empty',
-          '-m',
-          message,
-        ]),
-        { cwd: workTree },
-      )
-      const recovery = await this.gitExec(
-        this.gitDirArgs(project_id).concat(['rev-parse', 'HEAD']),
-      )
-      const recovery_commit_sha = recovery.stdout.trim()
-      this.logger('restore_completed', {
-        project_id,
-        snapshot_sha,
-        prior_head_sha,
-        recovery_commit_sha,
-        file_path,
-      })
-      return {
-        snapshot_sha,
-        prior_head_sha,
-        recovery_commit_sha,
-        file_path,
-        completed_at_ms: completedAt(),
-      }
-    })()
+    const op = performRestore(
+      this.repo,
+      this.restoreDeps,
+      project_id,
+      snapshot_sha,
+      file_path,
+      snapshotHasPath,
+    )
     this.inFlightRestore.set(project_id, op)
     try {
       return await op
     } finally {
       this.inFlightRestore.delete(project_id)
-    }
-  }
-
-  /** Throws `SnapshotNotFoundError` when `sha` doesn't resolve to a
-   *  commit in the project-backup repo. */
-  private async assertSnapshotExists(
-    project_id: string,
-    sha: string,
-  ): Promise<void> {
-    try {
-      await this.gitExec(
-        this.gitDirArgs(project_id).concat([
-          'cat-file',
-          '-e',
-          `${sha}^{commit}`,
-        ]),
-      )
-    } catch {
-      throw new SnapshotNotFoundError(
-        `snapshot ${sha} does not exist in project ${project_id}`,
-      )
-    }
-  }
-
-  private async readSnapshotMeta(
-    project_id: string,
-    sha: string,
-  ): Promise<{ parent_sha: string | null; message: string; author_date: string }> {
-    const { stdout } = await this.gitExec(
-      this.gitDirArgs(project_id).concat([
-        'log',
-        '-1',
-        '--no-color',
-        '--pretty=format:%P%x00%aI%x00%s',
-        sha,
-      ]),
-    )
-    const [parents = '', date = '', ...subjectParts] = stdout.split('\u0000')
-    const parentSha = parents.split(' ')[0] ?? ''
-    return {
-      parent_sha: parentSha.length > 0 ? parentSha : null,
-      message: subjectParts.join('\u0000'),
-      author_date: date,
     }
   }
 
@@ -1791,48 +1182,20 @@ export class ProjectBackupStore {
     ]
   }
 
+  /** Timeout-capped `git` invocation — see `git-exec.ts:createGitExec`. */
   private async gitExec(
     args: string[],
-    opts: { allowNonZero?: boolean; cwd?: string } = {},
+    opts: GitExecOptions = {},
   ): Promise<{ stdout: string; stderr: string }> {
-    try {
-      const execOpts: Parameters<typeof execFileAsync>[2] = {
-        timeout: GIT_EXEC_TIMEOUT_MS,
-        maxBuffer: 16 * 1024 * 1024,
-        encoding: 'utf8',
-      }
-      if (opts.cwd !== undefined) execOpts.cwd = opts.cwd
-      const { stdout, stderr } = await execFileAsync(this.gitBinary, args, execOpts)
-      return {
-        stdout: typeof stdout === 'string' ? stdout : stdout.toString('utf8'),
-        stderr: typeof stderr === 'string' ? stderr : stderr.toString('utf8'),
-      }
-    } catch (err) {
-      if (opts.allowNonZero === true && isExecChildError(err)) {
-        return {
-          stdout: typeof err.stdout === 'string' ? err.stdout : '',
-          stderr: typeof err.stderr === 'string' ? err.stderr : '',
-        }
-      }
-      throw err
-    }
+    return this.execGit(args, opts)
   }
 
   private async hasStagedChanges(project_id: string): Promise<boolean> {
-    const args = this.workArgs(project_id).concat([
-      'diff',
-      '--cached',
-      '--quiet',
-    ])
-    try {
-      await this.gitExec(args, { cwd: this.workTree(project_id) })
-      return false
-    } catch (err) {
-      if (isExecChildError(err) && (err.code === 1 || err.code === '1')) {
-        return true
-      }
-      throw err
-    }
+    return gitHasStagedChanges(
+      this.execGit,
+      this.workArgs(project_id),
+      this.workTree(project_id),
+    )
   }
 
   /**
@@ -1957,48 +1320,6 @@ function isUserResolvableTransient(code: PushFailureKind): boolean {
   )
 }
 
-interface ExecChildError extends Error {
-  code?: string | number
-  stdout?: string | Buffer
-  stderr?: string | Buffer
-}
-
-function isExecChildError(err: unknown): err is ExecChildError {
-  return err instanceof Error
-}
-
-function errMessage(err: unknown): string {
-  if (err instanceof Error) return err.message
-  return String(err)
-}
-
-function errStderr(err: unknown): string {
-  if (err instanceof Error) {
-    const raw = (err as ExecChildError).stderr
-    if (typeof raw === 'string') return raw
-    if (Buffer.isBuffer(raw)) return raw.toString('utf8')
-  }
-  return ''
-}
-
-function errStdout(err: unknown): string {
-  if (err instanceof Error) {
-    const raw = (err as ExecChildError).stdout
-    if (typeof raw === 'string') return raw
-    if (Buffer.isBuffer(raw)) return raw.toString('utf8')
-  }
-  return ''
-}
-
-/** Extract the FIRST `fatal: ...` line from git stderr if present. */
-function extractGitFatal(stderr: string): string | null {
-  if (stderr.length === 0) return null
-  for (const line of stderr.split('\n')) {
-    if (line.toLowerCase().startsWith('fatal:')) return line.trim()
-  }
-  return null
-}
-
 /** Convert a wall-clock ms number to an ISO string (or null). */
 function tsToIso(ms: number | null): string | null {
   if (ms === null) return null
@@ -2017,224 +1338,6 @@ export async function ensureParentDir(abs: string): Promise<void> {
 
 /** Promote the un-exported `REMOTE_CONFIG_FILENAME` for the platform adapters. */
 export const PROJECT_BACKUP_REMOTE_CONFIG_FILENAME = REMOTE_CONFIG_FILENAME
-
-const SNAPSHOT_SHA_RE = /^[0-9a-f]{40}$/
-
-/** Throws `InvalidSnapshotShaError` when `sha` is not 40-char lowercase hex. */
-export function assertSnapshotSha(sha: string): void {
-  if (typeof sha !== 'string' || !SNAPSHOT_SHA_RE.test(sha)) {
-    throw new InvalidSnapshotShaError(
-      `sha must be a 40-char lowercase hex string (got '${sha}')`,
-    )
-  }
-}
-
-/**
- * Path-shape validator for snapshot file routes. Mirrors the doc-store's
- * hostile-input gates with one deliberate divergence (Argus r3 BLOCKER #2):
- * leading-dot segments are ALLOWED for ordinary config files because the
- * project-backup repo legitimately tracks `.gitignore`, `.eslintrc`,
- * `.husky/`, etc., and the preview surface lists them as restorable
- * diff rows. The doc-store route is markdown-only and never has reason
- * to address a dot-prefixed file, so its blanket leading-dot rejection
- * is the right policy there; the snapshot routes have to round-trip the
- * same set of paths the snapshot itself contains.
- *
- * Hard rejects retained: NUL bytes, absolute paths, Windows drive
- * prefixes, `.` / `..` segments, chars outside [<>:"|?*] / control
- * chars, segments > 256 chars. Plus an explicit reject of the three
- * operational sigil directories that share a parent with the snapshot:
- *
- *   - `.git`            — could overwrite the user project's real
- *                         git metadata if the user's project root
- *                         happens to also be a git repo
- *   - `.project-backup` — the snapshot's OWN git dir; restoring into
- *                         it would self-corrupt
- *   - `.docs-versions`  — Phase 1's per-edit history git dir
- *
- * The `.gitignore` excludes those three sigils from the snapshot in
- * the first place, so a user-supplied path that names any of them can
- * only ever miss (`SnapshotPathNotFoundError` for present-at-snapshot
- * reads, or a no-op deletion for absent-at-snapshot restores). Blocking
- * them here keeps the failure mode loud + uniform (400 instead of a
- * silently-no-op restore) and forecloses any future code path that
- * could accidentally permit a write under one of them.
- *
- * NOTE: deliberately does NOT enforce an `.md/.markdown` extension.
- * The project-backup repo accepts arbitrary user content (binaries,
- * SQLite sidecars, source files); the surface uses `binary: true` on
- * the response shape to signal "do not render inline".
- */
-const SNAPSHOT_FORBIDDEN_SIGIL_SEGMENTS = new Set([
-  '.git',
-  '.project-backup',
-  '.docs-versions',
-])
-
-export function assertSnapshotPath(path: string): void {
-  if (typeof path !== 'string' || path.length === 0) {
-    throw new InvalidSnapshotPathError('path must be a non-empty string')
-  }
-  if (path.length > 1024) {
-    throw new InvalidSnapshotPathError('path exceeds 1024 chars')
-  }
-  if (path.includes('\u0000')) {
-    throw new InvalidSnapshotPathError('path contains NUL byte')
-  }
-  if (path.startsWith('/') || path.startsWith('\\')) {
-    throw new InvalidSnapshotPathError('path must be relative')
-  }
-  const posix = path.replace(/\\+/g, '/')
-  if (/^[A-Za-z]:\//.test(posix)) {
-    throw new InvalidSnapshotPathError('path must be relative')
-  }
-  const segments = posix.split('/').filter((s) => s.length > 0)
-  if (segments.length === 0) {
-    throw new InvalidSnapshotPathError('path resolves to empty')
-  }
-  for (const seg of segments) {
-    if (seg === '.' || seg === '..') {
-      throw new InvalidSnapshotPathError('path may not contain . or ..')
-    }
-    if (SNAPSHOT_FORBIDDEN_SIGIL_SEGMENTS.has(seg)) {
-      throw new InvalidSnapshotPathError(
-        `path may not contain operational sigil segment (${seg})`,
-      )
-    }
-    if (seg.length > 256) {
-      throw new InvalidSnapshotPathError(
-        `segment '${seg}' exceeds 256 chars`,
-      )
-    }
-    // eslint-disable-next-line no-control-regex
-    if (/[<>:"|?*\x00-\x1f]/.test(seg)) {
-      throw new InvalidSnapshotPathError(
-        `segment '${seg}' contains a forbidden character`,
-      )
-    }
-  }
-}
-
-function clampSnapshotLimit(limit: number | undefined): number {
-  if (limit === undefined || limit === null) return SNAPSHOT_DEFAULT_LIMIT
-  if (!Number.isFinite(limit) || limit <= 0) return SNAPSHOT_DEFAULT_LIMIT
-  const floor = Math.floor(limit)
-  if (floor > SNAPSHOT_MAX_LIMIT) return SNAPSHOT_MAX_LIMIT
-  return floor
-}
-
-/**
- * Parse a `git diff --shortstat` line. Shapes seen in the wild:
- *
- *   ` 3 files changed, 12 insertions(+), 5 deletions(-)`
- *   ` 1 file changed, 1 insertion(+)`
- *   ` 1 file changed, 0 insertions(+), 2 deletions(-)`
- *   `` (empty — no changes, returns zeroes)
- */
-function parseShortstat(raw: string): SnapshotSummary['shortstat'] {
-  const trimmed = raw.trim()
-  if (trimmed.length === 0) {
-    return { files_changed: 0, insertions: 0, deletions: 0 }
-  }
-  const files = /(\d+) files? changed/.exec(trimmed)
-  const inserts = /(\d+) insertions?\(\+\)/.exec(trimmed)
-  const deletes = /(\d+) deletions?\(-\)/.exec(trimmed)
-  return {
-    files_changed: files !== null ? Number(files[1]) : 0,
-    insertions: inserts !== null ? Number(inserts[1]) : 0,
-    deletions: deletes !== null ? Number(deletes[1]) : 0,
-  }
-}
-
-/**
- * Parse `git diff --name-status -z HEAD..sha` output. With `-z`,
- * fields are NUL-separated (NOT tab-separated as in the non-`-z`
- * mode). Entries look like:
- *
- *   - A / M / D / T:  `<status>\0<path>\0`
- *   - R<NN> / C<NN>:  `<status>\0<from>\0<to>\0`
- *
- * The leading character of the status code distinguishes two-field
- * vs three-field entries. v1 collapses rename/copy pairs into
- * (deleted-source, added-target) so the UI can show "this file
- * moved" as two rows; a unified rename row is a future polish.
- */
-function parseNameStatusZ(
-  raw: string,
-): Array<{ path: string; status: SnapshotFileStatus }> {
-  if (raw.length === 0) return []
-  const fields = raw.split('\u0000').filter((t) => t.length > 0)
-  const out: Array<{ path: string; status: SnapshotFileStatus }> = []
-  let i = 0
-  while (i < fields.length) {
-    const statusCode = fields[i]!
-    const head = statusCode.charAt(0)
-    if (head === 'R' || head === 'C') {
-      const from = fields[i + 1] ?? ''
-      const to = fields[i + 2] ?? ''
-      if (from.length > 0 && to.length > 0) {
-        out.push({ path: from, status: 'deleted' })
-        out.push({ path: to, status: 'added' })
-      } else if (from.length > 0) {
-        out.push({ path: from, status: 'modified' })
-      }
-      i += 3
-      continue
-    }
-    const path = fields[i + 1] ?? ''
-    if (path.length === 0) {
-      i += 1
-      continue
-    }
-    const status: SnapshotFileStatus =
-      head === 'A'
-        ? 'added'
-        : head === 'D'
-          ? 'deleted'
-          : head === 'M'
-            ? 'modified'
-            : 'modified'
-    out.push({ path, status })
-    i += 2
-  }
-  return out
-}
-
-/** Same diff-header stripper used by `doc-version-store.ts`, copied
- *  here so the project-backup module stays self-contained. */
-function extractProjectBackupDiffHunks(raw: string): string {
-  if (raw.length === 0) return ''
-  const lines = raw.split('\n')
-  const out: string[] = []
-  let inHunk = false
-  for (const line of lines) {
-    if (line.startsWith('@@')) {
-      inHunk = true
-      out.push(line)
-      continue
-    }
-    if (
-      !inHunk &&
-      (line.startsWith('diff --git ') ||
-        line.startsWith('index ') ||
-        line.startsWith('--- ') ||
-        line.startsWith('+++ ') ||
-        line.startsWith('similarity index ') ||
-        line.startsWith('rename from ') ||
-        line.startsWith('rename to ') ||
-        line.startsWith('new file mode ') ||
-        line.startsWith('deleted file mode ') ||
-        line.startsWith('old mode ') ||
-        line.startsWith('new mode ') ||
-        line.startsWith('Binary files '))
-    ) {
-      continue
-    }
-    if (!inHunk) continue
-    out.push(line)
-  }
-  return out.join('\n')
-}
 
 /** Promote the unlink helper so the disconnect-remote endpoint can use it. */
 export async function deleteIfExists(path: string): Promise<void> {
