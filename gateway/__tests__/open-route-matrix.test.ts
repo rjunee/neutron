@@ -584,31 +584,24 @@ describe('G1 — ladder order: landing path-set, then SPA catch-all, then connec
 })
 
 // ─────────────────────────────────────────────────────────────────────────
-// Part 3 — the `import_resume_handler`-only boundary (KNOWN DIVERGENCE)
+// Part 3 — the `import_resume_handler`-only boundary (C4 DIVERGENCE FIX)
 // ─────────────────────────────────────────────────────────────────────────
 
-describe('G1 — import_resume_handler-only composition (pinned known-divergence)', () => {
-  test('supplying ONLY import_resume_handler yields NO composed fetch (graph.fetch undefined)', async () => {
-    // KNOWN DIVERGENCE — pinned AS-IS, not fixed (G1 characterizes reality).
-    //
-    // `import_resume_handler` IS mapped into `composeInput`
-    // (`gateway/composition.ts:173-174`) but is OMITTED from the
-    // `hasAnyChainedSurface` gate (`gateway/composition.ts:264-295`, which
-    // counts `import_upload_handler` + `chunked_upload_handler` but NOT
-    // `import_resume_handler`). So when it is the ONLY supplied HTTP surface,
-    // `hasAnyChainedSurface` is false → `buildComposedHttpFromComposition`
-    // returns null → `graph.fetch`/`graph.websocket` stay UNDEFINED and the
-    // boot shell falls back to its `/healthz`-only default handler. The
-    // resume route (`POST /api/import/<job>/resume`) is therefore NOT served
-    // even though its handler was wired.
-    //
-    // This looks like a LATENT PROD BUG (a box that supplied only the resume
-    // handler would silently serve no composed surface), but it is harmless in
-    // practice today because every real composition also supplies landing +
-    // other surfaces, so the gate is always satisfied. Flagged here for a
-    // later fix unit to add `import_resume_handler` (and `import_upload_handler`
-    // is already listed) to the gate. G1 only pins the current behavior; a fix
-    // must change this assertion WITH an explicit ratchet-change PR note.
+describe('G1 — import_resume_handler-only composition (C4 divergence fix)', () => {
+  test('supplying ONLY import_resume_handler DOES build the chain and serves the resume route', async () => {
+    // RATCHET CHANGE (C4 divergence fix) — this test previously pinned the
+    // pre-C4 drift AS-IS: `import_resume_handler` was mapped into
+    // `composeInput` but OMITTED from the hand-maintained
+    // `hasAnyChainedSurface` gate, so as the ONLY supplied HTTP surface it
+    // yielded `graph.fetch === undefined` and its wired route was silently
+    // never served (latent prod bug; harmless in practice because every real
+    // composition also supplies landing). The pre-C4 comment here required a
+    // fix to "change this assertion WITH an explicit ratchet-change PR note"
+    // — this is that change. C4 generates the gate from the RouteSlot
+    // registry (`gateway/http/route-slots.ts:CHAINED_SURFACE_COMPOSITION_KEYS`)
+    // where every mapped surface chain-gates: `chat_history_surface`,
+    // `chat_topics_surface`, `import_resume_handler`, and `auth_gate` now
+    // count, so the composed fetch exists and the resume route is OWNED.
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-import-resume-only-'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
     applyMigrations(db.raw())
@@ -623,8 +616,18 @@ describe('G1 — import_resume_handler-only composition (pinned known-divergence
       // NOTHING else supplied — import_resume_handler is the sole HTTP surface.
     })
     try {
-      expect(graph.fetch).toBeUndefined()
-      expect(graph.websocket).toBeUndefined()
+      expect(graph.fetch).toBeDefined()
+      const res = await graph.fetch!(
+        new Request('http://127.0.0.1/api/import/job-1/resume', { method: 'POST' }),
+        FAKE_SERVER,
+      )
+      expect(await answered(res)).toBe('import-resume')
+      // Non-owned paths still fall through to the default 404 chain.
+      const miss = await graph.fetch!(
+        new Request('http://127.0.0.1/api/does-not-exist'),
+        FAKE_SERVER,
+      )
+      expect(miss.status).toBe(404)
     } finally {
       await graph.shutdown()
       db.close()

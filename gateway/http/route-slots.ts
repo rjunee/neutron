@@ -417,7 +417,7 @@ export const ROUTE_SLOTS = [
     key: 'chatHistory',
     rung: 'chat-history',
     composition: 'chat_history_surface',
-    gated: false, // pre-C4 divergence, preserved: mapped but NOT chain-gating
+    gated: true, // C4 divergence fix — was mapped but missing from the pre-C4 gate
     promote: (c) => pluckHandler(c.chat_history_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
@@ -426,7 +426,7 @@ export const ROUTE_SLOTS = [
     key: 'chatTopics',
     rung: 'chat-topics',
     composition: 'chat_topics_surface',
-    gated: false, // pre-C4 divergence, preserved: mapped but NOT chain-gating
+    gated: true, // C4 divergence fix — was mapped but missing from the pre-C4 gate
     promote: (c) => pluckHandler(c.chat_topics_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
@@ -469,7 +469,7 @@ export const ROUTE_SLOTS = [
     key: 'importResumeHandler',
     rung: 'import-resume',
     composition: 'import_resume_handler',
-    gated: false, // pre-C4 divergence, preserved: mapped but NOT chain-gating
+    gated: true, // C4 divergence fix — was mapped but missing from the pre-C4 gate
     promote: (c) => c.import_resume_handler,
     dispatch: (v: (req: Request) => Promise<Response | null>, ctx) => v(ctx.req),
   }),
@@ -762,12 +762,18 @@ export type ComposeSurfaceInput = {
  * composed HTTP chain at all (`hasAnyChainedSurface`). Derived from the
  * slots' `gated` flags.
  *
- * KNOWN DIVERGENCE (preserved verbatim in the C4 transition commit; fixed in
- * the follow-up divergence commit): `chat_history_surface`,
- * `chat_topics_surface`, `import_resume_handler`, and `auth_gate` are
- * MAPPED into the chain but do NOT count toward the gate — supplying only
- * one of them yields `graph.fetch === undefined` (pinned by
- * `open-route-matrix.test.ts` Part 3).
+ * C4 DIVERGENCE FIX (the one intended behavior change of §C4): the pre-C4
+ * hand-maintained gate had drifted from the mapping — `chat_history_surface`,
+ * `chat_topics_surface`, `import_resume_handler`, and `auth_gate` were
+ * MAPPED into the chain but omitted from the gate, so a composition that
+ * supplied only one of them silently yielded `graph.fetch === undefined`
+ * (its wired route was never served; latent-prod-bug analysis in the pre-C4
+ * `open-route-matrix.test.ts` Part 3, which pinned the drift AS-IS). Every
+ * mapped surface now counts: the three surfaces via `gated: true` on their
+ * slots, and `auth_gate` via the explicit entry below (it is promoted as a
+ * non-rung wrapper in `gateway/composition.ts`, so it has no slot to flag).
+ * Harmless for every real composition (all supply landing + more), but the
+ * gate can no longer silently drop a wired surface.
  */
 export const CHAINED_SURFACE_COMPOSITION_KEYS: readonly (keyof RouteSlotComposition)[] = [
   ...new Set(
@@ -775,6 +781,7 @@ export const CHAINED_SURFACE_COMPOSITION_KEYS: readonly (keyof RouteSlotComposit
       (s) => s.composition as keyof RouteSlotComposition,
     ),
   ),
+  'auth_gate',
 ]
 
 /**

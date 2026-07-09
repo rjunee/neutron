@@ -19,10 +19,11 @@
  *      pre-C4 literal `(path|prefix, method)` / predicate condition;
  *   4. generated mapping + gate — `buildComposeSurfaces` reproduces the
  *      pre-C4 field-by-field promotion (incl. the `{handler}` plucks and
- *      the admin-respawn wrap) and `hasAnyChainedSurface` reproduces the
- *      pre-C4 31-field gate INCLUDING its known divergence
- *      (`chat_history_surface` / `chat_topics_surface` /
- *      `import_resume_handler` / `auth_gate` mapped-but-not-gating).
+ *      the admin-respawn wrap) and `hasAnyChainedSurface` equals the
+ *      pre-C4 31-field gate PLUS the four documented divergence-fix
+ *      fields (`chat_history_surface` / `chat_topics_surface` /
+ *      `import_resume_handler` / `auth_gate` were mapped-but-not-gating
+ *      before C4 — the one intended §C4 behavior change).
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -55,14 +56,15 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['internal-cache-invalidate', 'internalCacheInvalidateHandler', 'internal_cache_invalidate', true],
   ['admin-respawn', 'adminRespawn', 'admin_respawn_handler', true],
   ['slug-check', 'slugCheckHandler', 'slug_check_handler', true],
-  // Pre-C4 divergence, preserved by the transition commit: chat-history /
-  // chat-topics / import-resume are MAPPED but not chain-GATING.
-  ['chat-history', 'chatHistory', 'chat_history_surface', false],
-  ['chat-topics', 'chatTopics', 'chat_topics_surface', false],
+  // C4 divergence fix (the one intended §C4 behavior change): chat-history /
+  // chat-topics / import-resume were MAPPED but missing from the pre-C4
+  // hand-maintained gate; every mapped surface now chain-gates.
+  ['chat-history', 'chatHistory', 'chat_history_surface', true],
+  ['chat-topics', 'chatTopics', 'chat_topics_surface', true],
   ['avatar', 'avatarHandler', 'avatar_handler', true],
   ['profile-pic-candidate', 'candidateHandler', 'candidate_handler', true],
   ['chunked-upload', 'chunkedUploadHandler', 'chunked_upload_handler', true],
-  ['import-resume', 'importResumeHandler', 'import_resume_handler', false],
+  ['import-resume', 'importResumeHandler', 'import_resume_handler', true],
   ['import-upload', 'importUploadHandler', 'import_upload_handler', true],
   ['app-ws', 'appWs', 'app_ws_surface', true],
   ['app-upload', 'appUpload', 'app_upload_surface', true],
@@ -457,8 +459,13 @@ function fullComposition(): RouteSlotComposition {
   }
 }
 
-/** The pre-C4 `hasAnyChainedSurface` gate list, literally (31 fields). */
-const PRE_C4_GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
+/**
+ * The `hasAnyChainedSurface` gate list: the pre-C4 literal 31 fields PLUS
+ * the four divergence-fix fields (C4's one intended behavior change —
+ * `chat_history_surface`, `chat_topics_surface`, `import_resume_handler`,
+ * `auth_gate` were mapped-but-missing in the pre-C4 hand-maintained gate).
+ */
+const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'landing_server',
   'telegram_webhook',
   'connect_api',
@@ -490,37 +497,31 @@ const PRE_C4_GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'cores_surface',
   'cores_oauth_surface',
   'cores_integrations_surface',
-]
-
-/** The pre-C4 mapped-but-NOT-gating divergence set (fixed in the follow-up
- *  divergence commit; the fix must update this test WITH a ratchet note). */
-const PRE_C4_DIVERGENT_FIELDS: readonly (keyof RouteSlotComposition)[] = [
+  // ── C4 divergence-fix additions (RATCHET CHANGE, documented) ──────────
+  // These four were MAPPED into the chain but omitted from the pre-C4
+  // hand-maintained gate, so a composition supplying only one of them
+  // silently served nothing (graph.fetch === undefined). The C4 registry
+  // makes every mapped surface chain-gating; the pre-C4 drift was pinned by
+  // open-route-matrix.test.ts Part 3, updated in the same commit.
   'chat_history_surface',
   'chat_topics_surface',
   'import_resume_handler',
   'auth_gate',
 ]
 
-describe('C4 transition — generated gate equals the pre-C4 literal gate', () => {
-  test('gate membership is exactly the pre-C4 31-field list', () => {
-    expect(new Set(CHAINED_SURFACE_COMPOSITION_KEYS)).toEqual(new Set(PRE_C4_GATE_FIELDS))
+describe('C4 — generated gate = pre-C4 literal gate + the documented divergence fix', () => {
+  test('gate membership is exactly the pre-C4 31-field list + the 4 divergence-fix fields', () => {
+    expect(new Set(CHAINED_SURFACE_COMPOSITION_KEYS)).toEqual(new Set(GATE_FIELDS))
   })
 
   test('empty composition → no chain', () => {
     expect(hasAnyChainedSurface({})).toBe(false)
   })
 
-  for (const field of PRE_C4_GATE_FIELDS) {
+  for (const field of GATE_FIELDS) {
     test(`supplying ONLY ${String(field)} builds the chain`, () => {
       const full = fullComposition()
       expect(hasAnyChainedSurface({ [field]: full[field] } as RouteSlotComposition)).toBe(true)
-    })
-  }
-
-  for (const field of PRE_C4_DIVERGENT_FIELDS) {
-    test(`KNOWN DIVERGENCE preserved: ONLY ${String(field)} does NOT build the chain`, () => {
-      const full = fullComposition()
-      expect(hasAnyChainedSurface({ [field]: full[field] } as RouteSlotComposition)).toBe(false)
     })
   }
 })
