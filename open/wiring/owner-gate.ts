@@ -203,9 +203,17 @@ export function buildOpenOwnerGate(
     // derives `userId` (→ its default `dev:<owner>` app-ws bearer, the one our
     // owner-restricted resolver accepts) and connects.
     // S0 (b) — inject the per-boot app-ws token. The client reads
-    // `window.__neutron_app_ws_token` (chat-react/config.ts) and presents it as
-    // its WS + /api/app/* bearer, REPLACING the guessable `dev:<owner>` default.
-    // A page from a previous boot carries a stale token the server now rejects.
+    // `window.__neutron_app_ws_token` (chat-react/config.ts) and sends it as its
+    // WS + /api/app/* bearer instead of the guessable `dev:<owner>` default, so a
+    // page from a previous boot carries a stale token.
+    // SCOPE (do not overclaim): S0 hardens the WS UPGRADE — a browser-origin
+    // `/ws/app/chat` upgrade is rejected unless it presents this exact token
+    // (app-ws-surface.ts). The `/api/app/*` resolver ADDS this token as a valid
+    // owner credential but still ACCEPTS the legacy `dev:owner` bearer (the
+    // pre-existing dev-bypass); server-side rejection of `dev:owner` on every
+    // /api/app/* surface is S1's job (per-install owner credential + C5 gate seam).
+    // S0 closes the most exploitable hole (WS bypasses CORS); the HTTP bearer
+    // path is CORS/SOP-mitigated cross-origin and hardened fully in S1.
     return (
       `<script>window.__neutron_user_id=${enc(OWNER_USER_ID)};` +
       `window.__neutron_projects=${enc(projects)};` +
