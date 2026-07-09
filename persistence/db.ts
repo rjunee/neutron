@@ -29,6 +29,18 @@ export interface OpenOptions {
 }
 
 /**
+ * Result of a mutating statement — structurally the `bun:sqlite` `Changes`
+ * shape. `lastInsertRowid` is a `bigint` only when the connection enables
+ * `safeIntegers` (ProjectDb does not), so in practice it is a `number`.
+ */
+export interface RunSyncResult {
+  /** Number of rows changed by the statement. */
+  changes: number
+  /** Rowid of the most recent successful INSERT on this connection. */
+  lastInsertRowid: number | bigint
+}
+
+/**
  * Per-project SQLite wrapper. One ProjectDb instance per process; opening twice on
  * the same path within one process is allowed but leaves the busy-retry layer to
  * handle inter-connection lock contention.
@@ -127,6 +139,57 @@ export class ProjectDb {
   }
 
   /**
+   * Typed single-row read. Behavior-identical to
+   * `raw().query<R, P>(sql).get(...params)` — named and greppable so read
+   * call sites stop reaching for the `raw()` escape hatch. Returns the first
+   * matching row or `null`.
+   *
+   * NOT mutex-serialized (same as `prepare` — `bun:sqlite` calls are
+   * synchronous, so a read can never interleave into an in-flight statement).
+   * Note that a read issued while THIS instance has an open `transaction()`
+   * runs on the same shared connection and therefore sees that transaction's
+   * uncommitted writes — identical to today's `raw()` read semantics.
+   */
+  get<R, P extends SQLQueryBindings[] = SQLQueryBindings[]>(sql: string, params: P | [] = []): R | null {
+    return this.db.query<R, SQLQueryBindings[]>(sql).get(...params)
+  }
+
+  /**
+   * Typed multi-row read. Behavior-identical to
+   * `raw().query<R, P>(sql).all(...params)`. Returns every matching row
+   * (empty array when none match). Same serialization notes as `get`.
+   */
+  all<R, P extends SQLQueryBindings[] = SQLQueryBindings[]>(sql: string, params: P | [] = []): R[] {
+    return this.db.query<R, SQLQueryBindings[]>(sql).all(...params)
+  }
+
+  /**
+   * Synchronous parameterised mutation returning the driver's
+   * `{ changes, lastInsertRowid }` — the missing return values that pushed
+   * callers into `tx.raw().run(...)` / `tx.raw().prepare(...).run(...)`.
+   * Behavior-identical to `raw().run(sql, params)`.
+   *
+   * Two blessed contexts:
+   *  1. Inside a `transaction(fn)` callback — the write is covered by the
+   *     transaction's mutex hold, and BEGIN/COMMIT carry the busy-retry.
+   *  2. Genuinely synchronous call sites that cannot `await` (e.g. a sync
+   *     progress-counter UPDATE on a hot path).
+   *
+   * NOT busy-retry-wrapped: the retry layer sleeps with `await Bun.sleep`
+   * BY DESIGN (a sync sleep would pin the event loop and starve the systemd
+   * watchdog tick — see retry.ts), so a sync API cannot participate. Only the
+   * C-level `busy_timeout` (100 ms) applies. NOT mutex-serialized either
+   * (sync code cannot await the lock): called outside a transaction callback
+   * while another caller's async `transaction()` is open on this instance,
+   * the write lands INSIDE that open BEGIN/COMMIT window and shares its fate
+   * (pinned by regression test). Prefer `await run(...)` whenever the call
+   * site can be async and doesn't need the returned counts.
+   */
+  runSync<P extends SQLQueryBindings[] = SQLQueryBindings[]>(sql: string, params: P | [] = []): RunSyncResult {
+    return this.db.run<P | []>(sql, params)
+  }
+
+  /**
    * Execute one or more statements. Routed through the per-instance mutex so a
    * concurrent `exec` from elsewhere can't land between a live transaction's
    * BEGIN and COMMIT. NOT busy-retry-wrapped: `exec` is for one-off DDL /
@@ -204,6 +267,37 @@ export class ProjectDb {
         return result
       })
     })
+  }
+
+  /**
+   * True while the calling async context is inside THIS instance's
+   * `transaction(fn)` callback (detected via the same per-instance
+   * AsyncLocalStorage that powers `withLock` re-entry, so it survives
+   * `await`s and propagates into helper functions called from the callback).
+   *
+   * Scope note: this answers "is MY current call stack inside the
+   * transaction callback", NOT "does the connection have an open BEGIN" — a
+   * concurrent caller outside the callback sees `false` even while another
+   * caller's transaction is mid-flight.
+   */
+  isInTransaction(): boolean {
+    return this.inTransaction.getStore() === true
+  }
+
+  /**
+   * Opt-in transaction-open assertion. Store methods whose correctness
+   * depends on running inside a caller-held transaction (e.g. "MUST be
+   * called from within `db.transaction(...)` so writes share the tx"
+   * contracts) call this at entry so a bare invocation fails loudly instead
+   * of silently writing outside the transaction. Throws `PersistenceError`;
+   * `what` names the operation in the error message.
+   */
+  assertInTransaction(what = 'this operation'): void {
+    if (!this.isInTransaction()) {
+      throw new PersistenceError(
+        `transaction required: ${what} must run inside ProjectDb.transaction()`,
+      )
+    }
   }
 
   /**
