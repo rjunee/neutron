@@ -1,4 +1,4 @@
-export { ProjectDb, type OpenOptions } from './db.ts'
+export { ProjectDb, type OpenOptions, type RunSyncResult } from './db.ts'
 export {
   AppChatStore,
   DEFAULT_REPLAY_LIMIT,
