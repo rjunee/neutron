@@ -236,6 +236,38 @@ export class EntityWriteError extends Error {
 }
 
 /**
+ * RA1 — per-(kind,slug) write serialization. The read→merge→render→rename
+ * pipeline below is atomic (tmp + rename, byte-equal short-circuit) but on
+ * its own it is NOT isolated: two concurrent same-slug writers (chat scribe
+ * + a Cores calendar/email scribe, or scribe + onboarding import) would each
+ * read the same base page, each merge only their OWN timelineAppend, and the
+ * second rename would silently drop the first's timeline row (classic lost
+ * update). Same-key writes therefore chain on a per-`${kind}/${slug}`
+ * promise — the exact `withLock` idiom from `persistence/db.ts` — so the
+ * full critical section runs one-after-another per key while different keys
+ * proceed concurrently. The stored chain is rebuilt with a swallowing
+ * `.then` so one caller's failure does NOT propagate as a rejection into
+ * queued callers, and the map entry is deleted once its chain drains so the
+ * lock table doesn't grow with every slug ever written.
+ */
+const writeLocks = new Map<string, Promise<void>>()
+
+function withWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = writeLocks.get(key) ?? Promise.resolve()
+  const next = prev.then(fn)
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  )
+  writeLocks.set(key, settled)
+  void settled.then(() => {
+    // Only clean up if no later writer has already chained past us.
+    if (writeLocks.get(key) === settled) writeLocks.delete(key)
+  })
+  return next
+}
+
+/**
  * Write a single entity page transactionally.
  *
  * @param input the page to write (instance data dir + kind + slug + body)
@@ -248,6 +280,17 @@ export async function writeEntity(
   deps: WriteEntityDeps = {},
 ): Promise<EntityWriteOutput> {
   validateInput(input)
+  // Serialize the whole read→merge→render→rename critical section per
+  // (kind,slug) so concurrent same-slug writes can't lose updates (RA1).
+  return withWriteLock(`${input.kind}/${input.slug}`, () =>
+    writeEntityLocked(input, deps),
+  )
+}
+
+async function writeEntityLocked(
+  input: EntityWriteInput,
+  deps: WriteEntityDeps,
+): Promise<EntityWriteOutput> {
   const { ownerDataDir, kind, slug, body } = input
 
   const entitiesRoot = resolve(ownerDataDir, 'entities')
