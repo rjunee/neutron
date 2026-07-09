@@ -45,7 +45,7 @@
  * Re-exported below so any other existing import specifier stays valid.
  */
 
-export { MOBILE_APP_URL, TELEGRAM_BIND_TOKEN_TTL_MS } from '../../contracts/handoff-config.ts'
+export { MOBILE_APP_URL, TELEGRAM_BIND_TOKEN_TTL_MS } from '@neutronai/contracts/handoff-config.ts'
 
 /**
  * Fallback Telegram bot username (without `@`). Production sets

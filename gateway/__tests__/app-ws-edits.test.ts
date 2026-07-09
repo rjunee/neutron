@@ -17,15 +17,15 @@ import {
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
   type AppWsOutbound,
-} from '../../channels/index.ts'
+} from '@neutronai/channels/index.ts'
 import {
   AppChatEditStore,
   APP_CHAT_AGENT_DEVICE_ID,
   AppChatStore,
   ProjectDb,
-} from '../../persistence/index.ts'
-import type { Topic } from '../../channels/types.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
+} from '@neutronai/persistence/index.ts'
+import type { Topic } from '@neutronai/channels/types.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
 

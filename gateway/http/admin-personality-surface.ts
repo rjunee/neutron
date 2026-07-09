@@ -93,7 +93,7 @@ import { constants as fsConstants, existsSync } from 'node:fs'
 import { mkdir, open, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
 import { createKeyedMutex, type KeyedMutex } from './keyed-mutex.ts'
 

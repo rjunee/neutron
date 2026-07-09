@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { createAppDocsSurface } from '../http/app-docs-surface.ts'
 import { DocStore, type DocTreeNode } from '../http/doc-store.ts'
 import { composeHttpHandler } from '../http/compose.ts'

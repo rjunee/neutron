@@ -57,11 +57,11 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { ApiKeyStore } from '../../auth/api-key-store.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { CommentStore } from '../comments/comment-store.ts'
 import { createAppDocsSurface } from '../http/app-docs-surface.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '../http/chat-bridge.ts'
@@ -231,11 +231,11 @@ async function buildResolver(
   h: Harness,
   captured: string[],
 ): Promise<NonNullable<Awaited<ReturnType<typeof buildPhaseSpecResolver>>>> {
-  const substrate: import('../../runtime/substrate.ts').Substrate = {
-    start(spec): import('../../runtime/session-handle.ts').SessionHandle {
+  const substrate: import('@neutronai/runtime/substrate.ts').Substrate = {
+    start(spec): import('@neutronai/runtime/session-handle.ts').SessionHandle {
       captured.push(spec.prompt)
       const events = (async function* (): AsyncGenerator<
-        import('../../runtime/events.ts').Event,
+        import('@neutronai/runtime/events.ts').Event,
         void,
         void
       > {

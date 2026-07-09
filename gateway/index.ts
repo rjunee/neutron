@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
-import { applyMigrations } from '../migrations/runner.ts'
-import { shutdownAllPersistentRepls } from '../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { ProjectDb } from '../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
@@ -13,7 +13,7 @@ import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // file holds ZERO imports — static OR dynamic — into Managed dirs
 // (signup/, provisioning/, identity/, proxy/).
 import { composeProductionGraph } from './composition.ts'
-import { resolveBootConfig, type BootConfig } from '../config/index.ts'
+import { resolveBootConfig, type BootConfig } from '@neutronai/config/index.ts'
 
 
 // Shared boot-time helpers — extracted to `./boot-helpers.ts` (Argus

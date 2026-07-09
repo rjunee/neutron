@@ -19,7 +19,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyProjectScopedMigrations } from '../../../../migrations/runner.ts'
+import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 
 import { ResearchClaimStore } from './claim-store.ts'
 import { ResearchProjectStore } from './research-store.ts'

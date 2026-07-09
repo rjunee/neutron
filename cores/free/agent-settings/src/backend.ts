@@ -38,8 +38,8 @@
  * (out of scope for this sprint).
  */
 
-import type { ProjectDb } from '../../../../persistence/index.ts'
-import { TELEGRAM_BIND_TOKEN_TTL_MS } from '../../../../contracts/handoff-config.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TELEGRAM_BIND_TOKEN_TTL_MS } from '@neutronai/contracts/handoff-config.ts'
 // L3 (2026-07) — source the engagement-mode vocabulary from the node-free
 // `contracts` leaf (where L2 extracted it) instead of the `connect` service.
 // `connect/agent-engagement.ts` only re-exports these three symbols from
@@ -49,7 +49,7 @@ import {
   DEFAULT_AGENT_ENGAGEMENT_MODE,
   isAgentEngagementMode,
   type AgentEngagementMode,
-} from '../../../../contracts/agent-engagement.ts'
+} from '@neutronai/contracts/agent-engagement.ts'
 
 /** The user-facing project shape every tool returns. */
 export interface ProjectView {

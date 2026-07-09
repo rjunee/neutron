@@ -13,7 +13,7 @@
  * resolve_member gate.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * The member's role in the meeting point. ONE owner per project; everyone else

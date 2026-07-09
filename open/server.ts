@@ -26,9 +26,9 @@
 
 import { randomBytes } from 'node:crypto'
 
-import { boot, loadGraphComposerFromEnv, resolveOwnerSlugFromConfig } from '../gateway/index.ts'
-import type { BootHandle } from '../gateway/index.ts'
-import { resolveBootConfig, envShimFromBootConfig } from '../config/index.ts'
+import { boot, loadGraphComposerFromEnv, resolveOwnerSlugFromConfig } from '@neutronai/gateway/index.ts'
+import type { BootHandle } from '@neutronai/gateway/index.ts'
+import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/index.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
 

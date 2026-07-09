@@ -19,8 +19,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   ALL_ONBOARDING_EVENT_NAMES,
   OnboardingTelemetry,

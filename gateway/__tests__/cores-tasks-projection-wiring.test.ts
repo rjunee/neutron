@@ -45,9 +45,9 @@ import {
   loadManifest as loadTasksManifest,
 } from '@neutronai/tasks-core'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { TaskStore } from '../../tasks/store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   composeProductionGraph,
   type CompositionInput,

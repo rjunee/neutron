@@ -47,7 +47,7 @@ import { constants as fsConstants } from 'node:fs'
 import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type { AgentProfileBackend } from '../cores/free/agent-settings/index.ts'
+import type { AgentProfileBackend } from '@neutronai/agent-settings'
 
 /** The SOUL.md filename the PersonaPromptLoader reads first (identity file). */
 const SOUL_FILENAME = 'SOUL.md'

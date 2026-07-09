@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ToolRegistry } from '../tools/registry.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { McpServer } from './server.ts'
 import { withTopicContext, type TopicContext } from './topic-context.ts'
 

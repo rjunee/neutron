@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { buildButtonPrompt } from '../../../channels/button-primitive.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import type { WowActionContext, WowActionModule, WowActionResult } from '../action-types.ts'
 import type { WowEngagement } from '../telemetry.ts'
 

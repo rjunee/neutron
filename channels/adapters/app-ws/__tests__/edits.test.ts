@@ -11,14 +11,14 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   AppChatEditStore,
   AppChatEditNotAuthorizedError,
   APP_CHAT_AGENT_DEVICE_ID,
   AppChatStore,
   ProjectDb,
-} from '../../../../persistence/index.ts'
+} from '@neutronai/persistence/index.ts'
 import type { Topic } from '../../../types.ts'
 import { AppWsAdapter } from '../adapter.ts'
 import { decodeAppWsEdit } from '../envelope.ts'

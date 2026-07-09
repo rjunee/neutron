@@ -21,9 +21,9 @@ import {
   type SecretsPrompter,
 } from '@neutronai/cores-runtime'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ProjectDb } from '../../../../persistence/index.ts'
-import { SecretsStore } from '../../../../auth/secrets-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 
 import {
   CORE_PACKAGE_NAME,

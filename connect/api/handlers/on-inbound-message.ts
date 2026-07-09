@@ -27,9 +27,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ChannelRouter } from '../../../channels/router.ts'
-import type { Author, ChannelKind, IncomingEvent } from '../../../channels/types.ts'
-import type { ProjectDb } from '../../../persistence/index.ts'
+import type { ChannelRouter } from '@neutronai/channels/router.ts'
+import type { Author, ChannelKind, IncomingEvent } from '@neutronai/channels/types.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ConnectAuthContext } from '../jwt-bearer-middleware.ts'
 import type { IncomingMessage } from '../server.ts'
 import type { TaggedContent } from '../origin-tag.ts'

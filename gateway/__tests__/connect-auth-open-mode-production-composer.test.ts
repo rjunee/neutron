@@ -33,9 +33,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppConnectAuthSurface } from '../http/app-connect-auth.ts'
 import { FederatedTokenStore } from '../connect/federated-token-store.ts'
@@ -44,7 +44,7 @@ import {
   formatSetCookie,
   readSessionCookie,
   signSessionCookie,
-} from '../../landing/session-cookie.ts'
+} from '@neutronai/landing/session-cookie.ts'
 
 const OWNER = 'open-client-owner'
 const INTERNAL_HANDLE = 'ih-open-client'

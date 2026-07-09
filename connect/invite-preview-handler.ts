@@ -21,7 +21,7 @@
  * expired} — no field leak.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ConnectGuestInviteStore } from './guest-invite-store.ts'
 
 /** A SHA-256 hex digest — 64 lowercase hex chars. The client computes this from

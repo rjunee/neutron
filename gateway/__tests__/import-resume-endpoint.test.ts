@@ -19,17 +19,17 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildImportResumeHandler,
   RESUMABLE_STATUSES,
 } from '../upload/import-resume-handler.ts'
-import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
+import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 import type {
   ImportJobRunnerHook,
   ImportPayloadResolver,
-} from '../../onboarding/interview/engine.ts'
+} from '@neutronai/onboarding/interview/engine.ts'
 
 const OWNER = 'alice'
 const USER = 'u-alice'

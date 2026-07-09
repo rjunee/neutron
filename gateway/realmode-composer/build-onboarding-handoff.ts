@@ -81,15 +81,15 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { OnboardingHandoffHook } from '../../onboarding/interview/engine.ts'
-import type { ButtonStore } from '../../channels/button-store.ts'
-import { buildButtonPrompt } from '../../channels/button-primitive.ts'
-import type { ImportResult } from '../../onboarding/history-import/types.ts'
+import type { OnboardingHandoffHook } from '@neutronai/onboarding/interview/engine.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import {
   slugifyProjectId,
   findRelatedImportSignal,
   type RelatedImportSignal,
-} from '../../onboarding/wow-moment/project-identity.ts'
+} from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { webTopicId } from '../http/web-topic-id.ts'
 
 /**

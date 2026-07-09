@@ -44,9 +44,9 @@ import {
   _extractCompiledTruthSlice,
   _parseFrontmatter,
   _KIND_TO_DIR as SCRIBE_KIND_TO_DIR,
-} from '../../scribe/write-to-gbrain.ts'
+} from '@neutronai/scribe/write-to-gbrain.ts'
 
-import { _DIR_TO_KIND as GBRAIN_DIR_TO_KIND } from '../../gbrain-memory/GBrainSyncHook.ts'
+import { _DIR_TO_KIND as GBRAIN_DIR_TO_KIND } from '@neutronai/gbrain-memory/GBrainSyncHook.ts'
 
 describe('KIND_TO_DIR / DIR_TO_KIND — three-way mirror agreement', () => {
   test('scribe/write-to-gbrain.ts KIND_TO_DIR byte-equals runtime/entity-writer.ts KIND_TO_DIR', () => {

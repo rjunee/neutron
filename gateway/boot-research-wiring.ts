@@ -48,7 +48,7 @@ export function buildResearchLlmCallForOwner(opts: {
    * an instance that re-pastes Max OAuth mid-session is honoured on the next
    * `/research` dispatch without a gateway restart.
    */
-  substrate: import('../runtime/substrate.ts').Substrate | null
+  substrate: import('@neutronai/runtime/substrate.ts').Substrate | null
 }): import('@neutronai/research-core').ResearchLlmCall {
   return async (input) => {
     if (opts.substrate === null) {
@@ -67,7 +67,7 @@ export function buildResearchLlmCallForOwner(opts: {
     if (prompt.length === 0) {
       throw new Error('[research-core] empty prompt — refusing to dispatch')
     }
-    const spec: import('../runtime/substrate.ts').AgentSpec = {
+    const spec: import('@neutronai/runtime/substrate.ts').AgentSpec = {
       prompt,
       tools: [],
       model_preference: [input.model],

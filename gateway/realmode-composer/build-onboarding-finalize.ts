@@ -41,26 +41,26 @@ import { fileURLToPath } from 'node:url'
 import type {
   OnboardingState,
   OnboardingStateStore,
-} from '../../onboarding/interview/state-store.ts'
-import type { ImportResult } from '../../onboarding/history-import/types.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/onboarding/interview/state-store.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type {
   ProjectDocComposer,
   MaterializeOutcome,
-} from '../../onboarding/wow-moment/project-materializer.ts'
-import type { CapturedProject } from '../../onboarding/wow-moment/action-types.ts'
-import type { SyncHook } from '../../runtime/entity-writer.ts'
+} from '@neutronai/onboarding/wow-moment/project-materializer.ts'
+import type { CapturedProject } from '@neutronai/onboarding/wow-moment/action-types.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
-import { PersonaComposer } from '../../onboarding/persona-gen/compose.ts'
-import { buildCringeChecker } from '../../onboarding/persona-gen/cringe-check.ts'
-import { ArchetypeLibrary } from '../../onboarding/archetypes/library.ts'
-import { buildComposeInput } from '../../onboarding/interview/engine-internals.ts'
-import { readNonWorkInterests } from '../../onboarding/interview/engine-internals.ts'
+import { PersonaComposer } from '@neutronai/onboarding/persona-gen/compose.ts'
+import { buildCringeChecker } from '@neutronai/onboarding/persona-gen/cringe-check.ts'
+import { ArchetypeLibrary } from '@neutronai/onboarding/archetypes/library.ts'
+import { buildComposeInput } from '@neutronai/onboarding/interview/engine-internals.ts'
+import { readNonWorkInterests } from '@neutronai/onboarding/interview/engine-internals.ts'
 import {
   slugifyProjectId,
   findRelatedImportSignal,
-} from '../../onboarding/wow-moment/project-identity.ts'
-import { capProposedProjects } from '../../onboarding/interview/phase-prompts.ts'
+} from '@neutronai/onboarding/wow-moment/project-identity.ts'
+import { capProposedProjects } from '@neutronai/onboarding/interview/phase-prompts.ts'
 import {
   buildScaffoldMaterializer,
   ensureProjectRow,

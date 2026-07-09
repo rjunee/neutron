@@ -1,10 +1,10 @@
-import type { ReminderDispatcher } from '../../../reminders/tick.ts'
-import type { ApprovalNotifier } from '../../../tools/approval.ts'
+import type { ReminderDispatcher } from '@neutronai/reminders/tick.ts'
+import type { ApprovalNotifier } from '@neutronai/tools/approval.ts'
 import type {
   HeartbeatTracker,
   PidLivenessProbe,
-} from '../../../watchdog/detectors.ts'
-import type { WatchdogNotifier } from '../../../watchdog/types.ts'
+} from '@neutronai/watchdog/detectors.ts'
+import type { WatchdogNotifier } from '@neutronai/watchdog/types.ts'
 
 export interface NotifierCompositionInput {
   /** Approval surface (Telegram inline-keyboard) — supplied by the boot shell. */

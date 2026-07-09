@@ -15,7 +15,7 @@
  * module has no current runtime caller; it is the extracted seam P6 wires.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ImportResult, ImportSource } from './types.ts'
 
 interface ImportResultRow {

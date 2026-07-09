@@ -19,7 +19,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export type WowActionId =
   | '01-first-week-brief'

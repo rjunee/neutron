@@ -3,10 +3,10 @@ import type {
   InstallTelemetryEvent,
 } from '../../cores/install-bundled.ts'
 import type { CoresModuleState } from '../../cores/composer-state.ts'
-import type { BundledRegistryEvent } from '../../../cores/runtime/bundled-registry.ts'
-import type { SecretsPrompter } from '../../../cores/runtime/lifecycle.ts'
-import type { AppWsAuthResolver } from '../../../channels/adapters/app-ws/auth.ts'
-import type { SecretsStore } from '../../../auth/secrets-store.ts'
+import type { BundledRegistryEvent } from '@neutronai/cores-runtime/bundled-registry.ts'
+import type { SecretsPrompter } from '@neutronai/cores-runtime/lifecycle.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 
 export interface CoresCompositionInput {
   /**

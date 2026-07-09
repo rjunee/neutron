@@ -24,9 +24,9 @@
  * the one warm REPL and accumulate context.
  */
 
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { Event } from '../../runtime/events.ts'
-import { getBestModel } from '../../runtime/models.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import { extractJsonObject } from './json-extract.ts'
 import {
   SYNTHESIS_CEILING_MS_DEFAULT,

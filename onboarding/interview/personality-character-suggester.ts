@@ -37,7 +37,7 @@
  * better, more varied set of picks.
  */
 
-import { getBestModel } from '../../runtime/models.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import { SUGGESTER_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
 import {
   STATIC_PERSONALITY_CHARACTER_FALLBACK,

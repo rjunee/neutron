@@ -25,7 +25,7 @@
  * `OutboundSink`, exactly like the morning brief + trident async-delivery.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { resolveOwnerDay } from '../tasks/p6/nudge-engine.ts'
 import { proactiveTopic, type OutboundSink, type Topic } from './sink.ts'
 import { ProactiveStateStore } from './state-store.ts'

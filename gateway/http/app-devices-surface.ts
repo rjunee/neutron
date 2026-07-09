@@ -22,7 +22,7 @@
  * swaps `user_id` + `updated_at` if the device changed hands.
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import {
   type DevicePushPlatform,
   type DevicePushTokenStore,

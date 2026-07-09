@@ -36,7 +36,7 @@
  * There is NO `reset_context_per_turn` on this path; the model ACCUMULATES.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type {
   ChunkerInput,
   ConversationRecord,
@@ -46,17 +46,17 @@ import type {
   ImportResult,
   ImportSource,
   SourceParser,
-} from '../../onboarding/history-import/types.ts'
-import { buildDefaultSourceParser } from '../../onboarding/history-import/default-source-parser.ts'
+} from '@neutronai/onboarding/history-import/types.ts'
+import { buildDefaultSourceParser } from '@neutronai/onboarding/history-import/default-source-parser.ts'
 import type {
   ImportJobRunnerHook,
-} from '../../onboarding/interview/engine-internals.ts'
+} from '@neutronai/onboarding/interview/engine-internals.ts'
 import type {
   ConversationSignal,
   ProjectSeed,
   SynthesisResult,
-} from '../../onboarding/synthesis/index.ts'
-import { slugifyProjectId } from '../../onboarding/wow-moment/project-identity.ts'
+} from '@neutronai/onboarding/synthesis/index.ts'
+import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import type { SynthesisRunner } from './build-synthesis-session.ts'
 
 export interface BuildSynthesisImportJobRunnerInput {

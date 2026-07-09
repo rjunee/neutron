@@ -22,10 +22,10 @@
  * within ~one full TTL window of its expiry.
  */
 
-import type { CronHandler, CronHandlerRegistry } from '../../cron/handlers.ts'
-import type { CronJobDef, CronJobRegistry } from '../../cron/jobs.ts'
+import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CoresOAuthPendingStore } from './oauth-pending-store.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export const DEFAULT_CORES_OAUTH_SWEEP_INTERVAL_MS = 5 * 60 * 1_000
 

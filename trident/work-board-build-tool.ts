@@ -22,16 +22,16 @@
  * the loop, exactly like `/code`.
  */
 
-import type { JsonSchemaDocument } from '../core-sdk/types.ts'
-import type { ToolRegistry } from '../tools/registry.ts'
-import type { Topic } from '../channels/types.ts'
+import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
+import type { Topic } from '@neutronai/channels/types.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
-import { workBoardScopeKey } from '../work-board/store.ts'
+import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { MergeMode, TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'

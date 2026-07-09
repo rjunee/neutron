@@ -19,8 +19,8 @@
  *                  broken-packaging failure without scanning logs.
  */
 
-import type { BundledRegistry } from '../../cores/runtime/bundled-registry.ts'
-import type { InstallCoreResult } from '../../cores/runtime/lifecycle.ts'
+import type { BundledRegistry } from '@neutronai/cores-runtime/bundled-registry.ts'
+import type { InstallCoreResult } from '@neutronai/cores-runtime/lifecycle.ts'
 
 export interface CoreInstallFailure {
   /** Stable slug — matches `BundledCore.slug` so `/api/cores` can

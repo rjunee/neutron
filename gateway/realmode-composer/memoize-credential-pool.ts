@@ -103,7 +103,7 @@
 
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
-import { hasUsableCredential, type CredentialPool } from '../../runtime/credential-pool.ts'
+import { hasUsableCredential, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 
 export interface MemoizeCredentialPoolInput {
   /** Instance home dir whose `.env` file is the invalidation trigger. */

@@ -45,8 +45,8 @@ import {
   ensureBrainInitialized,
   resolveGbrainCommand,
   resolveGbrainChildPath,
-} from '../../gbrain-memory/index.ts'
-import type { SyncHook } from '../../runtime/entity-writer.ts'
+} from '@neutronai/gbrain-memory/index.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 export interface GBrainMemoryWiring {
   /** The live stdio MCP transport (spawns `gbrain serve` lazily). */

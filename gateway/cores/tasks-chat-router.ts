@@ -25,7 +25,7 @@
  * commands) + § 6 (production-composer reachability test).
  */
 
-import type { IncomingEvent, IncomingEventReceiver } from '../../channels/types.ts'
+import type { IncomingEvent, IncomingEventReceiver } from '@neutronai/channels/types.ts'
 import {
   executeTaskCommand,
   parseTaskCommand,
@@ -36,7 +36,7 @@ import {
   type TaskStore,
 } from '@neutronai/tasks-core'
 
-import type { AppWsOutbound } from '../../channels/adapters/app-ws/envelope.ts'
+import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 
 /**
  * Per-instance Tasks Core dependencies the router resolves via

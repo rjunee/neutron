@@ -49,9 +49,9 @@
  *   EXPLICITLY OUT OF SCOPE: any other engine handler changes.
  */
 
-import type { CronHandler, CronHandlerRegistry } from '../../cron/handlers.ts'
-import type { CronJobDef, CronJobRegistry } from '../../cron/jobs.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InterviewEngine } from './engine.ts'
 
 /**

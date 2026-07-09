@@ -18,7 +18,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import type { Triple } from '../../runtime/auto-link.ts'
+import type { Triple } from '@neutronai/runtime/auto-link.ts'
 import { GBrainUnavailableError, type McpClient, type MemoryStore } from '../memory-store.ts'
 import { GBrainSyncHook, type SyncHookFailureEvent, _parseEntityPath } from '../GBrainSyncHook.ts'
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'

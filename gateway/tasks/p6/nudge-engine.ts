@@ -32,17 +32,17 @@
 
 import { composeSystemPrompt } from '../../realmode-composer/index.ts'
 import type { PersonaPromptLoader } from '../../realmode-composer/persona-loader.ts'
-import type { LlmCallFn } from '../../../onboarding/interview/phase-spec-resolver.ts'
+import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import type {
   CronHandler,
   CronHandlerRegistry,
-} from '../../../cron/handlers.ts'
+} from '@neutronai/cron/handlers.ts'
 import type {
   CronJobDef,
   CronJobRegistry,
-} from '../../../cron/jobs.ts'
-import type { ProjectDb } from '../../../persistence/index.ts'
-import { TaskStore, type Task } from '../../../tasks/store.ts'
+} from '@neutronai/cron/jobs.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TaskStore, type Task } from '@neutronai/tasks/store.ts'
 import {
   NUDGE_RATIONALE_MAX_CHARS,
   NUDGE_SLATE_LLM_LIMIT,

@@ -21,8 +21,8 @@ import {
   handleAdminRespawnSessionRequest,
   type AdminRespawnRateLimitConfig,
   type AdminRespawnRateState,
-} from '../../runtime/adapters/claude-code/persistent/admin-respawn-session.ts'
-import type { RespawnOutcome } from '../../runtime/adapters/claude-code/persistent/session-respawn.ts'
+} from '@neutronai/runtime/adapters/claude-code/persistent/admin-respawn-session.ts'
+import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/persistent/session-respawn.ts'
 
 export interface AdminRespawnSurfaceInput {
   /** Expected operator token — request must present it in `X-Gateway-Token`. */

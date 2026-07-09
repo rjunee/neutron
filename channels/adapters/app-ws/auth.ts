@@ -34,7 +34,7 @@ import { jwtVerify } from 'jose'
 // length of this instance's slug through response timing. Route it through the
 // shared constant-time primitive (the same one the landing cookie + gateway
 // surfaces use).
-import { constantTimeEqual } from '../../../runtime/constant-time-equal.ts'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 
 export type AppWsAuthMode = 'dev-bypass' | 'hs256'
 

@@ -52,7 +52,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { canonicalizeMime, magicByteSniff } from '../storage/binary-types.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
 

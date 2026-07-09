@@ -35,8 +35,8 @@
 import {
   issueInviteToken,
   type InviteSigningKey,
-} from '../../onboarding/api/invite-link-generate.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/onboarding/api/invite-link-generate.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface AppProjectInviteRequest {
   /** Bearer-resolved user id of the caller (the inviter). */

@@ -38,7 +38,7 @@ import {
   type TabMountKind as EngineTabMountKind,
   type TabScope as EngineTabScope,
   type TabSource as EngineTabSource,
-} from '../../tabs/registry'
+} from '@neutronai/tabs/registry'
 
 import type {
   TabDescriptor as AppTabDescriptor,
@@ -52,7 +52,7 @@ import type {
   TabMountKind as WebTabMountKind,
   TabScope as WebTabScope,
   TabSource as WebTabSource,
-} from '../../landing/chat-react/tabs-client'
+} from '@neutronai/landing/chat-react/tabs-client'
 
 describe('TabDescriptor — engine ↔ app/lib/tabs-client mirror', () => {
   test('bidirectional structural assignment compiles + round-trips at runtime', () => {

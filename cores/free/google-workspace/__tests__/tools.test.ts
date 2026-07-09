@@ -7,8 +7,8 @@ import { Database } from 'bun:sqlite'
 import { CapabilityDeniedError, SecretAuditLog } from '@neutronai/cores-runtime'
 import type { NeutronManifest } from '@neutronai/cores-sdk'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ProjectDb } from '../../../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import {
   buildInMemoryGoogleWorkspaceClient,

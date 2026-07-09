@@ -26,7 +26,7 @@
  * level.
  */
 
-import type { AgentKind } from '../runtime/subagent/registry.ts'
+import type { AgentKind } from '@neutronai/runtime/subagent/registry.ts'
 
 /** Owner/agent-facing dispatch kinds. */
 export type DispatchKind = 'research' | 'review' | 'adhoc'

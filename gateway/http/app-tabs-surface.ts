@@ -30,16 +30,16 @@
  * surfaces. The per-project route additionally validates `project_id`.
  */
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import type { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
   resolveGlobalTabs,
   resolveProjectTabs,
   type CoreTabContribution,
   type TabDescriptor,
-} from '../../tabs/registry.ts'
+} from '@neutronai/tabs/registry.ts'
 
 export interface AppTabsSurfaceOptions {
   auth: AppWsAuthResolver

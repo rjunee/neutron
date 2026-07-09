@@ -52,7 +52,7 @@ import {
   parseCalCommand,
 } from '@neutronai/calendar-core'
 
-import { composeCalendarPayload } from '../../scribe/index.ts'
+import { composeCalendarPayload } from '@neutronai/scribe/index.ts'
 import type { ScribeFanOut } from './scribe-fan-out.ts'
 
 import type {

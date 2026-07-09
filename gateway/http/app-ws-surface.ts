@@ -29,8 +29,8 @@
  */
 
 import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
-import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
-import { AppChatEditNotAuthorizedError } from '../../persistence/index.ts'
+import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
+import { AppChatEditNotAuthorizedError } from '@neutronai/persistence/index.ts'
 import {
   decodeAppWsInbound,
   decodeAppWsButtonChoice,
@@ -48,19 +48,19 @@ import {
   sanitizePlatform,
   sanitizeProjectId,
   type AppWsOutbound,
-} from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+} from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type {
   AppWsClientPlatform,
   AppWsSessionRegistry,
-} from '../../channels/adapters/app-ws/session-registry.ts'
+} from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 // L2 (2026-07) — `ChatCommandFilter` + `ChatCommandFilterResult` moved to
 // `../../contracts/chat-command-filter.ts` (a node-free leaf — see that
 // file's header for the "stranded contract" rationale).
 import type {
   ChatCommandFilter,
   ChatCommandFilterResult,
-} from '../../contracts/chat-command-filter.ts'
+} from '@neutronai/contracts/chat-command-filter.ts'
 export type { ChatCommandFilter, ChatCommandFilterResult }
 
 export interface AppWsSocketData {

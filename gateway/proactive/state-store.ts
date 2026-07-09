@@ -12,7 +12,7 @@
  * module only persists/reads the watermarks those policies consult.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface ProactiveTopicState {
   topic_id: string

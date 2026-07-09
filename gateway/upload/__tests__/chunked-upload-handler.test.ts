@@ -16,10 +16,10 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { Database } from 'bun:sqlite'
-import type { AdvanceResult } from '../../../onboarding/interview/engine.ts'
+import type { AdvanceResult } from '@neutronai/onboarding/interview/engine.ts'
 
 import {
   buildChunkedUploadHandler,

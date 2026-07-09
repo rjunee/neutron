@@ -28,17 +28,17 @@ import {
   appWsTopicId,
   createAppWsAuthResolver,
   type AppWsOutbound,
-} from '../../channels/index.ts'
-import type { IncomingEvent, OutgoingMessage, Topic } from '../../channels/types.ts'
+} from '@neutronai/channels/index.ts'
+import type { IncomingEvent, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import {
   createAppWsSurface,
   type ChatCommandFilter,
   type ChatCommandFilterResult,
 } from '../http/app-ws-surface.ts'
-import { AppChatStore, ProjectDb } from '../../persistence/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { InMemoryStore, SendQueue, SyncEngine, normalizeInbound } from '../../chat-core/index.ts'
+import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { InMemoryStore, SendQueue, SyncEngine, normalizeInbound } from '@neutronai/chat-core/index.ts'
 
 const TOPIC = 'app:sam'
 

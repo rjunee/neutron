@@ -12,7 +12,7 @@
  * (services band) already legitimately does.
  */
 
-import type { OutgoingMessage } from '../channels/types.ts'
+import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 
 /**
  * Minimal structural outbound seam — the subset of `ChannelRouter` this

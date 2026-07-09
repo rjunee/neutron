@@ -29,7 +29,7 @@ import { describe, expect, it } from 'bun:test';
 
 // Oracle: the actual gateway-side sanitizer the surface runs every
 // inbound `attachments` array through.
-import { sanitizeAttachments } from '../../channels/adapters/app-ws/envelope';
+import { sanitizeAttachments } from '@neutronai/channels/adapters/app-ws/envelope';
 import {
   isAlreadyUploadedAttachmentUrl,
   resolveSendableAttachments,

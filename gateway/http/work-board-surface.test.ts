@@ -2,16 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { createAppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import { WorkBoardStore, workBoardScopeKey } from '../../work-board/store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { WorkBoardStore, workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import {
   createWorkBoardSurface,
   type TridentRunAccess,
   type WorkBoardSurface,
 } from './work-board-surface.ts'
-import type { TridentPhase, TridentRun } from '../../trident/store.ts'
+import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
 
 /** A minimal fake trident run for the surface's progress + cancel deps. */
 function fakeRun(over: Partial<TridentRun> = {}): TridentRun {

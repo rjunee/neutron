@@ -47,10 +47,10 @@ import {
   type LlmCallFn,
   type PhaseContextBundle,
   type PhaseSpecResolver,
-} from '../../onboarding/interview/phase-spec-resolver.ts'
+} from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
-import { getBestModel } from '../../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { collectTokensToString } from './build-llm-call-substrate.ts'
 import { loadSkills } from './skills-loader.ts'
 import { composeSystemPrompt } from './index.ts'

@@ -32,7 +32,7 @@ import {
   formatSetCookie,
   readSessionCookie,
   signSessionCookie,
-} from '../../landing/session-cookie.ts'
+} from '@neutronai/landing/session-cookie.ts'
 import {
   buildOwnerHandleResolver,
   ownerIdentityMismatch,

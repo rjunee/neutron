@@ -55,44 +55,44 @@
 import { randomUUID } from 'node:crypto'
 import { join as joinPath } from 'node:path'
 
-import { AppWsAdapter } from '../../channels/adapters/app-ws/adapter.ts'
+import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
 import {
   createAppWsSurface,
   type AppWsSurface,
-} from '../../gateway/http/app-ws-surface.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import type { AppWsSessionRegistry } from '../../channels/adapters/app-ws/session-registry.ts'
-import type { ChatCommandFilter } from '../../contracts/chat-command-filter.ts'
-import { buildButtonPrompt, type ButtonPrompt } from '../../channels/button-primitive.ts'
+} from '@neutronai/gateway/http/app-ws-surface.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { AppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
+import type { ChatCommandFilter } from '@neutronai/contracts/chat-command-filter.ts'
+import { buildButtonPrompt, type ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import {
   AppChatStore,
   AppChatReceiptStore,
   AppChatReactionStore,
   AppChatEditStore,
-} from '../../persistence/index.ts'
+} from '@neutronai/persistence/index.ts'
 import {
   appWsTopicId,
   type AppWsOutboundAgentMessage,
   type AppWsOutboundAgentTyping,
   type AppWsOutboundImportProgress,
   type AppWsOutboundOnboardingCompleted,
-} from '../../channels/adapters/app-ws/envelope.ts'
+} from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import {
   buildProjectDocReader,
   buildDeterministicProjectOpening,
   finalizeOpeningBody,
   type ProjectOpeningDocs,
-} from '../../gateway/realmode-composer/build-onboarding-handoff.ts'
-import type { IncomingEvent, OutgoingMessage } from '../../channels/types.ts'
-import type { ChatOutbound } from '../../landing/chat-protocol.ts'
-import type { LandingStackWithEngine } from '../../gateway/realmode-composer/build-landing-stack.ts'
-import type { LiveAgentTurnRequest } from '../../gateway/http/chat-bridge.ts'
-import type { LiveAgentTurnResult } from '../../gateway/realmode-composer/build-live-agent-turn.ts'
+} from '@neutronai/gateway/realmode-composer/build-onboarding-handoff.ts'
+import type { IncomingEvent, OutgoingMessage } from '@neutronai/channels/types.ts'
+import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
+import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-bridge.ts'
+import type { LiveAgentTurnResult } from '@neutronai/gateway/realmode-composer/build-live-agent-turn.ts'
 import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
-} from '../../gateway/http/chat-bridge.ts'
-import type { UserTurnInput } from '../../scribe/index.ts'
+} from '@neutronai/gateway/http/chat-bridge.ts'
+import type { UserTurnInput } from '@neutronai/scribe/index.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Late } from './late.ts'
 import type { OpenWiringContext } from './context.ts'
@@ -234,7 +234,7 @@ export interface WireAppWsDeps {
   /** Diff-gated rail refresh (no-ops when the snapshot is unchanged). */
   emitProjectsChangedIfChanged: (user_id: string) => void
   /** Build the current `projects_changed` frame for a targeted seed on connect. */
-  buildProjectsChangedFrame: () => import('../../channels/adapters/app-ws/envelope.ts').AppWsOutboundProjectsChanged
+  buildProjectsChangedFrame: () => import('@neutronai/channels/adapters/app-ws/envelope.ts').AppWsOutboundProjectsChanged
   /** True while the owner is still onboarding. */
   isOnboardingActive: (user_id: string) => Promise<boolean>
   /**

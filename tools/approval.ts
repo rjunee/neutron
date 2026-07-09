@@ -18,7 +18,7 @@
  * is invoked by the channel adapter when the user / admin makes a decision.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ApprovalPolicy } from './registry.ts'
 
 export type ApprovalDecision = 'approved' | 'denied' | 'expired'

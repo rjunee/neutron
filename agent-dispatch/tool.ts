@@ -19,9 +19,9 @@
  * surfaces a Trident build's terminal result asynchronously.
  */
 
-import type { JsonSchemaDocument } from '../core-sdk/types.ts'
-import type { ToolRegistry } from '../tools/registry.ts'
-import { workBoardScopeKey } from '../work-board/store.ts'
+import type { JsonSchemaDocument } from '@neutronai/core-sdk/types.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import { DISPATCH_KINDS, type DispatchKind } from './prompts.ts'
 import type { DispatchRequest, DispatchService } from './service.ts'
 

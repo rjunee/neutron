@@ -13,11 +13,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
-import { SecretsStore } from '../../../auth/secrets-store.ts'
-import { ProjectCredentialStore } from '../../../project-credentials/store.ts'
-import { ToolRegistry } from '../../../tools/registry.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { installBundledCores } from '../install-bundled.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
 
@@ -77,9 +77,9 @@ test('composes the bundled free-Core backend factory map (Calendar/Email/Google 
 test('agent_settings is threaded with a LIVE profile (update_agent_name persists, no unavailable error)', async () => {
   const { readFileSync } = await import('node:fs')
   const { SETTINGS_BACKEND_UNAVAILABLE_ERROR } = await import(
-    '../../../cores/free/agent-settings/index.ts'
+    '@neutronai/agent-settings'
   )
-  const { buildOpenAgentProfileBackend } = await import('../../../open/agent-profile-backend.ts')
+  const { buildOpenAgentProfileBackend } = await import('@neutronai/open/agent-profile-backend.ts')
   const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
   const reloads: string[] = []
   const mounted = await mountOpenCores({
@@ -107,7 +107,7 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
     NonNullable<(typeof mounted.backends)['agent_settings']>
   >[0]
   const built = (await mounted.backends['agent_settings']!(factoryCtx)) as {
-    backend: import('../../../cores/free/agent-settings/index.ts').AgentSettingsBackend
+    backend: import('@neutronai/agent-settings').AgentSettingsBackend
   }
   const nameRes = await built.backend.updateAgentName('Nova')
   expect(nameRes.success).toBe(true)

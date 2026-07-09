@@ -32,12 +32,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { Event } from '../../runtime/events.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -144,8 +144,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(composition.trident_build_dispatch).toBeDefined()
     const tbd = composition.trident_build_dispatch!
     expect(typeof tbd.repo_path).toBe('string')
-    const { dispatchBoardBoundBuild } = await import('../../trident/board-dispatch.ts')
-    const { WorkBoardStore } = await import('../../work-board/store.ts')
+    const { dispatchBoardBoundBuild } = await import('@neutronai/trident/board-dispatch.ts')
+    const { WorkBoardStore } = await import('@neutronai/work-board/store.ts')
     const board = new WorkBoardStore(db)
     const item = await board.create('owner', {
       title: 'wire the export button to the new CSV endpoint with tests',

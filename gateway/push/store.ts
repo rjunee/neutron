@@ -16,7 +16,7 @@
  * docs/engineering-plan.md § B.P5.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * Platforms recognised by the Expo Push API. Mirrors the CHECK

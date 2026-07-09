@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyProjectScopedMigrations } from '../../../../migrations/runner.ts'
+import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import {
   CODE_GEN_SCHEMA_VERSION,
   CodegenSidecarMismatchError,

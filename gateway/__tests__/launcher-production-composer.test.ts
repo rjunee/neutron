@@ -43,9 +43,9 @@ import {
   AppWsAdapter,
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
-} from '../../channels/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppLauncherSurface } from '../http/app-launcher-surface.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'

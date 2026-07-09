@@ -22,7 +22,7 @@ import {
 // agent's SYSTEM prompt. Loaded here (the real leaf @neutronai/prompts reader,
 // cwd-independent) to reconcile a persona's CONTRACT against the toolset it is
 // actually dispatched with — see the reconciliation describe block below.
-import { loadPrompt } from '../../../../prompts/index.ts'
+import { loadPrompt } from '@neutronai/prompts/index.ts'
 
 const FORGE_TOOL_DEFS: CodegenToolDefinition[] = [
   {

@@ -27,18 +27,18 @@
  * link only); a rejected scheme surfaces here as a 400, not a 500.
  */
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import {
   WorkBoardValidationError,
   workBoardScopeKey,
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
-} from '../../work-board/store.ts'
-import { isTerminalPhase } from '../../trident/state-machine.ts'
-import { runProgressForItem } from '../../trident/run-progress.ts'
-import type { TridentPhase, TridentRun } from '../../trident/store.ts'
+} from '@neutronai/work-board/store.ts'
+import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
+import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
 
 /**
  * The minimal trident-run surface the board needs (M1 trident-UX hardening):

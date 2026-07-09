@@ -20,8 +20,8 @@
  * re-write it so the loop's CODEX_HOME is always populated.
  */
 
-import type { ProjectCredentialStore } from '../project-credentials/store.ts'
-import type { CredentialScope } from '../project-credentials/store.ts'
+import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import type { CredentialScope } from '@neutronai/project-credentials/store.ts'
 import {
   codexProjectHome,
   deriveCodexStatus,

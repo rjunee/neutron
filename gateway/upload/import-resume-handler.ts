@@ -41,13 +41,13 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type {
   ImportJobRunnerHook,
   ImportPayloadResolver,
-} from '../../onboarding/interview/engine.ts'
-import type { OnboardingStateStore } from '../../onboarding/interview/state-store.ts'
-import type { ImportSource } from '../../onboarding/history-import/types.ts'
+} from '@neutronai/onboarding/interview/engine.ts'
+import type { OnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
+import type { ImportSource } from '@neutronai/onboarding/history-import/types.ts'
 
 /** Statuses a job is allowed to resume from. */
 export const RESUMABLE_STATUSES: ReadonlyArray<string> = Object.freeze([

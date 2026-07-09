@@ -19,15 +19,15 @@ import {
   buildLlmCallSubstrate,
   collectTokensToString,
 } from '../build-llm-call-substrate.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
-import type { ClaudeCodeSubstrateOptions } from '../../../runtime/adapters/claude-code/index.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
   newCredentialPool,
   type CredentialPool,
-} from '../../../runtime/credential-pool.ts'
-import type { AgentSpec, Substrate } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import { poolKeyFor } from '../../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+} from '@neutronai/runtime/credential-pool.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import { poolKeyFor } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 
 let workdir: string
 

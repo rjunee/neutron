@@ -40,11 +40,11 @@
  * directly, so trident stays decoupled + unit-testable with a stub binder.
  */
 
-import type { Topic } from '../channels/types.ts'
+import type { Topic } from '@neutronai/channels/types.ts'
 import {
   assessDispatchReadiness,
   type DispatchReadinessTarget,
-} from '../work-board/dispatch-readiness.ts'
+} from '@neutronai/work-board/dispatch-readiness.ts'
 import { detectMergeMode, defaultGitModeProbe, detectRalphMode, defaultRalphModeProbe } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { slugifyTask } from './slugify-task.ts'

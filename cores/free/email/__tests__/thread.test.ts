@@ -18,8 +18,8 @@ import { Database } from 'bun:sqlite'
 
 import { SecretAuditLog } from '@neutronai/cores-runtime'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ProjectDb } from '../../../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import {
   ThreadNotFoundError,

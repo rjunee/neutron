@@ -31,7 +31,7 @@
  *   JSON-serialisable data; throws bubble up as `error` events.
  */
 
-import type { JsonSchemaDocument, NeutronCapability } from '../core-sdk/types.ts'
+import type { JsonSchemaDocument, NeutronCapability } from '@neutronai/core-sdk/types.ts'
 
 export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
 

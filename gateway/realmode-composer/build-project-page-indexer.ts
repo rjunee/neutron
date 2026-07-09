@@ -21,9 +21,9 @@
  * projects, so failures here are logged loudly by the caller).
  */
 
-import { writeEntity as defaultWriteEntity, type SyncHook } from '../../runtime/entity-writer.ts'
-import { entitySlugify } from '../../runtime/entity-slug.ts'
-import type { ProjectPageIndexFn } from '../../onboarding/wow-moment/project-materializer.ts'
+import { writeEntity as defaultWriteEntity, type SyncHook } from '@neutronai/runtime/entity-writer.ts'
+import { entitySlugify } from '@neutronai/runtime/entity-slug.ts'
+import type { ProjectPageIndexFn } from '@neutronai/onboarding/wow-moment/project-materializer.ts'
 
 /** Minimal writeEntity surface (test seam — mirrors entity-populator's). */
 export type ProjectPageWriteEntityFn = typeof defaultWriteEntity

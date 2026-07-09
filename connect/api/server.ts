@@ -22,7 +22,7 @@
  */
 
 import { stampOriginInstance, isTaggedContent, type TaggedContent } from './origin-tag.ts'
-import type { Author } from '../../channels/types.ts'
+import type { Author } from '@neutronai/channels/types.ts'
 import {
   authorizeConnectRequest,
   type ConnectAuthContext,

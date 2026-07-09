@@ -12,8 +12,8 @@ import {
   buildSharedProjectsResolver,
   type SharedProjectsResolverDeps,
 } from './shared-projects-resolver.ts'
-import type { Membership } from '../../jwt-validator/index.ts'
-import type { UnifiedProjectListSource } from '../../connect/unified-project-list.ts'
+import type { Membership } from '@neutronai/jwt-validator/index.ts'
+import type { UnifiedProjectListSource } from '@neutronai/connect/unified-project-list.ts'
 
 const MEMBERSHIPS: Membership[] = [
   { slug: 'alice', role: 'owner', kind: 'user' },

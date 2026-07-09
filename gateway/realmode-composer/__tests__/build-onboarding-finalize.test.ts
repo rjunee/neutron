@@ -16,11 +16,11 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ProjectDb } from '../../../persistence/index.ts'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { SqliteOnboardingStateStore } from '../../../onboarding/interview/sqlite-state-store.ts'
-import { slugifyProjectId } from '../../../onboarding/wow-moment/project-identity.ts'
-import { MAX_ANALYSIS_PROJECTS } from '../../../onboarding/interview/phase-prompts.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
+import { MAX_ANALYSIS_PROJECTS } from '@neutronai/onboarding/interview/phase-prompts.ts'
 import {
   buildOnboardingFinalize,
   type OnboardingFinalizeDeps,
@@ -706,7 +706,7 @@ test('finalize materializes hobby/interest answers as projects (non_work_interes
       proposed_projects: [],
       proposed_tasks: [],
       inferred_interests: [{ name: 'Photography', basis: 'you shared several photo edits' }],
-    } as unknown as import('../../../onboarding/history-import/types.ts').ImportResult,
+    } as unknown as import('@neutronai/onboarding/history-import/types.ts').ImportResult,
   })
 
   const names = h.db

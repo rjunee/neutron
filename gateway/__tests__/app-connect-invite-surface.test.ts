@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 import {
   createAppProjectsSurface,
@@ -23,9 +23,9 @@ import {
   type ProjectSettingsStore,
 } from '../http/app-projects-surface.ts'
 import { canInviteRole } from '../http/app-project-invite.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { ConnectGuestInviteStore, hashInviteToken } from '../../connect/guest-invite-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ConnectGuestInviteStore, hashInviteToken } from '@neutronai/connect/guest-invite-store.ts'
 
 // --- in-process handler shim (no socket) -------------------------------------
 // These surface tests used to bind a real `Bun.serve({ port: 0 })` and round-

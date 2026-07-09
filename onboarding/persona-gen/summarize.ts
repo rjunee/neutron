@@ -16,7 +16,7 @@
  * is never stranded on a "Couldn't generate" error.
  */
 
-import { FAST_MODEL } from '../../runtime/models.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 
 // ---------------------------------------------------------------------------
 // Public types

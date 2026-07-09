@@ -37,7 +37,7 @@ import {
   ALL_AGENT_ENGAGEMENT_MODES,
   DEFAULT_AGENT_ENGAGEMENT_MODE,
   type AgentEngagementMode as EngineMode,
-} from '../../connect/agent-engagement'
+} from '@neutronai/connect/agent-engagement.ts'
 
 import type { AgentEngagementMode as AppMode } from '../lib/projects-client'
 

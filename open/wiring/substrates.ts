@@ -21,9 +21,9 @@
  *     `...(substrateFactory !== undefined ? { substrateFactory } : {})` spread.
  */
 
-import { buildLlmCallSubstrate } from '../../gateway/realmode-composer/build-llm-call-substrate.ts'
+import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
-import type { Substrate } from '../../runtime/substrate.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
 
 export interface WiredSubstrates {

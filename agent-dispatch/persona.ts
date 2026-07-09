@@ -10,7 +10,7 @@
  * trident-agnostic + unit-testable with a stub loader.
  */
 
-import { loadAgentSystemPrompt } from '../trident/agent-prompts.ts'
+import { loadAgentSystemPrompt } from '@neutronai/trident/agent-prompts.ts'
 import type { PersonaLoader } from './service.ts'
 
 /** The production persona loader — reads `prompts/<kind>.md`. */

@@ -35,7 +35,7 @@ import {
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import {
   BINARY_EXTENSIONS,
   BINARY_MIME_WHITELIST,

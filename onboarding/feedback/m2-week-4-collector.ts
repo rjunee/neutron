@@ -20,7 +20,7 @@
 
 import { mkdirSync, appendFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { ButtonChoice } from '../../channels/button-primitive.ts'
+import type { ButtonChoice } from '@neutronai/channels/button-primitive.ts'
 import type {
   OnboardingTelemetry,
   SeanEllisResponsePayload,
@@ -29,7 +29,7 @@ import {
   SEAN_ELLIS_PROMPT_OPTIONS,
   SeanEllisStore,
 } from '../telemetry/sean-ellis-trigger.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * Default M2 feedback path. Resolved under `NEUTRON_HOME` (the owner's Neutron

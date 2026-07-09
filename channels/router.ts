@@ -12,7 +12,7 @@
  * Message` shapes.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type {
   ChannelAdapter,
   ChannelKind,

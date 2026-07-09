@@ -8,6 +8,7 @@
     "@neutronai/agent-settings": "workspace:*",
     "@neutronai/auth": "workspace:*",
     "@neutronai/channels": "workspace:*",
+    "@neutronai/config": "workspace:*",
     "@neutronai/contracts": "workspace:*",
     "@neutronai/cron": "workspace:*",
     "@neutronai/doc-search": "workspace:*",

@@ -19,7 +19,7 @@ import {
   buildPortraitPickPrompt,
   buildPortraitWaitPrompt,
 } from '../selection.ts'
-import { deriveIdempotencyKey } from '../../../channels/button-primitive.ts'
+import { deriveIdempotencyKey } from '@neutronai/channels/button-primitive.ts'
 
 // Stable UUID factory — the prompt_id is always a 36-char canonical UUID;
 // passing a deterministic uuid lets tests assert exact equality. The

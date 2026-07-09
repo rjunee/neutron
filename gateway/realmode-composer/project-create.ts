@@ -29,17 +29,17 @@
 
 import { randomUUID } from 'node:crypto'
 
-import type { ProjectDb } from '../../persistence/index.ts'
-import type { ImportResult } from '../../onboarding/history-import/types.ts'
-import type { CapturedProject } from '../../onboarding/wow-moment/action-types.ts'
-import type { ProjectDocComposer } from '../../onboarding/wow-moment/project-materializer.ts'
-import type { SyncHook } from '../../runtime/entity-writer.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
+import type { CapturedProject } from '@neutronai/onboarding/wow-moment/action-types.ts'
+import type { ProjectDocComposer } from '@neutronai/onboarding/wow-moment/project-materializer.ts'
+import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 import {
   slugifyProjectId,
   synthesizeProjectContext,
-} from '../../onboarding/wow-moment/project-identity.ts'
-import { buildProjectMaterializer } from '../../onboarding/wow-moment/project-materializer.ts'
+} from '@neutronai/onboarding/wow-moment/project-identity.ts'
+import { buildProjectMaterializer } from '@neutronai/onboarding/wow-moment/project-materializer.ts'
 import { buildProjectPageIndexer } from './build-project-page-indexer.ts'
 import { defaultProjectEmoji } from '../projects/default-emoji.ts'
 

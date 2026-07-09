@@ -8,9 +8,9 @@
  * via the supplied `ChannelRouter`.
  */
 
-import type { ChannelRouter } from '../../channels/router.ts'
-import type { OutgoingMessage, Topic } from '../../channels/types.ts'
-import type { ToolHandler, ToolRegistry } from '../../tools/registry.ts'
+import type { ChannelRouter } from '@neutronai/channels/router.ts'
+import type { OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
+import type { ToolHandler, ToolRegistry } from '@neutronai/tools/registry.ts'
 
 const sendInputSchema = {
   type: 'object',

@@ -36,10 +36,10 @@ import {
   AppWsAdapter,
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
-} from '../../channels/index.ts'
-import type { IncomingEvent } from '../../channels/types.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/channels/index.ts'
+import type { IncomingEvent } from '@neutronai/channels/types.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppUploadSurface } from '../http/app-upload-surface.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'

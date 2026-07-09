@@ -52,15 +52,15 @@ import {
   CHANNEL_WEDGED_MESSAGE,
 } from '../build-llm-call-substrate.ts'
 import { isFreezeTimeout } from '../build-live-agent-turn.ts'
-import { is429ErrorMessage } from '../../../onboarding/history-import/rate-limit.ts'
-import { startResponsesStream } from '../../../runtime/adapters/gpt-5-5-api/responses-stream.ts'
-import { ChannelWedgedSpawnError } from '../../../runtime/adapters/claude-code/persistent/channel-wedge-respawn.ts'
+import { is429ErrorMessage } from '@neutronai/onboarding/history-import/rate-limit.ts'
+import { startResponsesStream } from '@neutronai/runtime/adapters/gpt-5-5-api/responses-stream.ts'
+import { ChannelWedgedSpawnError } from '@neutronai/runtime/adapters/claude-code/persistent/channel-wedge-respawn.ts'
 import {
   assertReplAlive,
   type SpawnAssertionDeps,
   type SpawnAssertionResult,
-} from '../../../runtime/adapters/claude-code/persistent/post-spawn-assertion.ts'
-import type { Event } from '../../../runtime/events.ts'
+} from '@neutronai/runtime/adapters/claude-code/persistent/post-spawn-assertion.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
 
 // Absolute paths to the producer SOURCE files, resolved from this test file so
 // the source-text extraction below is worktree-independent.

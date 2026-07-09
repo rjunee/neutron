@@ -25,7 +25,7 @@
  * the WAVE 2 Track A Integrations spec.
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
 // Sprint B (2026-05-20) — HMAC + PKCE helpers lifted from
 // `identity/oauth/*` to `runtime/` so this core HTTP surface no longer
@@ -35,9 +35,9 @@ import { ownerSlugMismatch } from './auth-helpers.ts'
 import {
   signInternalRequest,
   verifyInternalRequest,
-} from '../../runtime/internal-signature.ts'
-import { generateOAuthState, generatePkce } from '../../runtime/oauth-pkce.ts'
-import type { BundledRegistryEvent } from '../../cores/runtime/bundled-registry.ts'
+} from '@neutronai/runtime/internal-signature.ts'
+import { generateOAuthState, generatePkce } from '@neutronai/runtime/oauth-pkce.ts'
+import type { BundledRegistryEvent } from '@neutronai/cores-runtime/bundled-registry.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import type { CoresOAuthPendingStore } from '../cores/oauth-pending-store.ts'
 import {
@@ -54,9 +54,9 @@ import {
   type InstallBundledCoresResult,
   type InstallTelemetryEvent,
 } from '../cores/install-bundled.ts'
-import type { SecretsStore } from '../../auth/secrets-store.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
-import type { ToolRegistry } from '../../tools/registry.ts'
+import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { disconnectOAuth } from '../cores/integrations.ts'
 
 const PATH_BASE = '/api/cores/oauth/google'

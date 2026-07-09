@@ -16,8 +16,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateKeyPair, type KeyLike } from 'jose'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   canInviteRole,
   handleAppProjectInvite,
@@ -28,7 +28,7 @@ import {
 } from '../app-project-invite.ts'
 import { createAppProjectsSurface } from '../app-projects-surface.ts'
 import { InMemoryProjectSettingsStore } from '../app-projects-surface.ts'
-import type { AppWsAuthResolver } from '../../../channels/adapters/app-ws/auth.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 
 let tmp: string
 let inviterDb: ProjectDb

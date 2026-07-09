@@ -49,10 +49,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ApiKeyStore } from '../../../auth/api-key-store.ts'
-import { SecretsStore } from '../../../auth/secrets-store.ts'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ProjectDb } from '../../../persistence/index.ts'
+import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { CommentStore, type AppendEventInput } from '../comment-store.ts'
 import { AgentWatcher } from '../agent-watcher.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '../../http/chat-bridge.ts'
@@ -162,11 +162,11 @@ function start(): Harness {
     // (which packs `<composed system>\n\n<user>` — the system body
     // containing any escalation splice is the prefix of each captured
     // string) so existing tests keep their string-array assertion shape.
-    const substrate: import('../../../runtime/substrate.ts').Substrate = {
-      start(spec): import('../../../runtime/session-handle.ts').SessionHandle {
+    const substrate: import('@neutronai/runtime/substrate.ts').Substrate = {
+      start(spec): import('@neutronai/runtime/session-handle.ts').SessionHandle {
         captured.push(spec.prompt)
         const events = (async function* (): AsyncGenerator<
-          import('../../../runtime/events.ts').Event,
+          import('@neutronai/runtime/events.ts').Event,
           void,
           void
         > {

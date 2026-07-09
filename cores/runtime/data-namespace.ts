@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path'
 
 import { Database } from 'bun:sqlite'
 
-import { ProjectDb } from '../../persistence/index.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { CoreInstallError } from './errors.ts'
 import type { CoreDataLayout } from './installations-store.ts'

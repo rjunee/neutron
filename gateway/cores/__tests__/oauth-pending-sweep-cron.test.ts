@@ -10,8 +10,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { ProjectDb } from '../../../persistence/index.ts'
-import { applyMigrations } from '../../../migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import {
   CoresOAuthPendingStore,
   PENDING_TTL_MS,
@@ -23,8 +23,8 @@ import {
   DEFAULT_CORES_OAUTH_SWEEP_INTERVAL_MS,
   CORES_OAUTH_PENDING_SWEEP_HANDLER_NAME,
 } from '../oauth-pending-sweep-cron.ts'
-import { CronJobRegistry } from '../../../cron/jobs.ts'
-import { CronHandlerRegistry } from '../../../cron/handlers.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 
 let workdir: string
 let db: ProjectDb

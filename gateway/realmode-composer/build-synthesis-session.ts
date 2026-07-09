@@ -24,8 +24,8 @@
  */
 
 import { join } from 'node:path'
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { ConversationRecord } from '../../onboarding/history-import/types.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ConversationRecord } from '@neutronai/onboarding/history-import/types.ts'
 import {
   DiskRawTranscriptStore,
   runDeterministicPrepass,
@@ -39,7 +39,7 @@ import {
   type RawTranscriptStore,
   type SynthesisResult,
   type WriteProjectSeedOutcome,
-} from '../../onboarding/synthesis/index.ts'
+} from '@neutronai/onboarding/synthesis/index.ts'
 
 export interface BuildSynthesisSessionInput {
   /**

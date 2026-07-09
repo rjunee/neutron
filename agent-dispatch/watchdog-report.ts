@@ -15,7 +15,7 @@
  * agent.
  */
 
-import type { AgentWatchdogEvent, AgentWatchdogNotifier } from '../runtime/subagent/watchdog.ts'
+import type { AgentWatchdogEvent, AgentWatchdogNotifier } from '@neutronai/runtime/subagent/watchdog.ts'
 import { DISPATCH_KIND_BY_AGENT_KIND } from './prompts.ts'
 import type { DispatchReport, DispatchReporter } from './service.ts'
 

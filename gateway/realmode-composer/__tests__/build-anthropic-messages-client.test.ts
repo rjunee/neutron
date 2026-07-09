@@ -20,10 +20,10 @@
 import { expect, test } from 'bun:test'
 
 import { buildGatewayAnthropicMessagesClient } from '../build-anthropic-messages-client.ts'
-import { BEST_MODEL } from '../../../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
+import { BEST_MODEL } from '@neutronai/runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 /**
  * Capture-and-yield Substrate stub. Each `start(spec)` call records the

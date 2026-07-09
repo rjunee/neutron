@@ -20,7 +20,7 @@
  * read-back still work, so the layer degrades gracefully.
  */
 
-import type { Substrate } from '../runtime/substrate.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
 
 import { appendCorrection, readRecentCorrections } from './corrections-store.ts'
 import { appendDiaryEntry, readRecentDiary } from './diary-store.ts'

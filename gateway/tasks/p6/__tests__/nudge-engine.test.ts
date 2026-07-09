@@ -12,11 +12,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../../../migrations/runner.ts'
-import { ProjectDb } from '../../../../persistence/index.ts'
-import { TaskStore } from '../../../../tasks/store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TaskStore } from '@neutronai/tasks/store.ts'
 import { PersonaPromptLoader } from '../../../realmode-composer/persona-loader.ts'
-import type { LlmCallFn } from '../../../../onboarding/interview/phase-spec-resolver.ts'
+import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import {
   clampRationale,
   localMidnightUtc,

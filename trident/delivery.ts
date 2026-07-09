@@ -36,7 +36,7 @@
  * specifiers stay valid.
  */
 
-import type { InlineChoice, OutgoingMessage, Topic } from '../channels/types.ts'
+import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'

@@ -49,13 +49,13 @@
  * so a returning user with revoked tokens can re-connect.
  */
 
-import type { ApiKeyStore, ApiKeyProvider } from '../../auth/api-key-store.ts'
-import { buildBYOApiKeyPool } from '../../auth/byo-api-key-fallback.ts'
+import type { ApiKeyStore, ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
+import { buildBYOApiKeyPool } from '@neutronai/auth/byo-api-key-fallback.ts'
 import { resolveDeploymentMode } from '../deployment-mode.ts'
 import {
   newCredentialPool,
   type CredentialPool,
-} from '../../runtime/credential-pool.ts'
+} from '@neutronai/runtime/credential-pool.ts'
 
 /**
  * Sprint 22 — pluggable OAuth source. Production wires `MaxOAuthClient`

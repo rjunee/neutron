@@ -29,9 +29,9 @@
  *     including the not-mounted `console.warn`.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
-import type { CompositionInput } from '../../gateway/composition.ts'
-import type { LandingStackWithEngine } from '../../gateway/realmode-composer/build-landing-stack.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { CompositionInput } from '@neutronai/gateway/composition.ts'
+import type { LandingStackWithEngine } from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
 import type { OpenWiringContext } from './context.ts'
 
 /**
@@ -95,7 +95,7 @@ export async function wireUploads(
   }
 
   const { buildImportUploadHandler, TOPIC_ID_FALLBACK, TOPIC_ID_HEADER } =
-    await import('../../gateway/upload/import-upload-handler.ts')
+    await import('@neutronai/gateway/upload/import-upload-handler.ts')
   // Bare single-shot `POST /api/upload/<source>` handler. Writes the export
   // ZIP to `<owner_home>/imports/<source>.zip` then notifies the engine.
   const import_upload_handler = buildImportUploadHandler({
@@ -121,13 +121,13 @@ export async function wireUploads(
   // long-lived sweeper marks expired sessions + unlinks partial files and is
   // torn down via `realmode_cleanups` on shutdown.
   const { buildChunkedUploadHandler } = await import(
-    '../../gateway/upload/chunked-upload-handler.ts'
+    '@neutronai/gateway/upload/chunked-upload-handler.ts'
   )
   const { SqliteUploadSessionStore } = await import(
-    '../../gateway/upload/upload-session-store.ts'
+    '@neutronai/gateway/upload/upload-session-store.ts'
   )
   const { ChunkedUploadSweeper } = await import(
-    '../../gateway/upload/chunked-upload-sweeper.ts'
+    '@neutronai/gateway/upload/chunked-upload-sweeper.ts'
   )
   const uploadSessionStore = new SqliteUploadSessionStore(db)
   const chunked_upload_handler = buildChunkedUploadHandler({
@@ -168,7 +168,7 @@ export async function wireUploads(
   const resumeStateStore = landing.stateStore
   if (resumeRunner !== null && resumePayloadResolver !== null) {
     const { buildImportResumeHandler } = await import(
-      '../../gateway/upload/import-resume-handler.ts'
+      '@neutronai/gateway/upload/import-resume-handler.ts'
     )
     import_resume_handler = buildImportResumeHandler({
       db,

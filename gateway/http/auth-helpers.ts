@@ -25,7 +25,7 @@
  * buffer lengths.
  */
 
-import { constantTimeEqual } from '../../runtime/constant-time-equal.ts'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 
 export function ownerSlugMismatch(actual: string, expected: string): boolean {
   return !constantTimeEqual(actual, expected)

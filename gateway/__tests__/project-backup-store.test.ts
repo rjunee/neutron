@@ -36,7 +36,7 @@ import {
   classifyPushFailure,
 } from '../git/project-backup-store.ts'
 import type { BackupResult, RestoreResult } from '../git/project-backup-store.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -55,10 +55,10 @@ beforeAll(async () => {
 })
 
 function stubPlatformAdapter(): PlatformAdapter & {
-  remoteState: { config: import('../../runtime/platform-adapter.ts').ProjectBackupRemoteConfig | null }
+  remoteState: { config: import('@neutronai/runtime/platform-adapter.ts').ProjectBackupRemoteConfig | null }
   capabilitiesMut: { project_backup: boolean }
 } {
-  const remoteState: { config: import('../../runtime/platform-adapter.ts').ProjectBackupRemoteConfig | null } = {
+  const remoteState: { config: import('@neutronai/runtime/platform-adapter.ts').ProjectBackupRemoteConfig | null } = {
     config: null,
   }
   const capabilitiesMut = { project_backup: true }
@@ -542,7 +542,7 @@ describe('ProjectBackupStore — Managed lazy provisioning', () => {
     h.platform.remoteState.config = null
     ;(h.platform as unknown as PlatformAdapter & { autoProvisionProjectBackupRemote: PlatformAdapter['autoProvisionProjectBackupRemote'] }).autoProvisionProjectBackupRemote = async () => {
       calls += 1
-      const config: import('../../runtime/platform-adapter.ts').ProjectBackupRemoteConfig = {
+      const config: import('@neutronai/runtime/platform-adapter.ts').ProjectBackupRemoteConfig = {
         remote_url: 'git@github.com:neutron-managed/x-y-z-backup.git',
         ssh_key_path: '/tmp/none',
         source: 'managed_provisioned',

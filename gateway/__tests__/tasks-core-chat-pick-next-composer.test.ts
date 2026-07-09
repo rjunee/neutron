@@ -40,7 +40,7 @@ import {
   AppWsAdapter,
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
-} from '../../channels/index.ts'
+} from '@neutronai/channels/index.ts'
 import { SecretAuditLog } from '@neutronai/cores-runtime'
 import {
   buildPickNextService,
@@ -50,9 +50,9 @@ import {
   loadManifest as loadTasksManifest,
 } from '@neutronai/tasks-core'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { TaskStore as CanonicalTaskStore } from '../../tasks/store.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TaskStore as CanonicalTaskStore } from '@neutronai/tasks/store.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppTasksSurface } from '../http/app-tasks-surface.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
@@ -62,8 +62,8 @@ import {
   wrapWithTasksChatRouter,
   type TasksChatOwnerDeps,
 } from '../cores/tasks-chat-router.ts'
-import type { IncomingEvent } from '../../channels/types.ts'
-import type { AppWsOutbound } from '../../channels/adapters/app-ws/envelope.ts'
+import type { IncomingEvent } from '@neutronai/channels/types.ts'
+import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 
 const OWNER = 'tasks-chat-composer-project'
 const PROJECT = 'demo-project'

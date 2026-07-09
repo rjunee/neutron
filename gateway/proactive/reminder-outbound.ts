@@ -28,11 +28,11 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { buildButtonPrompt } from '../../channels/button-primitive.ts'
-import type { ButtonStore } from '../../channels/button-store.ts'
-import type { ChatOutbound } from '../../landing/chat-protocol.ts'
+import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
+import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { WebChatSenderRegistry } from '../http/chat-sender-registry.ts'
-import type { ReminderOutbound, ReminderOutboundInput } from '../../reminders/dispatcher.ts'
+import type { ReminderOutbound, ReminderOutboundInput } from '@neutronai/reminders/dispatcher.ts'
 
 /** Reply rows are HISTORY, not pending questions — never expire them out of
  *  hydration. Ten years ≈ never (mirrors build-live-agent-turn's TTL). */

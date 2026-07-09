@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { createCipheriv, createDecipheriv } from 'node:crypto'
 import { Database } from 'bun:sqlite'
-import { ProjectDb } from '../../persistence/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { SecretsStore, SecretsStoreError, ensureKey } from '../secrets-store.ts'
 
 /**

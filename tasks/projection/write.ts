@@ -21,7 +21,7 @@
 
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { atomicWriteFile } from '../../runtime/atomic-write.ts'
+import { atomicWriteFile } from '@neutronai/runtime/atomic-write.ts'
 import { NO_PROJECT, type Task, type TaskStore } from '../store.ts'
 import {
   renderActionsFile,

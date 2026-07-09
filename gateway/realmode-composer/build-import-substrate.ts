@@ -44,18 +44,18 @@
 import {
   createClaudeCodeSubstrateAuto,
   type ClaudeCodeSubstrateOptions,
-} from '../../runtime/adapters/claude-code/index.ts'
+} from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
   reportFailure,
   reportSuccess,
   selectCredential,
   soonestCooldownUntil,
   type CredentialPool,
-} from '../../runtime/credential-pool.ts'
-import { ImportError } from '../../onboarding/history-import/types.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
+} from '@neutronai/runtime/credential-pool.ts'
+import { ImportError } from '@neutronai/onboarding/history-import/types.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 import {
   BINARY_NOT_FOUND_MESSAGE,

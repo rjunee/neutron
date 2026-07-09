@@ -28,8 +28,8 @@ import type { Server, ServerWebSocket, WebSocketHandler } from 'bun'
 import {
   evaluateAuthGate,
   type AuthGateOptions,
-} from '../../landing/auth-gate.ts'
-import { isSpaClientRoute } from '../../landing/spa-routes.ts'
+} from '@neutronai/landing/auth-gate.ts'
+import { isSpaClientRoute } from '@neutronai/landing/spa-routes.ts'
 
 /** Matches landing/server.ts SocketState (kept loose to avoid coupling). */
 type LandingSocketState = unknown

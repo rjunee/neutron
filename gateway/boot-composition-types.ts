@@ -10,7 +10,7 @@
  * the exact shapes. This module MUST NEVER import `gateway/index.ts`.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 // Connect API types come from `runtime/connect-handlers.ts` as
 // structural aliases; the Managed concrete types in `connect/api/`
 // structurally satisfy them. Keeps this helper module off the
@@ -18,7 +18,7 @@ import type { ProjectDb } from '../persistence/index.ts'
 import type {
   ConnectAuthContext,
   ProjectRef,
-} from '../runtime/connect-handlers.ts'
+} from '@neutronai/runtime/connect-handlers.ts'
 import type { CompositionInput } from './composition.ts'
 
 /**

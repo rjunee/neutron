@@ -35,14 +35,14 @@ import {
   buildLandingStack,
   type BuildLandingStackInput,
   type LandingStackWithEngine,
-} from '../../gateway/realmode-composer/build-landing-stack.ts'
-import type { CredentialPool } from '../../runtime/credential-pool.ts'
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
+} from '@neutronai/gateway/realmode-composer/build-landing-stack.ts'
+import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import type {
   AppSocketButtonPromptRouter,
   AppSocketImportProgressRouter,
-} from '../../gateway/http/chat-bridge.ts'
+} from '@neutronai/gateway/http/chat-bridge.ts'
 import type { OpenWiringContext } from './context.ts'
 
 /**

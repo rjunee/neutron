@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ToolRegistry, type ToolCallContext } from '../tools/registry.ts'
+import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
 import { DocSearchIndex } from './store.ts'
 import { DocSearchRuntime } from './runtime.ts'
 import { DOC_READ_TOOL, DOC_SEARCH_TOOL, registerDocSearchToolSurface } from './tool.ts'

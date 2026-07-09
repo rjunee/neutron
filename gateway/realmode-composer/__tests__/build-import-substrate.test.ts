@@ -20,16 +20,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { buildImportSubstrate } from '../build-import-substrate.ts'
-import type { ClaudeCodeSubstrateOptions } from '../../../runtime/adapters/claude-code/index.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
   COOLDOWN_429_MS,
   newCredentialPool,
   reportFailure,
   type CredentialPool,
-} from '../../../runtime/credential-pool.ts'
-import type { AgentSpec, Substrate } from '../../../runtime/substrate.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
-import type { Event } from '../../../runtime/events.ts'
+} from '@neutronai/runtime/credential-pool.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
 
 let workdir: string
 

@@ -38,7 +38,7 @@
 import {
   type McpClient,
   isGbrainBinaryMissingError,
-} from '../gbrain-memory/memory-store.ts'
+} from '@neutronai/gbrain-memory/memory-store.ts'
 
 /** A single mirrored entity page — slug + body, optional per-fact author. */
 export interface MirrorPage {

@@ -28,7 +28,7 @@
  */
 
 import { SignJWT } from 'jose'
-import type { Membership } from '../../jwt-validator/index.ts'
+import type { Membership } from '@neutronai/jwt-validator/index.ts'
 
 /** Default 5-minute TTL — long enough for a fan-out round-trip + retry,
  *  short enough that a leaked token is useless quickly. Cross-instance tokens

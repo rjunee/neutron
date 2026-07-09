@@ -22,8 +22,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../../tests/support/test-isolation.ts'
-import { boot, resolveOwnerSlugFromConfig, type BootHandle } from '../../gateway/index.ts'
-import { resolveBootConfig, envShimFromBootConfig } from '../../config/index.ts'
+import { boot, resolveOwnerSlugFromConfig, type BootHandle } from '@neutronai/gateway/index.ts'
+import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/index.ts'
 import { startOpenServer } from '../server.ts'
 import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 

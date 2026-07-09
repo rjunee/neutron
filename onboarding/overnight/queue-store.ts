@@ -14,7 +14,7 @@
  * reconciler and any chat-driven "queue this" path mint ids the same way.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export type OvernightAgentRole = 'forge' | 'atlas'
 export type OvernightPriority = 'P1' | 'P2' | 'P3'

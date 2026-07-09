@@ -57,7 +57,7 @@ import {
   buildTriageScheduler,
 } from '@neutronai/email-managed-core'
 
-import type { Scribe } from '../../scribe/index.ts'
+import type { Scribe } from '@neutronai/scribe/index.ts'
 import {
   buildCalendarCacheResolver,
   buildCalendarPreMeetingBriefQueueStore,

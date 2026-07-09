@@ -9,26 +9,26 @@
  * are load-bearing. Behaviour is byte-identical to the inline definitions.
  */
 
-import { ChannelRouter } from '../../channels/router.ts'
-import { CronHandlerRegistry } from '../../cron/handlers.ts'
-import { CronJobRegistry } from '../../cron/jobs.ts'
-import { CronScheduler } from '../../cron/scheduler.ts'
-import { CronStateStore } from '../../cron/state.ts'
-import { McpServer } from '../../mcp/server.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
+import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { CronScheduler } from '@neutronai/cron/scheduler.ts'
+import { CronStateStore } from '@neutronai/cron/state.ts'
+import { McpServer } from '@neutronai/mcp/server.ts'
 import {
   setReplToolBridge,
   clearReplToolBridgeIf,
-} from '../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { registerNeutronToolsSurface } from '../../mcp/surfaces/neutron-tools.ts'
-import { registerDocSearchToolSurface } from '../../doc-search/tool.ts'
-import { registerGBrainSearchToolSurface } from '../../gbrain-memory/agent-tool.ts'
-import { registerWorkBoardToolSurface } from '../../work-board/agent-tool.ts'
-import { registerTridentBuildToolSurface } from '../../trident/work-board-build-tool.ts'
-import { registerCodexCredentialToolSurface } from '../../trident/codex-credential-tool.ts'
+} from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import { registerNeutronToolsSurface } from '@neutronai/mcp/surfaces/neutron-tools.ts'
+import { registerDocSearchToolSurface } from '@neutronai/doc-search/tool.ts'
+import { registerGBrainSearchToolSurface } from '@neutronai/gbrain-memory/agent-tool.ts'
+import { registerWorkBoardToolSurface } from '@neutronai/work-board/agent-tool.ts'
+import { registerTridentBuildToolSurface } from '@neutronai/trident/work-board-build-tool.ts'
+import { registerCodexCredentialToolSurface } from '@neutronai/trident/codex-credential-tool.ts'
 import { registerCreateProjectToolSurface } from '../realmode-composer/create-project-tool.ts'
-import { registerMessageSearchToolSurface } from '../../message-search/tool.ts'
-import { registerDispatchToolSurface } from '../../agent-dispatch/tool.ts'
-import { registerSkillForgeToolSurface } from '../../skill-forge/tool.ts'
+import { registerMessageSearchToolSurface } from '@neutronai/message-search/tool.ts'
+import { registerDispatchToolSurface } from '@neutronai/agent-dispatch/tool.ts'
+import { registerSkillForgeToolSurface } from '@neutronai/skill-forge/tool.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
 import {
@@ -38,36 +38,36 @@ import {
   composeOnboardingTelemetrySinks,
   registerSeanEllisCron,
   type ComposedTelemetrySinks,
-} from '../../onboarding/telemetry/index.ts'
+} from '@neutronai/onboarding/telemetry/index.ts'
 import {
   buildImportRunningHandler,
   registerImportRunningCron,
-} from '../../onboarding/interview/import-running-cron.ts'
+} from '@neutronai/onboarding/interview/import-running-cron.ts'
 import {
   buildOvernightEngineHandler,
   registerOvernightHandler,
-} from '../../onboarding/overnight/register.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
-import { ReminderStore } from '../../reminders/store.ts'
-import { ReminderTickLoop } from '../../reminders/tick.ts'
-import { TridentRunStore, type TridentRun } from '../../trident/store.ts'
-import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '../../trident/tick.ts'
-import { stubAdvanceDeps } from '../../trident/state-machine.ts'
-import { buildTridentOrchestrator } from '../../trident/orchestrator.ts'
-import { buildWorkflowFirer } from '../../trident/inner-loop.ts'
-import { buildTridentDelivery } from '../../trident/delivery.ts'
-import { withTerminalObserver } from '../../trident/terminal-observer.ts'
-import { buildBoardReconcileObserver } from '../../trident/board-reconcile.ts'
-import { spawnCapture } from '../../trident/git-mode.ts'
-import { TaskStore } from '../../tasks/store.ts'
+} from '@neutronai/onboarding/overnight/register.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
+import { ReminderStore } from '@neutronai/reminders/store.ts'
+import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
+import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '@neutronai/trident/tick.ts'
+import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
+import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
+import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
+import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
+import { withTerminalObserver } from '@neutronai/trident/terminal-observer.ts'
+import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   buildFocusScoreRecomputeHandler,
   registerFocusScoreRecomputeCron,
-} from '../../tasks/focus-score-cron.ts'
+} from '@neutronai/tasks/focus-score-cron.ts'
 import {
   buildTaskPrioritizeHandler,
   registerTaskPrioritizeCron,
-} from '../../tasks/prioritize-llm.ts'
+} from '@neutronai/tasks/prioritize-llm.ts'
 import {
   buildNudgeEngineHandler,
   registerNudgeEngineCron,
@@ -88,26 +88,26 @@ import type {
   MorningBriefDeps,
   ProactiveContextSources,
 } from '../proactive/morning-brief.ts'
-import { attachReminderLinkSubscriber } from '../../tasks/reminder-link.ts'
+import { attachReminderLinkSubscriber } from '@neutronai/tasks/reminder-link.ts'
 import {
   buildProjectionWriter,
   type ProjectionWriter,
-} from '../../tasks/projection/index.ts'
+} from '@neutronai/tasks/projection/index.ts'
 import {
   attachOvernightWorkCompletedHook,
   type OvernightWorkCompletedEvent,
-} from '../../tasks/overnight-task-hook.ts'
-import type { Task } from '../../tasks/store.ts'
-import { ApprovalManager } from '../../tools/approval.ts'
-import { ProcessRegistry } from '../../tools/process-registry.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
-import { AlertStore } from '../../watchdog/alert-store.ts'
+} from '@neutronai/tasks/overnight-task-hook.ts'
+import type { Task } from '@neutronai/tasks/store.ts'
+import { ApprovalManager } from '@neutronai/tools/approval.ts'
+import { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { AlertStore } from '@neutronai/watchdog/alert-store.ts'
 import {
   CrashedAgentDetector,
   HeartbeatDetector,
   StuckAgentDetector,
-} from '../../watchdog/detectors.ts'
-import { WatchdogSupervisor } from '../../watchdog/supervisor.ts'
+} from '@neutronai/watchdog/detectors.ts'
+import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import { type GatewayModule } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 

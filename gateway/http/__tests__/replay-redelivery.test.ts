@@ -18,10 +18,10 @@ import { describe, it, expect, afterEach } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import type { AgentSpec } from '../../../runtime/substrate.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { PtyChild, PtyHost } from '../../../runtime/adapters/claude-code/persistent/pty-host.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { PtyChild, PtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import {
   createPersistentReplSubstrate,
   drainPendingRespawns,
@@ -30,10 +30,10 @@ import {
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
   type RecoveredReply,
-} from '../../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { loadPendingRespawns } from '../../../runtime/adapters/claude-code/persistent/pending-respawns-queue.ts'
+} from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import { loadPendingRespawns } from '@neutronai/runtime/adapters/claude-code/persistent/pending-respawns-queue.ts'
 import { InMemoryWebChatSenderRegistry, webTopicId } from '../chat-bridge.ts'
-import type { ChatOutbound } from '../../../landing/server.ts'
+import type { ChatOutbound } from '@neutronai/landing/server.ts'
 import {
   InMemoryRecoveredReplyStore,
   makeRecoveredReplySink,

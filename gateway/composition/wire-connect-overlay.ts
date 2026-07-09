@@ -9,7 +9,7 @@
  * byte-identical to the inline block.
  */
 
-import { ChannelRouter } from '../../channels/router.ts'
+import { ChannelRouter } from '@neutronai/channels/router.ts'
 import type { GatewayModuleGraph } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 

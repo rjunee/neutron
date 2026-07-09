@@ -30,8 +30,8 @@ import {
   mintInstanceToken,
   type CrossInstanceActiveKey,
 } from './api/mint-instance-token.ts'
-import type { Membership } from '../jwt-validator/index.ts'
-import type { ProjectDb } from '../persistence/index.ts'
+import type { Membership } from '@neutronai/jwt-validator/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ConnectedMembersStore } from './connected-members-store.ts'
 import { ConnectGuestInviteStore, GuestInviteError } from './guest-invite-store.ts'
 import { acceptGuestMember, type MirrorMemoryOnJoinFn } from './member-join.ts'

@@ -15,13 +15,13 @@
  * persists into `watchdog_alerts` + notifies.
  */
 
-import type { CronJobRegistry } from '../cron/jobs.ts'
-import type { CronStateStore } from '../cron/state.ts'
+import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import type { CronStateStore } from '@neutronai/cron/state.ts'
 import type {
   CredentialPool,
   PooledCredential,
-} from '../runtime/credential-pool.ts'
-import type { ProcessRegistry } from '../tools/process-registry.ts'
+} from '@neutronai/runtime/credential-pool.ts'
+import type { ProcessRegistry } from '@neutronai/tools/process-registry.ts'
 import type { WatchdogAlert, WatchdogDetector, WatchdogKind } from './types.ts'
 
 export interface CommonDetectorOptions {

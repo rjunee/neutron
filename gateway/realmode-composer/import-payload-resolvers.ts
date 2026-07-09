@@ -16,12 +16,12 @@ import { join } from 'node:path'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { lookup as dnsLookupDefault } from 'node:dns/promises'
 
-import type { ProjectDb } from '../../persistence/index.ts'
-import type { ImportSource, Pass1ChunkResult } from '../../onboarding/history-import/types.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ImportSource, Pass1ChunkResult } from '@neutronai/onboarding/history-import/types.ts'
 import type {
   ImportPayloadResolver,
   ImportResumeReadinessProbe,
-} from '../../onboarding/interview/engine.ts'
+} from '@neutronai/onboarding/interview/engine.ts'
 import { RESUMABLE_STATUSES, zipPathForSource } from '../upload/import-resume-handler.ts'
 
 /**

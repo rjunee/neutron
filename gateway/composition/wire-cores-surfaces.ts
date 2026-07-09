@@ -9,13 +9,13 @@
  * byte-identical to the inline block.
  */
 
-import { CronHandlerRegistry } from '../../cron/handlers.ts'
-import { CronJobRegistry } from '../../cron/jobs.ts'
+import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
-import { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
+import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import { createCoresSurface } from '../http/cores-surface.ts'
 import type { StartOAuthResult } from '../http/cores-oauth-surface.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { GatewayModuleGraph } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 

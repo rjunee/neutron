@@ -39,7 +39,7 @@
  * memoized after that.
  */
 
-import { getBestModel } from '../../runtime/models.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
 import { RESERVED_AGENT_NAMES } from './phase-prompts.ts'
 import { SUGGESTER_TIMEOUT_MS_DEFAULT } from './llm-timeouts.ts'
 

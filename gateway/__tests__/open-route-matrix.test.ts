@@ -59,20 +59,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Server, WebSocketHandler } from 'bun'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { composeProductionGraph } from '../composition.ts'
 import {
   composeHttpHandler,
   type ComposeHttpHandlerInput,
 } from '../http/compose.ts'
-import type { AuthGateOptions } from '../../landing/auth-gate.ts'
+import type { AuthGateOptions } from '@neutronai/landing/auth-gate.ts'
 import {
   SESSION_COOKIE_NAME,
   formatSetCookie,
   signSessionCookie,
-} from '../../landing/session-cookie.ts'
+} from '@neutronai/landing/session-cookie.ts'
 
 const OWNER = 'open-route-matrix-owner'
 

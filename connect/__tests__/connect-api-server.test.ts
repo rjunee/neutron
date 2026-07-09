@@ -6,7 +6,7 @@ import {
   type ConnectApiHandlers,
 } from '../api/server.ts'
 import { stampOriginInstance } from '../api/origin-tag.ts'
-import { JwksCache, type FetchLike } from '../../jwt-validator/index.ts'
+import { JwksCache, type FetchLike } from '@neutronai/jwt-validator/index.ts'
 
 interface KeyMaterial {
   kid: string

@@ -36,7 +36,7 @@ import type {
   AgentSettingsBackend,
 } from './backend.ts'
 // L3 (2026-07) — the mode vocabulary lives in the node-free `contracts` leaf.
-import type { AgentEngagementMode } from '../../../../contracts/agent-engagement.ts'
+import type { AgentEngagementMode } from '@neutronai/contracts/agent-engagement.ts'
 
 export interface ListProjectsOutput {
   projects: ProjectView[]

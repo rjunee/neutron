@@ -44,10 +44,10 @@
 import { join } from 'node:path'
 import type * as fs from 'node:fs/promises'
 
-import type { ChannelKindForButton } from '../../channels/button-primitive.ts'
-import { parseAnyTopicId } from '../../channels/topic-id.ts'
-import type { InterviewEngine } from '../../onboarding/interview/engine.ts'
-import { listEntries } from '../../onboarding/history-import/zip-reader.ts'
+import type { ChannelKindForButton } from '@neutronai/channels/button-primitive.ts'
+import { parseAnyTopicId } from '@neutronai/channels/topic-id.ts'
+import type { InterviewEngine } from '@neutronai/onboarding/interview/engine.ts'
+import { listEntries } from '@neutronai/onboarding/history-import/zip-reader.ts'
 import { csrfForbiddenResponse, evaluateCsrfOrigin } from './csrf-origin-guard.ts'
 
 /**

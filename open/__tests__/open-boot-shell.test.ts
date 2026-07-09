@@ -31,10 +31,10 @@ import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../../tests/support/test-isolation.ts'
 
-import { boot } from '../../gateway/index.ts'
-import type { BootHandle } from '../../gateway/index.ts'
-import { SqliteOnboardingStateStore } from '../../onboarding/interview/sqlite-state-store.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { boot } from '@neutronai/gateway/index.ts'
+import type { BootHandle } from '@neutronai/gateway/index.ts'
+import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 

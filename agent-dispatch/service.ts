@@ -45,15 +45,15 @@ import {
   formatAnnouncement,
   renderAnnouncementMarkdown,
   type AnnouncementPayload,
-} from '../runtime/subagent/announce.ts'
+} from '@neutronai/runtime/subagent/announce.ts'
 import {
   cancelRun,
   type ControlState,
   registerCanceller,
-} from '../runtime/subagent/control.ts'
-import type { AgentKind, SubagentRecord, SubagentStatus } from '../runtime/subagent/registry.ts'
-import type { SubagentRegistry } from '../runtime/subagent/registry.ts'
-import { spawnSubagent, type DelegationVerifier, type SpawnInput } from '../runtime/subagent/spawn.ts'
+} from '@neutronai/runtime/subagent/control.ts'
+import type { AgentKind, SubagentRecord, SubagentStatus } from '@neutronai/runtime/subagent/registry.ts'
+import type { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import { spawnSubagent, type DelegationVerifier, type SpawnInput } from '@neutronai/runtime/subagent/spawn.ts'
 import {
   AGENT_KIND_BY_DISPATCH_KIND,
   ADHOC_SYSTEM_PROMPT,
@@ -63,7 +63,7 @@ import {
 import {
   assessDispatchReadiness,
   type DispatchReadinessTarget,
-} from '../work-board/dispatch-readiness.ts'
+} from '@neutronai/work-board/dispatch-readiness.ts'
 
 /** Where a dispatch result should be delivered back. */
 export interface DeliveryTarget {

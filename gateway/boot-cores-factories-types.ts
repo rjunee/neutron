@@ -12,11 +12,11 @@
  * Open-classified and import-clean of Managed dirs.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 // Type-only alias for the canonical task-store shared across the
-// production composer (the composer's dynamic `import('../tasks/store.ts')`
+// production composer (the composer's dynamic `import('@neutronai/tasks/store.ts')`
 // at its surfaces block is unaffected).
-import type { TaskStore as TaskStoreType } from '../tasks/store.ts'
+import type { TaskStore as TaskStoreType } from '@neutronai/tasks/store.ts'
 import type {
   TasksChatOwnerDeps,
   TasksChatRouterDepsResolver,
@@ -61,7 +61,7 @@ export interface CoresBackendFactoriesOptions {
    * audits captured via `/email ...` land in the same SQLite file
    * the Core's MCP tools read from.
    */
-  emailResolver: import('../cores/free/email/index.ts').EmailProjectCacheResolver
+  emailResolver: import('@neutronai/email-managed-core').EmailProjectCacheResolver
   /**
    * Email-Managed Core's OAuth token accessor. When present, the
    * backend factory wires the production Gmail v1 REST client with

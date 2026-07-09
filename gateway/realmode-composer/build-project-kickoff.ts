@@ -50,12 +50,12 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { ImportResult } from '../../onboarding/history-import/types.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import type {
   MaterializeOutcome,
   ProjectPageIndexFn,
-} from '../../onboarding/wow-moment/project-materializer.ts'
-import { namesRelate } from '../../onboarding/wow-moment/project-identity.ts'
+} from '@neutronai/onboarding/wow-moment/project-materializer.ts'
+import { namesRelate } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import {
   parseStatusMd,
   firstProseParagraph,

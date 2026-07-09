@@ -40,16 +40,16 @@ import {
   createClaudeCodeSubstrateAuto,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
-} from '../../runtime/adapters/claude-code/index.ts'
+} from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
   reportFailure,
   reportSuccess,
   selectCredential,
   type CredentialPool,
-} from '../../runtime/credential-pool.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
+} from '@neutronai/runtime/credential-pool.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 
 /**
@@ -786,4 +786,4 @@ export function renderMessagesArray(
 // stream without importing UP into this gateway composition band. Re-exported
 // here so every existing gateway import specifier stays valid (test-policy
 // §2.2 barrel rule).
-export { collectTokensToString } from '../../runtime/collect-tokens.ts'
+export { collectTokensToString } from '@neutronai/runtime/collect-tokens.ts'

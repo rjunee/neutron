@@ -13,7 +13,7 @@
  * etc.) land as additive columns on the same row.
  */
 
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * Read the IANA timezone identifier for `project_slug` from `instance_metadata`.

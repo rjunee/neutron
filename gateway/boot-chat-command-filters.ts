@@ -115,9 +115,9 @@ export function buildTridentCodeChatCommandFilter(deps: {
     user_id: string
     channel_topic_id: string
   }) =>
-    | import('../trident/code-command.ts').TridentCodeContext
+    | import('@neutronai/trident/code-command.ts').TridentCodeContext
     | null
-    | Promise<import('../trident/code-command.ts').TridentCodeContext | null>
+    | Promise<import('@neutronai/trident/code-command.ts').TridentCodeContext | null>
   default_project_id?: string
   /** Message when `resolve_context` yields null (no build target wired). */
   unavailable_message?: string
@@ -128,7 +128,7 @@ export function buildTridentCodeChatCommandFilter(deps: {
    * already set one) so terminal result delivery routes the build's result
    * back to THIS surface instead of defaulting to Telegram.
    */
-  channel_kind?: import('../channels/types.ts').Topic['channel_kind']
+  channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
 }): import('./http/app-ws-surface.ts').ChatCommandFilter {
   const default_pid = deps.default_project_id ?? 'default'
   const channel_kind = deps.channel_kind ?? 'app_socket'
@@ -142,7 +142,7 @@ export function buildTridentCodeChatCommandFilter(deps: {
       // prefixed `/code`. The real boundary check is `parseCodeCommand`
       // below — bare `startsWith` would wrongly claim `/codefoo`.
       if (!trimmed.startsWith('/code')) return null
-      const { parseAndExecuteCodeCommand, parseCodeCommand } = await import('../trident/code-command.ts')
+      const { parseAndExecuteCodeCommand, parseCodeCommand } = await import('@neutronai/trident/code-command.ts')
       // Share ONE grammar with the canonical parser (K8): `/code` must be
       // followed by EOL/whitespace. `/codefoo bar` is NOT a code command —
       // fall through to the LLM instead of pre-claiming it here (which, in the

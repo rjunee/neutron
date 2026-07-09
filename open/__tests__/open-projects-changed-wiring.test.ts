@@ -29,10 +29,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { composeProductionGraph } from '../../gateway/composition.ts'
-import type { AppWsOutbound } from '../../channels/adapters/app-ws/envelope.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))

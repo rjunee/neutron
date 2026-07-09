@@ -39,18 +39,18 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { ReminderStore } from '../../reminders/store.ts'
-import { TaskStore } from '../../tasks/store.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ReminderStore } from '@neutronai/reminders/store.ts'
+import { TaskStore } from '@neutronai/tasks/store.ts'
 import { composeProductionGraph } from '../composition.ts'
 import {
   appProjectTopicId,
   createAppRemindersSurface,
 } from '../http/app-reminders-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts' // retained for the 501 "no adapter wired" sanity test below
-import { buildReminderStoreBackend } from '../../cores/free/reminders/src/backend.ts'
+import { buildReminderStoreBackend } from '@neutronai/reminders-core/backend'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 const OWNER = 'reminders-composer-project'

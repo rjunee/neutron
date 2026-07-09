@@ -22,7 +22,7 @@ export interface AuthCompositionInput {
      * production composer wires `signup/start-token.ts:
      * verifyStartTokenCryptographic`.
      */
-    verifyStartToken: import('../../../landing/auth-gate.ts').VerifyStartTokenGateFn
+    verifyStartToken: import('@neutronai/landing/auth-gate.ts').VerifyStartTokenGateFn
     identity_public_base_url: string
     now?: () => number
     /**

@@ -58,6 +58,17 @@ jobs:
       - name: Typecheck (tsc matrix over every tsconfig)
         run: bash scripts/ci/typecheck-all.sh
 
+      # L5 — relative cross-workspace import guard. Fails the build on any NEW
+      # `../<other-workspace>/...` import: eslint `import/no-relative-packages`
+      # (eslint.config.mjs, with a TS resolver so extensionless `.ts` specifiers
+      # are caught) covers static/require/value-`import()`; a companion
+      # type-query check (scripts/ci/type-query-check.mjs) covers the
+      # type-position `import('...').Foo` form ESLint can't lint. depcruise
+      # (G4, below) tracks resolved module edges but not specifier shape, so it
+      # can't catch either on its own.
+      - name: Lint (relative cross-workspace imports)
+        run: bash scripts/ci/lint.sh
+
       - name: Test (bounded-memory partitioned runner)
         # OOM mitigation: #193 tipped a general chunk past the 7 GB ubuntu-latest
         # ceiling (silent SIGKILL, no assertion). Halve peak RSS = concurrency 4→2

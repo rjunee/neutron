@@ -14,9 +14,9 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ProjectDb } from '../../../persistence/index.ts'
-import { applyMigrations } from '../../../migrations/runner.ts'
-import { ToolRegistry } from '../../../tools/registry.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { createProjectRow, type ProjectScaffoldDeps } from '../project-create.ts'
 import {
   CREATE_PROJECT_TOOL,

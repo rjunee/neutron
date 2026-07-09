@@ -25,9 +25,9 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import type { McpClient } from '../memory-store.ts'
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'
 import { bootPgliteBrain } from './boot-pglite-brain.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
-import { McpServer } from '../../mcp/server.ts'
-import { withTopicContext } from '../../mcp/topic-context.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { McpServer } from '@neutronai/mcp/server.ts'
+import { withTopicContext } from '@neutronai/mcp/topic-context.ts'
 import { GBRAIN_SEARCH_TOOL, registerGBrainSearchToolSurface } from '../agent-tool.ts'
 
 describe('gbrain_search — real GBrain write→native-recall loop', () => {

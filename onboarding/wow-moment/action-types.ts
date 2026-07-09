@@ -9,13 +9,13 @@
  * Per docs/plans/P2-onboarding.md § 2.5 + § 4.
  */
 
-import type { ButtonPrompt } from '../../channels/button-primitive.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import type { ImportResult } from '../history-import/types.ts'
-import type { ReminderStore } from '../../reminders/store.ts'
-import type { TaskStore } from '../../tasks/store.ts'
-import type { CronJobRegistry } from '../../cron/jobs.ts'
-import type { CronStateStore } from '../../cron/state.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ReminderStore } from '@neutronai/reminders/store.ts'
+import type { TaskStore } from '@neutronai/tasks/store.ts'
+import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import type { CronStateStore } from '@neutronai/cron/state.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ProjectMaterializer } from './project-materializer.ts'
 import type { WowActionId, WowEngagement } from './telemetry.ts'
 

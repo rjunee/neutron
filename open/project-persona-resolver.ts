@@ -16,7 +16,7 @@
  * alone rather than failing — mirrors the persona-loader's never-hard-fail rule.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 interface PersonaRow {
   persona: string | null

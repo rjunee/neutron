@@ -35,18 +35,18 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import {
   AppWsAdapter,
   InMemoryAppWsSessionRegistry,
   appWsTopicId,
   createAppWsAuthResolver,
   type AppWsOutbound,
-} from '../../channels/index.ts'
-import type { IncomingEvent, Topic } from '../../channels/types.ts'
+} from '@neutronai/channels/index.ts'
+import type { IncomingEvent, Topic } from '@neutronai/channels/types.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
@@ -64,7 +64,7 @@ import {
   parseCalCommand,
   type CalendarClient,
   type CalendarProjectCache,
-} from '../../cores/free/calendar/index.ts'
+} from '@neutronai/calendar-core'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')

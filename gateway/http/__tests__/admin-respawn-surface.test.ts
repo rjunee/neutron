@@ -12,8 +12,8 @@
 import { describe, expect, test, beforeEach } from 'bun:test'
 import { composeHttpHandler } from '../compose.ts'
 import { createAdminRespawnSurface } from '../admin-respawn-surface.ts'
-import { resetAdminRespawnRateLimitForTest } from '../../../runtime/adapters/claude-code/persistent/admin-respawn-session.ts'
-import type { RespawnOutcome } from '../../../runtime/adapters/claude-code/persistent/session-respawn.ts'
+import { resetAdminRespawnRateLimitForTest } from '@neutronai/runtime/adapters/claude-code/persistent/admin-respawn-session.ts'
+import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/persistent/session-respawn.ts'
 
 beforeEach(() => resetAdminRespawnRateLimitForTest())
 

@@ -18,10 +18,10 @@
 // builders. composition.ts retains only the imports its surviving
 // post-`graph.compose()` wiring + the `buildComposedHttpFromComposition`
 // helper still reference.
-import { CronHandlerRegistry } from '../cron/handlers.ts'
-import { CronJobRegistry } from '../cron/jobs.ts'
-import { CronScheduler } from '../cron/scheduler.ts'
-import { CronStateStore } from '../cron/state.ts'
+import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
+import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { CronScheduler } from '@neutronai/cron/scheduler.ts'
+import { CronStateStore } from '@neutronai/cron/state.ts'
 import { GatewayModuleGraph } from './module-graph.ts'
 import {
   composeHttpHandler,
@@ -116,7 +116,7 @@ async function buildComposedHttpFromComposition(
     // shapes are field-for-field equivalent so a narrow cast is the
     // cleanest seam.
     const cross = (
-      await import('../connect/api/server.ts')
+      await import('@neutronai/connect/api/server.ts')
     ).createConnectApiHandler({
       receiving_instance_slug: composition.project_slug,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -406,7 +406,7 @@ export async function composeProductionGraph(
   // inside `boot()` AFTER its `graph` variable was assigned, so its
   // catch could `await graph.shutdown()`. Now we own the lifecycle
   // until `return`: if the HTTP composition throws (the only realistic
-  // path is `import('../connect/api/server.ts')` failing
+  // path is `import('@neutronai/connect/api/server.ts')` failing
   // under a Managed boot when the submodule is unreadable), tear down
   // the graph BEFORE re-throwing so the caller's catch doesn't see a
   // half-running gateway it can't reach.

@@ -13,13 +13,13 @@
  * resolution follows docs/plans/project-folder-convention.md § 1.2.
  */
 
-import type { PlatformInstanceInfo } from '../runtime/platform-adapter.ts'
+import type { PlatformInstanceInfo } from '@neutronai/runtime/platform-adapter.ts'
 
 // `resolveNeutronHome` + `resolveOpenDbPath` moved to `../migrations/db-path.ts`
 // (L3, 2026-07) so the `migrations` leaf no longer imports UP into `open`.
 // Re-exported here so the boot shell + composer specifiers stay valid
 // (test-policy §2.2 barrel rule). Resolution precedence + timing are unchanged.
-export { resolveNeutronHome, resolveOpenDbPath } from '../migrations/db-path.ts'
+export { resolveNeutronHome, resolveOpenDbPath } from '@neutronai/migrations/db-path.ts'
 
 /**
  * The single owner's user id. The Open box has exactly one user; every

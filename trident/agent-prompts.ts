@@ -38,8 +38,8 @@
  * line so an agent is never dispatched with no role at all.
  */
 
-import { buildPromptVars, loadPrompt } from '../prompts/index.ts'
-import type { AgentKind } from '../runtime/subagent/registry.ts'
+import { buildPromptVars, loadPrompt } from '@neutronai/prompts/index.ts'
+import type { AgentKind } from '@neutronai/runtime/subagent/registry.ts'
 
 /**
  * Every kind the substrate dispatch closure can serve — `AgentKind` minus

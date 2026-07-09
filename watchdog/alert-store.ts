@@ -5,7 +5,7 @@
  * Append-only; `resolveAlert(id)` sets resolved_at when a condition clears.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { WatchdogAlert, WatchdogKind } from './types.ts'
 
 interface RawAlertRow {

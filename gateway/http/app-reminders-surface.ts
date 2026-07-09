@@ -25,9 +25,9 @@
  * ordered list so the client doesn't have to follow up with a GET.
  */
 
-import type { ReminderStore } from '../../reminders/index.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
+import type { ReminderStore } from '@neutronai/reminders/index.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
 
 const PATH_PREFIX = '/api/app/projects/'

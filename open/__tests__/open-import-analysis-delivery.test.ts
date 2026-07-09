@@ -24,7 +24,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import type { ButtonPrompt } from '../../channels/button-primitive.ts'
+import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import {
   resolveImportRunningStatusDelivery,
   resolveOpenImportPromptEmission,

@@ -50,8 +50,8 @@ import type {
   AppChatReceiptLog,
   AppChatReceiptState,
   AppChatRow,
-} from '../../../persistence/index.ts'
-import { AppChatEditNotAuthorizedError } from '../../../persistence/index.ts'
+} from '@neutronai/persistence/index.ts'
+import { AppChatEditNotAuthorizedError } from '@neutronai/persistence/index.ts'
 import type { AppWsSessionRegistry } from './session-registry.ts'
 import {
   sanitizeProjectId,

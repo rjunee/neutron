@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import type { ButtonStore, ChatHistoryTurn } from '../../../channels/button-store.ts'
+import type { ButtonStore, ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
 
 import { buildButtonStoreMessageSearchRuntime } from '../message-search-wiring.ts'
 

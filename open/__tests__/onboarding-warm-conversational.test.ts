@@ -34,15 +34,15 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { composeProductionGraph } from '../../gateway/composition.ts'
-import { buildLlmCallSubstrate } from '../../gateway/realmode-composer/build-llm-call-substrate.ts'
-import { newCredentialPool } from '../../runtime/credential-pool.ts'
-import type { Event } from '../../runtime/events.ts'
-import type { SessionHandle } from '../../runtime/session-handle.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
-import type { ClaudeCodeSubstrateOptions } from '../../runtime/adapters/claude-code/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
+import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { buildOpenGraphComposer, awaitPrewarmReady, prewarmSubstrate } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -286,7 +286,7 @@ describe('prewarmSubstrate — dynamic model resolution (always-latest)', () => 
 
   test('pre-warm spawns getBestModel() and tracks a watchdog flip on the next pre-warm', async () => {
     const { BEST_MODEL, getBestModel, setBestModelOverride } = await import(
-      '../../runtime/models.ts'
+      '@neutronai/runtime/models.ts'
     )
     setBestModelOverride(undefined)
     try {

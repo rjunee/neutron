@@ -19,11 +19,11 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { SecretsStore } from '../../auth/secrets-store.ts'
-import { ToolRegistry } from '../../tools/registry.ts'
-import { createAppWsAuthResolver } from '../../channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import { CoresOAuthPendingStore } from '../cores/oauth-pending-store.ts'
 import {
@@ -38,7 +38,7 @@ import { createCoresOAuthSurface } from '../http/cores-oauth-surface.ts'
 // ISSUES #219: import the HMAC signer from its canonical Open home in
 // runtime/ (identity/oauth/internal-signature.ts is a thin re-export of
 // this module and lives in a Managed-carved dir).
-import { signInternalRequest } from '../../runtime/internal-signature.ts'
+import { signInternalRequest } from '@neutronai/runtime/internal-signature.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const OWNER = 'oauth-test'

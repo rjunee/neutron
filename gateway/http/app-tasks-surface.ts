@@ -36,8 +36,8 @@
  * error code so the Expo client can render inline.
  */
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
 import {
   ALL_TASK_ORDERS,
@@ -50,7 +50,7 @@ import {
   type TaskStatus,
   type TaskStatusFilter,
   type UpdateTaskFields,
-} from '../../tasks/store.ts'
+} from '@neutronai/tasks/store.ts'
 
 export interface AppTasksSurfaceOptions {
   store: TaskStore

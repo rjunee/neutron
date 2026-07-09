@@ -15,10 +15,10 @@
  * rather than imported upward.
  */
 
-import type { CredentialPool } from '../../runtime/credential-pool.ts'
-import type { Substrate } from '../../runtime/substrate.ts'
-import type { ClaudeCodeSubstrateOptions } from '../../runtime/adapters/claude-code/index.ts'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface OpenWiringContext {
   /**

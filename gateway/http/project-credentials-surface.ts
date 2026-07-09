@@ -24,13 +24,13 @@
  * plaintext never leave the store.
  */
 
-import { sanitizeProjectId } from '../../channels/adapters/app-ws/envelope.ts'
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import {
   ProjectCredentialValidationError,
   type CredentialScope,
   type ProjectCredentialStore,
-} from '../../project-credentials/store.ts'
+} from '@neutronai/project-credentials/store.ts'
 
 export interface ProjectCredentialsSurfaceOptions {
   store: ProjectCredentialStore

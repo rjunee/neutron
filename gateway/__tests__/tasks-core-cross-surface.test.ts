@@ -33,10 +33,10 @@ import {
   loadManifest as loadTasksManifest,
 } from '@neutronai/tasks-core'
 
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
-import { TaskStore as CanonicalTaskStore } from '../../tasks/store.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TaskStore as CanonicalTaskStore } from '@neutronai/tasks/store.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppTasksSurface } from '../http/app-tasks-surface.ts'
 

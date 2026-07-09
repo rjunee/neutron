@@ -30,9 +30,9 @@ import {
   AppWsAdapter,
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
-} from '../../channels/index.ts'
-import { applyMigrations } from '../../migrations/runner.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+} from '@neutronai/channels/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppLauncherSurface } from '../http/app-launcher-surface.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
@@ -48,7 +48,7 @@ import {
   createEmailChatCommandFilter,
   projectLabelName,
   type SeededInMemoryGmailClient,
-} from '../../cores/free/email/index.ts'
+} from '@neutronai/email-managed-core'
 
 const OWNER = 'email-composer-project'
 const PROJECT = 'demo-email-project'
@@ -273,7 +273,7 @@ test('chat `/email summarize <id>` end-to-end → 2-3 sentence prose brief', asy
   const cache = await harness.resolver.resolve(PROJECT)
   const summary = cache.getSummary({
     message_id: id,
-    template_hash: (await import('../../cores/free/email/index.ts')).briefTemplateHash(),
+    template_hash: (await import('@neutronai/email-managed-core')).briefTemplateHash(),
   })
   expect(summary?.brief_text).toContain('prose brief')
 })

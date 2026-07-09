@@ -48,8 +48,8 @@ import {
 } from '../git/project-backup-store.ts'
 import { createAppBackupsSurface } from '../http/app-backups-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
-import { createAppWsAuthResolver } from '../../channels/index.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -70,7 +70,7 @@ const PROJECT_ID = 'demo-project'
 
 function stubAdapter(): PlatformAdapter {
   const remoteState: {
-    config: import('../../runtime/platform-adapter.ts').ProjectBackupRemoteConfig | null
+    config: import('@neutronai/runtime/platform-adapter.ts').ProjectBackupRemoteConfig | null
   } = { config: null }
   return {
     capabilities: {
@@ -763,7 +763,7 @@ describe('app-backups HTTP surface — owner mismatch', () => {
     const fakeAuth = {
       mode: 'test',
       resolve: async () => ({ user_id: 'u1', project_slug: 'somewhere-else' }),
-    } as unknown as import('../../channels/adapters/app-ws/auth.ts').AppWsAuthResolver
+    } as unknown as import('@neutronai/channels/adapters/app-ws/auth.ts').AppWsAuthResolver
     const surface = createAppBackupsSurface({
       auth: fakeAuth,
       project_slug: OWNER_SLUG,

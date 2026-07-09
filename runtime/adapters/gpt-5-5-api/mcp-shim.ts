@@ -33,7 +33,7 @@ import type { Event } from '../../events.ts'
 // L2 (2026-07) — `McpToolResolver` moved to `../../../contracts/mcp-tool-resolver.ts`
 // (a node-free leaf so `mcp/server.ts` can depend on the shape without
 // importing `runtime` — critic-layering.md §2.1 edge #11: `mcp → runtime`).
-import type { McpToolResolver } from '../../../contracts/mcp-tool-resolver.ts'
+import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 export type { McpToolResolver }
 
 export interface McpShimOptions {

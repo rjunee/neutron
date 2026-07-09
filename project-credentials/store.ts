@@ -30,7 +30,7 @@
  * returns METADATA ONLY (never ciphertext or plaintext).
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** '' is the global-scope sentinel — a real project id is always 1..128 chars. */
 export const GLOBAL_PROJECT_ID = ''

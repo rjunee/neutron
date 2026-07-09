@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyProjectScopedMigrations } from '../../../migrations/runner.ts'
+import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import {
   CommentBodyTooLargeError,
   CommentNotFoundError,

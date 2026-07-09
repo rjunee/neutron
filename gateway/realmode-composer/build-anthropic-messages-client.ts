@@ -20,12 +20,12 @@
  * per memory `feedback_cc_subprocess_substrate.md`.
  */
 
-import { getBestModel } from '../../runtime/models.ts'
-import type { AgentSpec, Substrate } from '../../runtime/substrate.ts'
+import { getBestModel } from '@neutronai/runtime/models.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type {
   AnthropicMessageResponse,
   AnthropicMessagesClient,
-} from '../../onboarding/interview/anthropic-client.ts'
+} from '@neutronai/onboarding/interview/anthropic-client.ts'
 import {
   collectTokensToString,
   renderMessagesArray,

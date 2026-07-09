@@ -19,8 +19,8 @@
  *   - any DB probe failure falls back to the raw scan, so live docs can never
  *     silently disappear because of a transient query error.
  */
-import { enumerateProjects as enumerateProjectDirs } from '../doc-search/projects.ts'
-import type { ProjectDb } from '../persistence/index.ts'
+import { enumerateProjects as enumerateProjectDirs } from '@neutronai/doc-search/projects.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export function buildLiveProjectEnumerator(
   db: ProjectDb,

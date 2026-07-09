@@ -38,7 +38,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { atomicWriteFile, atomicWriteFileSync } from '../runtime/atomic-write.ts'
+import { atomicWriteFile, atomicWriteFileSync } from '@neutronai/runtime/atomic-write.ts'
 
 /**
  * Phase 1 fires only on `chat`. Phase 2 adds `calendar` / `email` / `meeting`

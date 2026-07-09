@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto'
 
-import type { ImportResult } from '../onboarding/history-import/types.ts'
+import type { ImportResult } from '@neutronai/onboarding/history-import/types.ts'
 import { NO_PROJECT, TASK_SOURCE_HISTORY_IMPORT, type TaskStore } from './store.ts'
 
 export interface SeedTasksFromImportResultInput {

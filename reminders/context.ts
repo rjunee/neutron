@@ -16,7 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
-import { sanitizeProjectId } from '../channels/adapters/app-ws/envelope.ts'
+import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { ReminderContextSource } from './dispatcher.ts'
 import type { Reminder } from './store.ts'
 

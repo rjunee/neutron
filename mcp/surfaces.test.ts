@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ToolRegistry } from '../tools/registry.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { NEUTRON_TOOL_NAMES, registerNeutronToolsSurface } from './surfaces/neutron-tools.ts'
 import { registerCoreTool, unregisterCoreTools } from './surfaces/core-tools.ts'
 

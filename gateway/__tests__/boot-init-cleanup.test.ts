@@ -36,7 +36,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { boot } from '../index.ts'
-import { ProjectDb } from '../../persistence/index.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 const cleanups: string[] = []
@@ -131,7 +131,7 @@ describe('boot init-failure cleanup', () => {
       db,
       project_slug,
     }: {
-      db: import('../../persistence/index.ts').ProjectDb
+      db: import('@neutronai/persistence/index.ts').ProjectDb
       project_slug: string
     }): import('../composition.ts').CompositionInput => {
       const input: import('../composition.ts').CompositionInput = {

@@ -183,8 +183,13 @@ describe('project_slug timing-safe comparison (ISSUE #34)', () => {
         body.includes('constantTimeEqual'),
         `${label} must import + use constantTimeEqual for slug comparison`,
       ).toBe(true)
+      // L5 (2026-07) — cross-workspace imports moved from relative paths to
+      // `@neutronai/<pkg>/...` specifiers; accept either form so this
+      // doesn't re-trip on the next specifier-style sweep.
       expect(
-        /from ['"](?:\.\.\/)+runtime\/constant-time-equal\.ts['"]/.test(body),
+        /from ['"](?:(?:\.\.\/)+runtime|@neutronai\/runtime)\/constant-time-equal\.ts['"]/.test(
+          body,
+        ),
         `${label} must import constantTimeEqual from runtime/constant-time-equal.ts`,
       ).toBe(true)
       // Negative: no plain ===/!== slug comparison survives.

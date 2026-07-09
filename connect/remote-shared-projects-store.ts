@@ -17,7 +17,7 @@
  * mirror (connect-spec §1.8), not by this store.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface RemoteSharedProjectRow {
   project_id: string

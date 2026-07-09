@@ -25,7 +25,7 @@
  * an agent- or client-supplied argument.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** The board lane. `failed` is a run-driven terminal lane (a bound trident run
  *  that FAILED): it stays in the active list (`status != done`), KEEPS its

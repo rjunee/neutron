@@ -34,8 +34,8 @@ import {
   type ButtonChoice,
   type ButtonPrompt,
   type ChannelKindForButton,
-} from '../../channels/button-primitive.ts'
-import type { ButtonStore } from '../../channels/button-store.ts'
+} from '@neutronai/channels/button-primitive.ts'
+import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
   isLegalTransition,
   LEGAL_TRANSITIONS,
@@ -100,11 +100,11 @@ import type { TranscriptWriter } from './transcript.ts'
 // `SlugPickerEngineHook` DI seam below.
 import {
   suggestedSlugFromAgentName,
-} from '../../runtime/slug-picker-types.ts'
+} from '@neutronai/runtime/slug-picker-types.ts'
 import type {
   PlatformAdapter,
   SlugAvailabilityProbe,
-} from '../../runtime/platform-adapter.ts'
+} from '@neutronai/runtime/platform-adapter.ts'
 import { extractAgentNameFromFreeform } from './extract-agent-name.ts'
 import {
   getKnowledgeForPhase,

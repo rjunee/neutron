@@ -8,11 +8,11 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import type { SessionHandle } from '../runtime/session-handle.ts'
-import type { Event } from '../runtime/events.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
 import { buildForgeConflictResolver, RESOLVER_TOOL_NAMES } from './conflict-resolver.ts'
-import { buildReplArgv } from '../runtime/adapters/claude-code/persistent/build-repl-argv.ts'
+import { buildReplArgv } from '@neutronai/runtime/adapters/claude-code/persistent/build-repl-argv.ts'
 import type { TridentRun } from './store.ts'
 
 const completion = (): Event => ({

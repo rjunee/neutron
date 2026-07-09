@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 
-import { applyProjectScopedMigrations } from '../../../../migrations/runner.ts'
+import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import { ResearchProjectStore } from '../src/research-store.ts'
 import { DEFAULT_MIGRATIONS_DIR } from '../src/store-resolver.ts'
 import { sanitizeFtsQuery, searchPriorBriefs } from '../src/vault-search.ts'

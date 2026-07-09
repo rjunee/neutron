@@ -22,7 +22,7 @@
  * `parseAndExecuteCodeCommand` in a `ChatCommandFilter` at the boot layer.
  */
 
-import type { Topic } from '../channels/types.ts'
+import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
 

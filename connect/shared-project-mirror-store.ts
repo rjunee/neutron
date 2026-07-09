@@ -17,7 +17,7 @@
  * been imported, when, with how many pages/edges, attributed to which author.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface SharedProjectMirrorRow {
   project_id: string

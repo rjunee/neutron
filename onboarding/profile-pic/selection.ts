@@ -24,7 +24,7 @@
 import {
   buildButtonPrompt,
   type ButtonPrompt,
-} from '../../channels/button-primitive.ts'
+} from '@neutronai/channels/button-primitive.ts'
 
 export const PORTRAIT_WAIT_PROMPT_BODY =
   'Your portraits are being painted (~30 sec). Tap a button below or wait — I will surface them when ready.'

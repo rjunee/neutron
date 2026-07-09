@@ -51,13 +51,13 @@
  *   - multi-instance admin (one instance per Expo session in v1).
  */
 
-import type { AppWsAuthResolver } from '../../channels/adapters/app-ws/auth.ts'
-import type { CoreInstallationsStore } from '../../cores/runtime/installations-store.ts'
-import type { MemoryStore } from '../../gbrain-memory/memory-store.ts'
+import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import type { MemoryStore } from '@neutronai/gbrain-memory/memory-store.ts'
 import type { ProjectBackupStore } from '../git/project-backup-store.ts'
 import { defaultEnumerateProjects } from '../projects/enumerate.ts'
 import { ownerSlugMismatch } from './auth-helpers.ts'
-import { PlatformOperationUnsupportedError, type PlatformAdapter } from '../../runtime/platform-adapter.ts'
+import { PlatformOperationUnsupportedError, type PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 /** Maximum number of GBrain entries returned by the browse endpoint. */
 export const MAX_MEMORY_RECENT = 20
@@ -666,7 +666,7 @@ async function handleMintReauthToken(input: MintReauthInput): Promise<Response> 
     // no I/O — pure URL parsing + allowlist checks), so this Open
     // surface no longer holds an open→managed edge. Dynamic import kept
     // for lazy-load parity with the prior shape.
-    const { validateReturnUrl } = await import('../../runtime/return-url-validator.ts')
+    const { validateReturnUrl } = await import('@neutronai/runtime/return-url-validator.ts')
     const validation = validateReturnUrl(rawReturnUrl, {
       extraHosts: input.extraReauthReturnHosts,
     })

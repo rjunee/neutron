@@ -49,10 +49,10 @@
  * silent success.
  */
 
-import type { AgentSpec, Substrate } from '../runtime/substrate.ts'
-import type { SessionHandle } from '../runtime/session-handle.ts'
+import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
-import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '../runtime/models.ts'
+import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
 export interface InnerLoopInput {
   run: TridentRun

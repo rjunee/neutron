@@ -19,9 +19,9 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import type { Substrate, AgentSpec } from '../../../runtime/substrate.ts'
-import type { Event } from '../../../runtime/events.ts'
-import type { SessionHandle } from '../../../runtime/session-handle.ts'
+import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ConversationRecord } from '../../history-import/types.ts'
 import type { ProjectModel } from '../types.ts'
 import { runDeterministicPrepass } from '../prepass.ts'

@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ProjectDb } from '../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /**
  * Locked enum of every onboarding-domain event name. Adding a new event
@@ -611,7 +611,7 @@ export function buildStdoutEventLogger(write: (s: string) => void = (s) => {
  * shape evolves (e.g. adding user_id to the keying scheme later).
  */
 export function buildProductionOnboardingTelemetry(input: {
-  db: import('../../persistence/index.ts').ProjectDb
+  db: import('@neutronai/persistence/index.ts').ProjectDb
   eventLogger?: EventLogger
 }): OnboardingTelemetry {
   const deps: OnboardingTelemetryDeps = { db: input.db }

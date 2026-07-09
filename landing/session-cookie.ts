@@ -27,7 +27,7 @@
  */
 
 import { createHmac } from 'node:crypto'
-import { constantTimeEqual } from '../runtime/constant-time-equal.ts'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 
 /** Cookie name shared across the platform proxy + per-instance gateway. */
 export const SESSION_COOKIE_NAME = '__neutron_chat_session'

@@ -19,8 +19,8 @@
  * once at composition time and stops worrying about it.
  */
 
-import type { ProjectDb } from '../persistence/index.ts'
-import { ReminderStore, type Reminder } from '../reminders/store.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ReminderStore, type Reminder } from '@neutronai/reminders/store.ts'
 import type {
   Task,
   TaskMutationEvent,

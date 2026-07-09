@@ -75,7 +75,7 @@ import {
   type Task,
 } from '@neutronai/tasks'
 
-import type { ProjectDb } from '../../../../persistence/index.ts'
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { CORE_PACKAGE_NAME } from './manifest.ts'
 

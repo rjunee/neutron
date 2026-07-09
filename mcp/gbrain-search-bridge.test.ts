@@ -18,9 +18,9 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { ToolRegistry } from '../tools/registry.ts'
-import { registerGBrainSearchToolSurface } from '../gbrain-memory/agent-tool.ts'
-import type { MemoryStore } from '../gbrain-memory/memory-store.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { registerGBrainSearchToolSurface } from '@neutronai/gbrain-memory/agent-tool.ts'
+import type { MemoryStore } from '@neutronai/gbrain-memory/memory-store.ts'
 import { registerNeutronToolsSurface } from './surfaces/neutron-tools.ts'
 import { McpServer } from './server.ts'
 

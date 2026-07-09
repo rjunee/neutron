@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exportJWK, generateKeyPair, type KeyLike } from 'jose'
 import { boot } from './index.ts'
-import { JwksCache, type FetchLike } from '../jwt-validator/index.ts'
+import { JwksCache, type FetchLike } from '@neutronai/jwt-validator/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 interface KeyMaterial {
