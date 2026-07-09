@@ -83,7 +83,8 @@ import { buildGatewayAnthropicMessagesClient } from '@neutronai/gateway/realmode
 import { buildProjectOpeningMessageComposer } from '@neutronai/gateway/realmode-composer/build-project-opening-message.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 import { DocSearchIndex } from '@neutronai/doc-search/store.ts'
 import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
@@ -861,6 +862,19 @@ export function buildOpenGraphComposer(
       env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] ?? `open-ephemeral-${internal_handle}`
     const startTokenAuth = buildLocalStartTokenAuth(cookieSecret)
 
+    // S0 security quick-patch (b) — per-boot app-ws token. The React client's
+    // historical default bearer was the guessable public constant `dev:<owner>`
+    // (chat-react/config.ts), so any web page the owner visited could open
+    // `ws://127.0.0.1:7800/ws/app/chat?token=dev:owner`. Mint a fresh random
+    // token EACH BOOT, inject it into the served page bootstrap
+    // (`window.__neutron_app_ws_token`, owner-gate), and require it on the WS
+    // upgrade for any browser-origin connection (app-ws-surface). A token from a
+    // previous boot no longer matches, so it can never re-authenticate. Native
+    // clients (Expo/CLI — no Origin header) are exempt and keep the localhost-
+    // trust bearer path. This is the S0 quick-patch; S1 replaces it with a
+    // per-INSTALL credential required on every /api/app/* surface.
+    const appWsToken = `nbt_${randomBytes(24).toString('base64url')}`
+
     // FIX 2 (P2 follow-up to #84) — ONE shared single-use store for start-token
     // JTIs. With the legacy `/ws/chat` onboarding socket deleted, the start
     // token is now consumed ONLY at the HTTP `/chat?start=` cookie-mint gate
@@ -1201,6 +1215,7 @@ export function buildOpenGraphComposer(
       consumedTokens,
       landing,
       readProjectRows,
+      appWsToken,
     })
 
     // ── Sidebar topic-rail surface (`GET /api/v1/chat/topics`) ─────────────
@@ -1429,6 +1444,14 @@ export function buildOpenGraphComposer(
       return {
         mode: base.mode,
         resolve: async (token) => {
+          // S0 (b) — the per-boot app-ws token resolves directly to the owner.
+          // This is the credential the web client now presents (injected into
+          // the page bootstrap); the WS upgrade already constant-time-checked it
+          // for browser origins, but the resolver must ALSO map it to the owner
+          // identity so both the WS and the /api/app/* bearer path accept it.
+          if (constantTimeEqual(token, appWsToken)) {
+            return { user_id: OWNER_USER_ID, project_slug, mode: base.mode as 'dev-bypass' }
+          }
           const resolved = await base.resolve(token)
           if ('code' in resolved) return resolved
           if (resolved.user_id !== OWNER_USER_ID) {
@@ -2332,6 +2355,7 @@ export function buildOpenGraphComposer(
       scribeOnUserTurn,
       chatCommandFilter,
       appOwnerAuth,
+      appWsToken,
       landing,
       emitProjectsChangedIfChanged,
       buildProjectsChangedFrame,

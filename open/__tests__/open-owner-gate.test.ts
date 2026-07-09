@@ -124,6 +124,7 @@ function makeGate(
     consumedTokens: new InMemoryConsumedTokens(),
     landing: overrides.landing ?? makeLanding(),
     readProjectRows: overrides.readProjectRows ?? ((): ProjectRailRow[] => SAMPLE_ROWS),
+    appWsToken: 'nbt_test_token',
   }
   const { openFetch } = buildOpenOwnerGate(makeCtx(overrides.env), deps)
   return { openFetch, startTokenAuth }
@@ -200,6 +201,17 @@ describe('owner gate — React shell bootstrap injection', () => {
     // … immediately before the preserved shell tag.
     expect(body).toContain(REACT_SHELL_TAG)
     expect(body.indexOf('window.__neutron_projects=')).toBeLessThan(body.indexOf(REACT_SHELL_TAG))
+  })
+
+  test('S0 (b) — injects the per-boot app-ws token so the client presents it (not dev:owner)', async () => {
+    const { openFetch, startTokenAuth } = makeGate()
+    const token = startTokenAuth.mint({ project_slug: PROJECT_SLUG, user_id: OWNER_USER_ID })
+    const res = await openFetch(getReq(`/chat?start=${encodeURIComponent(token)}`), FAKE_SERVER)
+    const body = await res.text()
+    // The per-boot token is injected as the client's bearer source; it lands
+    // before the preserved shell tag alongside the other bootstrap globals.
+    expect(body).toContain('window.__neutron_app_ws_token="nbt_test_token"')
+    expect(body.indexOf('window.__neutron_app_ws_token=')).toBeLessThan(body.indexOf(REACT_SHELL_TAG))
   })
 
   test('the !html.includes(/chat-react.js) guard no-ops when the tag is absent', async () => {

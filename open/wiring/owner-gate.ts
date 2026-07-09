@@ -93,6 +93,14 @@ export interface WireOwnerGateDeps {
    * threaded here as the READER the page bootstrap injection consumes.
    */
   readProjectRows: () => ProjectRailRow[]
+  /**
+   * S0 security quick-patch (b) — the per-boot app-ws token, minted once per
+   * boot by the composer. Injected into the served `/chat` bootstrap as
+   * `window.__neutron_app_ws_token` so the React client presents it (instead of
+   * the guessable `dev:<owner>` default) on the WS upgrade + every /api/app/*
+   * bearer call. A fresh boot mints a fresh token, invalidating any prior one.
+   */
+  appWsToken: string
 }
 
 export interface WiredOwnerGate {
@@ -130,7 +138,8 @@ export function buildOpenOwnerGate(
   deps: WireOwnerGateDeps,
 ): WiredOwnerGate {
   const { db, env, project_slug } = ctx
-  const { cookieSecret, startTokenAuth, consumedTokens, landing, readProjectRows } = deps
+  const { cookieSecret, startTokenAuth, consumedTokens, landing, readProjectRows, appWsToken } =
+    deps
 
   // Mint a fresh owner cookie + one-shot local start-token and 302 to the
   // PROVEN cold-start path (/chat?start=<token> → engine.start → first
@@ -193,9 +202,14 @@ export function buildOpenOwnerGate(
     // `/ws/app/chat`. Inject the owner identity explicitly so the client
     // derives `userId` (→ its default `dev:<owner>` app-ws bearer, the one our
     // owner-restricted resolver accepts) and connects.
+    // S0 (b) — inject the per-boot app-ws token. The client reads
+    // `window.__neutron_app_ws_token` (chat-react/config.ts) and presents it as
+    // its WS + /api/app/* bearer, REPLACING the guessable `dev:<owner>` default.
+    // A page from a previous boot carries a stale token the server now rejects.
     return (
       `<script>window.__neutron_user_id=${enc(OWNER_USER_ID)};` +
       `window.__neutron_projects=${enc(projects)};` +
+      `window.__neutron_app_ws_token=${enc(appWsToken)};` +
       `window.__neutron_active_project_id=${active};</script>`
     )
   }
