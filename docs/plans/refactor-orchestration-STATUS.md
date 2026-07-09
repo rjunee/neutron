@@ -14,7 +14,8 @@ land — it is what a fresh context reads to resume without re-deriving anything
 - **Driver:** this orchestrator session — Opus 4.8, `/effort high`, ultracode OFF.
   High-judgment/low-token: adjudicates diff-vs-acceptance, reconciles line-drift, ticks
   §17, merges. Building is delegated to per-unit worktree agents on routed models.
-- **main HEAD:** `6983738` (C3d #278 merged 2026-07-08; FINAL `open/composer.ts` carve → `open/wiring/{late,app-ws}.ts`, `late<T>` holder seams + typed `OpenComposition` return, Codex APPROVE clean — **C3 CHAIN COMPLETE:** composer 4015→2681 lines, 8 `open/wiring/*` leaves) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **main HEAD:** `1422707` (L5 #280 merged 2026-07-09; relative cross-workspace imports → `@neutronai/*` specifiers, 1854 static + ~233 `import()` type-query rewrites, eslint `import/no-relative-packages` + TS resolver + `scripts/ci/type-query-check.mjs` gates wired into CI — **L-PHASE COMPLETE (L1–L7)**) — **WAVE 0 COMPLETE** (G1–G10 + W0) + **WAVE 1 (K = kill / deletions):**
+- **⚡ FABLE WINDOW (2026-07-09 → ~07-11):** Ryan directive — Fable free, so route refactor build+analysis to `fable` + MAXIMIZE PARALLELIZATION (fan out 4-6 disjoint-file units concurrently, up from cap-3; merge stays serial). See [[refactor-fable-window-2026-07-09]]. IN FLIGHT (analysis, read-only): 2 Fable agents — (a) cross-phase parallelization/lane map + spec re-anchoring (composer line-drift), (b) M1/M2/M3 Managed cross-repo feasibility. Fan out the first concurrent build batch off their output.
   K1,K2,K3,K4a,K5,K6,K7,K8,K9 merged. **✅ K11b1 DONE (the crown jewel — ~35k LOC of dead
   onboarding conversational-drive excised):** landed as THREE PRs — **#240 K11b0** (dead ChatBridge
   prerequisite), **#242 K11a6-completion** (re-anchor ~60 drive tests → survivors + DIE manifest),
@@ -415,13 +416,28 @@ composition bug) → fix-loop → rebase onto main + `typecheck-all.sh` → CI g
    & Required<Pick<…33 unconditional surfaces>>` (excludes the 5 LLM-less-omitted: `doc_search`,
    `import_resume_handler`, `trident`, `trident_build_dispatch`, `agent_dispatch`) + a `@ts-expect-error`
    proving a dropped surface fails compile. **Codex APPROVE, no findings.** composer −837.
-11. **IN FLIGHT:** L5 (relative-import autofix sweep — dispatched, `sonnet` routed-up for the 795-change purity
-   verification).
-12. **Next dispatchable:** **L5** (IN FLIGHT — eslint `import/no-relative-packages` autofix, `../<workspace>/…`
-   → `@neutronai/<workspace>/…`, ~795 escapes, PURE-RENAME, one PR, suite green, CI rule enforced; care:
-   env-at-load modules keep import positions). After L5 the **L-phase is DONE** (L1-L7). Then the C-phase tail
-   (**C4** data-driven surface registry → **C5** auth-gate seam → **C6** cred-resolver → **C7** rename →
-   **C8**) and waves 4-9. **M1/M2** = Managed (cross-repo, deferred). **K10 strictly LAST (wave 9).**
+11. **L5** ✅ #280 (**L-PHASE COMPLETE**). Sweep grew from the plan's ~795 estimate to **1854 static +
+   ~233 `import()` type-query** cross-workspace relative imports → `@neutronai/*` specifiers. Added root
+   `eslint.config.mjs` (`import/no-relative-packages`) + `eslint-import-resolver-typescript` (so the rule
+   resolves extensionless `.ts` specifiers) + `scripts/ci/type-query-check.mjs` (a comment/string-aware
+   whole-body scanner for the `import('../pkg/x')` type-query form the ESLint rule can't see), both wired into
+   `scripts/ci/lint.sh` + the CI lint step. 5 `package.json` manifest-honesty deps added; 2 source-text
+   guardrail tests repointed ([[refactor-lphase-source-text-guardrail-trap]]). **Codex 3 rounds:** r1 = the
+   two gate holes (extensionless + type-query) → resolver + type-query gate; r2 = the gate scanned line-by-line
+   so a multiline `import(\n'..'\n)` evaded it → rewrote to a string-aware char state machine + whole-body scan;
+   r3 APPROVE. Orchestrator caught 1 real WIP regression on resume (a `connect/agent-engagement` rewrite missing
+   the `.ts` the `./*` exports map needs — matrix caught it). Delivered across a machine-restart pause: WIP was
+   committed locally as a checkpoint, then verified+finished on resume. Lesson: **run the FULL gate set on any
+   resumed WIP before trusting it — an unverified checkpoint had a real matrix-breaking regression.**
+12. **⚡ IN FLIGHT (Fable window — analysis, read-only, conflict-free):** 2 `fable` agents — (a) parallelization/
+   lane map: which remaining units are file-disjoint → concurrent batches + spec re-anchoring for the composer
+   line-drift; (b) M1/M2/M3 Managed cross-repo feasibility + pull-forward adjudication.
+13. **Next (parallel build wave):** off the parallelization map, fan out the first **4–6 concurrent** disjoint-file
+   build units, default model **`fable`** (opus for delicate/security carves, haiku for trivial sweeps). Likely
+   C-tail (**C4** data-driven surface registry → **C5** → **C6** → **C7** → **C8** — composer-lane serial where
+   they share `gateway/composition.ts`/`compose.ts`) PLUS independent phases (**D** data, **P**, **F1–F8**, **O**,
+   **X**, **N**, **S**) that touch disjoint subsystems. Merge stays SERIAL (rebase + Codex + gates each). **M1/M2**
+   Managed = per the Fable M-phase report. **K10 strictly LAST (wave 9).**
 
 **Then waves 3–9** (C → D → P → O → X → W → M → N → S) per §16. K10 strictly LAST (wave 9).
 
