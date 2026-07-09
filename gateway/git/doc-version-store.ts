@@ -65,6 +65,9 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
+import { createKeyedMutex } from '../http/keyed-mutex.ts'
+import type { KeyedMutex } from '../http/keyed-mutex.ts'
+
 const execFileAsync = promisify(execFile)
 
 /**
@@ -325,8 +328,8 @@ export class DocVersionStore {
   /** Per-project init guard so concurrent first-writes share one init. */
   private readonly initLocks = new Map<string, Promise<void>>()
 
-  /** Per-project commit mutex tail (chained promise per project id). */
-  private readonly commitMutexes = new Map<string, Promise<void>>()
+  /** Per-project commit mutex (shared keyed-mutex — D4 adoption). */
+  private readonly commitMutex: KeyedMutex = createKeyedMutex()
 
   constructor(opts: DocVersionStoreOptions) {
     this.owner_home = opts.owner_home
@@ -825,38 +828,22 @@ export class DocVersionStore {
   /**
    * Per-project commit mutex. Serializes the entire `add → commit`
    * step so concurrent writes to different paths don't race on
-   * `.docs-versions/index`. Chains promises rather than spinning a
-   * Mutex class.
+   * `.docs-versions/index`.
+   *
+   * D4 (refactor plan 2026-07-02): the hand-rolled chained-promise map
+   * that used to live here was the MODEL for the generic
+   * `gateway/http/keyed-mutex.ts` (see that file's header); this now
+   * delegates to the shared implementation. Semantics are identical —
+   * per-`project_id` granularity, arrival-order FIFO, release-on-throw,
+   * reference-equality map cleanup — pinned by the "D4 — commit lock"
+   * tests in `gateway/__tests__/doc-version-store.test.ts`, which were
+   * written against (and pass against) the pre-swap implementation.
    */
   private async withCommitLock<T>(
     project_id: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const previous = this.commitMutexes.get(project_id) ?? Promise.resolve()
-    let release!: () => void
-    const released = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    // Chain: this task waits on the previous tail; the new tail is the
-    // chained promise that resolves only once THIS task's `release()`
-    // fires. Capture the tail in a single variable so the cleanup
-    // check below can compare by reference instead of building a
-    // second (non-identical) chain.
-    const tail = previous.then(() => released)
-    this.commitMutexes.set(project_id, tail)
-    await previous
-    try {
-      return await fn()
-    } finally {
-      release()
-      // Only drop the map entry if no later caller has chained onto
-      // OUR tail in the meantime. The reference check is safe because
-      // `tail` is the exact promise we wrote into the map a moment
-      // ago.
-      if (this.commitMutexes.get(project_id) === tail) {
-        this.commitMutexes.delete(project_id)
-      }
-    }
+    return this.commitMutex.withLock(project_id, fn)
   }
 
   /** Resolved `.docs-versions/` for a project. */
