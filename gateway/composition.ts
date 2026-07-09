@@ -28,6 +28,7 @@ import {
   type ComposedHttpHandler,
   type ComposeHttpHandlerInput,
 } from './http/compose.ts'
+import { buildComposeSurfaces, hasAnyChainedSurface } from './http/route-slots.ts'
 import { buildCoreModules } from './composition/build-core-modules.ts'
 import { wireCoresSurfaces } from './composition/wire-cores-surfaces.ts'
 import { wireConnectOverlay } from './composition/wire-connect-overlay.ts'
@@ -133,167 +134,33 @@ async function buildComposedHttpFromComposition(
 
   const defaultHandler: CompositionHttpHandler =
     composition.default_handler ?? (() => new Response('Not Found', { status: 404 }))
-  const composeInput: ComposeHttpHandlerInput = { defaultHandler }
-  if (composition.landing_server !== undefined) {
-    composeInput.landing = composition.landing_server
+
+  // C4 — the `CompositionInput → composeInput` surface mapping AND the
+  // build-the-chain-at-all gate are GENERATED from the ordered RouteSlot
+  // registry (`gateway/http/route-slots.ts`), the same source the ladder in
+  // `composeHttpHandler` walks. One registration entry per surface.
+  //
+  // Build the chain only if the caller supplied at least one chain-gating
+  // surface; otherwise return null so the boot shell stays on its dev
+  // `/healthz`-only handler (legacy `bun run gateway/index.ts`).
+  if (!hasAnyChainedSurface(composition)) return null
+
+  const composeInput: ComposeHttpHandlerInput = {
+    defaultHandler,
+    ...buildComposeSurfaces(composition),
   }
-  if (composition.telegram_webhook !== undefined) {
-    composeInput.telegramWebhookHandler = composition.telegram_webhook.handler
-  }
+  // The two non-rung promotions stay explicit here:
+  //   - `connectHandler` carries the Managed-only dynamic import above;
   if (connectHandler !== undefined) {
     composeInput.connectHandler = connectHandler
   }
-  if (composition.internal_cache_invalidate !== undefined) {
-    composeInput.internalCacheInvalidateHandler = composition.internal_cache_invalidate
-  }
-  if (composition.slug_check_handler !== undefined) {
-    composeInput.slugCheckHandler = composition.slug_check_handler
-  }
-  if (composition.admin_respawn_handler !== undefined) {
-    composeInput.adminRespawn = { handler: composition.admin_respawn_handler }
-  }
-  if (composition.chat_history_surface !== undefined) {
-    composeInput.chatHistory = { handler: composition.chat_history_surface.handler }
-  }
-  if (composition.chat_topics_surface !== undefined) {
-    composeInput.chatTopics = { handler: composition.chat_topics_surface.handler }
-  }
-  if (composition.avatar_handler !== undefined) {
-    composeInput.avatarHandler = composition.avatar_handler
-  }
-  if (composition.candidate_handler !== undefined) {
-    composeInput.candidateHandler = composition.candidate_handler
-  }
-  if (composition.import_upload_handler !== undefined) {
-    composeInput.importUploadHandler = composition.import_upload_handler
-  }
-  if (composition.chunked_upload_handler !== undefined) {
-    composeInput.chunkedUploadHandler = composition.chunked_upload_handler
-  }
-  if (composition.import_resume_handler !== undefined) {
-    composeInput.importResumeHandler = composition.import_resume_handler
-  }
-  if (composition.app_ws_surface !== undefined) {
-    composeInput.appWs = {
-      handler: composition.app_ws_surface.handler,
-      websocket: composition.app_ws_surface.websocket,
-    }
-  }
-  if (composition.app_upload_surface !== undefined) {
-    composeInput.appUpload = { handler: composition.app_upload_surface.handler }
-  }
-  if (composition.app_launcher_surface !== undefined) {
-    composeInput.appLauncher = { handler: composition.app_launcher_surface.handler }
-  }
-  if (composition.app_tasks_surface !== undefined) {
-    composeInput.appTasks = { handler: composition.app_tasks_surface.handler }
-  }
-  if (composition.app_reminders_surface !== undefined) {
-    composeInput.appReminders = { handler: composition.app_reminders_surface.handler }
-  }
-  if (composition.app_projects_surface !== undefined) {
-    composeInput.appProjects = { handler: composition.app_projects_surface.handler }
-  }
-  if (composition.app_connect_auth_surface !== undefined) {
-    composeInput.appConnectAuth = {
-      handler: composition.app_connect_auth_surface.handler,
-    }
-  }
-  if (composition.app_focus_surface !== undefined) {
-    composeInput.appFocus = { handler: composition.app_focus_surface.handler }
-  }
-  if (composition.app_focus_current_surface !== undefined) {
-    composeInput.appFocusCurrent = {
-      handler: composition.app_focus_current_surface.handler,
-    }
-  }
-  if (composition.app_admin_surface !== undefined) {
-    composeInput.appAdmin = { handler: composition.app_admin_surface.handler }
-  }
-  if (composition.app_persona_surface !== undefined) {
-    composeInput.appPersona = { handler: composition.app_persona_surface.handler }
-  }
-  if (composition.app_devices_surface !== undefined) {
-    composeInput.appDevices = { handler: composition.app_devices_surface.handler }
-  }
-  if (composition.app_docs_surface !== undefined) {
-    composeInput.appDocs = { handler: composition.app_docs_surface.handler }
-  }
-  if (composition.app_tabs_surface !== undefined) {
-    composeInput.appTabs = { handler: composition.app_tabs_surface.handler }
-  }
-  if (composition.app_work_board_surface !== undefined) {
-    composeInput.appWorkBoard = { handler: composition.app_work_board_surface.handler }
-  }
-  if (composition.app_project_credentials_surface !== undefined) {
-    composeInput.appProjectCredentials = {
-      handler: composition.app_project_credentials_surface.handler,
-    }
-  }
-  if (composition.app_codex_credential_surface !== undefined) {
-    composeInput.appCodexCredential = {
-      handler: composition.app_codex_credential_surface.handler,
-    }
-  }
-  if (composition.app_backups_surface !== undefined) {
-    composeInput.appBackups = {
-      handler: composition.app_backups_surface.handler,
-    }
-  }
-  if (composition.cores_surface !== undefined) {
-    composeInput.cores = { handler: composition.cores_surface.handler }
-  }
-  if (composition.cores_oauth_surface !== undefined) {
-    composeInput.coresOAuth = { handler: composition.cores_oauth_surface.handler }
-  }
-  if (composition.cores_integrations_surface !== undefined) {
-    composeInput.coresIntegrations = {
-      handler: composition.cores_integrations_surface.handler,
-    }
-  }
+  //   - the auth gate wraps the whole ladder rather than being a rung of it.
+  //     2026-05-27 returning-user resume sprint — every gated route in the
+  //     per-instance gateway runs through `landing/auth-gate.ts` before
+  //     dispatching to landing / app / cores surfaces.
   if (composition.auth_gate !== undefined) {
-    // 2026-05-27 returning-user resume sprint — every gated route in
-    // the per-instance gateway runs through `landing/auth-gate.ts` before
-    // dispatching to landing / app / cores surfaces.
     composeInput.authGate = composition.auth_gate
   }
-
-  // Build the chain only if the caller supplied at least one
-  // surface; otherwise return null so the boot shell stays on its
-  // dev `/healthz`-only handler (legacy `bun run gateway/index.ts`).
-  const hasAnyChainedSurface =
-    composition.landing_server !== undefined ||
-    composition.telegram_webhook !== undefined ||
-    composition.connect_api !== undefined ||
-    composition.internal_cache_invalidate !== undefined ||
-    composition.slug_check_handler !== undefined ||
-    composition.admin_respawn_handler !== undefined ||
-    composition.avatar_handler !== undefined ||
-    composition.candidate_handler !== undefined ||
-    composition.import_upload_handler !== undefined ||
-    composition.chunked_upload_handler !== undefined ||
-    composition.app_ws_surface !== undefined ||
-    composition.app_upload_surface !== undefined ||
-    composition.app_launcher_surface !== undefined ||
-    composition.app_tasks_surface !== undefined ||
-    composition.app_reminders_surface !== undefined ||
-    composition.app_projects_surface !== undefined ||
-    composition.app_connect_auth_surface !== undefined ||
-    composition.app_focus_surface !== undefined ||
-    composition.app_focus_current_surface !== undefined ||
-    composition.app_admin_surface !== undefined ||
-    composition.app_persona_surface !== undefined ||
-    composition.app_devices_surface !== undefined ||
-    composition.app_docs_surface !== undefined ||
-    composition.app_tabs_surface !== undefined ||
-    composition.app_work_board_surface !== undefined ||
-    composition.app_project_credentials_surface !== undefined ||
-    composition.app_codex_credential_surface !== undefined ||
-    composition.app_backups_surface !== undefined ||
-    composition.cores_surface !== undefined ||
-    composition.cores_oauth_surface !== undefined ||
-    composition.cores_integrations_surface !== undefined
-  if (!hasAnyChainedSurface) return null
   return composeHttpHandler(composeInput)
 }
 
