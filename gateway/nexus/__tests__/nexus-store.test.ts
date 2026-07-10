@@ -687,6 +687,28 @@ describe('NexusStore — readRecent filtering', () => {
     ).rejects.toThrow(NexusStoreError)
   })
 
+  it('invalid readRecent options rejected BEFORE the sidecar is created', async () => {
+    // Same amplification guard as appendEvent — validation precedes
+    // openHandle (Codex). Fresh project id, never otherwise touched.
+    const fresh = 'read-never-init'
+    const dir = join(h.owner_home, 'Projects', fresh)
+    await expect(
+      h.store.readRecent(fresh, { kinds: ['verdict' as NexusEventKind] }),
+    ).rejects.toThrow(NexusStoreError)
+    await expect(
+      h.store.readRecent(fresh, { since: Number.NaN }),
+    ).rejects.toThrow(NexusStoreError)
+    await expect(
+      h.store.readRecent(fresh, null as unknown as Parameters<typeof h.store.readRecent>[1]),
+    ).rejects.toThrow(NexusStoreError)
+    await expect(
+      h.store.readRecent(fresh, {
+        kinds: 'decision' as unknown as NexusEventKind[],
+      }),
+    ).rejects.toThrow(NexusStoreError)
+    expect(existsSync(dir)).toBe(false)
+  })
+
   it('since = 0 is a real (inclusive) filter, not treated as absent', async () => {
     await seed() // created_at values 2000..6000
     const events = await h.store.readRecent(PROJECT_ID, { since: 0 })

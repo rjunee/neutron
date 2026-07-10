@@ -402,8 +402,17 @@ export class NexusStore {
     project_id: string,
     opts: ReadRecentOptions = {},
   ): Promise<AgentNexusEvent[]> {
-    const handle = await this.openHandle(project_id)
+    // Validate ALL options BEFORE opening the handle — like appendEvent,
+    // `openHandle` creates + migrates the sidecar on first touch, so a
+    // stream of rejected reads on distinct project_ids would otherwise
+    // spawn unbounded .nexus/ dbs (Codex).
+    if (typeof opts !== 'object' || opts === null || Array.isArray(opts)) {
+      throw new NexusStoreError('invalid_input', 'readRecent options must be an object')
+    }
     const limit = clampLimit(opts.limit, 50, 500)
+    if (opts.kinds !== undefined && !Array.isArray(opts.kinds)) {
+      throw new NexusStoreError('invalid_event_kind', 'kinds must be an array')
+    }
     const kinds = opts.kinds ?? []
     for (const k of kinds) {
       if (!isNexusEventKind(k)) {
@@ -413,7 +422,17 @@ export class NexusStore {
         )
       }
     }
+    if (opts.since !== undefined && !Number.isFinite(opts.since)) {
+      // `since` reaches SQLite as a bound parameter; a non-finite value
+      // (NaN/Infinity from an untyped caller) would bind as NULL and
+      // silently drop the filter, so reject it with a typed error.
+      throw new NexusStoreError(
+        'invalid_since',
+        'since must be a finite ms-epoch number',
+      )
+    }
 
+    const handle = await this.openHandle(project_id)
     const conditions: string[] = []
     const params: Array<string | number> = []
     if (kinds.length > 0) {
@@ -421,15 +440,6 @@ export class NexusStore {
       params.push(...kinds)
     }
     if (opts.since !== undefined) {
-      // `since` reaches SQLite as a bound parameter; a non-finite value
-      // (NaN/Infinity from an untyped caller) would bind as NULL and
-      // silently drop the filter, so reject it with a typed error.
-      if (!Number.isFinite(opts.since)) {
-        throw new NexusStoreError(
-          'invalid_since',
-          'since must be a finite ms-epoch number',
-        )
-      }
       conditions.push('created_at >= ?')
       params.push(opts.since)
     }
