@@ -42,6 +42,7 @@ import {
   readString,
   readStringArray,
 } from './engine-internals.ts'
+import { autoConfirmProjectsProposedAndAdvance } from './engine-projects-proposed.ts'
 
 /**
  * P2 v2 § 3.10 / S7 — `agent_name_chosen` handler. Captures the
@@ -226,7 +227,8 @@ export async function consumeAgentNameChosenChoice(
       // redundant projects_proposed approval gate that #93 removed. The
       // zero-state guard inside the helper re-emits the "share your work"
       // prompt when there is no reviewed list to collapse.
-      return await self.autoConfirmProjectsProposedAndAdvance(
+      return await autoConfirmProjectsProposedAndAdvance(
+        self,
         input,
         open_advanced,
         observed_at,

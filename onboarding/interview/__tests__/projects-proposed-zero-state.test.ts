@@ -25,7 +25,7 @@ import {
   PROJECTS_PROPOSED_SKIP_AHEAD,
 } from '../phase-prompts.ts'
 
-import { splitFreeformProjectList } from '../engine.ts'
+import { splitFreeformProjectList } from '../engine-projects-proposed.ts'
 
 describe('buildProjectsProposedPromptSpec — zero-state buttons', () => {
   test('zero projects emits share_work + skip_ahead buttons', () => {
