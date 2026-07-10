@@ -19,12 +19,16 @@
 --
 -- BOOT REAP (the behaviour this unlocks — `runtime/subagent/boot-sweep.ts`):
 -- on startup, every row still `pending`|`running` was left in-flight by a PRIOR
--- process that has since died. The boot sweep marks each `crashed` (persisting
--- the terminal status so a second boot is idempotent — it fires exactly once)
--- and FIRES THE REPORT SINK for it, so a restart SURFACES the orphaned dispatch
--- on the same report-back surface a clean completion uses, instead of vanishing
--- it. It does NOT re-hydrate the record as live — the spec is "surface, don't
--- resume."
+-- process that has since died. The boot sweep FIRES THE REPORT SINK for each
+-- (the same report-back surface a clean completion uses) and THEN — only after
+-- the report was delivered — marks the row `crashed`, persisting the terminal
+-- status so later boots skip it. Report-first / commit-second is deliberate:
+-- the commit is what hides a row from every later `loadLive()`, so committing
+-- before a successful delivery would let a thrown sink lose the orphan forever.
+-- The result is at-least-once delivery (happy path: exactly once; a failed
+-- report leaves the row live so the NEXT boot retries) — the orphan is
+-- SURFACED, never vanished. It does NOT re-hydrate the record as live — the
+-- spec is "surface, don't resume."
 --
 -- DELIBERATELY NOT PERSISTED — the orphan-detection dedup sets:
 --   The Trident orchestrator's per-process `fired`/`redispatched` sets

@@ -178,22 +178,49 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     expect(fired2).toHaveLength(0)
   })
 
-  test('a sink that throws does not abort the sweep nor un-crash the row', async () => {
+  test('a failed report leaves the orphan LIVE so a later boot retries — never vanishes', async () => {
+    // The report-first / commit-second guarantee (Blocker fix): a thrown sink
+    // must not commit the row terminal, or the orphan would vanish from every
+    // later loadLive() and never be re-reported.
     const store = new SubagentRegistryStore(db)
     const reg = new SubagentRegistry(store)
     reg.create(dispatchInput({ run_id: 'boom' }))
     reg.update('boom', { status: 'running' })
 
-    const swept = await sweepOrphanedDispatchesOnBoot({
+    // Boot 1: the sink throws → the row stays LIVE, nothing surfaced.
+    const swept1 = await sweepOrphanedDispatchesOnBoot({
       store: new SubagentRegistryStore(db),
       report: () => {
         throw new Error('sink down')
       },
       now: () => 1,
     })
-    expect(swept.map((r) => r.run_id)).toEqual(['boom'])
-    // Still recorded terminal despite the sink throwing.
+    expect(swept1).toHaveLength(0)
+    expect(store.get('boom')?.status).toBe('running') // NOT vanished — still reap-able
+
+    // Boot 2: a working sink → delivered exactly once, now committed terminal.
+    const fired: string[] = []
+    const swept2 = await sweepOrphanedDispatchesOnBoot({
+      store: new SubagentRegistryStore(db),
+      report: (rec) => {
+        fired.push(rec.run_id)
+      },
+      now: () => 2,
+    })
+    expect(fired).toEqual(['boom'])
+    expect(swept2.map((r) => r.run_id)).toEqual(['boom'])
     expect(store.get('boom')?.status).toBe('crashed')
+
+    // Boot 3: idempotent — the delivered orphan does not re-fire.
+    const fired3: string[] = []
+    await sweepOrphanedDispatchesOnBoot({
+      store: new SubagentRegistryStore(db),
+      report: (rec) => {
+        fired3.push(rec.run_id)
+      },
+      now: () => 3,
+    })
+    expect(fired3).toEqual([])
   })
 })
 
