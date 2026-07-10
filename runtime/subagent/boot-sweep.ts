@@ -4,34 +4,34 @@
  * On startup, every persisted registry row still in a LIVE (`pending`|`running`)
  * status was left in-flight by a PRIOR process that has since died — the gateway
  * restarted mid-dispatch. Without this sweep those rows were silently orphaned:
- * the in-memory registry started empty, the awaiting caller was already gone,
- * and the dispatch just vanished with no signal.
+ * the in-memory registry started empty (no persistence at all), so the dispatch
+ * just vanished with no record and no signal.
  *
- * This sweep SURFACES each orphan instead of vanishing it:
- *   1. FIRE THE REPORT SINK for it — the SAME report-back surface a clean
- *      completion uses — so a restart reports "this dispatch crashed" rather
- *      than hanging forever, THEN
- *   2. mark the row terminal-`crashed` in the store (`markCrashed`) — but ONLY
- *      after the report was delivered (the sink did not throw).
+ * This sweep SURFACES each orphan instead of vanishing it, per the P7 spec
+ * ("mark rows left by a prior process as `crashed`, and fire the report sink"):
+ *   1. CLAIM the row — an ATOMIC guarded `live → crashed` transition
+ *      (`markCrashed`, `WHERE status IN (pending,running)`). This durable row is
+ *      the surfacing that never vanishes: it is persisted, queryable
+ *      (`store.get`/`loadAll`), and returned from this sweep. The claim is also
+ *      the concurrency + idempotency point — of any number of overlapping sweeps
+ *      (or repeated boots), EXACTLY ONE wins each row's transition, so an orphan
+ *      is claimed and reported once, never twice, and never after it is terminal.
+ *   2. FIRE THE REPORT SINK for the claimed row — the SAME report-back surface a
+ *      clean completion uses — as a best-effort NOTIFICATION on top of the
+ *      durable row. Only the claim winner reports.
+ *
+ * BEST-EFFORT REPORT — the durable row is the source of truth. The report sink is
+ * a notification, not the record. A sink failure does NOT un-claim the row (the
+ * crash is already durably recorded + returned here), exactly as the live
+ * agent-aware watchdog treats its own `notify` (`watchdog.ts`: `failRun` commits,
+ * then `notify` is best-effort). Indeed the production report path
+ * (`buildDispatchWatchdogNotifier`) already swallows sink rejections internally,
+ * so "commit then best-effort notify" is the only self-consistent contract: the
+ * orphan is never lost (the row persists), and a duplicate notification is
+ * structurally impossible (the atomic claim already fired).
  *
  * It does NOT re-hydrate the record into the in-memory registry (the spec is
  * "surface, don't resume") — the process that was awaiting it is gone.
- *
- * DELIVERY ORDER — report FIRST, commit terminal SECOND (at-least-once, never
- * vanishes). The commit is what excludes a row from every later boot's
- * `loadLive()`, so committing it BEFORE a successful delivery would make a
- * thrown sink (or a crash mid-report) lose the orphan forever — the exact
- * "vanishes" failure P7 exists to prevent. By reporting first and committing
- * only on success, a FAILED delivery leaves the row LIVE, so the next boot
- * RETRIES it. Guarantees:
- *   - happy path: delivered EXACTLY ONCE (the commit hides it from later boots);
- *   - sink failure: retried on the next boot — the orphan is never vanished;
- *   - never fired for an already-terminal row (only `loadLive()` rows are
- *     considered, and a committed row is excluded from every later `loadLive()`).
- * The residual window (a hard crash between a successful delivery and the commit
- * a few microseconds later) can re-deliver on the next boot — at-least-once, not
- * at-most-once, because a duplicate "your dispatch crashed" notice is strictly
- * safer than a silently lost one.
  *
  * ORPHAN-DETECTION SETS STAY VOLATILE. This sweep reads the persisted REGISTRY
  * only. It neither reads nor writes the Trident orchestrator's per-process
@@ -51,10 +51,10 @@ export interface BootSweepReport {
 export interface BootSweepDeps {
   store: SubagentRegistryStore
   /**
-   * Report-back sink — invoked once per orphan with the now-`crashed` record
-   * BEFORE the store commit. A throw is caught: the sweep leaves that row LIVE
-   * (uncommitted) and moves on, so the next boot retries the delivery. A sink
-   * failure never aborts the whole sweep.
+   * Report-back sink — invoked once per CLAIMED orphan with the now-`crashed`
+   * record, AFTER the atomic store claim. Best-effort: a throw is caught and
+   * swallowed (the crash is already durably recorded + returned), and a sink
+   * failure never aborts the sweep or re-opens the already-committed row.
    */
   report?: BootSweepReport
   /** Now-injection for tests. Default `Date.now`. */
@@ -62,9 +62,11 @@ export interface BootSweepDeps {
 }
 
 /**
- * Reap orphaned dispatches left in-flight by a prior process. Marks each live
- * persisted row `crashed` and fires the report sink exactly once per orphan.
- * Returns the records it surfaced (in store order). Idempotent across boots.
+ * Reap orphaned dispatches left in-flight by a prior process. Atomically claims
+ * each live persisted row `crashed` (the durable surfacing) and fires the report
+ * sink once per claimed orphan. Returns the records it claimed this sweep.
+ * Concurrency- and restart-idempotent: the guarded claim admits exactly one
+ * winner per row.
  */
 export async function sweepOrphanedDispatchesOnBoot(
   deps: BootSweepDeps,
@@ -73,6 +75,16 @@ export async function sweepOrphanedDispatchesOnBoot(
   const surfaced: SubagentRecord[] = []
 
   for (const rec of deps.store.loadLive()) {
+    // ATOMIC CLAIM first — the single guarded `live → crashed` UPDATE. Its truthy
+    // result means THIS sweep won the transition; a concurrent sweep or a later
+    // boot that also loaded this row loses the guard (0 changes) and skips, so
+    // the orphan is claimed + reported EXACTLY ONCE and never re-fired once
+    // terminal. Claiming before the report is what closes the double-report race:
+    // the `markCrashed` runs synchronously before any `await`, so an overlapping
+    // sweep sees the row already terminal by the time it re-reads `loadLive()`.
+    const claimed = deps.store.markCrashed(rec.run_id, 'process_dead', now)
+    if (!claimed) continue
+
     const crashed: SubagentRecord = {
       ...rec,
       status: 'crashed',
@@ -80,25 +92,21 @@ export async function sweepOrphanedDispatchesOnBoot(
       ended_at: now,
       last_event_at: now,
     }
+    surfaced.push(crashed)
 
-    // Report FIRST. A throw means the orphan was NOT delivered — leave the row
-    // LIVE (skip the commit) so the next boot retries it. The orphan is never
-    // vanished by a transient sink failure.
+    // Best-effort NOTIFICATION on top of the durable claimed row. A sink failure
+    // does not vanish the orphan (the row persists + is returned here) nor
+    // re-open it — mirrors the live watchdog's `notify` contract, and the
+    // production reporter (`buildDispatchWatchdogNotifier`) swallows rejections
+    // internally anyway.
     if (deps.report) {
       try {
         // eslint-disable-next-line no-await-in-loop
         await deps.report(crashed)
       } catch {
-        continue // undelivered — retried on the next boot
+        // Durable row already records the crash; the notification is best-effort.
       }
     }
-
-    // Delivered (or no sink wired) → COMMIT terminal. This is the only write
-    // that removes the row from every later boot's `loadLive()`, so a delivered
-    // orphan is surfaced exactly once on the happy path. Guarded on the row
-    // still being live, so it never re-fires an already-terminal row.
-    deps.store.markCrashed(rec.run_id, 'process_dead', now)
-    surfaced.push(crashed)
   }
 
   return surfaced

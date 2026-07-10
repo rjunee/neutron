@@ -178,49 +178,64 @@ describe('(b) boot sweep marks prior-process in-flight rows crashed + fires repo
     expect(fired2).toHaveLength(0)
   })
 
-  test('a failed report leaves the orphan LIVE so a later boot retries — never vanishes', async () => {
-    // The report-first / commit-second guarantee (Blocker fix): a thrown sink
-    // must not commit the row terminal, or the orphan would vanish from every
-    // later loadLive() and never be re-reported.
+  test('a throwing sink is best-effort: the orphan is still durably claimed crashed, no throw escapes', async () => {
+    // The report is a NOTIFICATION on top of the durable claimed row. A sink
+    // failure must not abort the sweep nor un-claim the row — the crash is
+    // recorded in the store (the surfacing that never vanishes) and returned.
     const store = new SubagentRegistryStore(db)
     const reg = new SubagentRegistry(store)
     reg.create(dispatchInput({ run_id: 'boom' }))
     reg.update('boom', { status: 'running' })
 
-    // Boot 1: the sink throws → the row stays LIVE, nothing surfaced.
-    const swept1 = await sweepOrphanedDispatchesOnBoot({
+    const swept = await sweepOrphanedDispatchesOnBoot({
       store: new SubagentRegistryStore(db),
       report: () => {
         throw new Error('sink down')
       },
       now: () => 1,
     })
-    expect(swept1).toHaveLength(0)
-    expect(store.get('boom')?.status).toBe('running') // NOT vanished — still reap-able
-
-    // Boot 2: a working sink → delivered exactly once, now committed terminal.
-    const fired: string[] = []
-    const swept2 = await sweepOrphanedDispatchesOnBoot({
-      store: new SubagentRegistryStore(db),
-      report: (rec) => {
-        fired.push(rec.run_id)
-      },
-      now: () => 2,
-    })
-    expect(fired).toEqual(['boom'])
-    expect(swept2.map((r) => r.run_id)).toEqual(['boom'])
+    // Surfaced + durably crashed despite the sink throwing (best-effort notify).
+    expect(swept.map((r) => r.run_id)).toEqual(['boom'])
     expect(store.get('boom')?.status).toBe('crashed')
+    expect(store.get('boom')?.failure_reason).toBe('process_dead')
 
-    // Boot 3: idempotent — the delivered orphan does not re-fire.
-    const fired3: string[] = []
+    // A second boot does not re-fire (the atomic claim already committed).
+    const fired2: string[] = []
     await sweepOrphanedDispatchesOnBoot({
       store: new SubagentRegistryStore(db),
       report: (rec) => {
-        fired3.push(rec.run_id)
+        fired2.push(rec.run_id)
       },
-      now: () => 3,
+      now: () => 2,
     })
-    expect(fired3).toEqual([])
+    expect(fired2).toEqual([])
+  })
+
+  test('concurrent sweeps report a shared orphan EXACTLY ONCE (atomic claim admits one winner)', async () => {
+    // Codex boundary: two overlapping sweeps must not both report the same row.
+    // The claim (guarded UPDATE) runs synchronously before any await, so whichever
+    // sweep re-reads loadLive() second sees the row already terminal.
+    const store = new SubagentRegistryStore(db)
+    const reg = new SubagentRegistry(store)
+    reg.create(dispatchInput({ run_id: 'shared' }))
+    reg.update('shared', { status: 'running' })
+
+    const fired: string[] = []
+    const report = async (rec: SubagentRecord): Promise<void> => {
+      // Yield to let the other sweep interleave — a naive report-before-claim
+      // implementation would double-report here.
+      await Promise.resolve()
+      fired.push(rec.run_id)
+    }
+    const [a, b] = await Promise.all([
+      sweepOrphanedDispatchesOnBoot({ store: new SubagentRegistryStore(db), report, now: () => 7 }),
+      sweepOrphanedDispatchesOnBoot({ store: new SubagentRegistryStore(db), report, now: () => 7 }),
+    ])
+
+    // Reported once total; claimed by exactly one sweep.
+    expect(fired).toEqual(['shared'])
+    expect(a.length + b.length).toBe(1)
+    expect(store.get('shared')?.status).toBe('crashed')
   })
 })
 

@@ -19,16 +19,17 @@
 --
 -- BOOT REAP (the behaviour this unlocks — `runtime/subagent/boot-sweep.ts`):
 -- on startup, every row still `pending`|`running` was left in-flight by a PRIOR
--- process that has since died. The boot sweep FIRES THE REPORT SINK for each
--- (the same report-back surface a clean completion uses) and THEN — only after
--- the report was delivered — marks the row `crashed`, persisting the terminal
--- status so later boots skip it. Report-first / commit-second is deliberate:
--- the commit is what hides a row from every later `loadLive()`, so committing
--- before a successful delivery would let a thrown sink lose the orphan forever.
--- The result is at-least-once delivery (happy path: exactly once; a failed
--- report leaves the row live so the NEXT boot retries) — the orphan is
--- SURFACED, never vanished. It does NOT re-hydrate the record as live — the
--- spec is "surface, don't resume."
+-- process that has since died. The boot sweep CLAIMS each — an atomic guarded
+-- `live → crashed` UPDATE (`WHERE status IN (pending,running)`) — and then FIRES
+-- THE REPORT SINK (the same report-back surface a clean completion uses) for the
+-- claimed row. The DURABLE `crashed` row is the surfacing that never vanishes
+-- (persisted + queryable); the report is a best-effort notification on top of it,
+-- exactly as the live agent-aware watchdog treats its own notify. The atomic
+-- claim is the concurrency + idempotency point: of any number of overlapping
+-- sweeps or repeated boots, EXACTLY ONE wins each row's transition, so an orphan
+-- is reported once, never twice, and never after it is terminal. The partial live
+-- index below keeps a boot's "load every in-flight row" scan flat-cost. It does
+-- NOT re-hydrate the record as live — the spec is "surface, don't resume."
 --
 -- DELIBERATELY NOT PERSISTED — the orphan-detection dedup sets:
 --   The Trident orchestrator's per-process `fired`/`redispatched` sets

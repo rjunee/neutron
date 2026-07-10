@@ -575,18 +575,19 @@ export function buildOpenGraphComposer(
 
     // BOOT REAP (plan §P7 / D-6). Every persisted registry row still LIVE
     // (`pending`|`running`) was left in-flight by a PRIOR process that has since
-    // died — an orphaned dispatch. Surface each through the SAME report-back sink
-    // a clean completion uses, then mark it `crashed`, instead of letting it
-    // vanish from `live()`. The report surface is TODAY the structured
-    // `[agent-dispatch]` log (identical to the live dispatch terminal path — this
-    // reuses `dispatchReport` verbatim); the live WS `agent_message` splice is the
-    // documented follow-up for BOTH paths, not a P7-specific gap. The boot-reap
-    // report reuses the dispatch watchdog notifier's SubagentRecord→report mapping
-    // (incl. its forge/argus skip — those belong to the Trident loop's own
-    // supervision). Fire-and-forget: never block boot; a sink failure leaves the
-    // orphan live for the next boot to retry (at-least-once — see boot-sweep.ts).
-    // Runs UNCONDITIONALLY (not gated on `llmPool`): if this boot has no
-    // dispatcher but a prior one did, its orphans still deserve to be reaped.
+    // died — an orphaned dispatch. Atomically claim each `crashed` (the durable,
+    // queryable surfacing that never vanishes) and fire the SAME report-back sink
+    // a clean completion uses, instead of letting it vanish from `live()`. The
+    // report surface is TODAY the structured `[agent-dispatch]` log (identical to
+    // the live dispatch terminal path — this reuses `dispatchReport` verbatim);
+    // the live WS `agent_message` splice is the documented follow-up for BOTH
+    // paths, not a P7-specific gap. The boot-reap report reuses the dispatch
+    // watchdog notifier's SubagentRecord→report mapping — incl. its forge/argus
+    // skip (those belong to the Trident loop's own supervision) AND its
+    // swallow-on-failure best-effort contract, which is exactly why the sweep
+    // treats the durable row (not the notification) as the record. Fire-and-forget:
+    // never block boot. Runs UNCONDITIONALLY (not gated on `llmPool`): if this
+    // boot has no dispatcher but a prior one did, its orphans still deserve reaping.
     const bootReapNotifier = buildDispatchWatchdogNotifier(dispatchReport)
     const bootReapReport: BootSweepReport = (rec) => {
       const detected_at = rec.ended_at ?? Date.now()
