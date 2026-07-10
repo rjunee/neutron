@@ -54,6 +54,11 @@ export type SystemEventName =
   | 'import_orphaned'
   | 'bundle_build_failed'
   | 'prewarm_failed'
+  // X1 — dispatch-time capability gate verdict. NOT a silent-degradation entry:
+  // this is a LOG-ONLY observability stream emitted once per tool dispatch by
+  // `McpServer.dispatch` (the verdict the gate WOULD reach under enforcement,
+  // decision D-9). It records; it never changes dispatch behavior.
+  | 'capability_verdict'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'gbrain_unavailable',
@@ -64,6 +69,7 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'import_orphaned',
   'bundle_build_failed',
   'prewarm_failed',
+  'capability_verdict',
 ]
 
 /** What a degrade site passes to {@link emitSystemEventSafe}. */
