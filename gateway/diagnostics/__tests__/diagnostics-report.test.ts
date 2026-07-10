@@ -22,7 +22,6 @@ describe('composeDiagnostics', () => {
     for (const s of [
       r.gbrain,
       r.credentials,
-      r.core_install,
       r.repl_sessions,
       r.cron_jobs,
       r.import_jobs,
@@ -69,18 +68,6 @@ describe('composeDiagnostics', () => {
       baseSources({ credentials: () => ({ hasUsable: false, soonestCooldownUntil: 42 }) }),
     )
     expect(cooling.credentials).toMatchObject({ available: true, has_usable: false, soonest_cooldown_until: 42 })
-  })
-
-  it('maps core install failures', () => {
-    const r = composeDiagnostics(
-      baseSources({
-        coreInstallFailures: () => [{ core_slug: 'gmail', code: 'npm_install_failed', message: 'boom' }],
-      }),
-    )
-    expect(r.core_install.available).toBe(true)
-    expect(r.core_install.failures).toEqual([
-      { core_slug: 'gmail', code: 'npm_install_failed', message: 'boom' },
-    ])
   })
 
   it('maps REPL sessions incl. age, respawn count, capped_at', () => {

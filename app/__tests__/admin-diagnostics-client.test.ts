@@ -48,7 +48,6 @@ function sampleReport(): DiagnosticsReport {
     project_slug: 'demo',
     gbrain: { available: true, status: 'ok' },
     credentials: { available: false, note: 'not wired on this gateway' },
-    core_install: { available: false },
     repl_sessions: { available: true, sessions: [] },
     cron_jobs: { available: true, jobs: [] },
     import_jobs: { available: true, jobs: [] },
@@ -102,6 +101,23 @@ describe('AdminClient.getDiagnostics', () => {
     }
     expect(err).toBeInstanceOf(AdminClientError);
     expect((err as AdminClientError).code).toBe('project_mismatch');
+  });
+
+  it('a 200 { ok:true } with NO diagnostics payload maps to a typed error (does not resolve undefined)', async () => {
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({
+      name: 'AdminClientError',
+      code: 'malformed_response',
+    });
+  });
+
+  it('a 200 with a wrong-shaped diagnostics (no project_slug) maps to a typed error', async () => {
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true, diagnostics: { nonsense: 1 } } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
   });
 
   it('a malformed/empty error body still yields a typed error (no throw-through)', async () => {

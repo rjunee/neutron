@@ -54,18 +54,6 @@ export interface CredentialsDiag {
   note?: string
 }
 
-export interface CoreInstallFailureDiag {
-  core_slug: string
-  code: string
-  message: string
-}
-
-export interface CoreInstallDiag {
-  available: boolean
-  failures?: CoreInstallFailureDiag[]
-  note?: string
-}
-
 export interface ReplSessionDiag {
   key: string
   session_id?: string | undefined
@@ -140,7 +128,6 @@ export interface DiagnosticsReport {
   project_slug: string
   gbrain: GbrainDiag
   credentials: CredentialsDiag
-  core_install: CoreInstallDiag
   repl_sessions: ReplDiag
   cron_jobs: CronDiag
   import_jobs: ImportDiag
@@ -221,8 +208,12 @@ export interface DiagnosticsSources {
   gbrain?: () => GbrainSyncRowish | null
   /** Credential-pool liveness probes (in-process only). */
   credentials?: () => CredentialProbeish
-  /** Core install failures (in-process boot state; in-process only). */
-  coreInstallFailures?: () => ReadonlyArray<CoreInstallFailureDiag>
+  // NOTE — core install failures (CoresModuleState.failures) are intentionally
+  // NOT a section here: that state lives ONLY in the downstream cores graph
+  // module (installBundledCores), with no read handle at the composer/request
+  // scope. Surfacing it read-only would require a builder-written shared ref
+  // threaded through the composition graph — a cross-module change beyond O5's
+  // additive/read-only mandate. Deferred to a follow-up.
   /** REPL registry file: the resolved path + the parsed records map. */
   replRegistry?: () => { path: string; records: Record<string, ReplRecordish> }
   /** cron_state rows, one per (job, project). */
@@ -289,15 +280,6 @@ export function composeDiagnostics(sources: DiagnosticsSources): DiagnosticsRepo
       available: true,
       has_usable: raw.hasUsable,
       soonest_cooldown_until: raw.soonestCooldownUntil,
-    }),
-    () => ({ available: false }),
-  )
-
-  const core_install = section<CoreInstallDiag>(
-    sources.coreInstallFailures,
-    (raw: ReadonlyArray<CoreInstallFailureDiag>): CoreInstallDiag => ({
-      available: true,
-      failures: raw.map((f) => ({ core_slug: f.core_slug, code: f.code, message: f.message })),
     }),
     () => ({ available: false }),
   )
@@ -376,7 +358,6 @@ export function composeDiagnostics(sources: DiagnosticsSources): DiagnosticsRepo
     project_slug: sources.project_slug,
     gbrain,
     credentials,
-    core_install,
     repl_sessions,
     cron_jobs,
     import_jobs,

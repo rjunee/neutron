@@ -82,17 +82,6 @@ export function formatDiagnosticsText(report: DiagnosticsReport): string {
     )
   }
 
-  // core install
-  const ci = report.core_install
-  if (!ci.available) {
-    lines.push(`core-install failures: ${ci.note ?? 'not readable off-process (see admin tab)'}`)
-  } else if ((ci.failures?.length ?? 0) === 0) {
-    lines.push(`core-install failures: none`)
-  } else {
-    lines.push(`core-install failures: ${ci.failures!.length}`)
-    for (const f of ci.failures!) lines.push(`  - ${f.core_slug}: [${f.code}] ${f.message}`)
-  }
-
   // chat / REPL sessions
   const r = report.repl_sessions
   if (!r.available) {

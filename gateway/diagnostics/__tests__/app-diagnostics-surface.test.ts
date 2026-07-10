@@ -57,7 +57,6 @@ describe('app-diagnostics-surface', () => {
     for (const key of [
       'gbrain',
       'credentials',
-      'core_install',
       'repl_sessions',
       'cron_jobs',
       'import_jobs',

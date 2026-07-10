@@ -121,8 +121,8 @@ export interface MintMaxReauthTokenResult {
  * Client-side mirror of `gateway/diagnostics/diagnostics-report.ts`
  * `DiagnosticsReport` (the app package cannot import the gateway type — same
  * local-mirror pattern as `MemorySummary`). Every section carries `available`
- * + an optional `note`; in-process-only sections (credentials, core_install)
- * are `available: false` when read off-process.
+ * + an optional `note`; in-process-only sections (credentials) are
+ * `available: false` when read off-process.
  */
 export interface DiagnosticsSection {
   available: boolean;
@@ -142,9 +142,6 @@ export interface DiagnosticsReport {
   credentials: DiagnosticsSection & {
     has_usable?: boolean;
     soonest_cooldown_until?: number | null;
-  };
-  core_install: DiagnosticsSection & {
-    failures?: Array<{ core_slug: string; code: string; message: string }>;
   };
   repl_sessions: DiagnosticsSection & {
     registry_path?: string;
@@ -251,10 +248,21 @@ export class AdminClient {
    * broken?" from the admin tab. Owner-gated; no writes.
    */
   async getDiagnostics(): Promise<DiagnosticsReport> {
-    const res = await this.req<{ ok: boolean; diagnostics: DiagnosticsReport }>(
+    const res = await this.req<{ ok: boolean; diagnostics?: DiagnosticsReport }>(
       '/api/app/admin/diagnostics',
     );
-    return res.diagnostics;
+    // Validate the success envelope — a 200 `{ ok: true }` with a missing /
+    // wrong-shaped `diagnostics` must map to a typed error, not resolve to
+    // `undefined` and crash the pane on `report.project_slug`.
+    const d = res.diagnostics;
+    if (d === null || typeof d !== 'object' || typeof d.project_slug !== 'string') {
+      throw new AdminClientError(
+        'malformed_response',
+        'diagnostics response was missing a valid `diagnostics` payload',
+        200,
+      );
+    }
+    return d;
   }
 
   /** P7.4 Phase 2 — list per-project backups for the Backup sub-tab. */

@@ -26,11 +26,7 @@ import {
   type CredentialPool,
 } from '@neutronai/runtime/credential-pool.ts'
 import { readGbrainSyncState } from '../realmode-composer/gbrain-sync-state-store.ts'
-import type {
-  CoreInstallFailureDiag,
-  DiagnosticsSources,
-  ImportRowish,
-} from './diagnostics-report.ts'
+import type { DiagnosticsSources, ImportRowish } from './diagnostics-report.ts'
 
 /** REPL supervision registry file, relative to the owner home. Mirrors
  *  `runtime/adapters/claude-code/index.ts` (`join(stateDir, 'repl-registry.json')`). */
@@ -46,9 +42,6 @@ export interface InstanceDiagnosticsSourceInput {
   /** Live credential pool (in-process only). Omit / null off-process → the
    *  credentials section renders `{ available: false }`. */
   credentialPool?: CredentialPool | null
-  /** In-memory cores install failures, when a caller can reach them. Omitted
-   *  today (no module-graph handle at wiring time) → `{ available: false }`. */
-  coreInstallFailures?: () => ReadonlyArray<CoreInstallFailureDiag>
   now?: () => number
   maxRecentEvents?: number
 }
@@ -109,10 +102,6 @@ export function buildInstanceDiagnosticsSources(
       hasUsable: hasUsableCredential(pool),
       soonestCooldownUntil: soonestCooldownUntil(pool),
     })
-  }
-
-  if (input.coreInstallFailures !== undefined) {
-    sources.coreInstallFailures = input.coreInstallFailures
   }
 
   return sources

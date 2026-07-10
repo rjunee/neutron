@@ -155,22 +155,6 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
           </Section>
 
           <Section
-            title="Core installs"
-            available={data.core_install.available}
-            note={data.core_install.note}
-          >
-            {data.core_install.available ? (
-              (data.core_install.failures ?? []).length === 0 ? (
-                <Text style={styles.muted}>No install failures.</Text>
-              ) : (
-                (data.core_install.failures ?? []).map((f) => (
-                  <Row key={f.core_slug} label={f.core_slug} value={`[${f.code}] ${f.message}`} />
-                ))
-              )
-            ) : null}
-          </Section>
-
-          <Section
             title="Chat (REPL sessions)"
             available={data.repl_sessions.available}
             note={data.repl_sessions.note}
