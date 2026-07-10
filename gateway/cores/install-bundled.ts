@@ -548,16 +548,40 @@ export async function reinstallFailedCore(
   const audit = new SecretAuditLog({ db: input.projectDb, author_id: 'owner' })
 
   try {
-    const result = await installCore({
-      project_slug: input.project_slug,
-      coreDir: core.coreDir,
-      projectDb: input.projectDb,
-      dataDir: input.dataDir,
-      secretsStore: input.secretsStore,
-      audit,
-      installations,
-      prompter: input.prompter,
-    })
+    // Re-run the install lifecycle. A prior `manifest_incomplete` failure
+    // (X2) threw out of `registerCoreTools` AFTER `installCore` had already
+    // persisted the `core_installations` row, so this retry sees the live row
+    // and `installCore` raises `duplicate_install`. Mirror the boot path's
+    // idempotent rehydrate instead of letting that spurious error mask the
+    // real recovery — a secret-provisioning retry (no persisted row) still
+    // takes the fresh `installCore` path unchanged.
+    let result: InstallCoreResult
+    try {
+      result = await installCore({
+        project_slug: input.project_slug,
+        coreDir: core.coreDir,
+        projectDb: input.projectDb,
+        dataDir: input.dataDir,
+        secretsStore: input.secretsStore,
+        audit,
+        installations,
+        prompter: input.prompter,
+      })
+    } catch (err) {
+      if (err instanceof CoreInstallError && err.code === 'duplicate_install') {
+        result = await rehydrateExistingInstall({
+          core,
+          project_slug: input.project_slug,
+          projectDb: input.projectDb,
+          dataDir: input.dataDir,
+          secretsStore: input.secretsStore,
+          audit,
+          installations,
+        })
+      } else {
+        throw err
+      }
+    }
     const registerArgs: RegisterCoreToolsInput = {
       core,
       project_slug: input.project_slug,
@@ -1014,30 +1038,32 @@ function registerNotImplementedStubs(tools: ToolRegistry, core: BundledCore): vo
  * hard-fail coverage check in `registerCoreTools` surface the resulting
  * missing handlers.
  *
- * X2: the fallback key now comes from the Core's `defineCore()` contract
- * (`coreModule.backendKey`) instead of the drift-prone `BACKEND_KEY_BY_SLUG`
- * table, which by X2 carried two dead rows (`notes`, `dtc_analytics`) and was
- * silently missing `scraping_core`.
+ * X2: both the already-shaped detection AND the fallback key now come from the
+ * Core's `defineCore()` contract (`coreModule.backendKey`) instead of the
+ * drift-prone `BACKEND_KEY_BY_SLUG` table (which carried two dead rows —
+ * `notes`, `dtc_analytics` — and silently omitted `scraping_core`) and its
+ * hardcoded five-key "already-shaped" allow-list. Keying the check on the
+ * Core's OWN declared `backendKey` generalizes correctly: a Core with
+ * `backendKey: 'transport'` whose factory returns `{ transport, helper }` is
+ * now passed through verbatim rather than double-wrapped into
+ * `{ transport: { transport, helper } }`.
+ *
+ * Exported for the boundary unit test (`gateway/__tests__/cores-normalize-backend.test.ts`).
  */
-function normalizeBackend(
+export function normalizeBackend(
   backendKey: string,
   result: unknown,
 ): Record<string, unknown> {
   if (result === null || result === undefined) return {}
-  // If the factory already returned a deps map (object with the Core's
-  // expected key like `backend` / `store` / `client`, or a multi-key shape
-  // like `{ store, pickNext }` / `{ client, summarizer }`), trust it verbatim.
-  if (typeof result === 'object' && !Array.isArray(result)) {
-    const obj = result as Record<string, unknown>
-    if (
-      'backend' in obj ||
-      'store' in obj ||
-      'client' in obj ||
-      'orchestrator' in obj ||
-      'summarizer' in obj
-    ) {
-      return obj
-    }
+  // If the factory already returned a deps map keyed by the Core's declared
+  // `backendKey` (a bare `{ store }` or a multi-key `{ store, pickNext }` /
+  // `{ client, summarizer }` shape), trust it verbatim.
+  if (
+    typeof result === 'object' &&
+    !Array.isArray(result) &&
+    backendKey in (result as Record<string, unknown>)
+  ) {
+    return result as Record<string, unknown>
   }
   // Otherwise map the single primitive to the Core's declared backend key so
   // the factory can stay shapeless when there's only one backend dep.

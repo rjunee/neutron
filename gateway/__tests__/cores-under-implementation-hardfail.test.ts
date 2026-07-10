@@ -29,7 +29,21 @@ import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { ToolCallContext as RegistryToolCallContext } from '@neutronai/tools/registry.ts'
 import type { ToolCallContext as SdkToolCallContext } from '@neutronai/cores-sdk'
-import { installBundledCores } from '../cores/install-bundled.ts'
+import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
+import type { SecretsPrompter } from '@neutronai/cores-runtime/lifecycle.ts'
+import { installBundledCores, reinstallFailedCore } from '../cores/install-bundled.ts'
+
+const NOOP_PROMPTER: SecretsPrompter = {
+  async promptApiKey() {
+    return null
+  },
+  async promptOauthToken() {
+    return null
+  },
+  async promptOauthClient() {
+    return null
+  },
+}
 
 // The fixture root's `cores/synth/underimpl-core/` is discovered by the
 // registry's `cores/<container>/<core>` walk. Its barrel resolves
@@ -130,6 +144,52 @@ describe('X2 — under-implementing Core cannot install silently-broken', () => 
     )
     expect(failEvent?.code).toBe('manifest_incomplete')
     expect(result.failures[0]?.code).toBe('manifest_incomplete')
+  })
+
+  test('retry rehydrates the persisted row — no spurious duplicate_install masks the real failure', async () => {
+    // `installCore` persists the core_installations row BEFORE tool
+    // registration, and the manifest_incomplete failure throws AFTER. So the
+    // row is live while the Core is in `failures`. `reinstallFailedCore` must
+    // rehydrate that row (not raise `duplicate_install`) and re-surface the
+    // REAL failure while the Core still under-implements.
+    const state = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [FIXTURE_ROOT],
+      backends: { [UNDERIMPL_SLUG]: () => ({ backend: {} }) },
+      hardFailFailureRatio: 1,
+    })
+    expect(state.failures[0]?.code).toBe('manifest_incomplete')
+
+    // The row was persisted by installCore before registration threw.
+    const installations = new CoreInstallationsStore({ db: bench.db })
+    const row = await installations.get('test', UNDERIMPL_SLUG)
+    expect(row, 'installCore persisted the row before registration threw').not.toBeNull()
+
+    // Retry: the Core still under-implements, so we expect the REAL
+    // manifest_incomplete error to surface — NOT a spurious duplicate_install.
+    let threw: unknown = null
+    try {
+      await reinstallFailedCore({
+        slug: UNDERIMPL_SLUG,
+        state,
+        project_slug: 'test',
+        projectDb: bench.db,
+        dataDir: bench.ownerHome,
+        tools: bench.tools,
+        secretsStore: bench.secrets,
+        prompter: NOOP_PROMPTER,
+        backends: { [UNDERIMPL_SLUG]: () => ({ backend: {} }) },
+      })
+    } catch (err) {
+      threw = err
+    }
+    expect(threw).not.toBeNull()
+    expect((threw as { code?: string }).code).toBe('manifest_incomplete')
+    expect((threw as Error).message).toContain('underimpl_missing')
   })
 
   test('SDK ToolCallContext stays field-identical to the registry ToolCallContext', () => {
