@@ -13,6 +13,12 @@
  * token-resolution path (agent-native parity).
  */
 
+import type {
+  CoreChatCommandFilter,
+  CoreChatCommandFilterInput,
+  CoreChatCommandFilterResult,
+} from '@neutronai/cores-runtime'
+
 import {
   executeScrapeCommand,
   parseScrapeCommand,
@@ -20,25 +26,12 @@ import {
 } from './chat-commands.ts'
 import type { ScrapingBackend } from './backend.ts'
 
-export interface ScrapingChatCommandFilterInput {
-  user_id: string
-  project_slug: string
-  channel_topic_id: string
-  project_id?: string
-  body: string
-}
-
-export interface ScrapingChatCommandFilterResult {
-  text: string
-  data?: unknown
-  error?: { code: string; message: string }
-}
-
-export interface ScrapingChatCommandFilter {
-  match(
-    input: ScrapingChatCommandFilterInput,
-  ): Promise<ScrapingChatCommandFilterResult | null>
-}
+// Refactor X4 (item 3): collapse onto the shared generic
+// `CoreChatCommandFilter`. Scraping attaches no card and uses the base
+// structured error, so it binds the generic defaults.
+export type ScrapingChatCommandFilterInput = CoreChatCommandFilterInput
+export type ScrapingChatCommandFilterResult = CoreChatCommandFilterResult
+export type ScrapingChatCommandFilter = CoreChatCommandFilter
 
 export interface CreateScrapingChatCommandFilterOptions {
   backend: ScrapingBackend

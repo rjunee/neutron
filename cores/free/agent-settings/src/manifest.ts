@@ -9,11 +9,11 @@
  * `CoreInstallError` via the runtime loader.
  */
 
-import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { parseManifest, type NeutronManifest } from '@neutronai/cores-sdk'
+import { loadManifestFromPackageJson } from '@neutronai/cores-runtime'
+import { type NeutronManifest } from '@neutronai/cores-sdk'
 
 /**
  * Slug derived from the package name. Mirrors `packageNameToSlug` on
@@ -70,15 +70,7 @@ export function loadManifest(
     package_json_path?: string
   } = {},
 ): NeutronManifest {
-  const path = options.package_json_path ?? defaultPackageJsonPath()
-  const raw = readFileSync(path, 'utf8')
-  const pkg: unknown = JSON.parse(raw)
-  if (pkg === null || typeof pkg !== 'object' || Array.isArray(pkg)) {
-    throw new Error(`package.json at ${path} is not an object`)
-  }
-  const block = (pkg as Record<string, unknown>)['neutron']
-  if (block === undefined) {
-    throw new Error(`package.json at ${path} has no "neutron" section`)
-  }
-  return parseManifest(block)
+  return loadManifestFromPackageJson(
+    options.package_json_path ?? defaultPackageJsonPath(),
+  )
 }

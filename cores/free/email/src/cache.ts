@@ -16,10 +16,13 @@
  */
 
 import type { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  ProjectSidecarResolver,
+  type ProjectSidecarResolverOptions,
+} from '@neutronai/cores-runtime'
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import { openSidecar, parseJsonColumn, resolveNow } from '@neutronai/persistence/index.ts'
 
@@ -274,66 +277,51 @@ export interface EmailProjectCacheResolverOptions {
   now?: () => number
 }
 
-interface ProjectHandle {
-  cache: EmailProjectCache
-  db_path: string
-}
-
+/**
+ * Refactor X4: the lazy-init/cache/dedup mechanics + the path-traversal
+ * guard now live in the shared `ProjectSidecarResolver` (this Core PREVIOUSLY
+ * did a BARE `join()` on the tool-supplied `project_id` — it now rejects
+ * `..`/NUL/absolute-path payloads exactly like the Research Core). This
+ * class is a thin binding supplying the email-specific `buildHandle`.
+ */
 export class EmailProjectCacheResolver {
-  private readonly owner_home: string
-  private readonly resolveProjectRoot: (project_id: string) => string
   private readonly migrations_dir: string
   private readonly now: (() => number) | undefined
-  private readonly handles = new Map<string, ProjectHandle>()
-  private readonly initPromises = new Map<string, Promise<ProjectHandle>>()
+  private readonly inner: ProjectSidecarResolver<EmailProjectCache>
 
   constructor(opts: EmailProjectCacheResolverOptions) {
-    this.owner_home = opts.owner_home
-    this.resolveProjectRoot =
-      opts.resolveProjectRoot ??
-      ((project_id) => join(opts.owner_home, 'Projects', project_id))
     this.migrations_dir = opts.migrations_dir ?? DEFAULT_MIGRATIONS_DIR
     this.now = opts.now
+    const innerOpts: ProjectSidecarResolverOptions<EmailProjectCache> = {
+      owner_home: opts.owner_home,
+      sidecar_dir: EMAIL_SIDECAR_DIR,
+      db_filename: EMAIL_SIDECAR_DB,
+      buildHandle: (init) => this.buildHandle(init),
+      closeHandle: (cache) => cache.close(),
+    }
+    if (opts.resolveProjectRoot !== undefined) {
+      innerOpts.resolveProjectRoot = opts.resolveProjectRoot
+    }
+    this.inner = new ProjectSidecarResolver(innerOpts)
   }
 
   pathFor(project_id: string): string {
-    return join(this.resolveProjectRoot(project_id), EMAIL_SIDECAR_DIR, EMAIL_SIDECAR_DB)
+    return this.inner.pathFor(project_id)
   }
 
   closeAll(): void {
-    for (const handle of this.handles.values()) handle.cache.close()
-    this.handles.clear()
-    this.initPromises.clear()
+    this.inner.closeAll()
   }
 
   async resolve(project_id: string): Promise<EmailProjectCache> {
-    const handle = await this.openHandle(project_id)
-    return handle.cache
+    return this.inner.resolve(project_id)
   }
 
-  private async openHandle(project_id: string): Promise<ProjectHandle> {
-    const cached = this.handles.get(project_id)
-    if (cached !== undefined) return cached
-    const pending = this.initPromises.get(project_id)
-    if (pending !== undefined) return pending
-    const init = this.doInit(project_id)
-    this.initPromises.set(project_id, init)
-    try {
-      const handle = await init
-      this.handles.set(project_id, handle)
-      return handle
-    } finally {
-      this.initPromises.delete(project_id)
-    }
-  }
-
-  private async doInit(project_id: string): Promise<ProjectHandle> {
-    const projectRoot = this.resolveProjectRoot(project_id)
-    const dir = join(projectRoot, EMAIL_SIDECAR_DIR)
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 })
-    }
-    const db_path = join(dir, EMAIL_SIDECAR_DB)
+  private async buildHandle(init: {
+    project_id: string
+    db_path: string
+  }): Promise<EmailProjectCache> {
+    const { project_id, db_path } = init
     // P3 shared open — previously foreign_keys only; now additionally gains
     // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
@@ -361,9 +349,6 @@ export class EmailProjectCacheResolver {
     }
     const cacheOpts: EmailProjectCacheOptions = { db, project_id }
     if (this.now !== undefined) cacheOpts.now = this.now
-    return {
-      cache: new EmailProjectCache(cacheOpts),
-      db_path,
-    }
+    return new EmailProjectCache(cacheOpts)
   }
 }

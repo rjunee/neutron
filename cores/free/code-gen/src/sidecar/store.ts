@@ -11,10 +11,13 @@
  */
 
 import type { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  ProjectSidecarResolver,
+  type ProjectSidecarResolverOptions,
+} from '@neutronai/cores-runtime'
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import { mapRow, mapRows, openSidecar, parseJsonColumn, resolveNow } from '@neutronai/persistence/index.ts'
 
@@ -341,77 +344,57 @@ export interface CodegenSidecarResolverOptions {
   now?: () => number
 }
 
-interface ProjectHandle {
-  sidecar: CodegenSidecar
-  db_path: string
-}
-
 /**
  * Lazy-init per-project sidecar handles. One Database per project,
  * cached for the gateway lifetime, init-promise dedup so two concurrent
  * first-writes wait on the same init.
+ *
+ * Refactor X4: the lazy-init/cache/dedup mechanics + the path-traversal
+ * guard now live in the shared `ProjectSidecarResolver` (this Core PREVIOUSLY
+ * did a BARE `join()` on the tool-supplied `project_id` — it now rejects
+ * `..`/NUL/absolute-path payloads exactly like the Research Core). This
+ * class is a thin binding supplying the code-gen-specific `buildHandle`.
  */
 export class CodegenSidecarResolver {
-  private readonly owner_home: string
-  private readonly resolveProjectRoot: (project_id: string) => string
   private readonly migrations_dir: string
   private readonly ulid: (() => string) | undefined
   private readonly now: (() => number) | undefined
-  private readonly handles = new Map<string, ProjectHandle>()
-  private readonly initPromises = new Map<string, Promise<ProjectHandle>>()
+  private readonly inner: ProjectSidecarResolver<CodegenSidecar>
 
   constructor(opts: CodegenSidecarResolverOptions) {
-    this.owner_home = opts.owner_home
-    this.resolveProjectRoot =
-      opts.resolveProjectRoot ??
-      ((project_id) => join(opts.owner_home, 'Projects', project_id))
     this.migrations_dir = opts.migrations_dir ?? DEFAULT_MIGRATIONS_DIR
     this.ulid = opts.ulid
     this.now = opts.now
+    const innerOpts: ProjectSidecarResolverOptions<CodegenSidecar> = {
+      owner_home: opts.owner_home,
+      sidecar_dir: PROJECT_SIDECAR_DIRNAME,
+      db_filename: PROJECT_SIDECAR_DB_FILENAME,
+      buildHandle: (init) => this.buildHandle(init),
+      closeHandle: (sidecar) => sidecar.close(),
+    }
+    if (opts.resolveProjectRoot !== undefined) {
+      innerOpts.resolveProjectRoot = opts.resolveProjectRoot
+    }
+    this.inner = new ProjectSidecarResolver(innerOpts)
   }
 
   pathFor(project_id: string): string {
-    return join(
-      this.resolveProjectRoot(project_id),
-      PROJECT_SIDECAR_DIRNAME,
-      PROJECT_SIDECAR_DB_FILENAME,
-    )
+    return this.inner.pathFor(project_id)
   }
 
   closeAll(): void {
-    for (const handle of this.handles.values()) handle.sidecar.close()
-    this.handles.clear()
-    this.initPromises.clear()
+    this.inner.closeAll()
   }
 
   async resolve(project_id: string): Promise<CodegenSidecar> {
-    const handle = await this.openHandle(project_id)
-    return handle.sidecar
+    return this.inner.resolve(project_id)
   }
 
-  private async openHandle(project_id: string): Promise<ProjectHandle> {
-    const cached = this.handles.get(project_id)
-    if (cached !== undefined) return cached
-    const pending = this.initPromises.get(project_id)
-    if (pending !== undefined) return pending
-    const init = this.doInit(project_id)
-    this.initPromises.set(project_id, init)
-    try {
-      const handle = await init
-      this.handles.set(project_id, handle)
-      return handle
-    } finally {
-      this.initPromises.delete(project_id)
-    }
-  }
-
-  private async doInit(project_id: string): Promise<ProjectHandle> {
-    const projectRoot = this.resolveProjectRoot(project_id)
-    const sidecarDir = join(projectRoot, PROJECT_SIDECAR_DIRNAME)
-    if (!existsSync(sidecarDir)) {
-      mkdirSync(sidecarDir, { recursive: true, mode: 0o700 })
-    }
-    const dbPath = join(sidecarDir, PROJECT_SIDECAR_DB_FILENAME)
+  private async buildHandle(init: {
+    project_id: string
+    db_path: string
+  }): Promise<CodegenSidecar> {
+    const { project_id, db_path: dbPath } = init
     // P3 shared open — previously foreign_keys only; now additionally gains
     // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
@@ -446,8 +429,7 @@ export class CodegenSidecarResolver {
     }
     if (this.ulid !== undefined) opts.ulid = this.ulid
     if (this.now !== undefined) opts.now = this.now
-    const sidecar = new CodegenSidecar(opts)
-    return { sidecar, db_path: dbPath }
+    return new CodegenSidecar(opts)
   }
 }
 

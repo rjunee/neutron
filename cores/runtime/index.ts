@@ -32,6 +32,33 @@ export {
   type LoadedCore,
 } from './loader.ts'
 
+// X4 item 1 — shared Core manifest loader (was ×9 copy-paste).
+export {
+  loadManifestFromPackageDir,
+  loadManifestFromPackageJson,
+} from './manifest-loader.ts'
+
+// X4 item 2 — shared per-project sidecar resolver + universal traversal guard.
+export {
+  CorePathTraversalError,
+  ProjectSidecarResolver,
+  assertWithinProjectsBoundary,
+  safeResolveProjectRoot,
+  type AssertWithinProjectsBoundaryOptions,
+  type PathTraversalErrorFactory,
+  type ProjectSidecarInit,
+  type ProjectSidecarResolverOptions,
+  type SafeResolveProjectRootOptions,
+} from './project-sidecar.ts'
+
+// X4 item 3 — shared Core chat-command-filter contract (was ×3 clones).
+export {
+  type CoreChatCommandFilter,
+  type CoreChatCommandFilterError,
+  type CoreChatCommandFilterInput,
+  type CoreChatCommandFilterResult,
+} from './chat-command-filter.ts'
+
 export {
   CoreInstallationsStore,
   mintInstallEventId,

@@ -131,7 +131,9 @@ export class CapabilityGuard {
       error: result.reason,
       ...(this.author_id !== undefined ? { author_id: this.author_id } : {}),
     })
-    throw new CapabilityDeniedError(result.code, result.reason, {
+    throw new CapabilityDeniedError({
+      code: result.code,
+      message: result.reason,
       core_id: this.core_slug,
       tool_name: input.tool_name,
       capability: input.capability_required,

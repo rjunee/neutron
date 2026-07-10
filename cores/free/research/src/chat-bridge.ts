@@ -11,6 +11,12 @@
  * Per docs/plans/research-core-tier1-brief.md § 3.2.
  */
 
+import type {
+  CoreChatCommandFilter,
+  CoreChatCommandFilterInput,
+  CoreChatCommandFilterResult,
+} from '@neutronai/cores-runtime'
+
 import {
   executeResearchCommand,
   parseResearchCommand,
@@ -19,27 +25,14 @@ import {
 } from './chat-commands.ts'
 import type { ResearchProjectBackend } from './research-orchestrator.ts'
 
-export interface ResearchChatCommandFilterInput {
-  user_id: string
-  project_slug: string
-  channel_topic_id: string
-  project_id?: string
-  body: string
-}
-
-export interface ResearchChatCommandFilterResult {
-  text: string
-  data?: unknown
-  card?: ResearchCommandCard
-  deep_link?: string
-  error?: { code: string; message: string }
-}
-
-export interface ResearchChatCommandFilter {
-  match(
-    input: ResearchChatCommandFilterInput,
-  ): Promise<ResearchChatCommandFilterResult | null>
-}
+// Refactor X4 (item 3): the ×3 hand-rolled in-core chat-command-filter
+// clones collapse onto the shared generic `CoreChatCommandFilter<Card>`.
+// Research attaches a typed `card`, so it binds `Card = ResearchCommandCard`.
+export type ResearchChatCommandFilterInput = CoreChatCommandFilterInput
+export type ResearchChatCommandFilterResult =
+  CoreChatCommandFilterResult<ResearchCommandCard>
+export type ResearchChatCommandFilter =
+  CoreChatCommandFilter<ResearchCommandCard>
 
 export interface CreateResearchChatCommandFilterOptions {
   backend: ResearchProjectBackend
