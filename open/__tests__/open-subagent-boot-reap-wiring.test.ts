@@ -108,13 +108,16 @@ describe('Open subagent boot-reap prod-boot wiring', () => {
       const composer = buildOpenGraphComposer({ env: process.env })
       const composition = await composer({ db, project_slug: 'owner' })
 
-      // Poll until the boot-reap REPORT line for THIS orphan is captured (the
-      // report fires just after the durable claim inside the fire-and-forget
-      // sweep). Matching on the wired `[agent-dispatch]` line + run_id.
+      // The wired report is a SINGLE `console.log` call: a header
+      // `[agent-dispatch] <kind> (<agent>) <run_id.slice(0,8)> → <status>` PLUS the
+      // markdown block (which carries the full run_id + failure_reason). Poll/match
+      // on the header's EMITTED (truncated) id so the match does not depend on
+      // markdown internals; the field assertions below then pin the mapped values.
+      const emittedId = 'prior-orphan'.slice(0, 8) // composer.ts logs run_id.slice(0,8) → 'prior-or'
       let reportLine: string | undefined
       for (let i = 0; i < 400; i++) {
         reportLine = captured.find(
-          (l) => l.includes('[agent-dispatch]') && l.includes('prior-orphan'),
+          (l) => l.includes('[agent-dispatch]') && l.includes(emittedId) && l.includes('crashed'),
         )
         if (reportLine !== undefined) break
         // eslint-disable-next-line no-await-in-loop
@@ -126,11 +129,12 @@ describe('Open subagent boot-reap prod-boot wiring', () => {
       expect(seed.get('prior-orphan')?.failure_reason).toBe('process_dead')
 
       // ...AND the report sink actually FIRED for the orphan, with the mapped
-      // fields (agent kind, terminal `crashed` status, failure_reason).
+      // fields (agent kind, terminal `crashed` status, failure_reason, full id).
       expect(reportLine).toBeDefined()
       expect(reportLine).toContain('crashed') // mapped terminal status
       expect(reportLine).toContain('atlas') // mapped agent kind (a non-skipped kind)
-      expect(reportLine).toContain('process_dead') // failure_reason surfaced
+      expect(reportLine).toContain('process_dead') // failure_reason surfaced (markdown)
+      expect(reportLine).toContain('prior-orphan') // full run_id surfaced (markdown)
 
       for (const cleanup of composition.realmode_cleanups ?? []) {
         try {
