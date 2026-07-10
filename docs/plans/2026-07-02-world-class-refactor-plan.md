@@ -1955,11 +1955,11 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [x] K6 ✅ #225 · [x] K7 ✅ #224 · [x] K8 · [x] K9 · [ ] K10 · [x] K11 ✅ #240/#242/#243/#247/#248/#251/#257 (fully closed)
 - Window auxiliary units: [x] FX1 ✅ #226 (`/code` pre-check narrow) · [x] FX2 ✅ #227 (K3 coverage restore) · [x] RT1 ✅ #228 (Ralph/SPEC tripwire) · [x] K11-pre ✅ #229 (K11a6 test re-anchor) · [x] M0 ✅ neutron-managed#123 (Managed CI)
 - [x] L1 ✅ #253 · [x] L2 ✅ #255 · [x] L3 ✅ #262 · [x] L4 ✅ #258 · [x] L5 ✅ #280 · [x] L6 ✅ #270 · [x] L7 ✅ #260 — **L-PHASE COMPLETE**
-- [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [ ] C5 · [~] C6 (in flight) · [ ] C7 · [ ] C8
-- [x] D1 ✅ #282 · [~] D2 (in flight) · [ ] D3 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [ ] D7 · [~] D8 (in flight) · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [ ] D9c · [ ] D9d
-- [x] P1 ✅ #284 · [ ] P2 · [~] P3 (in flight) · [ ] P4 · [ ] P5 · [ ] P6 · [ ] P7 · [ ] P8 · [ ] P9 · [ ] P10 · [ ] P11
-- [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [ ] F7 · [ ] F8 · [x] F9 ✅ #194 (pilot)
-- [ ] O1 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
+- [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [~] C5 (in flight) · [x] C6 ✅ #293 · [ ] C7 · [ ] C8
+- [x] D1 ✅ #282 · [x] D2 ✅ #294 · [ ] D3 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [ ] D7 · [x] D8 ✅ #298 · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [~] D9c (in flight) · [ ] D9d
+- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [ ] P4 · [x] P5 ✅ #299 · [ ] P6 · [ ] P7 · [ ] P8 · [ ] P9 · [~] P10 (in flight) · [ ] P11
+- [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [x] F7 ✅ #296 · [ ] F8 · [x] F9 ✅ #194 (pilot)
+- [x] O1 ✅ #295 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
 - [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
 - [x] W0 ✅ (docs/specs/ux-architecture-option-d-2026-07-03.md) · [ ] W1 · [ ] W2 · [ ] W3a · [ ] W3 · [ ] W4 · [x] W5 ✅ #263 · [ ] W6 · [ ] W7 · [x] W8 ✅ #197
 - [x] M0 ✅ neutron-managed#123 (Managed CI) · [ ] M1 · [ ] M2 · [ ] M3 (riders — MG-1 ✅ managed#124 relocation-tolerant contract gate landed) · [ ] M4 · [ ] M5 · [ ] M6
