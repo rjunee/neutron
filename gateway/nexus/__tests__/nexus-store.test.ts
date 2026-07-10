@@ -193,6 +193,32 @@ describe('NexusStore — schema init', () => {
     expect(events.map((e) => e.id)).toEqual([ok.id])
   })
 
+  it('closeAll() racing an op that reuses a CACHED handle aborts it (not a raw driver error)', async () => {
+    const internals = h.store as unknown as { handles: Map<string, unknown> }
+    // Prime the cache so openHandle resolves the CACHED handle (no
+    // init). The op still awaits openHandle, so a closeAll() in that
+    // await gap closes the cached db underneath it — the op must abort
+    // with a typed error, not run SQL on the closed connection (Codex).
+    await h.store.ensureInit(PROJECT_ID)
+    expect(internals.handles.size).toBe(1)
+
+    const w = h.store.appendEvent(PROJECT_ID, input({ body: 'cached-race' }))
+    h.store.closeAll()
+    await expect(w).rejects.toThrow(NexusStoreError)
+    expect(internals.handles.size).toBe(0)
+
+    // Same boundary for the read path.
+    await h.store.ensureInit(PROJECT_ID)
+    const r = h.store.readRecent(PROJECT_ID)
+    h.store.closeAll()
+    await expect(r).rejects.toThrow(NexusStoreError)
+
+    // Store recovers cleanly afterward.
+    const ok = await h.store.appendEvent(PROJECT_ID, input({ body: 'recovered' }))
+    const events = await h.store.readRecent(PROJECT_ID)
+    expect(events.map((e) => e.id)).toEqual([ok.id])
+  })
+
   it('closeAll() racing init lets a concurrent op start a clean new generation', async () => {
     const internals = h.store as unknown as { handles: Map<string, unknown> }
     // A: in-flight init (aborts under closeAll). B: a concurrent op

@@ -220,6 +220,12 @@ export interface NexusStoreOptions {
 interface ProjectHandle {
   db: Database
   nexus_db_path: string
+  /** Flipped by `closeAll()` before the underlying db is closed. An
+   *  operation that obtained this handle across an `await` boundary
+   *  re-checks it (synchronously, immediately before touching the db)
+   *  so a `closeAll()` landing in that gap aborts the op with a typed
+   *  error instead of running SQL on a closed connection. */
+  closed: boolean
 }
 
 export class NexusStore {
@@ -259,6 +265,11 @@ export class NexusStore {
   closeAll(): void {
     this.generation++
     for (const handle of this.handles.values()) {
+      // Flag BEFORE closing so an in-flight op that already holds this
+      // handle (obtained across an `await`, e.g. `appendEvent` past its
+      // `await openHandle`) sees `closed` and aborts rather than issuing
+      // SQL on the closed connection.
+      handle.closed = true
       try {
         handle.db.close()
       } catch {
@@ -328,6 +339,14 @@ export class NexusStore {
       created_at: this.now(),
     }
 
+    // A `closeAll()` may have landed while we were awaiting
+    // `openHandle` above (openHandle can resolve a CACHED handle, whose
+    // db `closeAll` then closes). Everything from here to the write
+    // below is synchronous — `withBusyRetry` runs its first attempt in
+    // the same tick — so this check + the write are one uninterrupted
+    // unit; no further `closeAll` can interleave. Abort cleanly rather
+    // than issue `BEGIN IMMEDIATE` on a closed connection.
+    this.assertHandleLive(handle)
     const db = handle.db
     await withBusyRetry(() => {
       db.exec('BEGIN IMMEDIATE')
@@ -400,6 +419,9 @@ export class NexusStore {
     }
     const where =
       conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    // Same closed-during-await guard as appendEvent — the query below
+    // is synchronous, so this check makes read + query one unit.
+    this.assertHandleLive(handle)
     const rows = handle.db
       .prepare<AgentNexusEvent, Array<string | number>>(
         `SELECT id, actor_kind, actor_id, kind, body, refs_json, created_at
@@ -414,6 +436,19 @@ export class NexusStore {
   }
 
   /* ─── internals ──────────────────────────────────────────────── */
+
+  /** Throw `store_closed` if `closeAll()` has retired this handle.
+   *  Called synchronously immediately before any db access so a
+   *  `closeAll()` that raced the preceding `await openHandle` aborts
+   *  the operation cleanly. */
+  private assertHandleLive(handle: ProjectHandle): void {
+    if (handle.closed) {
+      throw new NexusStoreError(
+        'store_closed',
+        'store was closed during the operation; aborted',
+      )
+    }
+  }
 
   private async openHandle(project_id: string): Promise<ProjectHandle> {
     const cleaned = sanitizeProjectId(project_id)
@@ -436,7 +471,7 @@ export class NexusStore {
       )
     }
     const cached = this.handles.get(cleaned)
-    if (cached !== undefined) return cached
+    if (cached !== undefined && !cached.closed) return cached
     const inflight = this.initPromises.get(cleaned)
     if (inflight !== undefined) return inflight
     // Capture the generation at init START. If a `closeAll()` lands
@@ -526,7 +561,7 @@ export class NexusStore {
       }
       try {
         applyProjectScopedMigrations(db, this.migrations_dir)
-        return { db, nexus_db_path }
+        return { db, nexus_db_path, closed: false }
       } catch (err) {
         try {
           db.close()
