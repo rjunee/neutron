@@ -32,7 +32,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { boot } from '../index.ts'
@@ -49,6 +49,7 @@ afterEach(() => {
   while (cleanups.length > 0) {
     rmSync(cleanups.pop()!, { recursive: true, force: true })
   }
+  delete process.env['OWNER_HOME']
   delete process.env['NEUTRON_DB_PATH']
   delete process.env['NEUTRON_INSTANCE_SLUG']
   delete process.env['NOTIFY_SOCKET']
@@ -451,5 +452,39 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     // must have been drained by bootFailureCleanup.
     expect(cleanupRan).toBe(true)
     expect(resolveSystemEventSink()).toBeNull()
+  })
+
+  test('owner-slug resolution failure closes the DB and registers NO sink', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-slug-'))
+    cleanups.push(root)
+    bootEnv(root)
+    // `.url_slug` present but a DIRECTORY → readFileSync throws EISDIR inside
+    // resolveOwnerSlugFromConfig, which runs BEFORE the sink is registered.
+    process.env['OWNER_HOME'] = root
+    mkdirSync(join(root, '.url_slug'))
+    registerSystemEventSink(null)
+
+    activeSpy = spyProjectDbClose()
+    const closeSpy = activeSpy
+    await expect(boot({ port: 0, composer: goodComposer })).rejects.toThrow()
+    // DB opened then closed by the slug guard; sink never registered.
+    expect(closeSpy.calls).toBe(1)
+    expect(resolveSystemEventSink()).toBeNull()
+  })
+
+  test('repeated boot/shutdown does NOT accumulate SIGTERM/SIGINT listeners', async () => {
+    const beforeTerm = process.listenerCount('SIGTERM')
+    const beforeInt = process.listenerCount('SIGINT')
+
+    for (let i = 0; i < 3; i += 1) {
+      const root = mkdtempSync(join(tmpdir(), `neutron-o4-sig-${i}-`))
+      cleanups.push(root)
+      bootEnv(root)
+      const handle = await boot({ port: 0, composer: goodComposer })
+      await handle.shutdown()
+    }
+    // Manual shutdown removed each boot's listeners → back to baseline.
+    expect(process.listenerCount('SIGTERM')).toBe(beforeTerm)
+    expect(process.listenerCount('SIGINT')).toBe(beforeInt)
   })
 })

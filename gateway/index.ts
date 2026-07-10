@@ -225,20 +225,31 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   const db = ProjectDb.open(dbPath)
   applyMigrationsToProjectDb(db)
 
-  // O4 — register the process-wide system_events degradation journal sink
-  // ONCE, right after migrations apply (so `system_events` exists). Every
-  // silent fail-soft / degrade site reaches this via the ambient registry
-  // (persistence/system-events.ts) and emits a VISIBILITY-ONLY row; when this
-  // registration hasn't run (unit tests, sidecar tools) each emit is a no-op.
-  // Push onto the ambient sink STACK and keep the identity-scoped deregister.
-  // Teardown removes exactly THIS sink (from any stack position), so overlapping
-  // boots tear down in any order without orphaning a live older boot or
-  // resurrecting a closed-DB sink — the stack top is always a live owner.
+  // Resolve the owner slug BEFORE registering the journal sink: the resolver
+  // does an unguarded readFileSync of `.url_slug`, so a throw here must not leak
+  // the just-registered sink. Guard the DB (the one resource open so far) so a
+  // slug-read failure closes it before propagating.
+  let project_slug: string
+  try {
+    project_slug = resolveOwnerSlugFromConfig(config)
+  } catch (err) {
+    db.close()
+    throw err
+  }
+  const bootedAt = Date.now()
+
+  // O4 — register the process-wide system_events degradation journal sink ONCE,
+  // after migrations + slug resolution (so `system_events` exists and no earlier
+  // throw can leak it). Every silent fail-soft / degrade site reaches this via
+  // the ambient registry (persistence/system-events.ts) and emits a
+  // VISIBILITY-ONLY row; when this registration hasn't run (unit tests, sidecar
+  // tools) each emit is a no-op. Push onto the ambient sink STACK and keep the
+  // identity-scoped deregister. Teardown removes exactly THIS sink (from any
+  // stack position), so overlapping boots tear down in any order without
+  // orphaning a live older boot or resurrecting a closed-DB sink — the stack top
+  // is always a live owner.
   const systemEventSink = new SystemEventsStore({ db })
   const clearOwnedSystemEventSink = pushSystemEventSink(systemEventSink)
-
-  const project_slug = resolveOwnerSlugFromConfig(config)
-  const bootedAt = Date.now()
 
   // Compose the module graph if the caller supplied a composer. We capture
   // the composition output BEFORE composing so we can read any graph-level
@@ -543,6 +554,15 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // emit raced in, emitSystemEventSafe swallows the write error — belt-and-braces.)
     clearOwnedSystemEventSink()
     db.close()
+    // Remove the process signal listeners this boot installed. `process.once`
+    // auto-removes on FIRE, but a MANUAL shutdown() (tests, in-process
+    // restarts, overlapping boots) never fires them — so without this, repeated
+    // boot/shutdown cycles accumulate stale SIGTERM/SIGINT listeners (eventual
+    // MaxListenersExceededWarning) and a later real signal would invoke every
+    // retired boot's closure. Idempotent: removeListener on an already-removed
+    // (fired) listener is a no-op.
+    process.removeListener('SIGTERM', handleSignal)
+    process.removeListener('SIGINT', handleSignal)
   }
 
   const handleSignal = (): void => {
