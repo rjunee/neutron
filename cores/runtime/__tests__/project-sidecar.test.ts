@@ -139,11 +139,10 @@ describe('safeResolveProjectRoot — traversal guard', () => {
     expect(resolved).toBe(join(tmp, 'Projects', 'nested', 'group', 'proj-7'))
   })
 
-  test('a bare absolute project_id is neutralized (flattened UNDER Projects/, not an escape)', () => {
-    // node `path.join` flattens a leading-slash segment under Projects/, so a
-    // bare absolute cannot escape the boundary via the default resolver.
-    const resolved = safeResolveProjectRoot({ owner_home: tmp, project_id: '/etc/passwd' })
-    expect(resolved).toBe(join(tmp, 'Projects', 'etc', 'passwd'))
+  test('rejects a bare absolute project_id outright (never valid input)', () => {
+    expect(() =>
+      safeResolveProjectRoot({ owner_home: tmp, project_id: '/etc/passwd' }),
+    ).toThrow(CorePathTraversalError)
   })
 })
 

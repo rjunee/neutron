@@ -21,7 +21,13 @@
  */
 
 import { existsSync, mkdirSync, realpathSync } from 'node:fs'
-import { dirname, join, resolve as resolvePath, sep } from 'node:path'
+import {
+  dirname,
+  isAbsolute,
+  join,
+  resolve as resolvePath,
+  sep,
+} from 'node:path'
 
 /**
  * Thrown when a caller-supplied `project_id` resolves to a filesystem path
@@ -115,6 +121,14 @@ export function safeResolveProjectRoot(
   }
   if (project_id.includes('\0')) {
     throw makeError(project_id, '', owner_projects_dir)
+  }
+  // Reject an ABSOLUTE `project_id` outright. A legit id is a slug / uuid /
+  // relative nested path; an absolute value is never valid input. (Left
+  // implicit, `path.join` would flatten `/etc/passwd` UNDER Projects/ —
+  // harmless but a contract violation vs the documented absolute-path
+  // rejection, and a footgun if the mapping ever changes.)
+  if (isAbsolute(project_id)) {
+    throw makeError(project_id, resolvePath(project_id), owner_projects_dir)
   }
   const resolveRoot =
     opts.resolveProjectRoot ??
