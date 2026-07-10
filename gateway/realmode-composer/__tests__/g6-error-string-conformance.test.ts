@@ -40,7 +40,7 @@
  */
 
 import { expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -64,12 +64,22 @@ import type { Event } from '@neutronai/runtime/events.ts'
 
 // Absolute paths to the producer SOURCE files, resolved from this test file so
 // the source-text extraction below is worktree-independent.
-const SUBSTRATE_SRC_PATH = fileURLToPath(
-  new URL(
-    '../../../runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts',
-    import.meta.url,
-  ),
+// D2 split the persistent REPL substrate along its section banners into sibling
+// modules (signatures/types/repl-session/spawn/pool/supervision/…); the producer
+// string literals this test pins moved VERBATIM into those siblings (e.g. the
+// `persistent-repl: spawn failed (` template → spawn.ts, the `persistent-repl:
+// turn timeout` literal → pool.ts). The source-text extraction therefore reads
+// the WHOLE substrate module cluster (the barrel + every split sibling), so it
+// stays green through any future banner reshuffle and still fails loudly the
+// moment a producer literal is reworded.
+const SUBSTRATE_DIR = fileURLToPath(
+  new URL('../../../runtime/adapters/claude-code/persistent/', import.meta.url),
 )
+const SUBSTRATE_SRC: string = readdirSync(SUBSTRATE_DIR)
+  .filter((f) => f.endsWith('.ts'))
+  .sort()
+  .map((f) => readFileSync(SUBSTRATE_DIR + f, 'utf8'))
+  .join('\n')
 // `collectTokensToString` (which throws the `cc-llm-call: aborted` producer)
 // was relocated out of build-llm-call-substrate.ts into the runtime leaf in L3
 // (the reminders→gateway DAG-edge cut). The literal is unchanged — only its home
@@ -86,17 +96,20 @@ const COLLECT_TOKENS_SRC_PATH = fileURLToPath(
  * (the match is `null`) the moment it is reworded, then assert the classifier
  * against the extracted-from-source string.
  */
-function extractFromSource(srcPath: string, pattern: RegExp, label: string): string {
-  const src = readFileSync(srcPath, 'utf8')
+function extractFromText(src: string, pattern: RegExp, label: string, where: string): string {
   const m = src.match(pattern)
   if (m === null || m[1] === undefined) {
     throw new Error(
-      `G6 producer-conformance: could not extract ${label} from ${srcPath} — the producer ` +
+      `G6 producer-conformance: could not extract ${label} from ${where} — the producer ` +
         `wording was reworded (or moved). Update BOTH the producer and its classifier, then ` +
         `re-pin this test (§2.4 ratchet: PR-body note + Fable sign-off).`,
     )
   }
   return m[1]
+}
+
+function extractFromSource(srcPath: string, pattern: RegExp, label: string): string {
+  return extractFromText(readFileSync(srcPath, 'utf8'), pattern, label, srcPath)
 }
 
 /** Drive `startResponsesStream` against an injected fetch returning `status` — this
@@ -241,10 +254,11 @@ test('G6 · detectChannelWedged pins the substrate `spawn failed (<reason>; ...)
   // `throw new Error(\`persistent-repl: spawn failed (${assertion.reason}; ${assertion.detail ?? ''})\`)`).
   // Extract the exact template prefix from source so a reword of the producer
   // format fails loudly here (the extraction returns `null`).
-  const templatePrefix = extractFromSource(
-    SUBSTRATE_SRC_PATH,
+  const templatePrefix = extractFromText(
+    SUBSTRATE_SRC,
     /throw new Error\(`(persistent-repl: spawn failed \()\$\{assertion\.reason\}/,
     'the `persistent-repl: spawn failed (<reason>` producer template',
+    'the substrate module cluster',
   )
   expect(templatePrefix).toBe('persistent-repl: spawn failed (')
 
@@ -310,10 +324,11 @@ test('G6 · detectTurnTimeout pins the REAL `persistent-repl: turn timeout` prod
   // This is a bare string literal that cannot be invoked without a full REPL, so
   // we extract the exact literal from the producer source (fails loudly on a
   // reword) and assert the classifier against it.
-  const producedLiteral = extractFromSource(
-    SUBSTRATE_SRC_PATH,
+  const producedLiteral = extractFromText(
+    SUBSTRATE_SRC,
     /message: '(persistent-repl: turn timeout)', retryable: true/,
     'the `persistent-repl: turn timeout` producer literal',
+    'the substrate module cluster',
   )
   expect(detectTurnTimeout(producedLiteral)).toBe(true)
   // A turn timeout is RETRYABLE on the same credential — must NOT read as an
@@ -329,10 +344,11 @@ test('G6 · detectTurnTimeout pins the REAL `persistent-repl: turn timeout` prod
 
 test('G6 · isFreezeTimeout matches the REAL turn-timeout AND composer-abort producers (both extracted from source)', () => {
   // Producer A: persistent-repl-substrate.ts `persistent-repl: turn timeout`.
-  const turnTimeout = extractFromSource(
-    SUBSTRATE_SRC_PATH,
+  const turnTimeout = extractFromText(
+    SUBSTRATE_SRC,
     /message: '(persistent-repl: turn timeout)', retryable: true/,
     'the `persistent-repl: turn timeout` producer literal',
+    'the substrate module cluster',
   )
   // Producer B: runtime/collect-tokens.ts abort-signal listener —
   //   throw new Error('cc-llm-call: aborted')
@@ -363,10 +379,11 @@ test('G6 · isFreezeTimeout does NOT swallow real faults as timeouts (binary-not
 test('G6 · classification-ladder disjointness — each REAL producer string trips exactly ONE health class (no double-classification into a false cooldown)', async () => {
   const http429 = await realHttpStatusProducerMessage(429, 'limit')
   const wedge = new ChannelWedgedSpawnError('s', 'pid=1 port=2').message
-  const timeout = extractFromSource(
-    SUBSTRATE_SRC_PATH,
+  const timeout = extractFromText(
+    SUBSTRATE_SRC,
     /message: '(persistent-repl: turn timeout)', retryable: true/,
     'turn-timeout literal',
+    'the substrate module cluster',
   )
 
   // channel-wedged: ONLY detectChannelWedged (checked first in the ladder).
