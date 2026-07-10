@@ -49,18 +49,20 @@ export async function cancelRun(
   // The durable persist is best-effort observability (since P7 `update` awaits a
   // store write that can reject). A persist failure must NOT reject the cancel
   // nor leak the canceller — swallow it and still remove the canceller below.
-  const cancelledPatch = { status: 'cancelled' as const, ended_at: Date.now() }
-  try {
-    await state.registry.update(run_id, cancelledPatch)
-  } catch (err) {
+  // Drive terminal with a CONVERGING durable write (never rejects; retries a
+  // transient store failure so the durable row reaches `cancelled` and a restart's
+  // boot sweep won't re-surface it as a crash). If it can't converge, the live
+  // record is still forced terminal in memory so waitForCompletion doesn't hang,
+  // the caps release it, and the watchdog doesn't re-reap it.
+  const settled = await state.registry.updateTerminal(run_id, {
+    status: 'cancelled',
+    ended_at: Date.now(),
+  })
+  if (!settled.durable) {
     console.warn(
-      `[subagent-control] cancel persist failed for ${run_id}; ` +
-        `canceller still removed (persistence best-effort): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+      `[subagent-control] cancel persist for ${run_id} did not converge; ` +
+        `canceller removed, durable row stale (best-effort)`,
     )
-    // Force the live record terminal despite the failed persist (else it lingers
-    // `running`: waitForCompletion hangs, caps retain it, the watchdog re-reaps).
-    await state.registry.reconcileInMemory(run_id, cancelledPatch)
   }
   state.cancellers.delete(run_id)
 }
@@ -121,23 +123,21 @@ export async function failRun(
   // canceller, and still return true so the caller notifies. The in-memory record
   // rolls back to its last persisted state on failure — the store outage is the
   // degradation, and the next boot re-reaps a still-live row.
-  const crashedPatch = {
-    status: 'crashed' as const,
+  // Drive terminal with a CONVERGING durable write (never rejects; retries a
+  // transient store failure so the durable `crashed` row lands and the watchdog /
+  // a restart's boot sweep don't re-reap this run into a duplicate report). If it
+  // can't converge, the live record is still forced terminal in memory.
+  const settled = await state.registry.updateTerminal(run_id, {
+    status: 'crashed',
     ended_at: now,
     failure_reason: reason,
     last_event_at: now,
-  }
-  try {
-    await state.registry.update(run_id, crashedPatch)
-  } catch (err) {
+  })
+  if (!settled.durable) {
     console.warn(
-      `[subagent-control] failRun persist failed for ${run_id}; ` +
-        `surfacing the crash anyway (persistence best-effort): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+      `[subagent-control] failRun persist for ${run_id} did not converge; ` +
+        `crash surfaced, durable row stale (best-effort)`,
     )
-    // Force the live record terminal despite the failed persist so the watchdog
-    // doesn't re-reap this run next tick into a second, contradictory report.
-    await state.registry.reconcileInMemory(run_id, crashedPatch)
   }
   state.cancellers.delete(run_id)
   return true

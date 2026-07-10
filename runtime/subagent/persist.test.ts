@@ -470,6 +470,54 @@ describe('live-path persist failures are best-effort (never reject, canceller ne
   })
 })
 
+describe('terminal-write convergence: a restart never re-reports an already-terminal run', () => {
+  test('a TRANSIENT terminal-write failure CONVERGES → a restart boot sweep does NOT re-crash it', async () => {
+    // The cross-restart hazard: if a `finished` write fails and the live process
+    // reports finished but leaves the durable row `running`, a restart's boot
+    // sweep re-surfaces it as a contradictory `crashed`. `updateTerminal` retries
+    // the durable write, so a transient failure converges to a terminal row and
+    // the sweep skips it. Wrap a REAL store ('boot-A') and inject ONE transient
+    // failure on the first `finished` persist.
+    const realStore = new SubagentRegistryStore(db, 'boot-A')
+    let finishedFailsLeft = 1
+    const flaky: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'finished' && finishedFailsLeft > 0) {
+          finishedFailsLeft--
+          throw new Error('transient terminal write failure')
+        }
+        await realStore.persist(rec)
+      },
+      remove: (id) => realStore.remove(id),
+    }
+    const reg = new SubagentRegistry(flaky)
+    await reg.create(dispatchInput({ run_id: 'r', agent_kind: 'atlas' })) // pending → store
+    await reg.update('r', { status: 'running' }) // running → store
+
+    // Terminal 'finished' via the CONVERGING path: attempt 1 throws (transient),
+    // the retry delegates to the real store → durable finished.
+    const settled = await reg.updateTerminal('r', { status: 'finished', ended_at: 5 })
+    expect(settled.durable).toBe(true) // converged despite the blip
+    expect(reg.byRunId('r')?.status).toBe('finished') // memory terminal
+    expect(realStore.get('r')?.status).toBe('finished') // DURABLE terminal — the crux
+
+    // RESTART: a fresh boot ('boot-B') sweeps the same DB. The row is terminal, so
+    // it is NOT reapable → the already-reported 'finished' run is never re-surfaced
+    // as a contradictory 'crashed'.
+    const fired: string[] = []
+    const swept = await sweepOrphanedDispatchesOnBoot({
+      store: new SubagentRegistryStore(db, 'boot-B'),
+      report: (r) => {
+        fired.push(r.run_id)
+      },
+      now: () => 999,
+    })
+    expect(swept).toHaveLength(0)
+    expect(fired).toEqual([]) // no contradictory crash re-report
+    expect(realStore.get('r')?.status).toBe('finished') // still finished, NOT crashed
+  })
+})
+
 describe('SubagentRegistryStore — malformed-row isolation', () => {
   test('one row with corrupt JSON does not abort loadReapable; valid orphans still reap', async () => {
     const store = priorStore()

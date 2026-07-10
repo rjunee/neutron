@@ -321,15 +321,56 @@ export class SubagentRegistry {
   reconcileInMemory(
     run_id: string,
     patch: Partial<Omit<SubagentRecord, 'run_id'>>,
-  ): Promise<void> {
+  ): Promise<SubagentRecord | undefined> {
     return this.runSerial(run_id, async () => {
       const cur = this.byId.get(run_id)
-      if (cur === undefined) return
+      if (cur === undefined) return undefined
       if (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled') {
-        return
+        return cur // already terminal — a concurrent completion/cancel/fail won
       }
-      this.byId.set(run_id, { ...cur, ...patch })
+      const next = { ...cur, ...patch }
+      this.byId.set(run_id, next)
+      return next
     })
+  }
+
+  /**
+   * Drive a run TERMINAL with a durable write that CONVERGES. Retries the durable
+   * `update` up to `attempts` times — a TRANSIENT store failure (a brief I/O blip,
+   * a momentary lock the async busy-retry didn't outlast) may clear, so a retry
+   * lands and memory + store agree. On success a restart's boot sweep skips the
+   * now-terminal row. If EVERY attempt fails, forces the live record terminal in
+   * memory anyway (`reconcileInMemory`) so the process's operational state is still
+   * correct, and returns `durable: false` — the durable row stays stale (a
+   * permanently-broken store is a degraded process, out of scope; the boot sweep
+   * may then re-surface the row). This convergence is the live terminal paths'
+   * (completion / cancelRun / failRun) durability guarantee: a CONVERGED terminal
+   * row is what stops a restart from re-reporting an already-surfaced
+   * finished/cancelled run as a contradictory crash. NEVER rejects.
+   */
+  async updateTerminal(
+    run_id: string,
+    patch: Partial<Omit<SubagentRecord, 'run_id'>>,
+    attempts = 4,
+  ): Promise<{ record: SubagentRecord | undefined; durable: boolean }> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const record = await this.update(run_id, patch)
+        return { record, durable: true }
+      } catch {
+        // `update` rolled memory back to the last durable snapshot; retry the
+        // durable write after a short backoff in case the failure was transient.
+        if (i < attempts - 1) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 5 * (i + 1)))
+        }
+      }
+    }
+    // Every durable attempt failed — force the live record terminal so the
+    // operational state is correct even though the durable row is stale.
+    const record = await this.reconcileInMemory(run_id, patch)
+    return { record, durable: false }
   }
 
   byRunId(run_id: string): SubagentRecord | undefined {

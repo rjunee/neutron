@@ -480,32 +480,29 @@ export class DispatchService {
         ended_at: this.now(),
       }
       if (turn.status === 'timed_out') patch.failure_reason = 'stuck'
-      // Persistence is BEST-EFFORT observability — a durable terminal-write
-      // failure must NEVER reject `completion` (contract below) nor skip the
-      // terminal steps (canceller removal + report + board cleanup). Since P7 the
-      // registry `update` awaits a durable persist that can reject; guard it.
-      // On failure `update` rolls memory BACK to the last persisted (pre-terminal)
-      // snapshot, so do NOT re-read — report the INTENDED terminal record we were
-      // writing (`{ ...cur, ...patch }`); on success use the returned `updated`.
-      let recordToReport: SubagentRecord
-      try {
-        recordToReport = await this.deps.registry.update(run_id, patch)
-      } catch (err) {
+      // Drive the run terminal with a CONVERGING durable write. `updateTerminal`
+      // never rejects — so a store outage can never reject `completion` (contract
+      // below) nor skip the terminal steps (canceller removal + report + board
+      // cleanup) — and it RETRIES the durable write so a transient failure
+      // converges. If it converges (`durable`), the durable row is terminal and a
+      // restart's boot sweep skips it (no contradictory crash re-report). If every
+      // retry fails, the live record is still forced terminal in memory (so
+      // waitForCompletion doesn't hang, the caps release it, the watchdog doesn't
+      // re-reap it); we report the intended terminal outcome regardless — never a
+      // re-read, since a failed durable write leaves memory pre-terminal only when
+      // NOT converged, and even then the intended record is authoritative.
+      const settled = await this.deps.registry.updateTerminal(run_id, patch)
+      const recordToReport: SubagentRecord = settled.record ?? { ...(cur ?? record), ...patch }
+      if (!settled.durable) {
         console.warn(
-          `[agent-dispatch] terminal persist failed for ${run_id} (${status}); ` +
-            `reporting intended terminal outcome (persistence best-effort): ` +
-            `${err instanceof Error ? err.message : String(err)}`,
+          `[agent-dispatch] terminal persist for ${run_id} (${status}) did not converge after ` +
+            `retries; reported from intent, durable row stale (best-effort) — the boot reap may ` +
+            `re-surface it on restart`,
         )
-        // The durable write failed AND `update` rolled memory back to the
-        // pre-terminal state — force the LIVE registry record terminal so
-        // waitForCompletion doesn't hang, the caps release the run, and the
-        // watchdog doesn't re-reap it into a second crash report.
-        await this.deps.registry.reconcileInMemory(run_id, patch)
-        recordToReport = { ...(cur ?? record), ...patch }
       }
-      // ALWAYS remove the canceller and report — on BOTH the success and the
-      // persist-failure path — so a store outage never leaks a canceller nor
-      // drops the report + board cleanup.
+      // ALWAYS remove the canceller and report — on BOTH the converged and the
+      // stale-durable path — so a store outage never leaks a canceller nor drops
+      // the report + board cleanup.
       this.deps.control.cancellers.delete(run_id)
       return this.report(
         recordToReport,
