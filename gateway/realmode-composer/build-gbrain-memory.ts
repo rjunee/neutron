@@ -1,18 +1,25 @@
 /**
  * @neutronai/gateway/realmode-composer — per-instance GBrain memory wiring.
  *
- * Builds the three live GBrain seams the composer threads into the boot path,
- * so GBrain is the genuine production memory store (not a built-but-unwired
- * layer):
+ * Builds the live GBrain seams the composer threads into the boot path, so
+ * GBrain is the genuine production memory store (not a built-but-unwired layer).
  *
- *   1. `client`      — `GBrainStdioMcpClient`, the stdio MCP transport that
- *      spawns `gbrain serve` scoped to THIS instance's brain.
- *   2. `memoryStore` — `GBrainMemoryStore` over that client. Threaded into the
- *      admin "Memory" tab (`app-admin-surface.ts`) so browse reads real pages.
- *   3. `syncHook`    — `GBrainSyncHook` over the store + client. Threaded into
+ * The raw stdio MCP transport (`GBrainStdioMcpClient`, which spawns `gbrain
+ * serve` scoped to THIS instance's brain) is an INTERNAL local of this builder —
+ * it is deliberately NOT on the returned `GBrainMemoryWiring` surface (RA5 /
+ * invariant I2). Exposing it would let a product module reach a raw op-name
+ * transport through the exempt composer (`buildGBrainMemory(...).client`),
+ * defeating the swap-seam type+import boundary. The PUBLIC seams are only the
+ * TYPED contract surfaces:
+ *
+ *   1. `memoryStore` — `GBrainMemoryStore` over the internal client. Threaded
+ *      into the admin "Memory" tab (`app-admin-surface.ts`) so browse reads real
+ *      pages, and into the `memory_search` agent tool.
+ *   2. `syncHook`    — `GBrainSyncHook` over the store + client. Threaded into
  *      the entity-writer's `syncHook` seam (today via the history-import
  *      populator's `importGbrainSyncHook`) so entity writes fan out to the
  *      GBrain page store + typed-edge graph.
+ *   3. `close`        — tears down the `gbrain serve` child on SIGTERM.
  *
  * **Per-instance isolation.** Each instance's brain lives at `<owner_home>/gbrain/`
  * (per `docs/architecture/memory-adapter-gbrain-2026-06-06.md`). We point
@@ -50,9 +57,11 @@ import {
 import type { SyncHook } from '@neutronai/runtime/entity-writer.ts'
 
 export interface GBrainMemoryWiring {
-  /** The live stdio MCP transport (spawns `gbrain serve` lazily). */
-  client: GBrainStdioMcpClient
-  /** Admin "Memory" tab read/write surface. */
+  // NB: the raw `GBrainStdioMcpClient` transport is intentionally NOT a field
+  // here — it stays a local inside `buildGBrainMemory`. Product code must reach
+  // memory only through the typed `MemoryStore` (RA5 / invariant I2); exposing
+  // the transport on this composer-returned shape would be a swap-seam bypass.
+  /** Admin "Memory" tab read/write surface + `memory_search` backing store. */
   memoryStore: MemoryStore
   /** Entity-writer fan-out hook (page store + typed-edge graph). */
   syncHook: SyncHook
@@ -289,8 +298,9 @@ export function buildGBrainMemory(input: {
     ...(input.syncStateSink !== undefined ? { syncStateSink: input.syncStateSink } : {}),
   })
 
+  // `client` stays a LOCAL — used to construct memoryStore + syncHook and for
+  // the close closure, but never surfaced (see GBrainMemoryWiring).
   return {
-    client,
     memoryStore,
     syncHook,
     close: () => client.close(),

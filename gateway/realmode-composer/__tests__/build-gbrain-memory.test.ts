@@ -2,9 +2,9 @@
  * build-gbrain-memory — per-instance GBrain memory wiring.
  *
  * Covers the scoping logic (`resolveGbrainClientOptions`) and that
- * `buildGBrainMemory` returns the live trio (client + memoryStore + syncHook +
+ * `buildGBrainMemory` returns ONLY the typed seams (memoryStore + syncHook +
  * close) that the composer threads into the admin surface (browse) and the
- * landing stack (`importGbrainSyncHook`).
+ * landing stack (`importGbrainSyncHook`) — NOT the raw transport (RA5 / I2).
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -14,7 +14,20 @@ import { join } from 'node:path'
 import {
   buildGBrainMemory,
   resolveGbrainClientOptions,
+  type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
+
+// COMPILE-TIME negative probe (RA5 / invariant I2). The composer wiring is the
+// exempt-module bypass Codex flagged: if the raw transport were on this public
+// shape, a product module could `buildGBrainMemory(...).client.call('put_page',
+// …)` with no `gbrain-memory` import, so depcruise never fires. This assertion
+// FAILS `tsc` if a `client` (or any GBrainStdioMcpClient) field is re-added —
+// `keyof GBrainMemoryWiring` must not include `client`.
+type _WiringExposesNoRawClient = 'client' extends keyof GBrainMemoryWiring
+  ? { ERROR: 'GBrainMemoryWiring must not expose the raw transport (RA5 swap-seam bypass)' }
+  : true
+const _wiringExposesNoRawClient: _WiringExposesNoRawClient = true
+void _wiringExposesNoRawClient
 
 describe('resolveGbrainClientOptions', () => {
   test('GBRAIN_HOME is the per-project <owner_home>/gbrain boundary', () => {
@@ -166,15 +179,21 @@ describe('resolveGbrainClientOptions', () => {
 })
 
 describe('buildGBrainMemory', () => {
-  test('returns the live trio + a close() that resolves', async () => {
+  test('returns ONLY the typed seams (no raw transport) + a close() that resolves', async () => {
     const wiring = buildGBrainMemory({
       owner_home: '/srv/owners/acme',
       project_slug: 'acme',
       env: {},
     })
-    expect(wiring.client).toBeDefined()
     expect(typeof wiring.memoryStore.query).toBe('function')
     expect(typeof wiring.syncHook.onEntityWrite).toBe('function')
+    // RA5 / invariant I2 — the raw `GBrainStdioMcpClient` transport must NOT be
+    // reachable through the exempt composer wiring (that would let a product
+    // module grab `.client` and call raw ops without a `gbrain-memory` import).
+    // The public shape carries ONLY memoryStore/syncHook/close.
+    expect('client' in wiring).toBe(false)
+    expect((wiring as unknown as Record<string, unknown>)['client']).toBeUndefined()
+    expect(Object.keys(wiring).sort()).toEqual(['close', 'memoryStore', 'syncHook'])
     // close() never spawned a child (lazy connect), so it resolves cleanly.
     await expect(wiring.close()).resolves.toBeUndefined()
   })

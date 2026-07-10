@@ -27,7 +27,12 @@
  * in-process client backed by a real PGLite brain. The legitimate holders of an
  * `McpClient` are the `gbrain-memory/` adapters (`GBrainMemoryStore`,
  * `GBrainSyncHook`) and the `connect/` federation mirror (which the swap-seam
- * rule exempts), never a product surface.
+ * rule exempts), never a product surface. Critically, the composer that builds
+ * the production transport (`gateway/realmode-composer/build-gbrain-memory.ts`,
+ * an exempt module) keeps the `GBrainStdioMcpClient` as a LOCAL and returns ONLY
+ * the typed `MemoryStore` (+ syncHook + close) on `GBrainMemoryWiring` — it does
+ * NOT surface the transport, so product code cannot reach a raw op even through
+ * the one composition module allowed to import it.
  */
 export interface McpClient {
   call(name: string, args: Record<string, unknown>): Promise<unknown>
