@@ -939,12 +939,13 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
       const extras = coreModule.buildExtraTools(deps)
       for (const [name, handler] of Object.entries(extras)) {
         if (Object.prototype.hasOwnProperty.call(built, name)) {
-          input.log({
-            event_name: 'cores.tool_registration_failed',
-            core_slug: core.slug,
-            code: 'extra_tool_name_collision',
-            message: `Core ${core.slug} buildExtraTools returned tool '${name}' that buildTools also returned; keeping buildTools handler`,
-          })
+          // buildTools already provided this tool — keep its handler. This is
+          // EXPECTED precedence for split-surface Cores whose `buildTools`
+          // conditionally includes an extra tool (e.g. Tasks' `tasks_pick_next`
+          // when `pickNext` is wired). It is NOT a failure, so it does not emit
+          // `cores.tool_registration_failed` telemetry (which would fire a
+          // console.warn on every healthy install). The coverage check below
+          // still guarantees every manifest tool has a callable handler.
           continue
         }
         built[name] = handler

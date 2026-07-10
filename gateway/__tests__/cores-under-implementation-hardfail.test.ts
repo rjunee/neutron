@@ -55,6 +55,8 @@ const UNDERIMPL_SLUG = 'underimpl_core'
 const NONFN_ROOT = join(import.meta.dir, 'fixtures', 'nonfn-root')
 const SLUG_MISMATCH_ROOT = join(import.meta.dir, 'fixtures', 'slug-mismatch-root')
 const TOOLNAMES_MISMATCH_ROOT = join(import.meta.dir, 'fixtures', 'toolnames-mismatch-root')
+const CTXECHO_ROOT = join(import.meta.dir, 'fixtures', 'ctxecho-root')
+const SPLIT_SURFACE_ROOT = join(import.meta.dir, 'fixtures', 'split-surface-root')
 
 interface Bench {
   ownerHome: string
@@ -254,6 +256,88 @@ describe('X2 — under-implementing Core cannot install silently-broken', () => 
     expect(threw).not.toBeNull()
     expect((threw as { code?: string }).code).toBe('manifest_incomplete')
     expect((threw as Error).message).toContain('underimpl_missing')
+  })
+
+  test('split-surface overlap (buildTools + buildExtraTools share a tool) installs clean — no false failure telemetry', async () => {
+    const events: Array<{ event_name?: string; code?: string; core_slug?: string }> = []
+    const result = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [SPLIT_SURFACE_ROOT],
+      backends: { split_core: () => ({ backend: {} }) },
+      hardFailFailureRatio: 1,
+      log: (e) => events.push(e as { event_name?: string }),
+    })
+    expect(result.installed.has('split_core')).toBe(true)
+    expect(result.failures).toEqual([])
+    // Both tools registered; the buildTools handler wins the overlap.
+    expect(bench.tools.get('split_a')).toBeDefined()
+    expect(bench.tools.get('split_b')).toBeDefined()
+    // NO tool_registration_failed / extra_tool_name_collision telemetry.
+    const noisy = events.filter(
+      (e) =>
+        e.event_name === 'cores.tool_registration_failed' ||
+        e.code === 'extra_tool_name_collision',
+    )
+    expect(noisy).toEqual([])
+    // The overlap kept the buildTools handler (not buildExtraTools').
+    const out = (await bench.tools.get('split_b')!.handler({}, {
+      project_slug: 'test',
+      project_id: null,
+      topic_id: null,
+      call_id: 'c',
+      speaker_user_id: null,
+    })) as { from: string }
+    expect(out.from).toBe('base')
+  })
+
+  test('wrapHandler THREADS the per-call ToolCallContext into the Core handler at dispatch', async () => {
+    // Behavioral proof (not just type assignability): a Core handler that
+    // echoes ctx into its backend must receive the exact ctx the registry
+    // dispatches with — every field, all non-null. Replacing wrapHandler's
+    // `fn(args, ctx)` with the old `fn(args)` would make `captured` null here.
+    const capturedRef: { current: RegistryToolCallContext | null } = { current: null }
+    const result = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [CTXECHO_ROOT],
+      backends: {
+        ctxecho_core: () => ({
+          backend: {
+            capture: (ctx: RegistryToolCallContext) => {
+              capturedRef.current = ctx
+            },
+          },
+        }),
+      },
+      hardFailFailureRatio: 1,
+    })
+    expect(result.installed.has('ctxecho_core')).toBe(true)
+
+    const reg = bench.tools.get('ctx_echo')
+    expect(reg, 'ctx_echo must register with a real handler').toBeDefined()
+
+    const ctx: RegistryToolCallContext = {
+      project_slug: 'owner-slug',
+      project_id: 'project-42',
+      topic_id: 'topic-9',
+      call_id: 'call-abc',
+      speaker_user_id: 'user-7',
+    }
+    await reg!.handler({ hello: 'world' }, ctx)
+    const captured = capturedRef.current
+    expect(captured).not.toBeNull()
+    expect(captured).toEqual(ctx)
+    // Explicitly pin the fields Codex called out as the X6 enabler.
+    expect(captured?.project_id).toBe('project-42')
+    expect(captured?.topic_id).toBe('topic-9')
+    expect(captured?.speaker_user_id).toBe('user-7')
   })
 
   test('SDK ToolCallContext stays field-identical to the registry ToolCallContext', () => {
