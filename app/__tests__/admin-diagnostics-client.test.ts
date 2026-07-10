@@ -147,6 +147,21 @@ describe('AdminClient.getDiagnostics', () => {
     await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
   });
 
+  it('a 200 { ok:false } with a valid report still maps to a typed error (ok must be true)', async () => {
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: false, diagnostics: sampleReport() } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
+  });
+
+  it('a 200 report whose section collection is NOT an array maps to a typed error', async () => {
+    const report = { ...sampleReport(), repl_sessions: { available: true, sessions: 'x' } } as unknown;
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true, diagnostics: report } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
+  });
+
   it('a malformed/empty error body still yields a typed error (no throw-through)', async () => {
     const stub = makeFetchStub(() => ({ status: 500, body: null, noJson: true }));
     globalThis.fetch = stub.fetch;

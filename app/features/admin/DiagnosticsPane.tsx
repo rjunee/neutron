@@ -4,8 +4,8 @@
  * Read-only view of `GET /api/app/admin/diagnostics`: composes existing
  * per-instance state so the owner can answer "why is memory / chat / import
  * broken?" without journalctl. Sections that read in-process-only state
- * (credentials, core install) may report `available: false` on some
- * deployments; each renders its own note.
+ * (credentials) may report `available: false` on some deployments; each
+ * renders its own note.
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -13,6 +13,12 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 
 import { AdminClient, type DiagnosticsReport } from '../../lib/admin-client';
 import { formatError } from './format';
+
+/** Defensive: only iterate real arrays (the client already validates, but this
+ *  guarantees rendering never throws on a `.map()` of a non-array). */
+function arr<T>(x: T[] | undefined): T[] {
+  return Array.isArray(x) ? x : [];
+}
 
 function fmtTime(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return '—';
@@ -160,10 +166,10 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
             note={data.repl_sessions.note}
           >
             {data.repl_sessions.available ? (
-              (data.repl_sessions.sessions ?? []).length === 0 ? (
+              arr(data.repl_sessions.sessions).length === 0 ? (
                 <Text style={styles.muted}>No active REPL sessions.</Text>
               ) : (
-                (data.repl_sessions.sessions ?? []).map((s) => (
+                arr(data.repl_sessions.sessions).map((s) => (
                   <View key={s.key} style={styles.subCard}>
                     <Text style={styles.subTitle}>{s.key}</Text>
                     <Row label="Model" value={s.model ?? '?'} />
@@ -185,10 +191,10 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
 
           <Section title="Cron jobs" available={data.cron_jobs.available} note={data.cron_jobs.note}>
             {data.cron_jobs.available ? (
-              (data.cron_jobs.jobs ?? []).length === 0 ? (
+              arr(data.cron_jobs.jobs).length === 0 ? (
                 <Text style={styles.muted}>No cron runs recorded.</Text>
               ) : (
-                (data.cron_jobs.jobs ?? []).map((j) => (
+                arr(data.cron_jobs.jobs).map((j) => (
                   <View key={j.job_name} style={styles.subCard}>
                     <Text style={styles.subTitle}>{j.job_name}</Text>
                     <Row label="Last run" value={fmtTime(j.last_run_at ?? null)} />
@@ -206,10 +212,10 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
             note={data.import_jobs.note}
           >
             {data.import_jobs.available ? (
-              (data.import_jobs.jobs ?? []).length === 0 ? (
+              arr(data.import_jobs.jobs).length === 0 ? (
                 <Text style={styles.muted}>No import jobs.</Text>
               ) : (
-                (data.import_jobs.jobs ?? []).map((j) => (
+                arr(data.import_jobs.jobs).map((j) => (
                   <View key={j.job_id} style={styles.subCard}>
                     <Text style={styles.subTitle}>{j.status ?? '?'}</Text>
                     <Row label="Source" value={j.source ?? '?'} />
@@ -229,10 +235,10 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
             note={data.recent_events.note}
           >
             {data.recent_events.available ? (
-              (data.recent_events.events ?? []).length === 0 ? (
+              arr(data.recent_events.events).length === 0 ? (
                 <Text style={styles.muted}>No recent events.</Text>
               ) : (
-                (data.recent_events.events ?? []).slice(0, 20).map((e, i) => (
+                arr(data.recent_events.events).slice(0, 20).map((e, i) => (
                   <Text key={i} style={styles.eventLine}>
                     {fmtTime(e.ts ?? null)} · [{e.level ?? '?'}] {e.module ?? '?'}/{e.event ?? '?'}
                   </Text>

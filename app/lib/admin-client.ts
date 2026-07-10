@@ -185,32 +185,39 @@ export interface DiagnosticsReport {
 }
 
 /** The sections the Diagnostics pane dereferences — each must be an object
- *  carrying a boolean `available`. */
-const DIAGNOSTICS_SECTIONS = [
-  'gbrain',
-  'credentials',
-  'repl_sessions',
-  'cron_jobs',
-  'import_jobs',
-  'recent_events',
-] as const;
+ *  carrying a boolean `available`. The optional value is the collection field
+ *  the pane iterates with `.map()`/`.slice()`; when present it MUST be an array. */
+const DIAGNOSTICS_SECTIONS: ReadonlyArray<readonly [section: string, collection: string | null]> = [
+  ['gbrain', null],
+  ['credentials', null],
+  ['repl_sessions', 'sessions'],
+  ['cron_jobs', 'jobs'],
+  ['import_jobs', 'jobs'],
+  ['recent_events', 'events'],
+];
 
 /**
  * Runtime-validate a diagnostics payload into a `DiagnosticsReport`, or `null`
  * when it is missing / partial / wrong-shaped. Checks the scalar header
- * (`generated_at`, `project_slug`) AND every required section's boolean
- * `available` — exactly what the pane dereferences — so a partial object can
- * never slip through and crash the UI.
+ * (`generated_at`, `project_slug`), every required section's boolean
+ * `available`, AND that each section's iterated collection (when present) is an
+ * array — exactly what the pane dereferences (`.available`, `.map()`, `.slice()`)
+ * — so a partial or wrong-typed object can never slip through and crash the UI.
  */
 export function validateDiagnosticsReport(raw: unknown): DiagnosticsReport | null {
   if (raw === null || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   if (typeof r.generated_at !== 'number') return null;
   if (typeof r.project_slug !== 'string') return null;
-  for (const key of DIAGNOSTICS_SECTIONS) {
+  for (const [key, collection] of DIAGNOSTICS_SECTIONS) {
     const section = r[key];
     if (section === null || typeof section !== 'object') return null;
-    if (typeof (section as Record<string, unknown>).available !== 'boolean') return null;
+    const s = section as Record<string, unknown>;
+    if (typeof s.available !== 'boolean') return null;
+    // A present collection field must be an array (the pane maps over it).
+    if (collection !== null && s[collection] !== undefined && !Array.isArray(s[collection])) {
+      return null;
+    }
   }
   return raw as DiagnosticsReport;
 }
@@ -279,14 +286,15 @@ export class AdminClient {
    * broken?" from the admin tab. Owner-gated; no writes.
    */
   async getDiagnostics(): Promise<DiagnosticsReport> {
-    const res = await this.req<{ ok: boolean; diagnostics?: unknown }>(
+    const res = await this.req<{ ok?: boolean; diagnostics?: unknown }>(
       '/api/app/admin/diagnostics',
     );
-    // Validate the FULL success envelope — the pane dereferences `generated_at`,
-    // `project_slug`, and every section's boolean `available`. A 200 `{ ok:true }`
-    // with a missing/partial/wrong-shaped `diagnostics` must map to a typed
-    // error, not resolve and crash the pane (`TypeError` on `data.gbrain.available`).
-    const report = validateDiagnosticsReport(res.diagnostics);
+    // Validate the FULL success envelope — require `ok === true` AND a
+    // fully-shaped report. The pane dereferences `generated_at`, `project_slug`,
+    // every section's boolean `available`, and iterates each collection with
+    // `.map()`. A 200 `{ ok:false }` or a missing/partial/wrong-shaped
+    // `diagnostics` must map to a typed error, not resolve and crash the pane.
+    const report = res.ok === true ? validateDiagnosticsReport(res.diagnostics) : null;
     if (report === null) {
       throw new AdminClientError(
         'malformed_response',
