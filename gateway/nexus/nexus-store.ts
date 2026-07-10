@@ -416,6 +416,15 @@ export class NexusStore {
       params.push(...kinds)
     }
     if (opts.since !== undefined) {
+      // `since` reaches SQLite as a bound parameter; a non-finite value
+      // (NaN/Infinity from an untyped caller) would bind as NULL and
+      // silently drop the filter, so reject it with a typed error.
+      if (!Number.isFinite(opts.since)) {
+        throw new NexusStoreError(
+          'invalid_since',
+          'since must be a finite ms-epoch number',
+        )
+      }
       conditions.push('created_at >= ?')
       params.push(opts.since)
     }
@@ -595,11 +604,19 @@ export class NexusStore {
         `kind must be one of ${NEXUS_EVENT_KINDS.join('|')}; got ${String(input.kind)}`,
       )
     }
-    if (input.actor_id.length === 0) {
-      throw new NexusStoreError('invalid_actor_id', 'actor_id must be non-empty')
+    // Runtime shape checks (not just the TS types): the store is the
+    // validated seam, so a malformed caller (`as any`, an untyped JSON
+    // boundary in a future RC2 emitter) must get a typed NexusStoreError
+    // — never a raw TypeError from dereferencing `.length` on a non-
+    // string.
+    if (typeof input.actor_id !== 'string' || input.actor_id.length === 0) {
+      throw new NexusStoreError(
+        'invalid_actor_id',
+        'actor_id must be a non-empty string',
+      )
     }
-    if (input.body.length === 0) {
-      throw new NexusStoreError('invalid_body', 'body must be non-empty')
+    if (typeof input.body !== 'string' || input.body.length === 0) {
+      throw new NexusStoreError('invalid_body', 'body must be a non-empty string')
     }
     if (byteLen(input.body) > MAX_NEXUS_BODY_BYTES) {
       throw new NexusStoreError(
@@ -667,9 +684,22 @@ export function isNexusRefKind(v: unknown): v is NexusRefKind {
  *  is NULL when an event carries no refs). Throws `NexusStoreError` on
  *  a malformed entry so bad shapes never reach the log. */
 function serializeRefs(refs: NexusRef[] | null): string | null {
-  if (refs === null || refs.length === 0) return null
+  if (refs === null) return null
+  // Runtime shape check on the container before we index it — a
+  // non-array `refs` (untyped caller) must be a typed error, not a
+  // `.length`/iteration TypeError.
+  if (!Array.isArray(refs)) {
+    throw new NexusStoreError('invalid_ref', 'refs must be an array or null')
+  }
+  if (refs.length === 0) return null
   const cleaned: NexusRef[] = []
   for (const r of refs) {
+    if (typeof r !== 'object' || r === null) {
+      throw new NexusStoreError(
+        'invalid_ref',
+        'each ref must be a { kind, ref, note? } object',
+      )
+    }
     if (!isNexusRefKind(r.kind)) {
       throw new NexusStoreError(
         'invalid_ref_kind',

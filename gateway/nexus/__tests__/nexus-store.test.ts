@@ -658,6 +658,40 @@ describe('NexusStore — readRecent filtering', () => {
       }),
     ).rejects.toThrow(NexusStoreError)
   })
+
+  it('limit boundaries: 0/negative/NaN/fractional/over-cap clamp per clampLimit', async () => {
+    await seed() // 5 rows: d1,o1,l1,h1,d2 (oldest→newest)
+    const bodies = async (limit: number) =>
+      (await h.store.readRecent(PROJECT_ID, { limit })).map((e) => e.body)
+    // ≤0 / non-finite → fallback 50 → all 5.
+    expect(await bodies(0)).toEqual(['d1', 'o1', 'l1', 'h1', 'd2'])
+    expect(await bodies(-5)).toEqual(['d1', 'o1', 'l1', 'h1', 'd2'])
+    expect(await bodies(Number.NaN)).toEqual(['d1', 'o1', 'l1', 'h1', 'd2'])
+    expect(await bodies(Number.POSITIVE_INFINITY)).toEqual([
+      'd1', 'o1', 'l1', 'h1', 'd2',
+    ])
+    // 1 → newest single; fractional floors to 2.
+    expect(await bodies(1)).toEqual(['d2'])
+    expect(await bodies(2.9)).toEqual(['h1', 'd2'])
+    // Over-cap (501 → 500) still returns all 5 available.
+    expect((await bodies(501)).length).toBe(5)
+  })
+
+  it('rejects a non-finite since', async () => {
+    await seed()
+    await expect(
+      h.store.readRecent(PROJECT_ID, { since: Number.NaN }),
+    ).rejects.toThrow(NexusStoreError)
+    await expect(
+      h.store.readRecent(PROJECT_ID, { since: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow(NexusStoreError)
+  })
+
+  it('since = 0 is a real (inclusive) filter, not treated as absent', async () => {
+    await seed() // created_at values 2000..6000
+    const events = await h.store.readRecent(PROJECT_ID, { since: 0 })
+    expect(events.length).toBe(5)
+  })
 })
 
 describe('NexusStore — taxonomy + caps enforcement', () => {
@@ -703,6 +737,26 @@ describe('NexusStore — taxonomy + caps enforcement', () => {
         input({ refs: [{ kind: 'ticket' as NexusRef['kind'], ref: 'X-1' }] }),
       ),
     ).rejects.toThrow(NexusStoreError)
+  })
+
+  it('malformed runtime input yields NexusStoreError, not a raw TypeError', async () => {
+    // The store is the validated seam — an untyped caller (`as any`, a
+    // future JSON boundary) must get a typed error, never a TypeError
+    // from dereferencing .length/.kind on a bad shape (Codex).
+    const bad = (o: Record<string, unknown>) =>
+      h.store.appendEvent(PROJECT_ID, { ...input(), ...o } as unknown as AppendNexusEventInput)
+    await expect(bad({ body: null })).rejects.toThrow(NexusStoreError)
+    await expect(bad({ body: 42 })).rejects.toThrow(NexusStoreError)
+    await expect(bad({ actor_id: null })).rejects.toThrow(NexusStoreError)
+    await expect(bad({ actor_id: 7 })).rejects.toThrow(NexusStoreError)
+    await expect(bad({ refs: [null] })).rejects.toThrow(NexusStoreError)
+    await expect(bad({ refs: ['not-an-object'] })).rejects.toThrow(NexusStoreError)
+    await expect(bad({ refs: { kind: 'doc', ref: 'a' } })).rejects.toThrow(
+      NexusStoreError,
+    )
+    // And none of these left a row behind.
+    const events = await h.store.readRecent(PROJECT_ID)
+    expect(events.length).toBe(0)
   })
 
   it('body cap: exactly-cap accepted, cap+1 rejected (byte boundary)', async () => {
