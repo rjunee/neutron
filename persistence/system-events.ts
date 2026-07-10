@@ -160,7 +160,16 @@ export class SystemEventsStore implements SystemEventSink {
       ],
     )
     this.inflight.add(write)
-    void write.finally(() => this.inflight.delete(write))
+    // Remove from the in-flight set on settle. Use `then(cleanup, cleanup)` —
+    // NOT `void write.finally(...)`: `finally` returns a promise that RE-REJECTS
+    // when `write` rejects, and voiding it would surface an unhandled rejection.
+    // Both `then` handlers return normally, so this derived promise always
+    // resolves. The original `write` rejection is still delivered to the awaiter
+    // below (and thence to emitSystemEventSafe, which swallows it).
+    const cleanup = (): void => {
+      this.inflight.delete(write)
+    }
+    void write.then(cleanup, cleanup)
     await write
     return { id }
   }

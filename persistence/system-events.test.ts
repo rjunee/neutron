@@ -177,6 +177,36 @@ describe('SystemEventsStore — drain flushes fire-and-forget writes', () => {
     await store.drain()
     expect(countRows()).toBe(5)
   })
+
+  it('a REAL store write failure never produces an unhandled rejection', async () => {
+    // Throwaway DB/store local to this test so closing it doesn't collide with
+    // the shared afterEach teardown of `db`.
+    const failDb = ProjectDb.open(join(tmp, 'fail.db'))
+    applyMigrations(failDb.raw())
+    const failStore = new SystemEventsStore({ db: failDb })
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (err: unknown): void => {
+      unhandled.push(err)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      // Close the DB so the next record()'s db.run rejects — the production
+      // "degrade emitted just as the DB is torn down" boundary.
+      failDb.close()
+      // Fire-and-forget against the failing store (as degrade sites do).
+      await expect(
+        emitSystemEventSafe(failStore, { event: 'gbrain_unavailable' }),
+      ).resolves.toBeUndefined()
+      // drain() must also settle cleanly against the failed write.
+      await expect(failStore.drain()).resolves.toBeUndefined()
+      // Let any stray microtask-scheduled rejection surface.
+      await new Promise((r) => setTimeout(r, 10))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled)
+    }
+  })
 })
 
 describe('ambient sink registry', () => {
