@@ -117,9 +117,15 @@ export {
   type ValidatePlatformJwtOptions,
 } from './auth.ts'
 
-// Secrets
+// Errors (X4 — single unified CapabilityDeniedError, shared with cores/runtime)
 export {
   CapabilityDeniedError,
+  type CapabilityDeniedCode,
+  type CapabilityDeniedErrorInit,
+} from './errors.ts'
+
+// Secrets
+export {
   buildDevSecretsAccessor,
   buildSecretsAccessor,
   type BuildDevSecretsAccessorOptions,

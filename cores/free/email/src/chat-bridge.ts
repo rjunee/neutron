@@ -11,6 +11,13 @@
  * Per docs/plans/email-managed-core-tier1-brief.md § 3.2.
  */
 
+import type {
+  CoreChatCommandFilter,
+  CoreChatCommandFilterError,
+  CoreChatCommandFilterInput,
+  CoreChatCommandFilterResult,
+} from '@neutronai/cores-runtime'
+
 import {
   executeEmailCommand,
   parseEmailCommand,
@@ -20,26 +27,21 @@ import type { EmailProjectCacheResolver } from './cache.ts'
 import type { GmailClient } from './backend.ts'
 import { buildStubEmailSummarizer, type EmailSummarizer } from './backend.ts'
 
-export interface EmailChatCommandFilterInput {
-  user_id: string
-  project_slug: string
-  channel_topic_id: string
-  project_id?: string
-  body: string
+// Refactor X4 (item 3): collapse onto the shared generic
+// `CoreChatCommandFilter`. Email attaches no card but its structured error
+// carries a `draft_id`, so it binds `Card = never` + a widened error type.
+export type EmailChatCommandFilterInput = CoreChatCommandFilterInput
+export interface EmailChatCommandFilterError extends CoreChatCommandFilterError {
+  draft_id?: string
 }
-
-export type EmailChatCommandFilterResult = {
-  text: string
-  data?: unknown
-  deep_link?: string
-  error?: { code: string; message: string; draft_id?: string }
-}
-
-export interface EmailChatCommandFilter {
-  match(
-    input: EmailChatCommandFilterInput,
-  ): Promise<EmailChatCommandFilterResult | null>
-}
+export type EmailChatCommandFilterResult = CoreChatCommandFilterResult<
+  never,
+  EmailChatCommandFilterError
+>
+export type EmailChatCommandFilter = CoreChatCommandFilter<
+  never,
+  EmailChatCommandFilterError
+>
 
 export interface CreateEmailChatCommandFilterOptions {
   resolver: EmailProjectCacheResolver

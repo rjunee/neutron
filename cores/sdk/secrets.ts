@@ -35,6 +35,7 @@ import {
 } from 'node:fs'
 import { dirname } from 'node:path'
 
+import { CapabilityDeniedError } from './errors.ts'
 import type { ManifestSecret, NeutronManifest } from './manifest.ts'
 
 /**
@@ -55,22 +56,19 @@ export type SecretKind =
   | 'bot_token'
   | 'channel_metadata'
 
+/** The secret-access subset of {@link CapabilityDeniedCode}. Public type;
+ *  kept for callers that branch on the accessor's denial codes. */
 export type SecretsAccessorErrorCode =
   | 'capability_denied'
   | 'not_found'
   | 'misconfigured'
 
-export class CapabilityDeniedError extends Error {
-  override readonly name = 'CapabilityDeniedError'
-  readonly code: SecretsAccessorErrorCode
-  constructor(
-    message: string,
-    code: SecretsAccessorErrorCode = 'capability_denied',
-  ) {
-    super(message)
-    this.code = code
-  }
-}
+// Refactor X4: `CapabilityDeniedError` is now the SINGLE unified definition
+// in `./errors.ts` (shared with the tool-dispatch surface in
+// `cores/runtime`). Re-exported here so `@neutronai/cores-sdk` callers keep
+// importing it from the barrel unchanged.
+export { CapabilityDeniedError } from './errors.ts'
+export type { CapabilityDeniedCode, CapabilityDeniedErrorInit } from './errors.ts'
 
 /**
  * The surface a Core uses. Implementations enforce capability gating
@@ -234,9 +232,10 @@ export function buildSecretsAccessor(
   return {
     async get(kind: SecretKind, label: string): Promise<string | null> {
       if (!isDeclared(declared, kind, label)) {
-        throw new CapabilityDeniedError(
-          `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
-        )
+        throw new CapabilityDeniedError({
+          code: 'capability_denied',
+          message: `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
+        })
       }
       return options.store.get({
         internal_handle: options.internal_handle,
@@ -251,9 +250,10 @@ export function buildSecretsAccessor(
       putOptions?: SecretsAccessorPutOptions,
     ): Promise<void> {
       if (!isDeclared(declared, kind, label)) {
-        throw new CapabilityDeniedError(
-          `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
-        )
+        throw new CapabilityDeniedError({
+          code: 'capability_denied',
+          message: `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
+        })
       }
       // Write/rotate. The platform `SecretsStore.put()` is INSERT-only
       // and rejects duplicates with `duplicate_label`; rotation runs
@@ -271,16 +271,16 @@ export function buildSecretsAccessor(
         // through to a duplicate_label re-insert that would surface
         // as a confusing platform-store error.
         if (typeof match.id !== 'string' || match.id.length === 0) {
-          throw new CapabilityDeniedError(
-            `platform store list() did not return id for kind=${kind} label=${label}; cannot rotate`,
-            'misconfigured',
-          )
+          throw new CapabilityDeniedError({
+            code: 'misconfigured',
+            message: `platform store list() did not return id for kind=${kind} label=${label}; cannot rotate`,
+          })
         }
         if (typeof options.store.rotate !== 'function') {
-          throw new CapabilityDeniedError(
-            `platform store does not support rotate(); cannot overwrite kind=${kind} label=${label}`,
-            'misconfigured',
-          )
+          throw new CapabilityDeniedError({
+            code: 'misconfigured',
+            message: `platform store does not support rotate(); cannot overwrite kind=${kind} label=${label}`,
+          })
         }
         const rotateOptions: { expires_at?: number } = {}
         if (putOptions?.expires_at !== undefined) {
@@ -370,10 +370,11 @@ export function buildDevSecretsAccessor(
     options.bypass_env_guard !== true &&
     (typeof process === 'undefined' || process.env['NEUTRON_DEV_AUTH'] !== '1')
   ) {
-    throw new CapabilityDeniedError(
-      'buildDevSecretsAccessor requires NEUTRON_DEV_AUTH=1 — never enable in production',
-      'misconfigured',
-    )
+    throw new CapabilityDeniedError({
+      code: 'misconfigured',
+      message:
+        'buildDevSecretsAccessor requires NEUTRON_DEV_AUTH=1 — never enable in production',
+    })
   }
   const declared = extractSecrets(manifest_input)
   const path = options.file_path
@@ -399,9 +400,10 @@ export function buildDevSecretsAccessor(
   return {
     async get(kind: SecretKind, label: string): Promise<string | null> {
       if (!isDeclared(declared, kind, label)) {
-        throw new CapabilityDeniedError(
-          `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
-        )
+        throw new CapabilityDeniedError({
+          code: 'capability_denied',
+          message: `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
+        })
       }
       const state = load()
       return state[key(kind, label)] ?? null
@@ -415,9 +417,10 @@ export function buildDevSecretsAccessor(
       // Dev accessor ignores expires_at — the dev JSON file has no
       // expiry index. Documented in SDK-CONTRACT § "Dev-mode stubs".
       if (!isDeclared(declared, kind, label)) {
-        throw new CapabilityDeniedError(
-          `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
-        )
+        throw new CapabilityDeniedError({
+          code: 'capability_denied',
+          message: `core=${options.core_id} did not declare secret kind=${kind} label=${label} in its manifest`,
+        })
       }
       const state = load()
       state[key(kind, label)] = plaintext

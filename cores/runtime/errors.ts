@@ -61,31 +61,22 @@ export class CoreInstallError extends Error {
   }
 }
 
+/** The tool-dispatch subset of the unified `CapabilityDeniedCode`. Kept as
+ *  a named type for callers that branch on the dispatch-surface codes. */
 export type CapabilityDeniedErrorCode =
   | 'capability_not_declared'
   | 'tool_not_declared'
   | 'capability_mismatch'
   | 'manifest_missing'
 
-export class CapabilityDeniedError extends Error {
-  override readonly name = 'CapabilityDeniedError'
-  readonly code: CapabilityDeniedErrorCode
-  readonly core_id: string
-  readonly tool_name?: string
-  readonly capability?: string
-  constructor(
-    code: CapabilityDeniedErrorCode,
-    message: string,
-    context: {
-      core_id: string
-      tool_name?: string
-      capability?: string
-    },
-  ) {
-    super(message)
-    this.code = code
-    this.core_id = context.core_id
-    if (context.tool_name !== undefined) this.tool_name = context.tool_name
-    if (context.capability !== undefined) this.capability = context.capability
-  }
-}
+// Refactor X4 (item 4): `CapabilityDeniedError` is now the SINGLE unified
+// definition in the lower `cores/sdk` band (`cores/sdk/errors.ts`), shared
+// with the secret-access surface. Re-exported here so every tool-layer
+// consumer (the 9 bundled cores + `capability-guard.ts`) keeps importing it
+// from `@neutronai/cores-runtime` unchanged, and so `instanceof` is one
+// identity across both surfaces.
+export {
+  CapabilityDeniedError,
+  type CapabilityDeniedCode,
+  type CapabilityDeniedErrorInit,
+} from '@neutronai/cores-sdk'

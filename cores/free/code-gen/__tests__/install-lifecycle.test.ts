@@ -1,27 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import {
-  cpSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Database } from 'bun:sqlite'
 
 import {
-  CoreInstallationsStore,
-  SecretAuditLog,
   buildBundledRegistry,
   installCore,
   uninstallCore,
-  type SecretsPrompter,
 } from '@neutronai/cores-runtime'
-
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import {
+  NoopPrompter,
+  copyCoreIntoFixture,
+  createInstallLifecycleEnv,
+  destroyInstallLifecycleEnv,
+  type InstallLifecycleEnv,
+} from '@neutronai/cores-runtime/testkit/install-lifecycle.ts'
 
 import {
   CORE_PACKAGE_NAME,
@@ -42,72 +34,21 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CODEGEN_SRC_DIR = join(HERE, '..')
 
-/**
- * Code-Gen declares zero secrets, so a noop prompter is the only
- * variant we need. Mirrors the Reminders Core's install-lifecycle
- * test fixture (which also declares zero secrets).
- */
-class NoopPrompter implements SecretsPrompter {
-  async promptApiKey(): Promise<string | null> {
-    return null
-  }
-  async promptOauthToken(): Promise<{ access_token: string; expires_at?: number } | null> {
-    return null
-  }
-  async promptOauthClient(): Promise<{ client_id: string; client_secret: string } | null> {
-    return null
-  }
-}
-
-interface TestEnv {
-  tmp: string
-  projectDb: ProjectDb
-  dataDir: string
-  secretsStore: SecretsStore
-  audit: SecretAuditLog
-  installations: CoreInstallationsStore
-}
-
-let env: TestEnv
+let env: InstallLifecycleEnv
 
 beforeEach(() => {
-  const tmp = mkdtempSync(join(tmpdir(), 'codegen-install-'))
-  const dataDir = join(tmp, 'data')
-  mkdirSync(dataDir, { recursive: true })
-  const dbPath = join(dataDir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
-  const projectDb = ProjectDb.open(dbPath)
-  const secretsStore = new SecretsStore({ data_dir: dataDir, db: projectDb })
-  const audit = new SecretAuditLog({ db: projectDb })
-  const installations = new CoreInstallationsStore({ db: projectDb })
-  env = { tmp, projectDb, dataDir, secretsStore, audit, installations }
+  env = createInstallLifecycleEnv('codegen-install-')
 })
 
 afterEach(() => {
-  env.projectDb.close()
-  rmSync(env.tmp, { recursive: true, force: true })
+  destroyInstallLifecycleEnv(env)
 })
 
 function copyCodegenIntoFixture(
   fixtureRoot: string,
   mountedAs = 'code-gen',
 ): string {
-  const dest = join(fixtureRoot, 'cores', mountedAs)
-  mkdirSync(dirname(dest), { recursive: true })
-  cpSync(CODEGEN_SRC_DIR, dest, {
-    recursive: true,
-    filter: (src) => {
-      // Skip __tests__ + node_modules so the bundled-registry walk
-      // doesn't try to validate test files. The Core's runtime entry
-      // points (index.ts, src/*, package.json) are copied verbatim.
-      if (src.endsWith('__tests__')) return false
-      if (src.endsWith('node_modules')) return false
-      return true
-    },
-  })
-  return dest
+  return copyCoreIntoFixture(CODEGEN_SRC_DIR, fixtureRoot, mountedAs)
 }
 
 describe('install lifecycle — Code-Gen Core round-trip', () => {

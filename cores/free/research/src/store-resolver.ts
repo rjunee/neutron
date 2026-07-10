@@ -6,19 +6,23 @@
  * `<owner_home>/Projects/<project_id>/research/research.db`,
  * applying the Research Core's own migration tree before construction.
  *
- * Mirrors the sibling free-Core store-resolver pattern in
- * mechanics: init-promise dedup so concurrent first-resolves wait on
- * the same init; one Database handle per project, cached for the
- * gateway lifetime.
+ * Refactor X4: the lazy-init/cache/dedup mechanics + the path-traversal
+ * guard now live in the shared `ProjectSidecarResolver<H>` +
+ * `safeResolveProjectRoot` (`@neutronai/cores-runtime`). This class is a
+ * thin binding that supplies the Research-specific `buildHandle`
+ * (migrations + `research_meta` bootstrap/mismatch + store construction).
  *
  * Per docs/plans/research-core-tier1-brief.md § 6.
  */
 
 import type { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync } from 'node:fs'
-import { dirname, join, resolve as resolvePath, sep } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import {
+  ProjectSidecarResolver,
+  type ProjectSidecarResolverOptions,
+} from '@neutronai/cores-runtime'
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import { openSidecar } from '@neutronai/persistence/index.ts'
 
@@ -42,35 +46,13 @@ export class ResearchSidecarMismatchError extends Error {
 }
 
 /**
- * Thrown when a caller-supplied `project_id` resolves to a filesystem
- * path outside the owner's `<owner_home>/Projects/` boundary. The
- * Research Core's MCP tool schemas + chat-command surface accept
- * `project_id` from external input — any value containing `..` (or an
- * absolute path) that escapes the instance boundary would let an
- * attacker read or write `research.db` and the rendered markdown
- * anywhere under (or above) `owner_home`. The resolver MUST throw
- * BEFORE any FS operation runs against the resolved path.
+ * Thrown when a caller-supplied `project_id` escapes the
+ * `<owner_home>/Projects/` boundary. Refactor X4: this is now an alias of
+ * the shared `CorePathTraversalError` (the guard was hoisted into
+ * `@neutronai/cores-runtime`) so `instanceof` keeps working for every
+ * existing catcher + test.
  */
-export class ResearchPathTraversalError extends Error {
-  readonly code = 'research_path_traversal' as const
-  readonly project_id: string
-  readonly resolved_path: string
-  readonly owner_projects_dir: string
-  constructor(
-    project_id: string,
-    resolved_path: string,
-    owner_projects_dir: string,
-  ) {
-    super(
-      `project_id ${JSON.stringify(project_id)} resolves to ${resolved_path}, ` +
-        `which escapes the project boundary ${owner_projects_dir}`,
-    )
-    this.name = 'ResearchPathTraversalError'
-    this.project_id = project_id
-    this.resolved_path = resolved_path
-    this.owner_projects_dir = owner_projects_dir
-  }
-}
+export { CorePathTraversalError as ResearchPathTraversalError } from '@neutronai/cores-runtime'
 
 export interface ResearchStoreResolverOptions {
   project_slug: string
@@ -90,127 +72,55 @@ export interface ResearchProjectHandle {
 
 export class ResearchStoreResolver {
   private readonly project_slug: string
-  private readonly owner_home: string
-  private readonly owner_projects_dir: string
-  private readonly owner_projects_dir_prefix: string
-  private readonly resolveProjectRoot: (project_id: string) => string
   private readonly migrations_dir: string
   private readonly nextId: (() => string) | undefined
   private readonly now: (() => number) | undefined
-  private readonly handles = new Map<string, ResearchProjectHandle>()
-  private readonly initPromises = new Map<string, Promise<ResearchProjectHandle>>()
+  private readonly inner: ProjectSidecarResolver<ResearchProjectHandle>
 
   constructor(opts: ResearchStoreResolverOptions) {
     this.project_slug = opts.project_slug
-    this.owner_home = opts.owner_home
-    this.owner_projects_dir = resolvePath(opts.owner_home, 'Projects')
-    // Guard against prefix-collision (`/home/Projects-evil/...` matching
-    // `/home/Projects`). `startsWith(prefix + sep)` enforces a true
-    // directory-boundary check; the bare-prefix equality case is
-    // handled separately below.
-    this.owner_projects_dir_prefix = this.owner_projects_dir + sep
-    this.resolveProjectRoot =
-      opts.resolveProjectRoot ??
-      ((project_id) => join(opts.owner_home, 'Projects', project_id))
     this.migrations_dir = opts.migrations_dir ?? DEFAULT_MIGRATIONS_DIR
     this.nextId = opts.nextId
     this.now = opts.now
-  }
-
-  /**
-   * Resolve `project_id` to its absolute project root AFTER asserting
-   * the result stays inside `<owner_home>/Projects/`. Throws
-   * `ResearchPathTraversalError` for any `project_id` that contains
-   * traversal segments (`..`), embedded NUL bytes, absolute-path
-   * separators, or otherwise escapes the instance boundary. Called by
-   * `pathFor`, `outputDirFor`, and `doInit` so EVERY FS-touching path
-   * is gated.
-   */
-  private safeResolveProjectRoot(project_id: string): string {
-    if (typeof project_id !== 'string' || project_id.length === 0) {
-      throw new ResearchPathTraversalError(
-        String(project_id),
-        '',
-        this.owner_projects_dir,
-      )
+    const innerOpts: ProjectSidecarResolverOptions<ResearchProjectHandle> = {
+      owner_home: opts.owner_home,
+      sidecar_dir: RESEARCH_SIDECAR_DIR,
+      db_filename: RESEARCH_SIDECAR_DB,
+      buildHandle: (init) => this.buildHandle(init),
+      closeHandle: (handle) => handle.db.close(),
     }
-    if (project_id.includes('\0')) {
-      throw new ResearchPathTraversalError(
-        project_id,
-        '',
-        this.owner_projects_dir,
-      )
+    if (opts.resolveProjectRoot !== undefined) {
+      innerOpts.resolveProjectRoot = opts.resolveProjectRoot
     }
-    const projectRoot = this.resolveProjectRoot(project_id)
-    const resolved = resolvePath(projectRoot)
-    const insideBoundary =
-      resolved === this.owner_projects_dir ||
-      resolved.startsWith(this.owner_projects_dir_prefix)
-    if (!insideBoundary || resolved === this.owner_projects_dir) {
-      // Disallow the bare-prefix case too — `project_id` MUST resolve
-      // to a strict subpath of `<owner_home>/Projects/`, never to the
-      // Projects/ dir itself.
-      throw new ResearchPathTraversalError(
-        project_id,
-        resolved,
-        this.owner_projects_dir,
-      )
-    }
-    return resolved
+    this.inner = new ProjectSidecarResolver(innerOpts)
   }
 
   pathFor(project_id: string): string {
-    return join(
-      this.safeResolveProjectRoot(project_id),
-      RESEARCH_SIDECAR_DIR,
-      RESEARCH_SIDECAR_DB,
-    )
+    return this.inner.pathFor(project_id)
   }
 
   /** Path to the per-project markdown output dir. */
   outputDirFor(project_id: string): string {
-    return join(this.safeResolveProjectRoot(project_id), RESEARCH_SIDECAR_DIR)
+    return this.inner.dirFor(project_id)
   }
 
   closeAll(): void {
-    for (const handle of this.handles.values()) {
-      try {
-        handle.db.close()
-      } catch {
-        /* ignore */
-      }
-    }
-    this.handles.clear()
-    this.initPromises.clear()
+    this.inner.closeAll()
   }
 
   async resolve(project_id: string): Promise<ResearchProjectHandle> {
-    const cached = this.handles.get(project_id)
-    if (cached !== undefined) return cached
-    const pending = this.initPromises.get(project_id)
-    if (pending !== undefined) return pending
-    const init = this.doInit(project_id)
-    this.initPromises.set(project_id, init)
-    try {
-      const handle = await init
-      this.handles.set(project_id, handle)
-      return handle
-    } finally {
-      this.initPromises.delete(project_id)
-    }
+    return this.inner.resolve(project_id)
   }
 
-  private async doInit(project_id: string): Promise<ResearchProjectHandle> {
-    const projectRoot = this.safeResolveProjectRoot(project_id)
-    const researchDir = join(projectRoot, RESEARCH_SIDECAR_DIR)
-    if (!existsSync(researchDir)) {
-      mkdirSync(researchDir, { recursive: true, mode: 0o700 })
-    }
-    const dbPath = join(researchDir, RESEARCH_SIDECAR_DB)
+  private async buildHandle(init: {
+    project_id: string
+    db_path: string
+  }): Promise<ResearchProjectHandle> {
+    const { project_id, db_path } = init
     // P3 shared open — previously foreign_keys only; now additionally gains
     // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
     // tolerant under contention, no semantic change).
-    const db = openSidecar(dbPath)
+    const db = openSidecar(db_path)
     applyProjectScopedMigrations(db, this.migrations_dir)
 
     // After migrations, research_meta exists. Insert bootstrap row if
@@ -240,7 +150,7 @@ export class ResearchStoreResolver {
         /* ignore */
       }
       throw new ResearchSidecarMismatchError(
-        `research.db at ${dbPath} was initialised for ` +
+        `research.db at ${db_path} was initialised for ` +
           `project_slug='${existing.project_slug}' project_id='${existing.project_id}', ` +
           `not project_slug='${this.project_slug}' project_id='${project_id}'`,
       )
@@ -263,6 +173,6 @@ export class ResearchStoreResolver {
     if (this.now !== undefined) claimOpts.now = this.now
     const claimStore = new ResearchClaimStore(claimOpts)
 
-    return { store, claimStore, db, research_db_path: dbPath }
+    return { store, claimStore, db, research_db_path: db_path }
   }
 }

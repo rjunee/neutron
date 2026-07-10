@@ -14,6 +14,11 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
+  safeResolveProjectRoot,
+  type SafeResolveProjectRootOptions,
+} from '@neutronai/cores-runtime'
+
+import {
   CodegenWorktreeNotResolvedError,
 } from './backend.ts'
 import { PROJECT_WORKTREE_DIRNAME } from './manifest.ts'
@@ -55,10 +60,19 @@ export interface ResolveWorktreeInput {
 export async function resolveWorktree(
   input: ResolveWorktreeInput,
 ): Promise<ResolvedWorktree> {
-  const resolveProjectRoot =
-    input.resolveProjectRoot ??
-    ((pid: string) => join(input.owner_home, 'Projects', pid))
-  const projectRoot = resolveProjectRoot(input.project_id)
+  // Refactor X4 (security): route the tool-supplied `project_id` through the
+  // universal traversal guard BEFORE any FS op. This Core PREVIOUSLY did a
+  // bare `join()` — a crafted `..`/NUL/absolute `project_id` could create a
+  // git worktree outside `<owner_home>/Projects/`. Throws
+  // `CorePathTraversalError` (before the mkdir try-block below).
+  const safeOpts: SafeResolveProjectRootOptions = {
+    owner_home: input.owner_home,
+    project_id: input.project_id,
+  }
+  if (input.resolveProjectRoot !== undefined) {
+    safeOpts.resolveProjectRoot = input.resolveProjectRoot
+  }
+  const projectRoot = safeResolveProjectRoot(safeOpts)
   const worktree_path = join(projectRoot, PROJECT_WORKTREE_DIRNAME)
 
   // 1. Ensure the dir exists. (mode 0700 mirrors the per-project

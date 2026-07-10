@@ -1,29 +1,22 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import {
-  cpSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Database } from 'bun:sqlite'
 
 import {
   CoreInstallError,
-  CoreInstallationsStore,
-  SecretAuditLog,
   buildBundledRegistry,
   installCore,
   uninstallCore,
   type SecretsPrompter,
 } from '@neutronai/cores-runtime'
-
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import {
+  NoopPrompter,
+  copyCoreIntoFixture,
+  createInstallLifecycleEnv,
+  destroyInstallLifecycleEnv,
+  type InstallLifecycleEnv,
+} from '@neutronai/cores-runtime/testkit/install-lifecycle.ts'
 
 import {
   CORE_PACKAGE_NAME,
@@ -46,7 +39,7 @@ const CALENDAR_SRC_DIR = join(HERE, '..')
 /**
  * Prompter that satisfies the required OAuth secret with a fixed
  * access token. Used by the happy-path install test; the
- * missing-token test uses a separate prompter that returns null.
+ * missing-token test uses the shared `NoopPrompter` that returns null.
  */
 class GoogleOauthPrompter implements SecretsPrompter {
   constructor(private readonly access_token: string = 'ya29.fake-test-token') {}
@@ -61,72 +54,21 @@ class GoogleOauthPrompter implements SecretsPrompter {
   }
 }
 
-/**
- * Prompter that returns null for every secret. The Calendar Core's
- * `google_calendar` secret is `required: true`, so `installCore`
- * must abort with a typed `CoreInstallError`.
- */
-class NoopPrompter implements SecretsPrompter {
-  async promptApiKey(): Promise<string | null> {
-    return null
-  }
-  async promptOauthToken(): Promise<{ access_token: string; expires_at?: number } | null> {
-    return null
-  }
-  async promptOauthClient(): Promise<{ client_id: string; client_secret: string } | null> {
-    return null
-  }
-}
-
-interface TestEnv {
-  tmp: string
-  projectDb: ProjectDb
-  dataDir: string
-  secretsStore: SecretsStore
-  audit: SecretAuditLog
-  installations: CoreInstallationsStore
-}
-
-let env: TestEnv
+let env: InstallLifecycleEnv
 
 beforeEach(() => {
-  const tmp = mkdtempSync(join(tmpdir(), 'calendar-core-install-'))
-  const dataDir = join(tmp, 'data')
-  mkdirSync(dataDir, { recursive: true })
-  const dbPath = join(dataDir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
-  const projectDb = ProjectDb.open(dbPath)
-  const secretsStore = new SecretsStore({ data_dir: dataDir, db: projectDb })
-  const audit = new SecretAuditLog({ db: projectDb })
-  const installations = new CoreInstallationsStore({ db: projectDb })
-  env = { tmp, projectDb, dataDir, secretsStore, audit, installations }
+  env = createInstallLifecycleEnv('calendar-core-install-')
 })
 
 afterEach(() => {
-  env.projectDb.close()
-  rmSync(env.tmp, { recursive: true, force: true })
+  destroyInstallLifecycleEnv(env)
 })
 
 function copyCalendarIntoFixture(
   fixtureRoot: string,
   mountedAs = 'calendar_core',
 ): string {
-  const dest = join(fixtureRoot, 'cores', mountedAs)
-  mkdirSync(dirname(dest), { recursive: true })
-  cpSync(CALENDAR_SRC_DIR, dest, {
-    recursive: true,
-    filter: (src) => {
-      // Skip __tests__ + node_modules so the bundled-registry walk
-      // doesn't try to validate test files. The Core's runtime entry
-      // points (index.ts, src/*, package.json) are copied verbatim.
-      if (src.endsWith('__tests__')) return false
-      if (src.endsWith('node_modules')) return false
-      return true
-    },
-  })
-  return dest
+  return copyCoreIntoFixture(CALENDAR_SRC_DIR, fixtureRoot, mountedAs)
 }
 
 describe('install lifecycle — Calendar Core happy path', () => {
