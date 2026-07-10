@@ -214,6 +214,41 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
     expect(rows).toHaveLength(2)
   })
 
+  test('CONCURRENT fires of the same failing job emit exactly ONE row (no double-emit race)', async () => {
+    const { rows, sink } = fakeSink()
+    registerSystemEventSink(sink)
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    jobs.register({
+      name: 'flaky',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'h',
+    })
+    // Barrier both handler invocations so both fires are genuinely in flight
+    // (both would read "not yet errored" under the old persisted-status read).
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    let entered = 0
+    handlers.register('h', async () => {
+      entered += 1
+      await gate
+      throw new Error('handler boom')
+    })
+    // Scheduler NOT started → no per-job in_flight entry to serialize the fires.
+    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    const f1 = scheduler.fireOnce('flaky')
+    const f2 = scheduler.fireOnce('flaky')
+    // Wait until both handlers are parked at the barrier, then release together.
+    while (entered < 2) await new Promise((r) => setTimeout(r, 1))
+    release()
+    await Promise.all([f1, f2])
+    expect(entered).toBe(2) // both genuinely ran
+    expect(rows.filter((r) => r.event === 'cron_job_error')).toHaveLength(1) // ONE row
+  })
+
   test('healthy job never emits; a write-throwing sink does NOT break the fire', async () => {
     const jobs = new CronJobRegistry()
     const handlers = new CronHandlerRegistry()

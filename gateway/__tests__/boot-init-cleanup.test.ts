@@ -373,4 +373,57 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     // sibling survives.
     expect(resolveSystemEventSink()).toBe(sibling)
   })
+
+  test('overlapping boots, newest-first shutdown: B restores A instead of orphaning it', async () => {
+    const rootA = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-A-'))
+    const rootB = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-B-'))
+    cleanups.push(rootA, rootB)
+    registerSystemEventSink(null)
+
+    bootEnv(rootA)
+    const handleA = await boot({ port: 0, composer: goodComposer })
+    const sinkA = resolveSystemEventSink()
+    expect(sinkA).not.toBeNull()
+
+    bootEnv(rootB)
+    const handleB = await boot({ port: 0, composer: goodComposer })
+    const sinkB = resolveSystemEventSink()
+    expect(sinkB).not.toBe(sinkA)
+
+    // Newest-first: B shuts down → RESTORES A (does not null the registry), so
+    // A's still-live degrade journal keeps working.
+    await handleB.shutdown()
+    expect(resolveSystemEventSink()).toBe(sinkA)
+
+    // Then A shuts down → restores the pre-A sink (null here).
+    await handleA.shutdown()
+    expect(resolveSystemEventSink()).toBeNull()
+  })
+
+  test('init-failure DRAINS realmode_cleanups (post-composition failure)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-drain-'))
+    cleanups.push(root)
+    bootEnv(root)
+    process.env['NOTIFY_SOCKET'] = join(root, 'nonexistent', 'bogus.sock')
+    registerSystemEventSink(null)
+
+    let cleanupRan = false
+    await expect(
+      boot({
+        port: 0,
+        composer: ({ db, project_slug }) => ({
+          ...goodComposer({ db, project_slug }),
+          realmode_cleanups: [
+            () => {
+              cleanupRan = true
+            },
+          ],
+        }),
+      }),
+    ).rejects.toThrow(/sd_notify/)
+    // The sd_notify('READY=1') failure is post-composition, so the wired cleanup
+    // must have been drained by bootFailureCleanup.
+    expect(cleanupRan).toBe(true)
+    expect(resolveSystemEventSink()).toBeNull()
+  })
 })

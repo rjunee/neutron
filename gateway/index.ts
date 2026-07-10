@@ -231,15 +231,18 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // silent fail-soft / degrade site reaches this via the ambient registry
   // (persistence/system-events.ts) and emits a VISIBILITY-ONLY row; when this
   // registration hasn't run (unit tests, sidecar tools) each emit is a no-op.
-  // The instance is captured so shutdown clears ONLY the sink THIS boot owns
-  // (never another concurrent boot handle's) before closing its DB.
+  // Save/restore discipline: capture whatever sink was registered before us so
+  // teardown RESTORES it (rather than nulling the registry). This keeps a
+  // still-live older boot's sink working when boots overlap and shut down
+  // newest-first (LIFO) — B's teardown restores A instead of orphaning it.
+  const priorSystemEventSink = resolveSystemEventSink()
   const systemEventSink = new SystemEventsStore({ db })
   registerSystemEventSink(systemEventSink)
-  // Ownership-guarded clear: drop the ambient sink iff it's still the one we
-  // registered, so a post-close degrade emit can't target this closed DB and a
-  // sibling boot's sink is never clobbered.
+  // Ownership-guarded restore: only act when the ambient sink is still the one
+  // we registered, so a post-close degrade emit can't target this closed DB and
+  // a NEWER boot's sink is never clobbered (its own teardown owns that).
   const clearOwnedSystemEventSink = (): void => {
-    if (resolveSystemEventSink() === systemEventSink) registerSystemEventSink(null)
+    if (resolveSystemEventSink() === systemEventSink) registerSystemEventSink(priorSystemEventSink)
   }
 
   const project_slug = resolveOwnerSlugFromConfig(config)
@@ -281,7 +284,13 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         console.error('graph shutdown during init failure threw:', shutdownErr)
       }
     }
-    // Clear the ambient sink (ownership-guarded) BEFORE closing the DB it holds.
+    // §F1 — drain any realmode cleanups the composition wired (auxiliary DB
+    // handles, timers) BEFORE db.close(), mirroring the normal shutdown order so
+    // a post-composition failure doesn't leak them. No-op when none were wired
+    // (composer threw before assignment). Each is awaited; a throwing one is
+    // logged and does not stop the rest (drainRealmodeCleanups always resolves).
+    await drainRealmodeCleanups(realmode_cleanups)
+    // Restore the ambient sink (ownership-guarded) BEFORE closing the DB it holds.
     clearOwnedSystemEventSink()
     db.close()
   }

@@ -93,6 +93,16 @@ export class CronScheduler {
    * trigger an inline bind.
    */
   private started = false
+  // O4 rising-edge dedup for the cron_job_error degrade journal. In-memory
+  // per-job "currently in error" set: the degrade row fires only on the
+  // healthy→error TRANSITION. Kept in-memory (not read from cron_state) so the
+  // decision + mutation are SYNCHRONOUS — two concurrent fires of the same job
+  // can't both observe "not yet errored" and double-emit (the persisted-status
+  // read had an await between read and write). A fresh process starts with an
+  // empty set, so the first fire after a restart re-emits a still-erroring job
+  // exactly once — acceptable (a restart is itself worth surfacing), never a
+  // per-poll spam.
+  private readonly erroredJobs = new Set<string>()
 
   /**
    * §F1 — in-flight FIRE promises. Cron keeps its own N per-job timers +
@@ -394,11 +404,6 @@ export class CronScheduler {
       return { status: 'error', detail: `handler '${job.handler}' not registered` }
     }
     if (entry) entry.in_flight = true
-    // O4 rising-edge dedup: capture the PRIOR persisted status BEFORE this fire
-    // overwrites cron_state, so the degrade journal only fires on the
-    // healthy→error TRANSITION (not on every poll of a persistently-failing
-    // job). Read-only; does not affect the fire.
-    const prior_status = this.state.get(name, this.project_slug)?.last_run_status ?? null
     const fired_at = this.now()
     let status: CronHandlerStatus = 'ok'
     let detail: string | undefined
@@ -423,21 +428,30 @@ export class CronScheduler {
       status,
       error,
     })
-    // O4 — VISIBILITY ONLY: journal the degrade on the RISING EDGE only
-    // (prior status was not 'error', this fire IS). Control flow is unchanged;
-    // fire-and-forget emit that can never throw.
-    if (status === 'error' && prior_status !== 'error') {
-      // `error` is set for a THROWN failure; a handler that RETURNS
-      // `{status:'error', detail}` carries its reason in `detail` (error stays
-      // null). Prefer whichever is present so the journal never drops the reason.
-      const reason = error ?? detail
-      void emitSystemEvent({
-        event: 'cron_job_error',
-        module: 'cron',
-        level: 'error',
-        project_slug: this.project_slug,
-        payload: { job_name: name, error: reason ?? undefined, duration_ms },
-      })
+    // O4 — VISIBILITY ONLY: journal the degrade on the RISING EDGE only. The
+    // check-and-mutate below is SYNCHRONOUS (no await between them), so two
+    // concurrent fires of the same job can't both emit for one transition: the
+    // first adds `name` to the set + emits, the second sees it present + skips.
+    // Control flow is unchanged; fire-and-forget emit that can never throw.
+    if (status === 'error') {
+      if (!this.erroredJobs.has(name)) {
+        this.erroredJobs.add(name)
+        // `error` is set for a THROWN failure; a handler that RETURNS
+        // `{status:'error', detail}` carries its reason in `detail` (error stays
+        // null). Prefer whichever is present so the journal never drops it.
+        const reason = error ?? detail
+        void emitSystemEvent({
+          event: 'cron_job_error',
+          module: 'cron',
+          level: 'error',
+          project_slug: this.project_slug,
+          payload: { job_name: name, error: reason ?? undefined, duration_ms },
+        })
+      }
+    } else {
+      // Recovery (or any non-error outcome) clears the edge so the NEXT
+      // healthy→error transition emits again.
+      this.erroredJobs.delete(name)
     }
     return detail !== undefined ? { status, detail } : { status }
   }
