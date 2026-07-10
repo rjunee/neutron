@@ -348,7 +348,22 @@ export class DispatchService {
     }
 
     // Fresh run → flip to running + launch the substrate turn in the background.
-    const running = await this.deps.registry.update(record.run_id, { status: 'running' })
+    // The running-flip's durable persist is best-effort: a store outage must not
+    // prevent the dispatch from launching (the record is already durably at
+    // `pending` from create, so it is still boot-reapable). On persist failure
+    // `update` rolls memory back to `pending`; proceed with the intended running
+    // record so the live flow continues.
+    let running: SubagentRecord
+    try {
+      running = await this.deps.registry.update(record.run_id, { status: 'running' })
+    } catch (err) {
+      console.warn(
+        `[agent-dispatch] running-flip persist failed for ${record.run_id}; ` +
+          `launching on the in-memory record (persistence best-effort): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      )
+      running = { ...record, status: 'running' }
+    }
     const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
     this.inflight.set(record.run_id, handle)
     return handle
@@ -461,12 +476,42 @@ export class DispatchService {
         ended_at: this.now(),
       }
       if (turn.status === 'timed_out') patch.failure_reason = 'stuck'
-      const updated = await this.deps.registry.update(run_id, patch)
+      // Persistence is BEST-EFFORT observability — a durable terminal-write
+      // failure must NEVER reject `completion` (contract below) nor skip the
+      // terminal steps (canceller removal + report + board cleanup). Since P7 the
+      // registry `update` awaits a durable persist that can reject; guard it.
+      // On failure `update` rolls memory BACK to the last persisted (pre-terminal)
+      // snapshot, so do NOT re-read — report the INTENDED terminal record we were
+      // writing (`{ ...cur, ...patch }`); on success use the returned `updated`.
+      let recordToReport: SubagentRecord
+      try {
+        recordToReport = await this.deps.registry.update(run_id, patch)
+      } catch (err) {
+        console.warn(
+          `[agent-dispatch] terminal persist failed for ${run_id} (${status}); ` +
+            `reporting intended terminal outcome (persistence best-effort): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        )
+        recordToReport = { ...(cur ?? record), ...patch }
+      }
+      // ALWAYS remove the canceller and report — on BOTH the success and the
+      // persist-failure path — so a store outage never leaks a canceller nor
+      // drops the report + board cleanup.
       this.deps.control.cancellers.delete(run_id)
-      return this.report(updated, kind, agent_kind, turn.result, delivery_target, board_item_id, board_scope)
+      return this.report(
+        recordToReport,
+        kind,
+        agent_kind,
+        turn.result,
+        delivery_target,
+        board_item_id,
+        board_scope,
+      )
     })()
 
-    // The completion promise can never reject (every path is caught), so a
+    // The completion promise can never reject — every path is caught, INCLUDING a
+    // durable persist failure at the terminal `registry.update` (guarded above),
+    // which resolves with the intended terminal report rather than rejecting. So a
     // caller that ignores it cannot trip an unhandled rejection.
     return { run_id, record, completion }
   }

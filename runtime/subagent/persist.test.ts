@@ -23,7 +23,7 @@ import {
 } from './registry.ts'
 import { SubagentRegistryStore } from './store.ts'
 import { sweepOrphanedDispatchesOnBoot } from './boot-sweep.ts'
-import { failRun, newControlState, registerCanceller } from './control.ts'
+import { cancelRun, failRun, newControlState, registerCanceller } from './control.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -419,6 +419,48 @@ describe('per-run serialization: memory never diverges from the last committed p
     // Read BEFORE awaiting p — the normal sequential lifecycle stays zero-await.
     expect(reg.byRunId('r')?.status).toBe('running')
     await p
+  })
+})
+
+describe('live-path persist failures are best-effort (never reject, canceller never leaks)', () => {
+  // Persist SUCCEEDS for pending/running but THROWS for terminal statuses — the
+  // store outage that bites exactly at a live→terminal transition.
+  const terminalFailSink = (): SubagentPersistence => ({
+    persist: async (rec) => {
+      if (rec.status === 'crashed' || rec.status === 'cancelled') {
+        throw new Error('terminal persist down')
+      }
+    },
+    remove: async () => {},
+  })
+
+  test('failRun: a terminal persist failure does not reject; canceller removed, returns true', async () => {
+    const reg = new SubagentRegistry(terminalFailSink())
+    const control = newControlState(reg)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' }) // running persists fine
+    let cancelled = false
+    registerCanceller(control, 'r', async () => {
+      cancelled = true
+    })
+
+    // The crashed-status persist throws — failRun must swallow it.
+    const won = await failRun(control, 'r', 'process_dead', 500)
+    expect(won).toBe(true) // reap intent stands (crash is surfaced to the caller)
+    expect(cancelled).toBe(true) // the live process was still terminated
+    expect(control.cancellers.has('r')).toBe(false) // canceller removed — no leak
+  })
+
+  test('cancelRun: a terminal persist failure does not reject; canceller removed', async () => {
+    const reg = new SubagentRegistry(terminalFailSink())
+    const control = newControlState(reg)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' })
+    registerCanceller(control, 'r', async () => {})
+
+    // The cancelled-status persist throws — cancelRun must not reject.
+    await cancelRun(control, 'r')
+    expect(control.cancellers.has('r')).toBe(false) // canceller removed — no leak
   })
 })
 

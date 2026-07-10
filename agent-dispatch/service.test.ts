@@ -15,6 +15,7 @@ import {
   newControlState,
   runAgentWatchdog,
   type ControlState,
+  type SubagentPersistence,
 } from '@neutronai/runtime/subagent/index.ts'
 import {
   DispatchService,
@@ -46,8 +47,11 @@ interface Harness {
  * `resolveTurn`, so the in-flight (`running`) state is observable.
  */
 function makeHarness(over: Partial<DispatchServiceDeps> = {}): Harness {
-  const registry = new SubagentRegistry()
-  const control = newControlState(registry)
+  // Derive control from an injected registry so the two stay consistent (a test
+  // that supplies a persistence-backed registry must not get a control bound to a
+  // different one).
+  const registry = over.registry ?? new SubagentRegistry()
+  const control = over.control ?? newControlState(registry)
   const calls: DispatchTurnInput[] = []
   const reports: DispatchReport[] = []
   let resolveTurn: (r: DispatchTurnResult) => void = () => {}
@@ -354,5 +358,62 @@ describe('DispatchService — stop + supervision', () => {
     expect(res.surfaced).toHaveLength(1)
     expect(res.surfaced[0]!.reason).toBe('stuck')
     expect(h.registry.byRunId('run-1')?.status).toBe('crashed')
+  })
+})
+
+describe('completion is best-effort against persistence — a terminal-write failure never rejects it', () => {
+  // A registry whose persist SUCCEEDS for pending/running but THROWS for any
+  // terminal status — a durable store outage that only bites at the terminal
+  // write, the exact regression P7's async persist introduced at the completion
+  // closure's `registry.update`.
+  const terminalFailPersistence: SubagentPersistence = {
+    persist: async (rec) => {
+      if (rec.status === 'finished' || rec.status === 'crashed' || rec.status === 'cancelled') {
+        throw new Error('terminal persist down')
+      }
+    },
+    remove: async () => {},
+  }
+
+  test('completion RESOLVES with the terminal report; canceller + board cleanup still run', async () => {
+    const registry = new SubagentRegistry(terminalFailPersistence)
+    let cleared = false
+    const h = makeHarness({
+      registry,
+      board: {
+        get: (_slug: string, id: string) => ({
+          id,
+          title: 'a fully specified plan item with plenty of detail to act on',
+          design_doc_ref: null,
+        }),
+        attachRun: async () => undefined,
+        clearRun: async () => {
+          cleared = true
+        },
+      },
+    })
+
+    const handle = await h.service.dispatch({
+      board_item_id: 'it-term',
+      kind: 'research',
+      task: 'survey the auth flow',
+    })
+    // Running (canceller registered) while the turn is in flight; pending/running
+    // persisted fine, so the record is durably reapable.
+    expect(h.control.cancellers.has(handle.run_id)).toBe(true)
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('running')
+
+    h.resolveTurn({ result: 'the survey', status: 'completed' })
+    // The terminal `update`'s persist throws — completion MUST still resolve.
+    const outcome = await handle.completion
+
+    expect(outcome.status).toBe('finished') // intended terminal outcome, not a reject
+    // Report fired with the terminal status (from the intended record, NOT a
+    // re-read — update rolled memory back to 'running' on the failed persist).
+    expect(h.reports.map((r) => r.status)).toContain('finished')
+    expect(h.reports.at(-1)?.run_id).toBe(handle.run_id)
+    // Canceller removed (no leak) + board cleanup ran.
+    expect(h.control.cancellers.has(handle.run_id)).toBe(false)
+    expect(cleared).toBe(true)
   })
 })

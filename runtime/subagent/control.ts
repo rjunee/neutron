@@ -46,7 +46,18 @@ export async function cancelRun(
       // Cancellers are best-effort. If they throw, we still mark cancelled.
     }
   }
-  await state.registry.update(run_id, { status: 'cancelled', ended_at: Date.now() })
+  // The durable persist is best-effort observability (since P7 `update` awaits a
+  // store write that can reject). A persist failure must NOT reject the cancel
+  // nor leak the canceller — swallow it and still remove the canceller below.
+  try {
+    await state.registry.update(run_id, { status: 'cancelled', ended_at: Date.now() })
+  } catch (err) {
+    console.warn(
+      `[subagent-control] cancel persist failed for ${run_id}; ` +
+        `canceller still removed (persistence best-effort): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
   state.cancellers.delete(run_id)
 }
 
@@ -100,12 +111,26 @@ export async function failRun(
       return false
     }
   }
-  await state.registry.update(run_id, {
-    status: 'crashed',
-    ended_at: now,
-    failure_reason: reason,
-    last_event_at: now,
-  })
+  // Best-effort durable persist (since P7 `update` awaits a store write that can
+  // reject). A persist failure must NOT reject `failRun` nor leak the canceller:
+  // the reap INTENT (crash + surface) still stands, so swallow, still remove the
+  // canceller, and still return true so the caller notifies. The in-memory record
+  // rolls back to its last persisted state on failure — the store outage is the
+  // degradation, and the next boot re-reaps a still-live row.
+  try {
+    await state.registry.update(run_id, {
+      status: 'crashed',
+      ended_at: now,
+      failure_reason: reason,
+      last_event_at: now,
+    })
+  } catch (err) {
+    console.warn(
+      `[subagent-control] failRun persist failed for ${run_id}; ` +
+        `surfacing the crash anyway (persistence best-effort): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
   state.cancellers.delete(run_id)
   return true
 }

@@ -63,11 +63,22 @@ export async function runLifecycleTick(deps: LifecycleDeps): Promise<number> {
     affected += surfaced.length
   }
 
-  // (2) Cleanup-after pruning of already-terminal records.
+  // (2) Cleanup-after pruning of already-terminal records. Best-effort: the
+  // durable delete can reject (since P7 `delete` awaits a store remove); a prune
+  // failure must not abort the tick — the row stays terminal and is retried next
+  // tick. Swallow per-row so one failure doesn't strand the rest.
   for (const rec of deps.registry.pruneCandidates(now)) {
-    // eslint-disable-next-line no-await-in-loop
-    await deps.registry.delete(rec.run_id)
-    affected++
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await deps.registry.delete(rec.run_id)
+      affected++
+    } catch (err) {
+      console.warn(
+        `[subagent-lifecycle] prune delete failed for ${rec.run_id}; ` +
+          `retrying next tick (persistence best-effort): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
   }
 
   return affected
