@@ -102,6 +102,49 @@ function writePatterns(table: string): RegExp[] {
   ]
 }
 
+/**
+ * Blank out `//` line comments and `/* … *​/` block comments so commented-out
+ * SQL cannot keep a stale allowlist entry alive (Codex): if the real writer is
+ * removed but a `// UPDATE projects SET …` comment lingers, the raw-text scan
+ * would still count the file as a writer and the "stale allowlist entry fails
+ * loudly" contract would silently break. String/template contents are
+ * preserved char-for-char so a `//` or `/*` INSIDE a string literal is never
+ * mistaken for a comment (and string-literal SQL stays unmatched by the
+ * identifier-only `tableToken`, as the matcher test already pins).
+ */
+function stripComments(src: string): string {
+  let out = ''
+  let i = 0
+  const n = src.length
+  let quote = '' // '', '"', "'", or '`' when inside a string/template
+  while (i < n) {
+    const c = src[i]!
+    const c2 = i + 1 < n ? src[i + 1]! : ''
+    if (quote) {
+      out += c
+      if (c === '\\' && i + 1 < n) { out += c2; i += 2; continue }
+      if (c === quote) quote = ''
+      i += 1
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i += 1; continue }
+    if (c === '/' && c2 === '/') {
+      while (i < n && src[i] !== '\n') i += 1
+      continue // drop the line comment (newline re-added by the loop)
+    }
+    if (c === '/' && c2 === '*') {
+      i += 2
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i += 1
+      i += 2
+      out += ' '
+      continue
+    }
+    out += c
+    i += 1
+  }
+  return out
+}
+
 function toRepoRel(abs: string): string {
   return relative(REPO_ROOT, abs).split(sep).join('/')
 }
@@ -144,6 +187,25 @@ describe('table-ownership conformance (migrations/table-ownership.json)', () => 
     }
   })
 
+  test('scanner strips comments — commented-out SQL is not a writer (Codex)', () => {
+    const pats = writePatterns('projects')
+    // A lingering comment for a since-removed writer must NOT keep the file
+    // counted as a writer (else a stale allowlist entry passes silently).
+    const commented = [
+      '// UPDATE projects SET last_activity_at = ?',
+      '  /* legacy: UPDATE projects SET x = 1 */ const q = 1',
+      '/**\n * historical: INSERT INTO projects (id) VALUES (?)\n */\nexport const x = 1',
+    ]
+    for (const src of commented) {
+      const stripped = stripComments(src)
+      expect(pats.some((re) => re.test(stripped)), `comment must be stripped: ${src}`).toBe(false)
+    }
+    // But real SQL survives stripping, and a `//` inside a string literal must
+    // not swallow following code.
+    expect(pats.some((re) => re.test(stripComments('db.run("UPDATE projects SET x = 1")')))).toBe(true)
+    expect(pats.some((re) => re.test(stripComments('const s = "a // b"; db.run(`UPDATE projects SET x = 1`)')))).toBe(true)
+  })
+
   test('every mapped table exists in expected-schema.txt', () => {
     const schema = readFileSync(SCHEMA_PATH, 'utf8')
     const declared = new Set(
@@ -171,7 +233,7 @@ describe('table-ownership conformance (migrations/table-ownership.json)', () => 
       const patterns = writePatterns(table)
       const found = new Set<string>()
       for (const file of sourceFiles) {
-        const text = readFileSync(file, 'utf8')
+        const text = stripComments(readFileSync(file, 'utf8'))
         if (patterns.some((re) => re.test(text))) found.add(toRepoRel(file))
       }
       const allow = new Set(entry.writers)
