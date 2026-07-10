@@ -176,6 +176,24 @@ export class SubagentRegistryStore implements SubagentPersistence {
   }
 }
 
+/**
+ * Parse a persisted JSON blob, ISOLATING a malformed value: a single corrupt
+ * row (e.g. external tampering — the store's own writes always `JSON.stringify`,
+ * so valid) must not throw out of `rowToRecord` and abort the WHOLE `loadLive()`
+ * scan, which would block reaping every other orphan. On a parse failure the
+ * optional field is dropped (logged) and the row is still returned + reaped.
+ */
+function parseBlob<T>(text: string, run_id: string, field: string): T | undefined {
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    console.warn(
+      `[subagent-store] dropping malformed ${field} JSON for run ${run_id} (row still reaped)`,
+    )
+    return undefined
+  }
+}
+
 function rowToRecord(row: SubagentRegistryDbRow): SubagentRecord {
   const rec: SubagentRecord = {
     run_id: row.run_id,
@@ -194,10 +212,12 @@ function rowToRecord(row: SubagentRegistryDbRow): SubagentRecord {
   if (row.ended_at !== null) rec.ended_at = row.ended_at
   if (row.cleanup_after !== null) rec.cleanup_after = row.cleanup_after
   if (row.delivery_target !== null) {
-    rec.delivery_target = JSON.parse(row.delivery_target) as DeliveryTarget
+    const parsed = parseBlob<DeliveryTarget>(row.delivery_target, row.run_id, 'delivery_target')
+    if (parsed !== undefined) rec.delivery_target = parsed
   }
   if (row.delegation_claims !== null) {
-    rec.delegation_claims = JSON.parse(row.delegation_claims) as DelegationClaims
+    const parsed = parseBlob<DelegationClaims>(row.delegation_claims, row.run_id, 'delegation_claims')
+    if (parsed !== undefined) rec.delegation_claims = parsed
   }
   if (row.spawn_key !== null) rec.spawn_key = row.spawn_key
   if (row.failure_reason !== null) rec.failure_reason = row.failure_reason

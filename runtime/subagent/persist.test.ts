@@ -12,7 +12,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { SubagentRegistry, type CreateRecordInput, type SubagentRecord } from './registry.ts'
+import {
+  SubagentRegistry,
+  type CreateRecordInput,
+  type SubagentPersistence,
+  type SubagentRecord,
+} from './registry.ts'
 import { SubagentRegistryStore } from './store.ts'
 import { sweepOrphanedDispatchesOnBoot } from './boot-sweep.ts'
 
@@ -52,32 +57,82 @@ describe('SubagentRegistryStore — migration + write-through', () => {
     expect(row?.name).toBe('code_subagent_registry')
   })
 
-  test('create write-throughs a row; every field round-trips', () => {
+  test('every field round-trips — full shape incl. integer boundaries + JSON blobs', () => {
     const store = new SubagentRegistryStore(db)
     const registry = new SubagentRegistry(store)
+    // create() only accepts the create-input subset; the rest (pid, timestamps,
+    // etc.) are applied via update() — exercise both write paths, then reload.
     registry.create(
       dispatchInput({
         run_id: 'run-rich',
+        instance_key: 'owner-x',
+        agent_kind: 'argus',
+        spawn_depth: 1,
         parent_run_id: 'parent-9',
         parent_session_id: 'sess-p',
         delivery_target: { channel: 'app', binding_id: 'b-1' },
-        delegation_claims: { instance: 'owner-a', depth: 1, scope: ['research'], jti: 'j-1' },
-        spawn_key: 'code-gen:t1:atlas',
+        delegation_claims: { instance: 'owner-x', depth: 1, scope: ['review', 'merge'], jti: 'j-1' },
+        spawn_key: 'code-gen:t1:argus',
       }),
     )
-    const loaded = store.get('run-rich')
-    expect(loaded).not.toBeNull()
-    expect(loaded?.status).toBe('pending')
-    expect(loaded?.parent_run_id).toBe('parent-9')
-    expect(loaded?.parent_session_id).toBe('sess-p')
-    expect(loaded?.delivery_target).toEqual({ channel: 'app', binding_id: 'b-1' })
-    expect(loaded?.delegation_claims).toEqual({
-      instance: 'owner-a',
-      depth: 1,
-      scope: ['research'],
-      jti: 'j-1',
+    const bigStart = 9_007_199_254_740_991 // Number.MAX_SAFE_INTEGER
+    registry.update('run-rich', {
+      status: 'running',
+      child_session_id: 'child-7',
+      pid: 0, // boundary: zero pid
+      pid_starttime: bigStart, // boundary: max-safe integer
+      ended_at: 1_700_000_000_000,
+      cleanup_after: 1_700_000_600_000,
+      failure_reason: 'stuck',
+      last_event_at: 1_699_999_999_000,
     })
-    expect(loaded?.spawn_key).toBe('code-gen:t1:atlas')
+
+    const loaded = store.get('run-rich')
+    expect(loaded).toEqual({
+      run_id: 'run-rich',
+      instance_key: 'owner-x',
+      agent_kind: 'argus',
+      spawn_depth: 1,
+      status: 'running',
+      parent_run_id: 'parent-9',
+      parent_session_id: 'sess-p',
+      child_session_id: 'child-7',
+      pid: 0,
+      pid_starttime: bigStart,
+      started_at: loaded?.started_at as number,
+      ended_at: 1_700_000_000_000,
+      last_event_at: 1_699_999_999_000,
+      cleanup_after: 1_700_000_600_000,
+      delivery_target: { channel: 'app', binding_id: 'b-1' },
+      delegation_claims: { instance: 'owner-x', depth: 1, scope: ['review', 'merge'], jti: 'j-1' },
+      spawn_key: 'code-gen:t1:argus',
+      failure_reason: 'stuck',
+    })
+    expect(typeof loaded?.started_at).toBe('number')
+  })
+
+  test('a minimal record persists with all optionals ABSENT (no null leaks as defined keys)', () => {
+    const store = new SubagentRegistryStore(db)
+    const registry = new SubagentRegistry(store)
+    registry.create(dispatchInput({ run_id: 'run-min' }))
+    const loaded = store.get('run-min')
+    // Optional columns are NULL in the DB → absent (not `undefined`-valued) keys.
+    for (const k of [
+      'parent_run_id',
+      'parent_session_id',
+      'child_session_id',
+      'pid',
+      'pid_starttime',
+      'ended_at',
+      'cleanup_after',
+      'delivery_target',
+      'delegation_claims',
+      'spawn_key',
+      'failure_reason',
+    ]) {
+      expect(loaded).not.toHaveProperty(k)
+    }
+    expect(loaded?.status).toBe('pending')
   })
 
   test('update write-throughs the status transition; delete removes the row', () => {
@@ -101,6 +156,76 @@ describe('SubagentRegistryStore — migration + write-through', () => {
     expect(store.loadAll()).toHaveLength(0)
     // In-memory registry still holds it.
     expect(registry.byRunId('run-mem')?.run_id).toBe('run-mem')
+  })
+
+  test('a throwing persist sink does not mutate the in-memory registry (persist-first)', () => {
+    const throwingPersist: SubagentPersistence = {
+      persist: () => {
+        throw new Error('db down')
+      },
+      remove: () => {},
+    }
+    const registry = new SubagentRegistry(throwingPersist)
+    // create() propagates the write failure AND leaves the in-memory map empty.
+    expect(() => registry.create(dispatchInput({ run_id: 'run-fail' }))).toThrow('db down')
+    expect(registry.byRunId('run-fail')).toBeUndefined()
+    expect(registry.snapshot()).toHaveLength(0)
+  })
+
+  test('an update whose persist throws leaves the in-memory record on its prior value', () => {
+    let live = true
+    const flaky: SubagentPersistence = {
+      persist: () => {
+        if (!live) throw new Error('db down')
+      },
+      remove: () => {},
+    }
+    const registry = new SubagentRegistry(flaky)
+    registry.create(dispatchInput({ run_id: 'run-flaky' })) // persisted while live
+    live = false
+    expect(() => registry.update('run-flaky', { status: 'running' })).toThrow('db down')
+    // Prior value retained — not the unpersisted 'running'.
+    expect(registry.byRunId('run-flaky')?.status).toBe('pending')
+  })
+})
+
+describe('SubagentRegistryStore — malformed-row isolation', () => {
+  test('one row with corrupt JSON does not abort loadLive; valid orphans still reap', async () => {
+    const store = new SubagentRegistryStore(db)
+    const reg = new SubagentRegistry(store)
+    reg.create(
+      dispatchInput({
+        run_id: 'good',
+        delivery_target: { channel: 'app', binding_id: 'b' },
+      }),
+    )
+    reg.update('good', { status: 'running' })
+    reg.create(dispatchInput({ run_id: 'corrupt' }))
+    reg.update('corrupt', { status: 'running' })
+    // Corrupt the second row's delivery_target JSON directly in the table.
+    db.runSync(`UPDATE code_subagent_registry SET delivery_target = '{' WHERE run_id = ?`, [
+      'corrupt',
+    ])
+
+    // loadLive must NOT throw — both rows come back (the corrupt field dropped).
+    const live = new SubagentRegistryStore(db).loadLive()
+    expect(live.map((r) => r.run_id).sort()).toEqual(['corrupt', 'good'])
+    const corrupt = live.find((r) => r.run_id === 'corrupt')
+    expect(corrupt).not.toHaveProperty('delivery_target') // malformed → dropped
+    const good = live.find((r) => r.run_id === 'good')
+    expect(good?.delivery_target).toEqual({ channel: 'app', binding_id: 'b' })
+
+    // The boot sweep still reaps BOTH orphans despite the corrupt row.
+    const fired: string[] = []
+    const swept = await sweepOrphanedDispatchesOnBoot({
+      store: new SubagentRegistryStore(db),
+      report: (rec) => {
+        fired.push(rec.run_id)
+      },
+      now: () => 1,
+    })
+    expect(swept.map((r) => r.run_id).sort()).toEqual(['corrupt', 'good'])
+    expect(fired.sort()).toEqual(['corrupt', 'good'])
   })
 })
 

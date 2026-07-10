@@ -75,15 +75,12 @@ import {
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
-import {
-  sweepOrphanedDispatchesOnBoot,
-  type BootSweepReport,
-} from '@neutronai/runtime/subagent/boot-sweep.ts'
+import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { newControlState } from '@neutronai/runtime/subagent/control.ts'
 import {
   DispatchService,
+  buildBootSweepReport,
   buildCancellableDispatchTurn,
-  buildDispatchWatchdogNotifier,
   defaultPersonaLoader,
   type DispatchBoardBinder,
   type DispatchReporter,
@@ -588,24 +585,9 @@ export function buildOpenGraphComposer(
     // treats the durable row (not the notification) as the record. Fire-and-forget:
     // never block boot. Runs UNCONDITIONALLY (not gated on `llmPool`): if this
     // boot has no dispatcher but a prior one did, its orphans still deserve reaping.
-    const bootReapNotifier = buildDispatchWatchdogNotifier(dispatchReport)
-    const bootReapReport: BootSweepReport = (rec) => {
-      const detected_at = rec.ended_at ?? Date.now()
-      return bootReapNotifier({
-        run_id: rec.run_id,
-        agent_kind: rec.agent_kind,
-        instance_key: rec.instance_key,
-        reason: 'process_dead',
-        last_event_at: rec.last_event_at,
-        detected_at,
-        age_ms: detected_at - rec.started_at,
-        ...(rec.delivery_target !== undefined ? { delivery_target: rec.delivery_target } : {}),
-        ...(rec.pid !== undefined ? { pid: rec.pid } : {}),
-      })
-    }
     void sweepOrphanedDispatchesOnBoot({
       store: subagentRegistryStore,
-      report: bootReapReport,
+      report: buildBootSweepReport(dispatchReport),
     }).catch((err: unknown) => {
       console.warn(
         `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,

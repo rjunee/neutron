@@ -114,8 +114,12 @@ export class SubagentRegistry {
     if (input.delivery_target !== undefined) rec.delivery_target = input.delivery_target
     if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
     if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
-    this.byId.set(input.run_id, rec)
+    // Persist FIRST: if the durable write throws, the in-memory map is left
+    // untouched so the two never diverge (the caller gets the exception and the
+    // record does not exist in either). A duplicate run_id was already rejected
+    // above, so this never fights an in-memory dup.
     this.persistence?.persist(rec)
+    this.byId.set(input.run_id, rec)
     return rec
   }
 
@@ -131,8 +135,10 @@ export class SubagentRegistry {
     // it to a past timestamp). Otherwise default to now().
     const last_event_at = patch.last_event_at ?? Date.now()
     const next: SubagentRecord = { ...cur, ...patch, last_event_at }
-    this.byId.set(run_id, next)
+    // Persist FIRST: a durable-write throw leaves the in-memory record on its
+    // prior value rather than exposing an unpersisted new state.
     this.persistence?.persist(next)
+    this.byId.set(run_id, next)
     return next
   }
 
@@ -185,8 +191,10 @@ export class SubagentRegistry {
   }
 
   delete(run_id: string): void {
-    this.byId.delete(run_id)
+    // Remove FIRST: if the durable delete throws, the record stays in BOTH the
+    // store and the in-memory map (still in sync) rather than only the store.
     this.persistence?.remove(run_id)
+    this.byId.delete(run_id)
   }
 
   /** Snapshot — used for tests + observability. */

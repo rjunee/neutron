@@ -19,12 +19,8 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
-import {
-  sweepOrphanedDispatchesOnBoot,
-  type BootSweepReport,
-} from '@neutronai/runtime/subagent/boot-sweep.ts'
-import type { SubagentRecord } from '@neutronai/runtime/subagent/registry.ts'
-import { buildDispatchWatchdogNotifier } from './watchdog-report.ts'
+import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
+import { buildBootSweepReport } from './watchdog-report.ts'
 import type { DispatchReport } from './service.ts'
 
 let tmp: string
@@ -41,25 +37,9 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-/** The exact adapter open/composer.ts builds: SubagentRecord → the production
- *  watchdog notifier (which maps to DispatchReport + swallows failures). */
-function productionBootReport(report: (r: DispatchReport) => void | Promise<void>): BootSweepReport {
-  const notifier = buildDispatchWatchdogNotifier(report)
-  return (rec: SubagentRecord) => {
-    const detected_at = rec.ended_at ?? Date.now()
-    return notifier({
-      run_id: rec.run_id,
-      agent_kind: rec.agent_kind,
-      instance_key: rec.instance_key,
-      reason: 'process_dead',
-      last_event_at: rec.last_event_at,
-      detected_at,
-      age_ms: detected_at - rec.started_at,
-      ...(rec.delivery_target !== undefined ? { delivery_target: rec.delivery_target } : {}),
-      ...(rec.pid !== undefined ? { pid: rec.pid } : {}),
-    })
-  }
-}
+// Exercises the SHARED production adapter (open/composer.ts wires this exact
+// function), not a local re-implementation.
+const productionBootReport = buildBootSweepReport
 
 test('a REJECTING DispatchReporter through the real adapter still durably claims the orphan crashed', async () => {
   const store = new SubagentRegistryStore(db)
