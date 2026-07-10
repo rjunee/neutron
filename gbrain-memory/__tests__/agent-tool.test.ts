@@ -1,5 +1,5 @@
 /**
- * P0-2 — `gbrain_search` agent recall tool.
+ * P0-2 — `memory_search` agent recall tool.
  *
  * Proves the READ path the audit said was missing: a tool, backed by the SAME
  * `GBrainMemoryStore` the scribe WRITE path uses, that the live agent can call
@@ -17,7 +17,7 @@ import {
   type McpClient,
   type MemoryStore,
 } from '../memory-store.ts'
-import { GBRAIN_SEARCH_TOOL, registerGBrainSearchToolSurface } from '../agent-tool.ts'
+import { MEMORY_SEARCH_TOOL, registerMemorySearchToolSurface } from '../agent-tool.ts'
 
 const ctx: ToolCallContext = {
   project_slug: 'p',
@@ -70,12 +70,12 @@ function storeOver(client: McpClient): MemoryStore {
   return new GBrainMemoryStore(client)
 }
 
-describe('registerGBrainSearchToolSurface', () => {
-  test('registers gbrain_search gated on read:memory, auto-approval', () => {
+describe('registerMemorySearchToolSurface', () => {
+  test('registers memory_search gated on read:memory, auto-approval', () => {
     const reg = new ToolRegistry()
-    const names = registerGBrainSearchToolSurface(reg, storeOver(fakeGbrainClient([])))
-    expect(names).toEqual([GBRAIN_SEARCH_TOOL])
-    const t = reg.get(GBRAIN_SEARCH_TOOL)!
+    const names = registerMemorySearchToolSurface(reg, storeOver(fakeGbrainClient([])))
+    expect(names).toEqual([MEMORY_SEARCH_TOOL])
+    const t = reg.get(MEMORY_SEARCH_TOOL)!
     expect(t.capability_required).toBe('read:memory')
     expect(t.approval_policy).toBe('auto')
     // Visible to the agent manifest (NOT agent_hidden) — the whole point of P0-2.
@@ -85,7 +85,7 @@ describe('registerGBrainSearchToolSurface', () => {
 
   test('recalls a scribe-written fact: query → ranked excerpt + entity kind', async () => {
     const reg = new ToolRegistry()
-    registerGBrainSearchToolSurface(
+    registerMemorySearchToolSurface(
       reg,
       storeOver(
         fakeGbrainClient([
@@ -100,7 +100,7 @@ describe('registerGBrainSearchToolSurface', () => {
         ]),
       ),
     )
-    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    const handler = reg.get(MEMORY_SEARCH_TOOL)!.handler
     const out = (await handler({ query: 'Acme' }, ctx)) as {
       results: Array<{ id: string; title?: string; content: string; score: number; kind?: string }>
     }
@@ -114,7 +114,7 @@ describe('registerGBrainSearchToolSurface', () => {
 
   test('dedupes multiple chunks from the same page, keeping the best score', async () => {
     const reg = new ToolRegistry()
-    registerGBrainSearchToolSurface(
+    registerMemorySearchToolSurface(
       reg,
       storeOver(
         fakeGbrainClient([
@@ -123,7 +123,7 @@ describe('registerGBrainSearchToolSurface', () => {
         ]),
       ),
     )
-    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    const handler = reg.get(MEMORY_SEARCH_TOOL)!.handler
     const out = (await handler({ query: 'Acme' }, ctx)) as {
       results: Array<{ id: string; content: string; score: number }>
     }
@@ -134,7 +134,7 @@ describe('registerGBrainSearchToolSurface', () => {
 
   test('empty query lists recent memory pages (list_pages path)', async () => {
     const reg = new ToolRegistry()
-    registerGBrainSearchToolSurface(
+    registerMemorySearchToolSurface(
       reg,
       storeOver(
         fakeGbrainClient([
@@ -143,7 +143,7 @@ describe('registerGBrainSearchToolSurface', () => {
         ]),
       ),
     )
-    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    const handler = reg.get(MEMORY_SEARCH_TOOL)!.handler
     const out = (await handler({ query: '' }, ctx)) as { results: Array<{ id: string }> }
     expect(out.results.map((r) => r.id).sort()).toEqual(['jane-doe', 'project-x'])
   })
@@ -160,8 +160,8 @@ describe('registerGBrainSearchToolSurface', () => {
       },
     }
     const reg = new ToolRegistry()
-    registerGBrainSearchToolSurface(reg, storeOver(client))
-    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    registerMemorySearchToolSurface(reg, storeOver(client))
+    const handler = reg.get(MEMORY_SEARCH_TOOL)!.handler
     await handler({ query: 'x', limit: 9999 }, ctx)
     expect(seenLimit).toBe(50)
     await handler({ query: 'x', limit: 'lots' }, ctx)
@@ -171,11 +171,11 @@ describe('registerGBrainSearchToolSurface', () => {
   test('truncates an over-long excerpt with an ellipsis', async () => {
     const long = 'A'.repeat(2000)
     const reg = new ToolRegistry()
-    registerGBrainSearchToolSurface(
+    registerMemorySearchToolSurface(
       reg,
       storeOver(fakeGbrainClient([{ slug: 'big', chunk_text: long, score: 0.5 }])),
     )
-    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    const handler = reg.get(MEMORY_SEARCH_TOOL)!.handler
     const out = (await handler({ query: 'A' }, ctx)) as { results: Array<{ content: string }> }
     expect(out.results[0]!.content.length).toBeLessThan(long.length)
     expect(out.results[0]!.content.endsWith('…')).toBe(true)
@@ -188,8 +188,8 @@ describe('registerGBrainSearchToolSurface', () => {
       },
     }
     const reg = new ToolRegistry()
-    registerGBrainSearchToolSurface(reg, storeOver(client))
-    const handler = reg.get(GBRAIN_SEARCH_TOOL)!.handler
+    registerMemorySearchToolSurface(reg, storeOver(client))
+    const handler = reg.get(MEMORY_SEARCH_TOOL)!.handler
     const out = (await handler({ query: 'anything' }, ctx)) as { results: unknown[] }
     expect(out.results).toEqual([])
   })

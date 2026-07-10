@@ -179,6 +179,42 @@ module.exports = {
       to: { path: '^connect/api/', dependencyTypes: ['import', 'require'] },
     },
     {
+      name: 'memory-backend-swap-seam',
+      comment:
+        'RA5 (invariant I2): the memory backend must stay swappable behind the ' +
+        'MemoryStore seam. Outside gbrain-memory/ itself, only the backend-neutral ' +
+        'contract files may be imported: memory-store.ts (MemoryStore/McpClient ' +
+        'interfaces) and agent-tool.ts (the memory_search tool, written purely ' +
+        'against MemoryStore). Everything else in gbrain-memory/ (GBrainMemoryStore, ' +
+        'GBrainSyncHook, the stdio client, brain init/doctor, the index barrel) is ' +
+        'backend INTERNALS. Exempt `from`s: connect/ (the shared-project memory ' +
+        'mirror federates at the backend level, per the RA5 spec) and the ONE ' +
+        'designated composition swap point, gateway/realmode-composer/' +
+        'build-gbrain-memory.ts (+ its gbrain-sync-state sink, which persists ' +
+        'backend-specific sync telemetry for that same wiring) — so swapping the ' +
+        'backend touches only buildGBrainMemory + gbrain-memory/. NOTE on the ' +
+        'gbrain MCP op names (put_page/add_link/get_links): depcruise sees import ' +
+        'edges, not call sites, so it cannot ban the strings themselves — but every ' +
+        'real op call needs an McpClient transport, which only these internals ' +
+        'provide, so this import ban IS the op-name ban (comments that merely ' +
+        'mention the op names, e.g. scribe/write-to-gbrain.ts + GBrainSyncHook ' +
+        'prose, are naturally unaffected).',
+      severity: 'error',
+      from: {
+        pathNot: [
+          '^gbrain-memory',
+          '^connect',
+          '^gateway/realmode-composer/build-gbrain-memory\\.ts$',
+          '^gateway/realmode-composer/gbrain-sync-state-store\\.ts$',
+          TEST,
+        ],
+      },
+      to: {
+        path: '^gbrain-memory/',
+        pathNot: ['^gbrain-memory/(memory-store|agent-tool)\\.ts$'],
+      },
+    },
+    {
       name: 'app-bundle-purity',
       comment: 'The Expo/RN bundle (app/) must never TRANSITIVELY import server-only ' +
         'workspaces — node:sqlite etc. bricks the bundle (audit §10.2, INVARIANTS §77). ' +

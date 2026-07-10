@@ -71,11 +71,13 @@ const EXPECTED_COMPOSITION_KEYS = [
   'cron_jobs',
   'db',
   'doc_search',
-  'gbrain_search',
   'heartbeat_tracker',
   'import_resume_handler',
   'import_upload_handler',
   'landing_server',
+  // RA5 — the memory-recall composition field is the backend-neutral
+  // `memory_search` (renamed from `gbrain_search`; same MemoryStore wiring).
+  'memory_search',
   'message_search',
   'onboarding_import_running_cron',
   'platform',
