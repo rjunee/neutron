@@ -29,8 +29,11 @@ describe('buildLiveAgentScopeFragment — RA5 memory-recall hint', () => {
     expect(frag).toContain('message_search')
   })
 
-  test('project scope keeps the tappable doc-link marker and leaks no backend name', () => {
+  test('project scope surfaces memory_search, keeps the doc-link marker, leaks no backend name', () => {
     const frag = buildLiveAgentScopeFragment({ scope: 'project', project_id: 'gondor' })
+    // Project turns also use long-term recall — the tool must be present here too.
+    expect(frag).toContain(MEMORY_SEARCH_TOOL)
+    expect(frag).toContain('memory_search')
     expect(frag).toContain('docs:/gondor/')
     expect(frag).toContain('project topic')
     expect(frag).not.toContain('gbrain_search')

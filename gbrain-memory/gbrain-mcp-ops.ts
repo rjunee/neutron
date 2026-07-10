@@ -16,13 +16,18 @@
  *     member here, so a newly-added backend op forces an update to this one
  *     list, which the ban then automatically covers.
  *
- * WHY AN AST OP-NAME BAN (not just the depcruise import rule): `McpClient` is a
- * purely STRUCTURAL interface — a product module could declare its own
- * identically-shaped `{ call(name, args) }` type with ZERO gbrain import and
- * call `client.call('put_page', …)`, which the import-edge depcruise rule has
- * no edge to reject. The AST op-NAME scan (which sees through bracket access,
- * optional chaining, and comment/whitespace trivia) closes that structural
- * bypass; the depcruise import ban stays as belt-and-suspenders.
+ * WHERE THE GUARANTEE LIVES (honest scoping): the AUTHORITATIVE barrier against
+ * a product module making ANY raw GBrain call — including a fully-dynamic
+ * `client.call(fetchName(), …)` — is the TYPE-SEAL + depcruise IMPORT-BAN:
+ * `McpClient` is internal to `gbrain-memory/` and the `memory-backend-swap-seam`
+ * rule forbids product code from importing it (or any adapter / the stdio
+ * transport), so product code can never OBTAIN a real transport instance. The
+ * AST op-NAME scan is DEFENSE-IN-DEPTH on top of that: it catches a raw op name
+ * written as a literal or a trivially-constant expression (the accidental
+ * copy-paste / structural-lookalike case) — seeing through bracket access,
+ * optional chaining, comment/whitespace trivia, and bounded const-folding — but
+ * it does NOT (and cannot) catch a fully-dynamic computed name; that case is
+ * covered by the type+import layer, by design.
  *
  * Legitimate holders of the raw transport (which therefore legitimately name
  * these ops) are the `gbrain-memory/` adapters and the `connect/` federation

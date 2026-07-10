@@ -12,7 +12,9 @@
  *     tool rename must also surface the tool in the prompt, closing the
  *     "memory tool never mentioned, agent greps files instead" gap the m1-e2e
  *     QA flagged). Backend-neutral by construction: names the TOOL, not GBrain.
- *   - `project` — scoped to one project's files + the tappable doc-link marker.
+ *   - `project` — scoped to one project's files + the tappable doc-link marker,
+ *     PLUS the same backend-neutral `memory_search` recall hint (project turns
+ *     use long-term entity/fact recall too).
  */
 export type LiveAgentScope =
   | { scope: 'general' }
@@ -26,6 +28,11 @@ export function buildLiveAgentScopeFragment(input: LiveAgentScope): string {
       `You are chatting with the user inside the "${projectId}" project topic.`,
       'Scope your answers to this project unless the user clearly asks wider.',
       `Project files (when materialized) live under Projects/${projectId}/ in your working directory.`,
+      // RA5 memory-recall hint — project turns also use long-term entity/fact
+      // recall, so surface the backend-neutral recall tool here too.
+      'To recall what you already know about a person, company, project, or fact before asking the user,',
+      'use the memory_search tool — it searches your long-term memory (the entities/facts the scribe recorded),',
+      'distinct from doc_search (project files) and message_search (chat history).',
       // Doc references: announce any doc you draft or edit as a TAPPABLE link,
       // never a raw filesystem path. The client linkifies this exact marker and
       // opens it in the Documents tab (runtime/doc-links.ts rewriteDocRefsInBody).

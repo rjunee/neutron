@@ -1,22 +1,31 @@
 /**
- * RA5 (invariant I2) — AST-based ban on raw GBrain op-name CALLS.
+ * RA5 (invariant I2) — AST-based ban on raw GBrain op-name CALLS (defense-in-depth).
  *
- * The depcruise `memory-backend-swap-seam` rule bans IMPORTING gbrain internals,
- * but `McpClient` is a purely STRUCTURAL interface: a product module can declare
- * its OWN identically-shaped `{ call(name, args) }` type with zero gbrain import
- * and call `client.call('put_page', …)` — a stray backend op the import-edge
- * rule has no edge to reject. The RA5 spec (§(b), plan ~:1807) requires the raw
- * op NAMES/CALLS to be forbidden, not just import edges. This test is that ban.
+ * WHERE THE REAL GUARANTEE LIVES (read this first). The AUTHORITATIVE guarantee
+ * that a product module cannot make ANY raw GBrain call — including a fully
+ * dynamic `client.call(fetchName(), …)` — is the **type-seal + depcruise
+ * import-ban**, NOT this scanner: `McpClient` (the only surface that can name a
+ * raw op) is internal to `gbrain-memory/`, and the `memory-backend-swap-seam`
+ * depcruise rule forbids product code from importing it (or any adapter / the
+ * stdio transport). So product code has no way to OBTAIN a raw client instance;
+ * a `client.call(<anything>)` in product scope can never reach a real transport.
  *
- * WHY AST, NOT REGEX: a `.call('op')` regex is trivially bypassable and gave
- * false assurance — `client['call']('put_page')` (bracket), `client.call?.(…)`
- * (optional chaining), `client.call /* gap *\/ (…)` (trivia between callee and
- * args) are all valid TS the regex misses. Parsing with the TypeScript compiler
- * API makes whitespace / comments / optional-chaining / bracket-vs-dot access
- * irrelevant BY CONSTRUCTION: we match the CallExpression shape, not source
- * text. The single source of truth for the banned op names is
- * `GBRAIN_MCP_OP_NAMES` (gbrain-mcp-ops.ts) — the scanner reads it directly, so
- * there is no second, drift-prone list.
+ * WHAT THIS SCANNER ADDS. Defense-in-depth: it catches a raw op NAME that a
+ * product module writes as a LITERAL or a trivially-constant expression — the
+ * accidental copy-paste / structural-lookalike case the spec (§(b), plan ~:1807)
+ * calls out — before it can even ship. It does NOT (and cannot, without an
+ * infinite regress) catch a fully-dynamic computed op name; that case is covered
+ * by the type+import layer above, by design.
+ *
+ * WHY AST, NOT REGEX: a `.call('op')` regex is trivially bypassable —
+ * `client['call']('put_page')` (bracket), `client.call?.(…)` (optional chain),
+ * `client.call /* gap *\/ (…)` (trivia) are all valid TS it misses. Parsing with
+ * the TypeScript compiler API matches the CallExpression SHAPE, not source text,
+ * and BOUNDED constant-folding resolves a first arg that is a string literal, a
+ * no-substitution template, a `'a' + 'b'` literal concat, or an identifier bound
+ * to a same-file `const X = '<literal>'`. The single source of truth for the
+ * banned op names is `GBRAIN_MCP_OP_NAMES` (gbrain-mcp-ops.ts) — read directly,
+ * so there is no second, drift-prone list.
  *
  * IMPORTANT — this is a SOURCE-scanning guard: it is INVISIBLE to tsc /
  * typecheck-all / depcruise / the matrix. It is only exercised by the full
@@ -52,10 +61,60 @@ function isCallMemberAccess(callee: ts.Expression): boolean {
   return false
 }
 
+/** Same-file `const NAME = <expr>` bindings, for bounded constant resolution. */
+function collectFileConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
+  const consts = new Map<string, ts.Expression>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableStatement(node) && (node.declarationList.flags & ts.NodeFlags.Const) !== 0) {
+      for (const decl of node.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name) && decl.initializer !== undefined) {
+          consts.set(decl.name.text, decl.initializer)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return consts
+}
+
 /**
- * Every `<recv>.call('<op>', …)` site (dot / optional / optional-call / bracket
- * access, any receiver name) whose FIRST argument is a string literal in `ops`.
- * Parsed via the TS compiler API, so trivia / optional-chaining can't evade it.
+ * BOUNDED constant resolution of an expression to a string value, or null if it
+ * isn't trivially constant. Handles: string literal / no-substitution template,
+ * `'a' + 'b'` literal concatenation, parenthesization, and an identifier bound
+ * to a same-file `const X = <foldable>`. A fully-DYNAMIC value (`fetchName()`,
+ * a template WITH substitutions, a mutable/imported binding) folds to null — the
+ * scanner is defense-in-depth; the type-seal + import-ban is what actually stops
+ * a dynamic raw call (a product module can't obtain a real transport at all).
+ */
+function foldStringExpr(
+  expr: ts.Expression,
+  consts: Map<string, ts.Expression>,
+  seen: ReadonlySet<string>,
+): string | null {
+  if (ts.isStringLiteralLike(expr)) return expr.text // StringLiteral + NoSubstitutionTemplateLiteral
+  if (ts.isParenthesizedExpression(expr)) return foldStringExpr(expr.expression, consts, seen)
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const l = foldStringExpr(expr.left, consts, seen)
+    const r = foldStringExpr(expr.right, consts, seen)
+    return l !== null && r !== null ? l + r : null
+  }
+  if (ts.isIdentifier(expr)) {
+    if (seen.has(expr.text)) return null // cycle guard
+    const init = consts.get(expr.text)
+    if (init === undefined) return null
+    const next = new Set(seen)
+    next.add(expr.text)
+    return foldStringExpr(init, consts, next)
+  }
+  return null
+}
+
+/**
+ * Every `<recv>.call(<op>, …)` site (dot / optional / optional-call / bracket
+ * access, any receiver name) whose FIRST argument RESOLVES (bounded const-fold)
+ * to a string in `ops`. Parsed via the TS compiler API, so trivia / optional-
+ * chaining / bracket access / a trivially-constant name can't evade it.
  */
 export function findRawOpCalls(
   fileName: string,
@@ -64,13 +123,15 @@ export function findRawOpCalls(
 ): Array<{ line: number; op: string }> {
   const opSet = new Set<string>(ops)
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName))
+  const consts = collectFileConsts(sf)
   const hits: Array<{ line: number; op: string }> = []
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && isCallMemberAccess(node.expression)) {
       const arg0 = node.arguments[0]
-      if (arg0 !== undefined && ts.isStringLiteralLike(arg0) && opSet.has(arg0.text)) {
-        const { line } = sf.getLineAndCharacterOfPosition(arg0.getStart(sf))
-        hits.push({ line: line + 1, op: arg0.text })
+      const value = arg0 !== undefined ? foldStringExpr(arg0, consts, new Set()) : null
+      if (value !== null && opSet.has(value)) {
+        const { line } = sf.getLineAndCharacterOfPosition(arg0!.getStart(sf))
+        hits.push({ line: line + 1, op: value })
       }
     }
     ts.forEachChild(node, visit)
@@ -80,18 +141,20 @@ export function findRawOpCalls(
 }
 
 /**
- * Every string-literal FIRST arg of any `.call(...)` in a file, regardless of
+ * Every bounded-constant FIRST arg of any `.call(...)` in a file, regardless of
  * membership — used by the anti-drift check to learn what op names the seam
  * actually calls (receiver-AGNOSTIC, so an aliased/renamed transport can't hide
  * an op from the ban-list, the leak the old `mcp.call` regex had).
  */
 function findAllDotCallStringArgs(fileName: string, src: string): string[] {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, scriptKindFor(fileName))
+  const consts = collectFileConsts(sf)
   const out: string[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && isCallMemberAccess(node.expression)) {
       const arg0 = node.arguments[0]
-      if (arg0 !== undefined && ts.isStringLiteralLike(arg0)) out.push(arg0.text)
+      const value = arg0 !== undefined ? foldStringExpr(arg0, consts, new Set()) : null
+      if (value !== null) out.push(value)
     }
     ts.forEachChild(node, visit)
   }
@@ -174,6 +237,26 @@ describe('RA5 raw-op seam ban — AST scanner (unit)', () => {
       src: `export const f = (c: { call: Function }) => c.call(\n  'get_links',\n  { slug: 's' },\n)`,
       op: 'get_links',
     },
+    {
+      label: 'identifier bound to a same-file const literal',
+      src: `const op = 'put_page'\nexport const f = (c: { call: Function }) => c.call(op, {})`,
+      op: 'put_page',
+    },
+    {
+      label: 'no-substitution template literal',
+      src: 'export const f = (c: { call: Function }) => c.call(`delete_page`, {})',
+      op: 'delete_page',
+    },
+    {
+      label: 'string-literal concatenation',
+      src: `export const f = (c: { call: Function }) => c.call('get' + '_stats', {})`,
+      op: 'get_stats',
+    },
+    {
+      label: 'identifier bound to a concatenation of const literals',
+      src: `const verb = 'list'\nconst op = verb + '_pages'\nexport const f = (c: { call: Function }) => c.call(op, {})`,
+      op: 'list_pages',
+    },
   ]
 
   for (const { label, src, op } of bypasses) {
@@ -182,6 +265,18 @@ describe('RA5 raw-op seam ban — AST scanner (unit)', () => {
       expect(hits.map((h) => h.op)).toEqual([op])
     })
   }
+
+  test('does NOT flag a FULLY-DYNAMIC op name — BY DESIGN, covered by type+import layer', () => {
+    // Source scanning can never resolve a runtime-computed name (infinite
+    // regress). The AUTHORITATIVE guarantee here is the type-seal + depcruise
+    // import-ban: a product module cannot obtain a real transport instance, so a
+    // `client.call(<anything>)` in product scope can never reach the backend.
+    const src = [
+      `declare function fetchName(): string`,
+      `export const f = (c: { call: Function }) => c.call(fetchName(), {})`,
+    ].join('\n')
+    expect(findRawOpCalls('fixture.ts', src, GBRAIN_MCP_OP_NAMES)).toEqual([])
+  })
 
   test('does NOT flag an op literal that appears only in a COMMENT (prose-safe)', () => {
     const src = [
