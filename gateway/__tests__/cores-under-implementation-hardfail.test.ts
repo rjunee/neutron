@@ -57,6 +57,7 @@ const SLUG_MISMATCH_ROOT = join(import.meta.dir, 'fixtures', 'slug-mismatch-root
 const TOOLNAMES_MISMATCH_ROOT = join(import.meta.dir, 'fixtures', 'toolnames-mismatch-root')
 const CTXECHO_ROOT = join(import.meta.dir, 'fixtures', 'ctxecho-root')
 const SPLIT_SURFACE_ROOT = join(import.meta.dir, 'fixtures', 'split-surface-root')
+const EXTRA_WINS_ROOT = join(import.meta.dir, 'fixtures', 'extra-wins-root')
 
 interface Bench {
   ownerHome: string
@@ -292,6 +293,40 @@ describe('X2 — under-implementing Core cannot install silently-broken', () => 
       speaker_user_id: null,
     })) as { from: string }
     expect(out.from).toBe('base')
+  })
+
+  test('a callable extra handler WINS over a non-callable base placeholder (installs, not manifest_incomplete)', async () => {
+    // buildTools returns { ew_b: undefined } (placeholder); buildExtraTools
+    // returns the real ew_b handler. The merge must install the extra's
+    // handler rather than keep the placeholder and wrongly hard-fail.
+    const events: Array<{ event_name?: string; code?: string }> = []
+    const result = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [EXTRA_WINS_ROOT],
+      backends: { extrawins_core: () => ({ backend: {} }) },
+      hardFailFailureRatio: 1,
+      log: (e) => events.push(e as { event_name?: string }),
+    })
+    expect(result.installed.has('extrawins_core')).toBe(true)
+    expect(result.failures).toEqual([])
+    expect(bench.tools.get('ew_a')).toBeDefined()
+    expect(bench.tools.get('ew_b')).toBeDefined()
+    // The registered ew_b handler is the EXTRA's (the base was a placeholder).
+    const out = (await bench.tools.get('ew_b')!.handler({}, {
+      project_slug: 'test',
+      project_id: null,
+      topic_id: null,
+      call_id: 'c',
+      speaker_user_id: null,
+    })) as { from: string }
+    expect(out.from).toBe('extra')
+    // No false failure telemetry on this healthy install.
+    const noisy = events.filter((e) => e.event_name === 'cores.tool_registration_failed')
+    expect(noisy).toEqual([])
   })
 
   test('wrapHandler THREADS the per-call ToolCallContext into the Core handler at dispatch', async () => {

@@ -938,16 +938,23 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
     try {
       const extras = coreModule.buildExtraTools(deps)
       for (const [name, handler] of Object.entries(extras)) {
-        if (Object.prototype.hasOwnProperty.call(built, name)) {
-          // buildTools already provided this tool — keep its handler. This is
-          // EXPECTED precedence for split-surface Cores whose `buildTools`
-          // conditionally includes an extra tool (e.g. Tasks' `tasks_pick_next`
-          // when `pickNext` is wired). It is NOT a failure, so it does not emit
-          // `cores.tool_registration_failed` telemetry (which would fire a
-          // console.warn on every healthy install). The coverage check below
-          // still guarantees every manifest tool has a callable handler.
+        if (
+          Object.prototype.hasOwnProperty.call(built, name) &&
+          typeof built[name] === 'function'
+        ) {
+          // buildTools already provided a CALLABLE handler for this tool — keep
+          // it. This is EXPECTED precedence for split-surface Cores whose
+          // `buildTools` conditionally includes an extra tool (e.g. Tasks'
+          // `tasks_pick_next` when `pickNext` is wired). It is NOT a failure, so
+          // it emits no `cores.tool_registration_failed` telemetry (which would
+          // fire a console.warn on every healthy install).
           continue
         }
+        // Base either doesn't declare this tool OR declares it as a
+        // NON-CALLABLE placeholder (a Core that wires the tool only on its extra
+        // surface). Let the extra's real handler win — otherwise the coverage
+        // check below would wrongly hard-fail a Core that DOES implement the
+        // tool (via extras) as `manifest_incomplete`.
         built[name] = handler
       }
     } catch (err) {
