@@ -339,16 +339,18 @@ export class NexusStore {
       created_at: this.now(),
     }
 
-    // A `closeAll()` may have landed while we were awaiting
-    // `openHandle` above (openHandle can resolve a CACHED handle, whose
-    // db `closeAll` then closes). Everything from here to the write
-    // below is synchronous — `withBusyRetry` runs its first attempt in
-    // the same tick — so this check + the write are one uninterrupted
-    // unit; no further `closeAll` can interleave. Abort cleanly rather
-    // than issue `BEGIN IMMEDIATE` on a closed connection.
-    this.assertHandleLive(handle)
     const db = handle.db
     await withBusyRetry(() => {
+      // Re-check at the TOP OF EVERY ATTEMPT, not just once before the
+      // loop: `withBusyRetry` yields (`await Bun.sleep`) between busy
+      // retries, and a `closeAll()` landing in that yield closes `db`.
+      // Each attempt runs synchronously from here through COMMIT, so
+      // this guard + the write are one uninterrupted unit — a closure
+      // between attempts is caught here and aborts with a typed error
+      // instead of issuing `BEGIN IMMEDIATE` on a closed connection.
+      // `store_closed` is non-busy, so `withBusyRetry` propagates it
+      // immediately rather than retrying.
+      this.assertHandleLive(handle)
       db.exec('BEGIN IMMEDIATE')
       try {
         db.run(

@@ -521,6 +521,56 @@ describe('NexusStore — REAL cross-process concurrency (subprocess)', () => {
     },
     30_000,
   )
+
+  it(
+    'closeAll() BETWEEN busy-retry attempts aborts the append cleanly (no closed-db write)',
+    async () => {
+      await h.store.ensureInit(PROJECT_ID)
+      const internals = h.store as unknown as { handles: Map<string, unknown> }
+      const db_path = sidecarPath(h.owner_home)
+      // Hold the write lock long enough that the append is still in its
+      // busy-retry loop (yielding via await Bun.sleep between attempts)
+      // when we tear the store down.
+      const holder = Bun.spawn({
+        cmd: [
+          process.execPath,
+          'run',
+          join(FIXTURES, 'hold-write-lock.ts'),
+          db_path,
+          '800',
+        ],
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      try {
+        await waitForLine(holder.stdout, 'HELD', 15_000)
+        // Enters withBusyRetry; first BEGIN IMMEDIATE blocks the busy
+        // window then the loop yields.
+        const w = h.store.appendEvent(
+          PROJECT_ID,
+          input({ body: 'contention-close', actor_id: 'racer' }),
+        )
+        // Land closeAll() during an inter-attempt yield — past the
+        // first ~100ms busy_timeout attempt, well inside the 800ms hold.
+        await Bun.sleep(250)
+        h.store.closeAll()
+        // The next retry attempt re-checks handle.closed and aborts
+        // with a TYPED error, not a raw "database is closed".
+        await expect(w).rejects.toThrow(NexusStoreError)
+        expect(internals.handles.size).toBe(0)
+        await holder.exited
+      } finally {
+        holder.kill()
+      }
+      // Recovery: fresh init; the aborted append left NO row (only the
+      // holder's marker survives), and a new append lands.
+      const ok = await h.store.appendEvent(PROJECT_ID, input({ body: 'recovered' }))
+      const events = await h.store.readRecent(PROJECT_ID, { limit: 100 })
+      expect(events.some((e) => e.body === 'contention-close')).toBe(false)
+      expect(events.some((e) => e.id === ok.id)).toBe(true)
+    },
+    30_000,
+  )
 })
 
 describe('NexusStore — readRecent filtering', () => {
