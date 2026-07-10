@@ -68,7 +68,15 @@ export function createAppDiagnosticsSurface(
       // must never read internal state.
       const resolved = await resolveBearer(req, auth)
       if ('code' in resolved) {
-        return jsonError(401, resolved.code, resolved.message)
+        // The real HS256 resolver performs the instance-slug cross-check
+        // INTERNALLY and returns `project_mismatch` as an auth error (before it
+        // ever yields an identity). That is an authorization / instance-boundary
+        // failure — surface it as 403, matching the explicit `ownerSlugMismatch`
+        // branch below (which covers a resolver whose own slug differs, e.g.
+        // dev-bypass). Every other resolver error (missing / malformed / expired
+        // / bad-signature token) is an AUTHENTICATION failure → 401.
+        const status = resolved.code === 'project_mismatch' ? 403 : 401
+        return jsonError(status, resolved.code, resolved.message)
       }
       if (ownerSlugMismatch(resolved.project_slug, project_slug)) {
         return jsonError(

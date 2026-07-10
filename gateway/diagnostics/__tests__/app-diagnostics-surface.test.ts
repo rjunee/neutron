@@ -9,7 +9,9 @@
  */
 
 import { describe, expect, it } from 'bun:test'
+import { SignJWT } from 'jose'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { createAppDiagnosticsSurface } from '../../http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '../diagnostics-report.ts'
 
@@ -100,6 +102,43 @@ describe('app-diagnostics-surface', () => {
     expect(await s.handler(new Request('http://x/healthz'))).toBeNull()
     expect(await s.handler(new Request('http://x/api/app/admin/memory'))).toBeNull()
     expect(await s.handler(new Request('http://x/api/app/chat/send'))).toBeNull()
+  })
+
+  it('403s a wrong-project token via the REAL HS256 resolver (project_mismatch → 403, not 401)', async () => {
+    // Production path: the HS256 resolver cross-checks the token's project_slug
+    // claim against the gateway slug INTERNALLY and returns a `project_mismatch`
+    // AUTH ERROR (never a resolved identity). The surface must map that to 403.
+    const secret = 'test-secret-key'
+    const realAuth = createAppWsAuthResolver({ project_slug: GATEWAY_SLUG, bypass: false, hs256_secret: secret })
+    const token = await new SignJWT({ sub: 'owner', project_slug: 'not-demo' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + 60)
+      .sign(new TextEncoder().encode(secret))
+
+    const s = createAppDiagnosticsSurface({
+      auth: realAuth,
+      project_slug: GATEWAY_SLUG,
+      diagnostics: () => composeDiagnostics({ project_slug: GATEWAY_SLUG }),
+    })
+    const res = await s.handler(req({ authorization: `Bearer ${token}` }))
+    expect(res!.status).toBe(403)
+    const body = (await res!.json()) as { code: string }
+    expect(body.code).toBe('project_mismatch')
+  })
+
+  it('401s a bad-signature token via the REAL HS256 resolver (authentication failure)', async () => {
+    const realAuth = createAppWsAuthResolver({ project_slug: GATEWAY_SLUG, bypass: false, hs256_secret: 'right-secret' })
+    const token = await new SignJWT({ sub: 'owner', project_slug: GATEWAY_SLUG })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime(Math.floor(Date.now() / 1000) + 60)
+      .sign(new TextEncoder().encode('wrong-secret'))
+    const s = createAppDiagnosticsSurface({
+      auth: realAuth,
+      project_slug: GATEWAY_SLUG,
+      diagnostics: () => composeDiagnostics({ project_slug: GATEWAY_SLUG }),
+    })
+    const res = await s.handler(req({ authorization: `Bearer ${token}` }))
+    expect(res!.status).toBe(401)
   })
 
   it('surfaces a composition throw as 500 without crashing', async () => {
