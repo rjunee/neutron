@@ -169,7 +169,12 @@ export async function spawnSubagent(
         )
       }
       // Coalesce: hand back the existing run so the caller awaits the one
-      // genuine process instead of starting a second.
+      // genuine process instead of starting a second. First share the winner's
+      // DURABLE-create outcome — if its persist is still in flight, await it so
+      // this caller sees the same success/failure and never returns a run the
+      // winner failed to durably create (a persist rejection rolls the reserved
+      // record back, and this await re-throws it here too).
+      await deps.registry.awaitCreate(inflight.run_id)
       return inflight
     }
   }

@@ -95,6 +95,14 @@ export interface SubagentPersistence {
  */
 export class SubagentRegistry {
   private readonly byId = new Map<string, SubagentRecord>()
+  /**
+   * In-flight `create` durable-write promises, keyed by run_id. A record is
+   * reserved in `byId` synchronously but its durable persist resolves later; a
+   * coalescing caller (the double-spawn guard) that hands back a still-reserved
+   * record must await THIS promise so it shares the create's durable outcome —
+   * never returning a run whose persist ultimately rejected (`awaitCreate`).
+   */
+  private readonly pendingCreate = new Map<string, Promise<void>>()
 
   constructor(private readonly persistence?: SubagentPersistence) {}
 
@@ -128,14 +136,36 @@ export class SubagentRegistry {
     // in-memory mutation — memory never diverges from the store on failure.
     this.byId.set(input.run_id, rec)
     if (this.persistence !== undefined) {
+      // Publish the durable-write promise so a coalescing caller shares this
+      // create's outcome (see `pendingCreate` / `awaitCreate`). Wrapped in an
+      // IIFE so both this method AND `awaitCreate` await the same settled result.
+      const durable = (async () => {
+        await this.persistence!.persist(rec)
+      })()
+      this.pendingCreate.set(input.run_id, durable)
       try {
-        await this.persistence.persist(rec)
+        await durable
       } catch (err) {
         this.byId.delete(input.run_id)
         throw err
+      } finally {
+        this.pendingCreate.delete(input.run_id)
       }
     }
     return rec
+  }
+
+  /**
+   * Await the in-flight durable `create` for `run_id`, if any. The double-spawn
+   * guard calls this before returning a coalesced record so the coalescing
+   * caller shares the winner's durable-create outcome: it resolves once the
+   * create's persist succeeded (the record is durable) and REJECTS if it failed
+   * (the record was rolled back) — so a coalesced caller never receives a run
+   * the winner failed to create. Resolves immediately when the create already
+   * settled or the registry has no persistence.
+   */
+  awaitCreate(run_id: string): Promise<void> {
+    return this.pendingCreate.get(run_id) ?? Promise.resolve()
   }
 
   /**
