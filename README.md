@@ -383,8 +383,10 @@ from your exported chat history, so the agent knows you from session one.
 
 A **Core** is Neutron's plugin unit — a package with a `"neutron"` manifest
 block declaring its id, capabilities, tools, secrets, and data namespace. The
-contract lives in `core-sdk/` (pure types + schema, published as
-[`@neutronai/core-sdk`](https://www.npmjs.com/package/@neutronai/core-sdk)).
+single manifest contract is the Zod schema in **`cores/sdk/`**
+(`@neutronai/cores-sdk`, workspace-internal — not published to npm). The older
+`core-sdk/` package is a one-release path-shim that re-exports those types (its
+hand validator + JSON-schema mirror were dead code and were removed).
 `cores/runtime/` owns the install lifecycle (validate manifest → allocate a
 per-Core data namespace → walk OAuth secrets if needed → register → start) and
 enforces the **capability gate on every tool call**.

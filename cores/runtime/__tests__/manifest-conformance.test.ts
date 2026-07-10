@@ -28,6 +28,7 @@ import {
   NeutronManifestSchema,
   isKnownCapability,
   isValidSemverRange,
+  validateNeutronManifest,
 } from '@neutronai/cores-sdk'
 
 /** Minimal green manifest, one field overridden per negative test. */
@@ -207,6 +208,32 @@ describe('bundled Core manifest conformance (X3 — one schema)', () => {
     expect(isKnownCapability('connect:google-ads')).toBe(false) // open, not known
     expect(isKnownCapability('not a capability')).toBe(false) // malformed
     expect(isKnownCapability('read:gmail_extra')).toBe(false) // near-miss, not a member
+  })
+
+  describe('validateNeutronManifest — generated adapter over the single schema', () => {
+    test('valid manifest → { valid: true, no errors }', () => {
+      const r = validateNeutronManifest(baseManifest())
+      expect(r.valid).toBe(true)
+      expect(r.errors).toEqual([])
+    })
+
+    test('all 9 bundled Cores pass the adapter', () => {
+      for (const slug of slugs) {
+        expect(validateNeutronManifest(readNeutronBlock(slug)).valid).toBe(true)
+      }
+    })
+
+    test('invalid manifest → { valid: false } with JSON-pointer error paths', () => {
+      const r = validateNeutronManifest({ ...baseManifest(), compat: { coreApi: 'nope' } })
+      expect(r.valid).toBe(false)
+      expect(r.errors.length).toBeGreaterThan(0)
+      expect(r.errors.some((e) => e.path.includes('compat/coreApi'))).toBe(true)
+    })
+
+    test('non-object input → invalid (does not throw)', () => {
+      expect(validateNeutronManifest(null).valid).toBe(false)
+      expect(validateNeutronManifest('nope').valid).toBe(false)
+    })
   })
 
   test('every bundled-declared capability is either platform-known or a well-formed open cap — never rejected', () => {

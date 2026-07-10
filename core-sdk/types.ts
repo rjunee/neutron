@@ -42,4 +42,7 @@ export type {
   ToolDef,
   UiComponentDef,
   UiComponentSurface,
+  ValidationError,
+  ValidationResult,
+  ValidationWarning,
 } from '@neutronai/cores-sdk/manifest'

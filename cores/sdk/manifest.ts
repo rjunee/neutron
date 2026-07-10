@@ -125,10 +125,12 @@ const KNOWN_CAPABILITY_SET: ReadonlySet<string> = new Set(KNOWN_CAPABILITIES)
 
 /**
  * Is `cap` a platform-known capability (one the platform can enforce with a
- * built-in gate)? Consumed by X1's install-time capability gate. A `false`
- * result does NOT mean the capability is invalid — a well-formed capability
- * outside this set is a legitimate third-party/sidecar declaration that
- * still validates + installs; it simply has no native platform gate.
+ * built-in gate)? This is the ENABLER X1 will consult from its install-time
+ * capability gate (X3 ships the set; X1 wires the gate — there is no
+ * production caller yet, only the conformance test). A `false` result does
+ * NOT mean the capability is invalid — a well-formed capability outside this
+ * set is a legitimate third-party/sidecar declaration that still validates +
+ * installs; it simply has no native platform gate.
  */
 export function isKnownCapability(cap: string): cap is KnownCapability {
   return KNOWN_CAPABILITY_SET.has(cap)
@@ -473,4 +475,54 @@ export function safeParseManifest(
   | { success: true; data: NeutronManifest }
   | { success: false; error: z.ZodError } {
   return NeutronManifestSchema.safeParse(input)
+}
+
+/**
+ * Structured validation result — the legacy `ValidationResult` shape from the
+ * deleted `core-sdk/validator.ts`, retained for the one-release
+ * `@neutronai/core-sdk` barrel. `valid` is `true` iff `errors` is empty;
+ * warnings never flip the verdict.
+ */
+export interface ValidationError {
+  code: string
+  /** JSON-Pointer-ish path into the manifest, e.g. `/capabilities/2`. */
+  path: string
+  message: string
+}
+export interface ValidationWarning {
+  code: string
+  path: string
+  message: string
+}
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationError[]
+  warnings: ValidationWarning[]
+}
+
+export const ERROR_CODES = {
+  /** Generic schema-validation failure (Zod-sourced; see `.message`). */
+  VALIDATION_FAILED: 'E_VALIDATION_FAILED',
+} as const
+export const WARNING_CODES = {} as const
+
+/**
+ * Structural manifest validator — GENERATED from the single Zod schema (X3).
+ * The 650-line hand validator was deleted; this thin adapter delegates to
+ * `safeParseManifest`, so there is exactly ONE validation implementation. It
+ * returns the legacy discriminated `ValidationResult` (rather than throwing)
+ * for the one-release `@neutronai/core-sdk` barrel. New code SHOULD use
+ * `safeParseManifest` / `NeutronManifestSchema` and read Zod issues directly.
+ */
+export function validateNeutronManifest(input: unknown): ValidationResult {
+  const result = safeParseManifest(input)
+  if (result.success) {
+    return { valid: true, errors: [], warnings: [] }
+  }
+  const errors: ValidationError[] = result.error.issues.map((issue) => ({
+    code: ERROR_CODES.VALIDATION_FAILED,
+    path: `/${issue.path.join('/')}`,
+    message: issue.message,
+  }))
+  return { valid: false, errors, warnings: [] }
 }
