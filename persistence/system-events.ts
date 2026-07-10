@@ -303,7 +303,7 @@ export function emitSystemEventSafe(
 // design) route per-boot, because degrade sites carry no boot handle. Two
 // CONCURRENTLY-LIVE boots in one process is a TEST-ONLY configuration; while
 // both are live, emits route to the newest (top-of-stack) boot. This is not a
-// production multi-tenant path.
+// production configuration — the single-owner install runs one boot per process.
 //
 // The stack — rather than a single slot — exists to make TEARDOWN order-
 // independent. Each boot pushes its sink via `pushSystemEventSink` and calls the
