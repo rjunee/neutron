@@ -38,6 +38,7 @@ import {
   type GBrainStdioMcpClientOptions,
   GBrainMemoryStore,
   GBrainSyncHook,
+  type GbrainSyncStateSink,
   type MemoryStore,
   type EmbedderConfig,
   resolveEmbedderConfig,
@@ -185,6 +186,15 @@ export function buildGBrainMemory(input: {
    * `openaiApiKey`.
    */
   resolveOpenAiKey?: () => Promise<string | undefined>
+  /**
+   * P9 — OPTIONAL sync-health observability sink. When present, the
+   * `GBrainSyncHook` publishes a `gbrain_sync_state` snapshot at each latch /
+   * success / defer point (built from `db` by the live wiring). Absent (the
+   * default, and every test/legacy caller) → byte-for-byte today's behavior:
+   * the hook simply skips the publish. Fail-soft is unaffected either way — the
+   * publish is a wrapped, swallow-all side-observation.
+   */
+  syncStateSink?: GbrainSyncStateSink
 }): GBrainMemoryWiring {
   const env = input.env ?? process.env
 
@@ -273,7 +283,11 @@ export function buildGBrainMemory(input: {
 
   const client = new GBrainStdioMcpClient(opts)
   const memoryStore = new GBrainMemoryStore(client)
-  const syncHook = new GBrainSyncHook({ memoryStore, gbrainMcp: client })
+  const syncHook = new GBrainSyncHook({
+    memoryStore,
+    gbrainMcp: client,
+    ...(input.syncStateSink !== undefined ? { syncStateSink: input.syncStateSink } : {}),
+  })
 
   return {
     client,

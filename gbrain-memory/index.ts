@@ -6,6 +6,8 @@ export {
   GBrainSyncHook,
   type GBrainSyncHookOptions,
   type SyncHookFailureEvent,
+  type GbrainSyncStateSnapshot,
+  type GbrainSyncStateSink,
 } from './GBrainSyncHook.ts'
 export { GBrainMemoryStore } from './gbrain-memory-store.ts'
 export {

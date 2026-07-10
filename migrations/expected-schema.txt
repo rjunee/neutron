@@ -648,6 +648,18 @@ CREATE TABLE gateway_events (
     duration_ms INTEGER                                   -- optional span close
 , attempt_id TEXT NOT NULL DEFAULT 'legacy-pre-S30') STRICT
 
+[table] gbrain_sync_state (tbl=gbrain_sync_state)
+CREATE TABLE gbrain_sync_state (
+    scope           TEXT PRIMARY KEY NOT NULL,      -- GBrain scope key (project slug / source); one brain per instance today
+    status          TEXT NOT NULL DEFAULT 'ok'
+                        CHECK (status IN ('ok', 'unavailable')),
+    latch_reason    TEXT,                           -- error message captured when status latched to 'unavailable'; NULL while 'ok'
+    latched_at      TEXT,                           -- ISO-8601 UTC when the unavailable latch tripped; NULL while 'ok'
+    last_success_at TEXT,                           -- ISO-8601 UTC of the last successful GBrain page persist; NULL until first success
+    deferred_count  INTEGER NOT NULL DEFAULT 0,     -- current depth of the RAM deferred-edge retry queue
+    updated_at      TEXT NOT NULL                   -- ISO-8601 UTC of the last observability write
+) STRICT
+
 [table] import_jobs (tbl=import_jobs)
 CREATE TABLE import_jobs (
     job_id TEXT PRIMARY KEY NOT NULL,
