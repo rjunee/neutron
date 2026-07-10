@@ -45,10 +45,22 @@ export async function cancelRun(
     } catch {
       // Cancellers are best-effort. If they throw, we still mark cancelled.
     }
+    // Re-read after the await: a real completion (or a watchdog crash) may have
+    // driven the run terminal while the canceller ran. Don't clobber it with
+    // `cancelled`. `updateTerminal` also refuses to clobber a terminal record
+    // (the atomic backstop), but short-circuiting here mirrors `failRun` and
+    // avoids a redundant no-op transition.
+    const after = state.registry.byRunId(run_id)
+    if (
+      after === undefined ||
+      after.status === 'finished' ||
+      after.status === 'cancelled' ||
+      after.status === 'crashed'
+    ) {
+      state.cancellers.delete(run_id)
+      return
+    }
   }
-  // The durable persist is best-effort observability (since P7 `update` awaits a
-  // store write that can reject). A persist failure must NOT reject the cancel
-  // nor leak the canceller — swallow it and still remove the canceller below.
   // Drive terminal with a CONVERGING durable write (never rejects; retries a
   // transient store failure so the durable row reaches `cancelled` and a restart's
   // boot sweep won't re-surface it as a crash). If it can't converge, the live

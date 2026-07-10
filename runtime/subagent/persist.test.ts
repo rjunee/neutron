@@ -468,6 +468,39 @@ describe('live-path persist failures are best-effort (never reject, canceller ne
     expect(reg.byRunId('r')?.status).toBe('cancelled')
     expect(reg.live().map((r) => r.run_id)).not.toContain('r')
   })
+
+  test('cancelRun does NOT clobber a completion that lands while the canceller is blocked', async () => {
+    // Codex race: cancelRun passes its liveness guard, then a real completion
+    // lands `finished` while the canceller is blocked. The atomic first-terminal-
+    // wins transition (+ the post-await re-check) must keep `finished`, NOT clobber
+    // it to `cancelled`.
+    const reg = new SubagentRegistry() // in-memory
+    const control = newControlState(reg)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    await reg.update('r', { status: 'running' })
+
+    let releaseCancel!: () => void
+    const cancelGate = new Promise<void>((res) => {
+      releaseCancel = res
+    })
+    registerCanceller(control, 'r', async () => {
+      await cancelGate
+    })
+
+    // cancelRun passes its liveness guard (running), then parks on the canceller.
+    const cancelling = cancelRun(control, 'r')
+    await Promise.resolve()
+
+    // A completion lands `finished` while the canceller is blocked.
+    await reg.updateTerminal('r', { status: 'finished', ended_at: 1 })
+    expect(reg.byRunId('r')?.status).toBe('finished')
+
+    // Release the canceller → cancelRun's terminal transition runs; it must NOT
+    // overwrite the completion.
+    releaseCancel()
+    await cancelling
+    expect(reg.byRunId('r')?.status).toBe('finished') // completion wins, not `cancelled`
+  })
 })
 
 describe('terminal-write convergence: a restart never re-reports an already-terminal run', () => {

@@ -353,24 +353,53 @@ export class SubagentRegistry {
     patch: Partial<Omit<SubagentRecord, 'run_id'>>,
     attempts = 4,
   ): Promise<{ record: SubagentRecord | undefined; durable: boolean }> {
+    // Step 1 — the ATOMIC "first terminal wins" point, in ONE serialized step: if
+    // the record is ALREADY terminal, that outcome WINS (a cancellation must never
+    // overwrite a concurrent completion, nor vice-versa — the watchdog/cancel and
+    // the real completion race here). Otherwise publish the terminal patch to
+    // memory synchronously. This does NOT go through `update` because a terminal
+    // live record must stay terminal even if the durable write later fails (round
+    // 14) — so there is no rollback here.
+    const published = await this.runSerial(run_id, async () => {
+      const cur = this.byId.get(run_id)
+      if (cur === undefined) return { rec: undefined as SubagentRecord | undefined, mine: false }
+      if (cur.status === 'finished' || cur.status === 'crashed' || cur.status === 'cancelled') {
+        return { rec: cur, mine: false } // already terminal — NO clobber
+      }
+      const last_event_at = patch.last_event_at ?? Date.now()
+      const next: SubagentRecord = { ...cur, ...patch, last_event_at }
+      this.byId.set(run_id, next)
+      return { rec: next, mine: true }
+    })
+    if (published.rec === undefined) return { record: undefined, durable: false }
+    // A concurrent terminal transition already won — do not clobber, do not
+    // re-persist (its owner converges its own durability).
+    if (!published.mine) return { record: published.rec, durable: true }
+
+    // Step 2 — CONVERGE the durable write for OUR terminal record. Retry a
+    // TRANSIENT store failure (a brief I/O blip / a lock the async busy-retry
+    // didn't outlast) so memory + store agree and a restart's boot sweep skips the
+    // now-terminal row. NEVER roll memory back (it is terminal + authoritative);
+    // if every retry fails return `durable:false` (store stale, degraded process).
+    const rec = published.rec
+    if (this.persistence === undefined) {
+      this.lastPersisted.set(run_id, rec)
+      return { record: rec, durable: true }
+    }
     for (let i = 0; i < attempts; i++) {
       try {
         // eslint-disable-next-line no-await-in-loop
-        const record = await this.update(run_id, patch)
-        return { record, durable: true }
+        await this.persistence.persist(rec)
+        this.lastPersisted.set(run_id, rec)
+        return { record: rec, durable: true }
       } catch {
-        // `update` rolled memory back to the last durable snapshot; retry the
-        // durable write after a short backoff in case the failure was transient.
         if (i < attempts - 1) {
           // eslint-disable-next-line no-await-in-loop
           await new Promise((r) => setTimeout(r, 5 * (i + 1)))
         }
       }
     }
-    // Every durable attempt failed — force the live record terminal so the
-    // operational state is correct even though the durable row is stale.
-    const record = await this.reconcileInMemory(run_id, patch)
-    return { record, durable: false }
+    return { record: rec, durable: false }
   }
 
   byRunId(run_id: string): SubagentRecord | undefined {
