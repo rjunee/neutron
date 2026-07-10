@@ -285,7 +285,7 @@ export class CronScheduler {
    * old `void this.fireOnce(...)` would have leaked as an unhandledRejection.
    */
   private trackFire(name: string): void {
-    const p = guardedFire(name, this.fireOnce(name), (jobName, err) => {
+    const p = guardedFire(name, () => this.fireOnce(name), (jobName, err) => {
       console.error(`cron scheduler: fire '${jobName}' threw:`, err)
     }).then(() => undefined)
     this.inflightFires.add(p)

@@ -62,8 +62,10 @@ export interface WiredUploads {
   chunked_upload_handler: NonNullable<CompositionInput['chunked_upload_handler']>
   /** Import-resume route handler; undefined when the engine built no runner. */
   import_resume_handler: CompositionInput['import_resume_handler']
-  /** Teardown hooks (upload sweeper stop) in registration order. */
-  cleanups: Array<() => void>
+  /** Teardown hooks (upload sweeper stop) in registration order. The sweeper's
+   *  `stop()` is async (quiescing), so a hook may return a Promise the gateway
+   *  shutdown runner awaits before `db.close()` (§F1). */
+  cleanups: Array<() => void | Promise<void>>
 }
 
 /**
@@ -77,7 +79,7 @@ export async function wireUploads(
 ): Promise<WiredUploads> {
   const { db, owner_home, project_slug } = ctx
   const { landing, uploadUid, uploadGid, importWatchHolder } = deps
-  const cleanups: Array<() => void> = []
+  const cleanups: Array<() => void | Promise<void>> = []
 
   // Path 1 — the upload handler still drives the engine's import pipeline
   // (synthesis + cron write the project DOCUMENTS), but Path 1 has no accept
@@ -149,13 +151,12 @@ export async function wireUploads(
     project_slug,
   })
   uploadSweeper.start()
-  cleanups.push(() => {
+  cleanups.push(async () => {
+    // §F1 — quiescing stop: the gateway shutdown runner awaits this before
+    // `db.close()`, so an in-flight sweep fully drains first. `stop()` never
+    // rejects, but keep the guard defensive.
     try {
-      // §F1 — `stop()` now returns a quiescing Promise, but `realmode_cleanups`
-      // is a synchronous `() => void` runner: the timer is cleared synchronously
-      // (no further ticks) and the in-flight-sweep drain settles best-effort.
-      // The sweep body already swallows its own errors, so a torn-down db is safe.
-      void uploadSweeper.stop()
+      await uploadSweeper.stop()
     } catch {
       // best-effort shutdown cleanup
     }

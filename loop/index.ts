@@ -105,9 +105,10 @@ export interface SupervisedLoopOptions {
 
 /**
  * Run a single piece of async work behind a catch-all so a rejection can never
- * escape as an unhandledRejection. Resolves to `true` when `work` settled
+ * escape as an unhandledRejection. Resolves to `true` when `work()` settled
  * cleanly, `false` when it threw (the error is routed to `onError` first).
- * Never rejects.
+ * NEVER rejects — even a SYNCHRONOUS throw from `work()` (it is a thunk invoked
+ * inside the try) or a throwing `onError` sink is contained.
  *
  * This is the shared "fire path" discipline: {@link SupervisedLoop} runs its
  * tick behind it, and cron — which keeps its own per-job calendar timers +
@@ -117,15 +118,25 @@ export interface SupervisedLoopOptions {
  */
 export async function guardedFire(
   name: string,
-  work: Promise<unknown>,
+  work: () => Promise<unknown>,
   onError?: (name: string, error: unknown) => void,
 ): Promise<boolean> {
   try {
-    await work
+    await work()
     return true
   } catch (err) {
-    if (onError !== undefined) onError(name, err)
-    else console.error(`[supervised-loop] tick '${name}' threw:`, err)
+    if (onError !== undefined) {
+      // The error sink must never re-throw out of the catch-all — that would
+      // break the "never rejects" contract and could become an unhandled
+      // rejection on a fire-and-forget timer path.
+      try {
+        onError(name, err)
+      } catch (sinkErr) {
+        console.error(`[supervised-loop] onError sink for '${name}' threw:`, sinkErr)
+      }
+    } else {
+      console.error(`[supervised-loop] tick '${name}' threw:`, err)
+    }
     return false
   }
 }
@@ -192,9 +203,11 @@ export class SupervisedLoop {
     }
     this.running = true
     // Route the tick through the shared catch-all AND record the in-flight
-    // promise so a concurrent `stop()` can await it (quiesce). `guardedFire`
-    // never rejects, so `inflight` never carries a rejection.
-    const p = guardedFire(this.name, this.tickBody(), (name, err) => {
+    // promise so a concurrent `stop()` can await it (quiesce). `tickBody` is
+    // passed as a THUNK so a synchronous throw is caught too (otherwise it would
+    // escape here and leave `running` stuck true). `guardedFire` never rejects,
+    // so `inflight` never carries a rejection.
+    const p = guardedFire(this.name, () => this.tickBody(), (name, err) => {
       this.lastError = err
       this.onErrorFn(name, err)
     })

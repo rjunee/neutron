@@ -47,6 +47,42 @@ describe('SupervisedLoop', () => {
     expect(loop.stats().ticks).toBe(1)
   })
 
+  test('catch-all: a SYNCHRONOUS tick-body throw is caught, counted, and does not wedge running', async () => {
+    let calls = 0
+    const loop = manualLoop({
+      onError: () => {},
+      // Non-async body that throws synchronously — must not escape runOnce nor
+      // leave `running` stuck true.
+      tick: (() => {
+        calls++
+        throw new Error('sync boom')
+      }) as unknown as () => Promise<void>,
+    })
+    const r = await loop.runOnce()
+    expect(r).toEqual({ ran: false, skipped: false })
+    expect(loop.stats().failures).toBe(1)
+    expect(loop.stats().running).toBe(false)
+    // The loop is not wedged — a subsequent tick still runs (not skipped).
+    const r2 = await loop.runOnce()
+    expect(r2.skipped).toBe(false)
+    expect(calls).toBe(2)
+  })
+
+  test('a throwing onError sink never breaks runOnce (still counts the failure)', async () => {
+    const loop = manualLoop({
+      onError: () => {
+        throw new Error('sink blew up')
+      },
+      tick: async () => {
+        throw new Error('work')
+      },
+    })
+    const r = await loop.runOnce()
+    expect(r).toEqual({ ran: false, skipped: false })
+    expect(loop.stats().failures).toBe(1)
+    expect(loop.stats().running).toBe(false)
+  })
+
   test('catch-all: a throwing tick is caught, counted, and the loop keeps going', async () => {
     let calls = 0
     const errors: unknown[] = []
@@ -163,13 +199,37 @@ describe('SupervisedLoop', () => {
 
 describe('guardedFire', () => {
   test('resolves true on success', async () => {
-    expect(await guardedFire('x', Promise.resolve(1))).toBe(true)
+    expect(await guardedFire('x', () => Promise.resolve(1))).toBe(true)
   })
 
   test('resolves false and routes the error on rejection — never rejects', async () => {
     const errs: unknown[] = []
-    const ok = await guardedFire('x', Promise.reject(new Error('nope')), (_n, e) => errs.push(e))
+    const ok = await guardedFire('x', () => Promise.reject(new Error('nope')), (_n, e) => errs.push(e))
     expect(ok).toBe(false)
     expect(errs).toHaveLength(1)
+  })
+
+  test('contains a SYNCHRONOUS throw from the work thunk — never rejects', async () => {
+    const errs: unknown[] = []
+    const ok = await guardedFire(
+      'x',
+      () => {
+        throw new Error('sync')
+      },
+      (_n, e) => errs.push(e),
+    )
+    expect(ok).toBe(false)
+    expect(errs).toHaveLength(1)
+  })
+
+  test('contains a throwing onError sink — never rejects', async () => {
+    const ok = await guardedFire(
+      'x',
+      () => Promise.reject(new Error('work')),
+      () => {
+        throw new Error('sink')
+      },
+    )
+    expect(ok).toBe(false)
   })
 })

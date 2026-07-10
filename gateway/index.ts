@@ -476,7 +476,9 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // in-flight queries on the auxiliary connections finish cleanly.
     for (const cleanup of realmode_cleanups) {
       try {
-        cleanup()
+        // §F1 — await so an async cleanup (e.g. the upload sweeper's quiescing
+        // `stop()`) fully drains its in-flight work BEFORE `db.close()`.
+        await cleanup()
       } catch (err) {
         console.error('realmode cleanup threw during shutdown:', err)
       }
