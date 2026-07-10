@@ -268,6 +268,40 @@ describe('bundled Core manifest conformance (X3 — one schema)', () => {
       ).toBe(ERROR_CODES.INVALID_LINKED_SOURCE)
     })
 
+    test('linked-source field taxonomy matches the deleted hand validator', () => {
+      const errFor = (ls: unknown, pathSubstr: string) => {
+        const r = validateNeutronManifest({ ...baseManifest(), linked_sources: [ls] })
+        return r.errors.find((e) => e.path.includes(pathSubstr))
+      }
+      // EMPTY kind (too_small) → INVALID_LINKED_SOURCE (was falling through to TYPE_MISMATCH).
+      expect(errFor({ kind: '', scope: 'read', target_kinds: ['user'] }, 'kind')?.code).toBe(
+        ERROR_CODES.INVALID_LINKED_SOURCE,
+      )
+      // MISSING kind (invalid_type/undefined) → INVALID_LINKED_SOURCE (was REQUIRED_MISSING).
+      expect(errFor({ scope: 'read', target_kinds: ['user'] }, 'kind')?.code).toBe(
+        ERROR_CODES.INVALID_LINKED_SOURCE,
+      )
+      // MISSING scope → INVALID_LINKED_SOURCE.
+      expect(errFor({ kind: 'gmail', target_kinds: ['user'] }, 'scope')?.code).toBe(
+        ERROR_CODES.INVALID_LINKED_SOURCE,
+      )
+      // Invalid target_kinds MEMBER → INVALID_LINKED_SOURCE.
+      expect(errFor({ kind: 'gmail', scope: 'read', target_kinds: ['bogus'] }, 'target_kinds/0')?.code).toBe(
+        ERROR_CODES.INVALID_LINKED_SOURCE,
+      )
+      // target_kinds ARRAY wrong type (not an array) → TYPE_MISMATCH (as the old validator).
+      expect(errFor({ kind: 'gmail', scope: 'read', target_kinds: 'nope' }, 'target_kinds')?.code).toBe(
+        ERROR_CODES.TYPE_MISMATCH,
+      )
+      // EMPTY target_kinds is VALID (warning-only), so no error is emitted.
+      const emptyTargets = validateNeutronManifest({
+        ...baseManifest(),
+        linked_sources: [{ kind: 'gmail', scope: 'read', target_kinds: [] }],
+      })
+      expect(emptyTargets.valid).toBe(true)
+      expect(emptyTargets.errors).toEqual([])
+    })
+
     test('advisory warnings are preserved (valid manifest, warnings never flip validity)', () => {
       const m = {
         ...baseManifest(),

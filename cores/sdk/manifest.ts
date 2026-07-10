@@ -552,8 +552,29 @@ function legacyErrorCode(issue: z.ZodIssue): string {
   const inCapability =
     path.includes('capabilities') || path.includes('capability_required')
   const inTier = path.includes('tier_support')
-  const inLinked = path.includes('linked_sources')
   const inCoreApi = path.includes('coreApi')
+
+  // Linked-source FIELD issues map to E_INVALID_LINKED_SOURCE regardless of
+  // the Zod issue code — matching the deleted hand validator, whose
+  // `validateLinkedSources` returned that code for a missing/empty/non-string
+  // `kind`, a missing/invalid `scope`, and any invalid `target_kinds[]`
+  // MEMBER. The `target_kinds` array ITSELF being absent or the wrong type,
+  // an item that isn't an object, and `/linked_sources` itself being
+  // missing/non-array all stayed TYPE_MISMATCH / REQUIRED_MISSING there, so
+  // those fall through to the generic mapping below.
+  const lsIdx = path.indexOf('linked_sources')
+  if (lsIdx !== -1) {
+    const field = path[lsIdx + 2] // linked_sources, <i>, <field>, [<memberIdx>]
+    if (field === 'kind' || field === 'scope') {
+      return ERROR_CODES.INVALID_LINKED_SOURCE
+    }
+    if (field === 'target_kinds' && path.length > lsIdx + 3) {
+      // A member index follows `target_kinds` → an invalid array MEMBER.
+      return ERROR_CODES.INVALID_LINKED_SOURCE
+    }
+    // else: the target_kinds array itself, an item-level object issue, or the
+    // linked_sources array itself — fall through to generic type/required.
+  }
 
   switch (issue.code) {
     case 'invalid_type':
@@ -563,7 +584,6 @@ function legacyErrorCode(issue: z.ZodIssue): string {
         : ERROR_CODES.TYPE_MISMATCH
     case 'invalid_enum_value':
       if (inTier) return ERROR_CODES.INVALID_TIER_SUPPORT
-      if (inLinked) return ERROR_CODES.INVALID_LINKED_SOURCE
       return ERROR_CODES.TYPE_MISMATCH
     case 'invalid_string':
       return inCapability ? ERROR_CODES.UNKNOWN_CAPABILITY : ERROR_CODES.TYPE_MISMATCH
