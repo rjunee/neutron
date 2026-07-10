@@ -133,6 +133,9 @@
     },
     "core-sdk": {
       "name": "@neutronai/core-sdk",
+      "dependencies": {
+        "@neutronai/cores-sdk": "workspace:*",
+      },
     },
     "cores": {
       "name": "@neutronai/cores",

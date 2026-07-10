@@ -68,6 +68,80 @@ export const CapabilitySchema = z
 export type Capability = z.infer<typeof CapabilitySchema>
 
 /**
+ * Known-platform capability set — the closed list of capabilities the
+ * PLATFORM itself implements and can gate natively. Folded in from the
+ * former `core-sdk/types.ts:NeutronCapability` union +
+ * `core-sdk/validator.ts:KNOWN_CAPABILITIES` (X3 — one manifest contract).
+ *
+ * CRITICAL — this set does NOT restrict what a Core may DECLARE. The
+ * manifest `CapabilitySchema` above stays deliberately OPEN: any well-formed
+ * `<verb>:<resource>` string validates, so third-party (and first-party
+ * sidecar) Cores can declare capabilities the platform doesn't enumerate
+ * (`connect:google-ads`, `read:notes.db`, `read:calendar_core.events`, …).
+ * Membership here only answers "is this a capability the platform knows how
+ * to enforce with a built-in gate?" — the enabler for X1's install-time
+ * capability gate. An unknown-but-well-formed capability is STILL a valid
+ * declaration and STILL installs; X1's gate treats platform-known vs
+ * platform-unknown differently, it does not reject the unknown.
+ *
+ * Adding a platform capability is a single edit here (the closed enum, the
+ * hand validator, and the JSON-schema mirror that used to need parallel
+ * edits are all gone — this is the one source).
+ */
+export const KNOWN_CAPABILITIES = [
+  'read:gmail',
+  'write:gmail',
+  'read:calendar',
+  'write:calendar',
+  'read:tasks',
+  'write:tasks',
+  'read:docs',
+  'write:docs',
+  'read:project_data',
+  'write:project_data',
+  'read:memory',
+  'write:memory',
+  'read:project.db',
+  'write:project.db',
+  'network:external',
+  'network:github',
+  'network:browse',
+  'fs:project_data',
+  'fs:cache',
+  'host:gh',
+  'agent:dispatch_subagent',
+  'mcp:tool_register',
+] as const
+
+/**
+ * A capability the platform implements + gates natively. Every member also
+ * satisfies `CapabilitySchema` (the open shape); this is the narrower,
+ * platform-known subset X1's gate consults. Formerly
+ * `core-sdk/types.ts:NeutronCapability`.
+ */
+export type KnownCapability = (typeof KNOWN_CAPABILITIES)[number]
+
+/**
+ * Back-compat alias for the one-release `@neutronai/core-sdk` path-shim.
+ * @deprecated import `KnownCapability` (or the open `Capability`) from
+ * `@neutronai/cores-sdk` instead.
+ */
+export type NeutronCapability = KnownCapability
+
+const KNOWN_CAPABILITY_SET: ReadonlySet<string> = new Set(KNOWN_CAPABILITIES)
+
+/**
+ * Is `cap` a platform-known capability (one the platform can enforce with a
+ * built-in gate)? Consumed by X1's install-time capability gate. A `false`
+ * result does NOT mean the capability is invalid — a well-formed capability
+ * outside this set is a legitimate third-party/sidecar declaration that
+ * still validates + installs; it simply has no native platform gate.
+ */
+export function isKnownCapability(cap: string): cap is KnownCapability {
+  return KNOWN_CAPABILITY_SET.has(cap)
+}
+
+/**
  * Substrate tier a Core declares it supports.
  * `regular` = managed substrate (Claude / GPT-5).
  * `private` = on-demand H100 confidential computing with open-weight model.
@@ -212,6 +286,15 @@ export type BillingMeter = BillingHookDef
  * kinds it links from. `target_kinds: []` is allowed (warning-only —
  * the Core opts out of cross-project linking at install time).
  */
+/**
+ * Cross-project linked-source kind. Open string (folded from
+ * `core-sdk/types.ts:LinkedSourceKind`) — a Core declares any provider it
+ * integrates with (`shopify`, `google-ads`, `meta-ads`, …); the schema
+ * accepts any non-empty string. `KNOWN_LINKED_SOURCE_KINDS` (marketplace
+ * display) is intentionally NOT enforced here.
+ */
+export type LinkedSourceKind = string
+
 export const LinkedSourceScopeSchema = z.enum(['read', 'read_write'])
 export type LinkedSourceScope = z.infer<typeof LinkedSourceScopeSchema>
 
