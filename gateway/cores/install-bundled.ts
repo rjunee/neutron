@@ -827,7 +827,43 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
       return
     }
     coreModule = mod.core
+    // Verify the barrel's DECLARED contract matches the package it's being
+    // installed as. install-bundled otherwise consumes only
+    // `coreModule.backendKey` + the factories, so a dynamically discovered
+    // Core (custom `rootDirs` / third-party) could declare a wrong slug or a
+    // tool-name surface that drifts from its manifest and still install. Hard-
+    // fail on drift so the typed contract stays authoritative (the conformance
+    // sweep only covers the 9 bundled dirs).
+    if (coreModule.slug !== core.slug) {
+      throw new CoreInstallError(
+        'core_contract_mismatch',
+        `Core defineCore() declares slug='${coreModule.slug}' but the package resolves to slug='${core.slug}'`,
+        { core_slug: core.slug, declared_slug: coreModule.slug },
+      )
+    }
+    const declaredTools = new Set(coreModule.toolNames)
+    const manifestToolNames = core.manifest.tools.map((t) => t.name)
+    const missingFromContract = manifestToolNames.filter((n) => !declaredTools.has(n))
+    const undeclaredInContract = [...declaredTools].filter(
+      (n) => !manifestToolNames.includes(n),
+    )
+    if (missingFromContract.length > 0 || undeclaredInContract.length > 0) {
+      throw new CoreInstallError(
+        'core_contract_mismatch',
+        `Core ${core.slug} defineCore().toolNames drifts from manifest.tools[] ` +
+          `(missing from contract: [${missingFromContract.join(', ')}], ` +
+          `undeclared in manifest: [${undeclaredInContract.join(', ')}])`,
+        {
+          core_slug: core.slug,
+          missing_from_contract: missingFromContract,
+          undeclared_in_contract: undeclaredInContract,
+        },
+      )
+    }
   } catch (err) {
+    if (err instanceof CoreInstallError && err.code === 'core_contract_mismatch') {
+      throw err
+    }
     // Barrel failed to import — an environmental fault (broken workspace
     // resolution, syntax error). PRESERVED soft path: stub + keep installed.
     input.log({
@@ -936,12 +972,12 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
   // CANNOT install silently-broken.
   const missingTools = core.manifest.tools
     .map((d) => d.name)
-    .filter((name) => !Object.prototype.hasOwnProperty.call(built, name))
+    .filter((name) => typeof built[name] !== 'function')
   if (missingTools.length > 0) {
     throw new CoreInstallError(
       'manifest_incomplete',
       `Core ${core.slug} manifest declares tool(s) [${missingTools.join(', ')}] ` +
-        `but neither buildTools nor buildExtraTools returned a handler for them`,
+        `but neither buildTools nor buildExtraTools returned a callable handler for them`,
       { core_slug: core.slug, missing_tools: missingTools },
     )
   }

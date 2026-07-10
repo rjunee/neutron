@@ -52,6 +52,9 @@ const NOOP_PROMPTER: SecretsPrompter = {
 // symlinks would be broken.
 const FIXTURE_ROOT = join(import.meta.dir, 'fixtures', 'underimpl-root')
 const UNDERIMPL_SLUG = 'underimpl_core'
+const NONFN_ROOT = join(import.meta.dir, 'fixtures', 'nonfn-root')
+const SLUG_MISMATCH_ROOT = join(import.meta.dir, 'fixtures', 'slug-mismatch-root')
+const TOOLNAMES_MISMATCH_ROOT = join(import.meta.dir, 'fixtures', 'toolnames-mismatch-root')
 
 interface Bench {
   ownerHome: string
@@ -144,6 +147,67 @@ describe('X2 — under-implementing Core cannot install silently-broken', () => 
     )
     expect(failEvent?.code).toBe('manifest_incomplete')
     expect(result.failures[0]?.code).toBe('manifest_incomplete')
+  })
+
+  test('a declared tool mapped to a NON-FUNCTION is under-implementation (not a valid handler)', async () => {
+    // `{ nonfn_bad: undefined }` has the property but it is not callable — it
+    // would crash at dispatch. The coverage check must reject it.
+    const result = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [NONFN_ROOT],
+      backends: { nonfn_core: () => ({ backend: {} }) },
+      hardFailFailureRatio: 1,
+    })
+    expect(result.installed.has('nonfn_core')).toBe(false)
+    const failure = result.failures.find((f) => f.core_slug === 'nonfn_core')
+    expect(failure?.code).toBe('manifest_incomplete')
+    expect(failure?.message).toContain('nonfn_bad')
+    expect(bench.tools.get('nonfn_bad')).toBeUndefined()
+    expect(bench.tools.get('nonfn_ok')).toBeUndefined()
+  })
+
+  test('a defineCore() contract that misdeclares its slug hard-fails (core_contract_mismatch)', async () => {
+    // package @neutronai/slugmatch-core → slug 'slugmatch_core', but the
+    // contract declares slug 'impostor_core'.
+    const result = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [SLUG_MISMATCH_ROOT],
+      backends: { slugmatch_core: () => ({ backend: {} }) },
+      hardFailFailureRatio: 1,
+    })
+    expect(result.installed.has('slugmatch_core')).toBe(false)
+    const failure = result.failures.find((f) => f.core_slug === 'slugmatch_core')
+    expect(failure?.code).toBe('core_contract_mismatch')
+    expect(failure?.message).toContain('impostor_core')
+    expect(bench.tools.get('sm_do')).toBeUndefined()
+  })
+
+  test('a defineCore() contract whose toolNames drift from the manifest hard-fails', async () => {
+    // manifest declares [tn_a, tn_b] (both implemented) but toolNames = [tn_a].
+    const result = await installBundledCores({
+      project_slug: 'test',
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [TOOLNAMES_MISMATCH_ROOT],
+      backends: { tnmatch_core: () => ({ backend: {} }) },
+      hardFailFailureRatio: 1,
+    })
+    expect(result.installed.has('tnmatch_core')).toBe(false)
+    const failure = result.failures.find((f) => f.core_slug === 'tnmatch_core')
+    expect(failure?.code).toBe('core_contract_mismatch')
+    expect(failure?.message).toContain('tn_b')
+    expect(bench.tools.get('tn_a')).toBeUndefined()
+    expect(bench.tools.get('tn_b')).toBeUndefined()
   })
 
   test('retry rehydrates the persisted row — no spurious duplicate_install masks the real failure', async () => {

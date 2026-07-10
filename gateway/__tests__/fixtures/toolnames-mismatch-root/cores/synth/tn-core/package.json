@@ -1,0 +1,32 @@
+{
+  "name": "@neutronai/tnmatch-core",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./index.ts",
+  "neutron": {
+    "capabilities": ["read:project_data"],
+    "tier_support": ["regular"],
+    "tools": [
+      {
+        "name": "tn_a",
+        "description": "Declared in the contract.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      },
+      {
+        "name": "tn_b",
+        "description": "A manifest tool the defineCore() contract forgot to declare in toolNames.",
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" },
+        "capability_required": "read:project_data"
+      }
+    ],
+    "ui_components": [],
+    "billing_hooks": [],
+    "linked_sources": [],
+    "secrets": [],
+    "compat": { "coreApi": "^1.0.0" },
+    "build": { "neutronVersion": "0.1.0" }
+  }
+}
