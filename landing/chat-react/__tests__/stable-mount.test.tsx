@@ -249,7 +249,7 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     }
   })
 
-  it('a project literally named `__general__` fetches ITS OWN board, not General (Codex P1 sentinel guard)', async () => {
+  it('General ↔ a project literally named `__general__` never share a surface, board, or transcript (Codex P1 collision guard)', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
     const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
@@ -259,18 +259,21 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     const { ChatApp } = await import('../ChatApp.tsx')
     const React = await import('react')
 
-    // `__general__` is the internal render-key sentinel for the General surface AND
-    // a validator-legal project id — deriving the pane's board scope from the
-    // sentinel string (`id === '__general__' ? '' : id`) would send this project's
-    // pane to General's `.../projects/general/work-board`. Deriving from the
-    // nullable `hostVm.projectId` keeps it on its OWN board.
-    const SENTINEL = '__general__'
+    // The dangerous boundary: `__general__` is a validator-legal project id, and the
+    // General surface's render/cache key used to BE `__general__` — so General (null)
+    // and a project named `__general__` shared one mount + frozen-vm cache slot.
+    // With a non-empty outgoing General transcript and an empty incoming project, the
+    // cached-General fallback would keep `hostVm.projectId` null → the project's pane
+    // fetched General's board (and the transcript could bleed) until hydration. The
+    // collision-proof `GENERAL_CONV_ID` ('#general', rejected by `sanitizeProjectId`)
+    // gives them SEPARATE surfaces; this drives the exact switch to prove it.
+    const NAMED = '__general__'
     const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
       if (url.includes('/work-board')) {
         boardUrls.push(url)
         return new Response(
-          JSON.stringify({ ok: true, items: [], project_id: SENTINEL }),
+          JSON.stringify({ ok: true, items: [], project_id: url.includes(NAMED) ? NAMED : 'general' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         )
       }
@@ -296,9 +299,9 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
       sockets.push(s)
       return s as never
     }
-    const projects = [{ id: SENTINEL, label: 'Sentinel', emoji: '🧨' }]
+    const projects = [{ id: NAMED, label: 'Sneaky', emoji: '🧨' }]
     const controller = new NeutronChatController({
-      projectId: SENTINEL,
+      projectId: null, // start on General
       projects,
       createSession: (sinks) =>
         new WebChatSession({
@@ -315,7 +318,7 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
       wsUrl: 'wss://t/ws/app/chat',
       topicId: TOPIC,
       userId: 'sam',
-      projectId: SENTINEL,
+      projectId: null,
       projects,
       origin: 'https://sam.neutron.test',
       deviceId: 'dev-test',
@@ -330,23 +333,57 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
+    const generalUrl = 'https://sam.neutron.test/api/app/projects/general/work-board'
+    const namedUrl = `https://sam.neutron.test/api/app/projects/${NAMED}/work-board`
     try {
       await act(async () => {
         root.render(<Harness />)
       })
+      // General gets a NON-EMPTY transcript (the outgoing-non-empty precondition).
       await act(async () => {
         sockets[0]!.open()
         sockets[0]!.deliver(ready())
+        sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'g1', seq: 1, body: 'GENERAL-ONLY transcript', ts: 1 })
         await tick()
         await tick()
       })
+      const convGeneral = activeConv(container)
+      expect(convGeneral.textContent ?? '').toContain('GENERAL-ONLY transcript')
+      // General's pane fetched the General board.
+      expect(boardUrls).toContain(generalUrl)
+      const beforeSwitch = boardUrls.length
 
-      expect(boardUrls.length).toBeGreaterThan(0)
-      expect(
-        boardUrls.every((u) => u === `https://sam.neutron.test/api/app/projects/${SENTINEL}/work-board`),
-      ).toBe(true)
-      // Must NOT have collapsed to the General board.
-      expect(boardUrls.some((u) => u.includes('/projects/general/work-board'))).toBe(false)
+      // Switch to the `__general__` PROJECT while General is non-empty and the new
+      // surface starts empty — the cached-General fallback scenario. Assert BEFORE
+      // hydration settles (immediately after the switch).
+      await act(async () => {
+        controller.setProject(NAMED)
+        await tick()
+      })
+      const convNamed = activeConv(container)
+      // Distinct surface — NOT General's node (proves no shared mount/cache slot).
+      expect(convNamed).not.toBe(convGeneral)
+      // The named project's transcript must NOT show General's messages.
+      expect(convNamed.textContent ?? '').not.toContain('GENERAL-ONLY transcript')
+      // Its pane fetched ITS OWN board — never General's — on the switch.
+      const newUrls = boardUrls.slice(beforeSwitch)
+      expect(newUrls).toContain(namedUrl)
+      expect(newUrls.some((u) => u === generalUrl)).toBe(false)
+
+      // Let hydration fully settle (past HYDRATION_GRACE_MS) and re-assert — no board
+      // ever collapses General↔named.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 700))
+      })
+      expect(boardUrls.filter((u) => u === namedUrl).length).toBeGreaterThan(0)
+      expect(activeConv(container).textContent ?? '').not.toContain('GENERAL-ONLY transcript')
+
+      // Switch back to General: its transcript + board are intact and isolated.
+      await act(async () => {
+        controller.setProject(null)
+        await tick()
+      })
+      expect(activeConv(container).textContent ?? '').toContain('GENERAL-ONLY transcript')
     } finally {
       await act(async () => {
         root.unmount()

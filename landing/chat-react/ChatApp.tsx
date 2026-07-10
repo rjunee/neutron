@@ -1621,12 +1621,26 @@ function ChatSurface({
 }
 
 /**
- * The stable per-conversation identity — the project id, or a sentinel for the
- * user-scoped General topic. Keying {@link ConversationRuntimeHost} on this
- * gives every conversation its OWN assistant-ui runtime.
+ * The General surface's per-conversation render/cache key. It MUST be a value no
+ * valid project id can ever equal, so the General surface can never collide with a
+ * named project's surface (share a mount + frozen-vm cache slot). The gateway's
+ * `sanitizeProjectId` accepts only `[A-Za-z0-9_.-]+`, so the leading `#` (rejected)
+ * makes this collision-proof — unlike the old `__general__`, which was itself a
+ * validator-legal project id and thus collided with a project literally named that
+ * (Codex P1: on a General↔`__general__` switch the shared cache slot leaked one
+ * scope's board/transcript into the other).
+ */
+export const GENERAL_CONV_ID = '#general'
+
+/**
+ * The stable per-conversation identity — the project id, or the collision-proof
+ * {@link GENERAL_CONV_ID} sentinel for the user-scoped General topic. Keying
+ * {@link ConversationRuntimeHost} on this gives every conversation its OWN
+ * assistant-ui runtime; keying the frozen-vm cache on it keeps each surface's
+ * snapshot isolated.
  */
 export function conversationIdOf(projectId: string | null): string {
-  return projectId !== null && projectId.length > 0 ? projectId : '__general__'
+  return projectId !== null && projectId.length > 0 ? projectId : GENERAL_CONV_ID
 }
 
 /**
@@ -1946,9 +1960,9 @@ export function ChatApp({
             // the globally-active one), so a kept-alive background surface never
             // renders a foreign project's board. Derive the board scope from the
             // authoritative NULLABLE `hostVm.projectId` (null General → '', the
-            // owner board), NOT from the `__general__` render-key sentinel: that
-            // sentinel is a validator-legal project id, so a project literally named
-            // `__general__` must fetch its OWN board, never General's (Codex P1).
+            // owner board), NOT from the render key `id` — the General key
+            // (`GENERAL_CONV_ID`) is now collision-proof, but `hostVm.projectId` is
+            // still the single source of truth for which board this surface owns.
             paneProjectId={hostVm.projectId ?? ''}
             {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           />
