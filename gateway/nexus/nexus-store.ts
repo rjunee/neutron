@@ -42,7 +42,12 @@ import { fileURLToPath } from 'node:url'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
-import { openSidecar, resolveNow } from '@neutronai/persistence/index.ts'
+import {
+  isBusyError,
+  openSidecar,
+  resolveNow,
+  withBusyRetry,
+} from '@neutronai/persistence/index.ts'
 import { defaultUlid } from '../comments/comment-store.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -273,7 +278,14 @@ export class NexusStore {
    *     never hand-build `refs_json`.
    *   - Body / refs_json size caps are enforced.
    *   - The INSERT runs inside `BEGIN IMMEDIATE` so concurrent appends
-   *     serialise cleanly.
+   *     serialise cleanly, and the whole transaction goes through the
+   *     sanctioned `withBusyRetry` ladder (persistence/retry.ts) — the
+   *     nexus writers are cross-PROCESS by design (forge/argus/
+   *     orchestrator emitters in RC2), so a competing connection can
+   *     hold the write lock past the 100 ms C-level busy_timeout; the
+   *     jittered async retries absorb that without pinning the event
+   *     loop. The callback is safe to re-run: a failed attempt rolls
+   *     back (or never acquired the lock), leaving no partial state.
    */
   async appendEvent(
     project_id: string,
@@ -303,31 +315,33 @@ export class NexusStore {
     }
 
     const db = handle.db
-    db.exec('BEGIN IMMEDIATE')
-    try {
-      db.run(
-        `INSERT INTO agent_nexus_events (
-           id, actor_kind, actor_id, kind, body, refs_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          row.id,
-          row.actor_kind,
-          row.actor_id,
-          row.kind,
-          row.body,
-          row.refs_json,
-          row.created_at,
-        ],
-      )
-      db.exec('COMMIT')
-    } catch (err) {
+    await withBusyRetry(() => {
+      db.exec('BEGIN IMMEDIATE')
       try {
-        db.exec('ROLLBACK')
-      } catch {
-        /* ignore */
+        db.run(
+          `INSERT INTO agent_nexus_events (
+             id, actor_kind, actor_id, kind, body, refs_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            row.id,
+            row.actor_kind,
+            row.actor_id,
+            row.kind,
+            row.body,
+            row.refs_json,
+            row.created_at,
+          ],
+        )
+        db.exec('COMMIT')
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          /* a failed BEGIN never opened a txn — nothing to roll back */
+        }
+        throw err
       }
-      throw err
-    }
+    })
     return row
   }
 
@@ -406,33 +420,69 @@ export class NexusStore {
     }
   }
 
+  /**
+   * Open + migrate the sidecar, retrying the failure modes a
+   * CONCURRENT FIRST-INIT produces. Nexus writers are cross-PROCESS by
+   * design (RC2's forge/argus/orchestrator emitters), so several
+   * connections can race a fresh `<project>/.nexus/` init:
+   *
+   *   1. `openSidecar` startup pragmas — `PRAGMA journal_mode = WAL`
+   *      needs an exclusive lock and runs BEFORE busy_timeout is set
+   *      on the new connection, so a sibling's in-flight open/write
+   *      makes it throw (PersistenceError with SQLITE_BUSY as cause).
+   *   2. SQLITE_BUSY out of the migration transaction itself.
+   *   3. `UNIQUE constraint failed: _migrations.version` — two
+   *      connections both read an empty `_migrations` snapshot, the
+   *      competitor commits first, and the loser's bookkeeping INSERT
+   *      collides (migrations/runner.ts records versions AFTER the
+   *      stale `seen` read).
+   *
+   * All three self-heal on re-run: the pragma set is idempotent, and
+   * the runner re-reads `_migrations` and skips the competitor's
+   * committed version (the 0001 body is additionally CREATE-IF-NOT-
+   * EXISTS idempotent). Any OTHER error — corrupt file, bad SQL —
+   * propagates immediately. Each attempt opens a FRESH connection
+   * (the failed one is closed), and the sleep is `await Bun.sleep`
+   * (never sleepSync) per the persistence/retry.ts convention so the
+   * gateway watchdog tick keeps firing.
+   */
   private async initHandle(project_id: string): Promise<ProjectHandle> {
     const dir = join(this.resolveProjectRoot(project_id), NEXUS_DIR)
     mkdirSync(dir, { recursive: true })
     const nexus_db_path = join(dir, NEXUS_DB)
-    let db: Database
-    try {
-      db = openSidecar(nexus_db_path)
-    } catch (err) {
-      throw new NexusStoreError(
-        'nexus_unavailable',
-        `failed to open ${nexus_db_path}: ${stringifyError(err)}`,
-      )
-    }
-    try {
-      applyProjectScopedMigrations(db, this.migrations_dir)
-    } catch (err) {
+    for (let attempt = 0; ; attempt++) {
+      let db: Database
       try {
-        db.close()
-      } catch {
-        /* ignore */
+        db = openSidecar(nexus_db_path)
+      } catch (err) {
+        if (isInitRaceError(err) && attempt < INIT_MAX_RETRIES) {
+          await Bun.sleep(initRaceJitterMs())
+          continue
+        }
+        throw new NexusStoreError(
+          'nexus_unavailable',
+          `failed to open ${nexus_db_path}: ${stringifyError(err)}`,
+        )
       }
-      throw new NexusStoreError(
-        'nexus_unavailable',
-        `failed to apply nexus migrations: ${stringifyError(err)}`,
-      )
+      try {
+        applyProjectScopedMigrations(db, this.migrations_dir)
+        return { db, nexus_db_path }
+      } catch (err) {
+        try {
+          db.close()
+        } catch {
+          /* ignore */
+        }
+        if (isInitRaceError(err) && attempt < INIT_MAX_RETRIES) {
+          await Bun.sleep(initRaceJitterMs())
+          continue
+        }
+        throw new NexusStoreError(
+          'nexus_unavailable',
+          `failed to apply nexus migrations: ${stringifyError(err)}`,
+        )
+      }
     }
-    return { db, nexus_db_path }
   }
 
   private assertInput(input: AppendNexusEventInput): void {
@@ -461,6 +511,37 @@ export class NexusStore {
       )
     }
   }
+}
+
+/** Attempts for the fresh-sidecar init race (see `initHandle`).
+ *  10 × ~20-60 ms of jitter comfortably outlasts a sibling process's
+ *  full open+migrate window while keeping a genuinely broken sidecar
+ *  failing fast (worst case well under a second). */
+const INIT_MAX_RETRIES = 10
+
+function initRaceJitterMs(): number {
+  return 20 + Math.random() * 40
+}
+
+/**
+ * Classify an init failure as the concurrent-first-init race (see
+ * `initHandle` for the three modes). Busy errors can hide one level
+ * down — `openSidecar` wraps the driver's SQLITE_BUSY in a
+ * `PersistenceError` whose `cause` carries the real error — so the
+ * check walks a short cause chain.
+ */
+function isInitRaceError(err: unknown): boolean {
+  for (let depth = 0; err !== null && err !== undefined && depth < 4; depth++) {
+    if (isBusyError(err)) return true
+    if (
+      err instanceof Error &&
+      /UNIQUE constraint failed: _migrations\.version/i.test(err.message)
+    ) {
+      return true
+    }
+    err = err instanceof Error ? err.cause : null
+  }
+  return false
 }
 
 /* ─── refs helpers ───────────────────────────────────────────────── */

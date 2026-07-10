@@ -20,9 +20,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   MAX_NEXUS_BODY_BYTES,
@@ -241,10 +242,12 @@ describe('NexusStore — concurrent append (RC1 accept criterion)', () => {
     expect(events.map((e) => e.id)).toEqual(sorted.map((e) => e.id))
   })
 
-  it('concurrent appends from TWO connections serialise (BEGIN IMMEDIATE)', async () => {
+  it('interleaved appends from TWO connections all land with distinct ids', async () => {
     // Second store instance = second SQLite connection on the same
-    // sidecar file — exercises real cross-connection write contention,
-    // not just same-connection interleaving.
+    // sidecar file. NOTE: bun:sqlite is synchronous on one JS thread,
+    // so these transactions do NOT overlap — this covers cross-
+    // connection correctness (ids, visibility), while the subprocess
+    // tests below cover genuinely overlapping write locks.
     const other = new NexusStore({ owner_home: h.owner_home })
     try {
       await h.store.ensureInit(PROJECT_ID)
@@ -262,6 +265,140 @@ describe('NexusStore — concurrent append (RC1 accept criterion)', () => {
       other.closeAll()
     }
   })
+})
+
+describe('NexusStore — REAL cross-process concurrency (subprocess)', () => {
+  const FIXTURES = join(
+    dirname(fileURLToPath(import.meta.url)),
+    'fixtures',
+  )
+  let h: Harness
+  beforeEach(() => {
+    h = startStore()
+  })
+  afterEach(() => {
+    h.cleanup()
+  })
+
+  /** Read a piped stream until `needle` shows up (or the stream ends /
+   *  `timeoutMs` elapses between chunks). */
+  async function waitForLine(
+    stream: ReadableStream<Uint8Array>,
+    needle: string,
+    timeoutMs: number,
+  ): Promise<string> {
+    const reader = stream.getReader()
+    const decoder = new TextDecoder()
+    const deadline = Date.now() + timeoutMs
+    let buf = ''
+    try {
+      while (Date.now() < deadline) {
+        const { value, done } = await reader.read()
+        if (value !== undefined) buf += decoder.decode(value, { stream: true })
+        if (buf.includes(needle)) return buf
+        if (done) break
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    throw new Error(`did not see ${JSON.stringify(needle)}; got: ${buf}`)
+  }
+
+  it(
+    'simultaneous first-writes from 3 PROCESSES to a fresh sidecar all land (init race)',
+    async () => {
+      const go_file = join(h.tmp, 'go')
+      const procs = Array.from({ length: 3 }, (_, i) =>
+        Bun.spawn({
+          cmd: [
+            process.execPath,
+            'run',
+            join(FIXTURES, 'append-first-write.ts'),
+            h.owner_home,
+            PROJECT_ID,
+            `proc-${i}`,
+            go_file,
+          ],
+          stdout: 'pipe',
+          stderr: 'pipe',
+        }),
+      )
+      try {
+        // Barrier: release the go file only once every process is
+        // booted + store-constructed, so all three hit the FRESH
+        // sidecar's migration path at (near) the same instant.
+        const readies = await Promise.all(
+          procs.map((p) => waitForLine(p.stdout, 'READY', 15_000)),
+        )
+        expect(readies.length).toBe(3)
+        writeFileSync(go_file, 'go')
+        const exits = await Promise.all(procs.map((p) => p.exited))
+        const errs = await Promise.all(
+          procs.map((p) => new Response(p.stderr).text()),
+        )
+        expect(exits.map((c, i) => `${i}:${c} ${errs[i]?.trim() ?? ''}`.trim())).toEqual([
+          '0:0',
+          '1:0',
+          '2:0',
+        ])
+      } finally {
+        for (const p of procs) p.kill()
+      }
+      const events = await h.store.readRecent(PROJECT_ID)
+      expect(events.length).toBe(3)
+      expect(new Set(events.map((e) => e.id)).size).toBe(3)
+      expect(new Set(events.map((e) => e.body))).toEqual(
+        new Set(['proc-0', 'proc-1', 'proc-2']),
+      )
+    },
+    30_000,
+  )
+
+  it(
+    'appendEvent OVERLAPPING a write lock held 400ms by another process succeeds (busy-retry ladder)',
+    async () => {
+      await h.store.ensureInit(PROJECT_ID)
+      const db_path = sidecarPath(h.owner_home)
+      const holder = Bun.spawn({
+        cmd: [
+          process.execPath,
+          'run',
+          join(FIXTURES, 'hold-write-lock.ts'),
+          db_path,
+          '400',
+        ],
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      try {
+        // Synchronize on HELD — the holder has BEGIN IMMEDIATE + a
+        // pending INSERT at this point, so the append below provably
+        // starts while the write lock is held. 400ms > the 100ms
+        // C-level busy_timeout, so only the withBusyRetry ladder can
+        // carry this write through.
+        await waitForLine(holder.stdout, 'HELD', 15_000)
+        const t0 = Date.now()
+        const written = await h.store.appendEvent(
+          PROJECT_ID,
+          input({ body: 'wrote through contention' }),
+        )
+        const elapsed = Date.now() - t0
+        // Proves the write actually contended (an uncontended append
+        // is single-digit ms) and waited out the holder's window.
+        expect(elapsed).toBeGreaterThan(150)
+        const exit = await holder.exited
+        expect(exit).toBe(0)
+        const events = await h.store.readRecent(PROJECT_ID)
+        // Holder's marker row + our append.
+        expect(events.length).toBe(2)
+        expect(events.some((e) => e.id === written.id)).toBe(true)
+        expect(events.some((e) => e.actor_id === 'lock-holder')).toBe(true)
+      } finally {
+        holder.kill()
+      }
+    },
+    30_000,
+  )
 })
 
 describe('NexusStore — readRecent filtering', () => {
