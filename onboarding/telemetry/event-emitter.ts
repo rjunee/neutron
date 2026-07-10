@@ -25,6 +25,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { SqliteOnboardingStateStore } from '../interview/sqlite-state-store.ts'
 
 /**
  * Locked enum of every onboarding-domain event name. Adding a new event
@@ -615,37 +616,13 @@ export function buildProductionOnboardingTelemetry(input: {
 }): OnboardingTelemetry {
   const deps: OnboardingTelemetryDeps = { db: input.db }
   if (input.eventLogger !== undefined) deps.eventLogger = input.eventLogger
+  // P4 (table-ownership, 2026-07) — the mint-on-miss transaction moved
+  // VERBATIM into the owning `onboarding_state` store
+  // (SqliteOnboardingStateStore.resolveOrMintAttemptId); this factory no
+  // longer writes the table directly (migrations/table-ownership.json).
+  const stateStore = new SqliteOnboardingStateStore({ db: input.db })
   deps.resolveAttemptId = async ({ project_slug, user_id }) => {
-    return input.db.transaction(async (tx) => {
-      const existing = tx
-        .prepare<{ attempt_id: string }, [string, string]>(
-          `SELECT attempt_id FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
-        )
-        .get(project_slug, user_id)
-      if (existing !== null && existing.attempt_id.length > 0) {
-        return existing.attempt_id
-      }
-      const fresh = randomUUID()
-      const ts = Date.now()
-      // ISSUES #2 (2026-05-19) — onboarding_state PK is (project_slug,
-      // user_id) per migration 0034. Mint-on-miss inserts a row for
-      // this (instance, user) pair; the engine's subsequent start()
-      // upsert merges over it.
-      await tx.run(
-        `INSERT OR IGNORE INTO onboarding_state
-           (project_slug, user_id, phase, phase_state_json, started_at,
-            last_advanced_at, completed_at, import_job_id,
-            persona_files_committed, wow_fired, attempt_id)
-         VALUES (?, ?, 'signup', '{}', ?, ?, NULL, NULL, 0, 0, ?)`,
-        [project_slug, user_id, ts, ts, fresh],
-      )
-      const reread = tx
-        .prepare<{ attempt_id: string }, [string, string]>(
-          `SELECT attempt_id FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
-        )
-        .get(project_slug, user_id)
-      return reread?.attempt_id ?? fresh
-    })
+    return stateStore.resolveOrMintAttemptId(project_slug, user_id)
   }
   return new OnboardingTelemetry(deps)
 }

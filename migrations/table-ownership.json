@@ -1,0 +1,58 @@
+{
+  "$comment": [
+    "P4 (world-class refactor, 2026-07) — committed table-ownership map:",
+    "'one owning module per table'. For every table listed here, the set of",
+    "non-test source files containing a WRITE statement (INSERT [OR ...] INTO /",
+    "UPDATE ... SET / DELETE FROM / REPLACE INTO) must EXACTLY equal the",
+    "'writers' allowlist below. CI-enforced by",
+    "migrations/__tests__/table-ownership-conformance.test.ts, which also",
+    "checks each table exists in migrations/expected-schema.txt.",
+    "Migrations (*.sql + the runner) and test files are exempt: schema",
+    "evolution and fixtures are not runtime writers.",
+    "To extend coverage to another table, add an entry with its honest",
+    "current writer set — the test picks it up automatically."
+  ],
+  "tables": {
+    "projects": {
+      "owner": "gateway/projects/sqlite-store.ts",
+      "writers": [
+        "cores/free/agent-settings/src/backend.ts",
+        "gateway/projects/sqlite-store.ts",
+        "gateway/realmode-composer/project-create.ts"
+      ],
+      "notes": [
+        "gateway/projects/sqlite-store.ts is the owning settings/lifecycle store",
+        "(seed, PATCH, archive/restore, activity stamps — incl.",
+        "touchActivityIncludingArchived, moved verbatim from open/composer.ts).",
+        "gateway/realmode-composer/project-create.ts is the sanctioned",
+        "project-CREATION writer (refactor-plan §P4: creation converges on",
+        "sqlite-store.ts + project-create.ts; the second creation writer at",
+        "onboarding/wow-moment/actions/03-project-shells.ts was deleted by",
+        "K11b1 before this unit landed, so there is nothing to converge).",
+        "cores/free/agent-settings/src/backend.ts is a RETAINED direct writer",
+        "(rename/delete/archive/restore/merge/engagement-mode): it lives in the",
+        "cores band, where importing the gateway store would violate the",
+        "cores-use-sdk-only dependency rule. Folding it in needs a",
+        "dependency-inversion seam (inject a lifecycle-writer interface built",
+        "in the gateway wiring) — deliberate follow-up, out of P4 scope.",
+        "FOLLOW-UP: touchActivity vs touchActivityIncludingArchived differ only",
+        "by 'archived_at IS NULL'; converge deliberately once the archived-row",
+        "stamp semantics are decided (byte-identical-move rule kept them apart)."
+      ]
+    },
+    "onboarding_state": {
+      "owner": "onboarding/interview/sqlite-state-store.ts",
+      "writers": [
+        "onboarding/interview/sqlite-state-store.ts"
+      ],
+      "notes": [
+        "Single-writer. The telemetry factory's mint-on-miss attempt_id",
+        "transaction (onboarding/telemetry/event-emitter.ts) moved verbatim",
+        "into SqliteOnboardingStateStore.resolveOrMintAttemptId in P4.",
+        "resume-cron's SQL json_remove writer (the plan's second dialect) was",
+        "deleted by K11b1 before this unit landed — the store's JS",
+        "shallow-merge is now the only phase_state write dialect."
+      ]
+    }
+  }
+}

@@ -1872,8 +1872,12 @@ export function buildOpenGraphComposer(
     // HTTP surface (`/api/app/projects` GET list + POST create). Wiring the
     // surface in Open also gives the mobile app's `fetchProjects` list a real
     // backend (previously unmounted here). Bearer-gated by the same owner auth.
+    // P4 (table-ownership, 2026-07): bound to a name so the agent-reply
+    // activity stamp below routes through the owning store instead of
+    // inlining `UPDATE projects` SQL here (migrations/table-ownership.json).
+    const projectSettingsStore = new SqliteProjectSettingsStore(db)
     const appProjectsSurface = createAppProjectsSurface({
-      store: new SqliteProjectSettingsStore(db),
+      store: projectSettingsStore,
       auth: appOwnerAuth,
       createProject: ({ name, user_id }) => createProjectAndRefresh({ name, user_id }),
       // Rail-redesign: a Settings PATCH that changes the project name or emoji is
@@ -2325,14 +2329,12 @@ export function buildOpenGraphComposer(
           // the fan itself sync + non-throwing; a stamp failure still emits (the
           // frame just keeps the prior order).
           void (async (): Promise<void> => {
-            try {
-              await db.run(
-                `UPDATE projects SET last_activity_at = ? WHERE id = ? AND deleted_at IS NULL`,
-                [new Date().toISOString(), project_id],
-              )
-            } catch {
-              /* activity stamping must never break a message turn */
-            }
+            // P4 (table-ownership): the exact UPDATE moved into the owning
+            // store — `touchActivityIncludingArchived` (best-effort, never
+            // throws), NOT `touchActivity` (whose predicate also skips
+            // archived rows; converging the two was not provably
+            // behaviour-preserving).
+            await projectSettingsStore.touchActivityIncludingArchived(project_id)
             emitProjectsChangedNow(OWNER_USER_ID)
           })()
         }

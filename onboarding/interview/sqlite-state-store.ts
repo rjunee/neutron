@@ -257,6 +257,55 @@ export class SqliteOnboardingStateStore implements OnboardingStateStore {
     })
   }
 
+  /**
+   * P4 (table-ownership, 2026-07) — resolve the instance's `attempt_id`,
+   * minting a fresh `onboarding_state` row when none exists. Moved VERBATIM
+   * (SQL byte-identical) from
+   * `onboarding/telemetry/event-emitter.ts:buildProductionOnboardingTelemetry`
+   * so this store stays the single writer of `onboarding_state`
+   * (migrations/table-ownership.json). Semantics unchanged: signup.* events
+   * that fire BEFORE the engine's first upsert mint the row so they share the
+   * same attempt_id bucket as the later interview events; the engine's
+   * subsequent start() upsert merges over it (INSERT OR IGNORE keeps the
+   * engine's row authoritative on a race).
+   *
+   * `this.newAttemptId` / `this.now` default to the exact expressions the
+   * telemetry inlined (`randomUUID()` / `Date.now()`), so production behaviour
+   * is identical while the store's existing test seams now apply.
+   */
+  async resolveOrMintAttemptId(project_slug: string, user_id: string): Promise<string> {
+    return this.db.transaction(async (tx) => {
+      const existing = tx
+        .prepare<{ attempt_id: string }, [string, string]>(
+          `SELECT attempt_id FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
+        )
+        .get(project_slug, user_id)
+      if (existing !== null && existing.attempt_id.length > 0) {
+        return existing.attempt_id
+      }
+      const fresh = this.newAttemptId()
+      const ts = this.now()
+      // ISSUES #2 (2026-05-19) — onboarding_state PK is (project_slug,
+      // user_id) per migration 0034. Mint-on-miss inserts a row for
+      // this (instance, user) pair; the engine's subsequent start()
+      // upsert merges over it.
+      await tx.run(
+        `INSERT OR IGNORE INTO onboarding_state
+           (project_slug, user_id, phase, phase_state_json, started_at,
+            last_advanced_at, completed_at, import_job_id,
+            persona_files_committed, wow_fired, attempt_id)
+         VALUES (?, ?, 'signup', '{}', ?, ?, NULL, NULL, 0, 0, ?)`,
+        [project_slug, user_id, ts, ts, fresh],
+      )
+      const reread = tx
+        .prepare<{ attempt_id: string }, [string, string]>(
+          `SELECT attempt_id FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
+        )
+        .get(project_slug, user_id)
+      return reread?.attempt_id ?? fresh
+    })
+  }
+
   async delete(project_slug: string, user_id: string): Promise<void> {
     await this.db.run(
       `DELETE FROM onboarding_state WHERE project_slug = ? AND user_id = ?`,
