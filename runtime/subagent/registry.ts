@@ -119,58 +119,120 @@ export class SubagentRegistry {
    * successful create/update persist; cleared on delete.
    */
   private readonly lastPersisted = new Map<string, SubagentRecord>()
+  /**
+   * Per-`run_id` in-flight mutation count + FIFO tail. Every create/update/delete
+   * for a given run_id is serialized through `runSerial`: it runs to COMPLETION
+   * (publish → await persist → advance `lastPersisted` or roll back) before the
+   * next SAME-run mutation begins. That is what makes the optimistic-publish
+   * model race-free at the root: memory and storage advance in submission order,
+   * so no rollback can strand memory behind a later-committed success, and there
+   * is never an "older A / newer B" interleaving. Cross-run mutations stay fully
+   * concurrent — the key is the run_id, not a global lock.
+   */
+  private readonly mutationPending = new Map<string, number>()
+  private readonly mutationTail = new Map<string, Promise<void>>()
 
   constructor(private readonly persistence?: SubagentPersistence) {}
 
-  async create(input: CreateRecordInput): Promise<SubagentRecord> {
-    if (this.byId.has(input.run_id)) {
-      throw new Error(`subagent registry: duplicate run_id ${JSON.stringify(input.run_id)}`)
-    }
-    const now = Date.now()
-    const rec: SubagentRecord = {
-      run_id: input.run_id,
-      instance_key: input.instance_key,
-      agent_kind: input.agent_kind,
-      spawn_depth: input.spawn_depth,
-      status: 'pending',
-      started_at: now,
-      last_event_at: now,
-    }
-    if (input.parent_run_id !== undefined) rec.parent_run_id = input.parent_run_id
-    if (input.parent_session_id !== undefined) rec.parent_session_id = input.parent_session_id
-    if (input.delivery_target !== undefined) rec.delivery_target = input.delivery_target
-    if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
-    if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
-    // RESERVE the in-memory slot SYNCHRONOUSLY — before the (async) persist —
-    // so the record is immediately visible to `liveByKey`. The double-spawn
-    // guard (`spawn.ts`) depends on there being NO `await` between its
-    // `liveByKey` read and this record becoming visible: a synchronous reserve
-    // keeps check-then-create atomic against a concurrent same-`spawn_key`
-    // dispatch (the durable persist runs entirely AFTER the reservation, so it
-    // can never open a window for a duplicate to slip through). If the durable
-    // write then REJECTS, roll the reservation back so the net effect is no
-    // in-memory mutation — memory never diverges from the store on failure.
-    this.byId.set(input.run_id, rec)
-    if (this.persistence !== undefined) {
-      // Publish the durable-write promise so a coalescing caller shares this
-      // create's outcome (see `pendingCreate` / `awaitCreate`). Wrapped in an
-      // IIFE so both this method AND `awaitCreate` await the same settled result.
-      const durable = (async () => {
-        await this.persistence!.persist(rec)
-      })()
-      this.pendingCreate.set(input.run_id, durable)
+  /**
+   * Serialize `fn` behind any in-flight mutation for `run_id` (FIFO), then run it
+   * to completion before the next same-run mutation starts. UNCONTENDED FAST PATH:
+   * when nothing is in flight for this run_id, `fn` is invoked SYNCHRONOUSLY, so
+   * its in-memory publish lands before the first `await` — preserving the S3
+   * zero-await visibility the double-spawn guard (`create` reserving `byId`) and
+   * the watchdog's `failRun` re-read (`control.ts`) depend on for the normal
+   * sequential lifecycle (create → running → finished, each awaited). Only
+   * genuinely-concurrent same-run mutations defer their publish, which is correct
+   * — they are strictly ordered.
+   */
+  private runSerial<T>(run_id: string, fn: () => Promise<T>): Promise<T> {
+    const inflight = this.mutationPending.get(run_id) ?? 0
+    this.mutationPending.set(run_id, inflight + 1)
+    const run = async (): Promise<T> => {
       try {
-        await durable
-        // Record the committed snapshot — the roll-back target for later updates.
-        this.lastPersisted.set(input.run_id, rec)
-      } catch (err) {
-        this.byId.delete(input.run_id)
-        throw err
+        return await fn()
       } finally {
-        this.pendingCreate.delete(input.run_id)
+        const n = (this.mutationPending.get(run_id) ?? 1) - 1
+        if (n <= 0) {
+          this.mutationPending.delete(run_id)
+          this.mutationTail.delete(run_id)
+        } else {
+          this.mutationPending.set(run_id, n)
+        }
       }
     }
-    return rec
+    // Uncontended → run NOW (synchronous publish). Contended → defer the WHOLE
+    // mutation (including its publish) behind the current tail, regardless of
+    // whether the predecessor settled fulfilled or rejected.
+    const result =
+      inflight === 0
+        ? run()
+        : (this.mutationTail.get(run_id) ?? Promise.resolve()).then(run, run)
+    // The next same-run mutation waits for THIS one to settle (either way).
+    this.mutationTail.set(
+      run_id,
+      result.then(
+        () => {},
+        () => {},
+      ),
+    )
+    return result
+  }
+
+  create(input: CreateRecordInput): Promise<SubagentRecord> {
+    // Serialized per run_id (uncontended → runs synchronously, so the byId
+    // reservation below still lands before the first await — the double-spawn
+    // guard's atomicity is preserved).
+    return this.runSerial(input.run_id, async () => {
+      if (this.byId.has(input.run_id)) {
+        throw new Error(`subagent registry: duplicate run_id ${JSON.stringify(input.run_id)}`)
+      }
+      const now = Date.now()
+      const rec: SubagentRecord = {
+        run_id: input.run_id,
+        instance_key: input.instance_key,
+        agent_kind: input.agent_kind,
+        spawn_depth: input.spawn_depth,
+        status: 'pending',
+        started_at: now,
+        last_event_at: now,
+      }
+      if (input.parent_run_id !== undefined) rec.parent_run_id = input.parent_run_id
+      if (input.parent_session_id !== undefined) rec.parent_session_id = input.parent_session_id
+      if (input.delivery_target !== undefined) rec.delivery_target = input.delivery_target
+      if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
+      if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
+      // RESERVE the in-memory slot SYNCHRONOUSLY — before the (async) persist —
+      // so the record is immediately visible to `liveByKey`. The double-spawn
+      // guard (`spawn.ts`) depends on there being NO `await` between its
+      // `liveByKey` read and this record becoming visible: a synchronous reserve
+      // keeps check-then-create atomic against a concurrent same-`spawn_key`
+      // dispatch (the durable persist runs entirely AFTER the reservation, so it
+      // can never open a window for a duplicate to slip through). If the durable
+      // write then REJECTS, roll the reservation back so the net effect is no
+      // in-memory mutation — memory never diverges from the store on failure.
+      this.byId.set(input.run_id, rec)
+      if (this.persistence !== undefined) {
+        // Publish the durable-write promise so a coalescing caller shares this
+        // create's outcome (see `pendingCreate` / `awaitCreate`). Wrapped in an
+        // IIFE so both this method AND `awaitCreate` await the same settled result.
+        const durable = (async () => {
+          await this.persistence!.persist(rec)
+        })()
+        this.pendingCreate.set(input.run_id, durable)
+        try {
+          await durable
+          // Record the committed snapshot — the roll-back target for later updates.
+          this.lastPersisted.set(input.run_id, rec)
+        } catch (err) {
+          this.byId.delete(input.run_id)
+          throw err
+        } finally {
+          this.pendingCreate.delete(input.run_id)
+        }
+      }
+      return rec
+    })
   }
 
   /**
@@ -190,53 +252,51 @@ export class SubagentRegistry {
    * Patch an existing record. Returns the new record. Throws if `run_id` is
    * unknown — callers should always have called `create` first.
    */
-  async update(
+  update(
     run_id: string,
     patch: Partial<Omit<SubagentRecord, 'run_id'>>,
   ): Promise<SubagentRecord> {
-    const cur = this.byId.get(run_id)
-    if (!cur) throw new Error(`subagent registry: unknown run_id ${JSON.stringify(run_id)}`)
-    // If the caller explicitly sets last_event_at in the patch, honor it
-    // (callers patching watchdog-driven staleness need to be able to set
-    // it to a past timestamp). Otherwise default to now().
-    const last_event_at = patch.last_event_at ?? Date.now()
-    const next: SubagentRecord = { ...cur, ...patch, last_event_at }
-    // PUBLISH synchronously — before the (async) persist — exactly like `create`
-    // reserves its slot. This is a CORRECTNESS requirement, not a style choice:
-    // a persist-FIRST update leaves memory on the PRIOR status for the whole
-    // duration of the durable write, so a completion landing `finished` stays
-    // INVISIBLE while its persist is in flight. The watchdog's `failRun`
-    // re-reads the record AFTER awaiting its canceller (`control.ts`) precisely
-    // to avoid clobbering a concurrent finish — but a persist-first update hides
-    // that finish, so `failRun` would overwrite a legitimate `finished` with
-    // `crashed` and emit a false failure. Publishing synchronously restores the
-    // S3 (in-memory, zero-await) visibility the guard was written against, and —
-    // because the read+publish share one synchronous tick — two racing updates
-    // can never both build on the same stale base (the second reads the first's
-    // published value). If the durable write then REJECTS, roll our slot back to
-    // the last DURABLE snapshot (`lastPersisted`) so memory never diverges from
-    // the store on failure — but ONLY if no later update has since superseded
-    // ours (identity guard), never clobbering a newer committed write. Rolling
-    // back to the captured `cur` would be WRONG under overlapping failures: `cur`
-    // may be a prior in-flight update's own UNPERSISTED optimistic value, so two
-    // failing updates could strand memory on a state neither committed. The last
-    // PERSISTED snapshot is the only correct roll-back target.
-    this.byId.set(run_id, next)
-    if (this.persistence !== undefined) {
-      try {
-        await this.persistence.persist(next)
-        this.lastPersisted.set(run_id, next)
-      } catch (err) {
-        if (this.byId.get(run_id) === next) {
-          const durable = this.lastPersisted.get(run_id)
-          // `durable` is always present here (create persisted before any update
-          // could run); the guard is defensive — never leave a wrong value.
-          if (durable !== undefined) this.byId.set(run_id, durable)
+    // Serialized per run_id: this runs to completion (publish → persist →
+    // advance/rollback) before the next same-run mutation, and `cur` is read
+    // AFTER any predecessor settled — so `next` always builds on the last
+    // committed (or rolled-back) state, never on another update's UNPERSISTED
+    // optimistic value. Uncontended → runs synchronously (below), preserving the
+    // S3 zero-await visibility the failRun re-read (`control.ts`) relies on.
+    return this.runSerial(run_id, async () => {
+      const cur = this.byId.get(run_id)
+      if (!cur) throw new Error(`subagent registry: unknown run_id ${JSON.stringify(run_id)}`)
+      // If the caller explicitly sets last_event_at in the patch, honor it
+      // (callers patching watchdog-driven staleness need to be able to set
+      // it to a past timestamp). Otherwise default to now().
+      const last_event_at = patch.last_event_at ?? Date.now()
+      const next: SubagentRecord = { ...cur, ...patch, last_event_at }
+      // PUBLISH synchronously — before the (async) persist. In the uncontended
+      // case this makes the mutation immediately visible: a persist-FIRST update
+      // would leave memory on the PRIOR status for the whole durable write, so a
+      // completion landing `finished` would stay INVISIBLE while its persist is
+      // in flight, and the watchdog's `failRun` (which re-reads AFTER awaiting
+      // its canceller) would clobber a legitimate `finished` with `crashed`.
+      this.byId.set(run_id, next)
+      if (this.persistence !== undefined) {
+        try {
+          await this.persistence.persist(next)
+          this.lastPersisted.set(run_id, next)
+        } catch (err) {
+          // Roll back to the last DURABLE snapshot (`lastPersisted`) — the store's
+          // committed truth. Per-run serialization guarantees no concurrent
+          // same-run mutation touched `byId` between our publish and here, so the
+          // identity guard is defensively-true; the `lastPersisted` target (never
+          // the optimistic `cur`) is what keeps memory === storage across any
+          // failure ordering.
+          if (this.byId.get(run_id) === next) {
+            const durable = this.lastPersisted.get(run_id)
+            if (durable !== undefined) this.byId.set(run_id, durable)
+          }
+          throw err
         }
-        throw err
       }
-    }
-    return next
+      return next
+    })
   }
 
   byRunId(run_id: string): SubagentRecord | undefined {
@@ -287,12 +347,15 @@ export class SubagentRegistry {
     )
   }
 
-  async delete(run_id: string): Promise<void> {
-    // Remove FIRST: if the durable delete rejects, the record stays in BOTH the
-    // store and the in-memory map (still in sync) rather than only the store.
-    if (this.persistence !== undefined) await this.persistence.remove(run_id)
-    this.byId.delete(run_id)
-    this.lastPersisted.delete(run_id)
+  delete(run_id: string): Promise<void> {
+    // Serialized per run_id (ordered behind any in-flight create/update).
+    return this.runSerial(run_id, async () => {
+      // Remove FIRST: if the durable delete rejects, the record stays in BOTH the
+      // store and the in-memory map (still in sync) rather than only the store.
+      if (this.persistence !== undefined) await this.persistence.remove(run_id)
+      this.byId.delete(run_id)
+      this.lastPersisted.delete(run_id)
+    })
   }
 
   /** Snapshot — used for tests + observability. */

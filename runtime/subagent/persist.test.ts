@@ -19,6 +19,7 @@ import {
   type CreateRecordInput,
   type SubagentPersistence,
   type SubagentRecord,
+  type SubagentStatus,
 } from './registry.ts'
 import { SubagentRegistryStore } from './store.ts'
 import { sweepOrphanedDispatchesOnBoot } from './boot-sweep.ts'
@@ -333,6 +334,91 @@ describe('async-persist update boundary — a landing completion stays visible',
     expect(clobbered).toBe(false) // old persist-first: true (false failure emitted)
     expect(reg.byRunId('r')?.status).toBe('finished') // finish preserved, not crashed
     expect(reg.byRunId('r')?.failure_reason).toBeUndefined()
+  })
+})
+
+describe('per-run serialization: memory never diverges from the last committed persist', () => {
+  // A sink whose CREATE ('pending') always commits; the two updates' outcomes are
+  // chosen by target status. `block` makes a status' persist wait until released;
+  // `fail` makes it throw. `committed()` is the last status the store durably
+  // accepted — the durable truth memory must equal.
+  const orderedSink = (opts: {
+    block?: SubagentStatus
+    fail?: SubagentStatus
+  }): { sink: SubagentPersistence; committed: () => SubagentStatus; release: () => void } => {
+    let released = false
+    let waiters: Array<() => void> = []
+    let committed: SubagentStatus = 'pending'
+    const sink: SubagentPersistence = {
+      persist: async (rec) => {
+        if (opts.block !== undefined && rec.status === opts.block && !released) {
+          await new Promise<void>((r) => waiters.push(r))
+        }
+        if (opts.fail !== undefined && rec.status === opts.fail) {
+          throw new Error(`persist failed for ${rec.status}`)
+        }
+        committed = rec.status
+      },
+      remove: async () => {},
+    }
+    const release = (): void => {
+      released = true
+      const pending = waiters
+      waiters = []
+      for (const w of pending) w()
+    }
+    return { sink, committed: () => committed, release }
+  }
+
+  test('A(running) blocked+succeeds, B(finished) fails first → memory AND storage agree on running', async () => {
+    // THE 4th-edge repro. Without per-run serialization: B(finished) runs while A
+    // is blocked, fails, and rolls memory back to 'pending'; then A commits
+    // 'running' but only advances lastPersisted, never republishing byId — memory
+    // stranded at 'pending' while storage holds 'running'. Serialization orders
+    // B strictly AFTER A, so this cannot happen.
+    const { sink, committed, release } = orderedSink({ block: 'running', fail: 'finished' })
+    const reg = new SubagentRegistry(sink)
+    await reg.create(dispatchInput({ run_id: 'r' })) // committed = 'pending'
+
+    const settled = Promise.allSettled([
+      reg.update('r', { status: 'running' }),
+      reg.update('r', { status: 'finished' }),
+    ])
+    await new Promise((r) => setTimeout(r, 10)) // give B a chance to (wrongly) run+fail early
+    release() // A's persist completes → 'running' commits
+    const [ra, rb] = await settled
+
+    expect(ra.status).toBe('fulfilled') // A(running) committed
+    expect(rb.status).toBe('rejected') // B(finished) failed
+    expect(committed()).toBe('running') // durable truth
+    expect(reg.byRunId('r')?.status).toBe('running') // memory AGREES (not stranded 'pending')
+  })
+
+  test('mirror: A(running) fails, B(finished) succeeds → memory AND storage agree on finished', async () => {
+    // A runs first and fails (rolls back to the persisted 'pending'); B then
+    // commits 'finished'. A's failure must not clobber B's committed value.
+    const { sink, committed } = orderedSink({ fail: 'running' })
+    const reg = new SubagentRegistry(sink)
+    await reg.create(dispatchInput({ run_id: 'r' }))
+
+    const [ra, rb] = await Promise.allSettled([
+      reg.update('r', { status: 'running' }),
+      reg.update('r', { status: 'finished' }),
+    ])
+
+    expect(ra.status).toBe('rejected') // A(running) failed
+    expect(rb.status).toBe('fulfilled') // B(finished) committed after A rolled back
+    expect(committed()).toBe('finished') // durable truth
+    expect(reg.byRunId('r')?.status).toBe('finished') // memory agrees, A didn't clobber
+  })
+
+  test('uncontended update is visible SYNCHRONOUSLY (no await) — S3 zero-await visibility preserved', async () => {
+    const reg = new SubagentRegistry() // pure in-memory
+    await reg.create(dispatchInput({ run_id: 'r' }))
+    const p = reg.update('r', { status: 'running' })
+    // Read BEFORE awaiting p — the normal sequential lifecycle stays zero-await.
+    expect(reg.byRunId('r')?.status).toBe('running')
+    await p
   })
 })
 
