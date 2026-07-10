@@ -171,7 +171,14 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     await firer(input())
     // Resolved via import.meta.url beside inner-loop.ts — the TARGET repo need
     // not contain trident/, so the path must be threaded, never derived there.
-    expect(calls[0]!.prompt).toMatch(/"checkpointScript":"[^"]*\/trident\/checkpoint\.sh"/)
+    const m = calls[0]!.prompt.match(/"checkpointScript":"([^"]*\/trident\/checkpoint\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    // Must be a DECODED filesystem path, not a URL `.pathname` (which leaves
+    // spaces as `%20` etc.) — else `bash <path>` fails on any checkout dir
+    // containing a space. fileURLToPath decodes; new URL(...).pathname does not.
+    expect(threaded).not.toContain('%')
+    expect(threaded.startsWith('/')).toBe(true)
   })
 
   test('args thread codexHome when a per-project CODEX_HOME is configured (cross-model review)', async () => {
