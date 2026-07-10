@@ -45,6 +45,17 @@ export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'
 
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'
+// C5 — the landing server OWNS the route predicate/set the per-instance gateway
+// delegates to it. The canonical declaration lives in the tiny `./routes.ts`
+// leaf (kept separate so `gateway/http` can consume it without importing this
+// asset-loading module); re-export it here so the surface that IMPLEMENTS these
+// routes also publishes their contract.
+export {
+  isLandingRoute,
+  LANDING_ROUTE_MANIFEST,
+  LANDING_ROUTE_PATHS,
+  LANDING_ROUTE_PREFIXES,
+} from './routes.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 

@@ -43,6 +43,13 @@
 import type { Server, WebSocketHandler } from 'bun'
 
 import { isSpaClientRoute } from '@neutronai/landing/spa-routes.ts'
+// C5 — the landing route predicate + path set are OWNED by the landing package
+// (`landing/routes.ts`, a tiny leaf mirroring `spa-routes.ts`) and CONSUMED
+// here for the `landing` slot's match. The pre-C5 hand-maintained `LANDING_PATHS`
+// literal that lived in this file is deleted; `LANDING_ROUTE_PATHS` is re-exported
+// below so existing importers keep working. Behavior-identical (pinned by
+// `landing/__tests__/routes-transition.test.ts`).
+import { isLandingRoute, LANDING_ROUTE_PATHS } from '@neutronai/landing/routes.ts'
 import type { HttpSurfacesCompositionInput } from '../composition/input/http-surfaces-input.ts'
 import type { AppSurfacesCompositionInput } from '../composition/input/app-surfaces-input.ts'
 
@@ -190,95 +197,14 @@ export interface RouteSlotComposition
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Landing path-set (owned by the landing server)
+// Landing path-set (owned by the landing package — see `landing/routes.ts`)
 // ─────────────────────────────────────────────────────────────────────────
 
-/**
- * Path prefixes the landing server owns. Listed here (not delegated by
- * trial-and-error) so the precedence chain stays explicit + the
- * cross-instance API isn't accidentally shadowed by a landing 404.
- *
- * Matches the routes implemented in `landing/server.ts:222-315`:
- *   - `GET  /chat`                       static HTML
- *   - `GET  /chat.js`                    bundled client
- *   - `GET  /api/v1/sign-up`             OAuth redirect trampoline
- *   - `GET  /invite[?invite=…]`          static HTML (when invite_html present)
- *   - `GET  /invite.js`                  bundled client
- *   - `POST /onboarding/invite-accept`   accept handler
- *   - `GET  /?invite=…`                  same as /invite (root-with-query)
- *   - `GET  /recover`                    S17 — silent reconnect after
- *                                        post-slug-rename WS disconnect
- *   - `GET  /start`                      2026-05-22 — `?token=` (or
- *                                        legacy `?start=`) lands on the
- *                                        per-instance gateway for
- *                                        returning owners who have
- *                                        picked a real URL slug
- *                                        (`identity/main.ts:594-615` via
- *                                        `buildPerOwnerDeepLink`); the
- *                                        handler 302s to
- *                                        `/chat?start=<token>` per
- *                                        `landing/server.ts:674-689`,
- *                                        propagating `?debug=` +
- *                                        `?import=`. Without this
- *                                        allowlist entry the per-instance
- *                                        gateway's HTTP precedence chain
- *                                        fell through to the default
- *                                        404 and the redirect handler
- *                                        was never reached.
- */
-const LANDING_PATHS: ReadonlySet<string> = new Set([
-  '/chat',
-  '/chat-react.js',
-  '/api/v1/sign-up',
-  '/invite',
-  '/invite.js',
-  '/onboarding/invite-accept',
-  '/recover',
-  '/start',
-  // 2026-05-28 chat-history hydration sprint — without this entry the
-  // per-instance gateway's HTTP precedence chain would fall through to
-  // the default 404 on `/api/v1/chat/history` for a slug-renamed
-  // instance (mirrors the ISSUES #59 root cause for `/start`).
-  '/api/v1/chat/history',
-  // 2026-05-28 sidebar topic-rail sprint — sibling of /chat/history.
-  // Same precedence-chain reasoning: a slug-renamed instance otherwise
-  // falls through to default 404 on the per-instance gateway.
-  '/api/v1/chat/topics',
-  // ISSUES #208 — mobile install page + PWA/brand assets. The wow
-  // handoff's MOBILE_APP_URL points at `/mobile`; without these entries
-  // the per-instance gateway falls through to the default 404 (same bug
-  // class as `/start`, ISSUES #59). The asset routes let chat.html link
-  // a manifest + icons so Add-to-Home-Screen installs carry the brand
-  // icon instead of a screenshot. All four are static, owner-data-free
-  // surfaces served by `landing/server.ts`; none are auth-gated (the
-  // gate only covers `/`, `/chat`, `/api/app/*`).
-  '/mobile',
-  '/site.webmanifest',
-  '/favicon.svg',
-  '/apple-touch-icon.png',
-])
-
-export function isLandingRoute(
-  pathname: string,
-  method: string,
-  hasInviteQuery: boolean,
-): boolean {
-  if (LANDING_PATHS.has(pathname)) return true
-  // AUTH-CORRECTION (2026-06-28) — the Claude-Max OAuth install-token handoff
-  // routes (`/oauth/max/install-token/{initiate,<signup_id>.sh,complete,state}`)
-  // are served by landing's `installTokenHandler`. They carry a variable
-  // `<signup_id>.sh` segment so a path-Set match won't do — prefix-match the
-  // whole surface. None are auth-gated (the gate only covers `/`, `/chat`,
-  // `/api/app/*`), which is correct: the handoff is the PRE-auth step.
-  if (pathname.startsWith('/oauth/max/install-token')) return true
-  // Root path with `?invite=` is the invite landing short-circuit.
-  if (pathname === '/' && method === 'GET' && hasInviteQuery) return true
-  return false
-}
-
-/** Re-exported test-helper view of the path table so other modules
- *  (or tests) can assert routing without re-implementing the predicate. */
-export const LANDING_ROUTE_PATHS = LANDING_PATHS
+// C5 — `isLandingRoute` + `LANDING_ROUTE_PATHS` now live in
+// `@neutronai/landing/routes.ts` (imported at the top of this file). They are
+// re-exported here so existing importers (`gateway/http/compose.ts`, tests)
+// keep resolving them through the gateway barrel unchanged.
+export { isLandingRoute, LANDING_ROUTE_PATHS }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Internal cache-invalidate handler (moved verbatim from compose.ts)
