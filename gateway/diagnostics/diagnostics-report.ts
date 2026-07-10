@@ -69,6 +69,11 @@ export interface ReplSessionDiag {
   respawn_count?: number
   /** Epoch ms the hard restart-rate cap tripped (auto-recovery OFF), or null. */
   capped_at?: number | null
+  // NOTE — `lastDataAt` (per-session PTY activity) is intentionally NOT surfaced.
+  // It is an in-memory PtySession field, NOT persisted to repl-registry.json (the
+  // only source reachable read-only here + off-process). Rendering a fabricated /
+  // zero value would read as real; surfacing the real one needs a persistence
+  // change (behaviour change, out of O5's read-only scope). Deferred.
 }
 
 export interface ReplDiag {
@@ -110,6 +115,9 @@ export interface ImportDiag {
   note?: string
 }
 
+/** One `gateway_events` row (onboarding/gateway telemetry). NOT the operational
+ *  `system_events` journal — that table is created by unit O4 (unmerged); this
+ *  section reads `gateway_events` and is labelled as such by every consumer. */
 export interface SystemEventDiag {
   ts?: number | undefined
   level?: string | undefined
@@ -118,6 +126,8 @@ export interface SystemEventDiag {
   duration_ms?: number | null
 }
 
+/** Recent `gateway_events` (source = onboarding/gateway telemetry). Pending O4,
+ *  this is NOT operational `system_events`; consumers label it `gateway_events`. */
 export interface EventsDiag {
   available: boolean
   events?: SystemEventDiag[]

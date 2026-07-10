@@ -233,7 +233,7 @@ export function DiagnosticsPane({ client }: { client: AdminClient }) {
           </Section>
 
           <Section
-            title="Recent events"
+            title="Recent events (gateway_events)"
             available={data.recent_events.available}
             note={data.recent_events.note}
           >

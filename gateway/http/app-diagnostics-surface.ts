@@ -24,6 +24,22 @@
  *
  * READ-ONLY: the injected `diagnostics` closure composes existing reads only
  * (see `gateway/diagnostics/`). No writes, no degrade-decision changes.
+ *
+ * HONEST PARTIAL — deferred sections (accepted deferrals, tracked follow-ups):
+ * O5 surfaces every source reachable read-only from this seam. Three spec items
+ * are DELIBERATELY not surfaced here because each is blocked on other work, and
+ * forcing them would breach the additive/read-only mandate or fabricate data:
+ *   - core_install failures → after unit X2 (`defineCore()` manifest⊄handlers
+ *     hard-fail / `/api/cores` degraded surface). `CoresModuleState.failures` is
+ *     in-process graph-module state with no read handle at this seam; consume
+ *     X2's surface in a follow-up instead of threading a bespoke graph ref now.
+ *   - system_events rename → after unit O4 (which creates `system_events`). The
+ *     events section reads `gateway_events` (onboarding/gateway telemetry) and is
+ *     LABELLED as such — it is NOT the operational system_events journal yet.
+ *   - REPL `lastDataAt` → needs a persistence decision (it is an in-memory
+ *     PtySession field, absent from repl-registry.json, unreachable off-process);
+ *     surfacing it would be a behaviour change, out of O5's read-only scope. The
+ *     repl_sessions section omits it rather than render a fabricated timestamp.
  */
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'

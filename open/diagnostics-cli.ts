@@ -131,14 +131,15 @@ export function formatDiagnosticsText(report: DiagnosticsReport): string {
     }
   }
 
-  // recent events
+  // recent events — source is gateway_events (onboarding/gateway telemetry),
+  // NOT the operational system_events journal (that table lands with unit O4).
   const ev = report.recent_events
   if (!ev.available) {
-    lines.push(`recent events: ${ev.note ?? 'no events'}`)
+    lines.push(`recent events (gateway_events): ${ev.note ?? 'no events'}`)
   } else if ((ev.events?.length ?? 0) === 0) {
-    lines.push(`recent events: none`)
+    lines.push(`recent events (gateway_events): none`)
   } else {
-    lines.push(`recent events (newest first, ${ev.events!.length}):`)
+    lines.push(`recent events (gateway_events, newest first, ${ev.events!.length}):`)
     for (const e of ev.events!.slice(0, 15)) {
       lines.push(`  - ${fmtTime(e.ts)} [${e.level ?? '?'}] ${e.module ?? '?'}/${e.event ?? '?'}`)
     }

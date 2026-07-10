@@ -75,9 +75,10 @@ export function buildInstanceDiagnosticsSources(
           ORDER BY started_at DESC`,
         [project_slug],
       ),
-    // Bounded at the DB (`ORDER BY ts DESC LIMIT`) — a long-lived instance reads
-    // + parses at most `maxEvents` rows per hit, not the whole event history.
-    // `listRecent` already returns newest-first.
+    // Source = `gateway_events` (onboarding/gateway telemetry), NOT operational
+    // `system_events` (that table lands with unit O4). Bounded at the DB
+    // (`ORDER BY ts DESC LIMIT`) — a long-lived instance reads + parses at most
+    // `maxEvents` rows per hit, not the whole history. Already newest-first.
     recentEvents: () => telemetry.listRecent(project_slug, maxEvents),
     replRegistry: () => ({
       path: registryPath,
