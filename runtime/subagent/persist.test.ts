@@ -63,11 +63,11 @@ const priorStore = (): SubagentRegistryStore => new SubagentRegistryStore(db, PR
 /** A store representing the CURRENT boot — runs `loadReapable()` / the sweep. */
 const currStore = (): SubagentRegistryStore => new SubagentRegistryStore(db, CURR_BOOT)
 
-describe('migration 0099 idempotency', () => {
-  test('the raw 0099 SQL re-applies cleanly (IF NOT EXISTS everywhere)', () => {
+describe('migration 0100 idempotency', () => {
+  test('the raw 0100 SQL re-applies cleanly (IF NOT EXISTS everywhere)', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const sql = readFileSync(
-      join(here, '..', '..', 'migrations', '0099_code_subagent_registry.sql'),
+      join(here, '..', '..', 'migrations', '0100_code_subagent_registry.sql'),
       'utf8',
     )
     const fresh = new Database(':memory:')

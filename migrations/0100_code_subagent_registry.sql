@@ -1,4 +1,4 @@
--- 0099_code_subagent_registry.sql
+-- 0100_code_subagent_registry.sql
 --
 -- Subagent-registry persistence (world-class-refactor plan §P7, decision D-6:
 -- "persist minimal + boot reap").

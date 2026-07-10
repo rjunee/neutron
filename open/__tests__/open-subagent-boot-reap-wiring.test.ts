@@ -88,31 +88,59 @@ describe('Open subagent boot-reap prod-boot wiring', () => {
     })
     expect(seed.get('prior-orphan')?.status).toBe('running')
 
-    // Boot the REAL composer (no credential needed — the boot reap runs
-    // unconditionally). Firing it is fire-and-forget inside composition.
-    const composer = buildOpenGraphComposer({ env: process.env })
-    const composition = await composer({ db, project_slug: 'owner' })
-
-    // The fire-and-forget sweep transitions the orphan to crashed shortly after
-    // composition returns; poll the durable row until it flips.
-    let reaped = false
-    for (let i = 0; i < 400; i++) {
-      if (seed.get('prior-orphan')?.status === 'crashed') {
-        reaped = true
-        break
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await Bun.sleep(5)
+    // Capture the REAL report surface the composer wires. `dispatchReport`
+    // (composer.ts) — the sink `buildBootSweepReport(dispatchReport)` feeds the
+    // sweep — writes each crashed report to `console.log` as an
+    // `[agent-dispatch] … → crashed` line + markdown. Spying it proves the boot
+    // sweep actually FIRES the report sink (not merely flips the durable row) —
+    // P7's exact acceptance criterion ("a restart SURFACES the orphan"). The
+    // durable-row assertion alone can't see this: `markCrashed` runs regardless,
+    // so deleting `report: buildBootSweepReport(dispatchReport)` in composer.ts
+    // would leave a row-only test green. This capture turns that mutation RED.
+    const captured: string[] = []
+    const realLog = console.log
+    console.log = (...args: unknown[]): void => {
+      captured.push(args.map((a) => (typeof a === 'string' ? a : String(a))).join(' '))
     }
-    expect(reaped).toBe(true)
-    expect(seed.get('prior-orphan')?.failure_reason).toBe('process_dead')
+    try {
+      // Boot the REAL composer (no credential needed — the boot reap runs
+      // unconditionally). Firing it is fire-and-forget inside composition.
+      const composer = buildOpenGraphComposer({ env: process.env })
+      const composition = await composer({ db, project_slug: 'owner' })
 
-    for (const cleanup of composition.realmode_cleanups ?? []) {
-      try {
-        cleanup()
-      } catch {
-        /* best-effort */
+      // Poll until the boot-reap REPORT line for THIS orphan is captured (the
+      // report fires just after the durable claim inside the fire-and-forget
+      // sweep). Matching on the wired `[agent-dispatch]` line + run_id.
+      let reportLine: string | undefined
+      for (let i = 0; i < 400; i++) {
+        reportLine = captured.find(
+          (l) => l.includes('[agent-dispatch]') && l.includes('prior-orphan'),
+        )
+        if (reportLine !== undefined) break
+        // eslint-disable-next-line no-await-in-loop
+        await Bun.sleep(5)
       }
+
+      // The durable row was transitioned...
+      expect(seed.get('prior-orphan')?.status).toBe('crashed')
+      expect(seed.get('prior-orphan')?.failure_reason).toBe('process_dead')
+
+      // ...AND the report sink actually FIRED for the orphan, with the mapped
+      // fields (agent kind, terminal `crashed` status, failure_reason).
+      expect(reportLine).toBeDefined()
+      expect(reportLine).toContain('crashed') // mapped terminal status
+      expect(reportLine).toContain('atlas') // mapped agent kind (a non-skipped kind)
+      expect(reportLine).toContain('process_dead') // failure_reason surfaced
+
+      for (const cleanup of composition.realmode_cleanups ?? []) {
+        try {
+          cleanup()
+        } catch {
+          /* best-effort */
+        }
+      }
+    } finally {
+      console.log = realLog
     }
   }, 20_000)
 })

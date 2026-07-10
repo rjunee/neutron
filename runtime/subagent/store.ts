@@ -3,7 +3,7 @@
  *
  * The S4 promise from `registry.ts`: "wires it to a SQLite-backed table so the
  * lifecycle watchdog can survive a gateway restart and reap orphaned children."
- * This is that table's typed wrapper (migration 0099 `code_subagent_registry`).
+ * This is that table's typed wrapper (migration 0100 `code_subagent_registry`).
  *
  * Shape mirrors `trident/store.ts`: a thin typed wrapper over `ProjectDb`.
  * Writes route through the ASYNC, mutex-serialized `ProjectDb.run` /

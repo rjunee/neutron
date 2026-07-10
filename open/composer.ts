@@ -539,7 +539,7 @@ export function buildOpenGraphComposer(
       )
     }
     // S4 (plan §P7 / D-6) — the registry's durable mirror (`code_subagent_registry`,
-    // migration 0099). Wiring it as the registry's write-through persistence makes
+    // migration 0100). Wiring it as the registry's write-through persistence makes
     // a dispatched sub-agent SURVIVE a gateway restart, so the boot reap below can
     // surface an in-flight dispatch a prior process left behind instead of
     // silently orphaning it. Persists the REGISTRY only — never the Trident
