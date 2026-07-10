@@ -121,19 +121,41 @@ describe('bundled Core manifest conformance (X3 — one schema)', () => {
   })
 
   describe('compat.coreApi semver validation preserved from the deleted hand validator', () => {
-    test('valid semver ranges parse green (positive boundaries)', () => {
-      for (const coreApi of ['^0.1.0', '^1.0.0', '1.2.3', '>=1.0.0 <2.0.0', '^1.0.0 || ^2.0.0', '*']) {
-        expect(isValidSemverRange(coreApi)).toBe(true)
+    test('valid semver ranges parse green (positive boundaries — every parser branch)', () => {
+      const valid = [
+        '^0.1.0',
+        '^1.0.0',
+        '1.2.3',
+        '>=1.2.3-rc.1', // prerelease
+        '>=1.0.0 <2.0.0', // space-joined intersection
+        '>= 1.0.0 <2.0.0', // comparator-then-whitespace branch (npm tolerates)
+        '^1.0.0 || ^2.0.0', // union
+        '*', // bare wildcard
+        '* || ^1.0.0', // wildcard clause leading a union
+        '^1.0.0 || *', // wildcard clause trailing a union
+      ]
+      for (const coreApi of valid) {
+        expect(isValidSemverRange(coreApi), `expected VALID: ${coreApi}`).toBe(true)
         const m = { ...baseManifest(), compat: { coreApi } }
-        expect(NeutronManifestSchema.safeParse(m).success).toBe(true)
+        expect(NeutronManifestSchema.safeParse(m).success, `expected VALID: ${coreApi}`).toBe(true)
       }
     })
 
     test('malformed compat.coreApi is REJECTED (single schema is not looser than the deleted validator)', () => {
-      for (const coreApi of ['not-a-version', 'v1', '1.2.3.4.5', '>>1.0.0', '']) {
-        expect(isValidSemverRange(coreApi)).toBe(false)
+      const invalid = [
+        'not-a-version',
+        'v1',
+        '1.2.3.4.5', // too many version segments
+        '>>1.0.0',
+        '> =1.0.0', // split comparator — stays split, per-term regex rejects
+        '^1.0.0 ||', // empty union clause
+        '^1.0.0 || || ^2.0.0', // empty middle clause
+        '', // empty string
+      ]
+      for (const coreApi of invalid) {
+        expect(isValidSemverRange(coreApi), `expected INVALID: ${coreApi}`).toBe(false)
         const m = { ...baseManifest(), compat: { coreApi } }
-        expect(NeutronManifestSchema.safeParse(m).success).toBe(false)
+        expect(NeutronManifestSchema.safeParse(m).success, `expected INVALID: ${coreApi}`).toBe(false)
       }
     })
 
