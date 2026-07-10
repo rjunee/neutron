@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { MAX_SPAWN_DEPTH, SubagentRegistry } from './registry.ts'
+import { MAX_SPAWN_DEPTH, SubagentRegistry, type SubagentPersistence } from './registry.ts'
 import { spawnSubagent } from './spawn.ts'
 
 /**
@@ -25,6 +25,17 @@ function makeIds(prefix: string): () => string {
   return () => `${prefix}-${n++}`
 }
 
+/** A persistence sink whose writes ACTUALLY await (a microtask) — so the
+ *  create→persist window that a durable store introduces is exercised. */
+const asyncPersistence: SubagentPersistence = {
+  persist: async () => {
+    await Promise.resolve()
+  },
+  remove: async () => {
+    await Promise.resolve()
+  },
+}
+
 describe('double-spawn guard', () => {
   test('coalesce (default): a duplicate in-flight spawn returns the SAME record, no second run', async () => {
     const registry = new SubagentRegistry()
@@ -47,6 +58,31 @@ describe('double-spawn guard', () => {
     // Exactly ONE record exists for the logical task.
     expect(registry.snapshot()).toHaveLength(1)
     expect(registry.live()).toHaveLength(1)
+  })
+
+  test('CONCURRENT same-key spawns coalesce to ONE live row even with async persistence', async () => {
+    // Regression (Codex round-5): making `create` async must NOT open a window
+    // between the guard's `liveByKey` read and the record becoming visible. With
+    // a persistence sink that awaits, two `Promise.all` same-key spawns must
+    // still resolve to a single live row (the loser coalesces onto the winner) —
+    // a naive persist-then-insert would let both miss the guard and mint two runs.
+    const registry = new SubagentRegistry(asyncPersistence)
+    const key = 'instance-a:task-99:forge'
+    const ids = makeIds('cc')
+    const [a, b] = await Promise.all([
+      spawnSubagent(
+        { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+        { registry, verify_delegation: verify, mint_run_id: ids },
+      ),
+      spawnSubagent(
+        { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+        { registry, verify_delegation: verify, mint_run_id: ids },
+      ),
+    ])
+    // Exactly ONE record for the logical task; both callers hold the same run.
+    expect(registry.snapshot()).toHaveLength(1)
+    expect(registry.live()).toHaveLength(1)
+    expect(a.run_id).toBe(b.run_id)
   })
 
   test('refuse: on_duplicate=refuse throws instead of coalescing', async () => {

@@ -117,12 +117,24 @@ export class SubagentRegistry {
     if (input.delivery_target !== undefined) rec.delivery_target = input.delivery_target
     if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
     if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
-    // Persist FIRST: if the durable write rejects, the in-memory map is left
-    // untouched so the two never diverge (the caller gets the exception and the
-    // record does not exist in either). A duplicate run_id was already rejected
-    // above, so this never fights an in-memory dup.
-    if (this.persistence !== undefined) await this.persistence.persist(rec)
+    // RESERVE the in-memory slot SYNCHRONOUSLY — before the (async) persist —
+    // so the record is immediately visible to `liveByKey`. The double-spawn
+    // guard (`spawn.ts`) depends on there being NO `await` between its
+    // `liveByKey` read and this record becoming visible: a synchronous reserve
+    // keeps check-then-create atomic against a concurrent same-`spawn_key`
+    // dispatch (the durable persist runs entirely AFTER the reservation, so it
+    // can never open a window for a duplicate to slip through). If the durable
+    // write then REJECTS, roll the reservation back so the net effect is no
+    // in-memory mutation — memory never diverges from the store on failure.
     this.byId.set(input.run_id, rec)
+    if (this.persistence !== undefined) {
+      try {
+        await this.persistence.persist(rec)
+      } catch (err) {
+        this.byId.delete(input.run_id)
+        throw err
+      }
+    }
     return rec
   }
 
