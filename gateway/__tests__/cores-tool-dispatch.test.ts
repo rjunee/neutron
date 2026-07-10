@@ -25,11 +25,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { McpServer } from '@neutronai/mcp/server.ts'
-import {
-  registerSystemEventSink,
-  type SystemEventInput,
-  type SystemEventSink,
-} from '@neutronai/persistence/index.ts'
+import { registerSystemEventSink, SystemEventsStore } from '@neutronai/persistence/index.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoreBackendFactoryMap } from '../cores/install-bundled.ts'
 
@@ -196,28 +192,28 @@ describe('cores tool dispatch — end-to-end', () => {
     // NO backend factory wired here, so its manifest tools register as throwing
     // stubs — they must STILL be attributed to their Core, not defaulted to
     // platform. Proves both modified install-bundled sites stamp provenance.
-    const scrape = bench.tools.get('scrape_x')?.provenance
+    const scrapeReg = bench.tools.get('scrape_x')
+    expect(scrapeReg).toBeDefined()
+    const scrape = scrapeReg?.provenance
     expect(scrape?.kind).toBe('core')
-    if (scrape?.kind === 'core') {
+    if (scrape?.kind === 'core' && scrapeReg !== undefined) {
       expect(scrape.slug).toBe('scraping_core')
-      expect(Array.isArray(scrape.declared_capabilities)).toBe(true)
+      // Mirror the wired path: the stub tool's OWN capability must be within the
+      // Core's declared grant, so the dispatch-time gate journals `allow` — an
+      // empty/unrelated array would spuriously journal `denied-capability`.
+      expect(scrape.declared_capabilities).toContain(scrapeReg.capability_required)
     }
   })
 
-  test('X1 — McpServer.dispatch journals a verdict to system_events WITHOUT writing secret_audit_log', () => {
-    // Fresh migrated DB (bench) → the `secret_audit_log` table exists. Register a
-    // plain PLATFORM tool (default provenance) whose handler does NOT touch the
-    // secret audit, dispatch it through McpServer, and prove the X1 verdict lands
-    // in system_events while secret_audit_log is byte-for-byte unchanged (X1 is a
+  test('X1 — dispatch PERSISTS a capability_verdict row to system_events WITHOUT writing secret_audit_log', async () => {
+    // Fresh migrated DB (bench) → both `system_events` and `secret_audit_log` exist.
+    // Register the REAL SystemEventsStore (O4) on the ambient sink — so this exercises
+    // the true path: McpServer.dispatch → emitSystemEvent → ambient registry →
+    // SystemEventsStore.record → SQLite INSERT — not an in-memory fake. Then assert
+    // the persisted row's fields, and that secret_audit_log gained ZERO rows (X1 is a
     // NEW event stream, not the Core-internal secret audit).
-    const captured: SystemEventInput[] = []
-    const sink: SystemEventSink = {
-      record: (input) => {
-        captured.push(input)
-        return { id: `evt-${captured.length}` }
-      },
-    }
-    registerSystemEventSink(sink)
+    const store = new SystemEventsStore({ db: bench.db })
+    registerSystemEventSink(store)
     cleanups.push(() => registerSystemEventSink(null))
 
     bench.tools.register({
@@ -238,15 +234,40 @@ describe('cores tool dispatch — end-to-end', () => {
         .get()?.n ?? 0
 
     const before = countAudit()
-    return server
-      .dispatch({ tool_name: 'noop_platform_tool', args: {}, call_id: 'c1' })
-      .then((result) => {
-        expect(result).toEqual({ ok: true })
-        // The X1 verdict was journaled to system_events…
-        expect(captured.filter((e) => e.event === 'capability_verdict').length).toBe(1)
-        // …and secret_audit_log gained ZERO rows.
-        expect(countAudit()).toBe(before)
-      })
+    const result = await server.dispatch({
+      tool_name: 'noop_platform_tool',
+      args: {},
+      call_id: 'c1',
+    })
+    expect(result).toEqual({ ok: true })
+    // Flush the fire-and-forget emit into SQLite before reading it back.
+    await store.drain()
+
+    // The verdict is a PERSISTED system_events row with the right primitive columns…
+    const rows = bench.db
+      .raw()
+      .query<
+        { event_name: string; project_slug: string | null; level: string; payload_json: string },
+        []
+      >(
+        `SELECT event_name, project_slug, level, payload_json FROM system_events
+          WHERE event_name = 'capability_verdict'`,
+      )
+      .all()
+    expect(rows.length).toBe(1)
+    const row = rows[0]!
+    expect(row.project_slug).toBe(OWNER)
+    expect(row.level).toBe('info')
+    const payload = JSON.parse(row.payload_json) as Record<string, unknown>
+    expect(payload['tool_name']).toBe('noop_platform_tool')
+    expect(payload['verdict']).toBe('allow')
+    expect(payload['capability']).toBe('read:project_data')
+    expect(payload['approval_policy']).toBe('auto')
+    expect(payload['enforcement']).toBe('log-only')
+    expect(payload['provenance']).toEqual({ kind: 'platform' })
+
+    // …and secret_audit_log gained ZERO rows.
+    expect(countAudit()).toBe(before)
   })
 
   test('unknown tool name returns undefined from the registry', async () => {
