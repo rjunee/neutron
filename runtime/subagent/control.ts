@@ -46,7 +46,7 @@ export async function cancelRun(
       // Cancellers are best-effort. If they throw, we still mark cancelled.
     }
   }
-  state.registry.update(run_id, { status: 'cancelled', ended_at: Date.now() })
+  await state.registry.update(run_id, { status: 'cancelled', ended_at: Date.now() })
   state.cancellers.delete(run_id)
 }
 
@@ -100,7 +100,7 @@ export async function failRun(
       return false
     }
   }
-  state.registry.update(run_id, {
+  await state.registry.update(run_id, {
     status: 'crashed',
     ended_at: now,
     failure_reason: reason,

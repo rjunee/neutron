@@ -348,7 +348,7 @@ export class DispatchService {
     }
 
     // Fresh run → flip to running + launch the substrate turn in the background.
-    const running = this.deps.registry.update(record.run_id, { status: 'running' })
+    const running = await this.deps.registry.update(record.run_id, { status: 'running' })
     const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
     this.inflight.set(record.run_id, handle)
     return handle
@@ -461,7 +461,7 @@ export class DispatchService {
         ended_at: this.now(),
       }
       if (turn.status === 'timed_out') patch.failure_reason = 'stuck'
-      const updated = this.deps.registry.update(run_id, patch)
+      const updated = await this.deps.registry.update(run_id, patch)
       this.deps.control.cancellers.delete(run_id)
       return this.report(updated, kind, agent_kind, turn.result, delivery_target, board_item_id, board_scope)
     })()

@@ -73,15 +73,18 @@ export interface CreateRecordInput {
  * them (`store.ts` / `boot-sweep.ts`). Absent → the registry is pure in-memory,
  * byte-identical to its S3 behaviour (every existing hermetic test path).
  *
- * Sync by design — the registry's `create`/`update`/`delete` are synchronous
- * (the spawn/watchdog/control call graph is sync), so the sink must be too
- * (wired in production to `SubagentRegistryStore` over `ProjectDb.runSync`).
+ * ASYNC by design — the durable write must go through the mutex-serialized
+ * `ProjectDb.run`/`transaction` (not `runSync`), or a write could be absorbed
+ * into a foreign open transaction and lost on its rollback (`store.ts` header).
+ * So the sink is async, and `create`/`update`/`delete` `await` it BEFORE
+ * mutating the in-memory map (persist-first). The spawn/watchdog/control call
+ * graph is already async, so this adds no new async surface at the call sites.
  */
 export interface SubagentPersistence {
   /** Insert-or-replace the latest snapshot of a record. */
-  persist(rec: SubagentRecord): void
+  persist(rec: SubagentRecord): void | Promise<void>
   /** Remove a record (lifecycle prune). */
-  remove(run_id: string): void
+  remove(run_id: string): void | Promise<void>
 }
 
 /**
@@ -95,7 +98,7 @@ export class SubagentRegistry {
 
   constructor(private readonly persistence?: SubagentPersistence) {}
 
-  create(input: CreateRecordInput): SubagentRecord {
+  async create(input: CreateRecordInput): Promise<SubagentRecord> {
     if (this.byId.has(input.run_id)) {
       throw new Error(`subagent registry: duplicate run_id ${JSON.stringify(input.run_id)}`)
     }
@@ -114,11 +117,11 @@ export class SubagentRegistry {
     if (input.delivery_target !== undefined) rec.delivery_target = input.delivery_target
     if (input.delegation_claims !== undefined) rec.delegation_claims = input.delegation_claims
     if (input.spawn_key !== undefined) rec.spawn_key = input.spawn_key
-    // Persist FIRST: if the durable write throws, the in-memory map is left
+    // Persist FIRST: if the durable write rejects, the in-memory map is left
     // untouched so the two never diverge (the caller gets the exception and the
     // record does not exist in either). A duplicate run_id was already rejected
     // above, so this never fights an in-memory dup.
-    this.persistence?.persist(rec)
+    if (this.persistence !== undefined) await this.persistence.persist(rec)
     this.byId.set(input.run_id, rec)
     return rec
   }
@@ -127,7 +130,10 @@ export class SubagentRegistry {
    * Patch an existing record. Returns the new record. Throws if `run_id` is
    * unknown — callers should always have called `create` first.
    */
-  update(run_id: string, patch: Partial<Omit<SubagentRecord, 'run_id'>>): SubagentRecord {
+  async update(
+    run_id: string,
+    patch: Partial<Omit<SubagentRecord, 'run_id'>>,
+  ): Promise<SubagentRecord> {
     const cur = this.byId.get(run_id)
     if (!cur) throw new Error(`subagent registry: unknown run_id ${JSON.stringify(run_id)}`)
     // If the caller explicitly sets last_event_at in the patch, honor it
@@ -135,9 +141,9 @@ export class SubagentRegistry {
     // it to a past timestamp). Otherwise default to now().
     const last_event_at = patch.last_event_at ?? Date.now()
     const next: SubagentRecord = { ...cur, ...patch, last_event_at }
-    // Persist FIRST: a durable-write throw leaves the in-memory record on its
+    // Persist FIRST: a durable-write rejection leaves the in-memory record on its
     // prior value rather than exposing an unpersisted new state.
-    this.persistence?.persist(next)
+    if (this.persistence !== undefined) await this.persistence.persist(next)
     this.byId.set(run_id, next)
     return next
   }
@@ -190,10 +196,10 @@ export class SubagentRegistry {
     )
   }
 
-  delete(run_id: string): void {
-    // Remove FIRST: if the durable delete throws, the record stays in BOTH the
+  async delete(run_id: string): Promise<void> {
+    // Remove FIRST: if the durable delete rejects, the record stays in BOTH the
     // store and the in-memory map (still in sync) rather than only the store.
-    this.persistence?.remove(run_id)
+    if (this.persistence !== undefined) await this.persistence.remove(run_id)
     this.byId.delete(run_id)
   }
 

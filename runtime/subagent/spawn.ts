@@ -206,7 +206,7 @@ export async function spawnSubagent(
   if (input.delivery_target !== undefined) createInput.delivery_target = input.delivery_target
   if (claims !== undefined) createInput.delegation_claims = claims
   if (input.spawn_key !== undefined) createInput.spawn_key = input.spawn_key
-  return deps.registry.create(createInput)
+  return await deps.registry.create(createInput)
 }
 
 function defaultMintRunId(): string {

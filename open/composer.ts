@@ -543,7 +543,10 @@ export function buildOpenGraphComposer(
     // a dispatched sub-agent SURVIVE a gateway restart, so the boot reap below can
     // surface an in-flight dispatch a prior process left behind instead of
     // silently orphaning it. Persists the REGISTRY only — never the Trident
-    // orchestrator's volatile `fired`/`redispatched` orphan-detection sets.
+    // orchestrator's volatile `fired`/`redispatched` orphan-detection sets. Writes
+    // route through the mutex-serialized async `ProjectDb.run`/`transaction` (see
+    // `store.ts`), so a registry write is never absorbed into — nor rolled back
+    // by — another store's in-flight transaction on this same shared connection.
     const subagentRegistryStore = new SubagentRegistryStore(db)
     const dispatchService = ((): DispatchService | null => {
       if (llmPool === null) return null

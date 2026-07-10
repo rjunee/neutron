@@ -65,7 +65,8 @@ export async function runLifecycleTick(deps: LifecycleDeps): Promise<number> {
 
   // (2) Cleanup-after pruning of already-terminal records.
   for (const rec of deps.registry.pruneCandidates(now)) {
-    deps.registry.delete(rec.run_id)
+    // eslint-disable-next-line no-await-in-loop
+    await deps.registry.delete(rec.run_id)
     affected++
   }
 

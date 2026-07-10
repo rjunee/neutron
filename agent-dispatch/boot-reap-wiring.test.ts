@@ -44,8 +44,8 @@ const productionBootReport = buildBootSweepReport
 test('a REJECTING DispatchReporter through the real adapter still durably claims the orphan crashed', async () => {
   const store = new SubagentRegistryStore(db)
   const reg = new SubagentRegistry(store)
-  reg.create({ run_id: 'orphan-atlas', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
-  reg.update('orphan-atlas', { status: 'running' })
+  await reg.create({ run_id: 'orphan-atlas', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+  await reg.update('orphan-atlas', { status: 'running' })
 
   let attempts = 0
   const rejecting = (): Promise<void> => {
@@ -70,8 +70,8 @@ test('a REJECTING DispatchReporter through the real adapter still durably claims
 test('a working DispatchReporter receives a crashed report for the orphan', async () => {
   const store = new SubagentRegistryStore(db)
   const reg = new SubagentRegistry(store)
-  reg.create({ run_id: 'orphan-sentinel', instance_key: 'owner', agent_kind: 'sentinel', spawn_depth: 0 })
-  reg.update('orphan-sentinel', { status: 'running' })
+  await reg.create({ run_id: 'orphan-sentinel', instance_key: 'owner', agent_kind: 'sentinel', spawn_depth: 0 })
+  await reg.update('orphan-sentinel', { status: 'running' })
 
   const reports: DispatchReport[] = []
   await sweepOrphanedDispatchesOnBoot({
@@ -91,8 +91,8 @@ test('a working DispatchReporter receives a crashed report for the orphan', asyn
 test('a forge orphan is claimed crashed but the adapter skips the report (Trident owns it)', async () => {
   const store = new SubagentRegistryStore(db)
   const reg = new SubagentRegistry(store)
-  reg.create({ run_id: 'orphan-forge', instance_key: 'owner', agent_kind: 'forge', spawn_depth: 0 })
-  reg.update('orphan-forge', { status: 'running' })
+  await reg.create({ run_id: 'orphan-forge', instance_key: 'owner', agent_kind: 'forge', spawn_depth: 0 })
+  await reg.update('orphan-forge', { status: 'running' })
 
   const reports: DispatchReport[] = []
   const swept = await sweepOrphanedDispatchesOnBoot({

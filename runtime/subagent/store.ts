@@ -5,12 +5,19 @@
  * lifecycle watchdog can survive a gateway restart and reap orphaned children."
  * This is that table's typed wrapper (migration 0099 `code_subagent_registry`).
  *
- * Shape mirrors `trident/store.ts`: a thin typed wrapper over `ProjectDb`. One
- * difference — the registry mutates SYNCHRONOUSLY (`SubagentRegistry.create` /
- * `update` / `delete` are sync so the spawn/watchdog/control call graph stays
- * sync), so writes here route through `ProjectDb.runSync` rather than the async
- * `run`. That keeps the registry a pure in-memory structure with an optional
- * write-through mirror, no async ripple through its callers.
+ * Shape mirrors `trident/store.ts`: a thin typed wrapper over `ProjectDb`.
+ * Writes route through the ASYNC, mutex-serialized `ProjectDb.run` /
+ * `transaction` (NOT the synchronous `runSync`). This is a correctness
+ * requirement, not a style choice: a `runSync` issued while another store has a
+ * `transaction()` open on the same connection is absorbed into that transaction
+ * and LOST on its rollback (pinned `persistence/db-api.test.ts` "runSync bypass
+ * hazard"). The async `run` instead QUEUES on the per-instance mutex, so a
+ * registry write always executes as its OWN statement AFTER any in-flight
+ * transaction has committed or rolled back — never captured by it, and its
+ * yielding busy-retry never stalls the event loop. Because these writes are
+ * async, the registry's `SubagentPersistence` sink — and thus `create`/`update`/
+ * `delete` — are async and `await` durability BEFORE mutating the in-memory map
+ * (persist-first: a durable-write failure never leaves memory diverged).
  *
  * The store is a faithful PROJECTION of the in-memory `SubagentRecord`: every
  * field round-trips (epoch-ms timestamps stay INTEGER, the two small structured
@@ -73,11 +80,11 @@ export class SubagentRegistryStore implements SubagentPersistence {
   /**
    * Insert-or-replace the row for `rec` (`SubagentPersistence.persist`). Called
    * by `SubagentRegistry` on every `create` and `update`, so the persisted row
-   * is always the latest snapshot. Synchronous (`runSync`) — the registry write
-   * path is sync.
+   * is always the latest snapshot. Async, mutex-serialized (`db.run`) so the
+   * write is never absorbed into a foreign open transaction.
    */
-  persist(rec: SubagentRecord): void {
-    this.db.runSync(
+  async persist(rec: SubagentRecord): Promise<void> {
+    await this.db.run(
       `INSERT INTO code_subagent_registry (${COLS})
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(run_id) DO UPDATE SET
@@ -121,9 +128,9 @@ export class SubagentRegistryStore implements SubagentPersistence {
     )
   }
 
-  /** Delete a row by run id (the lifecycle prune path). */
-  remove(run_id: string): void {
-    this.db.runSync(`DELETE FROM code_subagent_registry WHERE run_id = ?`, [run_id])
+  /** Delete a row by run id (the lifecycle prune path). Async, mutex-serialized. */
+  async remove(run_id: string): Promise<void> {
+    await this.db.run(`DELETE FROM code_subagent_registry WHERE run_id = ?`, [run_id])
   }
 
   /** Read a single row, or null. */
@@ -161,18 +168,36 @@ export class SubagentRegistryStore implements SubagentPersistence {
    * Drive a row terminal-`crashed` in the store (boot sweep). Sets `ended_at`
    * and the `failure_reason`, and — critically — guards on the row still being
    * LIVE (`WHERE status IN (pending, running)`) so the transition is idempotent:
-   * a re-run over an already-crashed row is a no-op (0 changes), which is how the
-   * sweep guarantees it fires the report sink EXACTLY ONCE per orphan across
-   * repeated boots. Returns true iff this call performed the transition.
+   * a re-run over an already-crashed row is a no-op, which is how the sweep
+   * guarantees it fires the report sink EXACTLY ONCE per orphan across repeated
+   * boots. Returns true iff this call performed the transition.
+   *
+   * Runs the guard-read + UPDATE in ONE `db.transaction` so the claim is atomic
+   * AND mutex-serialized: overlapping sweeps can't both observe the row live, and
+   * the write is never absorbed into a foreign transaction. `changes()` reports
+   * whether the guarded UPDATE actually hit a row.
    */
-  markCrashed(run_id: string, reason: 'process_dead' | 'stuck', ended_at: number): boolean {
-    const res = this.db.runSync(
-      `UPDATE code_subagent_registry
-          SET status = 'crashed', failure_reason = ?, ended_at = ?, last_event_at = ?
-        WHERE run_id = ? AND status IN ${LIVE_STATUS_SQL}`,
-      [reason, ended_at, ended_at, run_id],
-    )
-    return res.changes > 0
+  async markCrashed(
+    run_id: string,
+    reason: 'process_dead' | 'stuck',
+    ended_at: number,
+  ): Promise<boolean> {
+    return this.db.transaction((tx) => {
+      const before = tx.get<{ status: SubagentStatus }, [string]>(
+        `SELECT status FROM code_subagent_registry WHERE run_id = ?`,
+        [run_id],
+      )
+      if (before === null || (before.status !== 'pending' && before.status !== 'running')) {
+        return false
+      }
+      tx.runSync(
+        `UPDATE code_subagent_registry
+            SET status = 'crashed', failure_reason = ?, ended_at = ?, last_event_at = ?
+          WHERE run_id = ? AND status IN ${LIVE_STATUS_SQL}`,
+        [reason, ended_at, ended_at, run_id],
+      )
+      return true
+    })
   }
 }
 

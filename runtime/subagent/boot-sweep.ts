@@ -9,13 +9,14 @@
  *
  * This sweep SURFACES each orphan instead of vanishing it, per the P7 spec
  * ("mark rows left by a prior process as `crashed`, and fire the report sink"):
- *   1. CLAIM the row — an ATOMIC guarded `live → crashed` transition
- *      (`markCrashed`, `WHERE status IN (pending,running)`). This durable row is
- *      the surfacing that never vanishes: it is persisted, queryable
- *      (`store.get`/`loadAll`), and returned from this sweep. The claim is also
- *      the concurrency + idempotency point — of any number of overlapping sweeps
- *      (or repeated boots), EXACTLY ONE wins each row's transition, so an orphan
- *      is claimed and reported once, never twice, and never after it is terminal.
+ *   1. CLAIM the row — an ATOMIC, mutex-serialized `live → crashed` transition
+ *      (`markCrashed`, a `db.transaction` guard-reading `status IN
+ *      (pending,running)`). This durable row is the surfacing that never
+ *      vanishes: it is persisted, queryable (`store.get`/`loadAll`), and returned
+ *      from this sweep. The claim is also the concurrency + idempotency point —
+ *      of any number of overlapping sweeps (or repeated boots), EXACTLY ONE wins
+ *      each row's transition, so an orphan is claimed and reported once, never
+ *      twice, and never after it is terminal.
  *   2. FIRE THE REPORT SINK for the claimed row — the SAME report-back surface a
  *      clean completion uses — as a best-effort NOTIFICATION on top of the
  *      durable row. Only the claim winner reports.
@@ -75,14 +76,15 @@ export async function sweepOrphanedDispatchesOnBoot(
   const surfaced: SubagentRecord[] = []
 
   for (const rec of deps.store.loadLive()) {
-    // ATOMIC CLAIM first — the single guarded `live → crashed` UPDATE. Its truthy
-    // result means THIS sweep won the transition; a concurrent sweep or a later
-    // boot that also loaded this row loses the guard (0 changes) and skips, so
-    // the orphan is claimed + reported EXACTLY ONCE and never re-fired once
-    // terminal. Claiming before the report is what closes the double-report race:
-    // the `markCrashed` runs synchronously before any `await`, so an overlapping
-    // sweep sees the row already terminal by the time it re-reads `loadLive()`.
-    const claimed = deps.store.markCrashed(rec.run_id, 'process_dead', now)
+    // ATOMIC CLAIM first — a mutex-serialized `db.transaction` that guard-reads
+    // the status and transitions `live → crashed` in one atomic step. Its truthy
+    // result means THIS sweep won the transition; a concurrent sweep (its claim
+    // transaction serializes after) reads `crashed` and loses (returns false), as
+    // does a later boot — so the orphan is claimed + reported EXACTLY ONCE and
+    // never re-fired once terminal. Claiming before the report is what closes the
+    // double-report race.
+    // eslint-disable-next-line no-await-in-loop
+    const claimed = await deps.store.markCrashed(rec.run_id, 'process_dead', now)
     if (!claimed) continue
 
     const crashed: SubagentRecord = {
