@@ -120,6 +120,33 @@ describe('AdminClient.getDiagnostics', () => {
     await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
   });
 
+  it('a 200 diagnostics MISSING a required section (only project_slug/generated_at) maps to a typed error', async () => {
+    // This is exactly the payload the pane would crash on at `data.gbrain.available`.
+    const stub = makeFetchStub(() => ({
+      status: 200,
+      body: { ok: true, diagnostics: { generated_at: 1, project_slug: 'demo' } },
+    }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
+  });
+
+  it('a 200 diagnostics with a section of the WRONG TYPE maps to a typed error', async () => {
+    const report = { ...sampleReport(), gbrain: 'not-an-object' } as unknown;
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true, diagnostics: report } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
+  });
+
+  it('a 200 diagnostics with a section missing `available` maps to a typed error', async () => {
+    const report = { ...sampleReport(), credentials: { note: 'x' } } as unknown;
+    const stub = makeFetchStub(() => ({ status: 200, body: { ok: true, diagnostics: report } }));
+    globalThis.fetch = stub.fetch;
+    const client = new AdminClient({ base_url: 'https://gw', token: 'tok' });
+    await expect(client.getDiagnostics()).rejects.toMatchObject({ code: 'malformed_response' });
+  });
+
   it('a malformed/empty error body still yields a typed error (no throw-through)', async () => {
     const stub = makeFetchStub(() => ({ status: 500, body: null, noJson: true }));
     globalThis.fetch = stub.fetch;

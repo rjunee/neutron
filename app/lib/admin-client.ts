@@ -184,6 +184,37 @@ export interface DiagnosticsReport {
   };
 }
 
+/** The sections the Diagnostics pane dereferences — each must be an object
+ *  carrying a boolean `available`. */
+const DIAGNOSTICS_SECTIONS = [
+  'gbrain',
+  'credentials',
+  'repl_sessions',
+  'cron_jobs',
+  'import_jobs',
+  'recent_events',
+] as const;
+
+/**
+ * Runtime-validate a diagnostics payload into a `DiagnosticsReport`, or `null`
+ * when it is missing / partial / wrong-shaped. Checks the scalar header
+ * (`generated_at`, `project_slug`) AND every required section's boolean
+ * `available` — exactly what the pane dereferences — so a partial object can
+ * never slip through and crash the UI.
+ */
+export function validateDiagnosticsReport(raw: unknown): DiagnosticsReport | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.generated_at !== 'number') return null;
+  if (typeof r.project_slug !== 'string') return null;
+  for (const key of DIAGNOSTICS_SECTIONS) {
+    const section = r[key];
+    if (section === null || typeof section !== 'object') return null;
+    if (typeof (section as Record<string, unknown>).available !== 'boolean') return null;
+  }
+  return raw as DiagnosticsReport;
+}
+
 export interface AdminClientOptions {
   base_url: string;
   token: string;
@@ -248,21 +279,22 @@ export class AdminClient {
    * broken?" from the admin tab. Owner-gated; no writes.
    */
   async getDiagnostics(): Promise<DiagnosticsReport> {
-    const res = await this.req<{ ok: boolean; diagnostics?: DiagnosticsReport }>(
+    const res = await this.req<{ ok: boolean; diagnostics?: unknown }>(
       '/api/app/admin/diagnostics',
     );
-    // Validate the success envelope — a 200 `{ ok: true }` with a missing /
-    // wrong-shaped `diagnostics` must map to a typed error, not resolve to
-    // `undefined` and crash the pane on `report.project_slug`.
-    const d = res.diagnostics;
-    if (d === null || typeof d !== 'object' || typeof d.project_slug !== 'string') {
+    // Validate the FULL success envelope — the pane dereferences `generated_at`,
+    // `project_slug`, and every section's boolean `available`. A 200 `{ ok:true }`
+    // with a missing/partial/wrong-shaped `diagnostics` must map to a typed
+    // error, not resolve and crash the pane (`TypeError` on `data.gbrain.available`).
+    const report = validateDiagnosticsReport(res.diagnostics);
+    if (report === null) {
       throw new AdminClientError(
         'malformed_response',
         'diagnostics response was missing a valid `diagnostics` payload',
         200,
       );
     }
-    return d;
+    return report;
   }
 
   /** P7.4 Phase 2 — list per-project backups for the Backup sub-tab. */
