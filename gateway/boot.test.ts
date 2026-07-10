@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { boot } from './index.ts'
+import { boot, drainRealmodeCleanups } from './index.ts'
 
 afterEach(() => {
   delete process.env['NOTIFY_SOCKET']
@@ -49,5 +49,65 @@ describe('gateway boot/shutdown', () => {
     } finally {
       rmSync(ownerDir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('drainRealmodeCleanups — §F1 shutdown ordering', () => {
+  test('awaits an async cleanup before resolving, so db.close() waits for it', async () => {
+    let released = false
+    let laterRan = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const cleanups: Array<() => void | Promise<void>> = [
+      async () => {
+        await gate
+        released = true
+      },
+      () => {
+        laterRan = true
+      },
+    ]
+    // Model shutdown()'s exact sequence: await the drain, THEN "close the db".
+    let dbClosed = false
+    const done = drainRealmodeCleanups(cleanups).then(() => {
+      dbClosed = true
+    })
+    await new Promise((r) => setTimeout(r, 15))
+    // db.close() is NOT reached while the async cleanup is still in flight.
+    expect(dbClosed).toBe(false)
+    expect(released).toBe(false)
+    expect(laterRan).toBe(false)
+
+    release()
+    await done
+    expect(released).toBe(true)
+    expect(laterRan).toBe(true)
+    expect(dbClosed).toBe(true)
+  })
+
+  test('a rejecting cleanup does not stop later cleanups or db.close()', async () => {
+    const order: string[] = []
+    const cleanups: Array<() => void | Promise<void>> = [
+      async () => {
+        order.push('a')
+        throw new Error('cleanup boom')
+      },
+      () => {
+        order.push('b')
+      },
+      async () => {
+        order.push('c')
+      },
+    ]
+    let dbClosed = false
+    await drainRealmodeCleanups(cleanups).then(() => {
+      dbClosed = true
+    })
+    // All three ran in order despite the first rejecting, and the drain
+    // resolved (so shutdown proceeds to db.close()).
+    expect(order).toEqual(['a', 'b', 'c'])
+    expect(dbClosed).toBe(true)
   })
 })

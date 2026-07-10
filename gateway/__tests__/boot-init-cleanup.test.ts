@@ -198,4 +198,80 @@ describe('boot init-failure cleanup', () => {
       await handle.shutdown()
     }
   })
+
+  test('§F1 shutdown awaits an async realmode_cleanup before db.close(), and tolerates a rejecting one', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-boot-f1-cleanup-'))
+    cleanups.push(root)
+    process.env['NEUTRON_DB_PATH'] = join(root, 'owner.db')
+    process.env['NEUTRON_INSTANCE_SLUG'] = 'alice'
+    delete process.env['NOTIFY_SOCKET']
+
+    // Record the ORDER of cleanup markers vs db.close() by spying close.
+    const order: string[] = []
+    const original = ProjectDb.prototype.close
+    activeSpy = {
+      calls: 0,
+      restore: () => {
+        ProjectDb.prototype.close = original
+      },
+    }
+    const spy = activeSpy
+    ProjectDb.prototype.close = function patched(this: ProjectDb): void {
+      spy.calls++
+      order.push('db.close')
+      return original.call(this)
+    }
+
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+
+    const handle = await boot({
+      port: 0,
+      composer: ({ db, project_slug }) => ({
+        db,
+        project_slug,
+        topic_handler: async () => {},
+        approval_notifier: { notify: async () => undefined },
+        watchdog_notifier: { notify: async () => undefined },
+        reminder_dispatcher: { dispatch: async () => undefined },
+        heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+        platform: STUB_PLATFORM,
+        realmode_cleanups: [
+          async () => {
+            await gate
+            order.push('async-cleanup')
+          },
+          () => {
+            // A rejecting cleanup must NOT stop later cleanups or db.close().
+            throw new Error('mid-cleanup-boom')
+          },
+          () => {
+            order.push('after-throw')
+          },
+        ],
+      }),
+    })
+
+    let done = false
+    const shutdownP = handle.shutdown().then(() => {
+      done = true
+    })
+    // While the async cleanup is gated, shutdown cannot finish → db.close() not reached.
+    await new Promise((r) => setTimeout(r, 25))
+    expect(done).toBe(false)
+    expect(order).not.toContain('db.close')
+
+    release()
+    // Bound so a regression (db.close before cleanups, or a rejecting cleanup
+    // aborting the drain) surfaces as a failure, not a hang.
+    const timeout = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 2000))
+    const raced = await Promise.race([shutdownP.then(() => 'done' as const), timeout])
+    expect(raced).toBe('done')
+    expect(done).toBe(true)
+    // db.close() ran strictly AFTER the async cleanup finished and after the
+    // later cleanup ran despite the middle one throwing.
+    expect(order).toEqual(['async-cleanup', 'after-throw', 'db.close'])
+  })
 })

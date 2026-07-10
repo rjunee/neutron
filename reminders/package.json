@@ -7,6 +7,7 @@
     "@neutronai/channels": "workspace:*",
     "@neutronai/core-sdk": "workspace:*",
     "@neutronai/cron": "workspace:*",
+    "@neutronai/loop": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/runtime": "workspace:*"

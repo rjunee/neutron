@@ -635,7 +635,9 @@ export function buildOpenGraphComposer(
     // Declared here so the scribe wiring — which is constructed BEFORE
     // `buildLandingStack` (it needs `scribeOnUserTurn`) — can register the
     // `gbrain serve` close hook. Returned on `realmode_cleanups`.
-    const realmodeCleanups: Array<() => void> = []
+    // §F1 — a cleanup may be async (e.g. the upload sweeper's quiescing
+    // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
+    const realmodeCleanups: Array<() => void | Promise<void>> = []
     // Substrate teardown hooks (C3a): registered here — the point at which the
     // substrate wiring's inline cleanups previously ran. None exist today (the
     // array is empty), but the contract stays wired for the C3b-d carves.

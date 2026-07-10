@@ -23,6 +23,8 @@
  * immediately. For Managed (hosted VPS), this concern doesn't apply.
  */
 
+import { SupervisedLoop } from '@neutronai/loop'
+
 import type {
   BackupResult,
   ProjectBackupLogger,
@@ -96,8 +98,19 @@ export class ProjectBackupScheduler {
   private readonly clearTimeoutFn: (handle: NodeJS.Timeout) => void
   private readonly randomFn: () => number
 
-  private interval: NodeJS.Timeout | null = null
+  /** Loop scaffolding — drives the recurring re-check `poll()` at
+   *  `pollIntervalMs` with an immediate boot-backfill tick, plus the quiescing
+   *  stop (§F1). The per-project jitter timers below are the scheduler's OWN
+   *  domain machinery and stay here. */
+  private readonly loop: SupervisedLoop
   private readonly pendingJitterTimers = new Map<string, NodeJS.Timeout>()
+  /** §F1 — jittered snapshots ALREADY launched (their timer fired). `stop()`
+   *  drains these so a shutdown quiesces an in-flight `backupNow()`, not just
+   *  the polling loop + not-yet-fired jitter timers. */
+  private readonly activeFires = new Set<Promise<void>>()
+  /** §F1 — in-flight `poll()` runs (loop-driven AND direct/manual callers), so
+   *  `stop()` quiesces a poll that is mid-`readLastAttemptedAt`/`writeLastAttemptedAt`. */
+  private readonly activePolls = new Set<Promise<void>>()
   private stopped = false
 
   constructor(opts: ProjectBackupSchedulerOptions) {
@@ -121,33 +134,66 @@ export class ProjectBackupScheduler {
     this.clearIntervalFn = opts.clearInterval ?? ((handle): void => clearInterval(handle as unknown as ReturnType<typeof setInterval>))
     this.clearTimeoutFn = opts.clearTimeout ?? ((handle): void => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
     this.randomFn = opts.random ?? Math.random
+    // The SupervisedLoop drives the recurring `poll()` re-check. `immediate:
+    // true` fires the boot-backfill tick the moment `start()` is called (brief
+    // § 3.3), and its quiescing `stop()` awaits an in-flight poll before we
+    // clear the jitter timers. The interval timer seams are threaded through so
+    // tests that inject a fake `setInterval` keep working.
+    this.loop = new SupervisedLoop({
+      name: 'project-backup-scheduler',
+      intervalMs: this.pollIntervalMs,
+      immediate: true,
+      tick: () => this.poll(),
+      setTimer: (fn, ms) => this.setIntervalFn(fn, ms),
+      clearTimer: (handle) => this.clearIntervalFn(handle as NodeJS.Timeout),
+    })
   }
 
   start(): void {
-    if (this.interval !== null) return
     this.stopped = false
-    // Boot-time backfill: fire an immediate poll.
-    void this.poll()
-    this.interval = this.setIntervalFn(() => {
-      void this.poll()
-    }, this.pollIntervalMs)
+    this.loop.start()
   }
 
-  stop(): void {
+  /** Stop + quiesce: mark stopped so an in-flight `poll()` short-circuits,
+   *  await the loop (drains the in-flight poll), cancel any not-yet-fired
+   *  jittered snapshot timers, THEN drain any snapshot that already started so
+   *  shutdown never closes the store out from under an in-flight `backupNow()`. */
+  async stop(): Promise<void> {
     this.stopped = true
-    if (this.interval !== null) {
-      this.clearIntervalFn(this.interval)
-      this.interval = null
+    await this.loop.stop()
+    // Drain in-flight polls (loop-driven OR direct/manual) FIRST: a poll resuming
+    // past a gated store read/write bails on the `stopped` re-checks, but draining
+    // here BEFORE cancelling the jitter timers guarantees any timer a racing poll
+    // still managed to arm is included in the cancellation below (defense-in-depth
+    // against the read/write-boundary window).
+    if (this.activePolls.size > 0) {
+      await Promise.all([...this.activePolls])
     }
     for (const handle of this.pendingJitterTimers.values()) {
       this.clearTimeoutFn(handle)
     }
     this.pendingJitterTimers.clear()
+    // Finally drain any snapshot already firing so the store isn't in use when
+    // the caller closes the DB.
+    if (this.activeFires.size > 0) {
+      await Promise.all([...this.activeFires])
+    }
   }
 
-  /** Single poll — fires backups for projects whose tick interval has
-   *  elapsed. Exposed for tests to drive manually. */
+  /** Single poll — fires backups for projects whose tick interval has elapsed.
+   *  Exposed for tests + manual driving. Every run (loop-driven or direct) is
+   *  registered so `stop()` can quiesce it (§F1). */
   async poll(): Promise<void> {
+    const p = this.pollInner()
+    this.activePolls.add(p)
+    try {
+      await p
+    } finally {
+      this.activePolls.delete(p)
+    }
+  }
+
+  private async pollInner(): Promise<void> {
     if (this.stopped) return
     let projects: string[] = []
     try {
@@ -163,6 +209,10 @@ export class ProjectBackupScheduler {
       // already scheduled them; we don't want to double-arm).
       if (this.pendingJitterTimers.has(project_id)) continue
       const last = await this.store.readLastAttemptedAt(project_id)
+      // §F1 — re-check AFTER the await: if `stop()` fired while we were reading,
+      // bail before writing the attempt sidecar / arming a new jitter timer
+      // (which would outlive the shutdown that already cleared the timer map).
+      if (this.stopped) return
       const elapsed = last === null ? Infinity : now - last
       // Fire when at least `tickIntervalMs` has elapsed since the
       // LAST attempt. `Infinity` for fresh projects always triggers.
@@ -188,6 +238,10 @@ export class ProjectBackupScheduler {
         // project for this round.
         continue
       }
+      // §F1 — re-check AFTER the write await: if `stop()` fired while we were
+      // writing, bail before arming a jitter timer that would outlive the
+      // shutdown that already cleared the timer map.
+      if (this.stopped) return
       this.store.setNextScheduledAt(
         project_id,
         attempted_at + this.tickIntervalMs,
@@ -195,7 +249,12 @@ export class ProjectBackupScheduler {
       const handle = this.setTimeoutFn(() => {
         this.pendingJitterTimers.delete(project_id)
         if (this.stopped) return
-        this.fire(project_id)
+        // Track the in-flight snapshot so `stop()` can drain it. `fire()`
+        // catches its own errors + never rejects, so this never carries a
+        // rejection.
+        const p = this.fire(project_id).then(() => undefined)
+        this.activeFires.add(p)
+        void p.finally(() => this.activeFires.delete(p))
       }, jitter)
       this.pendingJitterTimers.set(project_id, handle)
     }

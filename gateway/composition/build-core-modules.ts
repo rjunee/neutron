@@ -123,7 +123,7 @@ export interface CoreModules {
   mcpModule: GatewayModule<McpServer>
   replToolBridgeModule: GatewayModule<{ wired: boolean }>
   remindersModule: GatewayModule<{ store: ReminderStore; loop: ReminderTickLoop }>
-  tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop }>
+  tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop; drain?: () => Promise<void> }>
   cronModule: GatewayModule<{
     jobs: CronJobRegistry
     handlers: CronHandlerRegistry
@@ -295,8 +295,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       loop.start()
       return { store, loop }
     },
-    shutdown: (instance) => {
-      instance.loop.stop()
+    shutdown: async (instance) => {
+      // §F1 — quiescing stop: awaits the in-flight tick before teardown.
+      await instance.loop.stop()
     },
   }
 
@@ -320,7 +321,7 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
   // live + restart-safe but advances nothing — unchanged Open behaviour.
   // Started here, stopped on shutdown.
   const tridentWiring = input.trident
-  const tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop }> = {
+  const tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop; drain?: () => Promise<void> }> = {
     name: 'trident',
     // Depend on `channels` so the SAME `ChannelRouter` instance the gateway
     // routes inbound events through is the one Trident delivers terminal
@@ -392,6 +393,10 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
           ? {}
           : { on_transition: { onTransition: (run) => runTransitionObserver(run) } }
       let loop: TridentTickLoop
+      // §F1 — the orchestrator's `drain()` (previously destructured away and
+      // never called) settles every in-flight FIRE turn on shutdown. Captured
+      // here and wired into `shutdown` so a clean teardown quiesces trident too.
+      let drain: (() => Promise<void>) | undefined
       if (tridentWiring !== undefined) {
         // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
         // loop is one native CC Dynamic Workflow. The FIRER (`fire_inner_workflow`)
@@ -431,16 +436,21 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome
         }
-        const { step } = buildTridentOrchestrator(orchestratorOpts)
-        loop = new TridentTickLoop({ store, step, on_terminal, ...transitionOpt })
+        const orchestrator = buildTridentOrchestrator(orchestratorOpts)
+        loop = new TridentTickLoop({ store, step: orchestrator.step, on_terminal, ...transitionOpt })
+        drain = orchestrator.drain
       } else {
         loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
       }
       loop.start()
-      return { store, loop }
+      return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
-    shutdown: (instance) => {
-      instance.loop.stop()
+    shutdown: async (instance) => {
+      // §F1 — stop the tick loop FIRST (no new FIRE turns launch), then drain
+      // the orchestrator's in-flight FIRE turns, so a clean shutdown quiesces
+      // trident before `db.close()`. `drain` is only present on the wired path.
+      await instance.loop.stop()
+      if (instance.drain !== undefined) await instance.drain()
     },
   }
 
@@ -470,8 +480,9 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       // The boot shell triggers start() after all modules register handlers.
       return { jobs, handlers, state, scheduler }
     },
-    shutdown: (instance) => {
-      instance.scheduler.stop()
+    shutdown: async (instance) => {
+      // §F1 — quiescing stop: awaits any in-flight cron fire before teardown.
+      await instance.scheduler.stop()
     },
   }
 

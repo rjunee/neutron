@@ -218,11 +218,178 @@ describe('ProjectBackupScheduler', () => {
       random: () => 0.5, // always pick midpoint of the jitter window
     })
     sched.start()
-    sched.stop()
+    await sched.stop()
     // Give any pending jittered timers a chance to fire if they
     // weren't actually cancelled.
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(store.attempts.get('a') ?? 0).toBe(0)
     expect(store.attempts.get('b') ?? 0).toBe(0)
+  })
+
+  it('§F1 stop() quiesces an already-fired in-flight backup', async () => {
+    const now = 1_000_000
+    // Gated store: backupNow blocks until released, so an already-launched
+    // snapshot is held in flight while we call stop().
+    let entered = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const store = new StubStore(() => now)
+    store.backupNow = async (project_id: string): Promise<BackupResult> => {
+      entered = true
+      store.attempts.set(project_id, (store.attempts.get(project_id) ?? 0) + 1)
+      await gate
+      return { ok: true, commit_sha: null, pushed: false, push_error: null, completed_at_ms: now }
+    }
+    let jitterCb: (() => void) | null = null
+    const sched = new ProjectBackupScheduler({
+      store: store as unknown as import('../git/project-backup-store.ts').ProjectBackupStore,
+      tickIntervalMs: 1_000,
+      jitterMaxMs: 0,
+      enumerateProjects: async () => ['a'],
+      now: () => now,
+      random: () => 0,
+      pollIntervalMs: 999_999,
+      setInterval: () => 1 as unknown as NodeJS.Timeout,
+      clearInterval: () => {},
+      // Capture the jitter timer so we can fire the snapshot deterministically.
+      setTimeout: (fn) => {
+        jitterCb = fn as () => void
+        return 2 as unknown as NodeJS.Timeout
+      },
+      clearTimeout: () => {},
+    })
+    sched.start() // immediate poll → schedules the jitter timer (captured)
+    for (let i = 0; i < 50 && jitterCb === null; i++) {
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(jitterCb).not.toBeNull()
+    jitterCb!() // launch the snapshot → backupNow blocks on the gate
+    for (let i = 0; i < 50 && !entered; i++) {
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(entered).toBe(true)
+
+    let stopped = false
+    const stopP = sched.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((r) => setTimeout(r, 15))
+    expect(stopped).toBe(false) // must not resolve while backupNow is in flight
+
+    release()
+    await stopP
+    expect(stopped).toBe(true)
+  })
+
+  it('§F1 stop() quiesces a directly-invoked poll() and blocks a post-stop snapshot', async () => {
+    const now = 1_000_000
+    let entered = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const store = new StubStore(() => now)
+    // Gate the FIRST store read so a manually-driven poll() can be held in flight.
+    store.readLastAttemptedAt = async (project_id: string): Promise<number | null> => {
+      entered = true
+      await gate
+      return store.sidecar.get(project_id) ?? null
+    }
+    let jitterArmed = 0
+    const sched = new ProjectBackupScheduler({
+      store: store as unknown as import('../git/project-backup-store.ts').ProjectBackupStore,
+      tickIntervalMs: 1_000,
+      jitterMaxMs: 0,
+      enumerateProjects: async () => ['a'],
+      now: () => now,
+      random: () => 0,
+      pollIntervalMs: 999_999,
+      setInterval: () => 1 as unknown as NodeJS.Timeout,
+      clearInterval: () => {},
+      setTimeout: () => {
+        jitterArmed++
+        return 2 as unknown as NodeJS.Timeout
+      },
+      clearTimeout: () => {},
+    })
+    // Drive poll() DIRECTLY (manual) — no start(). It blocks on the gated read.
+    const pollP = sched.poll()
+    for (let i = 0; i < 50 && !entered; i++) {
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(entered).toBe(true)
+
+    let stopped = false
+    const stopP = sched.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((r) => setTimeout(r, 15))
+    expect(stopped).toBe(false) // stop() awaits the in-flight direct poll
+
+    release()
+    await stopP
+    await pollP
+    expect(stopped).toBe(true)
+    // The poll saw `stopped` after its gated read and bailed BEFORE writing the
+    // sidecar / arming a jitter timer → no snapshot escapes the shutdown.
+    expect(jitterArmed).toBe(0)
+    expect(store.attempts.get('a') ?? 0).toBe(0)
+  })
+
+  it('§F1 stop() with a poll gated in writeLastAttemptedAt arms no surviving jitter timer', async () => {
+    const now = 1_000_000
+    let entered = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const store = new StubStore(() => now)
+    // Fresh project (read → null → Infinity elapsed) so the poll proceeds to the
+    // WRITE; gate the write so the poll is held in flight PAST the read boundary.
+    store.writeLastAttemptedAt = async (project_id: string, ts_ms: number): Promise<void> => {
+      entered = true
+      await gate
+      store.sidecar.set(project_id, ts_ms)
+    }
+    let jitterArmed = 0
+    const sched = new ProjectBackupScheduler({
+      store: store as unknown as import('../git/project-backup-store.ts').ProjectBackupStore,
+      tickIntervalMs: 1_000,
+      jitterMaxMs: 0,
+      enumerateProjects: async () => ['a'],
+      now: () => now,
+      random: () => 0,
+      pollIntervalMs: 999_999,
+      setInterval: () => 1 as unknown as NodeJS.Timeout,
+      clearInterval: () => {},
+      setTimeout: () => {
+        jitterArmed++
+        return 2 as unknown as NodeJS.Timeout
+      },
+      clearTimeout: () => {},
+    })
+    const pollP = sched.poll()
+    for (let i = 0; i < 50 && !entered; i++) {
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(entered).toBe(true)
+
+    let stopped = false
+    const stopP = sched.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((r) => setTimeout(r, 15))
+    expect(stopped).toBe(false) // stop() awaits the poll blocked in the write
+
+    release()
+    await stopP
+    await pollP
+    expect(stopped).toBe(true)
+    // Post-write `stopped` re-check → the poll bails before arming a jitter timer,
+    // so none survives the shutdown that already cleared the timer map.
+    expect(jitterArmed).toBe(0)
+    expect(store.attempts.get('a') ?? 0).toBe(0)
   })
 })

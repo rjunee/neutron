@@ -25,6 +25,8 @@
 
 import { join } from 'node:path'
 
+import { SupervisedLoop } from '@neutronai/loop'
+
 import type { UploadSessionStore } from './upload-session-store.ts'
 
 /** Default sweeper tick interval — 5 minutes. */
@@ -59,30 +61,50 @@ export interface ChunkedUploadSweeperDeps {
  * the interval.
  */
 export class ChunkedUploadSweeper {
-  private timer: unknown | null = null
   private readonly deps: ChunkedUploadSweeperDeps
   private inflight: Promise<void> | null = null
+  /** Loop scaffolding — single-flight interval, per-tick catch-all, and the
+   *  quiescing `stop()` (§F1). The sweep body + its own re-entrant coalesce
+   *  (below) are unchanged. */
+  private readonly loop: SupervisedLoop
 
   constructor(deps: ChunkedUploadSweeperDeps) {
     this.deps = deps
+    const setTimer = deps.setTimer
+    const clearTimer = deps.clearTimer
+    this.loop = new SupervisedLoop({
+      name: 'chunked-upload-sweeper',
+      intervalMs: deps.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS,
+      // Drive the coalescing `runOnce()` — the loop's single-flight prevents
+      // overlapping loop-driven ticks, and `runOnce`'s own coalesce keeps a
+      // direct caller from double-processing a still-in-flight sweep.
+      tick: () => this.runOnce(),
+      ...(setTimer !== undefined ? { setTimer } : {}),
+      ...(clearTimer !== undefined ? { clearTimer } : {}),
+    })
   }
 
   start(): void {
-    if (this.timer !== null) return
-    const ms = this.deps.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS
-    const set = this.deps.setTimer ?? ((fn, t) => setInterval(fn, t))
-    this.timer = set(() => {
-      // Fire-and-forget — async errors are swallowed inside runOnce so
-      // a single bad tick can't crash the interval.
-      void this.runOnce()
-    }, ms)
+    this.loop.start()
   }
 
-  stop(): void {
-    if (this.timer === null) return
-    const clear = this.deps.clearTimer ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>))
-    clear(this.timer)
-    this.timer = null
+  /** Stop + quiesce: awaits the in-flight sweep so a SIGTERM teardown can run
+   *  after `await stop()` without a half-processed batch. Drains BOTH the
+   *  loop-driven tick (`loop.stop()`) AND any sweep started directly through the
+   *  public `runOnce()` — those coalesce on `this.inflight`, which the loop does
+   *  not track, so a manually-triggered sweep must be awaited here too. */
+  async stop(): Promise<void> {
+    await this.loop.stop()
+    const sweep = this.inflight
+    if (sweep !== null) {
+      // `runOnceInner` swallows its own row-level errors and never rejects; the
+      // catch is defensive so quiesce can't throw.
+      try {
+        await sweep
+      } catch {
+        /* unreachable — the sweep body contains its own errors */
+      }
+    }
   }
 
   /**

@@ -191,6 +191,26 @@ export interface BootOptions {
   config?: BootConfig
 }
 
+/**
+ * §F1 — drain the realmode cleanups on shutdown. Each is AWAITED (they may be
+ * async — e.g. the upload sweeper's quiescing `stop()`) so its in-flight work
+ * finishes BEFORE the caller closes the DB. A cleanup that throws/rejects is
+ * logged and does NOT stop the remaining cleanups from running; the returned
+ * promise always resolves. `shutdown()` calls this, then `db.close()`, so DB
+ * teardown is strictly ordered after every cleanup has settled.
+ */
+export async function drainRealmodeCleanups(
+  cleanups: Array<() => void | Promise<void>>,
+): Promise<void> {
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup()
+    } catch (err) {
+      console.error('realmode cleanup threw during shutdown:', err)
+    }
+  }
+}
+
 export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // C1 — resolve+validate env ONCE. When the caller (an entrypoint) already
   // resolved it, thread theirs so we never re-read process.env divergently.
@@ -209,7 +229,9 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // hooks the production caller wired (e.g. http_handler) without changing
   // the GatewayModuleGraph contract.
   let graph: GatewayModuleGraph | null = null
-  let realmode_cleanups: Array<() => void> = []
+  // §F1 — a cleanup may be async (the upload sweeper's quiescing `stop()`); the
+  // shutdown drain awaits each before `db.close()`.
+  let realmode_cleanups: Array<() => void | Promise<void>> = []
   let composedHttpHandler: HttpHandler | undefined
   // Sprint 18: WebSocket handler exposed by the landing server (chat
   // upgrade path). Bun.serve receives it alongside the fetch handler so a
@@ -474,13 +496,8 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // slug-picker resolver's RW registry + identity DB handles) AFTER
     // module-graph shutdown but BEFORE the main `db.close()` so any
     // in-flight queries on the auxiliary connections finish cleanly.
-    for (const cleanup of realmode_cleanups) {
-      try {
-        cleanup()
-      } catch (err) {
-        console.error('realmode cleanup threw during shutdown:', err)
-      }
-    }
+    // §F1 — drain (await) every cleanup, async ones included, BEFORE db.close().
+    await drainRealmodeCleanups(realmode_cleanups)
     db.close()
   }
 

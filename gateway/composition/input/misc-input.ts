@@ -31,7 +31,7 @@ export interface MiscCompositionInput {
    *
    * Safe to omit; defaults to a no-op.
    */
-  realmode_cleanups?: Array<() => void>
+  realmode_cleanups?: Array<() => void | Promise<void>>
   /**
    * Trident v2 (Work Board Phase 2a exec-model) — drive the foundational
    * Forge→Argus→merge loop live. When `fire_inner_workflow` is supplied, the

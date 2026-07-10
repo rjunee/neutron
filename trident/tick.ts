@@ -20,6 +20,8 @@
  * Default interval is 90 s — matches the skill's ScheduleWakeup cadence.
  */
 
+import { SupervisedLoop } from '@neutronai/loop'
+
 import { advanceTridentRun, isTerminalPhase, type AdvanceDeps, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
@@ -170,9 +172,8 @@ export class TridentTickLoop {
   private readonly now: () => number
   /** Last observed progress signature per run id — drives the transition fan. */
   private readonly lastSig = new Map<string, string>()
-  private timer: ReturnType<typeof setInterval> | null = null
-  private running = false
-  private skippedTicks = 0
+  /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
+  private readonly loop: SupervisedLoop
   private advancedCount = 0
   private deliveredCount = 0
   private transitionCount = 0
@@ -192,36 +193,52 @@ export class TridentTickLoop {
     this.on_terminal = options.on_terminal ?? null
     this.on_transition = options.on_transition ?? null
     this.now = options.now ?? (() => Date.now())
+    this.loop = new SupervisedLoop({
+      name: 'trident',
+      intervalMs: this.interval_ms,
+      tick: () => this.tickBody(),
+    })
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
   start(): void {
-    if (this.timer !== null) return
-    this.timer = setInterval(() => {
-      void this.runOnce()
-    }, this.interval_ms)
+    this.loop.start()
   }
 
-  stop(): void {
-    if (this.timer !== null) {
-      clearInterval(this.timer)
-      this.timer = null
-    }
+  /** Stop + quiesce: awaits the in-flight tick so the composer can
+   *  `await loop.stop()` (then `drain()`) before `db.close()`. */
+  async stop(): Promise<void> {
+    await this.loop.stop()
   }
 
   /**
    * Run one tick. Exposed for tests + for any caller that wants to drive
-   * the loop manually rather than via setInterval. Returns the number of
-   * runs that transitioned this tick.
+   * the loop manually rather than via the interval. Returns the number of
+   * runs that transitioned this tick. Single-flight (overlap → skipped) + the
+   * per-tick catch-all now live in the {@link SupervisedLoop} driving
+   * {@link tickBody}; the per-tick `advanced` count is recovered from
+   * `advancedCount`'s delta (safe because single-flight guarantees only one
+   * tick body runs at a time).
    */
   async runOnce(): Promise<{ advanced: number; skipped_due_to_overlap: boolean }> {
-    if (this.running) {
-      this.skippedTicks++
-      return { advanced: 0, skipped_due_to_overlap: true }
-    }
-    this.running = true
+    const before = this.advancedCount
+    const { skipped } = await this.loop.runOnce()
+    if (skipped) return { advanced: 0, skipped_due_to_overlap: true }
+    return { advanced: this.advancedCount - before, skipped_due_to_overlap: false }
+  }
+
+  /**
+   * The domain tick body. Everything below — the `listNonTerminal`-only sweep,
+   * the save-before-hook ordering (P0-1 exactly-once terminal delivery), the
+   * transition fan, and the per-run try/catch — is UNCHANGED from the original
+   * hand-rolled loop and must not move. Only the loop scaffolding (single-flight
+   * guard, error catch-all, quiescing stop) was lifted into {@link SupervisedLoop}.
+   */
+  private async tickBody(): Promise<void> {
     let advanced = 0
-    try {
+    // Scoped block: the body below is lifted verbatim from the old `runOnce`
+    // (its `try` block); the brace keeps it byte-identical for review.
+    {
       const runs = this.store.listNonTerminal(this.per_tick_limit)
       for (const run of runs) {
         try {
@@ -285,16 +302,13 @@ export class TridentTickLoop {
         }
       }
       this.advancedCount += advanced
-    } finally {
-      this.running = false
     }
-    return { advanced, skipped_due_to_overlap: false }
   }
 
   stats(): { advanced: number; skipped_ticks: number; delivered: number; transitions: number } {
     return {
       advanced: this.advancedCount,
-      skipped_ticks: this.skippedTicks,
+      skipped_ticks: this.loop.stats().skipped,
       delivered: this.deliveredCount,
       transitions: this.transitionCount,
     }

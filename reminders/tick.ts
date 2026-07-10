@@ -15,6 +15,7 @@
  */
 
 import { hostTimeZone, nextCronFire, parseCron } from '@neutronai/cron'
+import { SupervisedLoop } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
 
@@ -79,9 +80,8 @@ export class ReminderTickLoop {
   private readonly now: () => number
   private readonly time_zone: string
   private readonly on_fired: ReminderFiredHook | null
-  private timer: ReturnType<typeof setInterval> | null = null
-  private running = false
-  private skippedTicks = 0
+  /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
+  private readonly loop: SupervisedLoop
   private firedCount = 0
 
   constructor(options: ReminderTickOptions) {
@@ -92,6 +92,11 @@ export class ReminderTickLoop {
     this.now = options.now ?? Date.now
     this.time_zone = options.time_zone ?? hostTimeZone()
     this.on_fired = options.on_fired ?? null
+    this.loop = new SupervisedLoop({
+      name: 'reminders',
+      intervalMs: this.interval_ms,
+      tick: () => this.tickBody(),
+    })
   }
 
   /**
@@ -99,32 +104,42 @@ export class ReminderTickLoop {
    * pairs this with `stop` in the gateway shutdown path.
    */
   start(): void {
-    if (this.timer !== null) return
-    this.timer = setInterval(() => {
-      void this.runOnce()
-    }, this.interval_ms)
+    this.loop.start()
   }
 
-  stop(): void {
-    if (this.timer !== null) {
-      clearInterval(this.timer)
-      this.timer = null
-    }
+  /** Stop + quiesce: awaits the in-flight tick so a caller can `await stop()`
+   *  before `db.close()`. */
+  async stop(): Promise<void> {
+    await this.loop.stop()
   }
 
   /**
    * Run one tick synchronously (well, awaitable). Exposed for tests + for
-   * any caller that wants to drive the loop manually rather than via
-   * setInterval.
+   * any caller that wants to drive the loop manually rather than via the
+   * interval. Single-flight (overlap → skipped) + the per-tick catch-all now
+   * live in the {@link SupervisedLoop} that drives {@link tickBody}; the
+   * per-tick `fired` count is recovered from `firedCount`'s delta (safe because
+   * single-flight guarantees only one tick body runs at a time).
    */
   async runOnce(): Promise<{ fired: number; skipped_due_to_overlap: boolean }> {
-    if (this.running) {
-      this.skippedTicks++
-      return { fired: 0, skipped_due_to_overlap: true }
-    }
-    this.running = true
+    const before = this.firedCount
+    const { skipped } = await this.loop.runOnce()
+    if (skipped) return { fired: 0, skipped_due_to_overlap: true }
+    return { fired: this.firedCount - before, skipped_due_to_overlap: false }
+  }
+
+  /**
+   * The domain tick body. Everything below is UNCHANGED from the original
+   * hand-rolled loop — including the #319 claim-before-dispatch +
+   * compare-and-swap revert ordering, which must not move. Only the loop
+   * scaffolding (single-flight guard, error catch-all, quiescing stop) was
+   * lifted out into {@link SupervisedLoop}.
+   */
+  private async tickBody(): Promise<void> {
     let fired = 0
-    try {
+    // Scoped block: the body below is lifted verbatim from the old `runOnce`
+    // (its `try` block); the brace keeps it byte-identical for review.
+    {
       const due = this.store.listDue(this.now() / 1000, this.per_tick_limit)
       for (const reminder of due) {
         // #319 — CLAIM the row BEFORE dispatch. The terminal state-change
@@ -203,14 +218,11 @@ export class ReminderTickLoop {
         }
       }
       this.firedCount += fired
-    } finally {
-      this.running = false
     }
-    return { fired, skipped_due_to_overlap: false }
   }
 
   stats(): { fired: number; skipped_ticks: number } {
-    return { fired: this.firedCount, skipped_ticks: this.skippedTicks }
+    return { fired: this.firedCount, skipped_ticks: this.loop.stats().skipped }
   }
 }
 
