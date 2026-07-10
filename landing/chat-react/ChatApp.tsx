@@ -1597,10 +1597,14 @@ function ChatSurface({
         </div>
         {/* Desktop Work slide-out — mounted inside the Chat view so it's scoped to
             this tab (never Documents/Settings) and sits ABOVE the composer footer.
-            Keyed by scope so its auto-open/close controller resets on a switch. */}
+            W7 — NO `key`: this pane belongs to ONE kept-alive conversation surface,
+            scoped to that surface's own (stable) project, so it must PERSIST across
+            switches — a `key` would force a remount and replay the slide (#355). Its
+            open/close lives in `usePlansPaneController` and rides the surface's
+            lifetime; a plain project switch (hide→show this surface) never re-slides
+            it, only a real kickoff/all-clear transition animates. */}
         {showPane ? (
           <PlansPane
-            key={paneProjectId}
             projectId={paneProjectId}
             config={config}
             controller={controller}
@@ -1617,12 +1621,26 @@ function ChatSurface({
 }
 
 /**
- * The stable per-conversation identity — the project id, or a sentinel for the
- * user-scoped General topic. Keying {@link ConversationRuntimeHost} on this
- * gives every conversation its OWN assistant-ui runtime.
+ * The General surface's per-conversation render/cache key. It MUST be a value no
+ * valid project id can ever equal, so the General surface can never collide with a
+ * named project's surface (share a mount + frozen-vm cache slot). The gateway's
+ * `sanitizeProjectId` accepts only `[A-Za-z0-9_.-]+`, so the leading `#` (rejected)
+ * makes this collision-proof — unlike the old `__general__`, which was itself a
+ * validator-legal project id and thus collided with a project literally named that
+ * (Codex P1: on a General↔`__general__` switch the shared cache slot leaked one
+ * scope's board/transcript into the other).
+ */
+export const GENERAL_CONV_ID = '#general'
+
+/**
+ * The stable per-conversation identity — the project id, or the collision-proof
+ * {@link GENERAL_CONV_ID} sentinel for the user-scoped General topic. Keying
+ * {@link ConversationRuntimeHost} on this gives every conversation its OWN
+ * assistant-ui runtime; keying the frozen-vm cache on it keeps each surface's
+ * snapshot isolated.
  */
 export function conversationIdOf(projectId: string | null): string {
-  return projectId !== null && projectId.length > 0 ? projectId : '__general__'
+  return projectId !== null && projectId.length > 0 ? projectId : GENERAL_CONV_ID
 }
 
 /**
@@ -1777,9 +1795,15 @@ function MountedConversation({
           config={config}
           draft={draft}
           uploadAffordance={uploadAffordance}
-          // Only the ACTIVE surface mounts the Work slide-out pane, so N hidden
-          // surfaces don't each poll a board.
-          showPane={active && showPane}
+          // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
+          // surface (NOT gated on `active`). Gating on `active` unmounted the pane
+          // on every switch-away and re-mounted it on return, replaying the
+          // slide-out animation (#355) and re-fetching the board. Kept mounted, its
+          // open/close state persists across switches — a plain switch never
+          // re-slides — and its board fetch/poll (poll is already gated on a LIVE
+          // run) stays warm so an in-flight build the user switched away from is
+          // still shown, mid-flight, when they switch back.
+          showPane={showPane}
           paneProjectId={paneProjectId}
           {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           {...(fetchImpl !== undefined ? { fetchImpl } : {})}
@@ -1803,8 +1827,7 @@ export function ChatApp({
   draft,
   fetchImpl,
   onOpenDocLink,
-  showPane,
-  paneProjectId,
+  paneEligible,
   paneOnOpenDoc,
 }: {
   vm: ChatViewModel
@@ -1816,13 +1839,13 @@ export function ChatApp({
   /** P-A — open a doc referenced by an agent chat link in the Documents tab.
    *  Supplied by `ProjectShell`; omit to leave doc links as plain anchors. */
   onOpenDocLink?: (projectId: string, path: string) => void
-  /** M1 polish (item 3+5) — host the desktop Work slide-out pane INSIDE this Chat
-   *  view (≥1024px on a resolved scope with a Work board). The shell decides;
-   *  omitting/false renders no pane (narrow width, or non-Work scope). */
-  showPane?: boolean
-  /** The scope the pane's board is for ('' = General). Also keys the pane so its
-   *  auto-open/close controller resets cleanly on a project switch. */
-  paneProjectId?: string
+  /** W7 — whether this viewport hosts the desktop Work slide-out pane (≥1024px).
+   *  A PLAIN viewport gate: each kept-alive conversation surface mounts its OWN
+   *  persistent pane, scoped to its OWN project, so a project switch never
+   *  unmounts + re-slides the pane (#355). Omitting/false renders no pane (narrow
+   *  width — Work stays a seated tab). Every scope, General included, is
+   *  Work-board-eligible, so no per-project gate is needed here. */
+  paneEligible?: boolean
   /** Open a Work card's spec-doc in the Documents tab; undefined = static label
    *  (e.g. General, which has no Documents tab). */
   paneOnOpenDoc?: (projectId: string, path: string) => void
@@ -1932,8 +1955,15 @@ export function ChatApp({
             draft={draft}
             {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             {...(onOpenDocLink !== undefined ? { onOpenDocLink } : {})}
-            showPane={showPane === true}
-            paneProjectId={paneProjectId ?? ''}
+            showPane={paneEligible === true}
+            // Each surface scopes its pane to ITS OWN conversation's project (not
+            // the globally-active one), so a kept-alive background surface never
+            // renders a foreign project's board. Derive the board scope from the
+            // authoritative NULLABLE `hostVm.projectId` (null General → '', the
+            // owner board), NOT from the render key `id` — the General key
+            // (`GENERAL_CONV_ID`) is now collision-proof, but `hostVm.projectId` is
+            // still the single source of truth for which board this surface owns.
+            paneProjectId={hostVm.projectId ?? ''}
             {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           />
         )

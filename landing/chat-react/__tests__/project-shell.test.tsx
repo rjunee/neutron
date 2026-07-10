@@ -886,7 +886,15 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     container.remove()
   })
 
-  it('does NOT mount the pane while a scope switch is still resolving (Codex P2)', async () => {
+  it('W7 — the pane is scoped to its own project, so a still-resolving scope can never trigger a wrong-scope board fetch (Codex P2)', async () => {
+    // W7 reframe of the old "does NOT mount the pane while resolving" guard: the
+    // pane is no longer gated on the ACTIVE scope's tab resolution. Each kept-alive
+    // conversation surface owns a PERSISTENT pane scoped to its OWN (stable) project
+    // id, so the wrong-scope hazard the old resolve-gate protected against is
+    // structurally impossible — the pane always fetches ITS project's board, even
+    // while the tab set is still resolving. This asserts that stronger invariant:
+    // the pane mounts immediately on desktop, and every board fetch targets PROJECT
+    // (never '', never the `//work-board` double-slash a wrong/empty scope produces).
     mediaMatches = (q) => q.includes('min-width: 1024px')
 
     const { createRoot } = await import('react-dom/client')
@@ -926,11 +934,19 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     const tabsPending = new Promise<void>((res) => {
       releaseTabs = res
     })
+    const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
       if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
         await tabsPending
         return new Response(
           JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.includes('/work-board')) {
+        boardUrls.push(url)
+        return new Response(
+          JSON.stringify({ ok: true, items: [], project_id: PROJECT }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         )
       }
@@ -982,17 +998,181 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
       await tick()
     })
 
-    // Resolving (gated fetch still pending) → NO pane, NO handle.
-    expect(container.querySelector('.car-plans-handle')).toBeNull()
-    expect(container.querySelector('.car-plans')).toBeNull()
+    // Resolving (gated tabs fetch still pending) → the pane ALREADY mounts,
+    // scoped to its own project (viewport-gated, not tab-resolution-gated).
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+    expect(container.querySelector('.car-tabpanel .car-plans')).not.toBeNull()
 
-    // Release the resolver → the pane mounts for the now-resolved scope.
+    // Release the resolver → still mounted; no change of scope.
     await act(async () => {
       releaseTabs()
       await tick()
       await tick()
     })
     expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+
+    // The invariant the old resolve-gate really protected: EVERY board fetch —
+    // both during and after the resolving window — targets PROJECT's board, never
+    // an empty/wrong scope (`//work-board`) that a globally-active-scope pane could
+    // have fired mid-switch.
+    expect(boardUrls.length).toBeGreaterThan(0)
+    expect(
+      boardUrls.every(
+        (u) => u === `https://sam.neutron.test/api/app/projects/${PROJECT}/work-board`,
+      ),
+    ).toBe(true)
+    expect(boardUrls.every((u) => !u.includes('//work-board'))).toBe(true)
+
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('W7 — desktop never shows BOTH a seated Work tab AND the pane, even during a scope-switch resolving window (Codex P1)', async () => {
+    // Codex P1 repro: pane eligibility (`paneEligible = isDesktop`) mounts the pane
+    // immediately, but the seated Work TAB is dropped from `visibleTabs` on the
+    // SAME viewport gate — so during a switch, while the new scope's tabs are still
+    // pending (`tabsScope === null`, stale outgoing `tabs` still carrying Work), the
+    // seated Work tab must NOT reappear alongside the mounted pane. One Work surface
+    // on desktop, always.
+    mediaMatches = (q) => q.includes('min-width: 1024px')
+    const PROJECT2 = 'beta'
+
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null,
+        onerror: null,
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+    const sockets: Array<{ open: () => void; deliver: (o: unknown) => void }> = []
+
+    // PROJECT tabs resolve immediately; PROJECT2's tabs are GATED so the shell sits
+    // in the resolving window with PROJECT's stale (Work-carrying) tabs on screen.
+    let releaseTabs2: () => void = () => {}
+    const tabs2Pending = new Promise<void>((res) => {
+      releaseTabs2 = res
+    })
+    const fetchImpl = async (url: string): Promise<Response> => {
+      if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.endsWith(`/api/app/projects/${PROJECT2}/tabs`)) {
+        await tabs2Pending
+        return new Response(
+          JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT2, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.includes('/work-board')) {
+        return new Response(
+          JSON.stringify({ ok: true, items: [], project_id: url.includes(PROJECT2) ? PROJECT2 : PROJECT }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }, { id: PROJECT2, label: 'Beta' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    // A SEATED Work tab is a `button[role="tab"]` labelled "Work" — distinct from
+    // the pane's own `.car-plans-ttl` "Work" header (not a tab button).
+    const container = document.createElement('div')
+    const seatedWorkTab = () =>
+      Array.from(container.querySelectorAll('button[role="tab"]')).some(
+        (b) => (b.textContent ?? '').trim() === 'Work',
+      )
+
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+      await tick()
+    })
+
+    // Resolved PROJECT on desktop → pane up, NO seated Work tab.
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+    expect(seatedWorkTab()).toBe(false)
+
+    // Switch to PROJECT2 and HOLD its tabs pending → resolving window with
+    // PROJECT's stale Work-carrying tabs still mounted. The pane is up for the new
+    // surface; the seated Work tab must STAY dropped (no dual affordance).
+    await act(async () => {
+      controller.setProject(PROJECT2)
+      await tick()
+    })
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+    expect(seatedWorkTab()).toBe(false)
+
+    // Release → resolved on PROJECT2; still exactly one Work surface.
+    await act(async () => {
+      releaseTabs2()
+      await tick()
+      await tick()
+    })
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+    expect(seatedWorkTab()).toBe(false)
 
     await act(async () => {
       root.unmount()

@@ -126,8 +126,7 @@ describe('#354 guard — Work pane mounted + rapid project switch never crashes'
           controller={controller}
           config={config}
           draft={draft}
-          showPane
-          paneProjectId={vm.projectId ?? ''}
+          paneEligible
         />
       )
     }

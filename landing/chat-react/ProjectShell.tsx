@@ -359,8 +359,8 @@ export function ProjectShell({
         .then((globalTabs) => {
           if (cancelled) return
           // General gets the SAME Work surface every named project has: inject the
-          // `work_board` descriptor (after Chat) so the existing `showPane` gate +
-          // narrow-width tab light up for General, scoped to its `owner_slug` board.
+          // `work_board` descriptor (after Chat) so the desktop pane (`paneEligible`)
+          // + narrow-width tab light up for General, scoped to its `owner_slug` board.
           // The engine's global set is Admin-only, so General had no `workboard`
           // descriptor and thus no Work view (the gap this closes). Mirrors the
           // mobile shell's `ensureWorkTab` injection — one code path, no branch.
@@ -420,21 +420,23 @@ export function ProjectShell({
   // INSIDE the Chat view (`ChatApp`) rather than at this shell level, so it is
   // scoped to the Chat tab and NEVER bleeds onto Documents / Settings / any other
   // tab, and the chat composer becomes a full-width footer with the pane lifted
-  // above it. Here we only DECIDE whether the Chat view should host the pane
-  // (`showPane`) and drop the `workboard` descriptor from the tab bar. Below
-  // 1024px Work STAYS a tab (the mobile Work badge is PR-6) — one implementation
-  // per platform, never a dual tab-and-pane path on the same viewport.
+  // above it. Below 1024px Work STAYS a tab (the mobile Work badge is PR-6) — one
+  // implementation per platform, never a dual tab-and-pane path on the same
+  // viewport.
   const isDesktop = useMediaQuery('(min-width: 1024px)')
-  const workboardTab = tabs.find((t) => t.mount.target === 'workboard')
-  // Gate the pane on a RESOLVED scope (`tabsScope !== null`). During a scope
-  // switch `tabs` intentionally still holds the OUTGOING scope's descriptors, so
-  // an ungated `showPane` would mount the pane — and fire a wrong-scope
-  // (`/projects//work-board`, or the previous project's) board fetch — for the new
-  // scope before its tabs resolve, exactly the stale-scope hazard the disabled tab
-  // buttons already guard against (Codex P2). Once resolved, `tabs`/`workboardTab`
-  // belong to the current scope.
-  const showPane = isDesktop && tabsScope !== null && workboardTab !== undefined
-  const visibleTabs = showPane ? tabs.filter((t) => t.mount.target !== 'workboard') : tabs
+  // W7 — pane eligibility is a PLAIN viewport gate. `ChatApp` mounts a persistent
+  // Work pane PER kept-alive conversation surface, each scoped to its OWN stable
+  // project, so the wrong-scope hazard the old `tabsScope !== null` gate guarded
+  // against is structurally impossible (a pane never fetches a foreign/resolving
+  // scope's board — see `stable-mount`/`project-shell` tests). Because it's now a
+  // plain viewport flag, the seated-tab drop below MUST match it exactly:
+  // dropping the Work descriptor only on a RESOLVED scope would, during the brief
+  // scope-switch resolving window (`tabsScope === null`, stale outgoing `tabs`
+  // still carrying Work), leave the seated Work TAB up WHILE the pane is already
+  // mounted — a dual tab-and-pane Work affordance (Codex P1). Gate both on
+  // `paneEligible` so desktop shows exactly one Work surface at all times.
+  const paneEligible = isDesktop
+  const visibleTabs = paneEligible ? tabs.filter((t) => t.mount.target !== 'workboard') : tabs
 
   // FIX #348/#349 — mobile work-activity: one subscription to the active scope's
   // board drives both the Work-tab pulse (a build is live) and the job-start
@@ -575,10 +577,15 @@ export function ProjectShell({
         <div className="car-stage">
           <div className="car-tabpanels" ref={panelsRef}>
             {/* Chat stays mounted across tab switches so the live session, stream,
-                and scroll state survive — only its visibility toggles. The Chat
-                view hosts the desktop Work pane when `showPane` (≥1024px + a
-                resolved scope with a Work board); `paneProjectId` scopes + resets
-                the pane on a project switch. */}
+                and scroll state survive — only its visibility toggles. W7 — the
+                Chat view hosts a desktop Work pane PER kept-alive conversation
+                surface, so `paneEligible` is the plain viewport gate (≥1024px):
+                each surface scopes its own pane to its OWN project (General + every
+                project is Work-board-eligible — `tabs-client` injects the descriptor
+                for General too), and the pane stays MOUNTED across a project switch
+                so it never re-slides (#355). `paneEligible` gates the seated-tab
+                drop (`visibleTabs`) in lock-step, so desktop shows exactly ONE Work
+                surface; below 1024px `paneEligible` is false and Work stays a tab. */}
             <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
               <ChatApp
                 vm={vm}
@@ -586,8 +593,7 @@ export function ProjectShell({
                 config={config}
                 draft={draft}
                 onOpenDocLink={onOpenDocLink}
-                showPane={showPane}
-                paneProjectId={projectId ?? ''}
+                paneEligible={paneEligible}
                 {...(workOpenDoc !== undefined ? { paneOnOpenDoc: workOpenDoc } : {})}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
               />
