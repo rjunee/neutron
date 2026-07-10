@@ -2,8 +2,9 @@
  * @neutronai/email-managed-core — GmailClient interface + reference
  * adapters + EmailSummarizer abstraction.
  *
- * The Tier 1 Email-Managed Core programs against a narrow `GmailClient`
- * (listMessages / getMessage / search / createDraft). Production: a
+ * The Email-Managed Core programs against a narrow `GmailClient`
+ * (listMessages / getMessage / search / createDraft / sendMessage +
+ * modifyThread). Production: a
  * thin Gmail API v1 REST wrapper backed by an OAuth bearer token
  * resolved lazily from the per-Core SecretsAccessor + a refresh-token
  * exchange (handled at the runtime composition layer — for v1 the
