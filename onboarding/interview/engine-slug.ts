@@ -37,6 +37,7 @@ import {
   readNumber,
   readString,
 } from './engine-internals.ts'
+import { autoConfirmProjectsProposedAndAdvance } from './engine-projects-proposed.ts'
 
 // K11a5 — transition re-export of the moved live agent-name half so
 // consumers (and Managed vendoring) that still import these names from
@@ -457,7 +458,8 @@ export async function advanceFromSlugChosen(
       effective_project_slug === input.project_slug
         ? input
         : { ...input, project_slug: effective_project_slug }
-    return await self.autoConfirmProjectsProposedAndAdvance(
+    return await autoConfirmProjectsProposedAndAdvance(
+      self,
       advance_input,
       advanced,
       observed_at,

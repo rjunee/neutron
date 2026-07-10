@@ -2084,11 +2084,6 @@ export interface EngineInternals {
     user_id: string,
     phase: OnboardingPhase,
   ): Promise<PhasePromptSpec | null>
-  autoConfirmProjectsProposedAndAdvance(
-    input: AdvanceInput,
-    state: OnboardingState,
-    observed_at: number,
-  ): Promise<AdvanceResult>
 
   // --- the 11 extracted slug methods (so the slug free functions can
   //     cross-call each other via self.* identically to the originals,
