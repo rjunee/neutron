@@ -94,6 +94,35 @@ test('a working DispatchReporter receives a crashed report for the orphan', asyn
   expect(reports[0]?.kind).toBe('review') // sentinel → review
 })
 
+test('END-TO-END sweep→adapter reports the TRUE orphan age (progress→reap), not 0ms', async () => {
+  // Regression: the sweep overwrote the reported record's `last_event_at` with the
+  // reap time, so `buildBootSweepReport` computed `ended_at - last_event_at = 0ms`
+  // for EVERY real sweep. Exercised through the actual sweep (not the adapter in
+  // isolation) with DISTINCT progress vs reap timestamps, the reported age must be
+  // `reap - last_progress`, matching what a live watchdog reap reports.
+  const LAST_EVENT_AT = 900
+  const REAP_AT = 1000
+  const store = new SubagentRegistryStore(db, 'boot-prior-process')
+  const reg = new SubagentRegistry(store)
+  await reg.create({ run_id: 'orphan-aged', instance_key: 'owner', agent_kind: 'atlas', spawn_depth: 0 })
+  // Last progress at 900 (durably persisted), well before the reap at 1000.
+  await reg.update('orphan-aged', { status: 'running', last_event_at: LAST_EVENT_AT })
+
+  const reports: DispatchReport[] = []
+  await sweepOrphanedDispatchesOnBoot({
+    store: new SubagentRegistryStore(db),
+    report: productionBootReport((r) => {
+      reports.push(r)
+    }),
+    now: () => REAP_AT,
+  })
+
+  expect(reports).toHaveLength(1)
+  const age = Number(/age at reap: (\d+)ms/.exec(reports[0]!.markdown)![1])
+  expect(age).toBe(REAP_AT - LAST_EVENT_AT) // 100ms — the true age
+  expect(age).not.toBe(0) // NOT the reap-overwrites-progress bug
+})
+
 test('a forge orphan is claimed crashed but the adapter skips the report (Trident owns it)', async () => {
   // Seed under a PRIOR boot id so the current-boot sweep (default CURRENT_BOOT_ID)
   // sees the row as a reapable prior-process orphan.

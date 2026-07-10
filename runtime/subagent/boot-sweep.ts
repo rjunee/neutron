@@ -98,12 +98,20 @@ export async function sweepOrphanedDispatchesOnBoot(
     const claimed = await deps.store.markCrashed(rec.run_id, 'process_dead', now)
     if (!claimed) continue
 
+    // PRESERVE the pre-claim `last_event_at` (the run's last PROGRESS timestamp,
+    // as loaded from the store) — do NOT overwrite it with the reap time. The
+    // report adapter derives `age_ms = ended_at - last_event_at`, exactly as the
+    // live watchdog does off its pre-crash snapshot (`watchdog.ts` surfaces
+    // `last_event_at: rec.last_event_at`); stamping `now` here would zero the age
+    // for every real sweep. `ended_at`/reap-time IS `now` (the detection time);
+    // the DURABLE row's `last_event_at` is separately set to `now` by `markCrashed`
+    // (matching the live crash write), but the SURFACED record carries the progress
+    // timestamp so the reported age is truthful.
     const crashed: SubagentRecord = {
       ...rec,
       status: 'crashed',
       failure_reason: 'process_dead',
       ended_at: now,
-      last_event_at: now,
     }
     surfaced.push(crashed)
 
