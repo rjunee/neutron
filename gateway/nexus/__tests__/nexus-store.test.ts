@@ -114,7 +114,7 @@ describe('NexusStore — schema init', () => {
         )
         .all()
         .map((r) => r.name)
-      expect(indexes).toContain('idx_agent_nexus_events_kind_id')
+      expect(indexes).toContain('idx_agent_nexus_events_kind_created')
       expect(indexes).toContain('idx_agent_nexus_events_created_at')
     } finally {
       db.close()
@@ -280,8 +280,11 @@ describe('NexusStore — REAL cross-process concurrency (subprocess)', () => {
     h.cleanup()
   })
 
-  /** Read a piped stream until `needle` shows up (or the stream ends /
-   *  `timeoutMs` elapses between chunks). */
+  /** Read a piped stream until `needle` shows up, the stream ends, or
+   *  `timeoutMs` elapses. Every `reader.read()` is raced against the
+   *  remaining deadline (Codex r2 — a silent-but-alive child must not
+   *  leave the await pending forever); on timeout the reader is
+   *  cancelled so the pending read settles. */
   async function waitForLine(
     stream: ReadableStream<Uint8Array>,
     needle: string,
@@ -292,16 +295,35 @@ describe('NexusStore — REAL cross-process concurrency (subprocess)', () => {
     const deadline = Date.now() + timeoutMs
     let buf = ''
     try {
-      while (Date.now() < deadline) {
-        const { value, done } = await reader.read()
-        if (value !== undefined) buf += decoder.decode(value, { stream: true })
+      for (;;) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) {
+          await reader.cancel().catch(() => {})
+          throw new Error(`timed out waiting for ${JSON.stringify(needle)}; got: ${buf}`)
+        }
+        const next = await Promise.race([
+          reader.read(),
+          Bun.sleep(remaining).then(() => 'timeout' as const),
+        ])
+        if (next === 'timeout') {
+          await reader.cancel().catch(() => {})
+          throw new Error(`timed out waiting for ${JSON.stringify(needle)}; got: ${buf}`)
+        }
+        if (next.value !== undefined) {
+          buf += decoder.decode(next.value, { stream: true })
+        }
         if (buf.includes(needle)) return buf
-        if (done) break
+        if (next.done) {
+          throw new Error(`stream ended without ${JSON.stringify(needle)}; got: ${buf}`)
+        }
       }
     } finally {
-      reader.releaseLock()
+      try {
+        reader.releaseLock()
+      } catch {
+        /* a cancelled reader may already be detached */
+      }
     }
-    throw new Error(`did not see ${JSON.stringify(needle)}; got: ${buf}`)
   }
 
   it(
@@ -451,6 +473,31 @@ describe('NexusStore — readRecent filtering', () => {
     expect(events.map((e) => e.body)).toEqual(['o1', 'd2'])
     const newest = await h.store.readRecent(PROJECT_ID, { limit: 2 })
     expect(newest.map((e) => e.body)).toEqual(['h1', 'd2'])
+  })
+
+  it('orders + limits by created_at even when id order disagrees (injected clock/ULID)', async () => {
+    // ids DESCEND while the clock ASCENDS — created_at is the recency
+    // truth, so readRecent must ignore the id order for selection and
+    // only tie-break on it (Codex r2).
+    const ids = ['03-id-sorts-last', '02-id-sorts-middle', '01-id-sorts-first']
+    let clock = 0
+    const g = startStore({
+      ulid: () => ids.shift() ?? 'exhausted',
+      now: () => (clock += 1_000),
+    })
+    try {
+      await g.store.appendEvent(PROJECT_ID, input({ body: 'e1' }))
+      await g.store.appendEvent(PROJECT_ID, input({ body: 'e2' }))
+      await g.store.appendEvent(PROJECT_ID, input({ body: 'e3' }))
+      const all = await g.store.readRecent(PROJECT_ID)
+      expect(all.map((e) => e.body)).toEqual(['e1', 'e2', 'e3'])
+      // limit keeps the NEWEST by created_at — under ORDER BY id these
+      // would wrongly be e1, e2.
+      const newest = await g.store.readRecent(PROJECT_ID, { limit: 2 })
+      expect(newest.map((e) => e.body)).toEqual(['e2', 'e3'])
+    } finally {
+      g.cleanup()
+    }
   })
 
   it('rejects an unknown kind filter', async () => {

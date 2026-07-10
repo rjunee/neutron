@@ -79,10 +79,12 @@ CREATE TABLE IF NOT EXISTS agent_nexus_events (
     created_at  INTEGER NOT NULL
 );
 
--- readRecent filters by kind + since and pages newest-first by id (ULIDs
--- sort chronologically, so id order == creation order).
-CREATE INDEX IF NOT EXISTS idx_agent_nexus_events_kind_id
-    ON agent_nexus_events (kind, id);
+-- readRecent filters by kind + since and pages newest-first by
+-- (created_at, id) — created_at is the recency truth, the ULID id is
+-- only the tiebreak (ids usually sort chronologically too, but the
+-- clock and the ULID factory are independently injectable).
+CREATE INDEX IF NOT EXISTS idx_agent_nexus_events_kind_created
+    ON agent_nexus_events (kind, created_at, id);
 
 CREATE INDEX IF NOT EXISTS idx_agent_nexus_events_created_at
     ON agent_nexus_events (created_at, id);

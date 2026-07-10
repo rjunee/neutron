@@ -349,10 +349,14 @@ export class NexusStore {
    * Read the most recent events, optionally restricted by `kinds`
    * and/or `since` (ms-epoch `created_at` lower bound, inclusive).
    *
-   * Selects the newest `limit` matches (ULID ids sort by creation
-   * time, so `ORDER BY id DESC` is newest-first) and returns them in
-   * CHRONOLOGICAL (oldest-first) order — the shape the RC3 prompt
-   * fragment splices directly.
+   * Selects the newest `limit` matches by `(created_at, id)` — NOT by
+   * id alone: ids are ULIDs and normally sort by creation time, but
+   * `created_at` comes from the injected `now()` while the default
+   * ULID factory reads `Date.now()` directly, so an injected clock, a
+   * clock rollback, or a custom ULID factory can make the two orders
+   * disagree; `created_at` is the recency truth, id is the tiebreak
+   * (Codex r2). Returns the slice in CHRONOLOGICAL (oldest-first)
+   * order — the shape the RC3 prompt fragment splices directly.
    */
   async readRecent(
     project_id: string,
@@ -387,7 +391,7 @@ export class NexusStore {
         `SELECT id, actor_kind, actor_id, kind, body, refs_json, created_at
            FROM agent_nexus_events
            ${where}
-          ORDER BY id DESC
+          ORDER BY created_at DESC, id DESC
           LIMIT ?`,
       )
       .all(...params, limit)
