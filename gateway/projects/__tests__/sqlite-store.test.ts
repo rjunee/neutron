@@ -532,8 +532,18 @@ describe('SqliteProjectSettingsStore — touchActivityIncludingArchived (P4 tabl
     const bareTmp = mkdtempSync(join(tmpdir(), 'neutron-projects-store-bare-'))
     const bareDb = ProjectDb.open(join(bareTmp, 'bare.db'))
     try {
+      // Premise: the raw UPDATE genuinely fails on this DB (no projects
+      // table) — otherwise the swallow assertion below would be vacuous.
+      let underlyingFailed = false
+      try {
+        await bareDb.run(`UPDATE projects SET last_activity_at = ? WHERE id = ?`, ['x', 'y'])
+      } catch {
+        underlyingFailed = true
+      }
+      expect(underlyingFailed).toBe(true)
+      // Contract: the store method swallows that failure and resolves.
       const bareStore = new SqliteProjectSettingsStore(bareDb)
-      await bareStore.touchActivityIncludingArchived('anything')
+      await expect(bareStore.touchActivityIncludingArchived('anything')).resolves.toBeUndefined()
     } finally {
       bareDb.close()
       rmSync(bareTmp, { recursive: true, force: true })
