@@ -31,8 +31,12 @@ import { emitSystemEvent } from '@neutronai/persistence/index.ts'
  *                            enforcement would request approval (D-9).
  *   - `denied-capability`  — the resolved capability gate does not grant the tool's
  *                            `capability_required`; enforcement would BLOCK.
+ *   - `gate-error`         — the capability predicate itself threw (could not
+ *                            decide). Journaled so EVERY resolved dispatch is
+ *                            observable; the original error is then re-thrown so
+ *                            dispatch behavior is unchanged.
  */
-export type CapabilityVerdict = 'allow' | 'gated-approval' | 'denied-capability'
+export type CapabilityVerdict = 'allow' | 'gated-approval' | 'denied-capability' | 'gate-error'
 
 export interface McpServerOptions {
   project_slug: string
@@ -108,7 +112,16 @@ export class McpServer {
     // dispatch. Everything below stays byte-identical — the SAME `granted` boolean
     // drives the existing throw, and real enforcement (block / 'prompt-user') is
     // decision D-9 in a separate flagged PR.
-    const granted = this.capability_gate(reg.capability_required)
+    let granted: boolean
+    try {
+      granted = this.capability_gate(reg.capability_required)
+    } catch (err) {
+      // The capability predicate itself threw. Journal an exceptional verdict so
+      // EVERY resolved dispatch is observable, then RE-THROW the original error —
+      // pre-X1 behavior (a throwing gate propagates) is preserved byte-identically.
+      this.emitCapabilityVerdict(reg, 'gate-error')
+      throw err
+    }
     this.emitCapabilityVerdict(reg, this.verdictFor(reg, granted))
     if (!granted) {
       throw new Error(
@@ -170,7 +183,9 @@ export class McpServer {
       void emitSystemEvent({
         event: 'capability_verdict',
         module: 'capability-gate',
-        level: verdict === 'denied-capability' ? 'warn' : 'info',
+        // allow / gated-approval are expected steady-state; denied-capability and
+        // gate-error are noteworthy → warn.
+        level: verdict === 'allow' || verdict === 'gated-approval' ? 'info' : 'warn',
         project_slug: this.project_slug,
         payload: {
           tool_name: reg.name,

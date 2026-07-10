@@ -8,7 +8,12 @@
  *   - is LOG-ONLY: dispatch behavior is byte-identical (nothing blocked, the
  *     handler runs, its result is returned) — the verdict is observability;
  *   - never lets a `system_events`-sink throw perturb dispatch;
- *   - does NOT touch `secret_audit_log` (it emits to a NEW event stream).
+ *   - journals an exceptional verdict even when the capability predicate throws.
+ *
+ * The proof that dispatch does NOT write `secret_audit_log` (a NEW event stream,
+ * not the Core-internal secret audit) is a DB-backed integration assertion in
+ * `gateway/__tests__/cores-tool-dispatch.test.ts` (that suite has the migrated
+ * `secret_audit_log` table); this system_events-only unit suite cannot observe it.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -257,6 +262,46 @@ describe('X1 capability gate (log-only)', () => {
     const server = new McpServer({ project_slug: 'owner-slug', registry: reg })
     const result = await server.dispatch({ tool_name: 'echo', args: { y: 2 }, call_id: 'c1' })
     expect(result).toEqual({ got: { y: 2 } })
+  })
+
+  test('a capability predicate that THROWS still journals a verdict, then re-throws (behavior preserved)', async () => {
+    const sink = new CapturingSink()
+    registerSystemEventSink(sink)
+
+    const reg = new ToolRegistry()
+    let handlerRan = false
+    reg.register({
+      name: 'echo',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'read:project_data',
+      approval_policy: 'auto',
+      handler: async () => {
+        handlerRan = true
+        return { ok: true }
+      },
+    })
+    const server = new McpServer({
+      project_slug: 'owner-slug',
+      registry: reg,
+      capability_gate: () => {
+        throw new Error('capability lookup failed')
+      },
+    })
+
+    // Pre-X1 behavior preserved: a throwing gate propagates and the handler never runs.
+    await expect(
+      server.dispatch({ tool_name: 'echo', args: {}, call_id: 'c1' }),
+    ).rejects.toThrow(/capability lookup failed/)
+    expect(handlerRan).toBe(false)
+
+    // …but the dispatch is STILL observable — a gate-error verdict was journaled.
+    const verdicts = capabilityVerdicts(sink)
+    expect(verdicts.length).toBe(1)
+    const payload = verdicts[0]?.payload as Record<string, unknown>
+    expect(payload['verdict']).toBe('gate-error')
+    expect(verdicts[0]?.level).toBe('warn')
   })
 
   test('unknown tool throws BEFORE any verdict is journaled (no tool to gate)', async () => {

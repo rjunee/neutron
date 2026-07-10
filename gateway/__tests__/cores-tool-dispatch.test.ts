@@ -24,6 +24,12 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import { McpServer } from '@neutronai/mcp/server.ts'
+import {
+  registerSystemEventSink,
+  type SystemEventInput,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
 import type { CoreBackendFactoryMap } from '../cores/install-bundled.ts'
 
@@ -196,6 +202,51 @@ describe('cores tool dispatch — end-to-end', () => {
       expect(scrape.slug).toBe('scraping_core')
       expect(Array.isArray(scrape.declared_capabilities)).toBe(true)
     }
+  })
+
+  test('X1 — McpServer.dispatch journals a verdict to system_events WITHOUT writing secret_audit_log', () => {
+    // Fresh migrated DB (bench) → the `secret_audit_log` table exists. Register a
+    // plain PLATFORM tool (default provenance) whose handler does NOT touch the
+    // secret audit, dispatch it through McpServer, and prove the X1 verdict lands
+    // in system_events while secret_audit_log is byte-for-byte unchanged (X1 is a
+    // NEW event stream, not the Core-internal secret audit).
+    const captured: SystemEventInput[] = []
+    const sink: SystemEventSink = {
+      record: (input) => {
+        captured.push(input)
+        return { id: `evt-${captured.length}` }
+      },
+    }
+    registerSystemEventSink(sink)
+    cleanups.push(() => registerSystemEventSink(null))
+
+    bench.tools.register({
+      name: 'noop_platform_tool',
+      description: '',
+      input_schema: { type: 'object', properties: {} },
+      output_schema: { type: 'object', properties: {} },
+      capability_required: 'read:project_data',
+      approval_policy: 'auto',
+      handler: async () => ({ ok: true }),
+    })
+    const server = new McpServer({ project_slug: OWNER, registry: bench.tools })
+
+    const countAudit = (): number =>
+      bench.db
+        .raw()
+        .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM secret_audit_log`)
+        .get()?.n ?? 0
+
+    const before = countAudit()
+    return server
+      .dispatch({ tool_name: 'noop_platform_tool', args: {}, call_id: 'c1' })
+      .then((result) => {
+        expect(result).toEqual({ ok: true })
+        // The X1 verdict was journaled to system_events…
+        expect(captured.filter((e) => e.event === 'capability_verdict').length).toBe(1)
+        // …and secret_audit_log gained ZERO rows.
+        expect(countAudit()).toBe(before)
+      })
   })
 
   test('unknown tool name returns undefined from the registry', async () => {
