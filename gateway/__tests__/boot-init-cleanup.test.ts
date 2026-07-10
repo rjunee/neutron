@@ -39,6 +39,7 @@ import { join } from 'node:path'
 import { boot } from '../index.ts'
 import {
   ProjectDb,
+  emitSystemEvent,
   registerSystemEventSink,
   resolveSystemEventSink,
   type SystemEventSink,
@@ -397,6 +398,57 @@ describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
     // The owned-clear only fires when the ambient sink is still ours → the
     // sibling survives.
     expect(resolveSystemEventSink()).toBe(sibling)
+  })
+
+  function countSystemEvents(db: ProjectDb): number {
+    const r = db.get<{ n: number }, []>('SELECT COUNT(*) AS n FROM system_events', [])
+    return r?.n ?? 0
+  }
+
+  test('PRODUCTION invariant (single boot): a degrade emit lands in THAT boot\'s DB', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-route-'))
+    cleanups.push(root)
+    bootEnv(root)
+    registerSystemEventSink(null)
+
+    const handle = await boot({ port: 0, composer: goodComposer })
+    try {
+      // Simulate a degrade site firing through the ambient registry. `await`
+      // resolves after the write, so no drain race in the assertion.
+      await emitSystemEvent({ event: 'gbrain_unavailable', project_slug: 'alice' })
+      expect(countSystemEvents(handle.db)).toBe(1)
+      const row = handle.db.get<{ event_name: string; project_slug: string | null }, []>(
+        'SELECT event_name, project_slug FROM system_events LIMIT 1',
+        [],
+      )
+      expect(row).toMatchObject({ event_name: 'gbrain_unavailable', project_slug: 'alice' })
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  test('overlapping boots (TEST-ONLY): emits route to the NEWEST live boot (documented process-global semantics)', async () => {
+    // Not a production path (single-owner = one boot/process). This pins the
+    // DOCUMENTED behavior so it is intentional + covered, not a hidden surprise:
+    // while two boots are live, the ambient registry routes to the top of stack.
+    const rootA = mkdtempSync(join(tmpdir(), 'neutron-o4-rA-'))
+    const rootB = mkdtempSync(join(tmpdir(), 'neutron-o4-rB-'))
+    cleanups.push(rootA, rootB)
+    registerSystemEventSink(null)
+
+    bootEnv(rootA)
+    const handleA = await boot({ port: 0, composer: goodComposer })
+    bootEnv(rootB)
+    const handleB = await boot({ port: 0, composer: goodComposer })
+    try {
+      await emitSystemEvent({ event: 'gbrain_unavailable', project_slug: 'alice' })
+      // Newest boot (B) owns the ambient journal while both are live.
+      expect(countSystemEvents(handleB.db)).toBe(1)
+      expect(countSystemEvents(handleA.db)).toBe(0)
+    } finally {
+      await handleB.shutdown()
+      await handleA.shutdown()
+    }
   })
 
   test('overlapping boots, newest-first shutdown: B restores A instead of orphaning it', async () => {

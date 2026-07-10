@@ -291,16 +291,26 @@ export function emitSystemEventSafe(
 // ── Ambient sink registry ──────────────────────────────────────────────────
 //
 // Degrade sites live across every band and mostly lack a DI seam, so they reach
-// the sink through this process-wide registry. It is a STACK of live sinks:
-// `resolveSystemEventSink()` returns the TOP (most-recently registered still-
-// live) sink, or null when empty.
+// the sink through this PROCESS-WIDE registry rather than a threaded handle —
+// that ambient reach is the whole reason the registry exists. It is a STACK of
+// live sinks: `resolveSystemEventSink()` returns the TOP (most-recently
+// registered still-live) sink, or null when empty.
 //
-// The stack — rather than a single slot — makes overlapping boots safe to tear
-// down in ANY order. Each boot pushes its sink via `pushSystemEventSink` and
-// calls the returned deregister on shutdown, which removes THAT sink by
-// identity from wherever it sits. So neither a still-live older boot is
-// orphaned (newest-first shutdown) nor a closed-DB sink resurrected (oldest-
-// first shutdown): the top of the stack is always a live owner.
+// SCOPE / INVARIANT: neutron-open is a SINGLE-OWNER gateway — exactly ONE boot
+// per OS process in production. So the stack normally holds exactly one sink and
+// every degrade routes to that owner's DB. The registry is deliberately
+// process-global; it does NOT (and cannot, without abandoning the ambient
+// design) route per-boot, because degrade sites carry no boot handle. Two
+// CONCURRENTLY-LIVE boots in one process is a TEST-ONLY configuration; while
+// both are live, emits route to the newest (top-of-stack) boot. This is not a
+// production multi-tenant path.
+//
+// The stack — rather than a single slot — exists to make TEARDOWN order-
+// independent. Each boot pushes its sink via `pushSystemEventSink` and calls the
+// returned deregister on shutdown, which removes THAT sink by identity from
+// wherever it sits. So neither a still-live older boot is orphaned (newest-first
+// shutdown) nor a closed-DB sink resurrected (oldest-first shutdown): the top of
+// the stack is always a live owner.
 
 const sinkStack: SystemEventSink[] = []
 
