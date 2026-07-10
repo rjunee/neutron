@@ -10,9 +10,29 @@
  * lives in `surfaces/`. The server is the multiplexer + dispatch layer.
  */
 
-import type { ToolRegistry } from '@neutronai/tools/registry.ts'
+import {
+  PLATFORM_TOOL_PROVENANCE,
+  type ToolRegistration,
+  type ToolRegistry,
+} from '@neutronai/tools/registry.ts'
 import { currentTopicContext, type TopicContext, withTopicContext } from './topic-context.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
+
+/**
+ * X1 — the capability verdict the dispatch-time gate WOULD reach under
+ * enforcement (decision D-9). In X1 this is LOG-ONLY: computed + journaled to
+ * O4's `system_events`, NEVER acted on. Dispatch always proceeds exactly as it
+ * did before this unit.
+ *
+ *   - `allow`              — capability granted AND `approval_policy: 'auto'`.
+ *   - `gated-approval`     — capability granted but the tool's `approval_policy`
+ *                            names a HITL surface ('prompt-user' / 'prompt-admin');
+ *                            enforcement would request approval (D-9).
+ *   - `denied-capability`  — the resolved capability gate does not grant the tool's
+ *                            `capability_required`; enforcement would BLOCK.
+ */
+export type CapabilityVerdict = 'allow' | 'gated-approval' | 'denied-capability'
 
 export interface McpServerOptions {
   project_slug: string
@@ -83,7 +103,14 @@ export class McpServer {
     if (!reg) {
       throw new Error(`mcp: unknown tool '${input.tool_name}'`)
     }
-    if (!this.capability_gate(reg.capability_required)) {
+    // X1 — evaluate the capability gate ONCE (as before), then compute + journal
+    // this dispatch's verdict (LOG-ONLY). Pure observability: it does NOT gate
+    // dispatch. Everything below stays byte-identical — the SAME `granted` boolean
+    // drives the existing throw, and real enforcement (block / 'prompt-user') is
+    // decision D-9 in a separate flagged PR.
+    const granted = this.capability_gate(reg.capability_required)
+    this.emitCapabilityVerdict(reg, this.verdictFor(reg, granted))
+    if (!granted) {
       throw new Error(
         `mcp: tool '${input.tool_name}' requires capability '${reg.capability_required}' which the project has not granted`,
       )
@@ -96,6 +123,51 @@ export class McpServer {
       call_id: ctx.call_id,
       speaker_user_id: ctx.speaker_user_id,
     })
+  }
+
+  /**
+   * X1 — the LOG-ONLY capability verdict for a tool: what the gate WOULD decide
+   * under enforcement (D-9). `granted` is the ALREADY-evaluated result of the
+   * SAME `capability_gate` the enforcement path uses (evaluated once in
+   * `dispatch`), so the gate predicate is not invoked an extra time. Pure
+   * function of the registration + that boolean; it does not touch dispatch.
+   */
+  private verdictFor(reg: ToolRegistration, granted: boolean): CapabilityVerdict {
+    if (!granted) return 'denied-capability'
+    if (reg.approval_policy !== 'auto') return 'gated-approval'
+    return 'allow'
+  }
+
+  /**
+   * X1 — journal a dispatch's capability verdict to O4's `system_events`.
+   * Fire-and-forget and fully guarded: this is observability on the dispatch
+   * edge and MUST NEVER throw, reject, or otherwise perturb the dispatch it
+   * observes (same never-throw contract O4 established for degrade sites —
+   * `emitSystemEvent` already swallows sink throws/rejections; the try/catch
+   * additionally covers payload construction). Collapses to a no-op when no
+   * `system_events` sink is registered (unit tests / non-gateway contexts).
+   */
+  private emitCapabilityVerdict(reg: ToolRegistration, verdict: CapabilityVerdict): void {
+    try {
+      const provenance = reg.provenance ?? PLATFORM_TOOL_PROVENANCE
+      void emitSystemEvent({
+        event: 'capability_verdict',
+        module: 'capability-gate',
+        level: verdict === 'denied-capability' ? 'warn' : 'info',
+        project_slug: this.project_slug,
+        payload: {
+          tool_name: reg.name,
+          verdict,
+          capability: reg.capability_required,
+          approval_policy: reg.approval_policy,
+          provenance,
+          // Marks X1's mode; D-9 flips this to real enforcement.
+          enforcement: 'log-only',
+        },
+      })
+    } catch {
+      // Observability must never perturb dispatch. Swallow.
+    }
   }
 
   /** Snapshot of registered tools — surfaces the registry through the server boundary. */

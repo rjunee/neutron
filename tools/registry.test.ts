@@ -24,6 +24,35 @@ describe('ToolRegistry', () => {
     expect(reg.size()).toBe(1)
   })
 
+  test('X1 — a registration with no provenance is normalized to the platform marker', () => {
+    const reg = new ToolRegistry()
+    reg.register({
+      name: 'doc_search',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'read:docs',
+      approval_policy: 'auto',
+      handler: noopHandler,
+    })
+    expect(reg.get('doc_search')?.provenance).toEqual({ kind: 'platform' })
+  })
+
+  test('X1 — an explicit core provenance is preserved verbatim', () => {
+    const reg = new ToolRegistry()
+    reg.register({
+      name: 'tasks_add',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      capability_required: 'write:tasks_core.items',
+      approval_policy: 'auto',
+      provenance: { kind: 'core', slug: 'tasks_core' },
+      handler: noopHandler,
+    })
+    expect(reg.get('tasks_add')?.provenance).toEqual({ kind: 'core', slug: 'tasks_core' })
+  })
+
   test('duplicate register throws', () => {
     const reg = new ToolRegistry()
     reg.register({

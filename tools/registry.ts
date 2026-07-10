@@ -35,6 +35,33 @@ import type { Capability, JsonSchemaDocument } from '@neutronai/core-sdk/types.t
 
 export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
 
+/**
+ * X1 — where a registered tool comes from. The dispatch-time capability gate
+ * (`McpServer.dispatch`) reads this to attribute each capability verdict. A
+ * discriminated union so a tool with NO Core installation record is EXPLICITLY
+ * classified as a first-class `platform` tool, never left unclassified / silently
+ * allow-all:
+ *
+ *   - `platform` — a first-party, gateway-composed tool (work_board, dispatch_agent,
+ *     doc_search, skill_forge, memory_search, message_search, create_project, …).
+ *     No Core install record exists for these (the gap the plan calls out); this is
+ *     their explicit policy class. Their HITL policy travels on
+ *     {@link ToolRegistration.approval_policy}.
+ *   - `core` — a tool contributed by a bundled / third-party Core, carrying the
+ *     Core's `slug` (from `defineCore()`), stamped at the single install chokepoint
+ *     (`install-bundled.ts`).
+ */
+export type ToolProvenance =
+  | { readonly kind: 'platform' }
+  | { readonly kind: 'core'; readonly slug: string }
+
+/**
+ * The provenance stamped on any registration that declares none: an explicit
+ * platform-tool marker. Exported so dispatch + tests reference the exact value
+ * the registry normalizes to.
+ */
+export const PLATFORM_TOOL_PROVENANCE: ToolProvenance = { kind: 'platform' }
+
 /** Per-call context handed to a tool handler at invocation time. */
 export interface ToolCallContext {
   project_slug: string
@@ -79,6 +106,17 @@ export interface ToolRegistration {
   approval_policy: ApprovalPolicy
   handler: ToolHandler
   /**
+   * X1 — where this tool comes from, for the dispatch-time capability gate.
+   * OPTIONAL at the call site: a registration that omits it is normalized by
+   * {@link ToolRegistry.register} to {@link PLATFORM_TOOL_PROVENANCE} (an explicit
+   * platform-tool classification — the 19 first-party sidecar surfaces all take
+   * this default). The bundled-Core install path sets `{ kind: 'core', slug }` so
+   * a Core tool's verdict is attributed to its Core. After registration this is
+   * always present (the registry stamps it), so `registry.get(name).provenance`
+   * is concrete.
+   */
+  provenance?: ToolProvenance
+  /**
    * P0-1 — hide this tool from the spawned agent's native-MCP tool manifest
    * (`McpServer.listToolSchemas`). The tool stays registered (introspection,
    * tests, the in-process resolver), but is NOT advertised to the live agent —
@@ -105,7 +143,14 @@ export class ToolRegistry {
     if (this.tools.has(reg.name)) {
       throw new Error(`tool '${reg.name}' is already registered`)
     }
-    this.tools.set(reg.name, reg)
+    // X1 — every stored registration carries a CONCRETE provenance so the
+    // dispatch-time capability gate can attribute its verdict without a fallback.
+    // A registration that declares none is EXPLICITLY classified as a platform
+    // tool (not left unclassified / silently allow-all); the bundled-Core install
+    // path passes `{ kind: 'core', slug }` at its single chokepoint.
+    const normalized: ToolRegistration =
+      reg.provenance === undefined ? { ...reg, provenance: PLATFORM_TOOL_PROVENANCE } : reg
+    this.tools.set(reg.name, normalized)
   }
 
   /** Look up a tool by name. Returns undefined if not registered. */

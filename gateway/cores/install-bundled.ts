@@ -1028,6 +1028,9 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
         // no cast is needed and the openness is preserved end-to-end.
         capability_required: def.capability_required,
         approval_policy: DEFAULT_APPROVAL_POLICY,
+        // X1 — attribute this tool to its originating Core so the dispatch-time
+        // capability gate's verdict names the Core (not the platform default).
+        provenance: { kind: 'core', slug: core.slug },
         handler: wrapHandler(handler),
       })
     } catch (err) {
@@ -1071,6 +1074,9 @@ function registerNotImplementedStubs(tools: ToolRegistry, core: BundledCore): vo
         output_schema: def.output_schema,
         capability_required: def.capability_required,
         approval_policy: DEFAULT_APPROVAL_POLICY,
+        // X1 — even a not-yet-wired Core stub is attributed to its Core so the
+        // dispatch-time capability verdict is correctly sourced.
+        provenance: { kind: 'core', slug: core.slug },
         handler: async () => {
           throw new Error(
             `tool '${def.name}' (core=${core.slug}) has no backend wired — register a CoreBackendFactory for slug '${core.slug}'`,
