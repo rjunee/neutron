@@ -31,10 +31,8 @@ import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import {
-  GBrainUnavailableError,
-  type McpClient,
-} from '@neutronai/gbrain-memory/memory-store.ts'
+import { GBrainUnavailableError } from '@neutronai/gbrain-memory/memory-store.ts'
+import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'
 import { ConnectedMembersStore } from '../connected-members-store.ts'
 import { ConnectGuestInviteStore } from '../guest-invite-store.ts'
 import {

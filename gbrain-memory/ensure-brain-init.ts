@@ -4,7 +4,7 @@
  * THE production memory bug (ND1, dogfood 2026-06-27 §2): the realmode composer
  * spawns `gbrain serve` against a brain that was **never `gbrain init`'d**, so
  * `serve` prints "No brain configured. Run: gbrain init" and exits → every MCP
- * op fails `MCP error -32000: Connection closed` → `gbrain_search`, the scribe
+ * op fails `MCP error -32000: Connection closed` → `memory_search`, the scribe
  * write fan-out, and the admin "Memory" tab all silently no-op. Recall only
  * *appeared* to work because the agent fell back to Claude Code file-memory.
  * The live install was affected too (`GBRAIN_HOME=… gbrain list` → "No brain

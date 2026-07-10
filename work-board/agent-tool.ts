@@ -10,7 +10,7 @@
  * Tools: `work_board_list`, `work_board_add`, `work_board_update`,
  * `work_board_complete`, `work_board_reorder`. All `approval_policy:'auto'`
  * with a `read:project_data` / `write:project_data` capability (mirrors
- * `gbrain_search`).
+ * `memory_search`).
  *
  * SECURITY + SCOPE: the storage scope is NEVER an agent-supplied argument. It is
  * derived at dispatch time from the server-injected `ToolCallContext` via

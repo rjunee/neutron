@@ -155,7 +155,7 @@ export type OpenComposition = CompositionInput &
       | 'platform'
       | 'cron_jobs'
       | 'cores'
-      | 'gbrain_search'
+      | 'memory_search'
       | 'work_board'
       | 'create_project'
       | 'message_search'
@@ -2468,13 +2468,13 @@ export function buildOpenGraphComposer(
       // `tools` module when a runtime is present. Omitted if the index
       // failed to open (boot stays healthy without doc search).
       ...(docSearchRuntime !== null ? { doc_search: { runtime: docSearchRuntime } } : {}),
-      // Memory recall (P0-2 — `gbrain_search`) — wire the SAME GBrainMemoryStore
+      // Memory recall (P0-2 — `memory_search`) — wire the SAME MemoryStore
       // the scribe writes to every turn (and the admin Memory tab reads) as an
       // agent-facing recall tool, so the live agent can read its long-term
       // memory back (people/companies/projects + scribe facts). The store is
       // always built (`buildGBrainMemory`), so this is unconditional; the tool
       // degrades to empty results on a host without the `gbrain` binary.
-      gbrain_search: { store: gbrainMemory.memoryStore },
+      memory_search: { store: gbrainMemory.memoryStore },
       // Work Board (Phase 1a) — register the `work_board_*` agent tools backed
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one

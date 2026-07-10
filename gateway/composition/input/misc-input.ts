@@ -160,19 +160,20 @@ export interface MiscCompositionInput {
     runtime: import('@neutronai/message-search/runtime.ts').MessageSearchRuntime
   }
   /**
-   * Memory recall (P0-2 — `gbrain_search`) — when supplied, the `tools`
-   * module registers the `gbrain_search` agent tool backed by this owner's
-   * `GBrainMemoryStore`, so the live chat agent can recall the entity pages
+   * Memory recall (P0-2 — `memory_search`) — when supplied, the `tools`
+   * module registers the `memory_search` agent tool backed by this owner's
+   * `MemoryStore`, so the live chat agent can recall the entity pages
    * (people/companies/projects/meetings/concepts/originals) + scribe-extracted
    * facts that the WRITE path persists every turn. Closes the write→read
-   * asymmetry: scribe writes to GBrain on every turn, this tool reads it back.
+   * asymmetry: scribe writes to memory on every turn, this tool reads it back.
    * Distinct corpus from doc_search (project files) + message_search (chat
    * history) — the vault-wide / fast-fact recall surface. The store is
-   * constructed by the production composer (which owns the GBrain client);
-   * omitting it leaves the surface unregistered (unchanged pre-recall
-   * behaviour).
+   * constructed by the production composer (which owns the backing memory
+   * client); omitting it leaves the surface unregistered (unchanged pre-recall
+   * behaviour). Backend-neutral (RA5 / invariant I2): only the `MemoryStore`
+   * interface crosses this seam.
    */
-  gbrain_search?: {
+  memory_search?: {
     store: import('@neutronai/gbrain-memory/memory-store.ts').MemoryStore
   }
   /**

@@ -332,7 +332,7 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
 The live chat agent is a spawned interactive `claude` REPL driven over the
 dev-channel (`runtime/adapters/claude-code/persistent/`). It reaches the
 gateway's in-process tool surface — Cores (`/cal` `/email` `/remind`
-`/research`), `doc_search` / `doc_read`, `message_search`, `gbrain_search`
+`/research`), `doc_search` / `doc_read`, `message_search`, `memory_search`
 (memory recall, P0-2), `dispatch_agent`, `skill_forge_*`, and the
 `neutron-tools` surface — as **native MCP tool calls**, not via the user typing
 a slash-command.
@@ -2016,10 +2016,10 @@ fan-out). `resolveGbrainClientOptions` is the pure config seam: it scopes the
 `gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`) and forwards the
 optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
 
-- **Agent memory RECALL (P0-2) — `gbrain_search` (`gbrain-memory/agent-tool.ts`).**
-  The scribe WRITES entities + facts to this store on every turn; `gbrain_search`
+- **Agent memory RECALL (P0-2) — `memory_search` (`gbrain-memory/agent-tool.ts`).**
+  The scribe WRITES entities + facts to this store on every turn; `memory_search`
   is the matching READ tool the spawned agent calls natively as
-  `mcp__neutron__gbrain_search` (rides the P0-1 bridge). It is backed by the SAME
+  `mcp__neutron__memory_search` (rides the P0-1 bridge). It is backed by the SAME
   `memoryStore.query` the admin Memory tab uses — one index, no second client —
   so the write→read asymmetry is closed: anything the scribe remembered is
   recallable mid-turn. `read:memory`, read-only, `{ query, limit? }` →
@@ -2032,13 +2032,13 @@ optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
   vault-wide / fast-fact recall surface — a different corpus than `doc_search`
   (project files) + `message_search` (chat history): GBrain holds the entity
   pages (people/companies/projects/meetings/concepts/originals) + scribe facts.
-  Wired when `open/composer.ts` supplies `MiscCompositionInput.gbrain_search.store`
+  Wired when `open/composer.ts` supplies `MiscCompositionInput.memory_search.store`
   (always, since `buildGBrainMemory` always builds the store).
 
 - **Init guard — the brain is `gbrain init`'d before the first `serve` (ND1).**
   `gbrain serve` exits with "No brain configured" against an uninitialized
   brain, so before the dogfood fix prod served an un-init'd brain → every MCP op
-  failed `Connection closed` → `gbrain_search` / scribe-write / admin Memory
+  failed `Connection closed` → `memory_search` / scribe-write / admin Memory
   silently no-op'd (recall was masked by Claude Code file-memory). The fix:
   `gbrain-memory/ensure-brain-init.ts#ensureBrainInitialized` runs an idempotent
   `gbrain init --pglite --non-interactive` (skip-embed-check) the FIRST time the

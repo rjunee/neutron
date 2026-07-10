@@ -35,10 +35,8 @@
  * (connect-spec §7 C-E phasing) and is deliberately not built here.
  */
 
-import {
-  type McpClient,
-  isGbrainBinaryMissingError,
-} from '@neutronai/gbrain-memory/memory-store.ts'
+import { isGbrainBinaryMissingError } from '@neutronai/gbrain-memory/memory-store.ts'
+import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'
 
 /** A single mirrored entity page — slug + body, optional per-fact author. */
 export interface MirrorPage {

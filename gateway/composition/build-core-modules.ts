@@ -21,7 +21,7 @@ import {
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { registerNeutronToolsSurface } from '@neutronai/mcp/surfaces/neutron-tools.ts'
 import { registerDocSearchToolSurface } from '@neutronai/doc-search/tool.ts'
-import { registerGBrainSearchToolSurface } from '@neutronai/gbrain-memory/agent-tool.ts'
+import { registerMemorySearchToolSurface } from '@neutronai/gbrain-memory/agent-tool.ts'
 import { registerWorkBoardToolSurface } from '@neutronai/work-board/agent-tool.ts'
 import { registerTridentBuildToolSurface } from '@neutronai/trident/work-board-build-tool.ts'
 import { registerCodexCredentialToolSurface } from '@neutronai/trident/codex-credential-tool.ts'
@@ -162,13 +162,13 @@ export function buildCoreModules(input: CompositionInput): CoreModules {
       if (input.message_search !== undefined) {
         registerMessageSearchToolSurface(reg, input.message_search.runtime)
       }
-      // Memory recall (P0-2) — register the `gbrain_search` agent tool when the
-      // composer wired the owner's GBrainMemoryStore, so the live agent can
-      // READ BACK the entity pages + scribe facts the WRITE path persists every
-      // turn. The agent-native twin of Vajra's `mcp__qmd__query` recall; rides
-      // the #87 tools-bridge as `mcp__neutron__gbrain_search`.
-      if (input.gbrain_search !== undefined) {
-        registerGBrainSearchToolSurface(reg, input.gbrain_search.store)
+      // Memory recall (P0-2) — register the `memory_search` agent tool when the
+      // composer wired the owner's MemoryStore, so the live agent can READ BACK
+      // the entity pages + scribe facts the WRITE path persists every turn. The
+      // agent-native twin of Vajra's `mcp__qmd__query` recall; rides the #87
+      // tools-bridge as `mcp__neutron__memory_search`.
+      if (input.memory_search !== undefined) {
+        registerMemorySearchToolSurface(reg, input.memory_search.store)
       }
       // Agent-dispatch family (parity gap #3) — register `dispatch_agent` when
       // the composer wired the service, so the live agent can dispatch a

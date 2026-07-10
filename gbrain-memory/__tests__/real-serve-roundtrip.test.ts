@@ -4,7 +4,7 @@
  * THE bug this proves fixed (dogfood 2026-06-27 §2): production spawns the
  * external `gbrain serve` binary against a brain that was never `gbrain init`'d,
  * so serve prints "No brain configured" and exits → every MCP op fails
- * `MCP error -32000: Connection closed` → `gbrain_search`, scribe-write, and the
+ * `MCP error -32000: Connection closed` → `memory_search`, scribe-write, and the
  * admin Memory tab silently no-op. CI's other "real GBrain" test boots an
  * IN-PROCESS PGLite engine, so it never exercised the `init`→`serve` seam where
  * the bug lived. This test closes that gap: it drives the EXACT production path
@@ -58,7 +58,7 @@ describeReal('ND1 — real gbrain serve write→read round-trip (keyword+graph d
         content: 'The launch code is BLUEBIRD-42 and the on-call engineer is Dana.',
       })
 
-      // 4. READ (what `gbrain_search` does on recall) — keyword search over the
+      // 4. READ (what `memory_search` does on recall) — keyword search over the
       //    real brain, no embedder required.
       const res = (await client.call('search', {
         query: 'launch code on-call engineer',

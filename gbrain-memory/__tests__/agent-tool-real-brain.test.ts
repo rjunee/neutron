@@ -1,5 +1,5 @@
 /**
- * P0-2 — `gbrain_search` write→native-recall loop against a REAL GBrain brain.
+ * P0-2 — `memory_search` write→native-recall loop against a REAL GBrain brain.
  *
  * This is the acceptance proof in committed form (mirrors the #87 real-turn
  * regression shape): it stands up an actual in-process PGLite GBrain brain
@@ -8,10 +8,10 @@
  *
  *   1. WRITE (turn 1's effect): `GBrainMemoryStore.add` → real gbrain `put_page`
  *      — exactly what the scribe does every turn.
- *   2. DISCOVERY: `McpServer.listToolSchemas()` advertises `gbrain_search` (what
+ *   2. DISCOVERY: `McpServer.listToolSchemas()` advertises `memory_search` (what
  *      the per-session manifest hands the spawned `claude`).
  *   3. NATIVE RECALL (a later turn): `McpServer.dispatch({ tool_name:
- *      'gbrain_search' })` — the bridge's invocation half (POST /tool-call →
+ *      'memory_search' })` — the bridge's invocation half (POST /tool-call →
  *      replToolBridge.dispatch) — recalls the written fact from the real brain.
  *
  * No fakes in the read path: a real brain, real `search`, real row shapes. This
@@ -22,15 +22,15 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 
-import type { McpClient } from '../memory-store.ts'
+import type { McpClient } from '../mcp-client.ts'
 import { GBrainMemoryStore } from '../gbrain-memory-store.ts'
 import { bootPgliteBrain } from './boot-pglite-brain.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import { withTopicContext } from '@neutronai/mcp/topic-context.ts'
-import { GBRAIN_SEARCH_TOOL, registerGBrainSearchToolSurface } from '../agent-tool.ts'
+import { MEMORY_SEARCH_TOOL, registerMemorySearchToolSurface } from '../agent-tool.ts'
 
-describe('gbrain_search — real GBrain write→native-recall loop', () => {
+describe('memory_search — real GBrain write→native-recall loop', () => {
   let engine: { disconnect(): Promise<void> }
   let client: McpClient
 
@@ -62,7 +62,7 @@ describe('gbrain_search — real GBrain write→native-recall loop', () => {
     if (engine !== undefined) await engine.disconnect()
   }, 30_000)
 
-  test('a fact written by the scribe is recalled by a native gbrain_search call', async () => {
+  test('a fact written by the scribe is recalled by a native memory_search call', async () => {
     const store = new GBrainMemoryStore(client)
 
     // 1) WRITE — the scribe's effect after turn 1 stated the fact.
@@ -76,18 +76,18 @@ describe('gbrain_search — real GBrain write→native-recall loop', () => {
     // 2) Register exactly as build-core-modules does; wrap in the McpServer the
     //    tools-bridge dispatches against.
     const registry = new ToolRegistry()
-    registerGBrainSearchToolSurface(registry, store)
+    registerMemorySearchToolSurface(registry, store)
     const server = new McpServer({ project_slug: 'default', registry })
 
     // DISCOVERY half — the manifest the spawned claude is handed.
-    expect(server.listToolSchemas().map((s) => s.name)).toContain(GBRAIN_SEARCH_TOOL)
+    expect(server.listToolSchemas().map((s) => s.name)).toContain(MEMORY_SEARCH_TOOL)
 
-    // 3) NATIVE RECALL — a later turn: mcp__neutron__gbrain_search.
+    // 3) NATIVE RECALL — a later turn: mcp__neutron__memory_search.
     const result = (await withTopicContext(
       { topic_id: 'app:owner', project_id: 'default', speaker_user_id: 'owner', call_id: 'recall-1' },
       async () =>
         server.dispatch({
-          tool_name: GBRAIN_SEARCH_TOOL,
+          tool_name: MEMORY_SEARCH_TOOL,
           args: { query: 'Acme Corp CEO' },
           call_id: 'recall-1',
         }),
@@ -111,11 +111,11 @@ describe('gbrain_search — real GBrain write→native-recall loop', () => {
       metadata: { slug: 'acme-corp', entity_kind: 'company' },
     })
     const registry = new ToolRegistry()
-    registerGBrainSearchToolSurface(registry, store)
+    registerMemorySearchToolSurface(registry, store)
     const server = new McpServer({ project_slug: 'default', registry })
 
     const result = (await server.dispatch({
-      tool_name: GBRAIN_SEARCH_TOOL,
+      tool_name: MEMORY_SEARCH_TOOL,
       args: { query: '' },
       call_id: 'recent-1',
     })) as { results: Array<{ id: string }> }

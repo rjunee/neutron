@@ -29,7 +29,7 @@ import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from './context.ts'
 
 export interface WiredMemory {
-  /** Lazy fail-soft GBrain memory (scribe write target + `gbrain_search` store). */
+  /** Lazy fail-soft GBrain memory (scribe write target + `memory_search` store). */
   gbrainMemory: ReturnType<typeof buildGBrainMemory>
   /** The GBrain `syncHook` fanned to scribe, the page-indexer, and finalize. */
   gbrainSyncHook: ReturnType<typeof buildGBrainMemory>['syncHook']
