@@ -104,6 +104,10 @@ export class ProjectBackupScheduler {
    *  domain machinery and stay here. */
   private readonly loop: SupervisedLoop
   private readonly pendingJitterTimers = new Map<string, NodeJS.Timeout>()
+  /** §F1 — jittered snapshots ALREADY launched (their timer fired). `stop()`
+   *  drains these so a shutdown quiesces an in-flight `backupNow()`, not just
+   *  the polling loop + not-yet-fired jitter timers. */
+  private readonly activeFires = new Set<Promise<void>>()
   private stopped = false
 
   constructor(opts: ProjectBackupSchedulerOptions) {
@@ -148,8 +152,9 @@ export class ProjectBackupScheduler {
   }
 
   /** Stop + quiesce: mark stopped so an in-flight `poll()` short-circuits,
-   *  await the loop (drains the in-flight poll), then cancel any pending
-   *  jittered snapshot timers. */
+   *  await the loop (drains the in-flight poll), cancel any not-yet-fired
+   *  jittered snapshot timers, THEN drain any snapshot that already started so
+   *  shutdown never closes the store out from under an in-flight `backupNow()`. */
   async stop(): Promise<void> {
     this.stopped = true
     await this.loop.stop()
@@ -157,6 +162,9 @@ export class ProjectBackupScheduler {
       this.clearTimeoutFn(handle)
     }
     this.pendingJitterTimers.clear()
+    if (this.activeFires.size > 0) {
+      await Promise.all([...this.activeFires])
+    }
   }
 
   /** Single poll — fires backups for projects whose tick interval has
@@ -209,7 +217,12 @@ export class ProjectBackupScheduler {
       const handle = this.setTimeoutFn(() => {
         this.pendingJitterTimers.delete(project_id)
         if (this.stopped) return
-        this.fire(project_id)
+        // Track the in-flight snapshot so `stop()` can drain it. `fire()`
+        // catches its own errors + never rejects, so this never carries a
+        // rejection.
+        const p = this.fire(project_id).then(() => undefined)
+        this.activeFires.add(p)
+        void p.finally(() => this.activeFires.delete(p))
       }, jitter)
       this.pendingJitterTimers.set(project_id, handle)
     }
