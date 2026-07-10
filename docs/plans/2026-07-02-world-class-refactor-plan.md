@@ -756,6 +756,8 @@ a transition test. The tested-but-dormant `landing/auth-gate.ts` vs live-anonymo
 both `authenticated` and `allow` — compose.ts:934-948).
 **Accept:** one gate seam, both modes; LANDING_PATHS deleted.
 
+> **⚠️ SPLIT (2026-07-09):** delivered as **C5a ✅ #302 (route-manifest half only)** — the `LANDING_PATHS` literal was deleted from `gateway/http/route-slots.ts` and regenerated in a new landing-owned leaf `landing/routes.ts` (`LANDING_ROUTE_MANIFEST` + `LANDING_ROUTE_PREFIXES`) with a frozen-snapshot transition test; cookie-stitch and both-mode routing left byte-unchanged. **C5b = the auth-gate-seam unification, DEFERRED as owner-gated.** The build agent correctly STOPPED: `openFetch` (a landing-fetch replacement wrapping only the landing rung, with a bare-`GET /` branch shadowed in the compose chain since `isLandingRoute('/','GET',false)===false`) and Managed's `composition.auth_gate` (an `AuthGateOptions` decision wrapping the whole ladder) are structurally/layer-wise incompatible; rerouting `openFetch` through the seam restructures the security-sensitive owner gate and **cannot be proven behavior-preserving without e2e verification of BOTH auth modes on the live login path**. → C5b is its own owner-adjudicated unit (like S1) with real both-mode e2e, NOT an autonomous carve.
+
 ### C6 — Credential-resolver unification · `opus` · M
 `resolveOpenLlmPool` (open/composer.ts:287-316) mirrors
 `gateway/realmode-composer/resolve-llm-credentials.ts` (309 LOC) by comment. One
@@ -1955,9 +1957,9 @@ the R-behavior block (RB*/RC2/RC3) is the perfect-recall uplift, sequenced last 
 - [x] K1 · [x] K2 · [x] K3 · [x] K4a (K4b deferred) · [x] K5 · [x] K6 ✅ #225 · [x] K7 ✅ #224 · [x] K8 · [x] K9 · [ ] K10 · [x] K11 ✅ #240/#242/#243/#247/#248/#251/#257 (fully closed)
 - Window auxiliary units: [x] FX1 ✅ #226 (`/code` pre-check narrow) · [x] FX2 ✅ #227 (K3 coverage restore) · [x] RT1 ✅ #228 (Ralph/SPEC tripwire) · [x] K11-pre ✅ #229 (K11a6 test re-anchor) · [x] M0 ✅ neutron-managed#123 (Managed CI)
 - [x] L1 ✅ #253 · [x] L2 ✅ #255 · [x] L3 ✅ #262 · [x] L4 ✅ #258 · [x] L5 ✅ #280 · [x] L6 ✅ #270 · [x] L7 ✅ #260 — **L-PHASE COMPLETE**
-- [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [~] C5 (in flight) · [x] C6 ✅ #293 · [ ] C7 · [ ] C8
-- [x] D1 ✅ #282 · [x] D2 ✅ #294 · [ ] D3 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [ ] D7 · [x] D8 ✅ #298 · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [~] D9c (in flight) · [ ] D9d
-- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [ ] P4 · [x] P5 ✅ #299 · [ ] P6 · [ ] P7 · [ ] P8 · [ ] P9 · [~] P10 (in flight) · [ ] P11
+- [x] C1 ✅ #265 · [x] C2 ✅ #268 · [x] C3a ✅ #272 · [x] C3b ✅ #274 · [x] C3c ✅ #276 · [x] C3d ✅ #278 · [x] C4 ✅ #283 · [~] C5a ✅ #302 (route-manifest half — LANDING_PATHS→generated `landing/routes.ts`; **C5b auth-gate-seam unification DEFERRED, owner-gated** — see note) · [x] C6 ✅ #293 · [ ] C7 · [ ] C8
+- [x] D1 ✅ #282 · [x] D2 ✅ #294 · [ ] D3 · [x] D4 ✅ #285 · [x] D5 ✅ #290 · [x] D6 ✅ #289 · [ ] D7 · [x] D8 ✅ #298 · [x] D9a ✅ #286 · [ ] D9b (MOOT — K11*) · [x] D9c ✅ #300 (ProjectsProposedFlow — router/consumeChoice core already K11b1-deleted) · [x] D9d ✅ #305 (PHASE_DESCRIPTORS + exhaustiveness; STATIC_PHASE_SPECS left — undefined-semantics leaf) — **D9-PHASE COMPLETE**
+- [x] P1 ✅ #284 · [x] P2 ✅ #297 · [x] P3 ✅ #292 · [x] P4 ✅ #304 (table-ownership map + conformance test) · [x] P5 ✅ #299 · [ ] P6 · [ ] P7 · [ ] P8 · [ ] P9 · [x] P10 ✅ #303 · [ ] P11
 - [ ] F1 · [ ] F2 · [ ] F3 · [ ] F4 · [ ] F5 · [ ] F6 · [x] F7 ✅ #296 · [ ] F8 · [x] F9 ✅ #194 (pilot)
 - [x] O1 ✅ #295 · [ ] O2 · [ ] O3 · [ ] O4 · [ ] O5 · [ ] O6 · [ ] O7 · [ ] O8
 - [ ] X1 · [ ] X2 · [ ] X3 · [ ] X4 · [ ] X5 · [ ] X6
