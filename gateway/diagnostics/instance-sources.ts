@@ -88,7 +88,17 @@ export function buildInstanceDiagnosticsSources(
       const tail = all.slice(Math.max(0, all.length - maxEvents))
       return tail.reverse()
     },
-    replRegistry: () => ({ path: registryPath, records: loadRegistry(registryPath) }),
+    replRegistry: () => ({
+      path: registryPath,
+      // Propagate corruption/read errors as a throw → the section renders
+      // `available: false` (an unreadable registry IS a chat-supervision fault,
+      // exactly what this feature diagnoses). An ABSENT file is the steady-state
+      // cold-boot case — `loadRegistry` returns `{}` without invoking the
+      // callback, so it stays `available: true` with zero sessions.
+      records: loadRegistry(registryPath, (reason) => {
+        throw new Error(`repl-registry unreadable/corrupt: ${reason}`)
+      }),
+    }),
   }
 
   if (input.now !== undefined) sources.now = input.now

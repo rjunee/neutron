@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -32,7 +32,7 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'o5-cli-'))
 })
 afterEach(() => {
-  rmSync(tmp, { recursive: true, force: true })
+  if (typeof tmp === 'string' && tmp.length > 0) rmSync(tmp, { recursive: true, force: true })
 })
 
 describe('collectCliDiagnostics', () => {
@@ -110,6 +110,37 @@ describe('collectCliDiagnostics', () => {
     expect(jobs.map((j) => j.job_name)).toEqual(['nudge'])
     // the other project's error text must NOT be present
     expect(JSON.stringify(jobs)).not.toContain('private error text')
+  })
+
+  it('repl registry: absent file → available with zero sessions', () => {
+    const dbPath = join(tmp, 'project.db')
+    ProjectDb.open(dbPath).close()
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.repl_sessions.available).toBe(true)
+    expect(result.report.repl_sessions.sessions).toEqual([])
+  })
+
+  it('repl registry: corrupt file → available:false with a note (NOT falsely healthy)', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.close()
+    // owner_home is `tmp` (see envFor) → registry at tmp/.neutron/repl-registry.json
+    mkdirSync(join(tmp, '.neutron'), { recursive: true })
+    writeFileSync(join(tmp, '.neutron', 'repl-registry.json'), '{ this is not valid json', 'utf8')
+
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.report.repl_sessions.available).toBe(false)
+    expect(result.report.repl_sessions.note).toContain('repl-registry unreadable/corrupt')
+    // must NOT report a healthy "no sessions" state
+    expect(result.report.repl_sessions.sessions).toBeUndefined()
   })
 
   it('returns { ok: false } when project.db does not exist (fresh box)', () => {
