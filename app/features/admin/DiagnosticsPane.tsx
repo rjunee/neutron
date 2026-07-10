@@ -8,17 +8,16 @@
  * renders its own note.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useReducer } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { AdminClient, type DiagnosticsReport } from '../../lib/admin-client';
+import { AdminClient } from '../../lib/admin-client';
+import {
+  arr,
+  diagnosticsReducer,
+  initialDiagnosticsState,
+} from '../../lib/diagnostics-pane-helpers';
 import { formatError } from './format';
-
-/** Defensive: only iterate real arrays (the client already validates, but this
- *  guarantees rendering never throws on a `.map()` of a non-array). */
-function arr<T>(x: T[] | undefined): T[] {
-  return Array.isArray(x) ? x : [];
-}
 
 function fmtTime(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return '—';
@@ -64,19 +63,17 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 export function DiagnosticsPane({ client }: { client: AdminClient }) {
-  const [data, setData] = useState<DiagnosticsReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [{ data, loading, error }, dispatch] = useReducer(
+    diagnosticsReducer,
+    initialDiagnosticsState,
+  );
 
   const fetchOne = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    dispatch({ type: 'fetch-start' });
     try {
-      setData(await client.getDiagnostics());
+      dispatch({ type: 'fetch-success', report: await client.getDiagnostics() });
     } catch (err) {
-      setError(formatError(err));
-    } finally {
-      setLoading(false);
+      dispatch({ type: 'fetch-error', error: formatError(err) });
     }
   }, [client]);
 
