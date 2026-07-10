@@ -148,83 +148,104 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
-    await act(async () => {
-      root.render(<Harness />)
-    })
-    await act(async () => {
-      sockets[0]!.open()
-      sockets[0]!.deliver(ready())
-      sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a1', seq: 1, body: 'hello from alpha', ts: 1 })
-      await tick()
-    })
 
-    // On Alpha: capture its live DOM instances and brand them with a JS expando.
-    const convA = activeConv(container)
-    const threadA = convA.querySelector('.car-thread') as HTMLElement
-    const composerA = convA.querySelector('.car-composer') as HTMLElement
-    const paneA = convA.querySelector('.car-plans') as HTMLElement
-    expect(threadA).not.toBeNull()
-    expect(composerA).not.toBeNull()
-    expect(paneA).not.toBeNull()
-    const brand = (el: HTMLElement) => {
-      ;(el as unknown as Record<string, unknown>)['__w7probe'] = 'alpha-surface'
+    // #354 DOM-side guard — sample the LIVE tree at every checkpoint (NOT after
+    // unmount, which would clear the container and make the check vacuous). Once
+    // the error boundary trips it renders this fallback; latch if it EVER appears.
+    let boundaryEverTripped = false
+    const checkBoundary = (): void => {
+      if ((container.textContent ?? '').includes('This conversation hit a snag')) {
+        boundaryEverTripped = true
+      }
     }
-    brand(threadA)
-    brand(composerA)
-    brand(paneA)
 
-    // Switch to Beta. Alpha's surface stays MOUNTED (just hidden) — its nodes stay
-    // connected — and Beta gets its OWN distinct nodes.
-    await act(async () => {
-      controller.setProject('beta')
-      await tick()
-    })
-    expect(threadA.isConnected).toBe(true)
-    expect(composerA.isConnected).toBe(true)
-    expect(paneA.isConnected).toBe(true)
-    const convB = activeConv(container)
-    expect(convB).not.toBe(convA)
-    expect(convB.querySelector('.car-composer')).not.toBe(composerA)
-    // Some unrelated re-renders while off Alpha (the shape that would provoke a
-    // stale remount if the surface weren't truly persistent).
-    for (let i = 0; i < 5; i++) {
+    try {
       await act(async () => {
-        bump(i + 1)
+        root.render(<Harness />)
+      })
+      await act(async () => {
+        sockets[0]!.open()
+        sockets[0]!.deliver(ready())
+        sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'a1', seq: 1, body: 'hello from alpha', ts: 1 })
         await tick()
       })
+      checkBoundary()
+
+      // On Alpha: capture its live DOM instances and brand them with a JS expando.
+      const convA = activeConv(container)
+      const threadA = convA.querySelector('.car-thread') as HTMLElement
+      const composerA = convA.querySelector('.car-composer') as HTMLElement
+      const paneA = convA.querySelector('.car-plans') as HTMLElement
+      expect(threadA).not.toBeNull()
+      expect(composerA).not.toBeNull()
+      expect(paneA).not.toBeNull()
+      const brand = (el: HTMLElement) => {
+        ;(el as unknown as Record<string, unknown>)['__w7probe'] = 'alpha-surface'
+      }
+      brand(threadA)
+      brand(composerA)
+      brand(paneA)
+
+      // Switch to Beta. Alpha's surface stays MOUNTED (just hidden) — its nodes stay
+      // connected — and Beta gets its OWN distinct nodes.
+      await act(async () => {
+        controller.setProject('beta')
+        await tick()
+      })
+      checkBoundary()
+      expect(threadA.isConnected).toBe(true)
+      expect(composerA.isConnected).toBe(true)
+      expect(paneA.isConnected).toBe(true)
+      const convB = activeConv(container)
+      expect(convB).not.toBe(convA)
+      expect(convB.querySelector('.car-composer')).not.toBe(composerA)
+      // Some unrelated re-renders while off Alpha (the shape that would provoke a
+      // stale remount if the surface weren't truly persistent).
+      for (let i = 0; i < 5; i++) {
+        await act(async () => {
+          bump(i + 1)
+          await tick()
+        })
+      }
+      checkBoundary()
+
+      // Switch back to Alpha. Its surface must be the SAME instances — reused, not
+      // rebuilt. Identity `===` AND the expando prove it's the same physical node.
+      await act(async () => {
+        controller.setProject('alpha')
+        await tick()
+      })
+      checkBoundary()
+      const convA2 = activeConv(container)
+      const threadA2 = convA2.querySelector('.car-thread') as HTMLElement
+      const composerA2 = convA2.querySelector('.car-composer') as HTMLElement
+      const paneA2 = convA2.querySelector('.car-plans') as HTMLElement
+
+      expect(convA2).toBe(convA)
+      expect(threadA2).toBe(threadA)
+      expect(composerA2).toBe(composerA)
+      // The #355 discriminator: the pane is the SAME node — it was never unmounted
+      // on the switch-away (so it never re-slid on return).
+      expect(paneA2).toBe(paneA)
+      expect((threadA2 as unknown as Record<string, unknown>)['__w7probe']).toBe('alpha-surface')
+      expect((composerA2 as unknown as Record<string, unknown>)['__w7probe']).toBe('alpha-surface')
+      expect((paneA2 as unknown as Record<string, unknown>)['__w7probe']).toBe('alpha-surface')
+      // Alpha's transcript is intact (the surface kept its state, not a cold reload).
+      expect(convA2.textContent ?? '').toContain('hello from alpha')
+
+      // #354 regression guard — the boundary never tripped at ANY checkpoint while
+      // the tree was live, and React never looped / unmounted a dead fiber.
+      expect(boundaryEverTripped).toBe(false)
+      expect(errs.filter((e) => e.includes('Maximum update depth')).length).toBe(0)
+      expect(errs.filter((e) => e.includes('already unmounted')).length).toBe(0)
+    } finally {
+      // Always restore the console + tear the tree down, even if an assertion above
+      // threw — otherwise the stub leaks into later tests and hides diagnostics.
+      console.error = origErr
+      await act(async () => {
+        root.unmount()
+      })
+      container.remove()
     }
-
-    // Switch back to Alpha. Its surface must be the SAME instances — reused, not
-    // rebuilt. Identity `===` AND the expando prove it's the same physical node.
-    await act(async () => {
-      controller.setProject('alpha')
-      await tick()
-    })
-    const convA2 = activeConv(container)
-    const threadA2 = convA2.querySelector('.car-thread') as HTMLElement
-    const composerA2 = convA2.querySelector('.car-composer') as HTMLElement
-    const paneA2 = convA2.querySelector('.car-plans') as HTMLElement
-
-    expect(convA2).toBe(convA)
-    expect(threadA2).toBe(threadA)
-    expect(composerA2).toBe(composerA)
-    // The #355 discriminator: the pane is the SAME node — it was never unmounted
-    // on the switch-away (so it never re-slid on return).
-    expect(paneA2).toBe(paneA)
-    expect((threadA2 as unknown as Record<string, unknown>)['__w7probe']).toBe('alpha-surface')
-    expect((composerA2 as unknown as Record<string, unknown>)['__w7probe']).toBe('alpha-surface')
-    expect((paneA2 as unknown as Record<string, unknown>)['__w7probe']).toBe('alpha-surface')
-    // Alpha's transcript is intact (the surface kept its state, not a cold reload).
-    expect(convA2.textContent ?? '').toContain('hello from alpha')
-
-    await act(async () => {
-      root.unmount()
-    })
-    console.error = origErr
-
-    // #354 regression guard from the DOM side: no error boundary, no loop.
-    expect(container.textContent ?? '').not.toContain('This conversation hit a snag')
-    expect(errs.filter((e) => e.includes('Maximum update depth')).length).toBe(0)
-    expect(errs.filter((e) => e.includes('already unmounted')).length).toBe(0)
   })
 })
