@@ -195,6 +195,22 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * O5 (world-class-refactor) — read-only diagnostics surface. When supplied,
+   * the composed HTTP chain mounts `GET /api/app/admin/diagnostics`, an
+   * owner-gated read-only composition of existing per-instance state (gbrain
+   * latch, credential-pool health, REPL registry, cron last-fire, import jobs,
+   * recent events) so "why is memory / chat / import broken?" is answerable
+   * without journalctl. Additive + read-only — mounts NO write route (unlike
+   * the currently-unmounted `app_admin_surface`, whose `/gateway/restart` etc.
+   * are side-effectful), so it can ship on its own seam.
+   *
+   * Surface factory:
+   *   `gateway/http/app-diagnostics-surface.ts:createAppDiagnosticsSurface`.
+   */
+  app_diagnostics_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * Admin-tab personality editor surface (2026-05-22). When supplied,
    * the composed HTTP chain mounts `/api/app/persona/*` (3-file list,
    * GET / PATCH per file, restart-from-scratch). HTTP-only — backed

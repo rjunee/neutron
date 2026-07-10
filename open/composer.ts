@@ -221,6 +221,9 @@ import {
 import type { CreateProjectToolService } from '@neutronai/gateway/realmode-composer/create-project-tool.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppUploadSurface } from '@neutronai/gateway/http/app-upload-surface.ts'
+import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
+import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
+import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { AppWsAdapter, optionsToInlineChoices } from '@neutronai/channels/adapters/app-ws/adapter.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
@@ -1521,6 +1524,30 @@ export function buildOpenGraphComposer(
       owner_home,
     })
 
+    // O5 (world-class-refactor) — read-only diagnostics surface. Composes
+    // EXISTING per-instance state (gbrain latch, credential-pool health, REPL
+    // registry, cron last-fire, import jobs, recent events) into ONE owner-gated
+    // report so "why is memory / chat / import broken?" is answerable without
+    // journalctl. Additive + read-only: no writes, no degrade-decision changes,
+    // and (unlike the unmounted app-admin surface) it exposes NO side-effectful
+    // route. The `diagnostics` closure runs at request time — `db`,
+    // `project_slug`, `owner_home`, `llmPool` are all captured here; the
+    // credential pool is in-process-only state the CLI (`neutron doctor`) cannot
+    // see, so it reads the on-disk subset instead.
+    const appDiagnosticsSurface = createAppDiagnosticsSurface({
+      auth: appOwnerAuth,
+      project_slug,
+      diagnostics: () =>
+        composeDiagnostics(
+          buildInstanceDiagnosticsSources({
+            db,
+            project_slug,
+            owner_home,
+            credentialPool: llmPool,
+          }),
+        ),
+    })
+
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
     // SINGLE chat transport the served React client uses
     // (`chat-react/config.ts` → `WebChatSession({url: /ws/app/chat})`). Both
@@ -2628,6 +2655,9 @@ export function buildOpenGraphComposer(
       // control has a live backend (no 404s behind a shown tab/button).
       app_tasks_surface: { handler: appTasksSurface.handler },
       app_upload_surface: { handler: appUploadSurface.handler },
+      // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
+      // owner-gated. Additive; mounts no write route.
+      app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },
     }
   }
 }

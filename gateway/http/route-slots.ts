@@ -541,6 +541,18 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_focus_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0i2. Read-only diagnostics — O5. `GET /api/app/admin/diagnostics`.
+  //      BEFORE appAdmin so it claims this exact path even if the (currently
+  //      unmounted) admin surface is ever wired — its `unknown_admin_route`
+  //      404 would otherwise swallow `/diagnostics`.
+  slot({
+    key: 'appDiagnostics',
+    rung: 'app-diagnostics',
+    composition: 'app_diagnostics_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_diagnostics_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0j. App admin — P5.7. `/api/app/admin/*`.
   slot({
     key: 'appAdmin',
