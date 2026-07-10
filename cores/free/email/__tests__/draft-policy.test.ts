@@ -30,12 +30,9 @@ import {
   plannedDraftLabels,
   retryDraftLabels,
 } from '../src/draft-policy.ts'
-import {
-  DraftLabelingError,
-  buildSeededInMemoryGmailClient,
-  type GmailClient,
-  type GmailDraftInput,
-} from '../src/backend.ts'
+import type { GmailClient, GmailDraftInput } from '../src/contract.ts'
+import { DraftLabelingError } from '../src/errors.ts'
+import { buildSeededInMemoryGmailClient } from '../src/in-memory.ts'
 import { DEFAULT_DRAFT_LABEL_IDS, projectLabelName } from '../src/manifest.ts'
 
 describe('Sam 4-point draft policy (load-bearing)', () => {

@@ -37,7 +37,8 @@ import {
 } from '../src/substrate-llm.ts'
 import { composeTriage } from '../src/triage.ts'
 import { composeBriefSummary } from '../src/summarizer.ts'
-import type { EmailSummary, GmailMessageFull, GmailMessageMeta } from '../src/backend.ts'
+import type { GmailMessageFull, GmailMessageMeta } from '../src/contract.ts'
+import type { EmailSummary } from '../src/summarizer.ts'
 
 interface RecordedCall {
   spec: AgentSpec

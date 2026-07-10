@@ -12,7 +12,7 @@ import {
   composeBriefSummary,
   renderBriefPrompt,
 } from '../src/summarizer.ts'
-import type { GmailMessageFull } from '../src/backend.ts'
+import type { GmailMessageFull } from '../src/contract.ts'
 
 const FAKE_MESSAGE: GmailMessageFull = {
   id: 'msg-1',

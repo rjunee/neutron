@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto'
 
-import type { EmailSummary, GmailMessageFull } from './backend.ts'
+import type { GmailMessageFull } from './contract.ts'
 
 /**
  * Locked v1 prompt template. The snapshot test in
@@ -144,4 +144,112 @@ export async function composeBriefSummary(
  */
 export function briefTemplateHash(): string {
   return sha256(BRIEF_PROMPT_TEMPLATE)
+}
+
+/**
+ * Structured email summary shape — what `email_summarize` returns.
+ *
+ * Why structured and not free-form prose: the Core's downstream
+ * consumers (launcher's inbox triage UI, "is this important"
+ * batch flows, planner reminders) need stable fields they can route
+ * on. A free-form summary would force every consumer to re-extract
+ * intent / urgency / ask-or-response, defeating the point of
+ * pre-summarisation. Future LLM passes can layer prose on top of
+ * this structured base.
+ */
+export interface EmailSummary {
+  message_id: string
+  from: string
+  subject: string
+  key_points: string[]
+  sentiment: 'positive' | 'neutral' | 'negative' | 'urgent'
+  ask_or_response: 'ask' | 'response' | 'informational'
+}
+
+/**
+ * Pluggable LLM caller for email summarization. The Core's tool
+ * layer composes this with `GmailClient.getMessage` — fetch the full
+ * body, hand it to the summarizer, return the structured object.
+ *
+ * Production: `buildSubstrateEmailSummarizer(...)` dispatches against
+ * the gateway's `Substrate` (Haiku 4.5 default per CLAUDE.md
+ * "default to the latest and most capable Claude models" + the
+ * sprint roadmap's "cheap, fast" guidance — pricing $1/MTok input
+ * / $5/MTok output). Tests use `buildStubEmailSummarizer(...)`,
+ * which returns a deterministic shape so the test suite never reaches
+ * an LLM. Wiring the substrate-backed implementation is a runtime
+ * composition concern that lands when the gateway boots this Core;
+ * the abstraction lives in the Core so the tool layer doesn't depend
+ * on substrate internals.
+ */
+export interface EmailSummarizer {
+  summarize(input: { message: GmailMessageFull }): Promise<EmailSummary>
+}
+
+/**
+ * Deterministic stub summarizer. The body-derived fields are
+ * computed by extremely cheap heuristics:
+ *
+ * - `key_points` — the first 3 sentences of `body_text` (split on
+ *   `.`/`!`/`?`), trimmed, empty entries dropped.
+ * - `sentiment` — `urgent` when the body contains any of
+ *   {urgent, asap, immediately, deadline} (case-insensitive),
+ *   `negative` for {issue, problem, fail, broken, sorry}, `positive`
+ *   for {thanks, great, congrats, awesome, glad}, otherwise
+ *   `neutral`.
+ * - `ask_or_response` — `ask` when body ends with `?` or contains
+ *   `please` / `could you` / `can you`, `response` when body opens
+ *   with `Re:` (subject line) or `yes,` / `no,`, otherwise
+ *   `informational`.
+ *
+ * The stub exists so tests can assert structural shape without
+ * pulling in a substrate. Production summarisation lives in
+ * `buildSubstrateEmailSummarizer` (deferred — wired at gateway-
+ * composition time). Both implementations conform to the
+ * `EmailSummarizer` interface.
+ */
+export function buildStubEmailSummarizer(): EmailSummarizer {
+  function classifySentiment(body: string): EmailSummary['sentiment'] {
+    const lower = body.toLowerCase()
+    if (/\b(urgent|asap|immediately|deadline)\b/.test(lower)) return 'urgent'
+    if (/\b(issue|problem|fail|broken|sorry)\b/.test(lower)) return 'negative'
+    if (/\b(thanks|great|congrats|awesome|glad)\b/.test(lower)) return 'positive'
+    return 'neutral'
+  }
+
+  function classifyAskOrResponse(
+    body: string,
+    subject: string,
+  ): EmailSummary['ask_or_response'] {
+    const lower = body.toLowerCase()
+    if (/\b(please|could you|can you)\b/.test(lower)) return 'ask'
+    if (body.trim().endsWith('?')) return 'ask'
+    if (subject.startsWith('Re:')) return 'response'
+    if (/^(yes|no)[,.]/i.test(body.trim())) return 'response'
+    return 'informational'
+  }
+
+  function extractKeyPoints(body: string): string[] {
+    const sentences = body
+      .split(/[.!?]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    return sentences.slice(0, 3)
+  }
+
+  return {
+    async summarize(input): Promise<EmailSummary> {
+      return {
+        message_id: input.message.id,
+        from: input.message.from,
+        subject: input.message.subject,
+        key_points: extractKeyPoints(input.message.body_text),
+        sentiment: classifySentiment(input.message.body_text),
+        ask_or_response: classifyAskOrResponse(
+          input.message.body_text,
+          input.message.subject,
+        ),
+      }
+    },
+  }
 }
