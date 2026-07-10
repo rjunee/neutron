@@ -79,6 +79,16 @@ export function buildBootSweepReport(report: DispatchReporter): BootSweepReport 
   const notifier = buildDispatchWatchdogNotifier(report)
   return (rec: SubagentRecord) => {
     const detected_at = rec.ended_at ?? Date.now()
+    // Age matches what a LIVE watchdog reap reports for the same record. The live
+    // watchdog (`runtime/subagent/watchdog.ts`) computes `age_ms = now - progressAt`
+    // where `progressAt` is the last PROGRESS timestamp (`last_event_at`, since a
+    // prior-process orphan has no live JSONL probe to override it). Using
+    // `started_at` here instead would over-report the age by the whole run duration
+    // (e.g. started_at=0, last_event_at=900, detected_at=1000 → 1000ms vs the
+    // watchdog's 100ms), contradicting the "surfaces exactly like a live reap"
+    // contract. Fall back to `started_at` only if a malformed record lacks a
+    // progress timestamp.
+    const progress_at = rec.last_event_at ?? rec.started_at
     return notifier({
       run_id: rec.run_id,
       agent_kind: rec.agent_kind,
@@ -86,7 +96,7 @@ export function buildBootSweepReport(report: DispatchReporter): BootSweepReport 
       reason: 'process_dead',
       last_event_at: rec.last_event_at,
       detected_at,
-      age_ms: detected_at - rec.started_at,
+      age_ms: detected_at - progress_at,
       ...(rec.delivery_target !== undefined ? { delivery_target: rec.delivery_target } : {}),
       ...(rec.pid !== undefined ? { pid: rec.pid } : {}),
     })

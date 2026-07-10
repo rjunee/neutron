@@ -14,8 +14,8 @@
  * makes repeat composition safe — the sweep runs inside the composer, and a
  * second composer build (or any repeat sweep) in the same process would
  * otherwise crash the current boot's own live dispatches. Correct for SEQUENTIAL
- * process generations (Managed: one process per tenant; Open: a single gateway).
- * Two CONCURRENTLY-live gateway processes sharing one project DB is NOT the
+ * process generations (one gateway process per project DB at a time). Two
+ * CONCURRENTLY-live gateway processes sharing one project DB is NOT the
  * deployment model and is out of scope — see `store.ts` / the migration header.
  *
  * This sweep SURFACES each orphan instead of vanishing it, per the P7 spec

@@ -470,11 +470,19 @@ describe('terminal-race gate — a run driven terminal during the running-flip i
     const runningGate = new Promise<void>((r) => {
       releaseRunning = r
     })
+    // Resolves the instant the running-flip's persist is ENTERED (and thus blocked)
+    // — a deterministic sync point, so the test never races a fixed sleep on a
+    // slow/loaded runner.
+    let signalEntered!: () => void
+    const enteredRunning = new Promise<void>((r) => {
+      signalEntered = r
+    })
     let gateRunning = false
     const persistence: SubagentPersistence = {
       persist: async (rec) => {
         if (rec.status === 'running' && gateRunning) {
           gateRunning = false
+          signalEntered() // the flip has published 'running' and is now blocked here
           await runningGate
         }
       },
@@ -487,8 +495,9 @@ describe('terminal-race gate — a run driven terminal during the running-flip i
     gateRunning = true
     const dispatching = h.service.dispatch({ board_item_id: 'it-race', kind: 'research', task: 'survey' })
 
-    // Let the flip publish 'running' and block on its gated persist.
-    await new Promise((r) => setTimeout(r, 10))
+    // Deterministically wait until the flip published 'running' and its persist is
+    // blocked — no fixed sleep.
+    await enteredRunning
     const runId = registry.live()[0]?.run_id
     expect(runId).toBeDefined()
     expect(registry.byRunId(runId!)?.status).toBe('running')
