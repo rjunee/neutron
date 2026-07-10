@@ -36,7 +36,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { boot } from '../index.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  registerSystemEventSink,
+  resolveSystemEventSink,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 const cleanups: string[] = []
@@ -273,5 +278,79 @@ describe('boot init-failure cleanup', () => {
     // db.close() ran strictly AFTER the async cleanup finished and after the
     // later cleanup ran despite the middle one throwing.
     expect(order).toEqual(['async-cleanup', 'after-throw', 'db.close'])
+  })
+})
+
+describe('O4 — boot manages the ambient system_events sink lifecycle', () => {
+  afterEach(() => registerSystemEventSink(null))
+
+  function bootEnv(root: string): void {
+    process.env['NEUTRON_DB_PATH'] = join(root, 'owner.db')
+    process.env['NEUTRON_INSTANCE_SLUG'] = 'alice'
+    delete process.env['NOTIFY_SOCKET']
+  }
+
+  const goodComposer = ({
+    db,
+    project_slug,
+  }: {
+    db: import('@neutronai/persistence/index.ts').ProjectDb
+    project_slug: string
+  }): import('../composition.ts').CompositionInput => ({
+    db,
+    project_slug,
+    topic_handler: async () => {},
+    approval_notifier: { notify: async () => undefined },
+    watchdog_notifier: { notify: async () => undefined },
+    reminder_dispatcher: { dispatch: async () => undefined },
+    heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+    platform: STUB_PLATFORM,
+  })
+
+  test('registers a sink on boot and CLEARS it on shutdown', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-'))
+    cleanups.push(root)
+    bootEnv(root)
+    registerSystemEventSink(null)
+
+    const handle = await boot({ port: 0, composer: goodComposer })
+    // Boot registered the journal sink.
+    expect(resolveSystemEventSink()).not.toBeNull()
+    await handle.shutdown()
+    // Shutdown cleared the owned sink before closing the DB.
+    expect(resolveSystemEventSink()).toBeNull()
+  })
+
+  test('CLEARS the sink on init failure (composer throws)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-fail-'))
+    cleanups.push(root)
+    bootEnv(root)
+    registerSystemEventSink(null)
+
+    await expect(
+      boot({
+        port: 0,
+        composer: async () => {
+          throw new Error('composer-boom')
+        },
+      }),
+    ).rejects.toThrow('composer-boom')
+    expect(resolveSystemEventSink()).toBeNull()
+  })
+
+  test('ownership-guarded: shutdown does NOT clobber a sibling sink registered after boot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-o4-sink-own-'))
+    cleanups.push(root)
+    bootEnv(root)
+    registerSystemEventSink(null)
+
+    const handle = await boot({ port: 0, composer: goodComposer })
+    // A sibling (later boot / test) overwrites the ambient sink.
+    const sibling: SystemEventSink = { record: () => ({ id: 'sibling' }) }
+    registerSystemEventSink(sibling)
+    await handle.shutdown()
+    // The owned-clear only fires when the ambient sink is still ours → the
+    // sibling survives.
+    expect(resolveSystemEventSink()).toBe(sibling)
   })
 })

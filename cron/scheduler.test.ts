@@ -183,6 +183,25 @@ describe('O4 — cron_job_error degrade journal (rising edge)', () => {
     expect(rows[0]?.payload).toMatchObject({ job_name: 'flaky', error: 'handler boom' })
   })
 
+  test('a handler that RETURNS {status:error, detail} preserves the reason in the journal payload', async () => {
+    const { rows, sink } = fakeSink()
+    registerSystemEventSink(sink)
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    jobs.register({
+      name: 'remote',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 1000 },
+      handler: 'h',
+    })
+    // Returned (not thrown) error — `error` stays null, reason is in `detail`.
+    handlers.register('h', async () => ({ status: 'error' as const, detail: 'remote returned 503' }))
+    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    await scheduler.fireOnce('remote')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.payload).toMatchObject({ job_name: 'remote', error: 'remote returned 503' })
+  })
+
   test('re-fires after recovery (error→ok→error is a fresh rising edge)', async () => {
     const { rows, sink } = fakeSink()
     registerSystemEventSink(sink)

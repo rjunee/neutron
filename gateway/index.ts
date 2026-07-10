@@ -3,7 +3,12 @@ import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { ProjectDb, SystemEventsStore, registerSystemEventSink } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  SystemEventsStore,
+  registerSystemEventSink,
+  resolveSystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
@@ -226,7 +231,16 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // silent fail-soft / degrade site reaches this via the ambient registry
   // (persistence/system-events.ts) and emits a VISIBILITY-ONLY row; when this
   // registration hasn't run (unit tests, sidecar tools) each emit is a no-op.
-  registerSystemEventSink(new SystemEventsStore({ db }))
+  // The instance is captured so shutdown clears ONLY the sink THIS boot owns
+  // (never another concurrent boot handle's) before closing its DB.
+  const systemEventSink = new SystemEventsStore({ db })
+  registerSystemEventSink(systemEventSink)
+  // Ownership-guarded clear: drop the ambient sink iff it's still the one we
+  // registered, so a post-close degrade emit can't target this closed DB and a
+  // sibling boot's sink is never clobbered.
+  const clearOwnedSystemEventSink = (): void => {
+    if (resolveSystemEventSink() === systemEventSink) registerSystemEventSink(null)
+  }
 
   const project_slug = resolveOwnerSlugFromConfig(config)
   const bootedAt = Date.now()
@@ -299,6 +313,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
           console.error('graph shutdown during init failure threw:', shutdownErr)
         }
       }
+      // O4 — clear the ambient sink before closing the DB it references (this
+      // is the composer-init-failure path; the sink was registered right after
+      // migrations applied, above).
+      clearOwnedSystemEventSink()
       db.close()
       throw err
     }
@@ -505,6 +523,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // in-flight queries on the auxiliary connections finish cleanly.
     // §F1 — drain (await) every cleanup, async ones included, BEFORE db.close().
     await drainRealmodeCleanups(realmode_cleanups)
+    // O4 — clear the ambient system_events sink BEFORE db.close() so a
+    // post-shutdown degrade emit can't reference the closed DB. Ownership-
+    // guarded so a sibling boot handle's sink is never clobbered. (Even if one
+    // raced in, emitSystemEventSafe swallows the write error — belt-and-braces.)
+    clearOwnedSystemEventSink()
     db.close()
   }
 

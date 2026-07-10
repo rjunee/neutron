@@ -427,12 +427,16 @@ export class CronScheduler {
     // (prior status was not 'error', this fire IS). Control flow is unchanged;
     // fire-and-forget emit that can never throw.
     if (status === 'error' && prior_status !== 'error') {
+      // `error` is set for a THROWN failure; a handler that RETURNS
+      // `{status:'error', detail}` carries its reason in `detail` (error stays
+      // null). Prefer whichever is present so the journal never drops the reason.
+      const reason = error ?? detail
       void emitSystemEvent({
         event: 'cron_job_error',
         module: 'cron',
         level: 'error',
         project_slug: this.project_slug,
-        payload: { job_name: name, error: error ?? undefined, duration_ms },
+        payload: { job_name: name, error: reason ?? undefined, duration_ms },
       })
     }
     return detail !== undefined ? { status, detail } : { status }
