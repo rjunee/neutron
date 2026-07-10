@@ -1,41 +1,44 @@
 /**
- * RA5 (invariant I2) — the `memory-backend-swap-seam` depcruise rule has TEETH.
+ * RA5 (invariant I2) — the memory swap-seam ACQUISITION BOUNDARY.
  *
- * The rule's JOB is to make "a stray GBrain op call from a product module fails
- * depcruise" a compile-time guarantee (plan §RA5). depcruise sees IMPORT EDGES,
- * not call sites, so the ban works structurally: the ONLY surface that can name
- * a raw op (`put_page` / `add_link` / `get_links`) is `McpClient.call(name,
- * args)`, which lives in the NON-permitted internal `gbrain-memory/mcp-client.ts`
- * (alongside the stdio transport + adapters). The permitted contract files
- * (`memory-store.ts`, `agent-tool.ts`) expose only typed `MemoryStore` methods,
- * so a product module cannot obtain or call a raw-op transport without importing
- * a banned internal — which this rule rejects.
+ * THE ENFORCED INVARIANT: no product-scope module can OBTAIN a raw GBrain
+ * transport instance. Because a product module can't get a transport AT ALL, it
+ * can't call ANY raw op on one — literal OR dynamically computed
+ * (`client.call([...].join('_'))`). The dynamic-op case is prevented HERE, by
+ * the acquisition boundary, not by the source-text op-name scanner (which is
+ * secondary defense-in-depth — see raw-op-seam-ban.test.ts).
  *
- * This test proves both directions against the REAL config by planting probe
- * modules in `gateway/` — a non-exempt `from` that actually declares
- * `@neutronai/gbrain-memory` as a dependency, so the probe's import RESOLVES to
- * a real edge the rule can evaluate (the composition tier is exactly where a
- * stray memory call would realistically originate, since it wires the store) —
- * and running dependency-cruiser:
- *   1. REJECT — a product module that imports the transport and calls
- *      `client.call('put_page', …)` trips `memory-backend-swap-seam`.
- *   2. PASS  — a product module that imports ONLY the neutral contract
- *      (`memory-store.ts`) and mentions the op names in a COMMENT does NOT trip
- *      the rule (proving the guard targets real edges, not prose — the concern
- *      the RA5 spec calls out for scribe/write-to-gbrain.ts + GBrainSyncHook).
+ * The boundary rests on THREE real, tested layers:
+ *   (1) TYPE-SEAL — `GBrainStdioMcpClient` / `McpClient` (the only surfaces that
+ *       can name + call a raw op) are internal to `gbrain-memory/`.
+ *   (2) IMPORT-BAN — the `memory-backend-swap-seam` depcruise rule forbids a
+ *       product module importing them (or any adapter / the stdio transport).
+ *       Proven by the REJECT probe below.
+ *   (3) NO WIRING LEAK — the ONE composition module allowed to import the
+ *       transport (`build-gbrain-memory.ts`) keeps it a LOCAL and returns only
+ *       the typed `MemoryStore`. Proven by the compile-time conditional-type
+ *       probe in build-gbrain-memory.test.ts AND by the acquisition scan below,
+ *       which asserts NO exempt/product-scope module exposes a raw transport on
+ *       a PROVIDER surface (exported field / return type). A raw client named
+ *       only as a function PARAMETER is a sink (it consumes a transport the
+ *       caller already holds) — not a source — so it does not leak acquisition.
  *
- * The probes are written + removed per test (afterEach), so the tree stays
- * clean even on failure.
+ * The depcruise probes are written + removed per test (afterEach), so the tree
+ * stays clean even on failure.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..', '..') // gbrain-memory/__tests__ → gbrain-memory → worktree root
 const CONFIG = join(ROOT, '.dependency-cruiser.cjs')
+
+/** Type names that ARE a raw op-capable transport (naming one on a provider surface = a leak). */
+const RAW_TRANSPORT_TYPES = new Set(['GBrainStdioMcpClient', 'McpClient'])
 
 const REJECT_REL = 'gateway/__ra5_seam_probe_reject__.ts'
 const PASS_REL = 'gateway/__ra5_seam_probe_pass__.ts'
@@ -107,5 +110,107 @@ describe('RA5 memory-backend-swap-seam rule (adversarial)', () => {
       (v) => v.rule.name === RULE && v.from === PASS_REL,
     )
     expect(seam).toEqual([])
+  })
+})
+
+// --- Acquisition-source scan (layer 3) ---------------------------------------
+
+/** True when `node` sits inside a function/method PARAMETER's type (a sink, not a source). */
+function isInsideParameterType(node: ts.Node): boolean {
+  for (let cur: ts.Node | undefined = node.parent; cur !== undefined; cur = cur.parent) {
+    if (ts.isParameter(cur)) return true
+    if (ts.isSourceFile(cur)) break
+  }
+  return false
+}
+
+/** True when `node` is inside a top-level declaration carrying the `export` modifier. */
+function isInsideExportedDecl(node: ts.Node): boolean {
+  let top: ts.Node = node
+  while (top.parent !== undefined && !ts.isSourceFile(top.parent)) top = top.parent
+  const mods = ts.canHaveModifiers(top) ? ts.getModifiers(top) : undefined
+  return mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false
+}
+
+/**
+ * Every EXPORTED PROVIDER surface (exported interface field, type alias, return
+ * type, exported const type) that names a raw transport type — i.e. hands a
+ * caller a way to OBTAIN one. A raw type in a PARAMETER position is a sink
+ * (consumes a transport the caller already has, e.g. connect's
+ * `exportProjectGraphSnapshot(mcp: McpClient)`) and is NOT a leak.
+ */
+function findRawTransportProviders(
+  fileName: string,
+  src: string,
+): Array<{ line: number; typeName: string }> {
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const leaks: Array<{ line: number; typeName: string }> = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeReferenceNode(node)) {
+      const name = ts.isQualifiedName(node.typeName)
+        ? node.typeName.right.text
+        : node.typeName.text
+      if (RAW_TRANSPORT_TYPES.has(name) && isInsideExportedDecl(node) && !isInsideParameterType(node)) {
+        const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf))
+        leaks.push({ line: line + 1, typeName: name })
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return leaks
+}
+
+function trackedTsFiles(): string[] {
+  const out = execFileSync('git', ['ls-files', '*.ts', '*.tsx'], { cwd: ROOT, encoding: 'utf8' })
+  return out.split('\n').filter((l) => l.length > 0)
+}
+
+function isTestFile(p: string): boolean {
+  return /(^|\/)__tests__\//.test(p) || /\.test\.[a-z]+$/.test(p) || /(^|\/)tests\//.test(p)
+}
+
+describe('RA5 acquisition boundary — no product-scope source of a raw transport (layer 3)', () => {
+  test('no module OUTSIDE gbrain-memory/ + connect/ exposes a raw transport on a provider surface', () => {
+    // Only the seam infra may hold/thread a raw transport: gbrain-memory/ (the
+    // seam owner) and connect/ (the federation mirror — it THREADS a
+    // caller-supplied client through input `Deps` fields + parameters, i.e.
+    // consumes one the caller already has; it never RETURNS one, and product
+    // can't reach it — connect/api is dynamic-import-gated). Both are exempt in
+    // the depcruise rule too. EVERY other module — product scope + the exempt
+    // composer wiring (build-gbrain-memory.ts, gbrain-sync-state-store.ts) —
+    // must expose ONLY the typed MemoryStore. A returned/field-typed raw client
+    // on a PROVIDER surface (not a parameter/input sink) is the exact
+    // `buildGBrainMemory().client` acquisition hole that was closed. depcruise's
+    // import-ban already stops a product module from even naming these types, so
+    // in practice the only non-exempt files that could reference them are the
+    // composer wiring — this asserts none of them PROVIDES one.
+    // NOTE: this is a SYNTACTIC scan (matches the type NAME as written), so a
+    // determined import-alias could evade it — but the ALIAS-PROOF structural
+    // authority is the compile-time conditional-type probe in
+    // build-gbrain-memory.test.ts, which checks the actual `GBrainMemoryWiring`
+    // shape regardless of how types are named. This scan is the broader belt.
+    const leaks: Array<{ file: string; line: number; typeName: string }> = []
+    for (const p of trackedTsFiles()) {
+      if (p.startsWith('gbrain-memory/')) continue // the seam owner may hold transports
+      if (p.startsWith('connect/')) continue // federation mirror: consumes (input), never provides
+      if (isTestFile(p)) continue
+      let src: string
+      try {
+        src = readFileSync(join(ROOT, p), 'utf8')
+      } catch {
+        continue // skip a raced/unreadable file rather than crash the suite
+      }
+      if (!src.includes('McpClient') && !src.includes('GBrainStdioMcpClient')) continue
+      for (const h of findRawTransportProviders(p, src)) {
+        leaks.push({ file: p, line: h.line, typeName: h.typeName })
+      }
+    }
+    expect(
+      leaks,
+      `A module outside gbrain-memory/ PROVIDES a raw transport (acquisition leak) — ` +
+        `expose only the typed MemoryStore:\n` +
+        leaks.map((l) => `  ${l.file}:${l.line} → ${l.typeName}`).join('\n'),
+    ).toEqual([])
   })
 })

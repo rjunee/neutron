@@ -1,21 +1,27 @@
 /**
  * RA5 (invariant I2) — AST-based ban on raw GBrain op-name CALLS (defense-in-depth).
  *
- * WHERE THE REAL GUARANTEE LIVES (read this first). The AUTHORITATIVE guarantee
- * that a product module cannot make ANY raw GBrain call — including a fully
- * dynamic `client.call(fetchName(), …)` — is the **type-seal + depcruise
- * import-ban**, NOT this scanner: `McpClient` (the only surface that can name a
- * raw op) is internal to `gbrain-memory/`, and the `memory-backend-swap-seam`
- * depcruise rule forbids product code from importing it (or any adapter / the
- * stdio transport). So product code has no way to OBTAIN a raw client instance;
- * a `client.call(<anything>)` in product scope can never reach a real transport.
+ * WHERE THE REAL GUARANTEE LIVES (read this first). The ENFORCED invariant is
+ * that no product-scope module can OBTAIN a raw GBrain transport instance — so
+ * it can't make ANY raw call on one, LITERAL or fully dynamic
+ * (`client.call([...].join('_'))`). That ACQUISITION BOUNDARY rests on three
+ * real, tested layers (all proven in memory-swap-seam.depcruise.test.ts):
+ *   (1) TYPE-SEAL — `GBrainStdioMcpClient` / `McpClient` (the only surfaces that
+ *       can name + call a raw op) are internal to `gbrain-memory/`.
+ *   (2) IMPORT-BAN — the `memory-backend-swap-seam` depcruise rule forbids a
+ *       product module importing them.
+ *   (3) NO WIRING LEAK — the one composition module allowed to import the
+ *       transport returns only the typed `MemoryStore`, never the transport
+ *       (guarded by a compile-time conditional-type probe + an acquisition scan).
+ * The fully-dynamic op-name case is therefore prevented by the ACQUISITION
+ * boundary, NOT by this scanner.
  *
- * WHAT THIS SCANNER ADDS. Defense-in-depth: it catches a raw op NAME that a
- * product module writes as a LITERAL or a trivially-constant expression — the
+ * WHAT THIS SCANNER ADDS. SECONDARY defense-in-depth: it catches a raw op NAME
+ * that a module writes as a LITERAL or a trivially-constant expression — the
  * accidental copy-paste / structural-lookalike case the spec (§(b), plan ~:1807)
- * calls out — before it can even ship. It does NOT (and cannot, without an
- * infinite regress) catch a fully-dynamic computed op name; that case is covered
- * by the type+import layer above, by design.
+ * calls out — before it can ship. It does NOT (and, by design, need not) catch a
+ * fully-dynamic computed op name; the acquisition boundary above covers that.
+ * This is NOT a claim that the scanner alone guarantees "any stray raw op fails".
  *
  * WHY AST, NOT REGEX: a `.call('op')` regex is trivially bypassable —
  * `client['call']('put_page')` (bracket), `client.call?.(…)` (optional chain),
@@ -266,11 +272,17 @@ describe('RA5 raw-op seam ban — AST scanner (unit)', () => {
     })
   }
 
-  test('does NOT flag a FULLY-DYNAMIC op name — BY DESIGN, covered by type+import layer', () => {
-    // Source scanning can never resolve a runtime-computed name (infinite
-    // regress). The AUTHORITATIVE guarantee here is the type-seal + depcruise
-    // import-ban: a product module cannot obtain a real transport instance, so a
-    // `client.call(<anything>)` in product scope can never reach the backend.
+  test('a FULLY-DYNAMIC op name is NOT flagged by the scanner — PREVENTED BY THE ACQUISITION BOUNDARY', () => {
+    // This is NOT a hole in the guarantee. The ENFORCED invariant is that a
+    // product module cannot OBTAIN a raw transport instance at all (type-seal +
+    // depcruise import-ban + no wiring leak — see memory-swap-seam.depcruise
+    // .test.ts). Because there is no obtainable transport, a fully-dynamic
+    // `client.call([...].join('_'))` in product scope can never reach the
+    // backend, regardless of whether the name is statically visible. Source
+    // scanning can't resolve a runtime-computed name (infinite regress), and it
+    // does not need to: the acquisition boundary already covers it. This scanner
+    // is SECONDARY defense-in-depth for literal / trivially-constant names (the
+    // accidental copy-paste inside the boundary).
     const src = [
       `declare function fetchName(): string`,
       `export const f = (c: { call: Function }) => c.call(fetchName(), {})`,

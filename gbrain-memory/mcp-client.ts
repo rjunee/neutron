@@ -7,17 +7,20 @@
  * returns that tool's response payload. It is the ONLY surface through which a
  * raw backend op can be named + executed.
  *
- * RA5 / invariant I2 — WHY THIS LIVES IN ITS OWN MODULE (not in
- * `memory-store.ts`): the depcruise `memory-backend-swap-seam` rule permits
- * product modules to import the backend-neutral contract files
- * (`memory-store.ts` = the typed `MemoryStore` interface, `agent-tool.ts` = the
- * `memory_search` tool) but forbids importing any other `gbrain-memory/`
- * internal. If `McpClient` lived in the permitted `memory-store.ts`, a product
- * module could import it (a permitted edge) and call `client.call('put_page',
- * …)` — a stray backend op the import-edge rule can't see. Keeping the
- * op-name-taking surface HERE, off the allowlist, means no product module can
- * even name a raw op: the swap seam is a real compile-time type boundary, so a
- * backend swap re-implements this interface + `gbrain-memory/` internals only.
+ * RA5 / invariant I2 — THE ENFORCED INVARIANT: no product-scope module can
+ * OBTAIN a raw transport instance, so it can't make ANY raw call on one (literal
+ * OR fully-dynamic). That ACQUISITION BOUNDARY rests on three layers:
+ *   (1) TYPE-SEAL — this `McpClient` (+ `GBrainStdioMcpClient`) lives in its OWN
+ *       gbrain-memory-internal module, NOT in the permitted contract files
+ *       (`memory-store.ts` = typed `MemoryStore`, `agent-tool.ts` =
+ *       `memory_search`). If it lived in the permitted `memory-store.ts` a
+ *       product module could import it and call `client.call('put_page', …)`.
+ *   (2) IMPORT-BAN — the depcruise `memory-backend-swap-seam` rule forbids a
+ *       product module importing this module (or any adapter / the stdio
+ *       transport), so it can't even NAME the type.
+ *   (3) NO WIRING LEAK — see below: the one composition module that DOES import
+ *       the transport keeps it local and returns only the typed `MemoryStore`.
+ * A backend swap re-implements this interface + `gbrain-memory/` internals only.
  *
  * The return is `unknown` because each GBrain MCP tool returns a different
  * shape (`get_links` returns edge rows, `add_link` returns an ack). Callers
