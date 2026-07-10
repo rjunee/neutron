@@ -32,7 +32,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { describe, expect, test } from 'bun:test'
-import { NeutronManifestSchema, isCoreModule, type CoreModule } from '@neutronai/cores-sdk'
+import { NeutronManifestSchema, defineCore, isCoreModule, type CoreModule } from '@neutronai/cores-sdk'
 
 import { loadCoreFromDir } from '../loader.ts'
 
@@ -82,14 +82,24 @@ function stubDeps(manifest: unknown): Record<string, unknown> {
   })
 }
 
-/** Union of handler names `buildTools` + `buildExtraTools` return. */
+/**
+ * Set of tool names `buildTools` + `buildExtraTools` return a CALLABLE handler
+ * for. Mirrors the install composer's coverage check
+ * (`typeof built[name] === 'function'`, install-bundled.ts) — a declared name
+ * mapped to a non-function (e.g. `{ tool: undefined }`) is NOT counted, so it
+ * surfaces as under-implementation here exactly as it would at install.
+ */
 function implementedToolNames(core: CoreModule, manifest: unknown): Set<string> {
   const deps = stubDeps(manifest)
   const built: Record<string, unknown> = { ...core.buildTools(deps) }
   if (core.buildExtraTools !== undefined) {
     Object.assign(built, core.buildExtraTools(deps))
   }
-  return new Set(Object.keys(built))
+  return new Set(
+    Object.entries(built)
+      .filter(([, handler]) => typeof handler === 'function')
+      .map(([name]) => name),
+  )
 }
 
 describe('bundled Core defineCore() conformance (X2 — typed Core module contract)', () => {
@@ -152,6 +162,23 @@ describe('bundled Core defineCore() conformance (X2 — typed Core module contra
       })
     })
   }
+
+  test('coverage boundary — a declared tool mapped to a non-function is NOT counted as implemented', () => {
+    // Guards the sweep itself: `Object.keys` alone would count `{ x: undefined }`
+    // as implemented, diverging from the install composer's callable check.
+    const nonCallableCore = defineCore({
+      slug: 'boundary_core',
+      backendKey: 'backend',
+      toolNames: ['ok', 'bad'],
+      buildTools: () => ({
+        ok: async (): Promise<Record<string, never>> => ({}),
+        bad: undefined as unknown as () => Promise<unknown>,
+      }),
+    })
+    const implemented = implementedToolNames(nonCallableCore, { tools: [] })
+    expect(implemented.has('ok')).toBe(true)
+    expect(implemented.has('bad')).toBe(false)
+  })
 
   test('every bundled Core barrel exports a valid contract (aggregate)', async () => {
     for (const dir of dirs) {
