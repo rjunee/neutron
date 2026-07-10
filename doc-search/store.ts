@@ -29,7 +29,9 @@
  *     lexical score.
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
+
+import { openSidecar, parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 import { sanitizeFtsQuery } from './query.ts'
 
@@ -172,10 +174,10 @@ export class DocSearchIndex {
 
   /** Open (or create) an index at `path`. Use ':memory:' for tests. */
   static open(path: string, options: DocSearchIndexOptions = {}): DocSearchIndex {
-    const db = new Database(path, { create: true })
-    db.exec('PRAGMA journal_mode = WAL')
-    db.exec('PRAGMA synchronous = NORMAL')
-    db.exec('PRAGMA foreign_keys = ON')
+    // P3 shared open — previously WAL + synchronous + foreign_keys only; now
+    // additionally gains busy_timeout/temp_store/cache_size (strictly more
+    // tolerant under contention, no semantic change).
+    const db = openSidecar(path)
     db.exec(SCHEMA)
     return new DocSearchIndex(db, options.embedder ?? null)
   }
@@ -384,11 +386,12 @@ export class DocSearchIndex {
 
     const cosines = embeddings.map((raw) => {
       if (raw === null) return null
-      try {
-        return cosineSimilarity(queryVec, JSON.parse(raw) as number[])
-      } catch {
-        return null
-      }
+      // Corrupt-JSON policy (explicit, historical): fallback → null — a
+      // chunk with an unparseable stored embedding simply drops out of the
+      // semantic blend. (`cosineSimilarity` itself never throws.)
+      const vec = parseJsonColumn(raw, { onCorrupt: 'fallback', fallback: null })
+      if (vec === null) return null
+      return cosineSimilarity(queryVec, vec as number[])
     })
     const present = cosines.filter((c): c is number => c !== null)
     if (present.length === 0) return lexNorm

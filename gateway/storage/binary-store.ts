@@ -23,7 +23,7 @@
  * are idempotent).
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
 import {
   existsSync,
@@ -36,6 +36,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { openSidecar } from '@neutronai/persistence/index.ts'
 import {
   BINARY_EXTENSIONS,
   BINARY_MIME_WHITELIST,
@@ -723,9 +724,10 @@ export class BinaryStore {
     }
     const blobs_root = join(this.resolveProjectRoot(cleaned), BLOBS_DIR)
     mkdirSync(blobs_root, { recursive: true })
-    const db = new Database(join(blobs_root, INDEX_FILE))
-    db.exec('PRAGMA journal_mode = WAL')
-    db.exec('PRAGMA foreign_keys = ON')
+    // P3 shared open — previously WAL + foreign_keys only; now additionally
+    // gains synchronous/busy_timeout/temp_store/cache_size (strictly more
+    // tolerant under contention, no semantic change).
+    const db = openSidecar(join(blobs_root, INDEX_FILE))
     db.exec(SCHEMA)
     db.run(
       "INSERT OR IGNORE INTO schema_version (k, v) VALUES ('binary_store', ?)",

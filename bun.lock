@@ -275,6 +275,7 @@
       "name": "@neutronai/doc-search",
       "dependencies": {
         "@neutronai/core-sdk": "workspace:*",
+        "@neutronai/persistence": "workspace:*",
         "@neutronai/tools": "workspace:*",
       },
     },

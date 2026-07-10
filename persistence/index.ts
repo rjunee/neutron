@@ -1,4 +1,14 @@
-export { ProjectDb, type OpenOptions, type RunSyncResult } from './db.ts'
+export { ProjectDb, STARTUP_PRAGMAS, type OpenOptions, type RunSyncResult } from './db.ts'
+export {
+  openSidecar,
+  parseJsonColumn,
+  mapRow,
+  mapRows,
+  resolveNow,
+  type SidecarOpenOptions,
+  type CorruptJsonPolicy,
+  type NowFn,
+} from './sidecar.ts'
 export {
   AppChatStore,
   DEFAULT_REPLAY_LIMIT,

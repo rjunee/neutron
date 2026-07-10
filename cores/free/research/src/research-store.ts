@@ -16,8 +16,10 @@
  * Per docs/plans/research-core-tier1-brief.md § 6.
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { randomUUID } from 'node:crypto'
+
+import { mapRow, mapRows, parseJsonColumn, resolveNow } from '@neutronai/persistence/index.ts'
 
 import {
   validateResearchBrief,
@@ -69,13 +71,15 @@ interface TaskColumns {
 }
 
 function rowFromColumns(c: TaskColumns): ResearchProjectTaskRow {
-  const sourcesRaw: unknown = JSON.parse(c.sources_json)
+  // Corrupt-JSON policy (explicit, historical): throw — corrupt sources_json
+  // / brief_json propagates the SyntaxError to the caller.
+  const sourcesRaw: unknown = parseJsonColumn(c.sources_json, { onCorrupt: 'throw' })
   const sources = Array.isArray(sourcesRaw)
     ? (sourcesRaw.filter((v) => typeof v === 'string') as string[])
     : []
   let brief: ResearchBrief | null = null
   if (c.brief_json !== null) {
-    const parsed: unknown = JSON.parse(c.brief_json)
+    const parsed: unknown = parseJsonColumn(c.brief_json, { onCorrupt: 'throw' })
     const validated = validateResearchBrief(parsed)
     brief = validated.ok ? validated.brief : null
   }
@@ -124,7 +128,7 @@ export class ResearchProjectStore {
     this.project_slug = opts.project_slug
     this.project_id = opts.project_id
     this.nextId = opts.nextId ?? ((): string => randomUUID())
-    this.now = opts.now ?? ((): number => Date.now())
+    this.now = resolveNow(opts.now)
   }
 
   get ownerSlug(): string {
@@ -265,8 +269,8 @@ export class ResearchProjectStore {
         WHERE id = ? AND project_slug = ? AND project_id = ?`,
     )
     const row = stmt.get(task_id, this.project_slug, this.project_id)
-    if (row === null || row === undefined) return null
-    return rowFromColumns(row)
+    // `?? null`: keep the historical defensive undefined-miss handling.
+    return mapRow(row ?? null, rowFromColumns)
   }
 
   list(opts: { limit?: number; since?: number }): ResearchProjectTaskRow[] {
@@ -282,9 +286,10 @@ export class ResearchProjectStore {
           ORDER BY created_at DESC
           LIMIT ?`,
       )
-      return stmt
-        .all(this.project_slug, this.project_id, opts.since, limit)
-        .map(rowFromColumns)
+      return mapRows(
+        stmt.all(this.project_slug, this.project_id, opts.since, limit),
+        rowFromColumns,
+      )
     }
     const stmt = this.db.query<TaskColumns, [string, string, number]>(
       `SELECT id, project_slug, project_id, query, depth, sources_json, status,
@@ -296,9 +301,7 @@ export class ResearchProjectStore {
         ORDER BY created_at DESC
         LIMIT ?`,
     )
-    return stmt
-      .all(this.project_slug, this.project_id, limit)
-      .map(rowFromColumns)
+    return mapRows(stmt.all(this.project_slug, this.project_id, limit), rowFromColumns)
   }
 
   recordSubAgentRun(input: {

@@ -10,12 +10,13 @@
  * Per docs/plans/code-gen-core-tier1-brief.md § 6.
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
+import { mapRow, mapRows, openSidecar, parseJsonColumn, resolveNow } from '@neutronai/persistence/index.ts'
 
 import {
   PROJECT_SIDECAR_DB_FILENAME,
@@ -77,7 +78,7 @@ export class CodegenSidecar {
     this.db_path = opts.db_path
     this.project_id = opts.project_id
     this.mintId = opts.ulid ?? defaultMintId
-    this.now = opts.now ?? Date.now
+    this.now = resolveNow(opts.now)
   }
 
   close(): void {
@@ -158,7 +159,7 @@ export class CodegenSidecar {
            FROM code_tasks WHERE id = ?`,
         )
         .get(task_id)
-      return raw === null ? null : decodeTaskRow(raw)
+      return mapRow(raw, decodeTaskRow)
     },
     list: (input: { limit?: number } = {}): CodegenTaskRow[] => {
       const limit = Math.max(1, Math.min(input.limit ?? 10, 100))
@@ -170,7 +171,7 @@ export class CodegenSidecar {
            ORDER BY updated_at DESC LIMIT ?`,
         )
         .all(this.project_id, limit)
-      return rows.map(decodeTaskRow)
+      return mapRows(rows, decodeTaskRow)
     },
     findByPr: (pr_number: number): CodegenTaskRow | null => {
       const raw = this.db
@@ -181,7 +182,7 @@ export class CodegenSidecar {
            ORDER BY updated_at DESC LIMIT 1`,
         )
         .get(this.project_id, pr_number)
-      return raw === null ? null : decodeTaskRow(raw)
+      return mapRow(raw, decodeTaskRow)
     },
   }
 
@@ -411,8 +412,10 @@ export class CodegenSidecarResolver {
       mkdirSync(sidecarDir, { recursive: true, mode: 0o700 })
     }
     const dbPath = join(sidecarDir, PROJECT_SIDECAR_DB_FILENAME)
-    const db = new Database(dbPath, { create: true })
-    db.exec('PRAGMA foreign_keys = ON')
+    // P3 shared open — previously foreign_keys only; now additionally gains
+    // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
+    // tolerant under contention, no semantic change).
+    const db = openSidecar(dbPath)
     applyProjectScopedMigrations(db, this.migrations_dir)
     // After migrations, code_gen_meta exists. Bootstrap if missing;
     // verify project_id matches if present.
@@ -467,13 +470,15 @@ interface RawCodeTaskRow {
 }
 
 function decodeTaskRow(raw: RawCodeTaskRow): CodegenTaskRow {
-  let request = ''
-  try {
-    const parsed = JSON.parse(raw.request_json) as { task?: string }
-    request = typeof parsed.task === 'string' ? parsed.task : raw.request_json
-  } catch {
-    request = raw.request_json
-  }
+  // Corrupt-JSON policy (explicit, historical): raw — a request_json column
+  // that doesn't parse (pre-JSON rows stored the bare task string) surfaces
+  // as the raw column text.
+  const parsed = parseJsonColumn(raw.request_json, { onCorrupt: 'raw' })
+  const task =
+    typeof parsed === 'object' && parsed !== null
+      ? (parsed as { task?: unknown }).task
+      : undefined
+  const request = typeof task === 'string' ? task : raw.request_json
   return {
     task_id: raw.id,
     project_id: raw.project_id,

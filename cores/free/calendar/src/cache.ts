@@ -23,9 +23,11 @@
  * explorer will list it), so it uses `calendar/` (no leading dot).
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+
+import { openSidecar, parseJsonColumn, resolveNow } from '@neutronai/persistence/index.ts'
 
 import { applyCalendarSidecarMigrations } from '../migrations/runner.ts'
 import type { CalendarEventRow } from './backend.ts'
@@ -139,16 +141,6 @@ export interface OpenCalendarProjectCacheInput {
   now?: () => number
 }
 
-interface SidecarPragmas {
-  cache_size: number
-  busy_timeout_ms: number
-}
-
-const DEFAULT_PRAGMAS: SidecarPragmas = {
-  cache_size: -64_000,
-  busy_timeout_ms: 100,
-}
-
 /**
  * Open the per-project Calendar Core sidecar, apply migrations,
  * verify project_id, and return a typed handle. Idempotent — every
@@ -159,13 +151,15 @@ const DEFAULT_PRAGMAS: SidecarPragmas = {
 export function openCalendarProjectCache(
   input: OpenCalendarProjectCacheInput,
 ): CalendarProjectCache {
-  const now = input.now ?? ((): number => Date.now())
+  const now = resolveNow(input.now)
   mkdirSync(input.dir, { recursive: true })
   const db_path = join(input.dir, CALENDAR_DB)
-  const db = new Database(db_path, { create: true })
+  // P3 shared open — previously cache_size + busy_timeout only (same values
+  // as the shared set); now additionally gains WAL/synchronous/temp_store
+  // plus foreign_keys=ON, which is inert here (schema declares no FOREIGN
+  // KEYs). Strictly more tolerant, no semantic change.
+  const db = openSidecar(db_path)
   try {
-    db.exec(`PRAGMA cache_size = ${DEFAULT_PRAGMAS.cache_size}`)
-    db.exec(`PRAGMA busy_timeout = ${DEFAULT_PRAGMAS.busy_timeout_ms}`)
     applyCalendarSidecarMigrations(db)
     bootstrapMetaRow(db, input.project_id, now())
   } catch (err) {
@@ -336,13 +330,12 @@ function buildHandle(deps: {
       return raw.map((r) => {
         let attendees: readonly string[] = []
         if (r.attendees_json !== null) {
-          try {
-            const parsed = JSON.parse(r.attendees_json) as unknown
-            if (Array.isArray(parsed)) {
-              attendees = parsed.filter((s): s is string => typeof s === 'string')
-            }
-          } catch {
-            // best-effort
+          // Corrupt-JSON policy (explicit, historical): fallback → [] —
+          // best-effort; a corrupt or non-array column renders as no
+          // attendees rather than failing the listEvents walk.
+          const parsed = parseJsonColumn(r.attendees_json, { onCorrupt: 'fallback', fallback: [] })
+          if (Array.isArray(parsed)) {
+            attendees = parsed.filter((s): s is string => typeof s === 'string')
           }
         }
         return {

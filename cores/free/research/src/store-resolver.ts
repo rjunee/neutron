@@ -14,12 +14,13 @@
  * Per docs/plans/research-core-tier1-brief.md § 6.
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
+import { openSidecar } from '@neutronai/persistence/index.ts'
 
 import { ResearchClaimStore } from './claim-store.ts'
 import { ResearchProjectStore } from './research-store.ts'
@@ -206,8 +207,10 @@ export class ResearchStoreResolver {
       mkdirSync(researchDir, { recursive: true, mode: 0o700 })
     }
     const dbPath = join(researchDir, RESEARCH_SIDECAR_DB)
-    const db = new Database(dbPath, { create: true })
-    db.exec('PRAGMA foreign_keys = ON')
+    // P3 shared open — previously foreign_keys only; now additionally gains
+    // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
+    // tolerant under contention, no semantic change).
+    const db = openSidecar(dbPath)
     applyProjectScopedMigrations(db, this.migrations_dir)
 
     // After migrations, research_meta exists. Insert bootstrap row if
