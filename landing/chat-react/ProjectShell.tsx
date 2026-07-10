@@ -575,10 +575,14 @@ export function ProjectShell({
         <div className="car-stage">
           <div className="car-tabpanels" ref={panelsRef}>
             {/* Chat stays mounted across tab switches so the live session, stream,
-                and scroll state survive — only its visibility toggles. The Chat
-                view hosts the desktop Work pane when `showPane` (≥1024px + a
-                resolved scope with a Work board); `paneProjectId` scopes + resets
-                the pane on a project switch. */}
+                and scroll state survive — only its visibility toggles. W7 — the
+                Chat view hosts a desktop Work pane PER kept-alive conversation
+                surface, so `paneEligible` is the plain viewport gate (≥1024px):
+                each surface scopes its own pane to its OWN project (General + every
+                project is Work-board-eligible — `tabs-client` injects the descriptor
+                for General too), and the pane stays MOUNTED across a project switch
+                so it never re-slides (#355). Below 1024px `paneEligible` is false and
+                Work stays a seated tab (see `showPane`/`visibleTabs` above). */}
             <div className="car-tabpanel" role="tabpanel" hidden={chatHidden} aria-hidden={chatHidden}>
               <ChatApp
                 vm={vm}
@@ -586,8 +590,7 @@ export function ProjectShell({
                 config={config}
                 draft={draft}
                 onOpenDocLink={onOpenDocLink}
-                showPane={showPane}
-                paneProjectId={projectId ?? ''}
+                paneEligible={isDesktop}
                 {...(workOpenDoc !== undefined ? { paneOnOpenDoc: workOpenDoc } : {})}
                 {...(fetchImpl !== undefined ? { fetchImpl } : {})}
               />

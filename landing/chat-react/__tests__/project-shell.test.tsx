@@ -886,7 +886,15 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     container.remove()
   })
 
-  it('does NOT mount the pane while a scope switch is still resolving (Codex P2)', async () => {
+  it('W7 — the pane is scoped to its own project, so a still-resolving scope can never trigger a wrong-scope board fetch (Codex P2)', async () => {
+    // W7 reframe of the old "does NOT mount the pane while resolving" guard: the
+    // pane is no longer gated on the ACTIVE scope's tab resolution. Each kept-alive
+    // conversation surface owns a PERSISTENT pane scoped to its OWN (stable) project
+    // id, so the wrong-scope hazard the old resolve-gate protected against is
+    // structurally impossible — the pane always fetches ITS project's board, even
+    // while the tab set is still resolving. This asserts that stronger invariant:
+    // the pane mounts immediately on desktop, and every board fetch targets PROJECT
+    // (never '', never the `//work-board` double-slash a wrong/empty scope produces).
     mediaMatches = (q) => q.includes('min-width: 1024px')
 
     const { createRoot } = await import('react-dom/client')
@@ -926,11 +934,19 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     const tabsPending = new Promise<void>((res) => {
       releaseTabs = res
     })
+    const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
       if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
         await tabsPending
         return new Response(
           JSON.stringify({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.includes('/work-board')) {
+        boardUrls.push(url)
+        return new Response(
+          JSON.stringify({ ok: true, items: [], project_id: PROJECT }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         )
       }
@@ -982,17 +998,30 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
       await tick()
     })
 
-    // Resolving (gated fetch still pending) → NO pane, NO handle.
-    expect(container.querySelector('.car-plans-handle')).toBeNull()
-    expect(container.querySelector('.car-plans')).toBeNull()
+    // Resolving (gated tabs fetch still pending) → the pane ALREADY mounts,
+    // scoped to its own project (viewport-gated, not tab-resolution-gated).
+    expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+    expect(container.querySelector('.car-tabpanel .car-plans')).not.toBeNull()
 
-    // Release the resolver → the pane mounts for the now-resolved scope.
+    // Release the resolver → still mounted; no change of scope.
     await act(async () => {
       releaseTabs()
       await tick()
       await tick()
     })
     expect(container.querySelector('.car-plans-handle')).not.toBeNull()
+
+    // The invariant the old resolve-gate really protected: EVERY board fetch —
+    // both during and after the resolving window — targets PROJECT's board, never
+    // an empty/wrong scope (`//work-board`) that a globally-active-scope pane could
+    // have fired mid-switch.
+    expect(boardUrls.length).toBeGreaterThan(0)
+    expect(
+      boardUrls.every(
+        (u) => u === `https://sam.neutron.test/api/app/projects/${PROJECT}/work-board`,
+      ),
+    ).toBe(true)
+    expect(boardUrls.every((u) => !u.includes('//work-board'))).toBe(true)
 
     await act(async () => {
       root.unmount()

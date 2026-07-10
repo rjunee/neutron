@@ -1597,10 +1597,14 @@ function ChatSurface({
         </div>
         {/* Desktop Work slide-out — mounted inside the Chat view so it's scoped to
             this tab (never Documents/Settings) and sits ABOVE the composer footer.
-            Keyed by scope so its auto-open/close controller resets on a switch. */}
+            W7 — NO `key`: this pane belongs to ONE kept-alive conversation surface,
+            scoped to that surface's own (stable) project, so it must PERSIST across
+            switches — a `key` would force a remount and replay the slide (#355). Its
+            open/close lives in `usePlansPaneController` and rides the surface's
+            lifetime; a plain project switch (hide→show this surface) never re-slides
+            it, only a real kickoff/all-clear transition animates. */}
         {showPane ? (
           <PlansPane
-            key={paneProjectId}
             projectId={paneProjectId}
             config={config}
             controller={controller}
@@ -1777,9 +1781,15 @@ function MountedConversation({
           config={config}
           draft={draft}
           uploadAffordance={uploadAffordance}
-          // Only the ACTIVE surface mounts the Work slide-out pane, so N hidden
-          // surfaces don't each poll a board.
-          showPane={active && showPane}
+          // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
+          // surface (NOT gated on `active`). Gating on `active` unmounted the pane
+          // on every switch-away and re-mounted it on return, replaying the
+          // slide-out animation (#355) and re-fetching the board. Kept mounted, its
+          // open/close state persists across switches — a plain switch never
+          // re-slides — and its board fetch/poll (poll is already gated on a LIVE
+          // run) stays warm so an in-flight build the user switched away from is
+          // still shown, mid-flight, when they switch back.
+          showPane={showPane}
           paneProjectId={paneProjectId}
           {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           {...(fetchImpl !== undefined ? { fetchImpl } : {})}
@@ -1803,8 +1813,7 @@ export function ChatApp({
   draft,
   fetchImpl,
   onOpenDocLink,
-  showPane,
-  paneProjectId,
+  paneEligible,
   paneOnOpenDoc,
 }: {
   vm: ChatViewModel
@@ -1816,13 +1825,13 @@ export function ChatApp({
   /** P-A — open a doc referenced by an agent chat link in the Documents tab.
    *  Supplied by `ProjectShell`; omit to leave doc links as plain anchors. */
   onOpenDocLink?: (projectId: string, path: string) => void
-  /** M1 polish (item 3+5) — host the desktop Work slide-out pane INSIDE this Chat
-   *  view (≥1024px on a resolved scope with a Work board). The shell decides;
-   *  omitting/false renders no pane (narrow width, or non-Work scope). */
-  showPane?: boolean
-  /** The scope the pane's board is for ('' = General). Also keys the pane so its
-   *  auto-open/close controller resets cleanly on a project switch. */
-  paneProjectId?: string
+  /** W7 — whether this viewport hosts the desktop Work slide-out pane (≥1024px).
+   *  A PLAIN viewport gate: each kept-alive conversation surface mounts its OWN
+   *  persistent pane, scoped to its OWN project, so a project switch never
+   *  unmounts + re-slides the pane (#355). Omitting/false renders no pane (narrow
+   *  width — Work stays a seated tab). Every scope, General included, is
+   *  Work-board-eligible, so no per-project gate is needed here. */
+  paneEligible?: boolean
   /** Open a Work card's spec-doc in the Documents tab; undefined = static label
    *  (e.g. General, which has no Documents tab). */
   paneOnOpenDoc?: (projectId: string, path: string) => void
@@ -1932,8 +1941,12 @@ export function ChatApp({
             draft={draft}
             {...(fetchImpl !== undefined ? { fetchImpl } : {})}
             {...(onOpenDocLink !== undefined ? { onOpenDocLink } : {})}
-            showPane={showPane === true}
-            paneProjectId={paneProjectId ?? ''}
+            showPane={paneEligible === true}
+            // Each surface scopes its pane to ITS OWN conversation's project (not
+            // the globally-active one), so a kept-alive background surface never
+            // renders a foreign project's board. `__general__` maps to '' (the
+            // General/owner board).
+            paneProjectId={id === '__general__' ? '' : id}
             {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           />
         )
