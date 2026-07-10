@@ -103,7 +103,12 @@
 
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
-import { hasUsableCredential, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
+import {
+  hasUsableCredential,
+  soonestCooldownUntil,
+  type CredentialPool,
+} from '@neutronai/runtime/credential-pool.ts'
 
 export interface MemoizeCredentialPoolInput {
   /** Instance home dir whose `.env` file is the invalidation trigger. */
@@ -131,6 +136,12 @@ export function memoizeCredentialPoolByEnvMtime(
   const envPath = join(input.owner_home, '.env')
   let cached: { pool: CredentialPool; mtime_ms: number } | null = null
   let pending: Promise<CredentialPool | null> | null = null
+  // O4 rising-edge latch: the all-cooldown wedge path re-resolves on EVERY
+  // dispatch while wedged, so a raw emit would spam. This latch fires the
+  // degrade journal ONCE per cooldown episode (healthy→all-cooldown edge) and
+  // resets when a usable credential returns. VISIBILITY ONLY — never gates the
+  // wedge decision itself.
+  let all_cooldown_latched = false
 
   const readMtimeMs = (): number => {
     try {
@@ -150,6 +161,7 @@ export function memoizeCredentialPoolByEnvMtime(
     // Hot path: cache valid by mtime AND still has a usable credential.
     // `hasUsableCredential` is a pure O(creds) scan — no mutation, no I/O.
     if (cachedFresh && hasUsableCredential(cached!.pool)) {
+      all_cooldown_latched = false
       return cached!.pool
     }
 
@@ -221,9 +233,24 @@ export function memoizeCredentialPoolByEnvMtime(
         // surface the same null selectCredential would produce — the next
         // dispatch retries the cheap re-resolve.
         if (!hasUsableCredential(resolved)) {
+          // O4 — VISIBILITY ONLY: journal the all-cooldown degrade on the
+          // rising edge only (not every wedged re-resolve). Control flow is
+          // unchanged (still returns the wedged pool); emit can never throw.
+          if (!all_cooldown_latched) {
+            all_cooldown_latched = true
+            void emitSystemEvent({
+              event: 'credential_all_cooldown',
+              module: 'credentials',
+              payload: {
+                credential_count: resolved.credentials.length,
+                soonest_cooldown_until: soonestCooldownUntil(resolved),
+              },
+            })
+          }
           return wedgedCached.pool
         }
       }
+      all_cooldown_latched = false
       cached = { pool: resolved, mtime_ms }
       return resolved
     })()

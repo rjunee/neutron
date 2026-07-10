@@ -374,6 +374,18 @@ CREATE INDEX skill_forge_proposals_signature
 CREATE INDEX skill_forge_proposals_status
     ON skill_forge_proposals (status)
 
+[index] system_events_module_event (tbl=system_events)
+CREATE INDEX system_events_module_event
+    ON system_events (module, event_name)
+
+[index] system_events_name_ts (tbl=system_events)
+CREATE INDEX system_events_name_ts
+    ON system_events (event_name, ts)
+
+[index] system_events_ts (tbl=system_events)
+CREATE INDEX system_events_ts
+    ON system_events (ts)
+
 [index] telegram_bind_tokens_expires (tbl=telegram_bind_tokens)
 CREATE INDEX telegram_bind_tokens_expires
     ON telegram_bind_tokens (expires_at_ms)
@@ -1271,6 +1283,21 @@ CREATE TABLE skill_forge_proposals (
     created_at         INTEGER NOT NULL,
     -- Epoch ms the proposal was approved/declined; NULL while pending.
     decided_at         INTEGER
+) STRICT
+
+[table] system_events (tbl=system_events)
+CREATE TABLE system_events (
+    id TEXT PRIMARY KEY NOT NULL,
+    ts INTEGER NOT NULL,                                  -- unix-ms
+    level TEXT NOT NULL DEFAULT 'warn'
+        CHECK (level IN ('info', 'warn', 'error')),
+    module TEXT NOT NULL,                                 -- 'gbrain' | 'cores' | 'cron' | …
+    event_name TEXT NOT NULL,                             -- degrade decision name
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    -- Optional instance/project scope. NULL for instance-wide degrade
+    -- decisions that have no owning project (most of them).
+    project_slug TEXT,
+    duration_ms INTEGER                                   -- optional span close
 ) STRICT
 
 [table] task_reminder_links (tbl=task_reminder_links)

@@ -32,6 +32,7 @@
  */
 
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import {
   resolveEnvOAuthTier,
   resolveApiKeyEnvTier,
@@ -2707,8 +2708,17 @@ export function prewarmSubstrate(substrate: Substrate): Promise<void> {
       // Drain to completion so the persistent substrate keeps the freshly
       // spawned child in its warm pool. The reply is discarded.
       await collectTokensToString(handle)
-    } catch {
-      // best-effort warm-up — never blocks boot, never throws.
+    } catch (err) {
+      // best-effort warm-up — never blocks boot, never throws. Control flow is
+      // UNCHANGED: the failure is still swallowed and the promise still resolves
+      // (never rejects). O4 adds a VISIBILITY-ONLY journal row for the otherwise
+      // fully-silent prewarm failure; the emit is fire-and-forget + can never
+      // throw (emitSystemEvent swallows all sink errors).
+      void emitSystemEvent({
+        event: 'prewarm_failed',
+        module: 'open',
+        payload: { error: err instanceof Error ? err.message : String(err) },
+      })
     }
   })()
 }

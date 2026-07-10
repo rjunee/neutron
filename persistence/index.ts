@@ -48,6 +48,21 @@ export {
   type AppChatEditAggregate,
   type AppChatEditStoreOptions,
 } from './app-chat-edits.ts'
+export {
+  SystemEventsStore,
+  ALL_SYSTEM_EVENT_NAMES,
+  emitSystemEvent,
+  emitSystemEventSafe,
+  registerSystemEventSink,
+  pushSystemEventSink,
+  resolveSystemEventSink,
+  type SystemEventName,
+  type SystemEventLevel,
+  type SystemEventInput,
+  type SystemEventSink,
+  type SystemEventsStoreDeps,
+  type PersistedSystemEvent,
+} from './system-events.ts'
 export { PersistenceError, BusyRetryExhaustedError } from './errors.ts'
 export {
   withBusyRetry,

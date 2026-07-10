@@ -19,7 +19,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  registerSystemEventSink,
+  type SystemEventInput,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { installBundledCores } from '../cores/install-bundled.ts'
@@ -171,6 +176,69 @@ describe('installBundledCores — failure isolation', () => {
     expect(result.discovered).toBe(3)
     expect(result.installed.size).toBe(1) // reminders
     expect(result.failures.length).toBe(2) // calendar + email
+  })
+
+  test('O4 — system_events journal receives ONE core_install_failed row per failed Core (and none on the healthy install)', async () => {
+    const rows: SystemEventInput[] = []
+    const sink: SystemEventSink = {
+      record(input) {
+        rows.push(input)
+        return { id: String(rows.length) }
+      },
+    }
+    registerSystemEventSink(sink)
+    try {
+      seedCore(bench.rootDir, 'reminders') // installs cleanly
+      seedCore(bench.rootDir, 'calendar') // fails (oauth secret)
+      seedCore(bench.rootDir, 'email') // fails (oauth secret)
+      await installBundledCores({
+        project_slug: 'test',
+        projectDb: bench.db,
+        dataDir: bench.ownerHome,
+        tools: bench.tools,
+        secretsStore: bench.secrets,
+        rootDirs: [bench.rootDir],
+        hardFailFailureRatio: 1,
+      })
+      const failed = rows.filter((r) => r.event === 'core_install_failed')
+      expect(failed).toHaveLength(2) // one per FAILED core, none for reminders
+      expect(failed.map((f) => (f.payload as { core_slug: string }).core_slug).sort()).toEqual([
+        'calendar_core',
+        'email_managed_core',
+      ])
+      for (const f of failed) {
+        expect(f).toMatchObject({ module: 'cores', project_slug: 'test' })
+      }
+    } finally {
+      registerSystemEventSink(null)
+    }
+  })
+
+  test('O4 — a throwing journal sink does NOT break core install failure isolation', async () => {
+    registerSystemEventSink({
+      record() {
+        throw new Error('journal write failed')
+      },
+    })
+    try {
+      seedCore(bench.rootDir, 'reminders')
+      seedCore(bench.rootDir, 'calendar')
+      seedCore(bench.rootDir, 'email')
+      const result = await installBundledCores({
+        project_slug: 'test',
+        projectDb: bench.db,
+        dataDir: bench.ownerHome,
+        tools: bench.tools,
+        secretsStore: bench.secrets,
+        rootDirs: [bench.rootDir],
+        hardFailFailureRatio: 1,
+      })
+      // Degrade behaviour unchanged: reminders installs, the two oauth cores fail-isolate.
+      expect(result.installed.size).toBe(1)
+      expect(result.failures.length).toBe(2)
+    } finally {
+      registerSystemEventSink(null)
+    }
   })
 
   test('telemetry log receives a cores.install_failed event per failed Core', async () => {

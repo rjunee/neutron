@@ -3,7 +3,11 @@ import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  ProjectDb,
+  SystemEventsStore,
+  pushSystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { MAX_UPLOAD_BYTES_DEFAULT } from './upload/import-upload-handler.ts'
 // C2 OSS-split (2026-06-10) — the Managed production composer
 // (`buildDefaultRealModeComposer`, formerly ~4800 lines of this file)
@@ -219,10 +223,41 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   mkdirSync(dirname(dbPath), { recursive: true })
 
   const db = ProjectDb.open(dbPath)
-  applyMigrationsToProjectDb(db)
+  // Guard migration application: a malformed migration / write failure /
+  // incompatible existing schema must close the just-opened SQLite handle
+  // before propagating, so a systemd restart doesn't race a leaked handle.
+  try {
+    applyMigrationsToProjectDb(db)
+  } catch (err) {
+    db.close()
+    throw err
+  }
 
-  const project_slug = resolveOwnerSlugFromConfig(config)
+  // Resolve the owner slug BEFORE registering the journal sink: the resolver
+  // does an unguarded readFileSync of `.url_slug`, so a throw here must not leak
+  // the just-registered sink. Guard the DB (the one resource open so far) so a
+  // slug-read failure closes it before propagating.
+  let project_slug: string
+  try {
+    project_slug = resolveOwnerSlugFromConfig(config)
+  } catch (err) {
+    db.close()
+    throw err
+  }
   const bootedAt = Date.now()
+
+  // O4 — register the process-wide system_events degradation journal sink ONCE,
+  // after migrations + slug resolution (so `system_events` exists and no earlier
+  // throw can leak it). Every silent fail-soft / degrade site reaches this via
+  // the ambient registry (persistence/system-events.ts) and emits a
+  // VISIBILITY-ONLY row; when this registration hasn't run (unit tests, sidecar
+  // tools) each emit is a no-op. Push onto the ambient sink STACK and keep the
+  // identity-scoped deregister. Teardown removes exactly THIS sink (from any
+  // stack position), so overlapping boots tear down in any order without
+  // orphaning a live older boot or resurrecting a closed-DB sink — the stack top
+  // is always a live owner.
+  const systemEventSink = new SystemEventsStore({ db })
+  const clearOwnedSystemEventSink = pushSystemEventSink(systemEventSink)
 
   // Compose the module graph if the caller supplied a composer. We capture
   // the composition output BEFORE composing so we can read any graph-level
@@ -245,6 +280,34 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   let composedChainFetch:
     | ((req: Request, server: import('bun').Server<unknown>) => Response | Promise<Response>)
     | undefined
+  // Sprint 19 + O4 — release ALL boot-owned resources on ANY init failure after
+  // the DB is open + the system_events sink is registered, so a systemd
+  // Restart=always loop doesn't race a still-open SQLite handle, dangling
+  // timers from a half-composed graph, or an ambient sink pointing at the
+  // failed boot's (now-closed) DB. Runs for a composer/compose throw AND for a
+  // later failure (listener bind, port assertion, sd_notify) before a
+  // BootHandle is returned. Idempotent-safe: only invoked on the failure paths.
+  const bootFailureCleanup = async (): Promise<void> => {
+    if (graph !== null) {
+      try {
+        await graph.shutdown()
+      } catch (shutdownErr) {
+        console.error('graph shutdown during init failure threw:', shutdownErr)
+      }
+    }
+    // §F1 — drain any realmode cleanups the composition wired (auxiliary DB
+    // handles, timers) BEFORE db.close(), mirroring the normal shutdown order so
+    // a post-composition failure doesn't leak them. No-op when none were wired
+    // (composer threw before assignment). Each is awaited; a throwing one is
+    // logged and does not stop the rest (drainRealmodeCleanups always resolves).
+    await drainRealmodeCleanups(realmode_cleanups)
+    // Deregister THIS boot's sink (no NEW emit can target it), then FLUSH any
+    // in-flight journal write so a degrade fired just before init failure is
+    // durably persisted rather than dropped against the closed DB.
+    clearOwnedSystemEventSink()
+    await systemEventSink.drain()
+    db.close()
+  }
   if (options.composer !== undefined) {
     try {
       const composition = await options.composer({ db, project_slug })
@@ -276,27 +339,27 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         composedWebsocket = composed.websocket
       }
     } catch (err) {
-      // Sprint 19 — release resources on init failure so a systemd
-      // restart doesn't race a still-open SQLite handle / dangling
-      // timers spawned by a partially-composed graph. Mirrors the
-      // shutdown() cleanup at lines ~321-354 below; that path runs on
-      // SIGTERM AFTER a successful boot, this one runs when the boot
-      // itself fails. Without this, a throw from `options.composer` or
-      // `composeProductionGraph` would leak `db` (open SQLite handle)
-      // + any timers a half-composed graph already started (e.g. the
-      // reminders tick loop, the watchdog supervisor).
-      if (graph !== null) {
-        try {
-          await graph.shutdown()
-        } catch (shutdownErr) {
-          console.error('graph shutdown during init failure threw:', shutdownErr)
-        }
-      }
-      db.close()
+      // Sprint 19 — release resources on init failure so a systemd restart
+      // doesn't race a still-open SQLite handle / dangling timers spawned by a
+      // partially-composed graph. This is the composer / composeProductionGraph
+      // throw path; the identical guard wraps the post-composition init below.
+      await bootFailureCleanup()
       throw err
     }
   }
 
+  // O4 / Sprint 19 — everything from here to the returned BootHandle is guarded:
+  // a throw (listener bind, port assertion, sd_notify) runs bootFailureCleanup
+  // so the DB handle, a composed graph's timers, and the ambient system_events
+  // sink are all released before the error propagates. `rawServerRef` captures
+  // the bound listener the INSTANT bindHttpListener returns (the socket is
+  // already OPEN then) so the catch can stop it even if a throw fires BEFORE the
+  // graceful-drain `boundServer` wrapper is built — critically the
+  // `server.port === undefined` assertion, which precedes `boundServer`. Without
+  // this, that assertion leaks the open socket into a systemd restart on the
+  // same port.
+  let rawServerRef: { stop: (force?: boolean) => void | Promise<void> } | null = null
+  try {
   // Pick the http handler. Explicit BootOptions wins over composer output;
   // composer output wins over the default healthz stub. The chained-fetch
   // path (Sprint 18) is wired below inside the Bun.serve `fetch` arrow so
@@ -381,6 +444,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       websocket: websocketHandler,
     }),
   })
+  // The socket is OPEN as of this line. Capture a stoppable ref BEFORE any
+  // subsequent throw (the port assertion below, sd_notify, watchdog wiring) so
+  // the init-failure catch always releases it. Error-path stop uses force:true
+  // (the graceful-drain semantics live on `boundServer` for the success path).
+  rawServerRef = server
   // Bun's typed surface marks `server.port` as `number | undefined` (TCP
   // sockets aren't required for every transport), but for a port-bound HTTP
   // server it's always set post-start. Assert at boot to keep the BootHandle
@@ -407,6 +475,8 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       await server.stop(force)
     },
   }
+  // (rawServerRef already tracks the open socket for the init-failure guard,
+  // captured above the moment bindHttpListener returned.)
 
   // Best-effort READY=1; sdNotify is a no-op when NOTIFY_SOCKET is unset (dev
   // mode / macOS), and throws on real systemd error paths so a bricked notify
@@ -498,7 +568,22 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // in-flight queries on the auxiliary connections finish cleanly.
     // §F1 — drain (await) every cleanup, async ones included, BEFORE db.close().
     await drainRealmodeCleanups(realmode_cleanups)
+    // O4 — deregister THIS boot's system_events sink from the stack (no NEW
+    // emit can target it — identity-scoped, so a concurrent boot's sink is never
+    // removed), then FLUSH any in-flight journal write so a degrade fired just
+    // before shutdown is durably persisted, not dropped against the closed DB.
+    clearOwnedSystemEventSink()
+    await systemEventSink.drain()
     db.close()
+    // Remove the process signal listeners this boot installed. `process.once`
+    // auto-removes on FIRE, but a MANUAL shutdown() (tests, in-process
+    // restarts, overlapping boots) never fires them — so without this, repeated
+    // boot/shutdown cycles accumulate stale SIGTERM/SIGINT listeners (eventual
+    // MaxListenersExceededWarning) and a later real signal would invoke every
+    // retired boot's closure. Idempotent: removeListener on an already-removed
+    // (fired) listener is a no-op.
+    process.removeListener('SIGTERM', handleSignal)
+    process.removeListener('SIGINT', handleSignal)
   }
 
   const handleSignal = (): void => {
@@ -510,6 +595,22 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   process.once('SIGINT', handleSignal)
 
   return { db, graph, server: boundServer, shutdown }
+  } catch (err) {
+    // Any failure between the sink registration and the returned BootHandle
+    // (listener bind rejection, port assertion, sd_notify READY throw) lands
+    // here. Force-stop the raw listener if the socket ever opened, then release
+    // the graph, sink, and DB via the shared cleanup so nothing leaks into a
+    // systemd restart.
+    if (rawServerRef !== null) {
+      try {
+        await rawServerRef.stop(true)
+      } catch (stopErr) {
+        console.error('http listener stop during init failure threw:', stopErr)
+      }
+    }
+    await bootFailureCleanup()
+    throw err
+  }
 }
 
 /**

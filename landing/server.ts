@@ -43,6 +43,7 @@ import { fileURLToPath } from 'node:url'
 // property.
 export { MOBILE_APP_URL } from '@neutronai/contracts/handoff-config.ts'
 
+import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { renderMobileInstallHtml } from './mobile-install-config.ts'
 import { isSpaClientRoute } from './spa-routes.ts'
 // C5 — the landing server OWNS the route predicate/set the per-instance gateway
@@ -544,6 +545,11 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
   let chat_react_js_cache: string | null = existsSync(chat_react_js_prebuilt_path)
     ? readFileSync(chat_react_js_prebuilt_path, 'utf8')
     : null
+  // O4 rising-edge latch for the bundle_build_failed journal. A failed lazy
+  // build leaves the cache null, so EVERY subsequent /chat-react.js request
+  // rebuilds — this latch fires the degrade row once per failure EPISODE
+  // (reset by a successful build) instead of on every request.
+  let chat_react_build_failed_latched = false
   const chat_react_entry_path = join(static_dir, 'chat-react', 'main.tsx')
   // P2 S5 — invite landing short-circuit. Optional: callers that haven't
   // wired the invite handler yet skip the route entirely so the existing
@@ -577,6 +583,9 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
   let invite_js_cache: string | null = existsSync(invite_js_prebuilt_path)
     ? readFileSync(invite_js_prebuilt_path, 'utf8')
     : null
+  // O4 rising-edge latch for the invite.js bundle_build_failed journal (see the
+  // chat-react latch above for rationale).
+  let invite_build_failed_latched = false
   const invite_ts_path = join(invite_assets_dir, 'invite.ts')
   // ISSUES #208 — `/mobile` install page. The wow handoff's "Get the
   // mobile app" button points at `MOBILE_APP_URL` (the `/mobile` path on
@@ -621,12 +630,44 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         minify: true,
         sourcemap: 'none',
       })
-      if (!result.success || result.outputs.length === 0) return null
+      if (!result.success || result.outputs.length === 0) {
+        // O4 — VISIBILITY ONLY: the web chat client silently 404s when this
+        // bundle build fails (return null → /chat-react.js 404). Journal it on
+        // the failure EDGE (latched) so a persistently-broken bundle doesn't
+        // emit a row per request. Control flow unchanged; emit can never throw.
+        if (!chat_react_build_failed_latched) {
+          chat_react_build_failed_latched = true
+          void emitSystemEvent({
+            event: 'bundle_build_failed',
+            module: 'landing',
+            payload: {
+              bundle: 'chat-react.js',
+              entry: chat_react_entry_path,
+              logs: result.logs.map((l) => String(l)),
+            },
+          })
+        }
+        return null
+      }
       const out = result.outputs[0]
       if (out === undefined) return null
       chat_react_js_cache = await out.text()
+      chat_react_build_failed_latched = false // successful build clears the edge
       return chat_react_js_cache
-    } catch {
+    } catch (err) {
+      if (!chat_react_build_failed_latched) {
+        chat_react_build_failed_latched = true
+        void emitSystemEvent({
+          event: 'bundle_build_failed',
+          module: 'landing',
+          level: 'error',
+          payload: {
+            bundle: 'chat-react.js',
+            entry: chat_react_entry_path,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        })
+      }
       return null
     }
   }
@@ -681,12 +722,40 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
         minify: false,
         sourcemap: 'none',
       })
-      if (!result.success || result.outputs.length === 0) return null
+      if (!result.success || result.outputs.length === 0) {
+        if (!invite_build_failed_latched) {
+          invite_build_failed_latched = true
+          void emitSystemEvent({
+            event: 'bundle_build_failed',
+            module: 'landing',
+            payload: {
+              bundle: 'invite.js',
+              entry: invite_ts_path,
+              logs: result.logs.map((l) => String(l)),
+            },
+          })
+        }
+        return null
+      }
       const out = result.outputs[0]
       if (out === undefined) return null
       invite_js_cache = await out.text()
+      invite_build_failed_latched = false // successful build clears the edge
       return invite_js_cache
-    } catch {
+    } catch (err) {
+      if (!invite_build_failed_latched) {
+        invite_build_failed_latched = true
+        void emitSystemEvent({
+          event: 'bundle_build_failed',
+          module: 'landing',
+          level: 'error',
+          payload: {
+            bundle: 'invite.js',
+            entry: invite_ts_path,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        })
+      }
       return null
     }
   }

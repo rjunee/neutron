@@ -31,7 +31,7 @@
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { emitSystemEvent, type ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type {
   ApprovalPolicy,
@@ -257,6 +257,17 @@ export async function installBundledCores(
         failEvent.details = err.details
       }
       log(failEvent)
+      // O4 — VISIBILITY ONLY: journal the per-core install failure alongside
+      // the existing structured `log` sink. The fail-soft decision (isolate the
+      // failure + continue to the next Core) is UNCHANGED; emit is
+      // fire-and-forget and can never throw.
+      void emitSystemEvent({
+        event: 'core_install_failed',
+        module: 'cores',
+        level: 'error',
+        project_slug: input.project_slug,
+        payload: { core_slug: failure.core_slug, code: failure.code, message: failure.message },
+      })
       // Continue to next Core. Failure isolation is the brief's lock.
     }
   }
