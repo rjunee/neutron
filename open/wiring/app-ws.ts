@@ -229,6 +229,14 @@ export interface WireAppWsDeps {
   chatCommandFilter: ChatCommandFilter
   /** The single-owner localhost-trust app-ws auth resolver (Path A). */
   appOwnerAuth: AppWsAuthResolver
+  /**
+   * S0 security quick-patch (b) — the per-boot app-ws token. Threaded into
+   * `createAppWsSurface` so a BROWSER-origin `/ws/app/chat` upgrade must present
+   * exactly it (the guessable `dev:<owner>` bearer is no longer accepted from
+   * the web). Native clients (no Origin) are exempt. Same value the owner-gate
+   * injects into the page bootstrap.
+   */
+  appWsToken: string
   /** The landing stack — supplies `buttonStore` + `stateStore`. */
   landing: LandingStackWithEngine
   /** Diff-gated rail refresh (no-ops when the snapshot is unchanged). */
@@ -283,6 +291,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     scribeOnUserTurn,
     chatCommandFilter,
     appOwnerAuth,
+    appWsToken,
     landing,
     emitProjectsChangedIfChanged,
     buildProjectsChangedFrame,
@@ -795,6 +804,8 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     registry: appWsRegistry,
     auth: appOwnerAuth,
     project_slug,
+    // S0 (b) — require the per-boot token on browser-origin WS upgrades.
+    app_ws_token: appWsToken,
     // Codex r1 [P2]: route slash commands (/note, /remind, /skills, …) through
     // the SAME chained filter the web chat uses — parity, not a second path.
     chat_command_filter: chatCommandFilter,

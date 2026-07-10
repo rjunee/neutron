@@ -104,6 +104,7 @@ function buildDeps() {
       mode: 'dev-bypass',
       resolve: async () => ({ ok: true as const, user_id: 'owner' }),
     } as unknown as AppWsAuthResolver,
+    appWsToken: 'nbt_test_token',
     landing: {
       stateStore: { get: async () => null },
       buttonStore: { emit: async () => ({ prompt_id: 'p', was_new: true }), latestTurnByTopic: async () => null },

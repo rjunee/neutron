@@ -93,6 +93,14 @@ export interface WireOwnerGateDeps {
    * threaded here as the READER the page bootstrap injection consumes.
    */
   readProjectRows: () => ProjectRailRow[]
+  /**
+   * S0 security quick-patch (b) — the per-boot app-ws token, minted once per
+   * boot by the composer. Injected into the served `/chat` bootstrap as
+   * `window.__neutron_app_ws_token` so the React client presents it (instead of
+   * the guessable `dev:<owner>` default) on the WS upgrade + every /api/app/*
+   * bearer call. A fresh boot mints a fresh token, invalidating any prior one.
+   */
+  appWsToken: string
 }
 
 export interface WiredOwnerGate {
@@ -130,7 +138,8 @@ export function buildOpenOwnerGate(
   deps: WireOwnerGateDeps,
 ): WiredOwnerGate {
   const { db, env, project_slug } = ctx
-  const { cookieSecret, startTokenAuth, consumedTokens, landing, readProjectRows } = deps
+  const { cookieSecret, startTokenAuth, consumedTokens, landing, readProjectRows, appWsToken } =
+    deps
 
   // Mint a fresh owner cookie + one-shot local start-token and 302 to the
   // PROVEN cold-start path (/chat?start=<token> → engine.start → first
@@ -193,9 +202,22 @@ export function buildOpenOwnerGate(
     // `/ws/app/chat`. Inject the owner identity explicitly so the client
     // derives `userId` (→ its default `dev:<owner>` app-ws bearer, the one our
     // owner-restricted resolver accepts) and connects.
+    // S0 (b) — inject the per-boot app-ws token. The client reads
+    // `window.__neutron_app_ws_token` (chat-react/config.ts) and sends it as its
+    // WS + /api/app/* bearer instead of the guessable `dev:<owner>` default, so a
+    // page from a previous boot carries a stale token.
+    // SCOPE (do not overclaim): S0 hardens the WS UPGRADE — a browser-origin
+    // `/ws/app/chat` upgrade is rejected unless it presents this exact token
+    // (app-ws-surface.ts). The `/api/app/*` resolver ADDS this token as a valid
+    // owner credential but still ACCEPTS the legacy `dev:owner` bearer (the
+    // pre-existing dev-bypass); server-side rejection of `dev:owner` on every
+    // /api/app/* surface is S1's job (per-install owner credential + C5 gate seam).
+    // S0 closes the most exploitable hole (WS bypasses CORS); the HTTP bearer
+    // path is CORS/SOP-mitigated cross-origin and hardened fully in S1.
     return (
       `<script>window.__neutron_user_id=${enc(OWNER_USER_ID)};` +
       `window.__neutron_projects=${enc(projects)};` +
+      `window.__neutron_app_ws_token=${enc(appWsToken)};` +
       `window.__neutron_active_project_id=${active};</script>`
     )
   }

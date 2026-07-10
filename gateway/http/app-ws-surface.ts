@@ -61,7 +61,40 @@ import type {
   ChatCommandFilter,
   ChatCommandFilterResult,
 } from '@neutronai/contracts/chat-command-filter.ts'
+import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 export type { ChatCommandFilter, ChatCommandFilterResult }
+
+/**
+ * S0 security quick-patch (a) — same-origin guard for the `/ws/app/chat`
+ * upgrade. A browser ALWAYS sends an `Origin` header on the WebSocket
+ * handshake, and a WS upgrade is NOT subject to CORS — so without this check
+ * ANY web page the owner merely visits could open
+ * `ws://127.0.0.1:7800/ws/app/chat?token=…` against the loopback gateway.
+ *
+ * Returns `true` when the request may proceed:
+ *   - `Origin` ABSENT (native Expo / CLI clients send none) → allowed; those
+ *     authenticate by bearer alone.
+ *   - `Origin` PRESENT and its host equals the request's own `Host` header
+ *     (the owner's served page) → allowed.
+ *   - `Origin` PRESENT but cross-origin (or opaque `"null"`, or the `Host`
+ *     header is missing) → REJECTED.
+ *
+ * The `Host` value is not a secret, so a plain equality is sufficient (and the
+ * length pre-check inside `constantTimeEqual` would leak nothing meaningful
+ * either way); we use a strict `===` for clarity.
+ */
+export function appWsOriginAllowed(origin: string | null, host: string | null): boolean {
+  if (origin === null) return true
+  if (host === null) return false
+  let originHost: string
+  try {
+    originHost = new URL(origin).host
+  } catch {
+    // Opaque / malformed origin (e.g. a sandboxed iframe's `Origin: null`).
+    return false
+  }
+  return originHost.length > 0 && originHost === host
+}
 
 export interface AppWsSocketData {
   /** Discriminator for the multiplexed websocket handler in compose.ts. */
@@ -127,6 +160,17 @@ export interface CreateAppWsSurfaceOptions {
   /** The gateway's own instance slug — used for `session_ready` payloads. */
   project_slug: string
   /**
+   * S0 security quick-patch (b) — the per-boot app-ws token. When set, a
+   * BROWSER upgrade (`Origin` header present) to `/ws/app/chat` MUST present
+   * exactly this token (constant-time compared) instead of the guessable
+   * `dev:<owner>` bearer; the web client receives the token via the served page
+   * bootstrap (`window.__neutron_app_ws_token`). Native clients (no `Origin`
+   * header) are exempt and continue to authenticate through the resolver.
+   * UNSET ⇒ no token gate — back-compat for gateway-level tests and non-Open
+   * consumers that never mint one.
+   */
+  app_ws_token?: string
+  /**
    * Optional pre-dispatch chat-command filter. When supplied, the
    * surface checks every inbound (HTTP + WS) against the filter
    * BEFORE calling `adapter.dispatchInbound`. A matching command
@@ -171,6 +215,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const { adapter, registry, auth } = opts
   const chat_command_filter = opts.chat_command_filter
   const project_slug = opts.project_slug
+  const app_ws_token = opts.app_ws_token
   const on_session_open = opts.on_session_open
   const on_button_choice = opts.on_button_choice
 
@@ -185,7 +230,42 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         if (method !== 'GET') {
           return new Response('method not allowed', { status: 405 })
         }
+        // S0 (a) — same-origin guard. A cross-origin web page cannot open this
+        // socket even though the loopback gateway trusts localhost; a native
+        // client (no Origin) is unaffected. Rejected BEFORE any token work so a
+        // malicious page never even reaches the resolver.
+        const origin = req.headers.get('origin')
+        if (!appWsOriginAllowed(origin, req.headers.get('host'))) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              code: 'bad_origin',
+              message: 'cross-origin websocket upgrade rejected',
+            }),
+            { status: 403, headers: { 'content-type': 'application/json' } },
+          )
+        }
         const token = url.searchParams.get('token') ?? ''
+        // S0 (b) — per-boot token gate for BROWSER upgrades. When a per-boot
+        // token is configured, an upgrade carrying an `Origin` (a browser) MUST
+        // present exactly it — the guessable `dev:<owner>` constant is no longer
+        // accepted from the web. Native clients (no Origin) skip this and fall
+        // through to the resolver's bearer check. Constant-time compare so a
+        // token guess can't be narrowed by response timing.
+        if (
+          app_ws_token !== undefined &&
+          origin !== null &&
+          !constantTimeEqual(token, app_ws_token)
+        ) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              code: 'bad_app_ws_token',
+              message: 'invalid app-ws token',
+            }),
+            { status: 401, headers: { 'content-type': 'application/json' } },
+          )
+        }
         const resolved = await auth.resolve(token)
         if ('code' in resolved) {
           // Bad credential → 401 with a small JSON body so the client
