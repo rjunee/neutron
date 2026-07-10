@@ -105,3 +105,22 @@ export {
   type RemindersListOutput,
   type ToolDeps,
 } from './src/tools.ts'
+
+// ── X2: typed Core module contract ──────────────────────────────────────
+// The ONE declaration the install composer (`gateway/cores/install-bundled.ts`)
+// reads instead of duck-typing barrel exports + a hardcoded backend-key table.
+// `backendKey` is the `ToolDeps` key a bare backend primitive maps onto; when
+// the backend factory returns an already-shaped object it is passed through
+// verbatim. Conformance: cores/runtime/__tests__/define-core-conformance.test.ts.
+import { defineCore } from '@neutronai/cores-sdk'
+import { CORE_SLUG as CORE_SLUG_X2, TOOL_NAMES as TOOL_NAMES_X2 } from './src/manifest.ts'
+import { buildTools as buildTools_X2 } from './src/tools.ts'
+import { buildExtraTools as buildExtraTools_X2 } from './src/mcp-tools-extra.ts'
+
+export const core = defineCore({
+  slug: CORE_SLUG_X2,
+  backendKey: 'backend',
+  toolNames: TOOL_NAMES_X2,
+  buildTools: buildTools_X2,
+  buildExtraTools: buildExtraTools_X2,
+})

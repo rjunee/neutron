@@ -33,7 +33,12 @@ import { pathToFileURL } from 'node:url'
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
-import type { ApprovalPolicy } from '@neutronai/tools/registry.ts'
+import type {
+  ApprovalPolicy,
+  ToolCallContext,
+  ToolHandler,
+} from '@neutronai/tools/registry.ts'
+import { isCoreModule, type CoreModule, type CoreToolHandler } from '@neutronai/cores-sdk'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import {
   buildBundledRegistry,
@@ -734,62 +739,73 @@ interface RegisterCoreToolsInput {
 }
 
 /**
- * Construct each Core's `buildTools(deps)` output and register the
- * resulting handlers into the production `ToolRegistry` against the
- * manifest's `tools[]` declarations. When the backend factory isn't
- * supplied OR throws, the tool registers with a `not_implemented`
- * stub so the manifest still surfaces in `/api/cores` (and any
- * dispatch fails loudly + structurally).
+ * Construct each Core's tool surface from its TYPED `defineCore()` contract
+ * (X2) and register the resulting handlers into the production
+ * `ToolRegistry` against the manifest's `tools[]` declarations.
+ *
+ * The composer reads the Core's `export const core = defineCore({...})`
+ * instead of duck-typing undeclared `buildTools`/`buildExtraTools` exports
+ * and instead of the old drift-prone `BACKEND_KEY_BY_SLUG` table. Failure
+ * shape:
+ *   - Barrel won't import / no typed `core` export → `not_implemented`
+ *     stubs (PRESERVED: matches the old `core_module_load_failed` /
+ *     `no_build_tools_export` soft path — a barrel that can't load is an
+ *     environmental fault, not manifest under-implementation. The
+ *     conformance sweep, not the runtime, is what proves all 9 bundled
+ *     Cores DO export a valid contract).
+ *   - No backend factory wired for the slug → `not_implemented` stubs
+ *     (PRESERVED: an intentional deploy state where the WHOLE surface is
+ *     uniformly stubbed — not under-implementation).
+ *   - Backend factory / `buildTools` throws → `not_implemented` stubs
+ *     (PRESERVED: a runtime/config fault, out of X2's scope).
+ *   - Backend wired + factories ran but a manifest tool has NO handler →
+ *     HARD `manifest_incomplete` install failure (X2, ISSUE #330 class):
+ *     a Core that under-implements its manifest cannot install
+ *     silently-broken. This lands the Core in `state.failures` →
+ *     `install_state: 'failed'` + `install_error` in `/api/cores`, the
+ *     SAME surfaced path a missing-secret Core uses. The conformance sweep
+ *     (`cores/runtime/__tests__/define-core-conformance.test.ts`) proves
+ *     none of the 9 bundled Cores ever trip this in production.
  */
 async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
   const { core, tools } = input
   const manifestToolByName = new Map<string, (typeof core.manifest.tools)[number]>()
   for (const t of core.manifest.tools) manifestToolByName.set(t.name, t)
 
-  // Resolve the Core's barrel via its `package.json#main`. Each
-  // bundled Core ships a top-level `index.ts` exporting `buildTools`;
-  // we import it lazily so the composer doesn't have to enumerate
-  // every Core entry point statically.
+  // Resolve the Core's TYPED module contract via its `package.json#main`.
+  // Each bundled Core ships a top-level `index.ts` exporting
+  // `core = defineCore({ slug, backendKey, toolNames, buildTools,
+  // buildExtraTools? })`. We import it lazily so the composer doesn't have
+  // to enumerate every Core entry point statically, then read the typed
+  // contract rather than probing undeclared exports.
   //
-  // A Core MAY additionally export `buildExtraTools(deps)` (Research
-  // Core S1) — a second factory returning ADDITIONAL handlers beyond
-  // the base set. Both factories receive the same `deps` bundle; the
-  // results are merged. The split exists so the legacy 3-tool surface
-  // (research_start / research_status / research_fetch) stays
-  // construction-compatible with older callers while the new 5-tool
-  // surface (research_deep / research_list / research_find /
-  // research_cite / research_claims_list) ships in `buildExtraTools`.
-  // Without invoking BOTH, the manifest declares tools that silently
-  // fall through to `not_implemented` stubs (Argus r1 BLOCKER #2).
-  let buildTools:
-    | ((deps: Record<string, unknown>) => Record<string, ToolHandlerFn>)
-    | null = null
-  let buildExtraTools:
-    | ((deps: Record<string, unknown>) => Record<string, ToolHandlerFn>)
-    | null = null
+  // A Core MAY declare `buildExtraTools` (the research/reminders/tasks/
+  // calendar split-surface pattern) — a second factory returning
+  // ADDITIONAL handlers beyond the base set. Both factories receive the
+  // same `deps` bundle; the results are merged. The split exists so the
+  // legacy 3-tool research surface stays construction-compatible with older
+  // callers while the newer tools ship in `buildExtraTools`.
+  let coreModule: CoreModule
   try {
     const pkgMain = await resolveCoreMain(core.coreDir)
-    const mod = (await import(pathToFileURL(pkgMain).href)) as {
-      buildTools?: (deps: Record<string, unknown>) => Record<string, ToolHandlerFn>
-      buildExtraTools?: (
-        deps: Record<string, unknown>,
-      ) => Record<string, ToolHandlerFn>
-    }
-    if (typeof mod.buildTools !== 'function') {
+    const mod = (await import(pathToFileURL(pkgMain).href)) as { core?: unknown }
+    if (!isCoreModule(mod.core)) {
+      // Barrel loaded but never adopted defineCore() — soft-stub (PRESERVED:
+      // the old `no_build_tools_export` path). The conformance test enforces
+      // the contract for the 9 bundled Cores at build time.
       input.log({
         event_name: 'cores.tool_registration_failed',
         core_slug: core.slug,
-        code: 'no_build_tools_export',
-        message: `Core ${core.slug} barrel does not export buildTools`,
+        code: 'no_define_core_export',
+        message: `Core ${core.slug} barrel does not export a defineCore() contract (\`export const core = defineCore({ ... })\`)`,
       })
       registerNotImplementedStubs(tools, core)
       return
     }
-    buildTools = mod.buildTools
-    if (typeof mod.buildExtraTools === 'function') {
-      buildExtraTools = mod.buildExtraTools
-    }
+    coreModule = mod.core
   } catch (err) {
+    // Barrel failed to import — an environmental fault (broken workspace
+    // resolution, syntax error). PRESERVED soft path: stub + keep installed.
     input.log({
       event_name: 'cores.tool_registration_failed',
       core_slug: core.slug,
@@ -800,46 +816,51 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
     return
   }
 
-  // Build the deps bundle. Three Cores always carry the same triple
-  // (manifest, project_slug, audit); the fourth field is the backend
-  // and is per-Core (notes.backend, tasks.store, calendar.client...).
+  // No backend wired — register the manifest's tool surface with a stub
+  // handler so the tool name appears in /api/cores and an MCP dispatch
+  // fails cleanly with `not_implemented`. PRESERVED behavior: this is an
+  // intentional deploy state (the whole surface is uniformly stubbed), NOT
+  // manifest under-implementation, so it is NOT a hard failure.
+  if (input.backendFactory === undefined) {
+    registerNotImplementedStubs(tools, core)
+    return
+  }
+
+  // Build the deps bundle. Every Core carries the fixed triple (manifest,
+  // project_slug, audit); the backend field(s) are per-Core and land under
+  // the Core's declared `backendKey` (or verbatim when the factory returns
+  // an already-shaped multi-key object like `{ store, pickNext }`).
   const deps: Record<string, unknown> = {
     manifest: core.manifest,
     project_slug: input.project_slug,
     audit: input.audit,
   }
-  if (input.backendFactory !== undefined) {
-    try {
-      const result = await input.backendFactory({
-        core,
-        project_slug: input.project_slug,
-        projectDb: input.projectDb,
-        installation: input.installation,
-      })
-      Object.assign(deps, normalizeBackend(core.slug, result))
-    } catch (err) {
-      input.log({
-        event_name: 'cores.tool_registration_failed',
-        core_slug: core.slug,
-        code: 'backend_factory_failed',
-        message: err instanceof Error ? err.message : String(err),
-      })
-      registerNotImplementedStubs(tools, core)
-      return
-    }
-  } else {
-    // No backend wired — register the manifest's tool surface with a
-    // stub handler so the tool name appears in /api/cores and an MCP
-    // dispatch fails cleanly with `not_implemented`. The manifest is
-    // still the source of truth for the tool's contract.
+  try {
+    const result = await input.backendFactory({
+      core,
+      project_slug: input.project_slug,
+      projectDb: input.projectDb,
+      installation: input.installation,
+    })
+    Object.assign(deps, normalizeBackend(coreModule.backendKey, result))
+  } catch (err) {
+    // Backend factory threw — a runtime/config fault (out of X2's scope).
+    // PRESERVED: stub the surface + keep the Core installed.
+    input.log({
+      event_name: 'cores.tool_registration_failed',
+      core_slug: core.slug,
+      code: 'backend_factory_failed',
+      message: err instanceof Error ? err.message : String(err),
+    })
     registerNotImplementedStubs(tools, core)
     return
   }
 
-  let built: Record<string, ToolHandlerFn>
+  let built: Record<string, CoreToolHandler>
   try {
-    built = buildTools(deps)
+    built = { ...coreModule.buildTools(deps) }
   } catch (err) {
+    // buildTools threw — runtime fault (out of X2's scope). PRESERVED.
     input.log({
       event_name: 'cores.tool_registration_failed',
       core_slug: core.slug,
@@ -850,13 +871,12 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
     return
   }
 
-  // Merge `buildExtraTools` output if the Core exports it. A failure
-  // here doesn't sink the entire registration — the base `built`
-  // surface is already valid and the affected tool names fall through
-  // to the `not_implemented` stub fill-in below.
-  if (buildExtraTools !== null) {
+  // Merge `buildExtraTools` output if the Core declares it. A failure here
+  // doesn't sink registration — the base `built` surface is already valid;
+  // any missing extra lands in the hard-fail coverage check below.
+  if (coreModule.buildExtraTools !== undefined) {
     try {
-      const extras = buildExtraTools(deps)
+      const extras = coreModule.buildExtraTools(deps)
       for (const [name, handler] of Object.entries(extras)) {
         if (Object.prototype.hasOwnProperty.call(built, name)) {
           input.log({
@@ -876,31 +896,30 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
         code: 'build_extra_tools_failed',
         message: err instanceof Error ? err.message : String(err),
       })
-      // Continue with the base `built` surface — the missing extras
-      // will register as `not_implemented` stubs in the fall-through
-      // pass at the bottom of this function.
+      // Continue with the base `built` surface — a manifest tool the extras
+      // would have supplied now trips the hard-fail coverage check below.
     }
   }
 
-  // Fill in manifest-declared tools that NEITHER buildTools NOR
-  // buildExtraTools provided a handler for. Without this the manifest
-  // would silently lie about its surface — the `/api/cores` response
-  // would advertise tools that an MCP dispatch fails on with the
-  // generic "tool not found" path instead of a structured
-  // `not_implemented` error.
-  for (const def of core.manifest.tools) {
-    if (Object.prototype.hasOwnProperty.call(built, def.name)) continue
-    built[def.name] = async (): Promise<unknown> => {
-      throw new Error(
-        `tool '${def.name}' (core=${core.slug}) declared in manifest but no handler returned by buildTools/buildExtraTools`,
-      )
-    }
-    input.log({
-      event_name: 'cores.tool_registration_failed',
-      core_slug: core.slug,
-      code: 'manifest_tool_unimplemented',
-      message: `Core ${core.slug} manifest declares tool '${def.name}' but no handler was returned`,
-    })
+  // X2 HARD FAILURE (ISSUE #330 class): a backend was wired and the
+  // factories ran, but one or more manifest-declared tools got NO handler.
+  // Formerly this silently installed a throwing stub + emitted a lone
+  // `manifest_tool_unimplemented` log line, so a Core could advertise a
+  // tool surface it never implemented. Now it is a hard install failure:
+  // the Core lands in `state.failures` (never `installed`), its tools never
+  // register, its launcher tile never seeds, and `/api/cores` flags it
+  // `install_state: 'failed'`. A Core that under-implements its manifest
+  // CANNOT install silently-broken.
+  const missingTools = core.manifest.tools
+    .map((d) => d.name)
+    .filter((name) => !Object.prototype.hasOwnProperty.call(built, name))
+  if (missingTools.length > 0) {
+    throw new CoreInstallError(
+      'manifest_incomplete',
+      `Core ${core.slug} manifest declares tool(s) [${missingTools.join(', ')}] ` +
+        `but neither buildTools nor buildExtraTools returned a handler for them`,
+      { core_slug: core.slug, missing_tools: missingTools },
+    )
   }
 
   for (const [toolName, handler] of Object.entries(built)) {
@@ -948,14 +967,18 @@ async function registerCoreTools(input: RegisterCoreToolsInput): Promise<void> {
 
 const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = 'auto'
 
-type ToolHandlerFn = (args: unknown) => Promise<unknown>
-
-function wrapHandler(fn: ToolHandlerFn): (
-  args: unknown,
-  _ctx: { project_slug: string; topic_id: string | null; call_id: string; speaker_user_id: string | null },
-) => Promise<unknown> {
-  return async (args, _ctx) => {
-    return fn(args)
+/**
+ * Adapt a Core's `defineCore()` handler to the ToolRegistry `ToolHandler`
+ * signature. X2: the per-call {@link ToolCallContext} is now THREADED to the
+ * Core handler as its second argument instead of being discarded (the old
+ * wrapper called `fn(args)` and dropped ctx — it even typed ctx with a stale
+ * 4-field shape that omitted `project_id`). Existing Cores whose handlers
+ * take only `(args)` stay assignable and simply ignore the extra argument;
+ * this is the plumbing X6 consumes to make Core tools project-scope aware.
+ */
+function wrapHandler(fn: CoreToolHandler): ToolHandler {
+  return async (args: unknown, ctx: ToolCallContext): Promise<unknown> => {
+    return fn(args, ctx)
   }
 }
 
@@ -984,20 +1007,26 @@ function registerNotImplementedStubs(tools: ToolRegistry, core: BundledCore): vo
 
 /**
  * Each Core's `ToolDeps` puts the backend under a Core-specific key
- * (notes.backend, tasks.store, calendar.client, ...). The factory
- * may return a flat object that's already shaped correctly, or a
- * single primitive that we map to the canonical key for that slug.
- * Returning `null`/`undefined` from the factory short-circuits to
- * the stub path (caller registers `not_implemented`).
+ * (`notes.backend`, `tasks.store`, `calendar.client`, ...). The factory may
+ * return a flat object that's already shaped correctly, or a single
+ * primitive that we map to the Core's declared `backendKey`. Returning
+ * `null`/`undefined` from the factory yields an empty bundle, which lets the
+ * hard-fail coverage check in `registerCoreTools` surface the resulting
+ * missing handlers.
+ *
+ * X2: the fallback key now comes from the Core's `defineCore()` contract
+ * (`coreModule.backendKey`) instead of the drift-prone `BACKEND_KEY_BY_SLUG`
+ * table, which by X2 carried two dead rows (`notes`, `dtc_analytics`) and was
+ * silently missing `scraping_core`.
  */
 function normalizeBackend(
-  slug: string,
+  backendKey: string,
   result: unknown,
 ): Record<string, unknown> {
   if (result === null || result === undefined) return {}
-  // If the factory already returned a deps map (object with the
-  // Core's expected key like `backend` / `store` / `client`), trust
-  // it verbatim.
+  // If the factory already returned a deps map (object with the Core's
+  // expected key like `backend` / `store` / `client`, or a multi-key shape
+  // like `{ store, pickNext }` / `{ client, summarizer }`), trust it verbatim.
   if (typeof result === 'object' && !Array.isArray(result)) {
     const obj = result as Record<string, unknown>
     if (
@@ -1010,24 +1039,9 @@ function normalizeBackend(
       return obj
     }
   }
-  // Otherwise map the single primitive to the per-slug expected
-  // key. Sticky to the slug names so the factory can stay shapeless
-  // when there's only one backend dep.
-  const key = BACKEND_KEY_BY_SLUG[slug] ?? 'backend'
-  return { [key]: result }
-}
-
-const BACKEND_KEY_BY_SLUG: Readonly<Record<string, string>> = {
-  notes: 'backend',
-  tasks_core: 'store',
-  reminders_core: 'backend',
-  calendar_core: 'client',
-  email_managed_core: 'client',
-  google_workspace_core: 'client',
-  research_core: 'backend',
-  codegen_core: 'orchestrator',
-  dtc_analytics: 'store',
-  agent_settings: 'backend',
+  // Otherwise map the single primitive to the Core's declared backend key so
+  // the factory can stay shapeless when there's only one backend dep.
+  return { [backendKey]: result }
 }
 
 async function resolveCoreMain(coreDir: string): Promise<string> {

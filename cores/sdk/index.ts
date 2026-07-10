@@ -77,6 +77,17 @@ export {
   type UiComponentSurface,
 } from './manifest.ts'
 
+// Typed Core module contract (X2)
+export {
+  defineCore,
+  isCoreModule,
+  type CoreModule,
+  type CoreToolFactory,
+  type CoreToolHandler,
+  type DefineCoreInput,
+  type ToolCallContext,
+} from './define-core.ts'
+
 // Connector
 export type {
   Connector,
