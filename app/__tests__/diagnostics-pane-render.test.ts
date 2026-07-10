@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as RealReact from 'react';
 
 import type { DiagnosticsReport } from '../lib/admin-client';
-import type { DiagnosticsState } from '../lib/diagnostics-pane-helpers';
+import type { DiagnosticsAction, DiagnosticsState } from '../lib/diagnostics-pane-helpers';
 
 // ── react-native host stubs: each primitive becomes an inspectable element with
 //    its props (testID, onPress, accessibilityState, children) preserved. ──────
@@ -36,9 +36,10 @@ mock.module('react-native', () => ({
 //    mount effect is captured so we can invoke it; useCallback/useMemo pass thru. ─
 let currentState: DiagnosticsState;
 let capturedEffect: (() => void) | null = null;
+let dispatched: DiagnosticsAction[] = [];
 const reactStub = {
   ...RealReact,
-  useReducer: () => [currentState, () => {}] as const,
+  useReducer: () => [currentState, (a: DiagnosticsAction) => dispatched.push(a)] as const,
   useEffect: (fn: () => void) => {
     capturedEffect = fn;
   },
@@ -112,6 +113,9 @@ function report(slug: string): DiagnosticsReport {
   };
 }
 
+/** Flush pending microtasks so a fire-and-forget `void fetchOne()` settles. */
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
 function makeClient(impl?: () => Promise<DiagnosticsReport>) {
   const calls = { n: 0 };
   const client = {
@@ -125,6 +129,7 @@ function makeClient(impl?: () => Promise<DiagnosticsReport>) {
 
 beforeEach(() => {
   capturedEffect = null;
+  dispatched = [];
   currentState = { data: null, loading: true, error: null };
 });
 afterEach(() => {
@@ -132,13 +137,29 @@ afterEach(() => {
 });
 
 describe('DiagnosticsPane component boundary', () => {
-  it('fetches on mount — the effect invokes client.getDiagnostics', async () => {
-    const { client, calls } = makeClient();
+  it('fetches on mount and dispatches fetch-start → fetch-success (resolved)', async () => {
+    const rep = report('demo');
+    const { client, calls } = makeClient(() => Promise.resolve(rep));
     DiagnosticsPane({ client }); // registers the mount effect via our useEffect stub
     expect(capturedEffect).not.toBeNull();
-    await capturedEffect!(); // run the mount effect
+    await capturedEffect!(); await flush(); // run the mount effect + settle
     // wiring regression (removing `void fetchOne()`) would leave this at 0.
     expect(calls.n).toBe(1);
+    // and it drives the reducer through the correct ORDERED lifecycle.
+    expect(dispatched).toEqual([
+      { type: 'fetch-start' },
+      { type: 'fetch-success', report: rep },
+    ]);
+  });
+
+  it('a REJECTED mount fetch dispatches fetch-start → fetch-error (with the formatted message)', async () => {
+    const { client } = makeClient(() => Promise.reject(new Error('network boom')));
+    DiagnosticsPane({ client });
+    await capturedEffect!();
+    await flush();
+    expect(dispatched[0]).toEqual({ type: 'fetch-start' });
+    expect(dispatched[1]?.type).toBe('fetch-error');
+    expect((dispatched[1] as { error: string }).error).toContain('network boom');
   });
 
   it('initial load renders ONLY the spinner (no report yet)', () => {
@@ -165,10 +186,12 @@ describe('DiagnosticsPane component boundary', () => {
     expect(refresh).toBeDefined();
     const onPress = refresh!.props.onPress as (() => void) | undefined;
     expect(typeof onPress).toBe('function');
-    onPress!();
+    dispatched = []; // ignore any mount dispatches; focus on the refresh press
+    await (onPress as () => Promise<void>)();
     // the onPress handler must call fetchOne → getDiagnostics (regression: removed onPress)
-    await Promise.resolve();
     expect(calls.n).toBe(1);
+    // and drive the same ordered lifecycle as mount.
+    expect(dispatched.map((d) => d.type)).toEqual(['fetch-start', 'fetch-success']);
   });
 
   it('error state renders the error banner', () => {
