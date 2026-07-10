@@ -87,6 +87,31 @@ describe('collectCliDiagnostics', () => {
     expect(result.report.import_jobs.jobs?.[0]).toMatchObject({ job_id: 'j1', status: 'failed', error_code: 'rate_limit' })
   })
 
+  it('scopes cron jobs to THIS instance slug (no cross-project leak)', () => {
+    const dbPath = join(tmp, 'project.db')
+    const db = ProjectDb.open(dbPath)
+    applyMigrationsToProjectDb(db)
+    db.runSync(
+      `INSERT INTO cron_state (job_name, project_slug, last_run_at, last_run_status, last_run_error, last_run_duration_ms)
+       VALUES ('nudge', 'demo', 10, 'ok', NULL, 5)`,
+      [],
+    )
+    db.runSync(
+      `INSERT INTO cron_state (job_name, project_slug, last_run_at, last_run_status, last_run_error, last_run_duration_ms)
+       VALUES ('secret-job', 'other-project', 20, 'error', 'private error text', 9)`,
+      [],
+    )
+    db.close()
+
+    const result = collectCliDiagnostics(envFor(dbPath))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const jobs = result.report.cron_jobs.jobs ?? []
+    expect(jobs.map((j) => j.job_name)).toEqual(['nudge'])
+    // the other project's error text must NOT be present
+    expect(JSON.stringify(jobs)).not.toContain('private error text')
+  })
+
   it('returns { ok: false } when project.db does not exist (fresh box)', () => {
     const result = collectCliDiagnostics(envFor(join(tmp, 'missing.db')))
     expect(result.ok).toBe(false)

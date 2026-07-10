@@ -99,9 +99,11 @@ case "$cmd" in
     # (--json / --force) pass straight through.
     _sub=check
     _rest=""
+    _json=0
     for _a in "$@"; do
       case "$_a" in
         --upgrade) _sub=upgrade ;;
+        --json) _json=1; _rest="$_rest $_a" ;;
         *) _rest="$_rest $_a" ;;
       esac
     done
@@ -113,9 +115,12 @@ case "$cmd" in
       _rc=0
       # shellcheck disable=SC2086
       "$_bun" run "$DOCTOR" check $_rest || _rc=$?
-      if [ -f "$DIAGNOSTICS" ]; then
-        # shellcheck disable=SC2086
-        "$_bun" run "$DIAGNOSTICS" $_rest || true
+      # Only append the human diagnostics dump in TEXT mode. Under --json the
+      # doctor already emits ONE machine-readable document; a second JSON object
+      # would break `neutron doctor --json | jq .` (query the live instance's
+      # GET /api/app/admin/diagnostics for JSON diagnostics instead).
+      if [ "$_json" = 0 ] && [ -f "$DIAGNOSTICS" ]; then
+        "$_bun" run "$DIAGNOSTICS" || true
       fi
       exit "$_rc"
     fi

@@ -10,38 +10,47 @@
  * `GET /api/app/admin/diagnostics` instead.
  */
 
-import { describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { defaultHealthzHandler } from '../index.ts'
 
 describe('default /healthz byte-identical', () => {
   const bootedAt = 1_000
+  const FROZEN_NOW = 5_000 // → uptime_ms = 4000, exactly
   const handler = defaultHealthzHandler({ project_slug: 'demo', bootedAt })
 
-  it('returns exactly {status, project_slug, uptime_ms} with a fixed shape', async () => {
+  // Freeze the clock so we can assert the EXACT serialized bytes (uptime_ms is
+  // the only clock-derived field).
+  const realNow = Date.now
+  beforeEach(() => {
+    Date.now = () => FROZEN_NOW
+  })
+  afterEach(() => {
+    Date.now = realNow
+  })
+
+  // The exact contract a monitoring probe depends on — bytes, not just fields.
+  const EXPECTED_BODY = JSON.stringify({ status: 'ok', project_slug: 'demo', uptime_ms: 4000 })
+
+  it('returns byte-identical body + headers for GET /healthz', async () => {
     const res = await handler(new Request('http://x/healthz'))
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('application/json')
-    const body = (await res.json()) as Record<string, unknown>
-    // Exactly these three keys — no diagnostics leak.
-    expect(Object.keys(body).sort()).toEqual(['project_slug', 'status', 'uptime_ms'])
-    expect(body.status).toBe('ok')
-    expect(body.project_slug).toBe('demo')
-    expect(typeof body.uptime_ms).toBe('number')
+    // No cache/security headers leaked in — the handler sets exactly one.
+    expect([...res.headers.keys()]).toEqual(['content-type'])
+    expect(await res.text()).toBe(EXPECTED_BODY)
   })
 
-  it('a ?deep=1 query changes NOTHING on the default handler', async () => {
+  it('a ?deep=1 query produces the BYTE-IDENTICAL default response', async () => {
     const plain = await handler(new Request('http://x/healthz'))
     const deep = await handler(new Request('http://x/healthz?deep=1'))
     expect(deep.status).toBe(plain.status)
-    const [pb, db] = await Promise.all([plain.json(), deep.json()])
-    // Same three keys, same static values (uptime_ms may differ by clock only).
-    expect(Object.keys(db as object).sort()).toEqual(Object.keys(pb as object).sort())
-    expect((db as { status: string }).status).toBe('ok')
-    expect((db as { project_slug: string }).project_slug).toBe('demo')
+    expect(await deep.text()).toBe(EXPECTED_BODY)
+    expect([...deep.headers.keys()]).toEqual(['content-type'])
   })
 
   it('non-healthz paths 404 unchanged', async () => {
     const res = await handler(new Request('http://x/whatever'))
     expect(res.status).toBe(404)
+    expect(await res.text()).toBe('Not Found')
   })
 })
