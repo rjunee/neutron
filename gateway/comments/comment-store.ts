@@ -42,13 +42,14 @@
  * the per-event INSERT is atomic.
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
+import { openSidecar, resolveNow } from '@neutronai/persistence/index.ts'
 import {
   materialiseAnchors,
   type AnchorRow,
@@ -286,7 +287,7 @@ export class CommentStore {
       ((project_id) => join(opts.owner_home, 'Projects', project_id))
     this.migrations_dir = opts.migrations_dir ?? DEFAULT_MIGRATIONS_DIR
     this.ulid = opts.ulid ?? defaultUlid
-    this.now = opts.now ?? (() => Date.now())
+    this.now = resolveNow(opts.now)
   }
 
   /** Force-close every per-project DB handle. Useful for tests that
@@ -882,7 +883,13 @@ export class CommentStore {
     const comments_db_path = join(dir, COMMENTS_DB)
     let db: Database
     try {
-      db = new Database(comments_db_path, { create: true })
+      // P3 shared open — previously NO pragmas set here at all; now gains
+      // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
+      // tolerant, no semantic change). foreign_keys is already ON in today's
+      // behavior — `applyProjectScopedMigrations` below asserts
+      // `PRAGMA foreign_keys = ON` on this connection — so openSidecar's
+      // FK=ON is behavior-preserving, not new enforcement.
+      db = openSidecar(comments_db_path)
     } catch (err) {
       throw new CommentStoreError(
         'comments_unavailable',

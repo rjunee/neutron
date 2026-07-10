@@ -8,8 +8,10 @@
  * Per docs/plans/research-core-tier1-brief.md § 3.5 + § 6.
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { randomUUID } from 'node:crypto'
+
+import { resolveNow } from '@neutronai/persistence/index.ts'
 
 export type ResearchClaimConfidence =
   | 'low'
@@ -94,7 +96,7 @@ export class ResearchClaimStore {
     this.db = opts.db
     this.project_slug = opts.project_slug
     this.nextId = opts.nextId ?? ((): string => randomUUID())
-    this.now = opts.now ?? ((): number => Date.now())
+    this.now = resolveNow(opts.now)
   }
 
   insertClaim(input: InsertClaimInput): ResearchClaim {

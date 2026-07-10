@@ -15,12 +15,13 @@
  *   - email_meta                — schema_version + project_id sentinel
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
+import { openSidecar, parseJsonColumn, resolveNow } from '@neutronai/persistence/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -99,7 +100,7 @@ export class EmailProjectCache {
   constructor(opts: EmailProjectCacheOptions) {
     this.db = opts.db
     this.project_id = opts.project_id
-    this.now = opts.now ?? ((): number => Date.now())
+    this.now = resolveNow(opts.now)
   }
 
   upsertTriage(input: {
@@ -227,7 +228,9 @@ export class EmailProjectCache {
       .all(limit)
     return rows.map((r) => ({
       ...r,
-      applied_labels: JSON.parse(r.applied_labels) as string[],
+      // Corrupt-JSON policy (explicit, historical): throw — a corrupt
+      // applied_labels column propagates the SyntaxError to the caller.
+      applied_labels: parseJsonColumn(r.applied_labels, { onCorrupt: 'throw' }) as string[],
     }))
   }
 
@@ -331,8 +334,10 @@ export class EmailProjectCacheResolver {
       mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
     const db_path = join(dir, EMAIL_SIDECAR_DB)
-    const db = new Database(db_path, { create: true })
-    db.exec('PRAGMA foreign_keys = ON')
+    // P3 shared open — previously foreign_keys only; now additionally gains
+    // WAL/synchronous/busy_timeout/temp_store/cache_size (strictly more
+    // tolerant under contention, no semantic change).
+    const db = openSidecar(db_path)
     applyProjectScopedMigrations(db, this.migrations_dir)
     const existing = db
       .query<{ project_id: string; schema_version: number }, []>(

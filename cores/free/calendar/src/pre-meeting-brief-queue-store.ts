@@ -29,9 +29,11 @@
  * `CalendarProjectCache` (both stores live in `calendar.db`).
  */
 
-import { Database } from 'bun:sqlite'
+import type { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { mapRows, openSidecar, parseJsonColumn } from '@neutronai/persistence/index.ts'
 
 import { applyCalendarSidecarMigrations } from '../migrations/runner.ts'
 import { CALENDAR_DB, CALENDAR_DIR } from './cache.ts'
@@ -170,7 +172,7 @@ export class SqlitePreMeetingBriefQueueStore implements PreMeetingBriefQueueStor
            ORDER BY fire_at_ms ASC`,
       )
       .all(project_id)
-    return rows.map(rowFromDb)
+    return mapRows(rows, rowFromDb)
   }
 
   async upsertPending(input: UpsertPendingInput): Promise<void> {
@@ -321,9 +323,12 @@ export class SqlitePreMeetingBriefQueueStore implements PreMeetingBriefQueueStor
     const dir = this.resolveProjectCalendarDir(project_id)
     mkdirSync(dir, { recursive: true })
     const db_path = join(dir, CALENDAR_DB)
-    const db = new Database(db_path, { create: true })
+    // P3 shared open — previously busy_timeout only (same 100 ms value as
+    // the shared set); now additionally gains WAL/synchronous/temp_store/
+    // cache_size plus foreign_keys=ON, which is inert here (schema declares
+    // no FOREIGN KEYs). Strictly more tolerant, no semantic change.
+    const db = openSidecar(db_path)
     try {
-      db.exec(`PRAGMA busy_timeout = 100`)
       applyCalendarSidecarMigrations(db)
     } catch (err) {
       try {
@@ -387,14 +392,13 @@ function rowFromDb(raw: RawQueueRow): PreMeetingBriefQueueRow {
  */
 function parseAttendeesJson(raw: string | null): readonly string[] | null {
   if (raw === null) return null
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return null
-    if (!parsed.every((v): v is string => typeof v === 'string')) return null
-    return parsed
-  } catch {
-    return null
-  }
+  // Corrupt-JSON policy (explicit, historical): fallback → null — corrupt
+  // or wrong-shaped attendees degrade to the empty-stub path rather than
+  // crashing the scheduler boot walk.
+  const parsed = parseJsonColumn(raw, { onCorrupt: 'fallback', fallback: null })
+  if (!Array.isArray(parsed)) return null
+  if (!parsed.every((v): v is string => typeof v === 'string')) return null
+  return parsed
 }
 
 /** Mirrors the comment-store's project-id sanitiser. */

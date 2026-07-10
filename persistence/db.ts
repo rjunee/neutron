@@ -12,7 +12,7 @@ import { BUSY_TIMEOUT_MS, withBusyRetry } from './retry.ts'
 // (so -64000 = 64 MB cache). Per Hermes' tuning recipe + SQLite docs, this is a
 // tradeoff sized for per-project workloads (one project ≈ tens of MB live working
 // set in messages + sessions + FTS).
-const STARTUP_PRAGMAS: ReadonlyArray<string> = [
+export const STARTUP_PRAGMAS: ReadonlyArray<string> = [
   'PRAGMA journal_mode = WAL',
   'PRAGMA foreign_keys = ON',
   'PRAGMA synchronous = NORMAL',
