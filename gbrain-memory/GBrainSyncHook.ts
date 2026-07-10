@@ -71,6 +71,47 @@ export interface GBrainSyncHookOptions {
    * (e.g. its OTHER endpoint never lands). Default 5.
    */
   maxDeferredAttempts?: number
+  /**
+   * P9 — OPTIONAL observability sink for the sync-health state row
+   * (`gbrain_sync_state`). When present, the hook publishes a snapshot
+   * (status/latch/last-success/deferred-count) at each latch, success, and
+   * defer point so an operator can answer "is my memory being written?".
+   *
+   * This is a PURE side-observation: every `publish` call is wrapped so a
+   * throwing sink can NEVER perturb, reorder, or abort the fail-soft sync
+   * path. Absent (the default) → byte-for-byte today's behavior. The concrete
+   * writer (`gateway/realmode-composer/gbrain-sync-state-store.ts`) is the
+   * table's sole owner (P4 table-ownership map).
+   */
+  syncStateSink?: GbrainSyncStateSink
+}
+
+/**
+ * P9 — a snapshot of the sync hook's health, published to the optional
+ * `GbrainSyncStateSink` for the `gbrain_sync_state` observability row. All
+ * fields are read from the hook's own in-RAM state at the observation point;
+ * the sink is a dumb writer that persists them verbatim.
+ */
+export interface GbrainSyncStateSnapshot {
+  /** 'ok' while sync is live; 'unavailable' once the binary-missing latch trips. */
+  status: 'ok' | 'unavailable'
+  /** Error message captured when the unavailable latch tripped; null while 'ok'. */
+  latchReason: string | null
+  /** ISO-8601 UTC when the unavailable latch tripped; null while 'ok'. */
+  latchedAt: string | null
+  /** ISO-8601 UTC of the most recent successful page persist; null until first success. */
+  lastSuccessAt: string | null
+  /** Current depth of the RAM deferred-edge retry queue. */
+  deferredCount: number
+}
+
+/**
+ * P9 — the observability port. `publish` is fire-and-forget and MUST be
+ * best-effort at the implementation too (the hook additionally wraps every
+ * call), so it can never throw into the fail-soft sync path.
+ */
+export interface GbrainSyncStateSink {
+  publish(snapshot: GbrainSyncStateSnapshot): void
 }
 
 export interface SyncHookFailureEvent {
@@ -115,6 +156,8 @@ export class GBrainSyncHook implements SyncHook {
   private readonly logFailure: (event: SyncHookFailureEvent) => void
   private readonly maxDeferredEdges: number
   private readonly maxDeferredAttempts: number
+  /** P9 — optional observability sink for the `gbrain_sync_state` row. */
+  private readonly syncStateSink: GbrainSyncStateSink | undefined
 
   /**
    * ISSUES #102 deferred-edge retry queue, keyed by the edge's TARGET slug
@@ -135,12 +178,21 @@ export class GBrainSyncHook implements SyncHook {
    */
   private gbrainUnavailable = false
 
+  /**
+   * P9 observability state (in-RAM; published to `syncStateSink`). NOT read by
+   * the sync control flow — pure side-observation.
+   */
+  private latchReason: string | null = null
+  private latchedAt: string | null = null
+  private lastSuccessAt: string | null = null
+
   constructor(opts: GBrainSyncHookOptions) {
     this.memoryStore = opts.memoryStore
     this.mcp = opts.gbrainMcp
     this.logFailure = opts.logFailure ?? defaultLogFailure
     this.maxDeferredEdges = opts.maxDeferredEdges ?? DEFAULT_MAX_DEFERRED_EDGES
     this.maxDeferredAttempts = opts.maxDeferredAttempts ?? DEFAULT_MAX_DEFERRED_ATTEMPTS
+    this.syncStateSink = opts.syncStateSink
   }
 
   /** Total edges currently held in the deferred-retry queue (test/observability). */
@@ -173,6 +225,9 @@ export class GBrainSyncHook implements SyncHook {
         },
       })
       pageLanded = true
+      // P9 observability (pure side-observation): stamp the last successful
+      // page persist. Not read by control flow.
+      this.lastSuccessAt = nowIso()
     } catch (err) {
       // Binary-missing → log ONCE + stop. Every other op in this write (and
       // every future write) would fail identically; the storm is noise.
@@ -242,6 +297,14 @@ export class GBrainSyncHook implements SyncHook {
     if (pageLanded) {
       await this.drainDeferredFor(meta.slug)
     }
+
+    // P9 — publish the health snapshot ONCE at the end of a completed write
+    // (last-success + current deferred depth). Best-effort; a throwing sink is
+    // swallowed by `publishState`, so this can never alter the outcome above.
+    // The latch path publishes its own snapshot inside `latchIfUnavailable`
+    // (and short-circuits before reaching here), so a latched write never
+    // double-publishes.
+    this.publishState()
   }
 
   /**
@@ -295,7 +358,14 @@ export class GBrainSyncHook implements SyncHook {
     if (!(err instanceof GBrainUnavailableError)) return false
     if (!this.gbrainUnavailable) {
       this.gbrainUnavailable = true
+      // P9 observability (pure side-observation): capture the latch reason +
+      // timestamp ONCE, mirroring the once-only latch, then publish the
+      // 'unavailable' snapshot. These assignments + publish do not change the
+      // return value or the caller's short-circuit.
+      this.latchReason = err instanceof Error ? err.message : String(err)
+      this.latchedAt = nowIso()
       this.logFailure({ stage: 'gbrain_unavailable', path, err })
+      this.publishState()
     }
     return true
   }
@@ -382,6 +452,39 @@ export class GBrainSyncHook implements SyncHook {
       await this.addLinkOrDefer(edge.triple, edge.path, edge.attempts + 1)
     }
   }
+
+  /**
+   * P9 — publish the current health snapshot to the optional observability
+   * sink. A no-op when no sink is wired (byte-for-byte today's behavior).
+   *
+   * CRITICAL fail-soft guarantee: this is a PURE side-observation. The publish
+   * is wrapped so a throwing sink is swallowed here — it can NEVER propagate
+   * into `onEntityWrite` / `latchIfUnavailable` and thus can never reorder or
+   * abort the sync path. The snapshot reads the hook's own in-RAM fields; it
+   * neither mutates them nor is read back by any control-flow decision.
+   */
+  private publishState(): void {
+    const sink = this.syncStateSink
+    if (sink === undefined) return
+    try {
+      sink.publish({
+        status: this.gbrainUnavailable ? 'unavailable' : 'ok',
+        latchReason: this.latchReason,
+        latchedAt: this.latchedAt,
+        lastSuccessAt: this.lastSuccessAt,
+        deferredCount: this.deferredCount,
+      })
+    } catch {
+      // Best-effort observability: a failed state-row write is intentionally
+      // swallowed so it can never perturb the fail-soft sync path. The row is
+      // a diagnostic; sync correctness never depends on it.
+    }
+  }
+}
+
+/** ISO-8601 UTC timestamp for the observability snapshot (single seam for tests). */
+function nowIso(): string {
+  return new Date().toISOString()
 }
 
 /**

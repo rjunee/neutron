@@ -19,6 +19,7 @@
 
 import { buildLlmCallSubstrate } from '@neutronai/gateway/realmode-composer/build-llm-call-substrate.ts'
 import { buildGBrainMemory } from '@neutronai/gateway/realmode-composer/build-gbrain-memory.ts'
+import { createGbrainSyncStateStore } from '@neutronai/gateway/realmode-composer/gbrain-sync-state-store.ts'
 import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/realmode-composer/resolve-onboarding-openai-key.ts'
 import { createScribe, type Scribe, type UserTurnInput } from '@neutronai/scribe/index.ts'
 import { createState, defaultStatePath } from '@neutronai/scribe/scribe-budget.ts'
@@ -109,10 +110,18 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   // (first memory op, after onboarding), so the key flips on embeddings at the
   // next turn — exactly what the onboarding offer promises. Best-effort: the
   // resolver swallows store errors and returns undefined (keyword + graph).
+  // P9 — GBrain sync observability. The sole writer of `gbrain_sync_state`,
+  // scoped to this project's brain (one brain per instance today). Threaded as
+  // the hook's best-effort health sink so an operator can answer "is my memory
+  // being written?". Pure side-observation: it never perturbs the fail-soft
+  // sync path (the hook wraps every publish; the store also swallows its own
+  // errors and uses a non-awaiting `runSync`).
+  const gbrainSyncStateSink = createGbrainSyncStateStore({ db, scope: project_slug })
   const gbrainMemory = buildGBrainMemory({
     owner_home,
     project_slug,
     env,
+    syncStateSink: gbrainSyncStateSink,
     resolveOpenAiKey: () =>
       resolveOnboardingOpenAiKey({ db, owner_home, internal_handle, project_slug }),
   })

@@ -53,6 +53,22 @@
         "deleted by K11b1 before this unit landed — the store's JS",
         "shallow-merge is now the only phase_state write dialect."
       ]
+    },
+    "gbrain_sync_state": {
+      "owner": "gateway/realmode-composer/gbrain-sync-state-store.ts",
+      "writers": [
+        "gateway/realmode-composer/gbrain-sync-state-store.ts"
+      ],
+      "notes": [
+        "P9 (world-class refactor) — GBrain sync observability. Single-writer:",
+        "the `createGbrainSyncStateStore` sink UPSERTs the one per-scope health",
+        "row (status/latch/last-success/deferred-count). It is the concrete",
+        "`GbrainSyncStateSink` implementation injected into GBrainSyncHook; the",
+        "hook (gbrain-memory, platform band) owns no DB and only calls the port,",
+        "so the write stays in the composition band where DB access lives.",
+        "Pure side-observation — this unit adds visibility, not behavior; the",
+        "fail-soft sync path is byte-identical."
+      ]
     }
   }
 }
