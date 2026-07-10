@@ -163,6 +163,41 @@ describe('cores tool dispatch — end-to-end', () => {
     expect(dispatched?.outcome).toBe('ok')
   })
 
+  test('X1 — installed Core tools carry {kind:core,slug} provenance (wired + stub paths)', async () => {
+    await installBundledCores({
+      project_slug: OWNER,
+      projectDb: bench.db,
+      dataDir: bench.ownerHome,
+      tools: bench.tools,
+      secretsStore: bench.secrets,
+      rootDirs: [REPO_ROOT],
+      backends: buildBackendFactories(bench.db, bench.ownerHome),
+    })
+    // Wired-backend chokepoint (install-bundled.ts registerCoreTools main loop):
+    // a real Core tool is attributed to its originating Core, carrying the Core's
+    // manifest-declared capability grant.
+    const remindersReg = bench.tools.get('reminders_create')
+    expect(remindersReg).toBeDefined()
+    const reminders = remindersReg?.provenance
+    expect(reminders?.kind).toBe('core')
+    if (reminders?.kind === 'core' && remindersReg !== undefined) {
+      expect(reminders.slug).toBe('reminders_core')
+      // The tool's own capability must be within the Core's declared grant (so the
+      // dispatch-time gate journals `allow`, not `denied-capability`).
+      expect(reminders.declared_capabilities).toContain(remindersReg.capability_required)
+    }
+    // Stub chokepoint (registerNotImplementedStubs): scraping_core installs with
+    // NO backend factory wired here, so its manifest tools register as throwing
+    // stubs — they must STILL be attributed to their Core, not defaulted to
+    // platform. Proves both modified install-bundled sites stamp provenance.
+    const scrape = bench.tools.get('scrape_x')?.provenance
+    expect(scrape?.kind).toBe('core')
+    if (scrape?.kind === 'core') {
+      expect(scrape.slug).toBe('scraping_core')
+      expect(Array.isArray(scrape.declared_capabilities)).toBe(true)
+    }
+  })
+
   test('unknown tool name returns undefined from the registry', async () => {
     await installBundledCores({
       project_slug: OWNER,

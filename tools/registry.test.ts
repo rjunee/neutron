@@ -47,10 +47,18 @@ describe('ToolRegistry', () => {
       output_schema: sampleSchema,
       capability_required: 'write:tasks_core.items',
       approval_policy: 'auto',
-      provenance: { kind: 'core', slug: 'tasks_core' },
+      provenance: {
+        kind: 'core',
+        slug: 'tasks_core',
+        declared_capabilities: ['write:tasks_core.items'],
+      },
       handler: noopHandler,
     })
-    expect(reg.get('tasks_add')?.provenance).toEqual({ kind: 'core', slug: 'tasks_core' })
+    expect(reg.get('tasks_add')?.provenance).toEqual({
+      kind: 'core',
+      slug: 'tasks_core',
+      declared_capabilities: ['write:tasks_core.items'],
+    })
   })
 
   test('duplicate register throws', () => {

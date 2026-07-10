@@ -127,13 +127,30 @@ export class McpServer {
 
   /**
    * X1 — the LOG-ONLY capability verdict for a tool: what the gate WOULD decide
-   * under enforcement (D-9). `granted` is the ALREADY-evaluated result of the
-   * SAME `capability_gate` the enforcement path uses (evaluated once in
-   * `dispatch`), so the gate predicate is not invoked an extra time. Pure
-   * function of the registration + that boolean; it does not touch dispatch.
+   * under enforcement (D-9). Consults TWO real sources, without touching dispatch:
+   *
+   *   1. the enforcing `capability_gate` (`granted`, already evaluated once in
+   *      `dispatch` — the predicate is NOT invoked an extra time). Allow-all in
+   *      production today; a wired denying gate would also deny here.
+   *   2. the tool's provenance: a CORE tool must have its `capability_required`
+   *      in its Core's manifest-declared grant (`declared_capabilities`, stamped
+   *      at install). This makes the verdict consult a REAL per-Core capability
+   *      source in production (not just the allow-all default), so a Core tool
+   *      whose capability was never declared journals `denied-capability`. Platform
+   *      tools have no Core install record — they are granted as platform-builtin
+   *      (their HITL policy is `approval_policy`).
+   *
+   * Pure function of the registration + that boolean; it does not touch dispatch.
    */
   private verdictFor(reg: ToolRegistration, granted: boolean): CapabilityVerdict {
     if (!granted) return 'denied-capability'
+    const provenance = reg.provenance ?? PLATFORM_TOOL_PROVENANCE
+    if (
+      provenance.kind === 'core' &&
+      !provenance.declared_capabilities.includes(reg.capability_required)
+    ) {
+      return 'denied-capability'
+    }
     if (reg.approval_policy !== 'auto') return 'gated-approval'
     return 'allow'
   }

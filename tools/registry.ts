@@ -48,12 +48,18 @@ export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
  *     their explicit policy class. Their HITL policy travels on
  *     {@link ToolRegistration.approval_policy}.
  *   - `core` — a tool contributed by a bundled / third-party Core, carrying the
- *     Core's `slug` (from `defineCore()`), stamped at the single install chokepoint
- *     (`install-bundled.ts`).
+ *     Core's `slug` (from `defineCore()`) AND the Core's manifest-declared
+ *     capability grant list (`declared_capabilities`), both stamped at the single
+ *     install chokepoint (`install-bundled.ts`). Carrying the declared grant on the
+ *     registration lets the dispatch-time gate consult a REAL per-Core capability
+ *     source (the same `manifest.capabilities` the cores runtime enforces on) with
+ *     NO gateway↔cores wiring — the grant rides the registration. NOTE: this is the
+ *     Core's DECLARED grant, not an owner-resolved allow/deny set — an owner-level
+ *     resolved capability grant does not exist yet and is decision D-9 (enforcement).
  */
 export type ToolProvenance =
   | { readonly kind: 'platform' }
-  | { readonly kind: 'core'; readonly slug: string }
+  | { readonly kind: 'core'; readonly slug: string; readonly declared_capabilities: readonly string[] }
 
 /**
  * The provenance stamped on any registration that declares none: an explicit

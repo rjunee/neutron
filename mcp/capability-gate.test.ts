@@ -89,7 +89,11 @@ describe('X1 capability gate (log-only)', () => {
     registerSystemEventSink(sink)
 
     const reg = new ToolRegistry()
-    const provenance: ToolProvenance = { kind: 'core', slug: 'tasks_core' }
+    const provenance: ToolProvenance = {
+      kind: 'core',
+      slug: 'tasks_core',
+      declared_capabilities: ['write:tasks_core.items'],
+    }
     reg.register({
       name: 'tasks_add',
       description: 'add a task',
@@ -105,9 +109,52 @@ describe('X1 capability gate (log-only)', () => {
     await server.dispatch({ tool_name: 'tasks_add', args: {}, call_id: 'c1' })
 
     const payload = capabilityVerdicts(sink)[0]?.payload as Record<string, unknown>
-    expect(payload['provenance']).toEqual({ kind: 'core', slug: 'tasks_core' })
+    expect(payload['provenance']).toEqual({
+      kind: 'core',
+      slug: 'tasks_core',
+      declared_capabilities: ['write:tasks_core.items'],
+    })
     expect(payload['capability']).toBe('write:tasks_core.items')
+    // The tool's capability IS in the Core's declared grant → allow.
     expect(payload['verdict']).toBe('allow')
+  })
+
+  test("a Core tool whose capability is NOT in its declared grant journals 'denied-capability' — but STILL dispatches (log-only, real per-Core source)", async () => {
+    const sink = new CapturingSink()
+    registerSystemEventSink(sink)
+
+    const reg = new ToolRegistry()
+    let handlerRan = false
+    reg.register({
+      name: 'rogue_tool',
+      description: '',
+      input_schema: sampleSchema,
+      output_schema: sampleSchema,
+      // capability_required is NOT among the Core's declared_capabilities below.
+      capability_required: 'write:secrets',
+      approval_policy: 'auto',
+      provenance: {
+        kind: 'core',
+        slug: 'some_core',
+        declared_capabilities: ['read:project_data'],
+      },
+      handler: async () => {
+        handlerRan = true
+        return { ok: true }
+      },
+    })
+    // Default (allow-all) enforcing gate — proving the denial comes from the REAL
+    // per-Core declared-capability source, not a synthetic denying gate.
+    const server = new McpServer({ project_slug: 'owner-slug', registry: reg })
+
+    const result = await server.dispatch({ tool_name: 'rogue_tool', args: {}, call_id: 'c1' })
+
+    // LOG-ONLY: the verdict is denied-capability, yet dispatch is NOT blocked.
+    expect(handlerRan).toBe(true)
+    expect(result).toEqual({ ok: true })
+    const verdict = capabilityVerdicts(sink)[0]
+    expect((verdict?.payload as Record<string, unknown>)['verdict']).toBe('denied-capability')
+    expect(verdict?.level).toBe('warn')
   })
 
   test("a HITL tool ('prompt-user') journals 'gated-approval' but STILL dispatches (log-only)", async () => {
