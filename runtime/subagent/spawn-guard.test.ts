@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { MAX_SPAWN_DEPTH, SubagentRegistry } from './registry.ts'
+import { MAX_SPAWN_DEPTH, SubagentRegistry, type SubagentPersistence } from './registry.ts'
 import { spawnSubagent } from './spawn.ts'
 
 /**
@@ -25,6 +25,17 @@ function makeIds(prefix: string): () => string {
   return () => `${prefix}-${n++}`
 }
 
+/** A persistence sink whose writes ACTUALLY await (a microtask) — so the
+ *  create→persist window that a durable store introduces is exercised. */
+const asyncPersistence: SubagentPersistence = {
+  persist: async () => {
+    await Promise.resolve()
+  },
+  remove: async () => {
+    await Promise.resolve()
+  },
+}
+
 describe('double-spawn guard', () => {
   test('coalesce (default): a duplicate in-flight spawn returns the SAME record, no second run', async () => {
     const registry = new SubagentRegistry()
@@ -47,6 +58,76 @@ describe('double-spawn guard', () => {
     // Exactly ONE record exists for the logical task.
     expect(registry.snapshot()).toHaveLength(1)
     expect(registry.live()).toHaveLength(1)
+  })
+
+  test('CONCURRENT same-key spawns coalesce to ONE live row even with async persistence', async () => {
+    // Regression (Codex round-5): making `create` async must NOT open a window
+    // between the guard's `liveByKey` read and the record becoming visible. With
+    // a persistence sink that awaits, two `Promise.all` same-key spawns must
+    // still resolve to a single live row (the loser coalesces onto the winner) —
+    // a naive persist-then-insert would let both miss the guard and mint two runs.
+    const registry = new SubagentRegistry(asyncPersistence)
+    const key = 'instance-a:task-99:forge'
+    const ids = makeIds('cc')
+    const [a, b] = await Promise.all([
+      spawnSubagent(
+        { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+        { registry, verify_delegation: verify, mint_run_id: ids },
+      ),
+      spawnSubagent(
+        { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+        { registry, verify_delegation: verify, mint_run_id: ids },
+      ),
+    ])
+    // Exactly ONE record for the logical task; both callers hold the same run.
+    expect(registry.snapshot()).toHaveLength(1)
+    expect(registry.live()).toHaveLength(1)
+    expect(a.run_id).toBe(b.run_id)
+  })
+
+  test('CONCURRENT same-key spawns: if the winner fails to persist, the coalesced caller fails too (no phantom run)', async () => {
+    // Codex round-6 boundary: the coalesced caller must share the winner's
+    // DURABLE-create outcome. If the winner's persist rejects (and its reserved
+    // record rolls back), a caller that coalesced onto it must NOT resolve with a
+    // now-nonexistent run — it must fail too.
+    let releasePersist!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      releasePersist = resolve
+    })
+    const failing: SubagentPersistence = {
+      // The winner's durable write hangs on the barrier, then throws.
+      persist: async () => {
+        await barrier
+        throw new Error('db down')
+      },
+      remove: async () => {},
+    }
+    const registry = new SubagentRegistry(failing)
+    const key = 'instance-a:task-x:forge'
+    const ids = makeIds('fail')
+    const pa = spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: ids },
+    )
+    const pb = spawnSubagent(
+      { instance_key: 'instance-a', agent_kind: 'forge', spawn_key: key },
+      { registry, verify_delegation: verify, mint_run_id: ids },
+    )
+    // Attach handlers to BOTH now (allSettled) so neither is ever an unhandled
+    // rejection when it fails. Drain microtasks so A reserves + awaits its persist
+    // and B coalesces + awaits the same durable promise; then let it fail.
+    const settled = Promise.allSettled([pa, pb])
+    await new Promise((r) => setTimeout(r, 0))
+    releasePersist()
+    const [ra, rb] = await settled
+
+    // The winner AND the coalesced caller both fail with the durable-write error.
+    expect(ra.status).toBe('rejected')
+    expect(rb.status).toBe('rejected')
+    expect((ra as PromiseRejectedResult).reason.message).toContain('db down')
+    expect((rb as PromiseRejectedResult).reason.message).toContain('db down')
+    // Rolled back — no phantom run persists in memory.
+    expect(registry.snapshot()).toHaveLength(0)
   })
 
   test('refuse: on_duplicate=refuse throws instead of coalescing', async () => {

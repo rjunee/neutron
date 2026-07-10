@@ -74,12 +74,16 @@ import {
 } from '@neutronai/onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
+import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
+import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
 import { newControlState } from '@neutronai/runtime/subagent/control.ts'
 import {
   DispatchService,
+  buildBootSweepReport,
   buildCancellableDispatchTurn,
   defaultPersonaLoader,
   type DispatchBoardBinder,
+  type DispatchReporter,
 } from '@neutronai/agent-dispatch/index.ts'
 import {
   buildAnthropicLlmCall,
@@ -525,9 +529,28 @@ export function buildOpenGraphComposer(
         await dispatchBoardHolder.deref((s) => s.clearRun(slug, id, run_id))
       },
     }
+    // Report-back sink — HOISTED (plan §P7) so the live dispatch terminal report
+    // AND the boot-reap of a prior process's orphaned dispatch surface the SAME
+    // way. First-cut: log the announcement. The live WS `agent_message` splice is
+    // the documented follow-up (Open is WS-native + single-owner, no Telegram).
+    const dispatchReport: DispatchReporter = async (r) => {
+      console.log(
+        `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
+      )
+    }
+    // S4 (plan §P7 / D-6) — the registry's durable mirror (`code_subagent_registry`,
+    // migration 0100). Wiring it as the registry's write-through persistence makes
+    // a dispatched sub-agent SURVIVE a gateway restart, so the boot reap below can
+    // surface an in-flight dispatch a prior process left behind instead of
+    // silently orphaning it. Persists the REGISTRY only — never the Trident
+    // orchestrator's volatile `fired`/`redispatched` orphan-detection sets. Writes
+    // route through the mutex-serialized async `ProjectDb.run`/`transaction` (see
+    // `store.ts`), so a registry write is never absorbed into — nor rolled back
+    // by — another store's in-flight transaction on this same shared connection.
+    const subagentRegistryStore = new SubagentRegistryStore(db)
     const dispatchService = ((): DispatchService | null => {
       if (llmPool === null) return null
-      const registry = new SubagentRegistry()
+      const registry = new SubagentRegistry(subagentRegistryStore)
       const control = newControlState(registry)
       return new DispatchService({
         registry,
@@ -535,14 +558,7 @@ export function buildOpenGraphComposer(
         dispatch: buildCancellableDispatchTurn({
           build_substrate: makeEphemeralSubstrate('cc-dispatch'),
         }),
-        report: async (r) => {
-          // First-cut report-back: log the announcement. The live WS
-          // `agent_message` splice is the documented follow-up (Open is
-          // WS-native + single-owner, no Telegram channel).
-          console.log(
-            `[agent-dispatch] ${r.kind} (${r.agent_kind}) ${r.run_id.slice(0, 8)} → ${r.status}\n${r.markdown}`,
-          )
-        },
+        report: dispatchReport,
         instance_key: internal_handle,
         // Phase 2b — the board-binding chokepoint: every dispatch must carry a
         // valid, sufficiently-specified board_item_id (else rejected) and is
@@ -556,6 +572,35 @@ export function buildOpenGraphComposer(
         persona_loader: defaultPersonaLoader,
       })
     })()
+
+    // BOOT REAP (plan §P7 / D-6). Every persisted registry row still LIVE
+    // (`pending`|`running`) AND owned by a PRIOR process boot (`boot_id`) was left
+    // in-flight by a process that has since died — an orphaned dispatch. Atomically
+    // claim each `crashed` (the durable, queryable surfacing that never vanishes)
+    // and fire the SAME report-back sink a clean completion uses, instead of
+    // letting it vanish from `live()`. CRITICAL: the sweep shares the SAME
+    // `subagentRegistryStore` instance (hence the SAME `CURRENT_BOOT_ID`) that
+    // backs the registry above, so `loadReapable()` reaps ONLY prior-boot rows and
+    // never a dispatch THIS boot creates and is legitimately running — a repeat
+    // composer build in this process cannot crash its own live dispatches. The
+    // report surface is TODAY the structured `[agent-dispatch]` log (identical to
+    // the live dispatch terminal path — this reuses `dispatchReport` verbatim);
+    // the live WS `agent_message` splice is the documented follow-up for BOTH
+    // paths, not a P7-specific gap. The boot-reap report reuses the dispatch
+    // watchdog notifier's SubagentRecord→report mapping — incl. its forge/argus
+    // skip (those belong to the Trident loop's own supervision) AND its
+    // swallow-on-failure best-effort contract, which is exactly why the sweep
+    // treats the durable row (not the notification) as the record. Fire-and-forget:
+    // never block boot. Runs UNCONDITIONALLY (not gated on `llmPool`): if this
+    // boot has no dispatcher but a prior one did, its orphans still deserve reaping.
+    void sweepOrphanedDispatchesOnBoot({
+      store: subagentRegistryStore,
+      report: buildBootSweepReport(dispatchReport),
+    }).catch((err: unknown) => {
+      console.warn(
+        `[agent-dispatch] boot reap failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    })
 
     // ── Skill-forge → Open boot (Vajra parity gap #5) ──────────────────────
     // Auto-skillify: audit a COMPLETED Trident workflow and, gated by the

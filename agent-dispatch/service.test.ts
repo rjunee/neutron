@@ -12,9 +12,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   MAX_CONCURRENT_SUBAGENTS,
   SubagentRegistry,
+  failRun,
   newControlState,
   runAgentWatchdog,
   type ControlState,
+  type SubagentPersistence,
 } from '@neutronai/runtime/subagent/index.ts'
 import {
   DispatchService,
@@ -46,8 +48,11 @@ interface Harness {
  * `resolveTurn`, so the in-flight (`running`) state is observable.
  */
 function makeHarness(over: Partial<DispatchServiceDeps> = {}): Harness {
-  const registry = new SubagentRegistry()
-  const control = newControlState(registry)
+  // Derive control from an injected registry so the two stay consistent (a test
+  // that supplies a persistence-backed registry must not get a control bound to a
+  // different one).
+  const registry = over.registry ?? new SubagentRegistry()
+  const control = over.control ?? newControlState(registry)
   const calls: DispatchTurnInput[] = []
   const reports: DispatchReport[] = []
   let resolveTurn: (r: DispatchTurnResult) => void = () => {}
@@ -354,5 +359,168 @@ describe('DispatchService — stop + supervision', () => {
     expect(res.surfaced).toHaveLength(1)
     expect(res.surfaced[0]!.reason).toBe('stuck')
     expect(h.registry.byRunId('run-1')?.status).toBe('crashed')
+  })
+})
+
+describe('completion is best-effort against persistence — a terminal-write failure never rejects it', () => {
+  // A registry whose persist SUCCEEDS for pending/running but THROWS for any
+  // terminal status — a durable store outage that only bites at the terminal
+  // write, the exact regression P7's async persist introduced at the completion
+  // closure's `registry.update`.
+  const terminalFailPersistence: SubagentPersistence = {
+    persist: async (rec) => {
+      if (rec.status === 'finished' || rec.status === 'crashed' || rec.status === 'cancelled') {
+        throw new Error('terminal persist down')
+      }
+    },
+    remove: async () => {},
+  }
+
+  test('completion RESOLVES with the terminal report; canceller + board cleanup still run', async () => {
+    const registry = new SubagentRegistry(terminalFailPersistence)
+    let cleared = false
+    const h = makeHarness({
+      registry,
+      board: {
+        get: (_slug: string, id: string) => ({
+          id,
+          title: 'a fully specified plan item with plenty of detail to act on',
+          design_doc_ref: null,
+        }),
+        attachRun: async () => undefined,
+        clearRun: async () => {
+          cleared = true
+        },
+      },
+    })
+
+    const handle = await h.service.dispatch({
+      board_item_id: 'it-term',
+      kind: 'research',
+      task: 'survey the auth flow',
+    })
+    // Running (canceller registered) while the turn is in flight; pending/running
+    // persisted fine, so the record is durably reapable.
+    expect(h.control.cancellers.has(handle.run_id)).toBe(true)
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('running')
+
+    h.resolveTurn({ result: 'the survey', status: 'completed' })
+    // The terminal `update`'s persist throws — completion MUST still resolve.
+    const outcome = await handle.completion
+
+    expect(outcome.status).toBe('finished') // intended terminal outcome, not a reject
+    // Report fired with the terminal status (from the intended record, NOT a
+    // re-read — update rolled memory back to 'running' on the failed persist).
+    expect(h.reports.map((r) => r.status)).toContain('finished')
+    expect(h.reports.at(-1)?.run_id).toBe(handle.run_id)
+    // Canceller removed (no leak) + board cleanup ran.
+    expect(h.control.cancellers.has(handle.run_id)).toBe(false)
+    expect(cleared).toBe(true)
+    // CRITICAL state boundary: the LIVE registry record is terminal, NOT stuck
+    // 'running' — else waitForCompletion hangs, caps retain it, watchdog re-reaps.
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('finished')
+    expect(h.service.liveDispatches().map((r) => r.run_id)).not.toContain(handle.run_id)
+  })
+
+  test('a running-flip persist failure still launches AND the LIVE record reads running', async () => {
+    // persist SUCCEEDS for 'pending' (create) but REJECTS for 'running' — the
+    // store outage that bites at the running-flip. The dispatch must still launch,
+    // and the live registry must read 'running' (reconciled), NOT a phantom
+    // 'pending' (which under-counts the caps + drifts statusOf).
+    const runningFailPersistence: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'running') throw new Error('running persist down')
+      },
+      remove: async () => {},
+    }
+    const registry = new SubagentRegistry(runningFailPersistence)
+    const h = makeHarness({ registry })
+
+    const handle = await h.service.dispatch({
+      board_item_id: 'it-run',
+      kind: 'research',
+      task: 'survey',
+    })
+
+    // Launched despite the failed running persist (substrate turn fired).
+    expect(h.calls).toHaveLength(1)
+    // The LIVE registry reflects 'running' (reconciled), NOT a phantom 'pending'.
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('running')
+    expect(h.service.liveDispatches().map((r) => r.run_id)).toContain(handle.run_id)
+    expect(h.control.cancellers.has(handle.run_id)).toBe(true)
+
+    // Drain the in-flight turn so the test doesn't leak (terminal persist succeeds).
+    h.resolveTurn({ result: '', status: 'completed' })
+    await handle.completion
+    expect(h.registry.byRunId(handle.run_id)?.status).toBe('finished')
+  })
+})
+
+describe('terminal-race gate — a run driven terminal during the running-flip is NOT launched', () => {
+  // Codex blocker: the canceller is not registered until `launch`, so a watchdog
+  // `failRun` (or a caller-stop) can drive a still-cancellerless run terminal
+  // DURING the running-flip. The old dispatch launched on the stale optimistic
+  // `running` record — starting a substrate for a run the registry says is dead,
+  // the exact orphan P7 exists to prevent. The gate now `settle`s the per-run
+  // queue and refuses to launch a terminal run.
+  test('a watchdog failRun that races the running-flip does NOT start a substrate', async () => {
+    // A store whose 'running' persist BLOCKS once, so the dispatch parks mid-flip
+    // with the record optimistically visible as running and NO canceller yet.
+    let releaseRunning!: () => void
+    const runningGate = new Promise<void>((r) => {
+      releaseRunning = r
+    })
+    // Resolves the instant the running-flip's persist is ENTERED (and thus blocked)
+    // — a deterministic sync point, so the test never races a fixed sleep on a
+    // slow/loaded runner.
+    let signalEntered!: () => void
+    const enteredRunning = new Promise<void>((r) => {
+      signalEntered = r
+    })
+    let gateRunning = false
+    const persistence: SubagentPersistence = {
+      persist: async (rec) => {
+        if (rec.status === 'running' && gateRunning) {
+          gateRunning = false
+          signalEntered() // the flip has published 'running' and is now blocked here
+          await runningGate
+        }
+      },
+      remove: async () => {},
+    }
+    const registry = new SubagentRegistry(persistence)
+    const control = newControlState(registry)
+    const h = makeHarness({ registry, control })
+
+    gateRunning = true
+    const dispatching = h.service.dispatch({ board_item_id: 'it-race', kind: 'research', task: 'survey' })
+
+    // Deterministically wait until the flip published 'running' and its persist is
+    // blocked — no fixed sleep.
+    await enteredRunning
+    const runId = registry.live()[0]?.run_id
+    expect(runId).toBeDefined()
+    expect(registry.byRunId(runId!)?.status).toBe('running')
+    expect(control.cancellers.has(runId!)).toBe(false) // canceller not registered yet
+
+    // The watchdog fails the run mid-flip; with no canceller its crash queues
+    // behind the flip.
+    const failed = failRun(control, runId!, 'stuck', 2000)
+
+    // Release the flip → it commits, the gate drains the queued crash, and the
+    // launch-gate observes 'crashed' → NO substrate is launched.
+    releaseRunning()
+    const handle = await dispatching
+    expect(await failed).toBe(true) // the watchdog OWNED the crash transition
+
+    expect(h.calls).toHaveLength(0) // substrate NEVER launched (old code: 1)
+    expect(registry.byRunId(runId!)?.status).toBe('crashed')
+
+    // The dispatch still yields a settled handle whose completion is the terminal
+    // report (board unbound, announcement delivered) — the contract holds.
+    const outcome = await handle.completion
+    expect(outcome.status).toBe('crashed')
+    expect(h.reports).toHaveLength(1)
+    expect(h.reports[0]!.status).toBe('crashed')
   })
 })

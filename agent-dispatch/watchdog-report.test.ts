@@ -8,8 +8,14 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import type { AgentWatchdogEvent } from '@neutronai/runtime/subagent/index.ts'
-import { buildDispatchWatchdogNotifier, type DispatchReport } from './index.ts'
+import {
+  SubagentRegistry,
+  newControlState,
+  runAgentWatchdog,
+  type AgentWatchdogEvent,
+  type SubagentRecord,
+} from '@neutronai/runtime/subagent/index.ts'
+import { buildBootSweepReport, buildDispatchWatchdogNotifier, type DispatchReport } from './index.ts'
 
 function event(over: Partial<AgentWatchdogEvent>): AgentWatchdogEvent {
   return {
@@ -69,5 +75,57 @@ describe('buildDispatchWatchdogNotifier', () => {
       throw new Error('sink down')
     })
     await expect(notify(event({}))).resolves.toBeUndefined()
+  })
+})
+
+describe('buildBootSweepReport — age matches a live watchdog reap for the same record', () => {
+  // A boot-reaped orphan must surface EXACTLY like a live watchdog reap, including
+  // its reported age. With DISTINCT start vs progress timestamps the two formulas
+  // diverge if the adapter uses `started_at`: the live watchdog reports
+  // `detected_at - last_event_at`, so the boot adapter must too — not
+  // `detected_at - started_at` (which over-reports by the whole run duration).
+  test('boot-reap age == live-watchdog age (progress-based, NOT started_at-based)', async () => {
+    // started_at=0 (spawn), last_event_at=900 (last progress), detected at 1000.
+    // Progress-based age = 1000 - 900 = 100. started_at-based age = 1000 - 0 = 1000.
+    const STARTED_AT = 0
+    const LAST_EVENT_AT = 900
+    const DETECTED_AT = 1000
+    const PROGRESS_AGE = DETECTED_AT - LAST_EVENT_AT // 100 — the correct age
+    const STARTED_AGE = DETECTED_AT - STARTED_AT // 1000 — the WRONG (old) age
+
+    // LIVE watchdog age for the same timestamps: a dead pid past its last progress.
+    const registry = new SubagentRegistry()
+    const ctrl = newControlState(registry)
+    await registry.create({ run_id: 'r', instance_key: 'inst-a', agent_kind: 'atlas', spawn_depth: 0 })
+    await registry.update('r', { status: 'running', last_event_at: LAST_EVENT_AT, pid: 99999 })
+    const live = await runAgentWatchdog({
+      control: ctrl,
+      registry,
+      pid_alive: () => false, // process_dead → surfaces regardless of the stuck threshold
+      now: () => DETECTED_AT,
+    })
+    const liveAge = live.surfaced[0]!.age_ms
+    expect(liveAge).toBe(PROGRESS_AGE)
+
+    // BOOT-reap age for a hand-built orphan with the same start/progress/detect.
+    const orphan: SubagentRecord = {
+      run_id: 'r',
+      instance_key: 'inst-a',
+      agent_kind: 'atlas',
+      spawn_depth: 0,
+      status: 'running',
+      started_at: STARTED_AT,
+      last_event_at: LAST_EVENT_AT,
+      ended_at: DETECTED_AT,
+    }
+    const reports: DispatchReport[] = []
+    await buildBootSweepReport((r) => {
+      reports.push(r)
+    })(orphan)
+    const bootAge = Number(/age at reap: (\d+)ms/.exec(reports[0]!.markdown)![1])
+
+    expect(bootAge).toBe(liveAge) // parity: boot reap age == live reap age
+    expect(bootAge).toBe(PROGRESS_AGE)
+    expect(bootAge).not.toBe(STARTED_AGE) // NOT the old started_at-based over-report
   })
 })

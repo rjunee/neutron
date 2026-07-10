@@ -348,8 +348,63 @@ export class DispatchService {
     }
 
     // Fresh run → flip to running + launch the substrate turn in the background.
-    const running = this.deps.registry.update(record.run_id, { status: 'running' })
-    const handle = this.launch(running, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
+    // The running-flip's durable persist is best-effort: a store outage must not
+    // prevent the dispatch from launching (the record is already durably at
+    // `pending` from create, so it is still boot-reapable). On persist failure
+    // `update` rolls memory back to `pending`; proceed with the intended running
+    // record so the live flow continues.
+    let running: SubagentRecord
+    try {
+      running = await this.deps.registry.update(record.run_id, { status: 'running' })
+    } catch (err) {
+      console.warn(
+        `[agent-dispatch] running-flip persist failed for ${record.run_id}; ` +
+          `launching on the in-memory record (persistence best-effort): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      )
+      // `update` rolled memory back to `pending` on the failed persist — reconcile
+      // the LIVE registry to `running` so the caps count it and `statusOf` doesn't
+      // show a phantom `pending` while the subprocess runs. `reconcileInMemory`
+      // returns the AUTHORITATIVE record (it refuses to clobber a terminal one), so
+      // capture it — a concurrent watchdog-`failRun` / caller-stop may already have
+      // driven this cancellerless run terminal.
+      running =
+        (await this.deps.registry.reconcileInMemory(record.run_id, { status: 'running' })) ?? {
+          ...record,
+          status: 'running',
+        }
+    }
+    // TERMINAL-RACE GATE. The canceller is not registered until `launch` below, so
+    // a watchdog `failRun` (or a caller-stop) can drive this still-cancellerless run
+    // terminal DURING the running-flip — either by acting on the `pending` record
+    // BEFORE the flip (the flip's terminal-guard then keeps it terminal) or by
+    // queuing a `crashed` transition BEHIND the in-flight flip. `settle` drains the
+    // per-run mutation queue so BOTH orderings have landed before we read the true
+    // status. Launching a substrate for an already-terminal run would orphan exactly
+    // the dispatch P7 exists to prevent, so don't launch: hand back a settled handle
+    // whose `completion` is the terminal report (board unbound, announcement
+    // delivered). A terminal transition that lands strictly AFTER the gate is still
+    // caught by the post-launch machinery — `launch` registers the canceller
+    // synchronously before its first await, so a later `failRun` fires the abort and
+    // the completion closure re-reads the terminal status.
+    const authoritative = (await this.deps.registry.settle(record.run_id)) ?? running
+    if (
+      authoritative.status === 'finished' ||
+      authoritative.status === 'crashed' ||
+      authoritative.status === 'cancelled'
+    ) {
+      const completion = this.report(
+        authoritative,
+        req.kind,
+        agent_kind,
+        '',
+        delivery_target,
+        board_item_id,
+        board_scope,
+      )
+      return { run_id: record.run_id, record: authoritative, completion }
+    }
+    const handle = this.launch(authoritative, req.kind, agent_kind, req, delivery_target, board_item_id, board_scope)
     this.inflight.set(record.run_id, handle)
     return handle
   }
@@ -461,12 +516,44 @@ export class DispatchService {
         ended_at: this.now(),
       }
       if (turn.status === 'timed_out') patch.failure_reason = 'stuck'
-      const updated = this.deps.registry.update(run_id, patch)
+      // Drive the run terminal with a CONVERGING durable write. `updateTerminal`
+      // never rejects — so a store outage can never reject `completion` (contract
+      // below) nor skip the terminal steps (canceller removal + report + board
+      // cleanup) — and it RETRIES the durable write so a transient failure
+      // converges. If it converges (`durable`), the durable row is terminal and a
+      // restart's boot sweep skips it (no contradictory crash re-report). If every
+      // retry fails, the live record is still forced terminal in memory (so
+      // waitForCompletion doesn't hang, the caps release it, the watchdog doesn't
+      // re-reap it); we report the intended terminal outcome regardless — never a
+      // re-read, since a failed durable write leaves memory pre-terminal only when
+      // NOT converged, and even then the intended record is authoritative.
+      const settled = await this.deps.registry.updateTerminal(run_id, patch)
+      const recordToReport: SubagentRecord = settled.record ?? { ...(cur ?? record), ...patch }
+      if (!settled.durable) {
+        console.warn(
+          `[agent-dispatch] terminal persist for ${run_id} (${status}) did not converge after ` +
+            `retries; reported from intent, durable row stale (best-effort) — the boot reap may ` +
+            `re-surface it on restart`,
+        )
+      }
+      // ALWAYS remove the canceller and report — on BOTH the converged and the
+      // stale-durable path — so a store outage never leaks a canceller nor drops
+      // the report + board cleanup.
       this.deps.control.cancellers.delete(run_id)
-      return this.report(updated, kind, agent_kind, turn.result, delivery_target, board_item_id, board_scope)
+      return this.report(
+        recordToReport,
+        kind,
+        agent_kind,
+        turn.result,
+        delivery_target,
+        board_item_id,
+        board_scope,
+      )
     })()
 
-    // The completion promise can never reject (every path is caught), so a
+    // The completion promise can never reject — every path is caught, INCLUDING a
+    // durable persist failure at the terminal `registry.update` (guarded above),
+    // which resolves with the intended terminal report rather than rejecting. So a
     // caller that ignores it cannot trip an unhandled rejection.
     return { run_id, record, completion }
   }

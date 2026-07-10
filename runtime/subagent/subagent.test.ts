@@ -330,15 +330,15 @@ describe('lifecycle prune pass', () => {
 })
 
 describe('announce', () => {
-  test('formatAnnouncement extracts duration and renders markdown', () => {
+  test('formatAnnouncement extracts duration and renders markdown', async () => {
     const registry = new SubagentRegistry()
-    const r = registry.create({
+    const r = await registry.create({
       run_id: 'r',
       instance_key: 't',
       agent_kind: 'forge',
       spawn_depth: 0,
     })
-    registry.update(r.run_id, { status: 'finished', ended_at: r.started_at + 5000 })
+    await registry.update(r.run_id, { status: 'finished', ended_at: r.started_at + 5000 })
     const updated = registry.byRunId(r.run_id)!
     const a = formatAnnouncement({ record: updated, summary: 'Done.', deliverables: ['PR #99'] })
     expect(a.duration_ms).toBe(5000)

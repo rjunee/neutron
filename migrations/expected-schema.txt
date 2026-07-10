@@ -69,6 +69,15 @@ CREATE INDEX idx_app_chat_reactions_topic_seq
 CREATE INDEX idx_app_chat_receipts_topic_seq
     ON app_chat_receipts (topic_id, seq)
 
+[index] idx_code_subagent_registry_live (tbl=code_subagent_registry)
+CREATE INDEX idx_code_subagent_registry_live
+    ON code_subagent_registry (status)
+    WHERE status IN ('pending', 'running')
+
+[index] idx_code_subagent_registry_owner (tbl=code_subagent_registry)
+CREATE INDEX idx_code_subagent_registry_owner
+    ON code_subagent_registry (instance_key)
+
 [index] idx_code_trident_runs_active (tbl=code_trident_runs)
 CREATE INDEX idx_code_trident_runs_active
     ON code_trident_runs (phase)
@@ -489,6 +498,41 @@ CREATE TABLE button_prompts (
     resolution_speaker_user_id TEXT,
     resolution_channel_kind TEXT
 , kind TEXT) STRICT
+
+[table] code_subagent_registry (tbl=code_subagent_registry)
+CREATE TABLE code_subagent_registry (
+    run_id              TEXT PRIMARY KEY NOT NULL,
+    instance_key        TEXT NOT NULL,
+    agent_kind          TEXT NOT NULL
+                            CHECK (agent_kind IN (
+                                'forge', 'atlas', 'sentinel', 'argus', 'core'
+                            )),
+    status              TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'running', 'finished', 'crashed', 'cancelled'
+                            )),
+    spawn_depth         INTEGER NOT NULL DEFAULT 0,
+    parent_run_id       TEXT,
+    parent_session_id   TEXT,
+    child_session_id    TEXT,
+    pid                 INTEGER,
+    pid_starttime       INTEGER,
+    started_at          INTEGER NOT NULL,               -- epoch ms
+    ended_at            INTEGER,                         -- epoch ms
+    last_event_at       INTEGER NOT NULL,               -- epoch ms
+    cleanup_after       INTEGER,                         -- epoch ms
+    delivery_target     TEXT,                            -- JSON {channel, binding_id}
+    delegation_claims   TEXT,                            -- JSON {instance, depth, scope, jti}
+    spawn_key           TEXT,
+    failure_reason      TEXT
+                            CHECK (failure_reason IS NULL OR failure_reason IN (
+                                'process_dead', 'stuck'
+                            )),
+    -- Per-process-boot ownership token (see header). NOT NULL: every row is
+    -- stamped with the creating process's boot id so the reap can tell prior-boot
+    -- orphans from current-boot live rows.
+    boot_id             TEXT NOT NULL
+) STRICT
 
 [table] code_trident_runs (tbl=code_trident_runs)
 CREATE TABLE code_trident_runs (

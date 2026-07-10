@@ -169,7 +169,12 @@ export async function spawnSubagent(
         )
       }
       // Coalesce: hand back the existing run so the caller awaits the one
-      // genuine process instead of starting a second.
+      // genuine process instead of starting a second. First share the winner's
+      // DURABLE-create outcome — if its persist is still in flight, await it so
+      // this caller sees the same success/failure and never returns a run the
+      // winner failed to durably create (a persist rejection rolls the reserved
+      // record back, and this await re-throws it here too).
+      await deps.registry.awaitCreate(inflight.run_id)
       return inflight
     }
   }
@@ -206,7 +211,15 @@ export async function spawnSubagent(
   if (input.delivery_target !== undefined) createInput.delivery_target = input.delivery_target
   if (claims !== undefined) createInput.delegation_claims = claims
   if (input.spawn_key !== undefined) createInput.spawn_key = input.spawn_key
-  return deps.registry.create(createInput)
+  // DELIBERATELY propagates a create-persist failure (unlike the terminal-update /
+  // cancel / fail / prune paths, which swallow persist failures and proceed on the
+  // already-durable record). `create` is the record's BIRTH: there is no prior
+  // persisted state to fall back to, so a best-effort "proceed in memory" would
+  // launch an agent whose existence was never persisted — reintroducing the exact
+  // vanish-on-crash bug P7 fixes (a crash would leave no boot-reapable row). If the
+  // record cannot be durably recorded at birth, failing the spawn cleanly (the
+  // reserve is rolled back) is the correct, boot-reap-preserving behaviour.
+  return await deps.registry.create(createInput)
 }
 
 function defaultMintRunId(): string {

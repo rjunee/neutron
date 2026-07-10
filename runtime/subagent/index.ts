@@ -13,7 +13,18 @@ export {
   MAX_CHILDREN_PER_AGENT,
   MAX_CONCURRENT_SUBAGENTS,
 } from './registry.ts'
-export type { SubagentRecord, SubagentStatus, AgentKind, CreateRecordInput } from './registry.ts'
+export type {
+  SubagentRecord,
+  SubagentStatus,
+  AgentKind,
+  CreateRecordInput,
+  SubagentPersistence,
+} from './registry.ts'
+
+export { SubagentRegistryStore } from './store.ts'
+
+export { sweepOrphanedDispatchesOnBoot } from './boot-sweep.ts'
+export type { BootSweepDeps, BootSweepReport } from './boot-sweep.ts'
 
 export { spawnSubagent } from './spawn.ts'
 export type { SpawnInput, SpawnDeps, DelegationClaims, DelegationVerifier } from './spawn.ts'

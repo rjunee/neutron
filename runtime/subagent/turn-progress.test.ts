@@ -126,12 +126,15 @@ describe('realReadJsonlTail', () => {
 
 describe('makeJsonlTurnProgressProbe', () => {
   const reg = new SubagentRegistry()
-  const rec = reg.create({
+  // No persistence sink → create() populates the in-memory map synchronously;
+  // read the record back (describe scope can't await).
+  void reg.create({
     run_id: 'r1',
     instance_key: 'i',
     agent_kind: 'forge',
     spawn_depth: 0,
   })
+  const rec = reg.byRunId('r1')!
 
   test('resolves path → reads tail → returns latest real-turn timestamp', () => {
     const probe = makeJsonlTurnProgressProbe({

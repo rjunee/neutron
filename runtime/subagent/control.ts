@@ -45,9 +45,42 @@ export async function cancelRun(
     } catch {
       // Cancellers are best-effort. If they throw, we still mark cancelled.
     }
+    // Re-read after the await: a real completion (or a watchdog crash) may have
+    // driven the run terminal while the canceller ran. Don't clobber it with
+    // `cancelled`. `updateTerminal` also refuses to clobber a terminal record
+    // (the atomic backstop), but short-circuiting here mirrors `failRun` and
+    // avoids a redundant no-op transition.
+    const after = state.registry.byRunId(run_id)
+    if (
+      after === undefined ||
+      after.status === 'finished' ||
+      after.status === 'cancelled' ||
+      after.status === 'crashed'
+    ) {
+      state.cancellers.delete(run_id)
+      return
+    }
   }
-  state.registry.update(run_id, { status: 'cancelled', ended_at: Date.now() })
+  // Drive terminal with a CONVERGING durable write (never rejects; retries a
+  // transient store failure so the durable row reaches `cancelled` and a restart's
+  // boot sweep won't re-surface it as a crash). If it can't converge, the live
+  // record is still forced terminal in memory so waitForCompletion doesn't hang,
+  // the caps release it, and the watchdog doesn't re-reap it.
+  const settled = await state.registry.updateTerminal(run_id, {
+    status: 'cancelled',
+    ended_at: Date.now(),
+  })
   state.cancellers.delete(run_id)
+  // Only warn when THIS call actually performed the cancel: if a concurrent
+  // completion/crash won the first-terminal race (`transitioned === false`), that
+  // winner owns durability and its own convergence logging — a warn here would be
+  // a misleading duplicate.
+  if (settled.transitioned && !settled.durable) {
+    console.warn(
+      `[subagent-control] cancel persist for ${run_id} did not converge; ` +
+        `canceller removed, durable row stale (best-effort)`,
+    )
+  }
 }
 
 /**
@@ -100,13 +133,39 @@ export async function failRun(
       return false
     }
   }
-  state.registry.update(run_id, {
+  // Best-effort durable persist (since P7 `update` awaits a store write that can
+  // reject). A persist failure must NOT reject `failRun` nor leak the canceller:
+  // the reap INTENT (crash + surface) still stands, so swallow, still remove the
+  // canceller, and still return true so the caller notifies. The in-memory record
+  // rolls back to its last persisted state on failure — the store outage is the
+  // degradation, and the next boot re-reaps a still-live row.
+  // Drive terminal with a CONVERGING durable write (never rejects; retries a
+  // transient store failure so the durable `crashed` row lands and the watchdog /
+  // a restart's boot sweep don't re-reap this run into a duplicate report). If it
+  // can't converge, the live record is still forced terminal in memory.
+  const settled = await state.registry.updateTerminal(run_id, {
     status: 'crashed',
     ended_at: now,
     failure_reason: reason,
     last_event_at: now,
   })
   state.cancellers.delete(run_id)
+  // `updateTerminal` serializes per run_id and is FIRST-TERMINAL-WINS: a real
+  // completion (or a caller-stop) whose transition was queued ahead of ours runs
+  // first, leaving the record `finished`/`cancelled`; our call then observes the
+  // terminal record and does NOT transition (`transitioned === false`). The
+  // post-await re-read above only catches a terminal that was already VISIBLE; a
+  // transition still QUEUED behind an in-flight same-run mutation is invisible to
+  // it, so `transitioned` is the authoritative "did I win the crash" signal.
+  // Return it so the watchdog never surfaces a contradictory crash for a run that
+  // actually finished.
+  if (!settled.transitioned) return false
+  if (!settled.durable) {
+    console.warn(
+      `[subagent-control] failRun persist for ${run_id} did not converge; ` +
+        `crash surfaced, durable row stale (best-effort)`,
+    )
+  }
   return true
 }
 

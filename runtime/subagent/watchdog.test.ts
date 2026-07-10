@@ -18,11 +18,11 @@ import {
  *   - stuck: no progress past the per-agent-kind timeout
  */
 
-function liveRecord(
+async function liveRecord(
   registry: SubagentRegistry,
   opts: { run_id: string; agent_kind?: 'forge' | 'argus' | 'atlas' | 'sentinel' | 'core'; pid?: number; last_event_at?: number },
 ) {
-  const rec = registry.create({
+  const rec = await registry.create({
     run_id: opts.run_id,
     instance_key: 'instance-a',
     agent_kind: opts.agent_kind ?? 'forge',
@@ -31,7 +31,7 @@ function liveRecord(
   const patch: Record<string, unknown> = { status: 'running' }
   if (opts.pid !== undefined) patch.pid = opts.pid
   if (opts.last_event_at !== undefined) patch.last_event_at = opts.last_event_at
-  registry.update(rec.run_id, patch)
+  await registry.update(rec.run_id, patch)
   return registry.byRunId(rec.run_id)!
 }
 
@@ -39,7 +39,7 @@ describe('agent-aware watchdog — process_dead', () => {
   test('a running agent whose pid is gone is marked crashed + surfaced + notified', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r-dead', pid: 99999, last_event_at: 1_000 })
+    await liveRecord(registry, { run_id: 'r-dead', pid: 99999, last_event_at: 1_000 })
 
     const notified: AgentWatchdogEvent[] = []
     const res = await runAgentWatchdog({
@@ -70,7 +70,7 @@ describe('agent-aware watchdog — process_dead', () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
     // Old last_event_at (stuck) AND a dead pid → reason must be process_dead.
-    liveRecord(registry, { run_id: 'r', pid: 5, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r', pid: 5, last_event_at: 0 })
     const res = await runAgentWatchdog({
       control: ctrl,
       registry,
@@ -85,7 +85,7 @@ describe('agent-aware watchdog — stuck', () => {
   test('a running agent past its inactivity threshold is killed + surfaced', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r-stuck', last_event_at: 0 }) // no pid; wedged
+    await liveRecord(registry, { run_id: 'r-stuck', last_event_at: 0 }) // no pid; wedged
 
     let killed = false
     registerCanceller(ctrl, 'r-stuck', async () => {
@@ -112,7 +112,7 @@ describe('agent-aware watchdog — stuck', () => {
   test('an agent making progress within threshold is NOT surfaced', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r-ok', pid: 1, last_event_at: 1_000 })
+    await liveRecord(registry, { run_id: 'r-ok', pid: 1, last_event_at: 1_000 })
     const res = await runAgentWatchdog({
       control: ctrl,
       registry,
@@ -127,8 +127,8 @@ describe('agent-aware watchdog — stuck', () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
     // atlas (research) gets a long leash; argus (review) a short one.
-    liveRecord(registry, { run_id: 'atlas-1', agent_kind: 'atlas', last_event_at: 0 })
-    liveRecord(registry, { run_id: 'argus-1', agent_kind: 'argus', last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'atlas-1', agent_kind: 'atlas', last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'argus-1', agent_kind: 'argus', last_event_at: 0 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -148,7 +148,7 @@ describe('agent-aware watchdog — stuck', () => {
   test('a flat numeric threshold applies to every kind', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r', agent_kind: 'sentinel', last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r', agent_kind: 'sentinel', last_event_at: 0 })
     const res = await runAgentWatchdog({
       control: ctrl,
       registry,
@@ -172,7 +172,7 @@ describe('agent-aware watchdog — JSONL turn-progress is the source of truth', 
     const now = DEFAULT_STUCK_THRESHOLD_MS + 5_000
     // last_event_at is FRESH (a heartbeat just bumped it to ~now) — pre-fix this
     // would never look stuck. The JSONL, though, has not advanced in ages (t=0).
-    liveRecord(registry, { run_id: 'r-wedged', pid: 1, last_event_at: now - 1 })
+    await liveRecord(registry, { run_id: 'r-wedged', pid: 1, last_event_at: now - 1 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -197,7 +197,7 @@ describe('agent-aware watchdog — JSONL turn-progress is the source of truth', 
     const ctrl = newControlState(registry)
     // last_event_at is ANCIENT (would trip the legacy threshold), but the JSONL
     // shows the turn advanced moments ago — the agent is working, not stuck.
-    liveRecord(registry, { run_id: 'r-working', pid: 1, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r-working', pid: 1, last_event_at: 0 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -215,7 +215,7 @@ describe('agent-aware watchdog — JSONL turn-progress is the source of truth', 
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
     // No JSONL signal for this record → the watchdog uses last_event_at as before.
-    liveRecord(registry, { run_id: 'r-notranscript', pid: 1, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r-notranscript', pid: 1, last_event_at: 0 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -236,7 +236,7 @@ describe('agent-aware watchdog — JSONL turn-progress is the source of truth', 
   test('process_dead still takes precedence even when JSONL looks fresh', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r-dead', pid: 42, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r-dead', pid: 42, last_event_at: 0 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -255,14 +255,14 @@ describe('agent-aware watchdog — surfacing semantics', () => {
   test('delivery_target rides along so a notice can be routed back to its origin', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    const rec = registry.create({
+    const rec = await registry.create({
       run_id: 'r',
       instance_key: 'instance-a',
       agent_kind: 'forge',
       spawn_depth: 0,
       delivery_target: { channel: 'telegram', binding_id: 'thread-77' },
     })
-    registry.update(rec.run_id, { status: 'running', pid: 1, last_event_at: 0 })
+    await registry.update(rec.run_id, { status: 'running', pid: 1, last_event_at: 0 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -276,8 +276,8 @@ describe('agent-aware watchdog — surfacing semantics', () => {
   test('a throwing notifier does not abort the tick or un-fail the run', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r1', pid: 1, last_event_at: 0 })
-    liveRecord(registry, { run_id: 'r2', pid: 2, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r1', pid: 1, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r2', pid: 2, last_event_at: 0 })
 
     const res = await runAgentWatchdog({
       control: ctrl,
@@ -301,7 +301,7 @@ describe('agent-aware watchdog — surfacing semantics', () => {
     // false failure event fires.
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    const rec = liveRecord(registry, { run_id: 'r-finish', last_event_at: 0 })
+    const rec = await liveRecord(registry, { run_id: 'r-finish', last_event_at: 0 })
     // The canceller yields, then a concurrent completion marks the run finished.
     registerCanceller(ctrl, rec.run_id, async () => {
       await Promise.resolve()
@@ -330,7 +330,7 @@ describe('agent-aware watchdog — surfacing semantics', () => {
   test('a healthy idle registry surfaces nothing (no false positives)', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'fresh', pid: 1, last_event_at: 9_000 })
+    await liveRecord(registry, { run_id: 'fresh', pid: 1, last_event_at: 9_000 })
     const res = await runAgentWatchdog({
       control: ctrl,
       registry,
@@ -343,7 +343,7 @@ describe('agent-aware watchdog — surfacing semantics', () => {
   test('already-terminal records are ignored (idempotent across ticks)', async () => {
     const registry = new SubagentRegistry()
     const ctrl = newControlState(registry)
-    liveRecord(registry, { run_id: 'r', pid: 9, last_event_at: 0 })
+    await liveRecord(registry, { run_id: 'r', pid: 9, last_event_at: 0 })
     const deps = {
       control: ctrl,
       registry,
