@@ -1,0 +1,7 @@
+# AGENTS.md — logger
+
+`@neutronai/logger` is the repo's ONE leveled key=value logger (refactor O1). `createLogger(subsystem)` emits `[subsystem] event=<event> k=v` lines (the `LOG_TAG event=… k=v` convention from chat-bridge/reminder-outbound), gated by `NEUTRON_LOG_LEVEL` (`error|warn|info|debug`, default `info`, re-read on every emit). Values with whitespace/quotes/`=`/backslashes/control chars are logfmt-quoted with backslash escapes so lines stay single-line and whitespace-splittable. Suppression helpers generalize three existing hand-rolled patterns with matching semantics: `once(key)` (the GBrain `latchIfUnavailable` process latch — exactly one line per key), `clearOnce(key)` (the rate-limit-banner edge-triggered latch's falling edge — rising edge fires `once`, falling edge re-arms), and `rateLimited(key, ms)` (the wedge-alert `alertDedupeMs` cooldown — suppressed while `now - last < ms`, stamped only on a REAL emit, so suppressed or level-gated attempts never extend the window). Latch state is per-process module state keyed `subsystem × key`, shared across logger instances. Sink and clock are injectable (`LoggerOptions.sink` / `.now`) for tests and DI seams.
+
+This package is a `contracts`-band LEAF: it must import NOTHING from the workspace (dependency-cruiser enforces it). Adoption of call sites is O2 — until then no production code imports it.
+
+Cross-refs: `docs/plans/2026-07-02-world-class-refactor-plan.md` §O1/§O2.
