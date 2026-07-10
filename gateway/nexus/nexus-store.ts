@@ -236,14 +236,19 @@ export class NexusStore {
   private readonly now: () => number
   private readonly handles = new Map<string, ProjectHandle>()
   private readonly initPromises = new Map<string, Promise<ProjectHandle>>()
-  /** Lifecycle generation, bumped by `closeAll()`. Each `openHandle`
-   *  captures the generation at init START and refuses to install (and
-   *  closes) a handle whose init resolved into a LATER generation —
-   *  i.e. after a `closeAll()` tore down the store. Without this a
-   *  `closeAll()` racing an in-flight init would leak the freshly
-   *  opened connection (the continuation caches it after the map was
-   *  cleared) and, because `initPromises` was also cleared, let a
-   *  second concurrent op kick off a duplicate init. */
+  /** Lifecycle generation, bumped by `closeAll()`. EVERY `openHandle`
+   *  caller — the one that starts the init AND every waiter that joins
+   *  the same in-flight init — captures the generation when it commits
+   *  to the shared init, then re-checks `(generation unchanged) AND
+   *  (handle not closed)` after the init resolves. A caller whose
+   *  generation moved (a `closeAll()` tore down the store mid-init)
+   *  rejects with `store_closed` and never touches the handle. Because
+   *  `closeAll()` also clears `initPromises`, any caller that joins
+   *  AFTER a `closeAll()` starts a fresh init rather than waiting on a
+   *  torn-down one, so all waiters on one promise share the owner's
+   *  captured generation. Without the waiter-inclusive gate a waiter
+   *  would receive the owner's freshly-closed handle (the owner is the
+   *  sole closer) and run SQL on a closed connection. */
   private generation = 0
 
   constructor(opts: NexusStoreOptions) {
@@ -497,47 +502,78 @@ export class NexusStore {
       )
     }
     const cached = this.handles.get(cleaned)
+    // A handle in the map is always current-generation: `closeAll()`
+    // clears the map AND flips `closed` in the same synchronous pass,
+    // and there is no `await` between this `get` and the `return`, so a
+    // non-closed cached handle cannot have been torn down under us.
     if (cached !== undefined && !cached.closed) return cached
-    const inflight = this.initPromises.get(cleaned)
-    if (inflight !== undefined) return inflight
-    // Capture the generation at init START. If a `closeAll()` lands
-    // while `initHandle` is awaiting, the generation moves on and the
-    // continuation below tears down its own freshly-opened connection
-    // instead of caching it into a store that was already closed.
-    const startGeneration = this.generation
-    const promise = this.initHandle(cleaned)
-    this.initPromises.set(cleaned, promise)
+
+    // Capture the generation at the moment THIS caller commits to the
+    // shared init — whether it starts the init (owner) or joins one
+    // already in flight (waiter). The post-resolve gate below then
+    // rejects if a `closeAll()` advanced the generation while we were
+    // awaiting. Capturing here (not only at init start) is what makes
+    // the gate correct for waiters that join late.
+    const captured = this.generation
+    let promise = this.initPromises.get(cleaned)
+    const isOwner = promise === undefined
+    if (promise === undefined) {
+      promise = this.initHandle(cleaned)
+      this.initPromises.set(cleaned, promise)
+    }
+
     let handle: ProjectHandle
     try {
       handle = await promise
-    } finally {
-      // Only retract the in-flight marker if it is still OURS. A
-      // `closeAll()` mid-init already cleared the map and may have let
-      // a fresh-generation init install its own promise under this key;
-      // deleting unconditionally would drop that live entry.
-      if (this.initPromises.get(cleaned) === promise) {
+    } catch (err) {
+      // Init itself failed. Only the owner installed the marker, so
+      // only the owner retracts it (if still ours — a `closeAll()`
+      // mid-init may have cleared it and let a fresh init install its
+      // own under this key).
+      if (isOwner && this.initPromises.get(cleaned) === promise) {
         this.initPromises.delete(cleaned)
       }
+      throw err
     }
-    if (this.generation !== startGeneration) {
-      // A `closeAll()` (or several) happened during init. This handle
-      // belongs to a torn-down generation — close it, refuse to cache
-      // it, and ABORT the operation cleanly. Returning the handle would
-      // hand the caller a closed connection (its next `BEGIN IMMEDIATE`
-      // would throw a raw driver error); throwing a typed error is the
-      // honest outcome for "you closed the store mid-operation" and
-      // leaves nothing retained (no leak, no cache).
-      try {
-        handle.db.close()
-      } catch {
-        /* ignore */
+    if (isOwner && this.initPromises.get(cleaned) === promise) {
+      this.initPromises.delete(cleaned)
+    }
+
+    // THE GATE — run by EVERY caller (owner AND every waiter), not just
+    // the one that created the promise. A waiter that received the
+    // shared handle must independently verify `(generation unchanged)
+    // AND (handle not closed)` before touching the db; otherwise a
+    // `closeAll()` that resolved between init and here would let the
+    // waiter run SQL on a closed connection.
+    if (this.generation !== captured || handle.closed) {
+      // Responsibility split: the OWNER (the generation-relevant path
+      // that created this handle) is the sole closer of the orphaned
+      // connection — `closeAll()` couldn't close it because it wasn't
+      // in `this.handles` yet. A stale WAITER merely rejects; it must
+      // NOT double-close. Flipping `closed` keeps the invariant "a
+      // closed db always has handle.closed === true" so any later
+      // `assertHandleLive` on this object is also correct.
+      if (isOwner && !handle.closed) {
+        handle.closed = true
+        try {
+          handle.db.close()
+        } catch {
+          /* ignore */
+        }
       }
       throw new NexusStoreError(
         'store_closed',
         'store was closed during initialization; operation aborted',
       )
     }
-    this.handles.set(cleaned, handle)
+
+    // Fresh. Only the OWNER caches — a waiter caching could clobber a
+    // newer-generation handle installed after a `closeAll()`/re-init
+    // (the waiter's own gen check guarantees the cache still holds the
+    // owner's handle, so it just returns it).
+    if (isOwner) {
+      this.handles.set(cleaned, handle)
+    }
     return handle
   }
 

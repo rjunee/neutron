@@ -235,6 +235,64 @@ describe('NexusStore — schema init', () => {
     expect(events.map((e) => e.body)).toEqual(['gen-2'])
   })
 
+  it('closeAll() DURING a shared in-flight init aborts BOTH the owner AND every waiter (multi-waiter)', async () => {
+    const internals = h.store as unknown as {
+      handles: Map<string, unknown>
+      initPromises: Map<string, unknown>
+    }
+    // Two appends on a FRESH project both await the SAME in-flight init
+    // (the second joins the first's initPromise as a waiter). closeAll()
+    // lands before init resolves. The waiter must run the SAME
+    // generation/closed gate as the owner — not receive the owner's
+    // freshly-closed handle and write on a closed connection.
+    const a = h.store.appendEvent(PROJECT_ID, input({ body: 'owner' }))
+    const b = h.store.appendEvent(PROJECT_ID, input({ body: 'waiter' }))
+    // Sanity: they really are sharing one init (one in-flight promise).
+    expect(internals.initPromises.size).toBe(1)
+    h.store.closeAll()
+    // allSettled attaches both handlers synchronously so neither
+    // rejection is ever momentarily unhandled.
+    const [ra, rb] = await Promise.allSettled([a, b])
+    expect(ra.status).toBe('rejected')
+    expect(rb.status).toBe('rejected')
+    expect((ra as PromiseRejectedResult).reason).toBeInstanceOf(NexusStoreError)
+    expect((rb as PromiseRejectedResult).reason).toBeInstanceOf(NexusStoreError)
+    expect(internals.handles.size).toBe(0)
+    expect(internals.initPromises.size).toBe(0)
+    // No row survived (a read re-inits an empty log).
+    const events = await h.store.readRecent(PROJECT_ID)
+    expect(events.length).toBe(0)
+  })
+
+  it('closeAll() DURING a shared in-flight init aborts BOTH waiters on the READ path too', async () => {
+    const internals = h.store as unknown as { handles: Map<string, unknown> }
+    const a = h.store.readRecent(PROJECT_ID)
+    const b = h.store.readRecent(PROJECT_ID)
+    h.store.closeAll()
+    const [ra, rb] = await Promise.allSettled([a, b])
+    expect(ra.status).toBe('rejected')
+    expect(rb.status).toBe('rejected')
+    expect((ra as PromiseRejectedResult).reason).toBeInstanceOf(NexusStoreError)
+    expect((rb as PromiseRejectedResult).reason).toBeInstanceOf(NexusStoreError)
+    expect(internals.handles.size).toBe(0)
+    // Store recovers cleanly.
+    const ok = await h.store.appendEvent(PROJECT_ID, input({ body: 'after' }))
+    expect((await h.store.readRecent(PROJECT_ID)).map((e) => e.id)).toEqual([ok.id])
+  })
+
+  it('three concurrent appends sharing one init all COMMIT when no closeAll races them', async () => {
+    // Regression guard: the waiter gate must not spuriously reject the
+    // normal case — all three share one init and all land.
+    const [x, y, z] = await Promise.all([
+      h.store.appendEvent(PROJECT_ID, input({ body: 'x' })),
+      h.store.appendEvent(PROJECT_ID, input({ body: 'y' })),
+      h.store.appendEvent(PROJECT_ID, input({ body: 'z' })),
+    ])
+    expect(new Set([x.id, y.id, z.id]).size).toBe(3)
+    const events = await h.store.readRecent(PROJECT_ID, { limit: 100 })
+    expect(new Set(events.map((e) => e.body))).toEqual(new Set(['x', 'y', 'z']))
+  })
+
   it('rm-with-project removes the log (sidecar lifecycle)', async () => {
     await h.store.appendEvent(PROJECT_ID, input())
     h.store.closeAll()
