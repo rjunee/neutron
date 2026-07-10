@@ -50,7 +50,8 @@
     "contracts",
     "wire-types",
     "config",
-    "logger"
+    "logger",
+    "loop"
   ],
   "scripts": {
     "start": "bun run open/server.ts",

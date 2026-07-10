@@ -151,7 +151,11 @@ export async function wireUploads(
   uploadSweeper.start()
   cleanups.push(() => {
     try {
-      uploadSweeper.stop()
+      // §F1 — `stop()` now returns a quiescing Promise, but `realmode_cleanups`
+      // is a synchronous `() => void` runner: the timer is cleared synchronously
+      // (no further ticks) and the in-flight-sweep drain settles best-effort.
+      // The sweep body already swallows its own errors, so a torn-down db is safe.
+      void uploadSweeper.stop()
     } catch {
       // best-effort shutdown cleanup
     }

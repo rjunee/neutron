@@ -26,6 +26,7 @@
  * `cron_state` via the supplied `CronStateStore`.
  */
 
+import { guardedFire } from '@neutronai/loop'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   hostTimeZone,
@@ -92,6 +93,16 @@ export class CronScheduler {
    */
   private started = false
 
+  /**
+   * §F1 — in-flight FIRE promises. Cron keeps its own N per-job timers +
+   * calendar re-arm + per-job overlap skip (`fireOnce`'s `in_flight` +
+   * `recordSkipped`); it delegates only its FIRE PATH to {@link guardedFire}
+   * (via {@link trackFire}) so (a) a store-level throw in the fire tail can
+   * never escape as an unhandledRejection, and (b) `stop()` can AWAIT the
+   * in-flight fires and quiesce before `db.close()`.
+   */
+  private readonly inflightFires = new Set<Promise<void>>()
+
   constructor(options: SchedulerOptions) {
     this.jobs = options.jobs
     this.handlers = options.handlers
@@ -152,7 +163,7 @@ export class CronScheduler {
 
     if (job.schedule.kind === 'interval_ms') {
       const entry: RunningJob = {
-        timer: setInterval(() => { void this.fireOnce(job.name) }, job.schedule.interval_ms),
+        timer: setInterval(() => { this.trackFire(job.name) }, job.schedule.interval_ms),
         kind: 'interval',
         spec: null,
         next_fire_ms: null,
@@ -208,7 +219,7 @@ export class CronScheduler {
         // Missed the most-recent scheduled instant → catch up exactly ONCE,
         // then arm the next FUTURE instant. Arm immediately (don't await the
         // handler) so a slow catch-up can't shift the next tick.
-        void this.fireOnce(name)
+        this.trackFire(name)
         this.scheduleNextFrom(name, nowMs)
         return
       }
@@ -262,11 +273,35 @@ export class CronScheduler {
       // Advance the schedule FIRST (cadence decoupled from handler duration),
       // then fire. fireOnce's overlap-skip handles a still-in-flight prior run.
       this.scheduleNextFrom(name, next)
-      void this.fireOnce(name)
+      this.trackFire(name)
     }, clamped)
   }
 
-  stop(): void {
+  /**
+   * §F1 — fire one job through the shared catch-all + track it so `stop()` can
+   * quiesce. `fireOnce` already owns the per-job overlap skip + `cron_state`
+   * recording + handler try/catch; `guardedFire` additionally contains a throw
+   * from the fire TAIL (e.g. `this.state.record` hitting a closed db) that the
+   * old `void this.fireOnce(...)` would have leaked as an unhandledRejection.
+   */
+  private trackFire(name: string): void {
+    const p = guardedFire(name, this.fireOnce(name), (jobName, err) => {
+      console.error(`cron scheduler: fire '${jobName}' threw:`, err)
+    }).then(() => undefined)
+    this.inflightFires.add(p)
+    void p.finally(() => {
+      this.inflightFires.delete(p)
+    })
+  }
+
+  /**
+   * Stop every job's timer, then QUIESCE — await any in-flight fire so a
+   * caller can `await scheduler.stop()` before `db.close()`. The synchronous
+   * teardown (clear timers, empty `running`, reset `started`) runs FIRST so
+   * `runningCount()`/`runningJobNames()` reflect the stop immediately, exactly
+   * as before; only the fire-drain is awaited.
+   */
+  async stop(): Promise<void> {
     for (const r of this.running.values()) {
       if (r.timer === undefined) continue
       if (r.kind === 'interval') clearInterval(r.timer)
@@ -280,6 +315,11 @@ export class CronScheduler {
     // registry — runtime registrations would still bind via the
     // listener but the originally registered jobs would be dormant.
     this.started = false
+    // Quiesce: await any fire that was already in flight when we cleared the
+    // timers. `guardedFire` never rejects, so this never throws.
+    if (this.inflightFires.size > 0) {
+      await Promise.all([...this.inflightFires])
+    }
   }
 
   /**

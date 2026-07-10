@@ -23,6 +23,8 @@
  * immediately. For Managed (hosted VPS), this concern doesn't apply.
  */
 
+import { SupervisedLoop } from '@neutronai/loop'
+
 import type {
   BackupResult,
   ProjectBackupLogger,
@@ -96,7 +98,11 @@ export class ProjectBackupScheduler {
   private readonly clearTimeoutFn: (handle: NodeJS.Timeout) => void
   private readonly randomFn: () => number
 
-  private interval: NodeJS.Timeout | null = null
+  /** Loop scaffolding — drives the recurring re-check `poll()` at
+   *  `pollIntervalMs` with an immediate boot-backfill tick, plus the quiescing
+   *  stop (§F1). The per-project jitter timers below are the scheduler's OWN
+   *  domain machinery and stay here. */
+  private readonly loop: SupervisedLoop
   private readonly pendingJitterTimers = new Map<string, NodeJS.Timeout>()
   private stopped = false
 
@@ -121,24 +127,32 @@ export class ProjectBackupScheduler {
     this.clearIntervalFn = opts.clearInterval ?? ((handle): void => clearInterval(handle as unknown as ReturnType<typeof setInterval>))
     this.clearTimeoutFn = opts.clearTimeout ?? ((handle): void => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
     this.randomFn = opts.random ?? Math.random
+    // The SupervisedLoop drives the recurring `poll()` re-check. `immediate:
+    // true` fires the boot-backfill tick the moment `start()` is called (brief
+    // § 3.3), and its quiescing `stop()` awaits an in-flight poll before we
+    // clear the jitter timers. The interval timer seams are threaded through so
+    // tests that inject a fake `setInterval` keep working.
+    this.loop = new SupervisedLoop({
+      name: 'project-backup-scheduler',
+      intervalMs: this.pollIntervalMs,
+      immediate: true,
+      tick: () => this.poll(),
+      setTimer: (fn, ms) => this.setIntervalFn(fn, ms),
+      clearTimer: (handle) => this.clearIntervalFn(handle as NodeJS.Timeout),
+    })
   }
 
   start(): void {
-    if (this.interval !== null) return
     this.stopped = false
-    // Boot-time backfill: fire an immediate poll.
-    void this.poll()
-    this.interval = this.setIntervalFn(() => {
-      void this.poll()
-    }, this.pollIntervalMs)
+    this.loop.start()
   }
 
-  stop(): void {
+  /** Stop + quiesce: mark stopped so an in-flight `poll()` short-circuits,
+   *  await the loop (drains the in-flight poll), then cancel any pending
+   *  jittered snapshot timers. */
+  async stop(): Promise<void> {
     this.stopped = true
-    if (this.interval !== null) {
-      this.clearIntervalFn(this.interval)
-      this.interval = null
-    }
+    await this.loop.stop()
     for (const handle of this.pendingJitterTimers.values()) {
       this.clearTimeoutFn(handle)
     }

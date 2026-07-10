@@ -25,6 +25,7 @@
     "@neutronai/google-workspace-core": "workspace:*",
     "@neutronai/jwt-validator": "workspace:*",
     "@neutronai/landing": "workspace:*",
+    "@neutronai/loop": "workspace:*",
     "@neutronai/mcp": "workspace:*",
     "@neutronai/message-search": "workspace:*",
     "@neutronai/migrations": "workspace:*",

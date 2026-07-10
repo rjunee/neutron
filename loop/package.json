@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/loop",
+  "type": "module",
+  "main": "./index.ts",
+  "private": true
+}

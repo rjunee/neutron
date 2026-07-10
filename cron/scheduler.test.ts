@@ -126,6 +126,54 @@ describe('CronScheduler.fireOnce', () => {
   })
 })
 
+describe('CronScheduler.stop — §F1 quiescing shutdown', () => {
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+  test('stop() awaits an in-flight fire before resolving (quiesce)', async () => {
+    const jobs = new CronJobRegistry()
+    const handlers = new CronHandlerRegistry()
+    jobs.register({
+      name: 'slow',
+      description: '',
+      schedule: { kind: 'interval_ms', interval_ms: 5 },
+      handler: 'h-slow',
+    })
+    let entered = false
+    let finished = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    handlers.register('h-slow', async () => {
+      entered = true
+      await gate
+      finished = true
+      return { status: 'ok' }
+    })
+    const scheduler = new CronScheduler({ jobs, handlers, db, project_slug: 't1' })
+    scheduler.start()
+    // Wait for the interval to fire and the handler to block on the gate.
+    for (let i = 0; i < 100 && !entered; i++) await sleep(2)
+    expect(entered).toBe(true)
+
+    let stopped = false
+    const stopP = scheduler.stop().then(() => {
+      stopped = true
+    })
+    // The synchronous teardown already ran (no more jobs ticking)...
+    expect(scheduler.runningCount()).toBe(0)
+    // ...but stop() must NOT resolve while the fire is still in flight.
+    await sleep(15)
+    expect(stopped).toBe(false)
+    expect(finished).toBe(false)
+
+    release()
+    await stopP
+    expect(stopped).toBe(true)
+    expect(finished).toBe(true)
+  })
+})
+
 describe('CronScheduler.start — runtime registrations (S15 Codex r1 P1)', () => {
   // Backstop for the Codex review on PR #126. Pre-fix the scheduler
   // snapshotted the job registry exactly once in `start()`, so jobs

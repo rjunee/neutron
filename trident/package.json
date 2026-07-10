@@ -7,6 +7,7 @@
     "@neutronai/auth": "workspace:*",
     "@neutronai/channels": "workspace:*",
     "@neutronai/core-sdk": "workspace:*",
+    "@neutronai/loop": "workspace:*",
     "@neutronai/migrations": "workspace:*",
     "@neutronai/persistence": "workspace:*",
     "@neutronai/project-credentials": "workspace:*",
