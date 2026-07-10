@@ -153,6 +153,45 @@ describe('NexusStore — schema init', () => {
     expect(events.length).toBe(2)
   })
 
+  it('closeAll() DURING an in-flight ensureInit caches no live handle (generation guard)', async () => {
+    // Peek at the private lifecycle maps — the invariant under test is
+    // internal (no handle retained past closeAll, no duplicate init).
+    const internals = h.store as unknown as {
+      handles: Map<string, unknown>
+      initPromises: Map<string, unknown>
+    }
+    // Kick off init, tear down before it resolves, THEN await it. The
+    // continuation must observe the bumped generation, close its own
+    // connection, and refuse to cache it.
+    const p = h.store.ensureInit(PROJECT_ID)
+    h.store.closeAll()
+    await p
+    expect(internals.handles.size).toBe(0)
+    expect(internals.initPromises.size).toBe(0)
+
+    // No double-init leak: a subsequent op inits cleanly under the new
+    // generation and retains EXACTLY one live handle.
+    const written = await h.store.appendEvent(PROJECT_ID, input({ body: 'after-close' }))
+    expect(internals.handles.size).toBe(1)
+    const events = await h.store.readRecent(PROJECT_ID)
+    expect(events.map((e) => e.id)).toEqual([written.id])
+  })
+
+  it('closeAll() racing init lets a concurrent op start a clean new generation', async () => {
+    const internals = h.store as unknown as { handles: Map<string, unknown> }
+    // A: in-flight init. closeAll() invalidates A. B: a concurrent op
+    // started AFTER closeAll must init fresh (not race A's dead handle)
+    // and its handle is the one retained.
+    const a = h.store.ensureInit(PROJECT_ID)
+    h.store.closeAll()
+    const b = h.store.appendEvent(PROJECT_ID, input({ body: 'gen-2' }))
+    await Promise.all([a, b])
+    // Only B's live handle survives; A's was closed + dropped.
+    expect(internals.handles.size).toBe(1)
+    const events = await h.store.readRecent(PROJECT_ID)
+    expect(events.map((e) => e.body)).toEqual(['gen-2'])
+  })
+
   it('rm-with-project removes the log (sidecar lifecycle)', async () => {
     await h.store.appendEvent(PROJECT_ID, input())
     h.store.closeAll()

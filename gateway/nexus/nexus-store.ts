@@ -230,6 +230,15 @@ export class NexusStore {
   private readonly now: () => number
   private readonly handles = new Map<string, ProjectHandle>()
   private readonly initPromises = new Map<string, Promise<ProjectHandle>>()
+  /** Lifecycle generation, bumped by `closeAll()`. Each `openHandle`
+   *  captures the generation at init START and refuses to install (and
+   *  closes) a handle whose init resolved into a LATER generation —
+   *  i.e. after a `closeAll()` tore down the store. Without this a
+   *  `closeAll()` racing an in-flight init would leak the freshly
+   *  opened connection (the continuation caches it after the map was
+   *  cleared) and, because `initPromises` was also cleared, let a
+   *  second concurrent op kick off a duplicate init. */
+  private generation = 0
 
   constructor(opts: NexusStoreOptions) {
     this.owner_home = opts.owner_home
@@ -242,8 +251,13 @@ export class NexusStore {
   }
 
   /** Force-close every per-project DB handle. Useful for tests that
-   *  swap fixture roots between cases. */
+   *  swap fixture roots between cases. Bumping `generation` invalidates
+   *  any init already in flight: its continuation observes the changed
+   *  generation, closes the connection it just opened, and does not
+   *  cache it (see `openHandle`), so `closeAll()` racing an in-flight
+   *  `ensureInit` never leaks a handle. */
   closeAll(): void {
+    this.generation++
     for (const handle of this.handles.values()) {
       try {
         handle.db.close()
@@ -425,15 +439,40 @@ export class NexusStore {
     if (cached !== undefined) return cached
     const inflight = this.initPromises.get(cleaned)
     if (inflight !== undefined) return inflight
+    // Capture the generation at init START. If a `closeAll()` lands
+    // while `initHandle` is awaiting, the generation moves on and the
+    // continuation below tears down its own freshly-opened connection
+    // instead of caching it into a store that was already closed.
+    const startGeneration = this.generation
     const promise = this.initHandle(cleaned)
     this.initPromises.set(cleaned, promise)
+    let handle: ProjectHandle
     try {
-      const handle = await promise
-      this.handles.set(cleaned, handle)
-      return handle
+      handle = await promise
     } finally {
-      this.initPromises.delete(cleaned)
+      // Only retract the in-flight marker if it is still OURS. A
+      // `closeAll()` mid-init already cleared the map and may have let
+      // a fresh-generation init install its own promise under this key;
+      // deleting unconditionally would drop that live entry.
+      if (this.initPromises.get(cleaned) === promise) {
+        this.initPromises.delete(cleaned)
+      }
     }
+    if (this.generation !== startGeneration) {
+      // A `closeAll()` (or several) happened during init. This handle
+      // belongs to a torn-down generation — close it and refuse to
+      // cache it. The caller still gets a usable handle for THIS write;
+      // it just isn't retained, so a later op re-inits cleanly under
+      // the current generation.
+      try {
+        handle.db.close()
+      } catch {
+        /* ignore */
+      }
+      return handle
+    }
+    this.handles.set(cleaned, handle)
+    return handle
   }
 
   /**
