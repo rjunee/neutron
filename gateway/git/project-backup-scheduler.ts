@@ -161,16 +161,20 @@ export class ProjectBackupScheduler {
   async stop(): Promise<void> {
     this.stopped = true
     await this.loop.stop()
+    // Drain in-flight polls (loop-driven OR direct/manual) FIRST: a poll resuming
+    // past a gated store read/write bails on the `stopped` re-checks, but draining
+    // here BEFORE cancelling the jitter timers guarantees any timer a racing poll
+    // still managed to arm is included in the cancellation below (defense-in-depth
+    // against the read/write-boundary window).
+    if (this.activePolls.size > 0) {
+      await Promise.all([...this.activePolls])
+    }
     for (const handle of this.pendingJitterTimers.values()) {
       this.clearTimeoutFn(handle)
     }
     this.pendingJitterTimers.clear()
-    // Drain any in-flight poll (loop-driven OR a direct/manual `poll()` call)
-    // BEFORE the fires, then the fires — so neither is mid-store-write when the
-    // caller closes the DB.
-    if (this.activePolls.size > 0) {
-      await Promise.all([...this.activePolls])
-    }
+    // Finally drain any snapshot already firing so the store isn't in use when
+    // the caller closes the DB.
     if (this.activeFires.size > 0) {
       await Promise.all([...this.activeFires])
     }
@@ -234,6 +238,10 @@ export class ProjectBackupScheduler {
         // project for this round.
         continue
       }
+      // §F1 — re-check AFTER the write await: if `stop()` fired while we were
+      // writing, bail before arming a jitter timer that would outlive the
+      // shutdown that already cleared the timer map.
+      if (this.stopped) return
       this.store.setNextScheduledAt(
         project_id,
         attempted_at + this.tickIntervalMs,
