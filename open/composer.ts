@@ -31,7 +31,12 @@
  * composer leaves `default_handler` unset and `boot()` fills it.
  */
 
-import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import {
+  resolveEnvOAuthTier,
+  resolveApiKeyEnvTier,
+  resolveAmbientTier,
+} from '@neutronai/gateway/realmode-composer/resolve-llm-credentials.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildOpenInstallTokenHandler } from './install-token-handoff.ts'
 import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
@@ -305,39 +310,54 @@ export interface BuildOpenGraphComposerOptions {
 
 /**
  * Resolve the single-owner LLM credential pool from the environment, honoring
- * BOTH subscription OAuth and API-billing auth — mirroring the Managed
- * resolver's precedence (`gateway/realmode-composer/resolve-llm-credentials.ts`:
- * the process-env `CLAUDE_CODE_OAUTH_TOKEN` source wins over the shared
- * `ANTHROPIC_API_KEY` env source). This is the credential the `claude`
- * subprocess substrate runs on (NEVER a direct api.anthropic.com call):
+ * BOTH subscription OAuth and API-billing auth. C6 (2026-07-09): this now walks
+ * the SHARED credential precedence table
+ * (`gateway/realmode-composer/resolve-llm-credentials.ts` —
+ * `resolveEnvOAuthTier` → `resolveApiKeyEnvTier` → `resolveAmbientTier`) rather
+ * than re-implementing the env-OAuth / API-key pool construction by hand. The
+ * Managed resolver (`resolveLlmCredentials`) consumes the SAME tier helpers, so
+ * the two paths can no longer drift; the pre-C6 "mirroring the Managed resolver
+ * by comment" note is retired. Open resolves the anthropic-only sync tiers
+ * (2 / 4 / 5) — it wires NO Max OAuth source (tier 1) and NO BYO ApiKeyStore
+ * (tier 3), and it uniquely enables the ambient tier (`allowAmbient: true`).
+ *
+ * This is the credential the `claude` subprocess substrate runs on (NEVER a
+ * direct api.anthropic.com call):
  *
  *   - `CLAUDE_CODE_OAUTH_TOKEN` (what `claude setup-token` prints — the
  *     self-host subscription path) → `kind: 'oauth'`, threaded to the
  *     subprocess as a `Authorization: Bearer …` token by
- *     `build-llm-call-substrate`.
- *   - else `ANTHROPIC_API_KEY` (API-billing) → `kind: 'api_key'`.
+ *     `build-llm-call-substrate`. (tier 2 — `resolveEnvOAuthTier`)
+ *   - else `ANTHROPIC_API_KEY` (API-billing) → `kind: 'api_key'`. Passed as a
+ *     single-entry `env_vars` list so the shared-tier gate never classifies it
+ *     as a cross-instance shared key — it is the per-owner box key.
+ *     (tier 4 — `resolveApiKeyEnvTier`)
  *   - else, if `claude` is already AMBIENT/Keychain-authed (the owner ran
  *     `claude` login on this Mac; creds live in the macOS "Claude Code-credentials"
  *     Keychain item, NOT in env) → `kind: 'ambient'`. The substrate spawns
- *     `claude` threading NO token, so the child auths via its own Keychain. This
- *     closes the fresh-install 503: a Mac self-hoster with `claude` already
- *     logged in no longer hits a Day-1 "Authenticate Claude" wall even though
- *     `claude -p` works headlessly. The probe is fast + cached + never-hanging
+ *     `claude` threading NO token (the ambient pool's secret is the empty
+ *     string), so the child auths via its own Keychain. This closes the
+ *     fresh-install 503: a Mac self-hoster with `claude` already logged in no
+ *     longer hits a Day-1 "Authenticate Claude" wall even though `claude -p`
+ *     works headlessly. The probe is fast + cached + never-hanging
  *     (`detectAmbientClaudeAuthCached`); a timeout/failure → not-authed → the
  *     gate stays up. SINGLE-OWNER ONLY: this resolver runs only on the Open
- *     composer, where an ambient Keychain login is the box owner's own. It is
- *     the sole credential resolver in this tree, so accepting ambient auth here
- *     cannot widen any shared/multi-user credential path (there is none here).
+ *     composer, where an ambient Keychain login is the box owner's own — which
+ *     is why the shared table gates the ambient tier behind `allowAmbient`, set
+ *     TRUE only here. (tier 5 — `resolveAmbientTier`)
  *   - else `null` → the box boots LLM-less and onboarding walks its static
  *     phase prompts.
  *
- * BEFORE this resolver the Open composer gated the entire substrate on
+ * BEFORE the OAuth tier existed the Open composer gated the entire substrate on
  * `ANTHROPIC_API_KEY` alone, so a self-hoster who authed via `claude
  * setup-token` (subscription OAuth, the headline `curl | sh` flow) booted
  * LLM-less while the installer reported success — a false-success no-op.
- * Consuming the OAuth token here is what makes the install.sh "✓ Claude auth
+ * Consuming the OAuth token is what makes the install.sh "✓ Claude auth
  * detected" honest: install.sh's notion of "authed" now matches what the
  * Open server actually consumes.
+ *
+ * Open threads NO `log_slug` into the tier helpers, so it stays silent (no
+ * INFO/WARN lines) exactly as before C6.
  *
  * `opts.probeAmbientAuth` is a test seam — production defaults to the cached
  * Keychain/creds-file probe. It is consulted ONLY on the no-explicit-token
@@ -347,31 +367,22 @@ export function resolveOpenLlmPool(
   env: NodeJS.ProcessEnv,
   opts?: { probeAmbientAuth?: () => boolean },
 ): CredentialPool | null {
-  const oauthToken = env['CLAUDE_CODE_OAUTH_TOKEN']
-  if (typeof oauthToken === 'string' && oauthToken.length > 0) {
-    return newCredentialPool({
-      strategy: 'fill_first',
-      credentials: [{ id: 'anthropic:env_oauth', kind: 'oauth', secret: oauthToken }],
-    })
-  }
-  const apiKey = env['ANTHROPIC_API_KEY']
-  if (typeof apiKey === 'string' && apiKey.length > 0) {
-    return newCredentialPool({
-      strategy: 'fill_first',
-      credentials: [{ id: 'anthropic:env_api_key', kind: 'api_key', secret: apiKey }],
-    })
-  }
-  // No explicit credential in env — accept an ambient/Keychain-authed `claude`
-  // (single-owner only). The `ambient` cred carries no secret; the substrate
-  // threads nothing and the spawned `claude` child uses its own Keychain auth.
+  // Tier 2 — subscription OAuth token.
+  const envOAuth = resolveEnvOAuthTier({ provider: 'anthropic', env })
+  if (envOAuth !== null) return envOAuth
+  // Tier 4 — API-billing key. Single-entry env_vars ⇒ never the "shared" tier;
+  // Open is always deployment-mode 'open' ⇒ allowSharedEnvTier is moot but true.
+  const envKey = resolveApiKeyEnvTier({
+    provider: 'anthropic',
+    env,
+    env_vars: ['ANTHROPIC_API_KEY'],
+    allowSharedEnvTier: true,
+  })
+  if (envKey !== null) return envKey
+  // Tier 5 — ambient/Keychain `claude` (Open-only). No secret threaded; the
+  // spawned `claude` child auths via its own Keychain.
   const probeAmbientAuth = opts?.probeAmbientAuth ?? (() => detectAmbientClaudeAuthCached(env))
-  if (probeAmbientAuth()) {
-    return newCredentialPool({
-      strategy: 'fill_first',
-      credentials: [{ id: 'anthropic:ambient_keychain', kind: 'ambient', secret: '' }],
-    })
-  }
-  return null
+  return resolveAmbientTier({ provider: 'anthropic', allowAmbient: true, probeAmbientAuth })
 }
 
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
